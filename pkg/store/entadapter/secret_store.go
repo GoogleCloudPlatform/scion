@@ -194,6 +194,75 @@ func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 	return nil
 }
 
+// UpdateSecretRefIfMatches conditionally updates only the secret_ref column,
+// applying the change (and incrementing version) only if the row's current
+// secret_ref equals expectedRef AND its current version equals
+// expectedVersion. See store.SecretStore for the full contract, including
+// why the version predicate is required, not merely the ref (ptone/scion#2152
+// round-4 review finding 1).
+func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID string, expectedRef string, expectedVersion int, newRef string) (bool, error) {
+	// secret_ref is an optional (nullable) column: a record that never had a
+	// ref set stores SQL NULL, not "". entsecret.SecretRefEQ("") compiles to
+	// "secret_ref = ''", which SQL NULL never matches — so matching an
+	// expected empty ref needs the IsNil predicate instead, or the CAS would
+	// silently never apply to exactly the records (no ref persisted yet)
+	// this method exists to safely migrate. Current writers never persist a
+	// literal "" (empty-but-non-NULL) secret_ref, but also match on
+	// SecretRefEQ("") defensively in case a row is ever imported or edited
+	// into that state (ptone/scion#2152 round-4 review nit 11). That
+	// SecretRefEQ("") arm is deliberately untested (ptone/scion#2152 round-5
+	// review nit 6): every write path in this store (CreateSecret,
+	// UpdateSecret, UpsertSecret) goes through SetSecretRef/ClearSecretRef,
+	// which never persist a literal empty string — reaching this arm from a
+	// test would require writing `secret_ref=''` via raw SQL against the ent
+	// client's underlying driver, bypassing the store API this file exists
+	// to provide, purely to exercise a branch the API can't produce. It
+	// stays as defense in depth against a row imported or edited outside
+	// this store, not as a path this code is expected to exercise itself.
+	refPredicate := entsecret.SecretRefEQ(expectedRef)
+	if expectedRef == "" {
+		refPredicate = entsecret.Or(entsecret.SecretRefIsNil(), entsecret.SecretRefEQ(""))
+	}
+	update := s.client.Secret.Update().
+		Where(
+			entsecret.KeyEQ(key),
+			entsecret.ScopeEQ(scope),
+			entsecret.ScopeIDEQ(scopeID),
+			refPredicate,
+			entsecret.VersionEQ(expectedVersion),
+		).
+		SetSecretRef(newRef).
+		AddVersion(1).
+		SetUpdated(time.Now())
+
+	n, err := update.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
+// UpdateSecretValueIfVersion conditionally replaces the encrypted value,
+// applying the change and incrementing Version only when the row's current
+// Version equals expectedVersion. Every other column is left untouched.
+func (s *SecretStore) UpdateSecretValueIfVersion(ctx context.Context, key, scope, scopeID string, expectedVersion int, newEncryptedValue string) (bool, error) {
+	n, err := s.client.Secret.Update().
+		Where(
+			entsecret.KeyEQ(key),
+			entsecret.ScopeEQ(scope),
+			entsecret.ScopeIDEQ(scopeID),
+			entsecret.VersionEQ(expectedVersion),
+		).
+		SetEncryptedValue(newEncryptedValue).
+		AddVersion(1).
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
 // UpdateSecretMeta updates only metadata columns of an existing secret without
 // touching the encrypted value. The version is incremented automatically.
 func (s *SecretStore) UpdateSecretMeta(ctx context.Context, key, scope, scopeID string, meta *store.SecretMetaUpdate) (*store.Secret, error) {

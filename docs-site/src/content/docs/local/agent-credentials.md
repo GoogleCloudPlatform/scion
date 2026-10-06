@@ -315,6 +315,15 @@ Credential capture supports scoping captured credentials to either the **project
     python3 ~/.scion/harness/capture_auth.py --scope project
     ```
 
+**Hub admins can restrict this to user scope only.** If the "Restrict agent-written secrets to
+profile scope" setting is on (Admin > Server Config, `agent_secrets.user_scope_only`), the hub
+rejects any project-scope write an agent attempts — capture included — with a 403, whatever
+harness, flag, or `--force` is used. In the Web UI, the Project option in the Capture Auth dialog
+is disabled with an explanation and Profile is preselected while the setting is on; retrying a
+rejected capture with `--scope user` (or via the CLI/Script path above) still works. This does not
+affect user-originated project writes made directly through the web UI or `scion hub secret set
+--project`.
+
 ### How capture works
 
 The host generates a capture manifest (`inputs/capture-auth-config.json`) from the harness's

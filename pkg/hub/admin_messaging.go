@@ -50,6 +50,9 @@ func (s *Server) handleAdminMessaging(w http.ResponseWriter, r *http.Request) {
 type messagingResponse struct {
 	ConversationEnvelopeSwitch   *bool `json:"conversation_envelope_switch"`
 	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled"`
+	// OffloadThresholdRunes is the large-DM offload threshold
+	// (ptone/scion#2257). Compiled default 0 (disabled).
+	OffloadThresholdRunes *int `json:"offload_threshold_runes"`
 	// Revision is the settings section revision, used for CAS on security-
 	// critical flag changes.
 	Revision int64 `json:"revision"`
@@ -60,26 +63,30 @@ type messagingResponse struct {
 type messagingPutRequest struct {
 	ConversationEnvelopeSwitch   *bool  `json:"conversation_envelope_switch,omitempty"`
 	CrossProjectMessagingEnabled *bool  `json:"cross_project_messaging_enabled,omitempty"`
+	OffloadThresholdRunes        *int   `json:"offload_threshold_runes,omitempty"`
 	ExpectedRevision             *int64 `json:"expected_revision,omitempty"`
 }
 
 // handleGetMessaging returns the current messaging settings.
 // Reports what enforcement sites would actually do: when OperationalSettings
-// is nil (init failed), enforcement reads false, so GET reports false.
+// is nil (init failed), enforcement reads false/0, so GET reports false/0.
 func (s *Server) handleGetMessaging(w http.ResponseWriter) {
 	envelopeSwitch := false
 	crossProjectEnabled := false
+	offloadThreshold := 0
 	var revision int64
 
 	if ops := s.GetOperationalSettings(); ops != nil {
 		envelopeSwitch = ops.ConversationEnvelopeSwitch()
 		crossProjectEnabled = ops.CrossProjectMessagingEnabled()
+		offloadThreshold = ops.OffloadThresholdRunes()
 		revision = ops.SectionRevision("messaging")
 	}
 
 	writeJSON(w, http.StatusOK, messagingResponse{
 		ConversationEnvelopeSwitch:   &envelopeSwitch,
 		CrossProjectMessagingEnabled: &crossProjectEnabled,
+		OffloadThresholdRunes:        &offloadThreshold,
 		Revision:                     revision,
 	})
 }
@@ -99,7 +106,7 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	ops := s.GetOperationalSettings()
 	if ops == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented",
-			"Updating messaging settings is not supported in file/SQLite mode", nil)
+			"Updating messaging settings requires DB-backed operational settings", nil)
 		return
 	}
 
@@ -124,11 +131,13 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	// Build the merged messaging section from current values.
 	currentEnvelope := ops.ConversationEnvelopeSwitch()
 	currentCrossProject := ops.CrossProjectMessagingEnabled()
+	currentOffloadThreshold := ops.OffloadThresholdRunes()
 	currentRevision := ops.SectionRevision("messaging")
 
 	ms := opsettings.MessagingSettings{
 		ConversationEnvelopeSwitch:   &currentEnvelope,
 		CrossProjectMessagingEnabled: &currentCrossProject,
+		OffloadThresholdRunes:        &currentOffloadThreshold,
 	}
 
 	// Apply per-field updates or resets.
@@ -172,6 +181,17 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 		ms.CrossProjectMessagingEnabled = &defaultVal
 	}
 
+	// offload_threshold_runes (ptone/scion#2257): not security-critical
+	// (reversible, no data loss — see design §8.4), so no expected_revision
+	// requirement, matching conversation_envelope_switch.
+	if body.OffloadThresholdRunes != nil {
+		ms.OffloadThresholdRunes = body.OffloadThresholdRunes
+	} else if fp != nil && fp.has("offload_threshold_runes") {
+		// Explicit null → reset to compiled default (0, disabled).
+		defaultVal := 0
+		ms.OffloadThresholdRunes = &defaultVal
+	}
+
 	doc, err := json.Marshal(ms)
 	if err != nil {
 		slog.Error("PUT messaging: failed to marshal messaging settings", "error", err)
@@ -207,10 +227,12 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	// Read back the applied state.
 	resultEnvelope := ops.ConversationEnvelopeSwitch()
 	resultCrossProject := ops.CrossProjectMessagingEnabled()
+	resultOffloadThreshold := ops.OffloadThresholdRunes()
 	resultRevision := ops.SectionRevision("messaging")
 	writeJSON(w, http.StatusOK, messagingResponse{
 		ConversationEnvelopeSwitch:   &resultEnvelope,
 		CrossProjectMessagingEnabled: &resultCrossProject,
+		OffloadThresholdRunes:        &resultOffloadThreshold,
 		Revision:                     resultRevision,
 	})
 }

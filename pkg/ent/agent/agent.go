@@ -68,6 +68,8 @@ const (
 	FieldRuntime = "runtime"
 	// FieldRuntimeBrokerID holds the string denoting the runtime_broker_id field in the database.
 	FieldRuntimeBrokerID = "runtime_broker_id"
+	// FieldWorkspacePlacement holds the string denoting the workspace_placement field in the database.
+	FieldWorkspacePlacement = "workspace_placement"
 	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
 	FieldWebPtyEnabled = "web_pty_enabled"
 	// FieldExposedPorts holds the string denoting the exposed_ports field in the database.
@@ -78,6 +80,8 @@ const (
 	FieldMessage = "message"
 	// FieldAppliedConfig holds the string denoting the applied_config field in the database.
 	FieldAppliedConfig = "applied_config"
+	// FieldHarnessConfig holds the string denoting the harness_config field in the database.
+	FieldHarnessConfig = "harness_config"
 	// FieldAncestry holds the string denoting the ancestry field in the database.
 	FieldAncestry = "ancestry"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -104,6 +108,10 @@ const (
 	FieldLaunchAsyncOptIn = "launch_async_opt_in"
 	// FieldLaunchID holds the string denoting the launch_id field in the database.
 	FieldLaunchID = "launch_id"
+	// FieldRunID holds the string denoting the run_id field in the database.
+	FieldRunID = "run_id"
+	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
+	FieldPreviousRunIds = "previous_run_ids"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -122,6 +130,52 @@ const (
 	FieldLaunchStep = "launch_step"
 	// FieldLaunchError holds the string denoting the launch_error field in the database.
 	FieldLaunchError = "launch_error"
+	// FieldDeletionState holds the string denoting the deletion_state field in the database.
+	FieldDeletionState = "deletion_state"
+	// FieldDeletionClaim holds the string denoting the deletion_claim field in the database.
+	FieldDeletionClaim = "deletion_claim"
+	// FieldDeletionLeaseAt holds the string denoting the deletion_lease_at field in the database.
+	FieldDeletionLeaseAt = "deletion_lease_at"
+	// FieldDeletionStartedAt holds the string denoting the deletion_started_at field in the database.
+	FieldDeletionStartedAt = "deletion_started_at"
+	// FieldDeletionFailedAt holds the string denoting the deletion_failed_at field in the database.
+	FieldDeletionFailedAt = "deletion_failed_at"
+	// FieldDeletionCode holds the string denoting the deletion_code field in the database.
+	FieldDeletionCode = "deletion_code"
+	// FieldDeletionError holds the string denoting the deletion_error field in the database.
+	FieldDeletionError = "deletion_error"
+	// FieldDeletionPrior holds the string denoting the deletion_prior field in the database.
+	FieldDeletionPrior = "deletion_prior"
+	// FieldDeletionRequest holds the string denoting the deletion_request field in the database.
+	FieldDeletionRequest = "deletion_request"
+	// FieldRunIntent holds the string denoting the run_intent field in the database.
+	FieldRunIntent = "run_intent"
+	// FieldRunIntentAt holds the string denoting the run_intent_at field in the database.
+	FieldRunIntentAt = "run_intent_at"
+	// FieldRunIntentMarkedAt holds the string denoting the run_intent_marked_at field in the database.
+	FieldRunIntentMarkedAt = "run_intent_marked_at"
+	// FieldStartClaimID holds the string denoting the start_claim_id field in the database.
+	FieldStartClaimID = "start_claim_id"
+	// FieldStartClaimKind holds the string denoting the start_claim_kind field in the database.
+	FieldStartClaimKind = "start_claim_kind"
+	// FieldStartClaimState holds the string denoting the start_claim_state field in the database.
+	FieldStartClaimState = "start_claim_state"
+	// FieldStartClaimOwner holds the string denoting the start_claim_owner field in the database.
+	FieldStartClaimOwner = "start_claim_owner"
+	// FieldStartClaimTarget holds the string denoting the start_claim_target field in the database.
+	FieldStartClaimTarget = "start_claim_target"
+	// FieldStartClaimAt holds the string denoting the start_claim_at field in the database.
+	FieldStartClaimAt = "start_claim_at"
+	// FieldStartClaimLeaseUntil holds the string denoting the start_claim_lease_until field in the database.
+	FieldStartClaimLeaseUntil = "start_claim_lease_until"
+	// FieldStartClaimUnconfirmedAt holds the string denoting the start_claim_unconfirmed_at field in the database.
+	FieldStartClaimUnconfirmedAt = "start_claim_unconfirmed_at"
+	// FieldStartClaimHoldUntil holds the string denoting the start_claim_hold_until field in the database.
+	FieldStartClaimHoldUntil = "start_claim_hold_until"
+	// FieldStartClaimLaunchID holds the string denoting the start_claim_launch_id field in the database.
+	FieldStartClaimLaunchID = "start_claim_launch_id"
+	// FieldSoftDeleteOpID holds the string denoting the soft_delete_op_id field in the database.
+	FieldSoftDeleteOpID = "soft_delete_op_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -182,11 +236,13 @@ var Columns = []string{
 	FieldDetached,
 	FieldRuntime,
 	FieldRuntimeBrokerID,
+	FieldWorkspacePlacement,
 	FieldWebPtyEnabled,
 	FieldExposedPorts,
 	FieldTaskSummary,
 	FieldMessage,
 	FieldAppliedConfig,
+	FieldHarnessConfig,
 	FieldAncestry,
 	FieldCreated,
 	FieldUpdated,
@@ -200,6 +256,8 @@ var Columns = []string{
 	FieldReincarnationUpdatedAt,
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
+	FieldRunID,
+	FieldPreviousRunIds,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -209,6 +267,29 @@ var Columns = []string{
 	FieldLaunchSeq,
 	FieldLaunchStep,
 	FieldLaunchError,
+	FieldDeletionState,
+	FieldDeletionClaim,
+	FieldDeletionLeaseAt,
+	FieldDeletionStartedAt,
+	FieldDeletionFailedAt,
+	FieldDeletionCode,
+	FieldDeletionError,
+	FieldDeletionPrior,
+	FieldDeletionRequest,
+	FieldRunIntent,
+	FieldRunIntentAt,
+	FieldRunIntentMarkedAt,
+	FieldStartClaimID,
+	FieldStartClaimKind,
+	FieldStartClaimState,
+	FieldStartClaimOwner,
+	FieldStartClaimTarget,
+	FieldStartClaimAt,
+	FieldStartClaimLeaseUntil,
+	FieldStartClaimUnconfirmedAt,
+	FieldStartClaimHoldUntil,
+	FieldStartClaimLaunchID,
+	FieldSoftDeleteOpID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -234,6 +315,8 @@ var (
 	DefaultCurrentModelCalls int
 	// DefaultDetached holds the default value on creation for the "detached" field.
 	DefaultDetached bool
+	// DefaultWorkspacePlacement holds the default value on creation for the "workspace_placement" field.
+	DefaultWorkspacePlacement string
 	// DefaultWebPtyEnabled holds the default value on creation for the "web_pty_enabled" field.
 	DefaultWebPtyEnabled bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -252,6 +335,8 @@ var (
 	DefaultLaunchAsyncOptIn bool
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
 	DefaultLaunchID string
+	// DefaultRunID holds the default value on creation for the "run_id" field.
+	DefaultRunID string
 	// DefaultLaunchState holds the default value on creation for the "launch_state" field.
 	DefaultLaunchState string
 	// DefaultLaunchEndReason holds the default value on creation for the "launch_end_reason" field.
@@ -266,6 +351,28 @@ var (
 	DefaultLaunchStep string
 	// DefaultLaunchError holds the default value on creation for the "launch_error" field.
 	DefaultLaunchError string
+	// DefaultDeletionState holds the default value on creation for the "deletion_state" field.
+	DefaultDeletionState string
+	// DefaultDeletionClaim holds the default value on creation for the "deletion_claim" field.
+	DefaultDeletionClaim int64
+	// DefaultDeletionCode holds the default value on creation for the "deletion_code" field.
+	DefaultDeletionCode string
+	// DefaultDeletionError holds the default value on creation for the "deletion_error" field.
+	DefaultDeletionError string
+	// DefaultDeletionPrior holds the default value on creation for the "deletion_prior" field.
+	DefaultDeletionPrior string
+	// DefaultDeletionRequest holds the default value on creation for the "deletion_request" field.
+	DefaultDeletionRequest string
+	// DefaultStartClaimKind holds the default value on creation for the "start_claim_kind" field.
+	DefaultStartClaimKind string
+	// DefaultStartClaimState holds the default value on creation for the "start_claim_state" field.
+	DefaultStartClaimState string
+	// DefaultStartClaimOwner holds the default value on creation for the "start_claim_owner" field.
+	DefaultStartClaimOwner string
+	// DefaultStartClaimTarget holds the default value on creation for the "start_claim_target" field.
+	DefaultStartClaimTarget string
+	// DefaultStartClaimLaunchID holds the default value on creation for the "start_claim_launch_id" field.
+	DefaultStartClaimLaunchID string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -460,6 +567,11 @@ func ByRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimeBrokerID, opts...).ToFunc()
 }
 
+// ByWorkspacePlacement orders the results by the workspace_placement field.
+func ByWorkspacePlacement(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWorkspacePlacement, opts...).ToFunc()
+}
+
 // ByWebPtyEnabled orders the results by the web_pty_enabled field.
 func ByWebPtyEnabled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWebPtyEnabled, opts...).ToFunc()
@@ -478,6 +590,11 @@ func ByMessage(opts ...sql.OrderTermOption) OrderOption {
 // ByAppliedConfig orders the results by the applied_config field.
 func ByAppliedConfig(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAppliedConfig, opts...).ToFunc()
+}
+
+// ByHarnessConfig orders the results by the harness_config field.
+func ByHarnessConfig(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHarnessConfig, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.
@@ -540,6 +657,11 @@ func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchID, opts...).ToFunc()
 }
 
+// ByRunID orders the results by the run_id field.
+func ByRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunID, opts...).ToFunc()
+}
+
 // ByLaunchState orders the results by the launch_state field.
 func ByLaunchState(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchState, opts...).ToFunc()
@@ -583,6 +705,121 @@ func ByLaunchStep(opts ...sql.OrderTermOption) OrderOption {
 // ByLaunchError orders the results by the launch_error field.
 func ByLaunchError(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchError, opts...).ToFunc()
+}
+
+// ByDeletionState orders the results by the deletion_state field.
+func ByDeletionState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionState, opts...).ToFunc()
+}
+
+// ByDeletionClaim orders the results by the deletion_claim field.
+func ByDeletionClaim(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionClaim, opts...).ToFunc()
+}
+
+// ByDeletionLeaseAt orders the results by the deletion_lease_at field.
+func ByDeletionLeaseAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionLeaseAt, opts...).ToFunc()
+}
+
+// ByDeletionStartedAt orders the results by the deletion_started_at field.
+func ByDeletionStartedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionStartedAt, opts...).ToFunc()
+}
+
+// ByDeletionFailedAt orders the results by the deletion_failed_at field.
+func ByDeletionFailedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionFailedAt, opts...).ToFunc()
+}
+
+// ByDeletionCode orders the results by the deletion_code field.
+func ByDeletionCode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionCode, opts...).ToFunc()
+}
+
+// ByDeletionError orders the results by the deletion_error field.
+func ByDeletionError(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionError, opts...).ToFunc()
+}
+
+// ByDeletionPrior orders the results by the deletion_prior field.
+func ByDeletionPrior(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionPrior, opts...).ToFunc()
+}
+
+// ByDeletionRequest orders the results by the deletion_request field.
+func ByDeletionRequest(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDeletionRequest, opts...).ToFunc()
+}
+
+// ByRunIntent orders the results by the run_intent field.
+func ByRunIntent(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntent, opts...).ToFunc()
+}
+
+// ByRunIntentAt orders the results by the run_intent_at field.
+func ByRunIntentAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntentAt, opts...).ToFunc()
+}
+
+// ByRunIntentMarkedAt orders the results by the run_intent_marked_at field.
+func ByRunIntentMarkedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntentMarkedAt, opts...).ToFunc()
+}
+
+// ByStartClaimID orders the results by the start_claim_id field.
+func ByStartClaimID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimID, opts...).ToFunc()
+}
+
+// ByStartClaimKind orders the results by the start_claim_kind field.
+func ByStartClaimKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimKind, opts...).ToFunc()
+}
+
+// ByStartClaimState orders the results by the start_claim_state field.
+func ByStartClaimState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimState, opts...).ToFunc()
+}
+
+// ByStartClaimOwner orders the results by the start_claim_owner field.
+func ByStartClaimOwner(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimOwner, opts...).ToFunc()
+}
+
+// ByStartClaimTarget orders the results by the start_claim_target field.
+func ByStartClaimTarget(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimTarget, opts...).ToFunc()
+}
+
+// ByStartClaimAt orders the results by the start_claim_at field.
+func ByStartClaimAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimAt, opts...).ToFunc()
+}
+
+// ByStartClaimLeaseUntil orders the results by the start_claim_lease_until field.
+func ByStartClaimLeaseUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimLeaseUntil, opts...).ToFunc()
+}
+
+// ByStartClaimUnconfirmedAt orders the results by the start_claim_unconfirmed_at field.
+func ByStartClaimUnconfirmedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimUnconfirmedAt, opts...).ToFunc()
+}
+
+// ByStartClaimHoldUntil orders the results by the start_claim_hold_until field.
+func ByStartClaimHoldUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimHoldUntil, opts...).ToFunc()
+}
+
+// ByStartClaimLaunchID orders the results by the start_claim_launch_id field.
+func ByStartClaimLaunchID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimLaunchID, opts...).ToFunc()
+}
+
+// BySoftDeleteOpID orders the results by the soft_delete_op_id field.
+func BySoftDeleteOpID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSoftDeleteOpID, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

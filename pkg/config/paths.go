@@ -191,6 +191,48 @@ func GetGlobalDir() (string, error) {
 	return filepath.Join(home, GlobalDir), nil
 }
 
+// IsGlobalProjectDir reports whether projectDir IS the global project's own
+// directory (GetGlobalDir()'s result), compared by resolved path rather than
+// by name. GetProjectName's "global" result conflates two different things:
+// the actual global project, and any ordinary project whose own directory
+// happens to produce the slug "global" -- which GetProjectName's own
+// fallback does for an ordinary git repository simply checked out into a
+// directory named "global" anywhere on disk, not just directly under $HOME.
+// A caller that needs to know whether projectDir really is the global
+// project's own directory, not merely named like it, must use this instead
+// of comparing GetProjectName(projectDir) to the string "global".
+//
+// Both sides are resolved through any symlinks before comparison (e.g.
+// ~/.scion itself symlinked to another location, a real supported layout
+// elsewhere in this codebase), so a symlinked global directory is still
+// recognized as itself rather than being compared by its pre-resolution
+// spelling alone.
+func IsGlobalProjectDir(projectDir string) bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return resolvePathForComparison(projectDir) == resolvePathForComparison(globalDir)
+}
+
+// resolvePathForComparison returns path's absolute, symlink-resolved form,
+// for a byte-for-byte comparison against another path resolved the same
+// way. Resolution failure (most commonly, path does not exist yet) falls
+// back to the plain absolute form rather than being treated as an error:
+// this function has no error to report, so a caller comparing two not-yet
+// resolvable paths still gets a consistent, if unresolved, answer instead
+// of an empty string that could spuriously compare equal.
+func resolvePathForComparison(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	return abs
+}
+
 // GetProjectConfigDir returns the directory where project config files (settings.yaml,
 // templates/) live. For git projects with split storage (project-id file exists), this
 // is the external path under ~/.scion/project-configs/. For all other projects

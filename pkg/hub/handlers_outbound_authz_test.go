@@ -627,7 +627,7 @@ func TestOutboundDMAuthz_CrossProject_OriginNotMember_Denied(t *testing.T) {
 		Slug: "mem-project-b",
 	}
 	require.NoError(t, s.CreateProject(ctx, projectB))
-	srv.createProjectMembersGroup(ctx, projectB)
+	srv.seedProjectCreatorMembership(ctx, projectB)
 	// Set inbound to "members".
 	_, err := s.UpdateProjectMessagingPolicy(ctx, projectB.ID, store.CrossProjectInboundMembers, 1)
 	require.NoError(t, err)

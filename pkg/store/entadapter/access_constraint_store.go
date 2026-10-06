@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -38,6 +39,7 @@ type AccessConstraintStore struct {
 	client      *ent.Client
 	dialectOnce sync.Once
 	dialectName string
+	inTx        bool
 }
 
 // NewAccessConstraintStore creates a new Ent-backed AccessConstraintStore.
@@ -91,7 +93,7 @@ func entAccessConstraintToStore(e *ent.AccessConstraint) *store.AccessConstraint
 
 // validateReferences checks that referenced entities (user, agent, group,
 // project) exist in the database. Runs inside a transaction.
-func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.Tx, c *store.AccessConstraint) error {
+func (s *AccessConstraintStore) validateReferences(ctx context.Context, client *ent.Client, c *store.AccessConstraint) error {
 	switch c.SubjectKind {
 	case store.ConstraintSubjectPrincipal:
 		if c.SubjectPrincipalType == nil || c.SubjectPrincipalID == nil {
@@ -103,7 +105,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 		}
 		switch *c.SubjectPrincipalType {
 		case store.ConstraintPrincipalTypeUser:
-			exists, err := tx.User.Query().Where(func(sel *entsql.Selector) {
+			exists, err := client.User.Query().Where(func(sel *entsql.Selector) {
 				sel.Where(entsql.EQ("id", principalID))
 			}).Exist(ctx)
 			if err != nil {
@@ -113,7 +115,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 				return fmt.Errorf("user %s not found: %w", *c.SubjectPrincipalID, store.ErrNotFound)
 			}
 		case store.ConstraintPrincipalTypeAgent:
-			exists, err := tx.Agent.Query().Where(func(sel *entsql.Selector) {
+			exists, err := client.Agent.Query().Where(func(sel *entsql.Selector) {
 				sel.Where(entsql.EQ("id", principalID))
 			}).Exist(ctx)
 			if err != nil {
@@ -139,7 +141,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 		if err != nil {
 			return fmt.Errorf("invalid group ID %q: %w", *c.SubjectGroupID, store.ErrInvalidInput)
 		}
-		exists, err := tx.Group.Query().Where(func(sel *entsql.Selector) {
+		exists, err := client.Group.Query().Where(func(sel *entsql.Selector) {
 			sel.Where(entsql.EQ("id", groupID))
 		}).Exist(ctx)
 		if err != nil {
@@ -159,7 +161,7 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 		if err != nil {
 			return fmt.Errorf("invalid project ID %q: %w", c.ScopeID, store.ErrInvalidInput)
 		}
-		exists, err := tx.Project.Query().Where(func(sel *entsql.Selector) {
+		exists, err := client.Project.Query().Where(func(sel *entsql.Selector) {
 			sel.Where(entsql.EQ("id", projectID))
 		}).Exist(ctx)
 		if err != nil {
@@ -178,16 +180,29 @@ func (s *AccessConstraintStore) validateReferences(ctx context.Context, tx *ent.
 func (s *AccessConstraintStore) CreateAccessConstraint(ctx context.Context, c *store.AccessConstraint) (*store.AccessConstraint, error) {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
+		if errors.Is(err, ent.ErrTxStarted) {
+			return s.createAccessConstraint(ctx, s.client, c)
+		}
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	created, err := s.createAccessConstraint(ctx, tx.Client(), c)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return created, nil
+}
 
+func (s *AccessConstraintStore) createAccessConstraint(ctx context.Context, client *ent.Client, c *store.AccessConstraint) (*store.AccessConstraint, error) {
 	// Validate references inside the transaction.
-	if err := s.validateReferences(ctx, tx, c); err != nil {
+	if err := s.validateReferences(ctx, client, c); err != nil {
 		return nil, err
 	}
 
-	builder := tx.AccessConstraint.Create().
+	builder := client.AccessConstraint.Create().
 		SetName(c.Name).
 		SetSubjectKind(accessconstraint.SubjectKind(c.SubjectKind)).
 		SetScopeType(accessconstraint.ScopeType(c.ScopeType)).
@@ -224,10 +239,6 @@ func (s *AccessConstraintStore) CreateAccessConstraint(ctx context.Context, c *s
 	created, err := builder.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
 	}
 
 	return entAccessConstraintToStore(created), nil
@@ -282,7 +293,7 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 	}
 
 	// Validate references inside the transaction.
-	if err := s.validateReferences(ctx, tx, c); err != nil {
+	if err := s.validateReferences(ctx, tx.Client(), c); err != nil {
 		return nil, err
 	}
 
@@ -474,6 +485,14 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		if err != nil {
 			return nil, "", 0, fmt.Errorf("invalid page token: %w", err)
 		}
+		// Time-sorted tokens carry an RFC3339Nano sort value. Reject a corrupt
+		// one here instead of letting mustParseCursorTime page from the zero
+		// time.
+		if sortField != accessconstraint.FieldName {
+			if _, err := time.Parse(time.RFC3339Nano, cursorVal); err != nil {
+				return nil, "", 0, fmt.Errorf("invalid page token: %w: parse sort value: %w", store.ErrInvalidInput, err)
+			}
+		}
 		// Keyset pagination: for asc, get records where (sort_field, id) > (cursor_val, cursor_id)
 		if sortDesc {
 			query = query.Where(accessconstraint.Or(
@@ -523,11 +542,11 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		var cursorVal string
 		switch sortField {
 		case accessconstraint.FieldUpdated:
-			cursorVal = last.Updated.Format(time.RFC3339Nano)
+			cursorVal = last.Updated.UTC().Format(time.RFC3339Nano)
 		case accessconstraint.FieldName:
 			cursorVal = last.Name
 		default:
-			cursorVal = last.Created.Format(time.RFC3339Nano)
+			cursorVal = last.Created.UTC().Format(time.RFC3339Nano)
 		}
 		nextPageToken = encodeConstraintCursor(cursorVal, last.ID.String())
 	}
@@ -667,10 +686,13 @@ func encodeConstraintCursor(sortVal string, id string) string {
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
+// decodeConstraintCursor is the inverse of encodeConstraintCursor. Every
+// failure wraps store.ErrInvalidInput: a malformed pageToken is caller error,
+// which the hub maps to HTTP 400 rather than 500 (ptone/scion#1957).
 func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("base64 decode: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
 	}
 	s := string(raw)
 	// Split at the last comma — UUIDs never contain commas, so the sort
@@ -678,11 +700,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 	// everything before the last comma.
 	lastComma := strings.LastIndex(s, ",")
 	if lastComma < 0 {
-		return "", uuid.UUID{}, fmt.Errorf("expected 'value,id' format")
+		return "", uuid.UUID{}, fmt.Errorf("%w: expected 'value,id' format", store.ErrInvalidInput)
 	}
 	id, err := uuid.Parse(s[lastComma+1:])
 	if err != nil {
-		return "", uuid.UUID{}, fmt.Errorf("parse id: %w", err)
+		return "", uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
 	}
 	return s[:lastComma], id, nil
 }
@@ -691,10 +713,11 @@ func decodeConstraintCursor(cursor string) (string, uuid.UUID, error) {
 // Time field comparison helpers for keyset pagination
 // ---------------------------------------------------------------------------
 
-// mustParseCursorTime parses a time string from a server-generated cursor.
-// Cursors are always encoded with RFC3339Nano, so parse errors indicate a
-// corrupted cursor. Returns time.Time{} and logs a warning on failure rather
-// than silently discarding the error.
+// mustParseCursorTime parses the RFC3339Nano sort value of a time-sorted
+// cursor. ListAccessConstraintsFiltered validates that value before building
+// any predicate and rejects a corrupt one with store.ErrInvalidInput, so the
+// zero-time fallback here is only defence in depth: on failure it logs a
+// warning and returns time.Time{}.
 func mustParseCursorTime(val string) time.Time {
 	t, err := time.Parse(time.RFC3339Nano, val)
 	if err != nil {

@@ -481,6 +481,31 @@ func TestGetIntegration_MethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestUpdateIntegrationByID_MethodNotAllowed_AllowsGetAndPost(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	seedRoleDefinitions(ctx, s)
+	// CO1: Admin access requires role binding.
+	createTestUserWithRole(t, s, tid("integ-admin-upd-ma"), "admin-upd-ma@example.com", "admin", store.SystemRoleSuperAdmin)
+
+	admin := NewAuthenticatedUser(tid("integ-admin-upd-ma"), "admin-upd-ma@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/admin/integrations/telegram/update/some-id", nil)
+	req = req.WithContext(contextWithIdentity(ctx, admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	// GET .../update/{id} is a valid status lookup (handleGetUpdateStatus) and
+	// POST .../update/{id} falls through to handleUpdateIntegration, so both
+	// methods are actually accepted on this by-id form — the Allow header
+	// must list both, not just POST as on the bare .../update path.
+	if allow := rr.Header().Get("Allow"); allow != "GET, POST" {
+		t.Errorf("expected Allow header %q, got %q", "GET, POST", allow)
+	}
+}
+
 // --- Health endpoint ---
 
 func TestIntegrationHealth_OK(t *testing.T) {

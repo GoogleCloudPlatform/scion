@@ -24,7 +24,7 @@
 # has looked at yet.
 #
 # This job uses `pull_request_target` instead of `pull_request` specifically
-# because it is dispatched from the base repository's copy of this workflow
+# because it is dispatched from the default branch's copy of this workflow
 # and does not require a computable merge ref, so it still runs when the PR
 # is conflicted. That gives conflicted PRs one visible, always-present check
 # that goes red instead of missing.
@@ -32,10 +32,21 @@
 # SAFETY: `pull_request_target` runs with base-repo context and read access
 # to secrets, so it is only safe to use here because this workflow never
 # checks out the PR head or executes any code from the fork/branch -- it
-# only reads PR metadata via the GitHub API with the default, read-only
-# GITHUB_TOKEN. Do not add an `actions/checkout` step (or anything else that
-# runs PR-controlled code) to this file without re-reviewing for secret
-# exposure; see GitHub's pull_request_target security guidance.
+# only calls the GitHub API (PR and run metadata reads, plus the live-head
+# guard's single re-run request described below). Do not add an
+# `actions/checkout` step (or anything else that runs PR-controlled code) to
+# this file without re-reviewing for secret exposure; see GitHub's
+# pull_request_target security guidance.
+#
+# The job's token also has `actions: write` (job level only; the workflow
+# default stays read-only). Every step in the job, including any step added
+# later, receives this token; only the live-head guard's single request to
+# re-run an existing run of this same workflow uses the write scope. This is
+# safe because no PR-controlled code runs that could reach the token, the
+# re-run target is picked only from trusted context and API data (this
+# run's ID -> workflow ID, digits-only; PR number -> live head SHA -> run
+# ID), and PR-controlled strings (title, body, branch name) never reach a
+# shell.
 #
 # Known gap (deferred, see ptone/scion#1294): this only re-evaluates on PR
 # events (opened/synchronize/reopened/ready_for_review). A PR that goes
@@ -47,18 +58,61 @@
 # updated.
 name: PR Mergeability Gate
 
-on:
+on: # zizmor: ignore[dangerous-triggers] -- no PR code checked out or run; see SAFETY note above
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
+# Concurrency (ptone/scion#3408, refining ptone/scion#2845): at most one
+# in-progress plus one pending gate run per PR. The group is keyed on the PR
+# number only, with cancel-in-progress false. Per GitHub's docs, a run that
+# joins a group whose slot is held becomes `pending`, and a newer arrival
+# cancels and replaces it. A run that is no longer `pending` (including one
+# still waiting for a runner) is never cancelled. Replacement follows the
+# order in which runs reach the group, which GitHub documents as not
+# guaranteed to match event order, and a re-run of an older run joins as a
+# new arrival. The live-head guard step makes the invariant independent of
+# that order. Relies on the default `queue: single`; do not set `queue: max`.
+#
+# Trade-off: the slot holder keeps the slot through its runner wait, so the
+# latest head's run stays `pending` until it finishes. With a saturated
+# runner pool the latest head's result can take up to about 2x the runner
+# queue wait (about 1x with a per-head group), plus one more runner wait on
+# the rare path where the live-head guard has to re-run the latest head's
+# run.
+#
+# INVARIANT: every PR's latest head ends with a completed gate result
+# (success or failure). (1) The run that reaches the group last for a PR is
+# never cancelled and, with no job-level `if:`, runs to completion. (2) If
+# its event head is not the live head and the newest run for the live head
+# is not active, awaiting approval, or completed with a gate result, its
+# guard re-runs that newest run; otherwise a live-head run is still to come
+# or already fine. That attempt joins the group while this run holds the
+# slot, so it is now the last arrival and (1) applies to it. Exceptions: a
+# live-head run is awaiting approval (left for a maintainer), or the guard
+# fails or its attempt backstop fires (the repair stops with a warning).
+#
+# Do NOT set cancel-in-progress to true: a later arrival could cancel the
+# latest head's run mid-run, and the guard cannot repair that because it
+# runs inside the cancelled run. Do not add a job-level `if:` or a trigger
+# whose run may skip the job.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 permissions:
-  contents: read
-  pull-requests: read
+  contents: read # no checkout; kept explicit as the read-only default
+  pull-requests: read # read the PR's mergeable_state and head SHA
 
 jobs:
   mergeability:
     name: Mergeability Gate
     runs-on: ubuntu-latest
+    # Job-level permissions replace the workflow default for this job, so the
+    # two read scopes are repeated. For `actions: write`, see the SAFETY note.
+    permissions:
+      contents: read # no checkout; kept explicit as the read-only default
+      pull-requests: read # read the PR's mergeable_state and head SHA
+      actions: write # live-head guard: re-run the live head's run that has no gate result
     steps:
       - name: Check PR mergeable state
         env:
@@ -90,3 +144,98 @@ jobs:
               echo "mergeable_state '${state}' does not indicate a merge conflict; not blocking."
               ;;
           esac
+
+      # Live-head guard (see INVARIANT above). Repair only: it never changes
+      # the gate verdict, and continue-on-error keeps a guard API error from
+      # failing the gate. `!cancelled()` runs it even when the check fails.
+      #
+      # Termination bound: the guard acts only in a run whose event head is
+      # not the live head, while the newest run for the live head is not
+      # active, awaiting approval, or completed with a gate result. It then
+      # makes at most one re-run request, with no retry, and the re-run
+      # carries the live head, so it does not trigger the guard again unless
+      # the PR gets a new head (which is a new event, not the guard).
+      # Runs in this group never overlap. (A re-run of a run created under an
+      # older version of this file may use a different group; the bound does
+      # not depend on mutual exclusion.) As a hard backstop it never re-runs
+      # when the newest run for the live head is already at attempt
+      # MAX_ATTEMPT or later, so it cannot re-queue the same run
+      # indefinitely. Only the newest live-head run by latest-attempt start
+      # time (the one GitHub shows as the PR's check, which can be an older
+      # run re-run by hand) is judged and re-run; other live-head runs are
+      # left alone, except that any action_required one suppresses the repair.
+      #
+      # Any failed command (for example an API error) stops the guard with a
+      # warning via the ERR trap.
+      - name: Live-head guard
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          MAX_ATTEMPT: "3"
+        run: |
+          set -euo pipefail
+          trap 'echo "::warning title=Live-head guard::Guard failed; if the latest head of this PR shows a gate with no result (for example cancelled), push an update or re-run that run by hand."' ERR
+
+          pr=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '{state, sha: .head.sha}')
+          pr_state=$(jq -r '.state' <<<"$pr")
+          live=$(jq -r '.sha' <<<"$pr")
+          if [ "$pr_state" != "open" ] || [ "$live" = "$EVENT_HEAD" ]; then
+            echo "This run is for the live head (or the PR is not open); nothing to do."
+            exit 0
+          fi
+          if ! [[ "$live" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::warning title=Live-head guard::Unexpected head SHA from the API; skipping."
+            exit 0
+          fi
+
+          # This workflow's ID, read from this run so a file rename cannot
+          # break the lookup. GITHUB_RUN_ID is set by the runner.
+          workflow_id=$(gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}" --jq '.workflow_id')
+          if ! [[ "$workflow_id" =~ ^[0-9]+$ ]]; then
+            echo "::warning title=Live-head guard::Unexpected workflow ID from the API; skipping."
+            exit 0
+          fi
+
+          # Gate runs for the live head, newest first by the start time of
+          # each run's latest attempt (`run_started_at`), because a re-run
+          # keeps its run ID but becomes the PR's check. A run with no start
+          # time yet falls back to its `created_at`; ties are broken by the
+          # higher run ID. ISO 8601 UTC timestamps sort correctly as strings.
+          # Keyed by SHA: a run for another PR with the same head SHA counts
+          # too, so a repair this PR needed can be skipped (rare; accepted).
+          # The API cannot narrow this: a run's `pull_requests` lists every
+          # open PR matching its head, not the PR that triggered it, and is
+          # empty for fork PRs.
+          runs=$(gh api "repos/${REPO}/actions/workflows/${workflow_id}/runs?event=pull_request_target&head_sha=${live}&per_page=100" \
+            --jq '[.workflow_runs[] | {id, run_attempt, conclusion, run_started_at, created_at}] | sort_by([(.run_started_at // .created_at // ""), .id]) | reverse')
+          # No run yet: the live head's own event run arrives later and completes.
+          # Judged on the newest run only, since that is the PR's check. Fine
+          # (allow-list): still active (null conclusion), completed with a gate
+          # result (success or failure), or action_required, which needs a
+          # maintainer's approval, not a re-run. An action_required older run
+          # also leaves the head alone (conservative). Anything else
+          # (cancelled, timed_out, startup_failure, ...) is repaired.
+          if jq -e 'length == 0 or (.[0].conclusion | . == null or . == "success" or . == "failure" or . == "action_required") or any(.[]; .conclusion == "action_required")' <<<"$runs" >/dev/null; then
+            echo "The newest gate run for the live head ${live} is absent, active, awaiting approval, or completed with a result; nothing to do."
+            exit 0
+          fi
+
+          target=$(jq -r '.[0].id' <<<"$runs")
+          attempt=$(jq -r '.[0].run_attempt' <<<"$runs")
+          if ! [[ "$target" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]; then
+            echo "::warning title=Live-head guard::Unexpected run data from the API; skipping."
+            exit 0
+          fi
+          if [ "$attempt" -ge "$MAX_ATTEMPT" ]; then
+            echo "::warning title=Live-head guard::The newest gate run for the live head ${live}, ${target}, is not active, awaiting approval, or completed with a result, and is already at attempt ${attempt}; not re-running it again. Push an update or re-run that run by hand."
+            exit 0
+          fi
+
+          echo "The newest gate run for the live head ${live}, ${target}, is not active, awaiting approval, or completed with a result; re-running it (attempt ${attempt})."
+          if ! gh api -X POST "repos/${REPO}/actions/runs/${target}/rerun"; then
+            echo "::warning title=Live-head guard::Re-run request for run ${target} failed. Push an update or re-run that run by hand."
+          fi

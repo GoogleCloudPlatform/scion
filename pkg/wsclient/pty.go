@@ -18,6 +18,7 @@ package wsclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -43,6 +45,35 @@ const (
 	// This helps detect when the server-side PTY stream fails silently
 	initialDataTimeout = 30 * time.Second
 )
+
+// attachUnsupportedMessage is the one fixed, actionable error text a caller
+// sees when the target runtime has no exec/attach/TTY primitive at all,
+// regardless of which of the two points where the broker can learn that
+// rejects the attempt: the pre-upgrade HTTP 501/runtime_attach_unsupported
+// response Connect checks for below, or the post-upgrade
+// 4501/attach_unsupported close code readFromWebSocket checks for. Kept as
+// one constant so the two call sites can never drift into two different
+// wordings for the same outcome.
+const attachUnsupportedMessage = "attach is not supported for this agent's runtime"
+
+// PTYCloseError reports that the server ended a PTY session with a close
+// code other than a clean detach (1000). Callers classify Code with
+// wsprotocol.ClassifyPTYClose to decide what to tell the user. The CLI does
+// not reconnect on any close code.
+type PTYCloseError struct {
+	// Code is the WebSocket close code (see the wsprotocol ClosePTY* constants).
+	// 1006 means the connection dropped without a close frame.
+	Code int
+	// Reason is the machine-readable close reason, possibly empty.
+	Reason string
+}
+
+func (e *PTYCloseError) Error() string {
+	if e.Reason == "" {
+		return fmt.Sprintf("attach session closed by server (code %d)", e.Code)
+	}
+	return fmt.Sprintf("attach session closed by server (code %d: %s)", e.Code, e.Reason)
+}
 
 // PTYClientConfig holds configuration for the PTY client.
 type PTYClientConfig struct {
@@ -64,14 +95,27 @@ type PTYClientConfig struct {
 
 // PTYClient manages a WebSocket PTY connection.
 type PTYClient struct {
-	config       PTYClientConfig
-	conn         *websocket.Conn
-	termState    *term.State
-	oldFd        int
-	writeMu      sync.Mutex
-	ctx          context.Context
-	cancel       context.CancelFunc
-	receivedData bool // tracks whether we've received any data
+	config    PTYClientConfig
+	conn      *websocket.Conn
+	termState *term.State
+	oldFd     int
+	writeMu   sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	// receivedData records whether any data arrived from the server. It is
+	// written by the WebSocket reader goroutine and read by Run when it
+	// restores the terminal, which may happen while that goroutine is still
+	// running, so it is atomic.
+	receivedData atomic.Bool
+
+	// stdin is read once here and never re-read from the os.Stdin package
+	// variable elsewhere, so a test can inject its own reader without ever
+	// mutating the (process-wide, shared) global: readFromStdin's inner
+	// reader goroutine can outlive both Run() and the test that started it
+	// (it only returns once its blocking Read call itself returns), so
+	// swapping os.Stdin back out from under it would be a data race, not
+	// just a functional risk.
+	stdin io.Reader
 }
 
 // NewPTYClient creates a new PTY client.
@@ -79,6 +123,7 @@ func NewPTYClient(config PTYClientConfig) *PTYClient {
 	return &PTYClient{
 		config: config,
 		oldFd:  int(os.Stdin.Fd()),
+		stdin:  os.Stdin,
 	}
 }
 
@@ -118,7 +163,7 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 	if err != nil {
 		// gorilla/websocket returns a non-nil resp (with an unread body) on a
 		// failed handshake so callers can inspect the status/body. Close it
-		// once attachFailureDetail has had a chance to read it, or it leaks.
+		// once parseAttachFailureBody has had a chance to read it, or it leaks.
 		if resp != nil && resp.Body != nil {
 			defer func() { _ = resp.Body.Close() }()
 		}
@@ -126,7 +171,11 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 			return fmt.Errorf("connection timed out after %v", connectTimeout)
 		}
 		if resp != nil && resp.StatusCode >= 400 {
-			return fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, attachFailureDetail(resp, err))
+			code, detail := parseAttachFailureBody(resp, err)
+			if resp.StatusCode == http.StatusNotImplemented && code == wsprotocol.ErrCodeRuntimeAttachUnsupported {
+				return errors.New(attachUnsupportedMessage)
+			}
+			return fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, detail)
 		}
 		return fmt.Errorf("connection failed: %w", err)
 	}
@@ -136,33 +185,36 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 }
 
 // attachErrorBody mirrors the shape of runtimebroker's JSON error envelope
-// (APIError/ErrorResponse) closely enough to pull out the human-readable
-// message without importing the broker package.
+// (APIError/ErrorResponse) closely enough to pull out the machine-readable
+// code and human-readable message without importing the broker package.
 type attachErrorBody struct {
 	Error struct {
+		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"error"`
 }
 
-// attachFailureDetail extracts an actionable message from a failed
-// WebSocket handshake response. Without this, a caller only ever sees
-// "websocket: bad handshake" — the broker's actual explanation (e.g. "agent
-// not found" vs. "container runtime temporarily unavailable, retry") is in
-// the response body, which gorilla/websocket buffers but does not surface.
-func attachFailureDetail(resp *http.Response, fallback error) string {
+// parseAttachFailureBody reads resp's body once and returns the parsed error
+// code (empty if the body isn't the runtimebroker error envelope shape) and
+// a best-effort human-readable detail: the envelope's message when present,
+// otherwise the raw body, otherwise fallback's own text. Centralizing the
+// single body read here (rather than letting each caller drain it) avoids
+// handing back an empty detail to a second reader of an already-consumed
+// body.
+func parseAttachFailureBody(resp *http.Response, fallback error) (code, detail string) {
 	if resp == nil || resp.Body == nil {
-		return fallback.Error()
+		return "", fallback.Error()
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil || len(body) == 0 {
-		return fallback.Error()
+		return "", fallback.Error()
 	}
 
 	var parsed attachErrorBody
 	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
-		return parsed.Error.Message
+		return parsed.Error.Code, parsed.Error.Message
 	}
-	return strings.TrimSpace(string(body))
+	return "", strings.TrimSpace(string(body))
 }
 
 // buildWebSocketURL constructs the WebSocket URL.
@@ -184,8 +236,10 @@ func (c *PTYClient) buildWebSocketURL() (string, error) {
 		u.Scheme = "ws"
 	}
 
-	// Build path
-	u.Path = fmt.Sprintf("/api/v1/agents/%s/pty", c.config.Slug)
+	// Build path. Keep any path prefix on the endpoint (e.g. a hub served
+	// under https://example.com/scion), matching how the REST client joins
+	// BaseURL and path.
+	u.Path = joinEndpointPath(u.Path, fmt.Sprintf("/api/v1/agents/%s/pty", c.config.Slug))
 
 	// Add query params for terminal size
 	q := u.Query()
@@ -198,6 +252,14 @@ func (c *PTYClient) buildWebSocketURL() (string, error) {
 	u.RawQuery = q.Encode()
 
 	return u.String(), nil
+}
+
+// joinEndpointPath appends an API path to the endpoint's own path prefix.
+// It strips any slashes at the end of the prefix and the start of apiPath,
+// then joins them with exactly one "/", so the result never has "//"
+// whether or not either side carries a slash.
+func joinEndpointPath(prefix, apiPath string) string {
+	return strings.TrimRight(prefix, "/") + "/" + strings.TrimLeft(apiPath, "/")
 }
 
 // Run starts the PTY session and blocks until it ends.
@@ -215,7 +277,7 @@ func (c *PTYClient) Run() error {
 	var runErr error
 	defer func() {
 		slog.Debug("PTY client restoring terminal", "had_error", runErr != nil)
-		c.restoreTerminal(runErr == nil)
+		c.restoreAfterRun(runErr)
 	}()
 
 	// Send initial resize so the remote PTY matches our terminal size,
@@ -330,6 +392,23 @@ func (c *PTYClient) restoreTerminal(writeResetSeqs bool) {
 	}
 }
 
+// restoreAfterRun restores the terminal when Run ends. On a clean end it
+// always writes the reset sequences. On an error it writes them only when the
+// server has sent data: by then the remote tmux has switched to the
+// alternate screen and drawn its status line, so the CLI must leave it before
+// printing the error, or the error lands on top of the remote screen. If no
+// data ever arrived, the local screen was never touched, and skipping the
+// sequences keeps earlier output (and the cursor) where they were. After a
+// reset on error it also starts a fresh line for the error message.
+func (c *PTYClient) restoreAfterRun(runErr error) {
+	hadTerminal := c.termState != nil
+	writeReset := runErr == nil || c.receivedData.Load()
+	c.restoreTerminal(writeReset)
+	if hadTerminal && writeReset && runErr != nil {
+		_, _ = os.Stdout.Write([]byte("\r\n"))
+	}
+}
+
 // handleResize handles terminal resize events.
 func (c *PTYClient) handleResize() {
 	sigCh := make(chan os.Signal, 1)
@@ -365,7 +444,7 @@ func (c *PTYClient) readFromStdin() error {
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := c.stdin.Read(buf)
 			if err != nil {
 				slog.Debug("PTY stdin inner reader got error", "error", err)
 				readCh <- readResult{nil, err}
@@ -425,12 +504,19 @@ func (c *PTYClient) readFromWebSocket() error {
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
 			slog.Debug("PTY websocket reader: read error", "error", err)
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				slog.Debug("PTY websocket reader: clean close")
-				return nil
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) {
+				if wsprotocol.ClassifyPTYClose(closeErr.Code) == wsprotocol.DispositionDetached {
+					slog.Debug("PTY websocket reader: clean close")
+					return nil
+				}
+				if closeErr.Code == wsprotocol.ClosePTYAttachUnsupported {
+					return errors.New(attachUnsupportedMessage)
+				}
+				return &PTYCloseError{Code: closeErr.Code, Reason: closeErr.Text}
 			}
 			// Check if this is a timeout on initial data
-			if !c.receivedData {
+			if !c.receivedData.Load() {
 				if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
 					return fmt.Errorf("timed out waiting for PTY data (server may have failed to start the session)")
 				}
@@ -439,8 +525,8 @@ func (c *PTYClient) readFromWebSocket() error {
 		}
 
 		// Clear read deadline after receiving first data
-		if !c.receivedData {
-			c.receivedData = true
+		if !c.receivedData.Load() {
+			c.receivedData.Store(true)
 			slog.Debug("PTY websocket reader: received first data, clearing deadline")
 			if err := c.conn.SetReadDeadline(time.Time{}); err != nil {
 				return fmt.Errorf("failed to clear read deadline: %w", err)
@@ -556,7 +642,7 @@ func BuildDirectAttachURL(hostEndpoint, slug string, cols, rows int) (string, er
 		u.Scheme = "ws"
 	}
 
-	u.Path = fmt.Sprintf("/api/v1/agents/%s/attach", slug)
+	u.Path = joinEndpointPath(u.Path, fmt.Sprintf("/api/v1/agents/%s/attach", slug))
 
 	q := u.Query()
 	q.Set("cols", fmt.Sprintf("%d", cols))

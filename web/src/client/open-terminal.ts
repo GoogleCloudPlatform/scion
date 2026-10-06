@@ -27,7 +27,7 @@
  * between entry-point components and main.ts.
  */
 
-import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 
 /**
  * Return the terminal URL path for an agent.
@@ -41,7 +41,7 @@ import { isFeatureEnabled } from '../utils/feature-flags.js';
  * semantics.
  */
 export function terminalHref(agentId: string): string {
-  return isFeatureEnabled('web.terminal_workspace')
+  return isFeatureEnabled(TERMINAL_WORKSPACE_FLAG)
     ? `/terminals/${agentId}`
     : `/agents/${agentId}/terminal`;
 }
@@ -63,4 +63,16 @@ export function openTerminal(agentId: string): void {
       bubbles: true,
     })
   );
+}
+
+/**
+ * Return the graph-view URL for an agent, focused on that agent within its
+ * project.
+ *
+ * The chat toolbar, members sidebar and message context menu each render an
+ * "Open in graph" control for a (possibly different) agent; this is the
+ * single place that builds the URL so the three never drift out of sync.
+ */
+export function agentGraphHref(projectId: string, agentId: string): string {
+  return `/agents/graph?project=${encodeURIComponent(projectId)}&focus=${encodeURIComponent(agentId)}`;
 }

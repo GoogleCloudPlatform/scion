@@ -25,7 +25,7 @@
 # provided by convention and verified by nobody. Writing the contract down found
 # four violations of it, all live at the time of writing:
 #
-#   * git     — core-base provided >= 2.47, thick-prep provided whatever Ubuntu
+#   * git     — core-base provided >= 2.48, thick-prep provided whatever Ubuntu
 #     shipped (2.43). Every thick image silently lost worktree-per-agent mode.
 #   * gh      — scion-base only installs its token-injecting wrapper when it
 #     finds /usr/bin/gh. When core-base moved gh to /usr/local/bin the wrapper
@@ -61,7 +61,7 @@ set -uo pipefail
 
 GO_MIN_VERSION="${GO_MIN_VERSION:-1.26.1}"
 NODE_MIN_VERSION="${NODE_MIN_VERSION:-24}"
-GIT_MIN_VERSION="2.47.0" # pkg/util/git.go CheckGitVersion — hard floor, not a preference
+GIT_MIN_VERSION="2.48.0" # pkg/util/git.go CheckGitVersion — hard floor, not a preference
 
 # --- Emulation awareness ----------------------------------------------------
 #
@@ -143,7 +143,7 @@ need_cmd() {
 echo "--- base contract ---"
 
 # ---------------------------------------------------------------------------
-# git — pkg/util/git.go CheckGitVersion requires >= 2.47.0 for
+# git — pkg/util/git.go CheckGitVersion requires >= 2.48.0 for
 # `worktree add --relative-paths`, which is what worktree-per-agent mode runs.
 #
 # The five sub-checks are not redundant. Each maps to a distinct real failure
@@ -423,6 +423,43 @@ else
       .scion/templates/web-dev/scion-agent.yaml and pkg/hub/suspended_page_browser_test.go.
       On Ubuntu there is no apt candidate; install google-chrome-stable and
       symlink it to /usr/bin/chromium"
+fi
+
+# ---------------------------------------------------------------------------
+# Timezone data — the agent TZ (defaulted to UTC by sciontool's harness
+# provisioning, cmd/sciontool/commands/harness.go) only takes effect if the
+# zone files exist. glibc treats an unknown zone as UTC without any error, so
+# check the effect, not just the package: a known zone must resolve to its
+# real offset. The image must also not pin TZ itself (no `ENV TZ`): the agent
+# zone is set per agent when the container starts, and an image default would
+# stand in for it wherever that setting is absent.
+#
+# A TZ in the environment is only a defect during a build, where it can only
+# have come from an ENV line. Re-checking a running agent container (a
+# supported use, see the header) legitimately sees the agent's own TZ, so
+# there it is reported as a note rather than a failure.
+# ---------------------------------------------------------------------------
+if [ -f /usr/share/zoneinfo/Asia/Tokyo ]; then
+  ok "/usr/share/zoneinfo present"
+else
+  fail "/usr/share/zoneinfo/Asia/Tokyo missing — install tzdata, or a
+      configured agent TZ silently behaves as UTC"
+fi
+tz_offset="$(TZ=Asia/Tokyo date +%z 2>/dev/null || true)"
+if [ "$tz_offset" = "+0900" ]; then
+  ok "TZ=Asia/Tokyo resolves to +0900"
+else
+  fail "TZ=Asia/Tokyo resolves to '${tz_offset:-<error>}', expected +0900 —
+      zone data is missing or unreadable, so agent TZ settings are ignored"
+fi
+if [ -z "${TZ+set}" ]; then
+  ok "TZ unset in the image environment"
+elif [ -n "$BUILD_ARCH" ]; then
+  fail "TZ is set to '${TZ}' during the image build — remove the ENV TZ;
+      the agent zone is set per agent when the container starts"
+else
+  note "TZ is set to '${TZ}'; not a build (BUILDARCH unset), so this is taken
+      to be a running container's own zone, not an ENV TZ in the image"
 fi
 
 # ---------------------------------------------------------------------------

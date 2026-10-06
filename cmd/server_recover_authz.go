@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -78,6 +79,7 @@ Examples:
 
   # Specify operator identity for audit
   scion server recover-authz --disable-constraint <id> --operator "admin@example.com"`,
+	Args: recoverAuthzArgs,
 	RunE: runRecoverAuthz,
 }
 
@@ -100,13 +102,12 @@ const DisableAllConfirmPhrase = "I understand this disables all access constrain
 // Tests replace this with a strings.Reader to avoid blocking.
 var recoverConfirmReader io.Reader = os.Stdin
 
-func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
-	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
-	defer cancel()
-
-	out := cmd.OutOrStdout()
-
-	// Validate flags
+// recoverAuthzArgs validates recover-authz's flags: exactly one of
+// --disable-constraint / --disable-all-constraints, and the confirmation
+// phrase for the latter. It is the command's Args validator, so it runs
+// before root's PersistentPreRunE and its errors keep the usage block
+// (ptone/scion#2859). Positional args are not checked, as before.
+func recoverAuthzArgs(_ *cobra.Command, _ []string) error {
 	if recoverDisableConstraint == "" && !recoverDisableAll {
 		return fmt.Errorf("either --disable-constraint <id> or --disable-all-constraints is required")
 	}
@@ -120,6 +121,18 @@ func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("--disable-all-constraints requires --confirm %q", DisableAllConfirmPhrase)
 		}
 	}
+	return nil
+}
+
+func runRecoverAuthz(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Minute)
+	defer cancel()
+
+	out := cmd.OutOrStdout()
+
+	// Flags were validated by recoverAuthzArgs.
 
 	// Resolve operator identity
 	operator := recoverOperator
@@ -414,7 +427,7 @@ func recoverDisplayConstraint(c *store.AccessConstraint, out io.Writer) {
 	if len(c.MaximumPermissions) > 0 && len(c.MaximumPermissions) <= 20 {
 		_, _ = fmt.Fprintf(out, "              [%s]\n", strings.Join(c.MaximumPermissions, ", "))
 	}
-	_, _ = fmt.Fprintf(out, "  Created:    %s by %s\n", c.CreatedAt.Format(time.RFC3339), c.CreatedBy)
+	_, _ = fmt.Fprintf(out, "  Created:    %s by %s\n", clitime.Format(c.CreatedAt, clitime.Full), c.CreatedBy)
 }
 
 func recoverPromptConfirmation(out io.Writer, question string) bool {

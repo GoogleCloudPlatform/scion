@@ -10,6 +10,8 @@ export default defineConfig({
     'toast-lifecycle.pw.ts',
     'url-layout.pw.ts',
     'url-nav-guard.pw.ts',
+    'persistence.pw.ts',
+    'jump-to-agent.pw.ts',
   ],
   workers: 1,
   timeout: 30000,

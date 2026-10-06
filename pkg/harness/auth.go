@@ -262,9 +262,23 @@ func OverlaySettings(auth *api.AuthConfig, h api.Harness, agentDir string) {
 	// The active repair at run.go cleans up the persisted value, but this
 	// guard prevents the corrupted value from entering the auth path on
 	// the first restart after corruption.
-	if !IsHarnessImplementationName(selectedType) {
+	//
+	// Also reject the no-auth sentinel "none": it marks an agent created in
+	// no-auth mode and is not an auth type the provisioner can select.
+	if !IsHarnessImplementationName(selectedType) && !IsNoAuthType(selectedType) {
 		auth.SelectedType = selectedType
 	}
+}
+
+// AuthTypeNone is the auth selection recorded for agents created in
+// no-auth mode (e.g. --harness-auth none or the no-auth fallback). It is a
+// sentinel, not an auth type, and must never reach the container-side
+// provisioner as a selected or explicit type.
+const AuthTypeNone = "none"
+
+// IsNoAuthType reports whether s is the no-auth sentinel.
+func IsNoAuthType(s string) bool {
+	return s == AuthTypeNone
 }
 
 // ValidateAuth checks a ResolvedAuth for completeness before container launch.

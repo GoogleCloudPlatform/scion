@@ -90,6 +90,15 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"project.register": {}, "project.set_messaging_policy": {}, "project.clone": {},
 	"project.list": {TargetClassKindHubResource},
 
+	// artifact.* — create is CapabilityScope (publish into a project);
+	// read is also collection-level, because the artifact list route
+	// (/api/v1/artifacts) is classified artifact.read and lists a
+	// project's artifacts. update/delete/manage always target an existing
+	// artifact.
+	"artifact.create": {TargetClassKindProjectScoped},
+	"artifact.read":   {TargetClassKindProjectScoped},
+	"artifact.update": {}, "artifact.delete": {}, "artifact.manage": {},
+
 	// skill.* — create/create_global/list/register are CapabilityScope;
 	// read/update/delete are CapabilityResource (always an existing skill).
 	"skill.create":        {TargetClassKindProjectScoped},
@@ -171,6 +180,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"hub.lifecycle_hooks.update": {TargetClassKindHubResource}, "hub.allow_list.read": {TargetClassKindHubResource},
 	"hub.allow_list.update": {TargetClassKindHubResource}, "hub.project_defaults.read": {TargetClassKindHubResource},
 	"hub.project_defaults.update": {TargetClassKindHubResource}, "hub.messaging.update": {TargetClassKindHubResource},
+	"hub.experiments.update": {TargetClassKindHubResource},
 	"hub.auth_reset.execute": {TargetClassKindHubResource}, "hub.scheduler.read": {TargetClassKindHubResource},
 	"hub.scheduler.update": {TargetClassKindHubResource}, "hub.federation.read": {TargetClassKindHubResource},
 	"hub.federation.update": {TargetClassKindHubResource}, "hub.teams_manifest.read": {TargetClassKindHubResource},
@@ -226,6 +236,13 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// project.secret_read — agent self-service, no CapabilityKind, always
 	// an existing project's secret.
 	"project.secret_read": {},
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129):
+	// each always targets one existing secret, environment variable, skill
+	// reference or GCP service account. None has a collection/list shape, so
+	// every entry is reviewed empty, matching project.secret_read above.
+	"secret.deliver": {}, "env_var.deliver": {}, "skill_injection.deliver": {},
+	"secret.use": {}, "gcp_service_account.use": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID

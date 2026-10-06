@@ -99,12 +99,26 @@ func TestUATScopesAreRegistryDerived(t *testing.T) {
 	}
 }
 
+// TestAgentTokenScopesMapToRegistry pins the permission coverage of every
+// agent token scope the registry uses. It is a guard, not a mirror: effect
+// ceilings are frozen at write time (store.EffectCeiling) and a scope is
+// issued only if the ceiling allows its whole coverage (ceilingAllowsScope),
+// so adding a permission to an existing scope's list silently withdraws that
+// scope from every agent and UAT ceiling frozen before the change. Give a new
+// permission its own scope instead, made ceiling-optional in the role
+// bundles (ceilingOptionalRoleScopes) when roles should carry it, as the
+// artifact scopes are. Every scope in the registry must have a row here.
 func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 	want := map[AgentTokenScope][]string{
 		ScopeAgentStatusUpdate: {"agent.status_update"},
 		ScopeAgentLogAppend:    {"agent.log_append"},
-		ScopeProjectSecretRead: {"project.secret_read"},
-		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
+		// ptone/scion#2129 gives secret.use the same explicit AgentScopes
+		// mapping as project.secret_read, so a runtime read and a project
+		// secret-read decision share one token capability. No other
+		// permission gains this mapping (TestMaterialPermissions_AgentScopeMappingExplicit).
+		ScopeProjectSecretRead: {"project.secret_read", "secret.use"},
+		ScopeAgentCreate:       {"agent.create"},
+		ScopeAgentSAAssign:     {"gcp_service_account.assign"},
 		ScopeAgentLifecycle:    {"agent.attach", "agent.delete", "agent.lifecycle"},
 		ScopeAgentNotify:       {"agent.notify"},
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
@@ -128,11 +142,27 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// Write access to templates within the agent's own project.
 		// Deliberately excludes template.delete - see the scope declaration.
 		ScopeProjectTemplateWrite: {"template.create", "template.update"},
+		// Publishing artifacts (and new versions) homed in the agent's own
+		// project. Deliberately excludes artifact.delete and artifact.manage.
+		// Not yet minted into any agent token (see the scope declaration).
+		ScopeProjectArtifactWrite: {"artifact.create", "artifact.update"},
+		// Reading artifacts has its own ceiling-optional scope rather than
+		// riding on project:read, so ceilings frozen before artifacts existed
+		// keep admitting project:read (see ceilingOptionalRoleScopes).
+		ScopeProjectArtifactRead: {"artifact.read"},
+		ScopeAgentSetMessageMode: {"agent.set_message_mode"},
 	}
 	for scope, wantIDs := range want {
 		gotIDs := registryPermissionIDsForAgentScope(string(scope))
 		if strings.Join(gotIDs, "\n") != strings.Join(wantIDs, "\n") {
 			t.Fatalf("agent token scope %q maps to wrong registry permissions\ngot:  %v\nwant: %v", scope, gotIDs, wantIDs)
+		}
+	}
+	for _, permission := range permissions.Registry {
+		for _, scope := range permission.AgentScopes {
+			if _, pinned := want[AgentTokenScope(scope)]; !pinned {
+				t.Fatalf("agent token scope %q (on %s) has no pinned coverage row in this test", scope, permission.ID)
+			}
 		}
 	}
 }

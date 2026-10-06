@@ -31,10 +31,10 @@ import (
 // migration (see resolveMaintenanceExecutor, key
 // "applied-config-env-cleanup") run once per hub; the write-path fix stops
 // new rows from acquiring these entries, this cleans up rows written before
-// the fix shipped. InlineConfig.Env is affected on any row where the create
-// path's `ac.Env = req.Config.Env; ac.InlineConfig = req.Config` aliasing
-// (handlers_agent_create_helpers.go) meant a later Env-only merge-back wrote
-// into the same underlying map InlineConfig.Env pointed at; the DB round
+// the fix shipped. InlineConfig.Env is affected on any row written while the
+// create path aliased AppliedConfig.Env to req.Config.Env (buildAppliedConfig
+// now clones it), so a later Env-only merge-back wrote into the same
+// underlying map InlineConfig.Env pointed at; the DB round
 // trip does not preserve that aliasing, so both fields must be swept
 // independently once a row is loaded back.
 //
@@ -62,6 +62,13 @@ import (
 //     live source (for example, one whose originating secret has since been
 //     deleted) is stripped along with the rest, since this job cannot tell
 //     that case apart from a value that predates the write-path fix.
+//
+// The auto-expose keys in autoExposeAllowlistExemptKeys are exempt from this
+// allowlist (the secret checks still apply): the hub derives
+// SCION_AUTO_EXPOSE_PORTS into AppliedConfig.Env from the project annotation,
+// and no plain source this job can see produces that value. Stamped
+// auto-expose values are normalized by a separate migration,
+// auto-expose-env-normalize (AutoExposeEnvNormalizeExecutor).
 //
 // InlineConfig.Env keys are decided by a narrower rule: only the GITHUB_TOKEN
 // and live-secret-name checks above apply. InlineConfig is itself one of the
@@ -279,7 +286,7 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 			applied = append(applied, k)
 			continue
 		}
-		if narrowEnv {
+		if narrowEnv || autoExposeAllowlistExemptKeys[k] {
 			continue
 		}
 		if values, ok := plainValues[k]; ok && values[v] {

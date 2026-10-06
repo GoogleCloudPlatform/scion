@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -22,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -128,6 +128,35 @@ func TestConversationGetMessageFlags(t *testing.T) {
 	f := flags.Lookup("json")
 	require.NotNil(t, f, "--json flag should exist")
 	assert.Equal(t, "false", f.DefValue)
+
+	f = flags.Lookup("body")
+	require.NotNil(t, f, "--body flag should exist")
+	assert.Equal(t, "false", f.DefValue)
+}
+
+// U6 (ptone/scion#2257): --body must print exactly msg.Msg, with no added
+// bytes — no trailing newline, no label — for every body shape a large-DM
+// offload stub's fetch command might need to reproduce byte-for-byte.
+func TestWriteMessageBody_GoldenBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"crlf", "line one\r\nline two\r\n"},
+		{"trailing_newline", "hello world\n"},
+		{"no_trailing_newline", "hello world"},
+		{"unicode", "héllo wörld 🚀 中文"},
+		{"empty", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			msg := &store.Message{Msg: tc.body}
+			require.NoError(t, writeMessageBody(&buf, msg))
+			assert.Equal(t, tc.body, buf.String(), "must write exactly the persisted body, no additions")
+			assert.Equal(t, len(tc.body), buf.Len(), "byte count must match exactly (no added bytes)")
+		})
+	}
 }
 
 func TestConversationMessagesRequiresArgs(t *testing.T) {
@@ -208,29 +237,6 @@ func TestConversationCatchUpFlags(t *testing.T) {
 	f = flags.Lookup("json")
 	require.NotNil(t, f, "--json flag should exist")
 	assert.Equal(t, "false", f.DefValue)
-}
-
-func TestFormatTimeAgo(t *testing.T) {
-	tests := []struct {
-		name     string
-		duration time.Duration
-		expected string
-	}{
-		{"just now", 30 * time.Second, "just now"},
-		{"1 minute", 1 * time.Minute, "1m ago"},
-		{"5 minutes", 5 * time.Minute, "5m ago"},
-		{"1 hour", 1 * time.Hour, "1h ago"},
-		{"3 hours", 3 * time.Hour, "3h ago"},
-		{"1 day", 24 * time.Hour, "1d ago"},
-		{"7 days", 7 * 24 * time.Hour, "7d ago"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := formatTimeAgo(time.Now().Add(-tt.duration))
-			assert.Equal(t, tt.expected, result)
-		})
-	}
 }
 
 // ---------------------------------------------------------------------------

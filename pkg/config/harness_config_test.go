@@ -16,6 +16,7 @@ package config
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -532,6 +533,26 @@ func TestSeedHarnessConfig_MockHarness(t *testing.T) {
 	}
 }
 
+// TestMapEmbedFileToHomePath_OpenCode pins where the opencode config is
+// placed: opencode 1.x reads opencode.json, not .opencode.json
+// (ptone/scion#2679). Without a config dir the file is skipped rather than
+// written to the home root, which is what the default branch would do.
+func TestMapEmbedFileToHomePath_OpenCode(t *testing.T) {
+	home := filepath.Join("h", "home")
+	tests := []struct {
+		configDir string
+		want      string
+	}{
+		{configDir: filepath.Join(".config", "opencode"), want: filepath.Join(home, ".config", "opencode", "opencode.json")},
+		{configDir: "", want: ""},
+	}
+	for _, tt := range tests {
+		if got := mapEmbedFileToHomePath(home, tt.configDir, "opencode.json"); got != tt.want {
+			t.Errorf("mapEmbedFileToHomePath(%q, %q, opencode.json) = %q, want %q", home, tt.configDir, got, tt.want)
+		}
+	}
+}
+
 func TestSeedHarnessConfig_AdditiveOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	hcBase := filepath.Join(tmpDir, "harness-configs")
@@ -546,7 +567,7 @@ func TestSeedHarnessConfig_AdditiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	customSettings := `{"custom": true}`
-	settingsPath := filepath.Join(opencodeDir, "home", ".config", "opencode", ".opencode.json")
+	settingsPath := filepath.Join(opencodeDir, "home", ".config", "opencode", "opencode.json")
 	if err := os.WriteFile(settingsPath, []byte(customSettings), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -578,7 +599,7 @@ func TestSeedHarnessConfig_AdditiveOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(data) != customSettings {
-		t.Errorf("opencode .opencode.json was modified; got: %s", data)
+		t.Errorf("opencode opencode.json was modified; got: %s", data)
 	}
 	data, err = os.ReadFile(filepath.Join(opencodeDir, "provision.py"))
 	if err != nil {
@@ -730,24 +751,52 @@ func TestSeedHarnessConfigFromDir(t *testing.T) {
 	}
 }
 
-func TestSeedHarnessConfigFromDir_NoOverwriteWithoutForce(t *testing.T) {
+// TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce
+// verifies that non-force seeding over an existing harness-config refreshes
+// config.yaml and the provisioner-owned scripts (provision.py,
+// scion_harness.py, capture_auth.py) from the bundled copy, keeps the
+// existing file mode, and preserves unrelated user files.
+func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *testing.T) {
 	tmpDir := t.TempDir()
 
+	const (
+		bundledConfig    = "harness: h\nimage: img:new\nuser: scion\n"
+		bundledProvision = "# bundled provision v2"
+		bundledLib       = "# bundled scion_harness v2"
+		bundledCapture   = "# bundled capture_auth v2"
+		bundledDialect   = "# bundled dialect"
+		bundledBashrc    = "# bundled bashrc"
+	)
 	sourceFS := fstest.MapFS{
-		"h/config.yaml": &fstest.MapFile{
-			Data: []byte("harness: h\nimage: img:latest\nuser: scion\n"),
-		},
-		"h/provision.py": &fstest.MapFile{
-			Data: []byte("# new provision"),
-		},
+		"h/config.yaml":      &fstest.MapFile{Data: []byte(bundledConfig)},
+		"h/provision.py":     &fstest.MapFile{Data: []byte(bundledProvision)},
+		"h/scion_harness.py": &fstest.MapFile{Data: []byte(bundledLib)},
+		"h/capture_auth.py":  &fstest.MapFile{Data: []byte(bundledCapture)},
+		"h/dialect.yaml":     &fstest.MapFile{Data: []byte(bundledDialect)},
+		"h/home/.bashrc":     &fstest.MapFile{Data: []byte(bundledBashrc)},
 	}
 
 	targetDir := filepath.Join(tmpDir, "h")
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		t.Fatal(err)
+	existing := map[string]string{
+		"config.yaml":      "harness: h\nimage: img:old\nuser: scion\n",
+		"provision.py":     "# stale provision v1",
+		"scion_harness.py": "# stale scion_harness v1",
+		"capture_auth.py":  "# stale capture_auth v1",
+		"dialect.yaml":     "# user dialect",
+		"home/.bashrc":     "# user bashrc",
+		"notes.txt":        "user notes",
 	}
-	existingContent := "# custom provision"
-	if err := os.WriteFile(filepath.Join(targetDir, "provision.py"), []byte(existingContent), 0644); err != nil {
+	for rel, content := range existing {
+		p := filepath.Join(targetDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := os.Chmod(filepath.Join(targetDir, "provision.py"), 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -755,12 +804,149 @@ func TestSeedHarnessConfigFromDir_NoOverwriteWithoutForce(t *testing.T) {
 		t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(targetDir, "provision.py"))
+	if info, err := os.Stat(filepath.Join(targetDir, "provision.py")); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0755 {
+		t.Errorf("provision.py mode = %v, want 0755 preserved", info.Mode().Perm())
+	}
+
+	want := map[string]string{
+		// Bundle-owned: refreshed from the bundled copy.
+		"config.yaml":      bundledConfig,
+		"provision.py":     bundledProvision,
+		"scion_harness.py": bundledLib,
+		"capture_auth.py":  bundledCapture,
+		// User files: preserved.
+		"dialect.yaml": "# user dialect",
+		"home/.bashrc": "# user bashrc",
+		"notes.txt":    "user notes",
+	}
+	for rel, wantContent := range want {
+		data, err := os.ReadFile(filepath.Join(targetDir, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if string(data) != wantContent {
+			t.Errorf("%s = %q, want %q", rel, string(data), wantContent)
+		}
+	}
+}
+
+// TestSeedHarnessConfigFromDir_SkipsSymlinkedProvisionerScript verifies that
+// non-force seeding neither writes through nor replaces a symlinked
+// provisioner script; it is treated as user-managed.
+func TestSeedHarnessConfigFromDir_SkipsSymlinkedProvisionerScript(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sourceFS := fstest.MapFS{
+		"h/config.yaml":  &fstest.MapFile{Data: []byte("harness: h\nimage: img:new\nuser: scion\n")},
+		"h/provision.py": &fstest.MapFile{Data: []byte("# bundled provision")},
+	}
+
+	targetDir := filepath.Join(tmpDir, "h")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linkTarget := filepath.Join(tmpDir, "my-provision.py")
+	if err := os.WriteFile(linkTarget, []byte("# my linked provision"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(targetDir, "provision.py")
+	if err := os.Symlink(linkTarget, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SeedHarnessConfigFromDir(targetDir, sourceFS, "h", false); err != nil {
+		t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
+	}
+
+	info, err := os.Lstat(linkPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != existingContent {
-		t.Errorf("provision.py was overwritten without force; got %q, want %q", string(data), existingContent)
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("provision.py symlink was replaced")
+	}
+	data, err := os.ReadFile(linkTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "# my linked provision" {
+		t.Errorf("seeding wrote through the symlink: target = %q", string(data))
+	}
+}
+
+// TestWriteFileAtomic_CreateTempFailureLeavesOriginal verifies that when the
+// temporary file cannot be created, writeFileAtomic returns an error, leaves
+// the original content in place, and leaves no temporary file behind.
+func TestWriteFileAtomic_CreateTempFailureLeavesOriginal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("directory permissions are not enforced for root")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "provision.py")
+	if err := os.WriteFile(target, []byte("# original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+
+	err := writeFileAtomic(target, []byte("# bundled"))
+	if err == nil {
+		t.Fatal("expected an error when the temp file cannot be created")
+	}
+	if !strings.Contains(err.Error(), "create temp file") {
+		t.Errorf("error = %v, want a create temp file error", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "# original" {
+		t.Errorf("original content changed: %q", string(data))
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "provision.py" {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("directory entries = %v, want only provision.py", names)
+	}
+}
+
+// TestSeedHarnessConfigFile_BundleReadErrors verifies that a provisioner
+// script missing from the bundle is skipped, while any other read error is
+// returned instead of being silently ignored.
+func TestSeedHarnessConfigFile_BundleReadErrors(t *testing.T) {
+	targetDir := t.TempDir()
+	targetPath := filepath.Join(targetDir, "provision.py")
+
+	// Missing from the bundle: nothing to seed, no error, no file written.
+	if err := seedHarnessConfigFile(fstest.MapFS{}, "h", "provision.py", targetPath, false); err != nil {
+		t.Fatalf("missing bundled script should be skipped, got %v", err)
+	}
+	if _, err := os.Lstat(targetPath); !os.IsNotExist(err) {
+		t.Errorf("no file should be written for a missing bundled script, stat err = %v", err)
+	}
+
+	// provision.py is a directory in the bundle, so reading it fails with an
+	// error other than fs.ErrNotExist; that must be propagated.
+	badFS := fstest.MapFS{
+		"h/provision.py/nested": &fstest.MapFile{Data: []byte("x")},
+	}
+	err := seedHarnessConfigFile(badFS, "h", "provision.py", targetPath, false)
+	if err == nil {
+		t.Fatal("expected a non-not-exist bundle read error to be returned")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error should not be fs.ErrNotExist: %v", err)
 	}
 }
 

@@ -34,17 +34,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAgentSecretRead_ProjectScopeSoftDeletedParentFollowsStoredRole is a
-// characterization, changed or removed by a follow-up change: a retained
-// soft-deleted parent agent still resolves in the delegation ceiling,
-// because GetAgent returns soft-deleted rows and checkAgentHoldsPermission
-// checks neither DeletedAt nor status. Runtime material reads do not claim
-// to enforce the non-deleted-source rule for delegation, and add no second,
-// separate delegation traversal. A follow-up change owns enforcing
-// non-deleted agents in the shared chain evaluation. This test is separate
-// from the final acceptance regression and must be changed or removed when
-// the shared fix lands.
-func TestAgentSecretRead_ProjectScopeSoftDeletedParentFollowsStoredRole(t *testing.T) {
+// TestAgentSecretRead_ProjectScopeSoftDeletedParentDenies: a retained
+// soft-deleted parent agent supplies no delegation authority in the shared
+// chain evaluation, so the child's runtime secret read is refused through
+// the concealed 404 path. Runtime material reads add no second, separate
+// delegation traversal; the rule comes from the delegation ceiling.
+func TestAgentSecretRead_ProjectScopeSoftDeletedParentDenies(t *testing.T) {
 	f := newMaterialFixture(t, "soft-deleted-parent")
 	ctx := context.Background()
 	setBackfillCompleted(t, f.Store)
@@ -72,15 +67,14 @@ func TestAgentSecretRead_ProjectScopeSoftDeletedParentFollowsStoredRole(t *testi
 	require.NoError(t, f.Store.UpdateAgent(ctx, parent))
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/SOFT_DEL_PARENT_KEY", nil, childToken)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 (today's outcome: retained soft-deleted parent followed at its stored role), got %d: %s", rec.Code, rec.Body.String())
-	}
+	require.Equal(t, http.StatusNotFound, rec.Code, "retained soft-deleted parent supplies no authority: %s", rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "denied_by", "the concealed 404 carries no denial detail")
 }
 
-// TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentFollowsStoredRole is
-// a characterization: the soft-deleted grandparent is still followed today.
-// Changed or removed by a follow-up change.
-func TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentFollowsStoredRole(t *testing.T) {
+// TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentDenies: a retained
+// soft-deleted grandparent supplies no delegation authority at a deeper link,
+// even with a live immediate parent.
+func TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentDenies(t *testing.T) {
 	f := newMaterialFixture(t, "soft-deleted-grandparent")
 	ctx := context.Background()
 	setBackfillCompleted(t, f.Store)
@@ -118,7 +112,6 @@ func TestAgentSecretRead_ProjectScopeSoftDeletedGrandparentFollowsStoredRole(t *
 	require.NoError(t, f.Store.UpdateAgent(ctx, grandparent))
 
 	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+childID+"/secrets/SOFT_DEL_GRANDPARENT_KEY", nil, childToken)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 (today's outcome: soft-deleted grandparent still followed), got %d: %s", rec.Code, rec.Body.String())
-	}
+	require.Equal(t, http.StatusNotFound, rec.Code, "retained soft-deleted grandparent supplies no authority: %s", rec.Body.String())
+	require.NotContains(t, rec.Body.String(), "denied_by", "the concealed 404 carries no denial detail")
 }

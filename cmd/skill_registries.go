@@ -22,6 +22,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -88,7 +89,7 @@ func runRegistriesAdd(cmd *cobra.Command, args []string) error {
 
 	endpoint, _ := cmd.Flags().GetString("endpoint")
 	if endpoint == "" {
-		return fmt.Errorf("--endpoint is required")
+		return newUsageError("--endpoint is required")
 	}
 
 	trust, _ := cmd.Flags().GetString("trust")
@@ -157,8 +158,8 @@ func runRegistriesShow(cmd *cobra.Command, args []string) error {
 	if registry.Description != "" {
 		fmt.Printf("Description: %s\n", registry.Description)
 	}
-	fmt.Printf("Created:     %s\n", registry.Created.Format(time.RFC3339))
-	fmt.Printf("Updated:     %s\n", registry.Updated.Format(time.RFC3339))
+	fmt.Printf("Created:     %s\n", clitime.Format(registry.Created, clitime.Full))
+	fmt.Printf("Updated:     %s\n", clitime.Format(registry.Updated, clitime.Full))
 	return nil
 }
 
@@ -264,7 +265,7 @@ func runRegistriesPin(cmd *cobra.Command, args []string) error {
 
 	hash, _ := cmd.Flags().GetString("hash")
 	if hash == "" {
-		return fmt.Errorf("--hash is required")
+		return newUsageError("--hash is required")
 	}
 
 	req := &hubclient.PinSkillHashRequest{

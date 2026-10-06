@@ -55,10 +55,10 @@ var mentionDispatchTimeout = 5 * time.Second
 // mentionFanoutTypes is the allow-list of message types that trigger
 // server-side mention fan-out for agent senders. Notably absent: "mention"
 // itself (parsing a mention row's body for more mentions would let a fan-out
-// chain recurse forever), "assistant-reply" (the automatic Stop-hook
-// transcript mirror — parsing it would page anyone an agent merely talked
-// about), "state-change", "system", and "group-set" (the CLI keeps its own
-// client-side fan-out for group[] sends, which excludes group members).
+// chain recurse forever), "assistant-reply" (retired: the outbound handler
+// drops it before fan-out), "state-change", "system", and "group-set" (the
+// CLI keeps its own client-side fan-out for group[] sends, which excludes
+// group members).
 var mentionFanoutTypes = map[string]bool{
 	"":                       true,
 	messages.TypeInstruction: true,
@@ -175,10 +175,30 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 		return nil
 	}
 
+	primarySlug := ""
+	if in.Primary != nil && in.Primary.ProjectID == in.Sender.ProjectID {
+		primarySlug = in.Primary.Slug
+	}
+
 	projectAgents, err := listAllProjectAgents(ctx, s.store, in.Sender.ProjectID)
 	if err != nil {
-		s.messageLog.Error("mention fan-out: failed to list project agents", "sender_id", in.Sender.ID, "error", err)
-		return nil
+		// Report every agent mention as failed rather than dropping them:
+		// the caller must be able to tell "lookup failed" from "no such
+		// agent". With no known agents, ResolveMentions de-duplicates,
+		// skips the primary and reports every name as not_found; names
+		// that address a human member are dropped as on the success path,
+		// and the rest are relabelled as errors. Nothing is dispatched.
+		s.messageLog.Error("mention fan-out: failed to list project agents",
+			"sender_id", in.Sender.ID, "project_id", in.Sender.ProjectID, "error", err)
+		failed := messages.ResolveMentions(names, nil, primarySlug)
+		failed = s.dropHumanMentionResults(ctx, in.Sender.ProjectID, failed, in.HumanMembers)
+		if len(failed) == 0 {
+			return nil
+		}
+		for i := range failed {
+			failed[i].Status, failed[i].Error = "error", "mention resolution unavailable"
+		}
+		return failed
 	}
 
 	agentInfos := make([]messages.AgentInfo, 0, len(projectAgents))
@@ -187,11 +207,6 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 		a := &projectAgents[i]
 		agentInfos = append(agentInfos, messages.AgentInfo{Slug: a.Slug, Name: a.Name})
 		agentBySlug[strings.ToLower(a.Slug)] = a
-	}
-
-	primarySlug := ""
-	if in.Primary != nil && in.Primary.ProjectID == in.Sender.ProjectID {
-		primarySlug = in.Primary.Slug
 	}
 
 	results := messages.ResolveMentions(names, agentInfos, primarySlug)

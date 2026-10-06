@@ -62,6 +62,12 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.String("state").
 			Default("pending"),
 		// result: JSON; for ops that return data (check_prompt, env-gather).
+		// On a failed row it carries the typed failure envelope
+		// (hub dispatchFailureEnvelope): brokerError
+		// ({status,code,body,retryAfter}) when the broker answered with an
+		// HTTP error status, envStillMissing (the env requirements a
+		// finalize still lacks), and/or hubErrors (hub sentinel errors such
+		// as a delete holding the row).
 		field.String("result").
 			Optional(),
 		// claimed_by: hub instanceID that reconciled this intent.
@@ -93,7 +99,7 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.String("initiator_principal_id").
 			Optional().
 			Nillable(),
-		// session | uat | agent | legacy_unknown — see
+		// session | uat | agent | dev_local | legacy_unknown — see
 		// store.InitiatorCredentialKind*.
 		field.String("initiator_credential_kind").
 			Optional().
@@ -114,6 +120,9 @@ func (BrokerDispatch) Indexes() []ent.Index {
 		// Drain query: WHERE broker_id=$X AND state='pending'.
 		index.Fields("broker_id", "state"),
 		index.Fields("correlation_id"),
+		// Delete start-block and engine classification (design
+		// ptone/scion#2483 §2.1): WHERE agent_id=$X AND op=$Y AND state IN (...).
+		index.Fields("agent_id", "op", "state"),
 	}
 }
 

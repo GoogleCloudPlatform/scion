@@ -23,9 +23,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
+// TestMain isolates $HOME (see isolateTestHome in
+// home_isolation_helpers_test.go) in addition to the existing ent test
+// database setup, so integration-tagged pkg/hub tests keep scion state off
+// the real developer/agent HOME (ptone/scion#2417), and starts the same
+// memory guard as the non-integration TestMain.
 func TestMain(m *testing.M) {
+	stopMemGuard := startMemGuard()
+	teardown := isolateTestHome()
+	clearAmbientGCPProjectEnv()
 	enttest.MainSetup()
 	code := m.Run()
 	enttest.MainTeardown()
+	teardown()
+	stopMemGuard()
 	os.Exit(code)
 }

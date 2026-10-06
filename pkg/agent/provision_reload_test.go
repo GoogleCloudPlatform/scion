@@ -123,3 +123,55 @@ func TestProvisionAgentWithHarnessAuthOverride(t *testing.T) {
 		t.Errorf("expected AuthSelectedType = 'vertex-ai', got %q", cfg.AuthSelectedType)
 	}
 }
+
+// TestPreflight_DoesNotMutateCallerInlineConfig pins buildProvisionContext's
+// copy-on-write handling of opts.InlineConfig (design t1-async-create-v11.md
+// §7 P1b-1): Preflight runs ahead of Manager.Start on the async path, and
+// Start goes on to receive the same opts.InlineConfig pointer, so Preflight
+// deriving an auth override from opts.HarnessAuth must never write it back
+// into the caller's config.
+func TestPreflight_DoesNotMutateCallerInlineConfig(t *testing.T) {
+	mockRuntimeForTest(t)
+
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	if err := config.InitMachine(getTestHarnesses()); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
+		t.Fatalf("InitProject failed: %v", err)
+	}
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	inlineCfg := &api.ScionConfig{AuthSelectedType: ""}
+	opts := api.StartOptions{
+		Name:         "preflight-no-mutate",
+		Template:     "default",
+		ProjectPath:  projectScionDir,
+		HarnessAuth:  "vertex-ai",
+		InlineConfig: inlineCfg,
+	}
+
+	mgr := &AgentManager{}
+	if err := mgr.Preflight(context.Background(), opts); err != nil {
+		t.Fatalf("Preflight failed: %v", err)
+	}
+
+	if inlineCfg.AuthSelectedType != "" {
+		t.Errorf("Preflight mutated the caller's InlineConfig: AuthSelectedType = %q, want unchanged (empty)", inlineCfg.AuthSelectedType)
+	}
+}

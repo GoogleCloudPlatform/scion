@@ -125,6 +125,9 @@ type Client interface {
 	// the list of skills found at the given GitHub directory URL.
 	DiscoverSkillsDirectory(ctx context.Context, req DiscoverSkillsDirectoryRequest) (*DiscoverSkillsDirectoryResponse, error)
 
+	// Artifacts returns the artifact operations interface.
+	Artifacts() ArtifactService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 }
@@ -155,6 +158,7 @@ type client struct {
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
+	artifacts             *artifactService
 }
 
 // New creates a new Hub API client.
@@ -209,6 +213,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
+	c.artifacts = &artifactService{c: c}
 
 	return c, nil
 }
@@ -343,6 +348,11 @@ func (c *client) Messaging() MessagingService {
 	return c.messaging
 }
 
+// Artifacts returns the artifact operations interface.
+func (c *client) Artifacts() ArtifactService {
+	return c.artifacts
+}
+
 // get performs an HTTP GET request.
 func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	return c.getWithQuery(ctx, path, nil, headers)
@@ -356,6 +366,16 @@ func (c *client) getWithQuery(ctx context.Context, path string, query url.Values
 // post performs an HTTP POST request.
 func (c *client) post(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	return c.transport.Post(ctx, path, body, headers)
+}
+
+// postNoRetry performs an HTTP POST request exactly once: it bypasses the
+// transport's configured retry policy (including a client built with
+// WithRetry) and does not follow redirects. Used by operations — currently
+// only agent keys injection — for which the generic transport retry/redirect
+// behavior would risk sending a non-idempotent request more than once. See
+// apiclient.Transport.DoNoRetry.
+func (c *client) postNoRetry(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return c.transport.PostNoRetry(ctx, path, body, headers)
 }
 
 // put performs an HTTP PUT request.
@@ -469,7 +489,13 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
-// WithRetry configures retry behavior.
+// WithRetry configures retry behavior: up to maxRetries further attempts
+// after a transport error or a 5xx response (see apiclient.Transport.Do).
+// Retries are off by default. A retry replays the whole request, body
+// included, and only the methods that use the no-retry send are exempt, so
+// enabling this on a client that issues non-idempotent writes can duplicate
+// them. Pinning those writes to the no-retry send is tracked in
+// ptone/scion#2955.
 func WithRetry(maxRetries int, wait time.Duration) Option {
 	return func(c *client) {
 		c.transport.MaxRetries = maxRetries

@@ -29,6 +29,29 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+// chat-members imports navigateTo from the app entry. Loading the real
+// main.ts registers every Shoelace component and runs the app bootstrap,
+// so happy-dom tries to fetch icons from localhost:3000 and logs
+// ECONNREFUSED on stderr. These tests only need a stub; it matches the
+// one in pages/chat.test.ts.
+vi.mock('../../../client/main.js', () => ({
+  navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
+  replaceRoute: vi.fn((path: string) => {
+    window.history.replaceState(
+      window.history.state,
+      '',
+      path + window.location.search + window.location.hash
+    );
+    return Promise.resolve();
+  }),
+  stateManager: new EventTarget(),
+}));
+
 import './chat-members.js';
 import type { ScionChatMembers, ChatAgentMember } from './chat-members.js';
 
@@ -107,12 +130,24 @@ describe('scion-chat-members agent tooltip', () => {
     expect(tooltipContent(el)).toBe('thinking');
   });
 
+  it('falls back to the display label, not the raw state name (ptone/scion#1571)', async () => {
+    const blocked = await mount([agent({ activity: 'blocked' })]);
+    expect(tooltipContent(blocked)).toBe('waiting on others');
+    document.body.innerHTML = '';
+    const waiting = await mount([agent({ activity: 'waiting_for_input' })]);
+    expect(tooltipContent(waiting)).toBe('waiting for input');
+    document.body.innerHTML = '';
+    // Matched case-insensitively, like resolveAgentStatus (the badge's status source).
+    const upper = await mount([agent({ activity: 'BLOCKED' as never })]);
+    expect(tooltipContent(upper)).toBe('waiting on others');
+  });
+
   it('shows the last activity event as the updated time', async () => {
     const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString();
     const el = await mount([
       agent({ detailMessage: 'Running tests', lastActivityEvent: tenMinAgo, lastSeen: '' }),
     ]);
-    expect(tooltipContent(el)).toBe('Running tests\nUpdated: 10 min ago');
+    expect(tooltipContent(el)).toBe('Running tests\nUpdated: 10m ago');
   });
 
   it('ignores the heartbeat time — only the activity event drives "Updated"', async () => {

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -793,15 +794,18 @@ func (m *ctxProbeResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 }
 
 // TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext covers I-4:
-// the fallback must not inherit the primary's cancellation. If a tight caller
-// deadline is consumed by the Hub call, passing the same context straight to
-// the fallback makes the fallback fail instantly and defeats its purpose.
-// context.WithoutCancel detaches the cancellation while keeping values.
+// the fallback must not inherit the primary's expired deadline. If a tight
+// caller deadline is consumed by the Hub call, passing the same context
+// straight to the fallback makes the fallback fail instantly and defeats its
+// purpose. context.WithoutCancel detaches the deadline while keeping values.
+// An explicit cancellation, by contrast, is honoured (see the "cancelled
+// caller" subtests).
 func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testing.T) {
 	t.Run("transport error with exhausted context", func(t *testing.T) {
-		// The primary "times out": it fails, and the caller's context is dead
-		// by the time the router reaches for the fallback.
-		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ctxProbeKey{}, "trace-abc"))
+		// The primary "times out": it fails, and the caller's deadline has
+		// passed by the time the router reaches for the fallback.
+		ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), ctxProbeKey{}, "trace-abc"), time.Now().Add(-time.Second))
+		defer cancel()
 		hub := &mockSchemeResolver{name: "hub", hardErr: context.DeadlineExceeded}
 		local := &ctxProbeResolver{
 			name:     "github",
@@ -809,8 +813,6 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		router := NewRoutingSkillResolver(hub)
 		router.RegisterFallback("gh", local)
-
-		cancel() // caller's deadline is gone before the fallback runs
 
 		result, err := router.Resolve(ctx, []api.SkillReference{
 			{URI: "gh://owner/repo/skill"},
@@ -840,7 +842,8 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 	})
 
 	t.Run("per-URI retry with exhausted context", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), ctxProbeKey{}, "trace-xyz"))
+		ctx, cancel := context.WithDeadline(context.WithValue(context.Background(), ctxProbeKey{}, "trace-xyz"), time.Now().Add(-time.Second))
+		defer cancel()
 		hub := &mockSchemeResolver{
 			name: "hub",
 			errors: []ResolveError{
@@ -853,8 +856,6 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		router := NewRoutingSkillResolver(hub)
 		router.RegisterFallback("gh", local)
-
-		cancel()
 
 		result, err := router.Resolve(ctx, []api.SkillReference{
 			{URI: "gh://owner/repo/bad"},
@@ -881,6 +882,70 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 		}
 		if len(result.Errors) != 0 {
 			t.Errorf("expected hub error to be superseded by fallback, got %+v", result.Errors)
+		}
+	})
+
+	// An explicitly cancelled caller (the agent was deleted or stopped, or the
+	// Hub abandoned the request) must not get a detached fallback: nobody is
+	// left to use the result, and a detached fallback kept the start running
+	// for up to fallbackTimeout after the agent was gone.
+	t.Run("transport error with cancelled caller is not detached", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		hub := &mockSchemeResolver{name: "hub", hardErr: context.Canceled}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "gh-skill", URI: "gh://owner/repo/skill"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		cancel()
+
+		_, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/skill"},
+		}, ResolveOpts{})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+		if local.callCtxOK {
+			t.Error("fallback was called with a live, detached context for a cancelled caller; want the caller's cancelled context")
+		}
+		if local.callHasDL {
+			t.Errorf("fallback context carries a fresh deadline %v; want the caller's context unchanged", local.callDeadline)
+		}
+	})
+
+	t.Run("per-URI retry with cancelled caller is not detached", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		hub := &mockSchemeResolver{
+			name: "hub",
+			errors: []ResolveError{
+				{URI: "gh://owner/repo/bad", Code: "resolve_failed", Message: "hub could not resolve"},
+			},
+		}
+		local := &ctxProbeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "bad", URI: "gh://owner/repo/bad"}},
+		}
+		router := NewRoutingSkillResolver(hub)
+		router.RegisterFallback("gh", local)
+
+		cancel()
+
+		result, err := router.Resolve(ctx, []api.SkillReference{
+			{URI: "gh://owner/repo/bad"},
+		}, ResolveOpts{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if local.callCtxOK {
+			t.Error("fallback retry was called with a live, detached context for a cancelled caller")
+		}
+		if len(result.Resolved) != 0 {
+			t.Errorf("got %d resolved, want 0 (the fallback must not complete for a cancelled caller)", len(result.Resolved))
+		}
+		if len(result.Errors) != 1 || result.Errors[0].URI != "gh://owner/repo/bad" {
+			t.Errorf("want the primary's error kept, got %+v", result.Errors)
 		}
 	})
 
@@ -1012,4 +1077,185 @@ func TestRoutingSkillResolver_RegisterFallback_CancelledPrimaryContext(t *testin
 			t.Errorf("detached fallback context lost caller values: got %q", v)
 		}
 	})
+}
+
+// routeFilterMock wraps mockSchemeResolver to also implement RouteFilter, for
+// tests of the up-front direct-to-fallback routing in
+// RoutingSkillResolver.Resolve.
+type routeFilterMock struct {
+	*mockSchemeResolver
+	direct func(api.SkillReference) bool
+}
+
+func (m *routeFilterMock) PreferFallback(ref api.SkillReference) bool {
+	return m.direct(ref)
+}
+
+// TestRoutingSkillResolver_RouteFilter_RoutesDirectlyToFallback is the
+// acceptance test for routing a hub-unservable ref directly to the fallback:
+// the primary (hub) must receive zero calls for a ref the fallback claims via
+// RouteFilter.
+func TestRoutingSkillResolver_RouteFilter_RoutesDirectlyToFallback(t *testing.T) {
+	hub := &mockSchemeResolver{name: "hub"}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "direct", URI: "gh://o/r/direct"}},
+		},
+		direct: func(ref api.SkillReference) bool { return ref.URI == "gh://o/r/direct" },
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/direct"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hub.called) != 0 {
+		t.Errorf("primary (hub) must not be called for a ref the fallback claims via RouteFilter; got %d calls: %+v", len(hub.called), hub.called)
+	}
+	if len(fb.called) != 1 || fb.called[0].URI != "gh://o/r/direct" {
+		t.Errorf("fallback must receive the claimed ref directly, got %+v", fb.called)
+	}
+	if len(result.Resolved) != 1 || result.Resolved[0].Name != "direct" {
+		t.Fatalf("expected the claimed skill resolved, got %+v", result.Resolved)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("got %d errors, want 0: %+v", len(result.Errors), result.Errors)
+	}
+}
+
+// TestRoutingSkillResolver_RouteFilter_MixedBatch confirms that within one
+// scheme group, direct and primary-routed refs are routed independently: the
+// primary sees only the primary-routed ref, and the fallback sees only the
+// direct one, with no fallback-retry interaction between them.
+func TestRoutingSkillResolver_RouteFilter_MixedBatch(t *testing.T) {
+	hub := &mockSchemeResolver{
+		name:     "hub",
+		resolved: []ResolvedSkill{{Name: "hub-served", URI: "gh://o/r/hub-served"}},
+	}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "direct", URI: "gh://o/r/direct"}},
+		},
+		direct: func(ref api.SkillReference) bool { return ref.URI == "gh://o/r/direct" },
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/hub-served"},
+		{URI: "gh://o/r/direct"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hub.called) != 1 || hub.called[0].URI != "gh://o/r/hub-served" {
+		t.Errorf("primary must only see the non-direct ref, got %+v", hub.called)
+	}
+	if len(fb.called) != 1 || fb.called[0].URI != "gh://o/r/direct" {
+		t.Errorf("fallback must only see the direct ref up front, got %+v", fb.called)
+	}
+	if len(result.Resolved) != 2 {
+		t.Fatalf("expected both refs resolved, got %+v", result.Resolved)
+	}
+}
+
+// TestRoutingSkillResolver_RouteFilter_AllDirectSkipsPrimaryGroup confirms
+// that when every ref in a scheme group is routed directly to the fallback,
+// the primary is never invoked for that scheme at all (not even with an
+// empty slice).
+func TestRoutingSkillResolver_RouteFilter_AllDirectSkipsPrimaryGroup(t *testing.T) {
+	hub := &mockSchemeResolver{name: "hub"}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{
+			name:     "github",
+			resolved: []ResolvedSkill{{Name: "a", URI: "gh://o/r/a"}, {Name: "b", URI: "gh://o/r/b"}},
+		},
+		direct: func(api.SkillReference) bool { return true },
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/a"},
+		{URI: "gh://o/r/b"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hub.called != nil {
+		t.Errorf("primary must not be invoked at all when every ref is routed directly, got %+v", hub.called)
+	}
+	if len(result.Resolved) != 2 {
+		t.Fatalf("expected both refs resolved via the fallback, got %+v", result.Resolved)
+	}
+}
+
+// TestRoutingSkillResolver_RouteFilter_DirectFallbackErrorIsPerRef checks
+// that a transport-level error from the fallback on directly routed refs
+// becomes a per-ref error for each of those refs, while the refs routed to
+// the primary in the same scheme group, and other scheme groups, still
+// resolve.
+func TestRoutingSkillResolver_RouteFilter_DirectFallbackErrorIsPerRef(t *testing.T) {
+	hub := &mockSchemeResolver{
+		name:     "hub",
+		resolved: []ResolvedSkill{{Name: "hub-served", URI: "gh://o/r/hub-served"}},
+	}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{name: "github", hardErr: errors.New("connection reset")},
+		direct: func(ref api.SkillReference) bool {
+			return ref.URI == "gh://o/r/direct-1" || ref.URI == "gh://o/r/direct-2"
+		},
+	}
+	other := &mockSchemeResolver{
+		name:     "gcp",
+		resolved: []ResolvedSkill{{Name: "other", URI: "gcp-skill://reg/other"}},
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+	router.Register("gcp-skill", other)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/hub-served"},
+		{URI: "gh://o/r/direct-1"},
+		{URI: "gh://o/r/direct-2"},
+		{URI: "gcp-skill://reg/other"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve returned %v; a fallback failure on direct refs must not fail the whole call", err)
+	}
+
+	resolved := map[string]bool{}
+	for _, s := range result.Resolved {
+		resolved[s.URI] = true
+	}
+	if !resolved["gh://o/r/hub-served"] || !resolved["gcp-skill://reg/other"] || len(result.Resolved) != 2 {
+		t.Errorf("resolved = %+v, want the primary-routed gh ref and the gcp-skill ref", result.Resolved)
+	}
+
+	errByURI := map[string]ResolveError{}
+	for _, e := range result.Errors {
+		errByURI[e.URI] = e
+	}
+	if len(result.Errors) != 2 {
+		t.Fatalf("errors = %+v, want one per direct ref", result.Errors)
+	}
+	for _, uri := range []string{"gh://o/r/direct-1", "gh://o/r/direct-2"} {
+		e, ok := errByURI[uri]
+		if !ok {
+			t.Errorf("no error for %s", uri)
+			continue
+		}
+		if e.Code != "resolve_failed" || !strings.Contains(e.Message, "connection reset") {
+			t.Errorf("%s: error %+v, want resolve_failed naming the fallback failure", uri, e)
+		}
+	}
 }

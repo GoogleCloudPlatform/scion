@@ -516,53 +516,34 @@ describe('fixture shape validation', () => {
   describe('audit-events.json', () => {
     it('has audit page shape', () => {
       const data = loadFixture<AccessBoundaryAuditPage>('audit-events.json');
-      expect(typeof data.constraintId).toBe('string');
       expect(data.items).toBeInstanceOf(Array);
       expect(data.items.length).toBeGreaterThan(0);
       expect(typeof data.totalCount).toBe('number');
       expect(typeof data.totalCountExact).toBe('boolean');
       expect(data.retention).toBeDefined();
-      expect(data._capabilities).toBeDefined();
+      expect(data.retention.maxRows).toBe(1000);
     });
 
     it('audit events have correct shape', () => {
       const data = loadFixture<AccessBoundaryAuditPage>('audit-events.json');
-      const validEventTypes = [
-        'boundary.created',
-        'boundary.updated',
-        'boundary.deleted',
-        'boundary.commit_rejected',
-        'boundary.recovery_disabled',
-      ];
       for (const event of data.items) {
         expect(typeof event.id).toBe('string');
-        expect(typeof event.occurredAt).toBe('string');
-        expect(validEventTypes).toContain(event.eventType);
-        expect(event.actor).toBeDefined();
-        expect(event.target).toBeDefined();
-        expect(event.target.type).toBe('access_constraint');
-        expect(typeof event.correlationId).toBe('string');
-        expect(['committed', 'rejected']).toContain(event.outcome);
-        expect(event._capabilities).toBeDefined();
+        expect(typeof event.constraintId).toBe('string');
+        expect(typeof event.timestamp).toBe('string');
+        expect(['create', 'update', 'delete']).toContain(event.operation);
+        if (event.correlationId !== undefined) {
+          expect(typeof event.correlationId).toBe('string');
+        }
+        expect(event).not.toHaveProperty('actor.credentialId');
       }
-    });
-
-    it('rejected events carry rejection code', () => {
-      const data = loadFixture<AccessBoundaryAuditPage>('audit-events.json');
-      const rejected = data.items.filter((e) => e.outcome === 'rejected');
-      expect(rejected.length).toBeGreaterThan(0);
-      for (const event of rejected) {
-        expect(typeof event.rejectionCode).toBe('string');
-        expect(
-          (ACCESS_BOUNDARY_ERROR_CODES as readonly string[]).includes(event.rejectionCode!)
-        ).toBe(true);
-      }
+      expect(data.items[0].correlationId).toBe('req-3c0e91aa');
+      expect(data.items[1]).not.toHaveProperty('correlationId');
     });
 
     it('covers multiple event types', () => {
       const data = loadFixture<AccessBoundaryAuditPage>('audit-events.json');
-      const types = new Set(data.items.map((e) => e.eventType));
-      expect(types.size).toBeGreaterThanOrEqual(3);
+      const operations = new Set(data.items.map((e) => e.operation));
+      expect(operations).toEqual(new Set(['create', 'update']));
     });
   });
 

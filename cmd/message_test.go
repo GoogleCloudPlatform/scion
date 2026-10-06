@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,11 +23,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +42,7 @@ type messageTestState struct {
 	bcastChanged bool
 	allChanged   bool
 	bodyFile     string
-	raw          bool
+	rawChanged   bool
 }
 
 func saveMessageTestState() messageTestState {
@@ -48,7 +52,7 @@ func saveMessageTestState() messageTestState {
 		bcastChanged: messageCmd.Flags().Lookup("broadcast").Changed,
 		allChanged:   messageCmd.Flags().Lookup("all").Changed,
 		bodyFile:     msgBodyFile,
-		raw:          msgRaw,
+		rawChanged:   messageCmd.Flags().Lookup("raw").Changed,
 	}
 }
 
@@ -58,7 +62,7 @@ func (s messageTestState) restore() {
 	messageCmd.Flags().Lookup("broadcast").Changed = s.bcastChanged
 	messageCmd.Flags().Lookup("all").Changed = s.allChanged
 	msgBodyFile = s.bodyFile
-	msgRaw = s.raw
+	messageCmd.Flags().Lookup("raw").Changed = s.rawChanged
 }
 
 // messageMockServer creates a mock Hub server that handles project-scoped
@@ -209,13 +213,78 @@ func TestResolveMessageBody_BodyFile(t *testing.T) {
 func TestResolveMessageBody_BodyFilePreservesNewlines(t *testing.T) {
 	tmpDir := t.TempDir()
 	bodyFile := filepath.Join(tmpDir, "msg.txt")
-	content := "line1\nline2\nline3\n"
+	content := "  line1\n\nline2\nline3  \n\n"
 	err := os.WriteFile(bodyFile, []byte(content), 0644)
 	require.NoError(t, err)
 
 	got, err := resolveMessageBody(bodyFile, "")
 	require.NoError(t, err)
-	assert.Equal(t, content, got, "body-file content should be preserved exactly")
+	// Same rule as stdin: trailing newlines are trimmed, everything else
+	// (interior blank lines, leading/trailing spaces) is preserved exactly.
+	assert.Equal(t, "  line1\n\nline2\nline3  ", got)
+}
+
+// withStdin replaces os.Stdin with a pipe carrying content for the test.
+func withStdin(t *testing.T, content string) {
+	t.Helper()
+	origStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = origStdin })
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	// Write from a goroutine: content larger than the OS pipe buffer
+	// (64 KiB on Linux) would otherwise block before anything reads it.
+	go func() {
+		_, _ = w.WriteString(content)
+		_ = w.Close()
+	}()
+	t.Cleanup(func() { _ = r.Close() })
+	os.Stdin = r
+}
+
+func TestResolveMessageBody_BodyFileDashReadsStdin(t *testing.T) {
+	withStdin(t, "from `stdin` via --body-file - $(not expanded)\n")
+	got, err := resolveMessageBody("-", "")
+	require.NoError(t, err)
+	assert.Equal(t, "from `stdin` via --body-file - $(not expanded)", got)
+}
+
+func TestResolveMessageBody_BodyFileDashConflict(t *testing.T) {
+	_, err := resolveMessageBody("-", "positional content")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestResolveMessageBody_NewlineRuleConsistent pins that --body-file <path>,
+// --body-file -, and positional "-" apply the same newline rule.
+func TestResolveMessageBody_NewlineRuleConsistent(t *testing.T) {
+	cases := map[string]string{
+		"single trailing LF":    "a\nb\n",
+		"multiple trailing LF":  "a\nb\n\n\n",
+		"trailing CRLF":         "a\r\nb\r\n",
+		"no trailing newline":   "a\nb",
+		"only newlines → empty": "\n\n",
+		"trailing spaces kept":  "a\nb  \n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			bodyFile := filepath.Join(t.TempDir(), "msg.txt")
+			require.NoError(t, os.WriteFile(bodyFile, []byte(content), 0644))
+			fromFile, err := resolveMessageBody(bodyFile, "")
+			require.NoError(t, err)
+
+			withStdin(t, content)
+			fromDashFlag, err := resolveMessageBody("-", "")
+			require.NoError(t, err)
+
+			withStdin(t, content)
+			fromDashArg, err := resolveMessageBody("", "-")
+			require.NoError(t, err)
+
+			assert.Equal(t, fromFile, fromDashFlag)
+			assert.Equal(t, fromFile, fromDashArg)
+			assert.NotRegexp(t, `[\r\n]$`, fromFile, "trailing line breaks should be trimmed")
+		})
+	}
 }
 
 func TestResolveMessageBody_BodyFileNotFound(t *testing.T) {
@@ -464,7 +533,7 @@ func TestBuildStructuredMessage(t *testing.T) {
 	msgInterrupt = true
 	msgAttach = []string{"file1.go", "file2.go"}
 
-	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach, msgRaw, msgPlain, msgInterrupt)
+	msg := buildStructuredMessage("user:alice", "agent:dev", "do something", msgAttach, msgPlain, msgInterrupt)
 
 	assert.Equal(t, messages.Version, msg.Version)
 	assert.Equal(t, "user:alice", msg.Sender)
@@ -658,16 +727,9 @@ func TestUserRecipientFlagValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
-		raw     bool
 		in      string
 		wantErr string
 	}{
-		{
-			name:    "raw with user recipient not allowed",
-			args:    []string{"user:alice", "hello"},
-			raw:     true,
-			wantErr: "--raw cannot be used with user recipients",
-		},
 		{
 			name:    "scheduled with user recipient not allowed",
 			args:    []string{"user:alice", "hello"},
@@ -678,14 +740,11 @@ func TestUserRecipientFlagValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			origRaw := msgRaw
 			origIn := msgIn
 			defer func() {
-				msgRaw = origRaw
 				msgIn = origIn
 			}()
 
-			msgRaw = tc.raw
 			msgIn = tc.in
 
 			err := messageCmd.RunE(messageCmd, tc.args)
@@ -702,17 +761,10 @@ func TestSetRecipientFlagValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
-		raw     bool
 		in      string
 		notify  bool
 		wantErr string
 	}{
-		{
-			name:    "set with raw not allowed",
-			args:    []string{"set[agent:a,agent:b]", "hello"},
-			raw:     true,
-			wantErr: "--raw cannot be used with group[] recipients",
-		},
 		{
 			name:    "set with in not allowed",
 			args:    []string{"set[agent:a,agent:b]", "hello"},
@@ -739,16 +791,13 @@ func TestSetRecipientFlagValidation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			origRaw := msgRaw
 			origIn := msgIn
 			origNotify := msgNotify
 			defer func() {
-				msgRaw = origRaw
 				msgIn = origIn
 				msgNotify = origNotify
 			}()
 
-			msgRaw = tc.raw
 			msgIn = tc.in
 			msgNotify = tc.notify
 
@@ -781,12 +830,6 @@ func TestWakeFlagValidation(t *testing.T) {
 			setup:    func() { msgWake = true; msgAt = "2026-01-01T00:00:00Z" },
 			teardown: func() { msgWake = false; msgAt = "" },
 			errMsg:   "--wake cannot be combined with --in or --at",
-		},
-		{
-			name:     "wake with raw",
-			setup:    func() { msgWake = true; msgRaw = true },
-			teardown: func() { msgWake = false; msgRaw = false },
-			errMsg:   "--wake cannot be combined with --raw",
 		},
 		{
 			name:     "wake with user recipient",
@@ -1086,17 +1129,14 @@ func TestBareEmailRecipientAutoPrefix(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			// Reset flags to defaults
-			origRaw := msgRaw
 			origIn := msgIn
 			origNotify := msgNotify
 			origWake := msgWake
 			defer func() {
-				msgRaw = origRaw
 				msgIn = origIn
 				msgNotify = origNotify
 				msgWake = origWake
 			}()
-			msgRaw = false
 			msgIn = ""
 			msgNotify = false
 			msgWake = false
@@ -2400,18 +2440,11 @@ func TestCCFlagValidation(t *testing.T) {
 	tests := []struct {
 		name      string
 		cc        []string
-		raw       bool
 		userRecip bool
 		in        string
 		at        string
 		wantErr   string
 	}{
-		{
-			name:    "cc with raw",
-			cc:      []string{"agent-a"},
-			raw:     true,
-			wantErr: "--cc cannot be combined with --raw",
-		},
 		{
 			name:      "cc with user recipient",
 			cc:        []string{"agent-a"},
@@ -2435,18 +2468,15 @@ func TestCCFlagValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			origCC := msgCC
-			origRaw := msgRaw
 			origIn := msgIn
 			origAt := msgAt
 			defer func() {
 				msgCC = origCC
-				msgRaw = origRaw
 				msgIn = origIn
 				msgAt = origAt
 			}()
 
 			msgCC = tc.cc
-			msgRaw = tc.raw
 			msgIn = tc.in
 			msgAt = tc.at
 
@@ -2919,45 +2949,10 @@ func TestCrossProjectMismatchRejection(t *testing.T) {
 	assert.False(t, hasAgentTarget, "email ref should not be detected as agent target")
 }
 
-// TestMessageCmd_RunE_CrossProjectRaw_Refused verifies that `scion message
-// --raw` refuses a cross-project target at the CLI layer, mirroring
-// TestKeysCmd_RunE_CrossProjectTarget_Refused. It is hermetic on unmutated
-// code: the --raw guard returns before any hub work, so it never reaches
-// the network. It still points at a mock hub (rather than the ambient one)
-// so a regression that lets the guard fall through fails on an assertion
-// instead of a real network round trip.
-func TestMessageCmd_RunE_CrossProjectRaw_Refused(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-	clearHubContextEnv(t)
-	t.Setenv("HOME", t.TempDir())
-	t.Chdir(t.TempDir())
-
-	server, sent := crossProjectMockServer(t, "target-uuid-raw", "target-agent", "other-project-uuid", "other-project")
-	defer server.Close()
-
-	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-	t.Setenv("SCION_AGENT_NAME", "sender-agent")
-	t.Setenv("SCION_PROJECT", "own-project")
-	t.Setenv("SCION_PROJECT_ID", "own-project-id")
-	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
-
-	cmd := newProjectFlagCommand(t)
-	require.NoError(t, cmd.Flags().Set("project", "other-project"))
-	msgRaw = true
-
-	err := messageCmd.RunE(cmd, []string{"target-agent", "hello"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--raw cannot be used with a cross-project target")
-	assert.Empty(t, *sent, "the --raw refusal must fire before any hub request is made")
-}
-
-// TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub is the companion to
-// TestMessageCmd_RunE_CrossProjectRaw_Refused: with msgRaw=false, the same
-// cross-project target must not trip the --raw refusal. Unlike a plain
-// "no error" check, this asserts positively that the send actually reaches
-// the mock hub's cross-project resolve/send endpoints, proving the guard let
-// it through rather than merely not erroring for an unrelated reason.
+// TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub asserts positively
+// that an ordinary cross-project send reaches the mock hub's cross-project
+// resolve/send endpoints, rather than merely not erroring for an unrelated
+// reason.
 //
 // The test is hermetic: HOME and the working directory are redirected to
 // scratch dirs (so project-root discovery can't find this container's real
@@ -2986,7 +2981,6 @@ func TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub(t *testing.T) {
 
 	cmd := newProjectFlagCommand(t)
 	require.NoError(t, cmd.Flags().Set("project", targetProjectSlug))
-	msgRaw = false
 
 	err := messageCmd.RunE(cmd, []string{targetAgentSlug, "hello"})
 	require.NoError(t, err)
@@ -2996,8 +2990,155 @@ func TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub(t *testing.T) {
 	assert.Equal(t, "hello", (*sent)[0].Message)
 }
 
+// newCountingHubServer answers /healthz and any other route successfully
+// (so a regression that reaches the Hub does not itself crash the test),
+// while counting every request received. Used to prove a refusal returns
+// before any Hub call is attempted at all: a test can then assert zero
+// requests, rather than only matching the error text.
+func newCountingHubServer(t *testing.T) (*httptest.Server, *int32) {
+	t.Helper()
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/healthz" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(agentkeys.Response{Status: agentkeys.StatusDispatched})
+	}))
+	return server, &hits
+}
+
+// setHermeticHubEnv points every hub-resolution env var at server and
+// isolates HOME/cwd, so resolving a project/sender never reaches outside
+// this test (the ambient container otherwise sets a real SCION_HUB_ENDPOINT
+// and credentials).
+func setHermeticHubEnv(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	restoreAllSilenceUsage(t)
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", "own-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	// Inside a Scion agent container the runtime sets SCION_HOST_UID, which
+	// makes root's agent-container guard abort before any Hub call. Clear
+	// it so a zero-hit assertion measures the command itself.
+	t.Setenv("SCION_HOST_UID", "")
+}
+
+// TestMessageCmd_RawFlag_ZeroWireCalls proves the removed --raw flag never
+// reaches the wire. It drives the real cobra pipeline (rootCmd.ExecuteC), so
+// the refusal is shown to fire in argument validation, before root's
+// PersistentPreRunE, project resolution, sender resolution or any Hub
+// request. Every recipient form and flag combination that previously
+// routed --raw somewhere (the keys alias, conversation references,
+// cross-project, local mode) is covered, plus --raw=false and a missing
+// body, which must be refused too.
+func TestMessageCmd_RawFlag_ZeroWireCalls(t *testing.T) {
+	cases := []struct {
+		name  string
+		args  []string
+		noHub bool
+	}{
+		{"agent", []string{"message", "target-agent", "Escape", "--raw"}, false},
+		{"raw false", []string{"message", "target-agent", "Escape", "--raw=false"}, false},
+		{"no body", []string{"message", "target-agent", "--raw"}, false},
+		{"at agent", []string{"message", "@target-agent", "Escape", "--raw"}, false},
+		{"conversation", []string{"message", "conv:11111111-1111-1111-1111-111111111111", "Escape", "--raw"}, false},
+		{"thread", []string{"message", "#general", "Escape", "--raw"}, false},
+		{"user", []string{"message", "user:alice", "Escape", "--raw"}, false},
+		{"group", []string{"message", "group[agent:a,agent:b]", "Escape", "--raw"}, false},
+		{"cross project", []string{"message", "target-agent", "Escape", "--raw", "--project", "other-project"}, false},
+		{"interrupt", []string{"message", "target-agent", "Escape", "--raw", "--interrupt"}, false},
+		{"msg alias", []string{"msg", "target-agent", "Escape", "--raw"}, false},
+		{"local mode", []string{"message", "target-agent", "Escape", "--raw"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := saveMessageTestState()
+			defer orig.restore()
+			restore := resetMessageFlags()
+			defer restore()
+			origInterrupt := msgInterrupt
+			t.Cleanup(func() {
+				msgInterrupt = origInterrupt
+				messageCmd.Flags().Visit(func(f *pflag.Flag) { f.Changed = false })
+				rootCmd.PersistentFlags().Visit(func(f *pflag.Flag) { f.Changed = false })
+				rootCmd.SetArgs(nil)
+				rootCmd.SetOut(nil)
+				rootCmd.SetErr(nil)
+			})
+
+			server, hits := newCountingHubServer(t)
+			defer server.Close()
+			setHermeticHubEnv(t, server)
+			noHub = tc.noHub
+
+			var out bytes.Buffer
+			rootCmd.SetOut(&out)
+			rootCmd.SetErr(&out)
+			rootCmd.SetArgs(tc.args)
+			_, err := rootCmd.ExecuteC()
+
+			require.ErrorIs(t, err, errRawFlagRemoved)
+			assert.Contains(t, err.Error(), "scion keys")
+			assert.EqualValues(t, 0, atomic.LoadInt32(hits), "--raw must make zero wire calls")
+		})
+	}
+}
+
+// TestMessageCmd_WithoutRawFlag_ReachesCountingServer is the positive
+// control for TestMessageCmd_RawFlag_ZeroWireCalls: the same pipeline and
+// environment without --raw does reach the counting server, so its
+// zero-hit assertion is not vacuous.
+func TestMessageCmd_WithoutRawFlag_ReachesCountingServer(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"agent", []string{"message", "target-agent", "hello"}},
+		{"at agent", []string{"message", "@target-agent", "hello"}},
+		{"msg alias", []string{"msg", "target-agent", "hello"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := saveMessageTestState()
+			defer orig.restore()
+			restore := resetMessageFlags()
+			defer restore()
+			t.Cleanup(func() {
+				messageCmd.Flags().Visit(func(f *pflag.Flag) { f.Changed = false })
+				rootCmd.PersistentFlags().Visit(func(f *pflag.Flag) { f.Changed = false })
+				rootCmd.SetArgs(nil)
+				rootCmd.SetOut(nil)
+				rootCmd.SetErr(nil)
+			})
+
+			server, hits := newCountingHubServer(t)
+			defer server.Close()
+			setHermeticHubEnv(t, server)
+			noHub = false
+
+			var out bytes.Buffer
+			rootCmd.SetOut(&out)
+			rootCmd.SetErr(&out)
+			rootCmd.SetArgs(tc.args)
+			_, err := rootCmd.ExecuteC()
+
+			assert.NotErrorIs(t, err, errRawFlagRemoved)
+			assert.Greater(t, atomic.LoadInt32(hits), int32(0),
+				"without --raw the command must reach the counting server (err=%v)", err)
+		})
+	}
+}
+
 // TestMessageCmd_RunE_ConvRefCrossProjectMismatch pins the conv: + --project
-// mismatch check (message.go, just after the --raw cross-project refusal).
+// mismatch check (message.go).
 // This check intentionally keeps its own inline same-project comparison
 // rather than calling detectCrossProjectTarget: that helper treats an
 // explicitly empty --project ("") as same-project, but this branch must
@@ -3300,4 +3441,40 @@ func TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice(t *testing.T)
 	assert.Contains(t, output, "msg-deferred-1", "the message ID must be shown for correlation")
 	assert.NotContains(t, output, "Message delivered to agent",
 		"the generic delivered message must not also print for a deferred outcome")
+}
+
+// TestResolveMessageBody_OversizeRejectedNotTruncated pins that an over-limit
+// body is rejected rather than cut at the read limit and sent. The input puts
+// newlines at the cut point, which trimming would otherwise remove, pulling
+// the read back under the limit and silently dropping the tail.
+func TestResolveMessageBody_OversizeRejectedNotTruncated(t *testing.T) {
+	content := strings.Repeat("a", messages.MaxMsgSize-1) + "\n\n" + "TAIL"
+
+	t.Run("--body-file path", func(t *testing.T) {
+		bodyFile := filepath.Join(t.TempDir(), "big.txt")
+		require.NoError(t, os.WriteFile(bodyFile, []byte(content), 0644))
+		_, err := resolveMessageBody(bodyFile, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("--body-file -", func(t *testing.T) {
+		withStdin(t, content)
+		_, err := resolveMessageBody("-", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("positional -", func(t *testing.T) {
+		withStdin(t, content)
+		_, err := resolveMessageBody("", "-")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("exactly at the limit is accepted", func(t *testing.T) {
+		atLimit := strings.Repeat("a", messages.MaxMsgSize)
+		bodyFile := filepath.Join(t.TempDir(), "limit.txt")
+		require.NoError(t, os.WriteFile(bodyFile, []byte(atLimit), 0644))
+		got, err := resolveMessageBody(bodyFile, "")
+		require.NoError(t, err)
+		assert.Len(t, got, messages.MaxMsgSize)
+	})
 }

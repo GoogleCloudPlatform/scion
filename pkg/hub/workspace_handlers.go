@@ -17,11 +17,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -80,6 +82,11 @@ type SyncToFinalizeResponse struct {
 	FilesApplied int `json:"filesApplied"`
 	// BytesTransferred is the total bytes transferred.
 	BytesTransferred int64 `json:"bytesTransferred"`
+	// Warnings lists non-fatal notices, for example that the agent was
+	// already launching and the workspace was not applied, or that files were
+	// ignored because the project gives each agent an empty workspace
+	// directory.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // WorkspaceStatusResponse is the response for getting workspace sync status.
@@ -117,28 +124,28 @@ func (s *Server) handleWorkspaceRoutes(w http.ResponseWriter, r *http.Request, a
 		if r.Method == http.MethodGet {
 			s.handleWorkspaceStatus(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 		}
 	case "sync-from":
 		// POST /api/v1/agents/{id}/workspace/sync-from - Initiate sync from agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncFrom(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	case "sync-to":
 		// POST /api/v1/agents/{id}/workspace/sync-to - Initiate sync to agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncTo(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	case "sync-to/finalize":
 		// POST /api/v1/agents/{id}/workspace/sync-to/finalize - Finalize sync to agent
 		if r.Method == http.MethodPost {
 			s.handleWorkspaceSyncToFinalize(w, r, agentID)
 		} else {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 		}
 	default:
 		NotFound(w, "Workspace action")
@@ -408,6 +415,16 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A launch is already in flight (for example a duplicate finalize): do
+	// not dispatch again.
+	if agent.IsInFlight() {
+		writeJSON(w, http.StatusOK, SyncToFinalizeResponse{
+			Applied:  false,
+			Warnings: []string{launchInFlightInputsWarning},
+		})
+		return
+	}
+
 	// Check agent is in a valid state for finalize
 	if agent.Phase != string(state.PhaseRunning) && agent.Phase != string(state.PhaseProvisioning) {
 		Conflict(w, "Agent must be running or provisioning")
@@ -449,11 +466,30 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 
 	// Bootstrap mode: agent is provisioning, dispatch to broker now
 	if agent.Phase == string(state.PhaseProvisioning) {
-		// Store workspace storage path on agent record for broker download
+		project, err := s.store.GetProject(ctx, agent.ProjectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		// Empty-per-agent agents start in an empty private directory
+		// (design #2703): the uploaded files are ignored, as on create, so
+		// the broker never pre-seeds the directory from GCS.
+		emptyPerAgent := project.IsEmptyPerAgent()
 		if agent.AppliedConfig == nil {
 			agent.AppliedConfig = &store.AgentAppliedConfig{}
 		}
-		agent.AppliedConfig.WorkspaceStoragePath = storagePath
+		if emptyPerAgent {
+			if len(req.Manifest.Files) > 0 {
+				s.workspaceLog.Warn("Ignoring workspace files for empty-per-agent project",
+					"agent_id", agent.ID, "project_id", project.ID, "files", len(req.Manifest.Files))
+			}
+			agent.AppliedConfig.WorkspaceStoragePath = ""
+			agent.AppliedConfig.WorkspaceStorageBucket = ""
+		} else {
+			// Store workspace storage path on agent record for broker download
+			agent.AppliedConfig.WorkspaceStoragePath = storagePath
+			agent.AppliedConfig.WorkspaceStorageBucket = workspaceDownloadBucket(stor)
+		}
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			RuntimeError(w, "Failed to update agent config: "+err.Error())
 			return
@@ -465,14 +501,64 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		// From here the launch no longer follows the client
+		// (ptone/scion#1961). The create-and-start runs under a start claim,
+		// which records run intent running; its dispatch is bounded by
+		// syncDispatch, derived from the claim's context.
+		ctx = detachLaunchFromClient(ctx)
+		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+			err = syncDispatch(ctx, func(dctx context.Context) error {
+				out, err = dispatcher.DispatchAgentCreate(dctx, agent)
+				return err
+			})
+			return out, err
+		})
+		if errors.Is(err, ErrLaunchInvalidPhase) {
+			writeLaunchInvalidPhase(w, err, agent.ID)
+			return
+		}
+		if s.writeStartClaimError(ctx, w, err, agent.ID) {
+			return
+		}
+		if err != nil {
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				ref.write(w)
+				return
+			}
+			if writeAgentTokenIssueError(w, err) {
+				return
+			}
+			if writeEmptyPerAgentCapabilityError(w, err) {
+				return
+			}
+			if relaySkillResolutionError(w, err) {
+				return
+			}
+			if relayWorkspaceStorageUnconfigured(w, err) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
 			return
 		}
 
-		// Update agent status from broker response
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+		if created.AcceptedLaunch() != nil {
+			// Accepted for asynchronous launch: the row is already
+			// provisioning; merge only the non-status fields.
+			if _, err := s.persistAcceptedLaunch(ctx, agent); err != nil {
+				s.workspaceLog.Warn("Failed to update agent after accepted launch", "error", err)
+			}
+		} else if err := s.store.UpdateAgent(ctx, agent); err != nil {
+			// Update agent status from broker response
 			s.workspaceLog.Warn("Failed to update agent status after dispatch", "error", err)
+		}
+
+		if emptyPerAgent {
+			resp := SyncToFinalizeResponse{ContentHash: contentHash}
+			if len(req.Manifest.Files) > 0 {
+				resp.Warnings = []string{api.WarningEmptyPerAgentWorkspaceFilesIgnored}
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
 		}
 
 		writeJSON(w, http.StatusOK, SyncToFinalizeResponse{
@@ -670,8 +756,9 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 		return
 	}
 
-	// Only applies to hub-managed and shared-workspace projects
-	if project.GitRemote != "" && !project.IsSharedWorkspace() {
+	// Only applies to hub-managed and shared-workspace projects. Empty-per-agent
+	// projects have no shared project workspace to keep in sync (design #2703).
+	if !syncsHubProjectWorkspace(project) {
 		return
 	}
 
@@ -706,4 +793,16 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
 			"project_id", project.ID, "path", workspacePath)
 	}
+}
+
+// workspaceDownloadBucket returns the bucket a broker should download a
+// workspace upload in stor from, or "" when stor is not GCS: a broker
+// cannot read the hub's local storage, so it is then left to the broker's
+// own bucket setting and its explicit refusal when it has none
+// (ptone/scion#3422).
+func workspaceDownloadBucket(stor storage.Storage) string {
+	if stor == nil || stor.Provider() != storage.ProviderGCS {
+		return ""
+	}
+	return stor.Bucket()
 }

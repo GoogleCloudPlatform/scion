@@ -73,7 +73,9 @@ func (d *def135Dispatcher) getCalls() []def135DispatchCall {
 }
 
 // No-op implementations for the remaining AgentDispatcher methods.
-func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error { return nil }
+func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
+}
 func (d *def135Dispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
@@ -101,11 +103,11 @@ func (d *def135Dispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, 
 func (d *def135Dispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *def135Dispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *def135Dispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *def135Dispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *def135Dispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +153,7 @@ func setupDEF135(t *testing.T) def135Fixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID:           tid("agent-def135"),
@@ -479,7 +481,13 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 	// the dispatcher — asserting the dispatcher was never called is what
 	// distinguishes the pre-dispatch 409 (the hoist) from the old
 	// post-dispatch 409.
-	srv2, s2 := testServer(t)
+	// The conversation-upsert failure wrapper is installed before setup
+	// and armed after setup: setup starts emitMutationAudit goroutines that
+	// read srv2.store, so swapping the field afterwards would race
+	// (ptone/scion#2099).
+	srv2, s2, _, upsertFault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *convUpsertFailStore {
+		return &convUpsertFailStore{Store: inner, fault: fault}
+	})
 	ctx := context.Background()
 
 	user2 := &store.User{
@@ -503,7 +511,7 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s2.CreateProject(ctx, project2))
-	srv2.createProjectMembersGroup(ctx, project2)
+	srv2.seedProjectCreatorMembership(ctx, project2)
 
 	agent2 := &store.Agent{
 		ID:           tid("agent-def135-ac5"),
@@ -522,9 +530,8 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 	srv2.SetDispatcher(dispatcher2)
 	enableWriteDenySwitch(t, srv2)
 
-	// Now replace the server's store with one that fails conversation upserts.
-	// We swap it AFTER all the setup is done.
-	srv2.store = &convUpsertFailStore{Store: s2}
+	// Now make conversation upserts fail, AFTER all the setup is done.
+	upsertFault.Arm()
 
 	topic2 := "scion.project." + project2.ID + ".agent." + agent2.Slug + ".messages"
 	payload := inboundMessageRequest{
@@ -559,12 +566,17 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 		"AC-5: dispatcher must NOT be called when conversation resolution fails under write-deny (pre-dispatch 409)")
 }
 
-// convUpsertFailStore wraps a real store and makes conversation upsert fail.
+// convUpsertFailStore wraps a real store and makes conversation upsert fail
+// while fault is active (always, when fault is nil).
 type convUpsertFailStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (s *convUpsertFailStore) UpsertConversationByExternalRef(_ context.Context, _ *store.Conversation) (*store.Conversation, error) {
+func (s *convUpsertFailStore) UpsertConversationByExternalRef(ctx context.Context, conv *store.Conversation) (*store.Conversation, error) {
+	if !s.fault.Active() {
+		return s.Store.UpsertConversationByExternalRef(ctx, conv)
+	}
 	return nil, assert.AnError
 }
 

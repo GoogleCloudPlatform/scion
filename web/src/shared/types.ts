@@ -24,6 +24,20 @@
 export type UserRole = 'admin' | 'member' | 'viewer';
 
 /**
+ * Personal, non-admin-controlled user preferences (tz-refactor task 11,
+ * design.md §3 A "Storage and API"). Present only on the authenticated
+ * caller's own user object — `GET /auth/me` / `GET /api/v1/auth/me` — never
+ * on a listing or another user's record.
+ */
+export interface UserPreferences {
+  /**
+   * IANA display-timezone name, or `''`/absent for Auto (follow the
+   * browser's zone). See `web/src/utils/time.ts`'s `effectiveTimeZone`.
+   */
+  timezone?: string | undefined;
+}
+
+/**
  * User information
  */
 export interface User {
@@ -32,6 +46,7 @@ export interface User {
   name: string;
   avatar?: string | undefined;
   role?: UserRole | undefined;
+  preferences?: UserPreferences | undefined;
 }
 
 /**
@@ -157,8 +172,12 @@ export interface Project {
   ownerId?: string;
   ownerName?: string;
   agentCount: number;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
@@ -172,6 +191,22 @@ export interface Project {
  */
 export function isSharedWorkspace(project: Project): boolean {
   return !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'shared';
+}
+
+/**
+ * Check whether a project gives each agent its own empty directory (#2703):
+ * no git remote and a hub-owned workspace-mode label of per-agent, or the
+ * raw empty-per-agent value (the hub's ResolveProjectSharingMode treats
+ * both the same on a non-git project).
+ */
+export function isEmptyPerAgentWorkspace(project?: {
+  gitRemote?: string | undefined;
+  labels?: Record<string, string> | undefined;
+}): boolean {
+  if (!project) return false;
+  if (project.gitRemote) return false;
+  const mode = project.labels?.['scion.dev/workspace-mode'];
+  return mode === 'per-agent' || mode === 'empty-per-agent';
 }
 
 /**
@@ -336,7 +371,10 @@ export interface AgentDetail {
  * Terminal is available when the agent is in running or stopping phase
  * and not offline.
  */
-export function isTerminalAvailable(agent: Agent): boolean {
+export function isTerminalAvailable(agent: {
+  phase?: AgentPhase;
+  activity?: AgentActivity;
+}): boolean {
   if (agent.activity === 'offline') return false;
   return agent.phase === 'running' || agent.phase === 'stopping';
 }
@@ -581,6 +619,9 @@ export interface Agent {
   image?: string;
   runtime?: string;
   createdBy?: string;
+  // The creator's display name. Set on compact list items, which carry no
+  // appliedConfig; full items carry it as appliedConfig.creatorName.
+  creatorName?: string;
   appliedConfig?: AgentAppliedConfig;
 
   // Ordered ancestor chain [root, ..., parent]; last entry is the direct
@@ -605,7 +646,61 @@ export interface Agent {
 
   // Children agent IDs (populated by some API responses)
   childrenIds?: string[];
+
+  // Backend-driven delete lifecycle (ptone/scion#2483 §2.2). The hub always
+  // sends this key on REST agents and SSE status deltas; an explicit `null`
+  // means no delete is active and must clear any earlier value.
+  deletion?: DeletionInfo | null;
+
+  // Computed by the hub: provisioned but never asked to run
+  // (ptone/scion#2929). Absent means false.
+  provisionedOnly?: boolean;
 }
+
+/** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
+export type DeletionState = 'deleting' | 'failed';
+
+/**
+ * Failure codes on a `failed` deletion (pkg/store/deletion_view.go). Kept
+ * open-ended so an unknown future code still renders its `error` text.
+ */
+export type DeletionCode =
+  | 'runtime_error'
+  | 'conflict'
+  | 'in_doubt'
+  | 'abandoned'
+  | 'revoke_failed'
+  | 'finalize_failed'
+  | 'runtime_unavailable'
+  | (string & Record<never, never>);
+
+/**
+ * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
+ * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
+ * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ */
+export interface DeletionInfo {
+  state: DeletionState;
+  code?: DeletionCode;
+  error?: string;
+  soft: boolean;
+  claim: number;
+  startedAt: string;
+  /** Set while `deleting`. */
+  leaseExpiresAt?: string;
+  /** Set on `failed`, except `in_doubt` and finalizing rows. */
+  expiresAt?: string;
+  /**
+   * `finalizing` when the hub row's stored state is finalizing (teardown
+   * has run; finalize is running or was interrupted), on both the deleting
+   * and the failed view; absent otherwise. Such a row never expires from
+   * view and blocks start until a retry or force (design note D4).
+   */
+  stage?: DeletionStage;
+}
+
+/** `DeletionInfo.stage` values (open-ended for forward compatibility). */
+export type DeletionStage = 'finalizing' | (string & Record<never, never>);
 
 /**
  * Template configuration embedded in template detail responses.
@@ -639,8 +734,12 @@ export interface Template {
   contentHash?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; kept optional for compatibility. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
 }
 
@@ -787,9 +886,116 @@ export interface RuntimeBroker {
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
+  /**
+   * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061
+   * P2.2, design.md §5.6, §5.9). Mirrors Go
+   * RuntimeBrokerWithCapabilities.AgentLimit (pkg/hub/response_types.go)
+   * exactly — hand-written since there is no Go->TS generator (design.md
+   * §6). Absent when unlimited, or when resolution didn't run or failed;
+   * never 0 (a non-positive effective limit means unlimited).
+   */
+  agentLimit?: number;
+  /**
+   * The number of active max_agents_per_broker reservations held by this
+   * broker. Absent only when resolution didn't run or failed. Unlike
+   * agentLimit, it is still present (possibly non-zero) when the broker is
+   * unlimited — agentLimit's absence there means "no cap", not "no count".
+   */
+  agentCount?: number;
+  /**
+   * The precedence step that produced agentLimit: "broker" | "entitlement" |
+   * "hub_default" | "unlimited" | "not_enforced". This names the step, not
+   * whether the result is a cap: when the effective limit is <= 0
+   * (unlimited), agentLimit is absent but agentLimitSource is still
+   * whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide — in that case resolution does not count either,
+   * and all three fields (agentLimit/agentCount/agentLimitSource) are
+   * absent together.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: agentLimit keeps whatever the precedence steps resolved
+   * (a cap, or absent when that resolves to unlimited, exactly as above),
+   * but the value is informational only — it is not currently applied.
+   * Renderers must show this visibly, not only in a tooltip.
+   */
+  agentLimitSource?: string;
+}
+
+/**
+ * General per-broker settings document (ptone/scion#2061 P2,
+ * ptone/scion#2177). Mirrors the Go store.BrokerSettings JSON tags exactly
+ * (pkg/store/models.go) — hand-written since there is no Go->TS generator
+ * (design.md §6). undefined/absent means "inherit" (fall through to the
+ * entitlement engine / hub-wide default); 0 means unlimited.
+ */
+export interface BrokerSettings {
+  maxAgents?: number;
+}
+
+/**
+ * The resolved value of one broker-settings key plus the precedence step
+ * that produced it (design.md §5.2, §5.9). Mirrors Go EffectiveSetting
+ * (pkg/hub/broker_settings_handlers.go).
+ */
+export interface EffectiveSetting {
+  /** null only when resolution errored outright; source is then "" too.
+   * Every other outcome, including "no quota configured" (source
+   * "unlimited"), is a concrete number (0 = unlimited). */
+  value: number | null;
+  /** "broker" | "entitlement" | "hub_default" | "unlimited" | "not_enforced" | "" */
+  source: string;
+  /** Current active-reservation count for this key, the same value Reserve
+   * counts against (shared via brokerCapacity, AC-P2-9/AC-P2-10). Omitted
+   * when resolution failed or the key isn't quota-backed. */
+  count?: number;
+  /** What value/source would apply if this key's own broker override were
+   * cleared (the entitlement engine: bindings, then the hub-wide default).
+   * Populated in every state, including while an override is active, so the
+   * UI can label "Use hub default (N)" correctly at exactly the moment an
+   * admin is deciding whether to clear it. */
+  inherited: InheritedSetting;
+}
+
+/**
+ * EffectiveSetting.inherited's shape (design.md §5.6, review round 2 R2).
+ * Mirrors Go InheritedSetting (pkg/hub/broker_settings_handlers.go).
+ */
+export interface InheritedSetting {
+  /** null only when resolution errored; source is then "" too. */
+  value: number | null;
+  /** "entitlement" | "hub_default" | "unlimited" | "" */
+  source: string;
+}
+
+/**
+ * GET/PUT /api/v1/runtime-brokers/{id}/settings response (design.md §5.4).
+ * Mirrors Go BrokerSettingsResponse (pkg/hub/broker_settings_handlers.go).
+ */
+export interface BrokerSettingsResponse {
+  brokerId: string;
+  /** Stored values only; a key absent here means "inherit". */
+  settings: BrokerSettings;
+  effective: {
+    maxAgents: EffectiveSetting;
+  };
+  /** Optimistic concurrency revision; 0 when the broker has no settings row. */
+  revision: number;
+  updatedBy?: string;
+  /** Absent when the broker has no settings row yet. */
+  updated?: string;
+  /** Per-key write permission for the caller. */
+  _capabilities: {
+    update: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -912,6 +1118,71 @@ export interface MembershipCapabilities {
   canManageOwners: boolean;
   canTransfer: boolean;
   actions: string[];
+  /**
+   * Whether the actor may grant and remove custom project roles
+   * (ptone/scion#2529). Decided server-side by the same authority function
+   * the members PUT uses; the UI never infers it from owner authority.
+   * Optional: absent means false.
+   */
+  canManageCustomRoles?: boolean;
+}
+
+/**
+ * One project-scope role binding as returned by the project members API,
+ * enriched with role and display names.
+ */
+export interface ProjectMemberBinding {
+  id: string;
+  roleDefinitionId: string;
+  roleName: string;
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  scopeType: string;
+  scopeId: string;
+  createdAt: string;
+  notBefore?: string;
+  expiresAt?: string;
+  /** 'direct' for direct bindings, otherwise the group it is inherited through. */
+  source: string;
+  sourceGroupName?: string;
+  /** 'builtin' (owner/admin/member) or 'custom'. */
+  roleKind?: 'builtin' | 'custom';
+}
+
+/**
+ * One principal's project membership: the item type of
+ * `GET /api/v1/projects/{id}/members?groupBy=principal` and the body of
+ * `PUT /api/v1/projects/{id}/members/principals/{type}/{id}`.
+ */
+export interface ProjectMemberGroup {
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  /** The built-in membership role name, or '' when the principal holds none. */
+  builtInRoleName: string;
+  /** Built-in binding first, then custom bindings by role name. */
+  bindings: ProjectMemberBinding[];
+  /** PUT responses only. */
+  changed?: boolean;
+}
+
+/**
+ * A project-scoped role the members dialog can offer, from
+ * `GET /api/v1/projects/{id}/members/assignable-roles`. `grantable` is the
+ * members PUT's decision for newly creating the role on a principal that
+ * does not hold it (principal-agnostic, op=add).
+ */
+export interface AssignableProjectRole {
+  id: string;
+  name: string;
+  description: string;
+  roleKind: 'builtin' | 'custom';
+  grantable: boolean;
+  /** Empty when grantable; otherwise the PUT's refusal reason. */
+  reason: string;
+  denialCode?: string;
+  details?: Record<string, unknown>;
 }
 
 /**

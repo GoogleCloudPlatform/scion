@@ -194,6 +194,17 @@ def _build_telemetry_env(env: dict[str, str] | None) -> dict[str, str]:
     """Build env vars that direct Copilot CLI's native OTel emitter to sciontool.
 
     This always targets the local receiver -- see _resolve_endpoint.
+
+    OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta requests delta
+    temporality for Copilot's native metrics (design §3.7). A real capture
+    (phase 3a) shows Copilot CLI 1.0.89 does not honor this -- it has no
+    documented temporality override at all, and every point it exports is
+    cumulative regardless of this setting. The usage deriver's metric rule
+    (ptone/scion#2053 phase 3a) converts cumulative points to per-export
+    deltas itself rather than relying on the source to do it (design §5's
+    copilot row). The env var is kept anyway: it is harmless, forward
+    compatible if a future Copilot release adds real support, and not left
+    to the default, which an unpinned CLI could change.
     """
     return {
         "COPILOT_OTEL_ENABLED": "true",
@@ -203,6 +214,7 @@ def _build_telemetry_env(env: dict[str, str] | None) -> dict[str, str]:
         "OTEL_METRICS_EXPORTER": "otlp",
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_METRIC_EXPORT_INTERVAL": "30000",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "delta",
     }
 
 
@@ -339,6 +351,14 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     # SCION_NATIVE_TELEMETRY_POLICY lets the env guard (hooks/envoverlay.go)
     # protect the OTEL_* vars above from being overridden at runtime.
     env["SCION_NATIVE_TELEMETRY_POLICY"] = "enabled" if telemetry_enabled else "disabled"
+    if telemetry_enabled:
+        # Copilot's usage (gen_ai.api.calls / scion.usage.tokens) is derived
+        # by sciontool's receiver from the native gen_ai.client.inference.*
+        # metrics (design §5's copilot row, ptone/scion#2053 phase 3a). This
+        # is narrow to usage only (D4): tool and session hook telemetry are
+        # unaffected, and unset here means no usage is published at all
+        # (D10).
+        env["SCION_USAGE_SOURCE"] = "native"
     # --- end telemetry ----------------------------------------------------
 
     ctx.write_outputs(resolved, env=env, extra=extra)

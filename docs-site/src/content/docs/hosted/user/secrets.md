@@ -33,6 +33,14 @@ runtime_broker  <  hub  <  project  <  user
 ```
 Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
 
+### Reserved Names
+
+Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) are reserved for Scion's own control-plane variables. The Hub rejects with a validation error any environment variable, or `environment`-type secret, whose key or target uses one of these prefixes. `file` and `variable` secrets are not affected.
+
+Values stored under a reserved name before this check existed are not deleted, but they are never used: the Hub drops them at dispatch and the Runtime Broker drops them again before injection. If a variable or secret collides with a value the runtime sets itself, the runtime's value wins.
+
+`SCION_METADATA_MODE` is always set by the Hub. It comes from the agent's GCP identity configuration and defaults to `block`. A Runtime Broker only accepts an elevated mode (anything other than `block`) when the Hub's dispatch includes its source marker. Otherwise the Runtime Broker downgrades it, so a stored value or an older Hub cannot turn on metadata access.
+
 ---
 ## Injection Modes
 
@@ -40,6 +48,10 @@ Both environment variables and secrets support **Injection Modes**, which contro
 
 - **As Needed (Default)**: The variable or secret is only injected if it is explicitly requested in the agent's template (`scion-agent.yaml`) or harness configuration. This is the recommended mode for most credentials to minimize the attack surface.
 - **Always**: The variable or secret is injected into *every* agent started within that scope, regardless of whether it is explicitly requested.
+
+:::note[GITHUB_TOKEN and the Always mode]
+When you enter a GitHub token while creating a git-backed project in the web UI, the Hub saves it as a project-scoped `GITHUB_TOKEN` secret with `always` injection mode. The token has to be present in the first environment-resolution pass so that `sciontool init` can clone the repository in **Clone-per-agent** and **Worktree-per-agent** sharing modes. On startup, the Hub also runs a one-time migration that moves any existing `GITHUB_TOKEN` secret from `as_needed` to `always`. Secrets you set after that migration keep the mode you give them, so pass `--always` when you set `GITHUB_TOKEN` yourself.
+:::
 
 You can set the injection mode via the CLI using the `--always` flag:
 
@@ -140,6 +152,13 @@ Secrets can be projected into the agent container in three ways:
 2.  **File**: Written to a specific path on the agent's filesystem.
 3.  **Variable**: Added to a JSON file at `~/.scion/secrets.json` for programmatic access by the harness.
 
+On the Cloud Run runtimes, secrets are delivered to the agent container as environment values, with these limits:
+
+- **File and variable secrets** are sent together in one environment value, capped at 32 KiB on Cloud Run Instances and at a 128 KiB entry on `cloudrun-sandbox`. File secrets are base64-encoded inside that base64 value and variable secrets are not, so the total room for them is about 18-24 KiB on Cloud Run Instances and about 72-96 KiB on `cloudrun-sandbox`, depending on the mix. A larger set fails agent start with an error naming the largest secret.
+- **Environment secrets** are limited to a 32 KiB value each on Cloud Run Instances and a 128 KiB `KEY=VALUE` entry each on `cloudrun-sandbox`. A larger one fails agent start with an error naming it.
+- **Reserved keys:** environment secrets cannot set `SCION_STAGED_SECRETS` or `SCION_OTEL_GCP_CREDENTIALS` on either runtime. On Cloud Run Instances they also cannot override `SCION_HOST_UID` or `SCION_HOST_GID`; on `cloudrun-sandbox` they also cannot override `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_WORKSPACE_PATH`, `HOME`, `USER` or `LOGNAME`. The runtime sets these itself.
+- **Existing keys:** a key that is already in the agent environment takes precedence over an environment secret with the same name, and the secret is not applied.
+
 ### Updating Secret Metadata
 
 You can update a secret's configuration metadata (like its `type`, `target` path, or injection mode) without needing to re-enter its sensitive value or create a new version in the backend. This is supported via the Web UI "Edit Settings" dialog and the CLI:
@@ -220,17 +239,25 @@ From inside an agent container, use the `sciontool secret` command suite:
     ```
     *Note: `--scope` accepts `project` (default) or `user`.*
 
+    *Hub admins can restrict agents to writing user (profile) scope only. If the "Restrict
+    agent-written secrets to profile scope" setting is on (Admin > Server Config), a project-scope
+    write from an agent — including one that omits `--scope` — is rejected with a 403 and a message
+    telling you to retry with `--scope user`. This does not affect writes you make yourself through
+    the web UI or `scion hub secret set --project`.*
+
 #### Using the Hub API Directly
 Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
 *   **`PUT /api/v1/agents/{agentID}/secrets/{key}`**: Stores or updates a secret.
+*   **`POST /api/v1/agent/secrets`**: Fetches several secret values in one call. There is no agent ID in the URL: the Hub identifies the agent from its token. The request body is `{"keys": ["KEY_A", "KEY_B"]}` (at most 100 keys). Each entry in the response has a `status` of `ok`, `not_found`, or `entitled_but_unavailable`. `sciontool init` calls this endpoint at startup to fetch the keys listed in `SCION_SECRET_KEYS`.
 
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
 *   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (the user who originally started the agent chain). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
-*   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Successful and failed retrieval attempts log an audit event (`agent_secret_read`) identifying the calling agent, requested key, and status.
+*   **Fail-Closed Reads**: Every runtime secret read goes through one check sequence: project permission, then an originating user who is still active and either an active member of the project (any active project role binding counts, built-in or custom, direct or through a group) or holds system-level authority for the exact `secret.use` permission, then progeny sharing. Membership alone does not grant reads: the project permission check (`project.secret_read`) still applies. A value is fetched only for the version recorded in the secret's metadata. If a value cannot be retrieved, that key is reported as unavailable in the response rather than returned as an empty value; other keys in the same request are unaffected.
+*   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Each retrieval request logs one audit event (`agent_secret_read`) identifying the calling agent, the requested keys, and the outcome.
 
 ---
 
@@ -346,8 +373,8 @@ Or via environment variables:
 
 ```bash
 export SCION_SERVER_SECRETS_BACKEND=gcpsm
-export SCION_SERVER_SECRETS_GCP_PROJECT_ID=my-gcp-project
-export SCION_SERVER_SECRETS_GCP_CREDENTIALS=/path/to/service-account.json
+export SCION_SERVER_SECRETS_GCPPROJECTID=my-gcp-project
+export SCION_SERVER_SECRETS_GCPCREDENTIALS=/path/to/service-account.json
 ```
 
 #### User-Managed Replication Locations
@@ -377,6 +404,29 @@ When this field is non-empty, Scion creates secrets with **user-managed** replic
 When GCP Secret Manager is configured, Scion uses a **hybrid storage** model:
 - **Metadata** (name, type, scope) is stored in the Hub database.
 - **Secret values** are stored in GCP Secret Manager with automatic versioning.
+
+#### IAM Permissions and Secret Naming
+
+Every secret name in GCP Secret Manager is prefixed with a hash derived from the hub's instance ID: `scion-<h12>-<scope>-<hash>-<name>`, where `<h12>` is the first 12 hex characters of `sha256(hub_id)`. This lets you grant a hub's service account access to only its own secrets, instead of every secret in a shared GCP project.
+
+In a project used by a single hub, `roles/secretmanager.admin` on the whole project is simplest. In a project shared by multiple hubs (or by a hub and other workloads), grant a **conditioned** binding scoped to the hub's prefix instead:
+
+```
+role: roles/secretmanager.admin
+condition: resource.name.startsWith("projects/<PROJECT_NUMBER>/secrets/scion-<h12>-")
+```
+
+Note that the condition uses the GCP **project number**, not the project ID. `<h12>` is stable for the life of the hub's instance ID; deployment tooling (e.g. Terraform) computes the same value from `hub_id` to keep the grant in sync.
+
+:::caution[Deploy ordering]
+Grant the new hub-prefixed IAM condition **before** deploying a Hub binary that writes hub-prefixed names — every secret write targets the prefixed name immediately, so writes fail with a permission error otherwise. Keep the legacy grant (conditioned or project-wide — whichever this hub previously had) in place until `--delete-legacy` (below) has been run and verified; only then remove it. Once the legacy grant is removed, `migrate-names` can no longer read legacy names at all, so run a final `--dry-run --delete-legacy` pass to confirm zero pending items **before** removing it — afterward, a clean dry-run only proves IAM is narrowed, not that migration finished.
+
+Run `--delete-legacy` itself only after **every** replica of this hub is running a binary that includes this change — i.e. no replica is still writing legacy names. GCP Secret Manager has no conditional delete: if an older binary is still a live writer during a mixed-version rolling deploy, its write can land between `--delete-legacy`'s safety check and the actual delete, and the delete then destroys that write's only copy along with the legacy container it lived in.
+:::
+
+Secrets created before this hub-prefixed scheme existed keep resolving under their original (legacy) name until migrated — existing secrets keep resolving through their stored reference until an administrator (or, for the built-in signing keys, the hub itself at boot) rewrites it to the prefixed name. An administrator can migrate legacy names forward with `scion hub secret migrate-names` (see `--help` for `--dry-run` and `--delete-legacy`); it is safe to run repeatedly, so a plain run followed later by a separate `--delete-legacy` run is the expected two-step workflow. Until that command's `--delete-legacy` step has run for a given secret, both the legacy and least-privilege-scoped IAM grants should remain in place.
+
+On a Cloud Run hub deployed with the hub-cloudrun Terraform module (private-IP Cloud SQL, Direct VPC egress, an explicit `hub_id`), run this command via the one-off Cloud Run job in [`docs/deploy/migrate-names-cloudrun.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md); no workstation ever runs it directly against that hub's database. Hubs deployed with the manual [Deploy on GCP](/scion/hosted/ha/setup-gcp/) guide are not covered by that runbook — see that guide's "Secret Name Migration" section and [ptone/scion#2395](https://github.com/ptone/scion/issues/2395) for the tracked gap.
 
 ---
 

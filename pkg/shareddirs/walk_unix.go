@@ -190,7 +190,7 @@ func warnIfIntermediateUnsafe(fd int, comp string) {
 		return
 	}
 	intermediateUnsafeWarnOnce.Do(func() {
-		slog.Warn("server.shared_dir_storage: an existing upper directory is group/other-writable or not owned by this broker; "+
+		slog.Warn("NFS directory walk: an existing upper directory is group/other-writable or not owned by this broker; "+
 			"the leaf modes/ACL hardening does not apply retroactively -- see the manual fix-up recipe in docs/deploy/hybrid-tier.md",
 			"component", comp, "mode", fmt.Sprintf("%#o", st.Mode&0o7777), "uid", st.Uid)
 	})

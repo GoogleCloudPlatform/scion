@@ -99,6 +99,48 @@ func TestWorkspaceWriteBlocked_GKESharedVolumeOnCloudRun(t *testing.T) {
 	assert.False(t, srv.workspaceWriteBlocked())
 }
 
+// A volume backend without a volume name has no mount point, so project
+// paths fall back to ephemeral local storage: writes must be blocked, the same
+// way for both volume backends (ptone/scion#1073).
+func TestWorkspaceWriteBlocked_VolumeBackendMissingVolumeName(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *config.V1WorkspaceStorageConfig
+	}{
+		{
+			name: "cloudrun-volume",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend:        "cloudrun-volume",
+				CloudRunVolume: &config.V1CloudRunVolumeConfig{SubPathRoot: "projects"},
+			},
+		},
+		{
+			name: "cloudrun-volume nil block",
+			cfg:  &config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume"},
+		},
+		{
+			name: "gke-shared-volume",
+			cfg: &config.V1WorkspaceStorageConfig{
+				Backend:         "gke-shared-volume",
+				GKESharedVolume: &config.V1GKESharedVolumeConfig{PVClaimName: "scion-workspaces"},
+			},
+		},
+		{
+			name: "gke-shared-volume nil block",
+			cfg:  &config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := testServer(t)
+			t.Setenv("K_SERVICE", "hub-service")
+			srv.config.WorkspaceStorageConfig = tt.cfg
+			assert.True(t, srv.workspaceWriteBlocked())
+		})
+	}
+}
+
 func TestWorkspaceWriteBlocked_NotOnCloudRun(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -556,6 +598,63 @@ func TestServerHubManagedProjectPath_GKESharedVolumeMissingVolumeName(t *testing
 	assert.Equal(t, expected, path)
 }
 
+// TestServerHubManagedProjectPath_CloudRunVolumeMissingVolumeName is the
+// regression test for ptone/scion#1073: an empty volume name must not build
+// the malformed /mnt/<subpath_root>/hub-projects/<slug> path. Like
+// gke-shared-volume, the config is treated as unset and the local path is
+// returned.
+func TestServerHubManagedProjectPath_CloudRunVolumeMissingVolumeName(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:        "cloudrun-volume",
+		CloudRunVolume: &config.V1CloudRunVolumeConfig{SubPathRoot: "projects"},
+	}
+
+	path, err := srv.hubManagedProjectPath("my-project")
+	require.NoError(t, err)
+
+	expected := filepath.Join(tmpHome, ".scion", "projects", "my-project")
+	assert.Equal(t, expected, path)
+	assert.NotContains(t, path, mountBase)
+}
+
+// TestServerHubManagedProjectPath_CloudRunVolumeLocalFallbackWarns checks the
+// cloudrun-volume branch now shares the gke-shared-volume fallback: local
+// content is served while the volume is empty, and the ephemeral path is
+// reported once.
+func TestServerHubManagedProjectPath_CloudRunVolumeLocalFallbackWarns(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mountBase := t.TempDir()
+	setVolumeMountBase(t, mountBase)
+
+	srv, _ := testServer(t)
+	logs := captureProjectsLog(t, srv)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend:        "cloudrun-volume",
+		CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "workspace-vol"},
+	}
+
+	localPath := filepath.Join(tmpHome, ".scion", "projects", "my-project")
+	require.NoError(t, os.MkdirAll(localPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(localPath, "README.md"), []byte("x"), 0644))
+
+	for i := 0; i < 2; i++ {
+		path, err := srv.hubManagedProjectPath("my-project")
+		require.NoError(t, err)
+		assert.Equal(t, localPath, path)
+	}
+	assert.Equal(t, 1, countWarningsForSlug(logs, "my-project"))
+	assert.Contains(t, logs.String(), "backend=cloudrun-volume")
+}
+
 // TestWorkspaceMountRoot covers the single resolver both the readiness check
 // and the hub-managed project path derive the mount location from.
 func TestWorkspaceMountRoot(t *testing.T) {
@@ -709,7 +808,8 @@ func TestHealthCheck_NFSUnhealthy(t *testing.T) {
 	var resp HealthResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Contains(t, resp.Checks["workspace_storage"], "unhealthy")
-	assert.Equal(t, "degraded", resp.Status)
+	// Critical check: /readyz 503s on it, so /healthz reports unhealthy too.
+	assert.Equal(t, "unhealthy", resp.Status)
 }
 
 func TestReadiness_NFSUnavailable(t *testing.T) {

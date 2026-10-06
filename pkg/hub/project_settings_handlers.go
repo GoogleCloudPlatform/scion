@@ -16,7 +16,12 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -47,6 +52,8 @@ const (
 	// Default GCP identity
 	projectSettingDefaultGCPIdentityMode = "scion.io/default-gcp-identity-mode"
 	projectSettingDefaultGCPIdentitySAID = "scion.io/default-gcp-identity-service-account-id"
+	// JSON object: broker profile name -> registered SA ID.
+	projectSettingDefaultGCPIdentitySAIDByProfile = "scion.io/default-gcp-identity-service-account-id-by-profile"
 
 	// Default resource spec (flat keys)
 	projectSettingDefaultResourcesCPUReq = "scion.io/default-resources-cpu-request"
@@ -106,13 +113,16 @@ const (
 // that a future system marker is not silently propagated into clones.
 //
 // One scion.dev/ label is excluded: store.LabelWorkspaceMode
-// ("scion.dev/workspace-mode") is NOT copied. It is derived for the new project
-// from the clone request and the new project's git remote, by the same
-// validation the create path applies (handlers_projects_core.go), which sets it
-// only when there is a git remote and the mode is one of the two valid values.
-// Copying it raw would bypass that check and let a clone carry a workspace mode
-// inconsistent with its own remote, which IsSharedWorkspace() and
-// IsWorktreePerAgent() would then evaluate against mismatched state.
+// ("scion.dev/workspace-mode") is NOT copied raw. deriveCloneWorkspaceMode
+// (project_workspace_mode.go) re-derives it from the source's label: the mode
+// is kept only when store.ValidateWorkspaceMode accepts it for the clone's
+// git-ness (after any gitRemote override) and dropped otherwise, so a non-git
+// per-agent template stays empty-per-agent and becomes clone-per-agent with a
+// git remote, while e.g. worktree-per-agent on a non-git clone is dropped. A
+// legacy raw "empty-per-agent" label is normalised to "per-agent" only on a
+// non-git source. Copying it raw would let a clone carry a workspace mode
+// inconsistent with its own remote, which SharingMode() and its callers would
+// then evaluate against mismatched state.
 //
 // Finally, do not try to "complete" this list from hubclient.ProjectSettings.
 // That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the
@@ -137,6 +147,7 @@ var projectSettingKeys = []string{
 	// Default GCP identity
 	projectSettingDefaultGCPIdentityMode,
 	projectSettingDefaultGCPIdentitySAID,
+	projectSettingDefaultGCPIdentitySAIDByProfile,
 
 	// Default resource spec (flat keys)
 	projectSettingDefaultResourcesCPUReq,
@@ -229,7 +240,7 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 
-		if !s.validateDefaultGCPIdentity(w, ctx, project.ID, &req) {
+		if !s.validateDefaultGCPIdentity(w, ctx, project, &req) {
 			return
 		}
 
@@ -263,7 +274,39 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 // default back into the silent-block path. That residue is deliberately not
 // handled here — it is tracked separately against the consumption site, because
 // no amount of write-time validation can subsume it.
-func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, projectID string, req *hubclient.ProjectSettings) bool {
+func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.Context, project *store.Project, req *hubclient.ProjectSettings) bool {
+	// block is not offered as a NEW selection for a Kubernetes-bound project:
+	// the broker rejects it at dispatch anyway, so saving it here would
+	// reproduce the same silent-defect shape the assign/no-SA check below
+	// exists to prevent. This only fires for a project whose linked brokers
+	// are reliably known to be Kubernetes-only (see projectIsKubernetesBound)
+	// — a project with no linked broker, or with a mix of runtime types, is
+	// left alone.
+	//
+	// It must not fire on a no-op re-save of an already-stored "block": PUT is
+	// a full replace and the settings page resends the current value on every
+	// save (project-settings.ts), so treating every "block" in the body as new
+	// would turn this into a forced migration of stored values — stored block
+	// defaults are not migrated or rewritten. Comparing against the stored
+	// annotation is what makes this a check on the transition, not on the
+	// value.
+	if req.DefaultGCPIdentityMode == store.GCPMetadataModeBlock &&
+		(project.Annotations == nil || project.Annotations[projectSettingDefaultGCPIdentityMode] != store.GCPMetadataModeBlock) {
+		k8sBound, err := s.projectIsKubernetesBound(ctx, project.ID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		if k8sBound {
+			BadRequest(w, "default GCP identity mode 'block' is not available for a Kubernetes-bound project; choose 'passthrough' or 'assign' instead")
+			return false
+		}
+	}
+
+	if !s.validateProfileDefaultSAIDs(w, ctx, project, req.DefaultGCPIdentityServiceAccountIDByProfile) {
+		return false
+	}
+
 	// mode=assign with no service account is the same defect wearing different
 	// clothes: the consumption path falls straight through to block.
 	if req.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && req.DefaultGCPIdentityServiceAccountID == "" {
@@ -286,9 +329,23 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// change here — because the agent create and PATCH paths had NOT followed
 	// this rule and now do. Three copies of a string whose entire value is that
 	// they match is three chances to stop matching.
+	// The check itself lives in validateProjectDefaultSAID, shared with the
+	// per-profile map.
+	return s.validateProjectDefaultSAID(w, ctx, project, req.DefaultGCPIdentityServiceAccountID, "the project default")
+}
+
+// validateProjectDefaultSAID checks that saID names a service account that
+// is reachable from project and verified: the same conditions the create
+// path's default rungs (resolveDefaultSAAssignmentCore) test, so a saved
+// default applies. what names the setting in the not-verified message. It
+// writes the error response itself and returns false when the caller must
+// stop.
+func (s *Server) validateProjectDefaultSAID(w http.ResponseWriter, ctx context.Context, project *store.Project, saID, what string) bool {
+	// See validateDefaultGCPIdentity: not-found and not-reachable share one
+	// message so the endpoint is not an existence oracle.
 	const notAvailable = msgSANotAvailableInProject
 
-	sa, err := s.store.GetGCPServiceAccount(ctx, req.DefaultGCPIdentityServiceAccountID)
+	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			BadRequest(w, notAvailable)
@@ -298,19 +355,206 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		return false
 	}
 
-	if !sa.ReachableFromProject(projectID) {
+	if !sa.ReachableFromProject(project.ID) {
 		BadRequest(w, notAvailable)
 		return false
 	}
 
 	// Safe to be specific: this service account is already readable by this
 	// caller, so naming its state discloses nothing they cannot already see.
-	if !sa.Verified {
-		BadRequest(w, "GCP service account is not verified; verify it before setting it as the project default")
+	if !gcpServiceAccountVerified(sa) {
+		BadRequest(w, "GCP service account is not verified; verify it before setting it as "+what)
 		return false
 	}
 
 	return true
+}
+
+// Bounds on the per-profile default service account map. Profile names are
+// not checked against the profiles brokers report (a broker may be offline
+// when the setting is saved); they only have to look like a profile name.
+const (
+	maxProfileDefaultSAEntries = 64
+	maxProfileDefaultNameLen   = 63
+)
+
+// profileDefaultNamePattern is the accepted profile-name charset: letters,
+// digits, '-' and '_', starting with a letter or digit, at most
+// maxProfileDefaultNameLen characters. Dots are excluded because settings
+// loading splits dotted profile names.
+var profileDefaultNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
+
+// validateProfileDefaultSAIDs checks every entry of the per-profile default
+// service account map: at most maxProfileDefaultSAEntries entries, a profile
+// name matching profileDefaultNamePattern, and a service account that passes
+// validateProjectDefaultSAID. A nil or empty map is always accepted
+// (nil keeps the stored map, empty clears it).
+func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.Context, project *store.Project, byProfile map[string]string) bool {
+	if len(byProfile) > maxProfileDefaultSAEntries {
+		BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: at most %d entries are allowed", maxProfileDefaultSAEntries))
+		return false
+	}
+	profiles := make([]string, 0, len(byProfile))
+	for profile := range byProfile {
+		profiles = append(profiles, profile)
+	}
+	// Sorted so the first reported error is deterministic.
+	sort.Strings(profiles)
+	for _, profile := range profiles {
+		saID := byProfile[profile]
+		if !profileDefaultNamePattern.MatchString(profile) {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: profile name %q is invalid; use 1-%d letters, digits, '-' or '_', starting with a letter or digit", profile, maxProfileDefaultNameLen))
+			return false
+		}
+		if saID == "" {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile[%s]: a service account ID is required; remove the entry to clear it", profile))
+			return false
+		}
+		if !s.validateProjectDefaultSAID(w, ctx, project, saID, fmt.Sprintf("the default for profile %q", profile)) {
+			return false
+		}
+	}
+	return true
+}
+
+// profileDefaultSAIDsFromAnnotations decodes the per-profile default service
+// account annotation. A missing, empty or malformed value yields nil (the
+// annotation is written only by setProfileDefaultSAIDsAnnotation, so a
+// malformed value means a hand edit; it is logged and ignored).
+func profileDefaultSAIDsFromAnnotations(annotations map[string]string) map[string]string {
+	raw := annotations[projectSettingDefaultGCPIdentitySAIDByProfile]
+	if raw == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		slog.Warn("ignoring malformed per-profile default GCP service account annotation",
+			"annotation", projectSettingDefaultGCPIdentitySAIDByProfile, "error", err)
+		return nil
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// setProfileDefaultSAIDsAnnotation stores m as the per-profile default
+// service account annotation, or deletes the annotation when m is empty.
+func setProfileDefaultSAIDsAnnotation(annotations map[string]string, m map[string]string) {
+	if annotations == nil {
+		// Callers initialize the map; nothing can be stored without one.
+		return
+	}
+	if len(m) == 0 {
+		delete(annotations, projectSettingDefaultGCPIdentitySAIDByProfile)
+		return
+	}
+	// encoding/json sorts map keys, so the stored value is stable.
+	b, err := json.Marshal(m)
+	if err != nil {
+		// A map[string]string always marshals; keep the stored value rather
+		// than writing a partial one.
+		return
+	}
+	annotations[projectSettingDefaultGCPIdentitySAIDByProfile] = string(b)
+}
+
+// isKubernetesRuntimeType reports whether a BrokerProfile.Type names the
+// Kubernetes runtime, under any spelling the runtime factory accepts
+// (pkg/runtime/factory.go): "kubernetes" itself, the "k8s" alias, and
+// "remote" (normalized to "kubernetes" before dispatch). Phase 1
+// (pkg/runtimebroker/start_context.go, ptone/scion#2338) classifies by this
+// same string set, checked against the resolved runtime's Name() rather than
+// a stored profile field, so the two cannot drift on which spellings count.
+//
+// A profile's Type is the settings *runtime key* the profile's `runtime:`
+// field references (cmd/server_broker.go, pkg/runtimebroker/handlers.go build
+// it directly from that map), not a resolved type — but it IS exactly that
+// runtime key, regardless of what the profile itself is named: a profile
+// named "my-cluster" with `runtime: kubernetes` reports Type "kubernetes",
+// correctly, because "kubernetes" is the runtime key, not the profile name
+// (the profile name is never inspected). The gap is a custom-named *runtime
+// entry*: `runtimes.gke-prod: {type: kubernetes}`
+// referenced by `runtime: gke-prod` reports Type "gke-prod" and is missed
+// here (pkg/config/settings_v1.go ResolveRuntime resolves it through
+// V1RuntimeConfig.Type, which this function never sees). The same gap runs in
+// reverse: a runtime key spelled "kubernetes"/"k8s"/"remote" with an explicit
+// `type: docker` (or any other non-Kubernetes type) is misclassified as
+// Kubernetes here, though it dispatches as that other type. Both gaps need
+// the broker to report its resolved type instead of the profile's runtime
+// key; out of scope for this check.
+func isKubernetesRuntimeType(t string) bool {
+	switch t {
+	case "kubernetes", "k8s", "remote":
+		return true
+	default:
+		return false
+	}
+}
+
+// brokerIsKubernetesOnly reports whether every profile registered on broker
+// names the Kubernetes runtime (isKubernetesRuntimeType). A broker with no
+// registered profiles is not considered Kubernetes-only — there is nothing to
+// confirm the type from, and this must not guess.
+func brokerIsKubernetesOnly(broker *store.RuntimeBroker) bool {
+	if broker == nil || len(broker.Profiles) == 0 {
+		return false
+	}
+	for _, p := range broker.Profiles {
+		if !isKubernetesRuntimeType(p.Type) {
+			return false
+		}
+	}
+	return true
+}
+
+// projectIsKubernetesBound reports whether a project's target runtime is
+// reliably known to be Kubernetes: the project has at least one linked
+// runtime broker (project_providers), and every linked broker is
+// Kubernetes-only per brokerIsKubernetesOnly.
+//
+// A project with no linked broker, with a linked broker whose record no
+// longer exists (store.ErrNotFound), or with a mix of runtime types
+// across its linked brokers, is NOT reliably Kubernetes-bound — this returns
+// false rather than guess in those cases, which is the deliberately
+// permissive side: it only ever blocks a write it can confirm the broker will
+// reject anyway. A real store error (anything other than ErrNotFound) is
+// propagated rather than silently treated as "allow": that failure mode is a
+// backend problem the caller should see as a 500, not a policy decision.
+//
+// This enumerates ALL of the project's project_providers rows, unfiltered.
+// The web UI's equivalent check (project-settings.ts, isBrokerKubernetesOnly)
+// instead uses GET /api/v1/runtime-brokers?projectId=, which is scoped to
+// brokers the caller may read and excludes scion.io/plugin-labelled brokers
+// (handlers_runtime_brokers.go). The two can disagree — e.g. the UI may
+// disable Block because the caller cannot see a linked docker broker, while
+// this function (and therefore the actual write) does not, and allows it.
+// That is acceptable: the UI's role here is cosmetic (hide/disable an option
+// this function would reject anyway), and this function is the actual gate.
+func (s *Server) projectIsKubernetesBound(ctx context.Context, projectID string) (bool, error) {
+	providers, err := s.store.GetProjectProviders(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	if len(providers) == 0 {
+		return false, nil
+	}
+	for _, provider := range providers {
+		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
+		if err != nil {
+			if err == store.ErrNotFound {
+				// The provider link outlived its broker record (or points at
+				// one this caller cannot resolve). Cannot confirm this
+				// broker's runtime type; do not guess.
+				return false, nil
+			}
+			return false, err
+		}
+		if !brokerIsKubernetesOnly(broker) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // projectSettingsFromAnnotations reads project settings from the project's annotations map.
@@ -329,7 +573,9 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 			settings.DefaultThinkingLevel = &n
 		}
 	}
-	settings.ActiveProfile = project.Annotations[projectSettingActiveProfile]
+	if v := project.Annotations[projectSettingActiveProfile]; v != "" {
+		settings.ActiveProfile = &v
+	}
 
 	if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
 		if b, err := strconv.ParseBool(val); err == nil {
@@ -359,6 +605,7 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	// Default GCP identity
 	settings.DefaultGCPIdentityMode = project.Annotations[projectSettingDefaultGCPIdentityMode]
 	settings.DefaultGCPIdentityServiceAccountID = project.Annotations[projectSettingDefaultGCPIdentitySAID]
+	settings.DefaultGCPIdentityServiceAccountIDByProfile = profileDefaultSAIDsFromAnnotations(project.Annotations)
 
 	// Default resources (flat annotation keys)
 	res := projectResourcesFromAnnotations(project.Annotations)
@@ -411,7 +658,12 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	} else {
 		delete(project.Annotations, projectSettingDefaultThinkingLevel)
 	}
-	setOrDelete(project.Annotations, projectSettingActiveProfile, settings.ActiveProfile)
+	// The active profile is kept when the field is absent: the web settings
+	// page sends a full body that does not carry it, and a save there must
+	// not wipe it (ptone/scion#3383). An explicit empty string clears it.
+	if settings.ActiveProfile != nil {
+		setOrDelete(project.Annotations, projectSettingActiveProfile, *settings.ActiveProfile)
+	}
 
 	if settings.TelemetryEnabled != nil {
 		project.Annotations[projectSettingTelemetryEnabled] = strconv.FormatBool(*settings.TelemetryEnabled)
@@ -428,6 +680,12 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	// Default GCP identity
 	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentityMode, settings.DefaultGCPIdentityMode)
 	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentitySAID, settings.DefaultGCPIdentityServiceAccountID)
+	// The per-profile map is kept when the field is absent: the web settings
+	// page sends a full body that does not carry it, and a save there must
+	// not wipe it. An empty object clears it.
+	if settings.DefaultGCPIdentityServiceAccountIDByProfile != nil {
+		setProfileDefaultSAIDsAnnotation(project.Annotations, settings.DefaultGCPIdentityServiceAccountIDByProfile)
+	}
 
 	// Default agent limits
 	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxTurns, settings.DefaultMaxTurns)
@@ -530,8 +788,8 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// broker-local defaults for a hub-created agent — and it degrades
 	// gracefully: resolveManagerForOpts returns the default manager when
 	// ResolveRuntime errors, so a stale annotation cannot fail dispatch.
-	if ac.Profile == "" && settings.ActiveProfile != "" {
-		ac.Profile = settings.ActiveProfile
+	if ac.Profile == "" && settings.ActiveProfile != nil && *settings.ActiveProfile != "" {
+		ac.Profile = *settings.ActiveProfile
 	}
 
 	// Check if there are any project limit/resource defaults to apply

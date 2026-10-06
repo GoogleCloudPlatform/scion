@@ -25,10 +25,12 @@ import { customElement, state } from 'lit/decorators.js';
 
 import type { SkillRegistry } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatRelative } from '../../utils/time.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface PinnedHash {
   uri: string;
@@ -86,6 +88,8 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
+      /* A long name takes its own line and the actions drop below it. */
+      flex-wrap: wrap;
       margin-bottom: 1.5rem;
       gap: 1rem;
     }
@@ -97,11 +101,16 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.75rem;
+      overflow-wrap: anywhere;
+    }
+    .header h1 sl-icon {
+      flex-shrink: 0;
     }
     .header-actions {
       display: flex;
       gap: 0.5rem;
       flex-shrink: 0;
+      margin-left: auto;
     }
 
     .card {
@@ -338,23 +347,10 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     }
   }
 
+  /** Relative age of `dateString` via `time.ts`; an em dash if unparsable. */
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '—';
-      const diffMs = Date.now() - date.getTime();
-      if (diffMs < 0) return 'just now';
-      const seconds = Math.floor(diffMs / 1000);
-      if (seconds < 60) return 'just now';
-      const minutes = Math.floor(seconds / 60);
-      if (minutes < 60) return `${minutes}m ago`;
-      const hours = Math.floor(minutes / 60);
-      if (hours < 24) return `${hours}h ago`;
-      const days = Math.floor(hours / 24);
-      return `${days}d ago`;
-    } catch {
-      return dateString;
-    }
+    if (Number.isNaN(new Date(dateString).getTime())) return '—';
+    return formatRelative(dateString);
   }
 
   // -- Edit mode --
@@ -448,8 +444,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to delete registry'));
       }
-      window.history.pushState({}, '', '/admin/skill-registries');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/admin/skill-registries');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {

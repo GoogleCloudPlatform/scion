@@ -13,7 +13,7 @@ import (
 // Authorization: enforced by routeGuard via hub.auth_reset.execute permission.
 func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -40,6 +40,9 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 		ID    string `json:"id"`
 		Name  string `json:"name"`
 		Error string `json:"error,omitempty"`
+		// Code is set to runtime_unavailable when the agent's broker does
+		// not have the agent's runtime available; the reset can be retried.
+		Code string `json:"code,omitempty"`
 	}
 
 	// Dispatch concurrently with a bounded worker pool to avoid timeouts
@@ -57,6 +60,9 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 			if err := disp.DispatchAgentResetAuth(ctx, &a); err != nil {
 				slog.Error("Bulk reset-auth failed for agent", "agent_id", a.ID, "error", err)
 				res.Error = err.Error()
+				if isBrokerRuntimeUnavailable(err) {
+					res.Code = brokerCodeRuntimeUnavailable
+				}
 			}
 			results <- res
 		}()

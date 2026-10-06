@@ -131,7 +131,7 @@ func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 
 	project, err := s.GetProject(ctx, projectID)
 	require.NoError(t, err)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, ownerUserID))
 
 	req := CreateScheduledEventRequest{
@@ -183,6 +183,47 @@ func TestScheduledEvent_CreateWithFireAt(t *testing.T) {
 
 	assert.WithinDuration(t, futureTime, evt.FireAt, 2*time.Second)
 }
+
+// TestScheduledEvent_CreateWithOffsetFireAt covers ptone/scion#2473 at the
+// HTTP boundary: an offset RFC 3339 fireAt (not "Z"/UTC) parses into a
+// time.Time with a nameless FixedZone. Without UTC normalisation at the
+// SQLite store boundary, persisting this event and then reading it back
+// breaks with a Scan error. This exercises
+// the full create -> get round trip through the HTTP handlers, not just the
+// store directly.
+func TestScheduledEvent_CreateWithOffsetFireAt(t *testing.T) {
+	srv, _, projectID := setupScheduledEventTest(t)
+
+	// A fixed future offset timestamp, deliberately not UTC.
+	futureTime := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+	offsetFireAt := futureTime.In(time.FixedZone("", 2*60*60)) // +02:00
+
+	req := CreateScheduledEventRequest{
+		EventType: "message",
+		FireAt:    offsetFireAt.Format(time.RFC3339),
+		AgentName: "test-agent",
+		Message:   "Scheduled with an offset fireAt",
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var created store.ScheduledEvent
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	assert.WithinDuration(t, futureTime, created.FireAt, 2*time.Second)
+
+	// The read-back path is where ptone/scion#2473 actually broke: a
+	// subsequent Get on a row with an un-normalised offset fireAt failed to
+	// Scan.
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+
+	var fetched store.ScheduledEvent
+	require.NoError(t, json.NewDecoder(getRec.Body).Decode(&fetched))
+	assert.WithinDuration(t, futureTime, fetched.FireAt, 2*time.Second)
+}
+
+// fireIn under a non-UTC time.Local is tested in pkg/store/entadapter.
 
 func TestScheduledEvent_CreateWithPlainFlag(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)
@@ -591,7 +632,7 @@ func TestScheduledEvent_ProjectOwnerAllowed(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create the project's members group and add user as owner
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a project-owner role binding — isProjectOwnerOrAdmin checks role
 	// bindings, not group membership.
@@ -648,7 +689,7 @@ func TestScheduledEvent_FederatedUserAllowed(t *testing.T) {
 	// Set up project membership infrastructure and owner role binding.
 	project, err := s.GetProject(ctx, projectID)
 	require.NoError(t, err)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, fedUserID))
 
 	t.Run("list allowed", func(t *testing.T) {
@@ -683,6 +724,18 @@ func (f *federatedTestIdentity) Type() string        { return "federated_user" }
 func (f *federatedTestIdentity) Email() string       { return f.email }
 func (f *federatedTestIdentity) DisplayName() string { return f.displayName }
 func (f *federatedTestIdentity) Role() string        { return f.role }
+
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification as a federated user: those
+// functions key on concrete type, and this fake is a distinct Go type from
+// the production FederatedUserIdentity. It does not implement
+// FederatedIdentity (no IssuerURL), so it is not caught by
+// AncestryIsHubAttested's federated rejection either way; it is used here
+// only to drive a real, allowed federated-user request end to end, not to
+// test ancestry denial.
+func (f *federatedTestIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindFederatedUser, CredentialKindFederation
+}
 
 func TestScheduledEvent_UnknownIdentityTypeDenied(t *testing.T) {
 	srv, _, projectID := setupScheduledEventTest(t)

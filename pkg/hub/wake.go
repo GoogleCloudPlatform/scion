@@ -22,6 +22,17 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 )
 
+// legacyResumedPhase is a non-standard phase value that a resuming agent's
+// broker may report instead of the canonical state.PhaseRunning; pkg/agent/run.go
+// no longer writes it. "resumed" was never a valid state.Phase, so it is not
+// part of the state package's enum — but a broker running an older build
+// during a rolling upgrade can still surface it for a short window after a
+// resume. Treat it as transitional, equivalent to starting/running, so
+// readiness polling does not fail a healthy resume just because of version
+// skew between the hub and an individual broker. Safe to remove once all
+// brokers run a build containing this fix.
+const legacyResumedPhase = "resumed"
+
 // waitForAgentReady polls the agent store until the agent's Activity field
 // indicates the harness has initialized after a resume, or until timeout.
 func (s *Server) waitForAgentReady(ctx context.Context, agentID string, timeout time.Duration) error {
@@ -42,7 +53,7 @@ func (s *Server) waitForAgentReady(ctx context.Context, agentID string, timeout 
 			}
 
 			phase := state.Phase(agent.Phase)
-			if phase != state.PhaseStarting && phase != state.PhaseRunning {
+			if phase != state.PhaseStarting && phase != state.PhaseRunning && agent.Phase != legacyResumedPhase {
 				return fmt.Errorf("agent entered unexpected phase %q while waiting for readiness", agent.Phase)
 			}
 

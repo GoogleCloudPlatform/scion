@@ -33,7 +33,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
 import type {
   AccessBoundaryDetail,
@@ -53,6 +52,9 @@ import '../shared/access-boundary-preview.js';
 import type { PageRequestDetail } from '../shared/affected-principals-table.js';
 import type { AuditPageRequestDetail } from '../shared/access-boundary-audit-timeline.js';
 import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting' | 'permission_denied';
 
@@ -60,6 +62,9 @@ const STALENESS_THRESHOLD_MS = 5 * 60 * 1000;
 
 @customElement('scion-page-admin-access-boundary-detail')
 export class ScionPageAdminAccessBoundaryDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private boundaryId = '';
   @state() private phase: PagePhase = 'loading';
   @state() private boundary: AccessBoundaryDetail | null = null;
@@ -77,6 +82,10 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   @state() private auditNextToken: PageToken | undefined;
   @state() private auditTotalCount = 0;
   @state() private loadingAudit = false;
+  @state() private auditError = '';
+  private auditResourceId = '';
+  private auditRequestGeneration = 0;
+  private consumedAuditTokens = new Set<PageToken>();
 
   // Delete flow
   @state() private showDeletePreview = false;
@@ -601,6 +610,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private async loadBoundary(): Promise<void> {
     this.phase = 'loading';
     this.errorMessage = '';
+    this.resetAuditState(this.boundaryId);
 
     try {
       const boundary = await accessBoundariesApi.get(this.boundaryId);
@@ -652,23 +662,66 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   }
 
   private async loadAuditEvents(pageToken?: PageToken): Promise<void> {
+    const resourceId = this.boundaryId;
+    if (!resourceId) return;
+    if (this.auditResourceId !== resourceId || !pageToken) {
+      this.resetAuditState(resourceId);
+    }
+    if (pageToken && this.consumedAuditTokens.has(pageToken)) {
+      this.auditNextToken = undefined;
+      return;
+    }
+    if (pageToken) this.consumedAuditTokens.add(pageToken);
+
+    const generation = ++this.auditRequestGeneration;
     this.loadingAudit = true;
+    this.auditError = '';
     try {
       const auditParams: { pageToken?: PageToken; pageSize?: number } = { pageSize: 20 };
       if (pageToken) auditParams.pageToken = pageToken;
-      const page = await accessBoundariesApi.listAudit(this.boundaryId, auditParams);
+      const page = await accessBoundariesApi.listAudit(resourceId, auditParams);
+      if (generation !== this.auditRequestGeneration || resourceId !== this.boundaryId) return;
+      const safeItems = page.items.filter((item) => item.constraintId === resourceId);
       if (pageToken) {
-        this.auditEvents = [...this.auditEvents, ...page.items];
+        const known = new Set(this.auditEvents.map((item) => item.id));
+        this.auditEvents = [
+          ...this.auditEvents,
+          ...safeItems.filter((item) => !known.has(item.id)),
+        ];
       } else {
-        this.auditEvents = page.items;
+        this.auditEvents = safeItems;
       }
-      this.auditNextToken = page.nextPageToken;
+      this.auditNextToken =
+        page.nextPageToken &&
+        page.nextPageToken !== pageToken &&
+        !this.consumedAuditTokens.has(page.nextPageToken)
+          ? page.nextPageToken
+          : undefined;
       this.auditTotalCount = page.totalCount;
     } catch (err) {
-      console.error('Failed to load audit events:', err);
+      if (generation !== this.auditRequestGeneration || resourceId !== this.boundaryId) return;
+      if (err instanceof accessBoundariesApi.StaleResponseError) return;
+      this.auditEvents = [];
+      this.auditNextToken = undefined;
+      this.auditTotalCount = 0;
+      this.auditError =
+        err instanceof accessBoundariesApi.AccessBoundaryAPIError && err.httpStatus === 404
+          ? 'Audit history is unavailable.'
+          : 'Unable to load audit history. Try again.';
     } finally {
-      this.loadingAudit = false;
+      if (generation === this.auditRequestGeneration) this.loadingAudit = false;
     }
+  }
+
+  private resetAuditState(resourceId: string): void {
+    this.auditRequestGeneration++;
+    this.auditResourceId = resourceId;
+    this.auditEvents = [];
+    this.auditNextToken = undefined;
+    this.auditTotalCount = 0;
+    this.auditError = '';
+    this.loadingAudit = false;
+    this.consumedAuditTokens.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -693,35 +746,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
 
   private formatDatetime(iso: string | null): string {
     if (!iso) return '—';
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleString(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
-    } catch {
-      return iso;
-    }
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(iso) || iso;
   }
 
   private subjectDescription(): string {
@@ -966,9 +991,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             <div class="header-meta">
               <span>${this.scopeDescription()}</span>
               <span>${this.subjectDescription()}</span>
-              ${b.updatedAt
-                ? html`<span>Updated ${this.formatRelativeTime(b.updatedAt)}</span>`
-                : nothing}
+              ${b.updatedAt ? html`<span>Updated ${formatRelative(b.updatedAt)}</span>` : nothing}
               ${b.updatedBy ? html`<span>by ${this.actorDisplay(b.updatedBy)}</span>` : nothing}
             </div>
           </div>
@@ -1282,6 +1305,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             .nextPageToken=${this.auditNextToken}
             .totalCount=${this.auditTotalCount}
             .loading=${this.loadingAudit}
+            .errorMessage=${this.auditError}
             @audit-page-request=${(e: CustomEvent<AuditPageRequestDetail>) =>
               this.handleAuditPageRequest(e)}
           ></scion-access-boundary-audit-timeline>

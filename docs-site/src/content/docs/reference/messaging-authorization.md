@@ -70,7 +70,7 @@ The **receiving project's inbound policy** is directional:
 | Policy | Meaning |
 |--------|---------|
 | `none` | Accept no agent messages from other projects. |
-| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project. |
+| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project (any active project role binding, built-in or custom). |
 | `any` | Accept an eligible agent from any project on this Hub. |
 
 All policies require the external **sender** to use `hub` mode. The
@@ -210,13 +210,29 @@ is evaluated on the **human principal at delivery time**.
   (U → owner's agent → restricted agent). Evaluated on the human principal,
   never on on-behalf-of markers.
 
+- **Active project access for ancestry.** The ancestry allow requires the
+  user's current access to the agent's project: a project role binding
+  (direct or through a group) or system authority that covers the agent.
+  A user whose last project binding was removed or has expired is not
+  allowed through ancestry, for full sessions and User Access Tokens alike.
+
 - **UAT caveat.** For User Access Tokens, piercing applies only when the
   token also carries the `agent:message` scope. A narrow-scoped token held
   by a project owner does not pierce.
 
 - **`none` is sealed.** Only super-admin can reach `none`-mode agents on the
-  message plane. Project owners and lineage users retain `attach`/PTY access
-  (mode governs only the message plane), but cannot deliver messages.
+  message plane. The agent's creator, users in its ancestry chain, and
+  anyone else holding `agent.attach` on it directly keep `attach`/PTY access
+  and the keys operation (`POST /:id/keys`; mode governs only the message
+  plane), but cannot deliver messages. **Project owners and admins do not
+  get this through their role** — `agent.attach` is explicitly excluded
+  from what those roles grant (see
+  [Permissions & Policy](/scion/hosted/ha/permissions/#access-control--authorization)) —
+  so a project owner who is not the agent's creator or in its ancestry
+  chain is sealed out of `none`-mode agents the same as anyone else without
+  a direct grant. The `scion keys` CLI uses the keys operation in Hub mode,
+  so the `none`-mode seal does not apply to it. Raw delivery through the
+  message API has been removed (see [Retired raw field](#retired-raw-field)).
 
 ---
 
@@ -250,8 +266,9 @@ This is a quarantine kill-switch independent of the agent's role.
 - Delivery to a newly-quarantined agent fails closed. The sender receives a
   system-plane notice about the delivery failure.
 - **Super-admin** can still reach quarantined agents.
-- **Attach/PTY** remains available to holders of `agent.attach`. Mode governs
-  only the message plane.
+- **Attach/PTY, and the keys operation (`POST /:id/keys`),** remain available
+  to holders of `agent.attach`. Mode governs only the message plane. This
+  includes the `scion keys` CLI, which uses the keys operation.
 - **System-plane** messages (scheduled events, lifecycle notifications)
   continue to be delivered.
 
@@ -355,6 +372,36 @@ machine-readable denial code:
 
 Denial codes are returned in the `MessageDecision.Code` field and in API
 error responses. The UI maps these codes to user-visible explanations.
+
+---
+
+## Retired raw field
+
+Raw delivery (the former `raw` flag on the message API, which sent literal
+keystrokes to an agent's terminal) has been removed. Use `scion keys` or
+`POST /:id/keys` instead; that operation is authorized like `agent.attach`,
+not by message mode. The `scion message --raw` flag has also been removed: it
+fails before sending anything, with guidance naming `scion keys`.
+
+A request that still carries `raw` is rejected with `422 raw_input_removed`
+before any side effect: no authorization-dependent delivery, persistence,
+fan-out, wake, event, or sender resolution. Both spellings and every value
+(`true`, `false`, `null`, a wrong type, or a malformed value) are rejected.
+
+| Route | Field checked |
+|------|---------|
+| `POST /api/v1/agents/:id/message` and the project-scoped equivalent | `raw`, `structured_message.raw` |
+| `POST /api/v1/projects/:projectId/broadcast` | `raw`, `structured_message.raw` |
+| `POST /api/v1/broker/inbound`, `POST /api/v1/broker/inbound/routed` (Message Broker plugins) | `raw`, `message.raw` |
+| Scheduled events and recurring schedules (advanced `payload` JSON) | `raw` |
+
+The error message names `scion keys`; `details` carries `operation_id`,
+`ingress`, and `replacement`. The former bridge codes
+(`raw_combination_unsupported`) and `unsupported_capability` reasons
+(`raw_plain_conflict`, `raw_broadcast_unsupported`,
+`raw_scheduling_unsupported`, `raw_broker_ingress_unsupported`) are no longer
+returned. See [API Reference](/scion/reference/api/#agents-apiv1agents) and
+[Migrating from raw message delivery](/scion/reference/raw-message-removal/).
 
 ---
 

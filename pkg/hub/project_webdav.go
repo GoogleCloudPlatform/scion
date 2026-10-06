@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -55,7 +56,9 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 	// Determine workspace path based on project type
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
-		Conflict(w, err.Error())
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			Conflict(w, err.Error())
+		}
 		return
 	}
 
@@ -168,12 +171,17 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 // for a given project. For hub-managed and shared-workspace projects, this is the
 // hub-managed workspace directory. For linked projects (workspace on a remote
 // broker), this is the hub's cached copy of that workspace.
+//
+// Empty-per-agent projects (design #2703) also resolve to the hub project
+// directory here, although their agents never mount it: each agent gets a
+// private, broker-local directory. This is intentionally left unguarded in
+// P1; the web UI hides the Files tab for this mode (P5).
 func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Project) (string, error) {
 	// Hub-managed projects (no git remote) always have a managed workspace
 	if project.GitRemote == "" {
 		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve project path")
+			return "", projectPathResolveError(err, "failed to resolve project path")
 		}
 		return path, nil
 	}
@@ -182,7 +190,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 	if project.IsSharedWorkspace() {
 		path, err := s.hubManagedProjectPath(project.Slug)
 		if err != nil {
-			return "", fmt.Errorf("failed to resolve project path")
+			return "", projectPathResolveError(err, "failed to resolve project path")
 		}
 		return path, nil
 	}
@@ -211,7 +219,7 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 	// The cache is populated via cache/refresh or cache/notify endpoints.
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve project cache path")
+		return "", projectPathResolveError(err, "failed to resolve project cache path")
 	}
 
 	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
@@ -222,6 +230,17 @@ func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Pr
 	}
 
 	return cachePath, nil
+}
+
+// projectPathResolveError returns a generic error for a failed project path
+// resolution. Callers show its text to clients, so it does not include the
+// filesystem path. A workspace storage timeout is still wrapped
+// (errWorkspaceContentTimeout) so callers can map it to 503.
+func projectPathResolveError(err error, msg string) error {
+	if errors.Is(err, errWorkspaceContentTimeout) {
+		return fmt.Errorf("%s: %w", msg, errWorkspaceContentTimeout)
+	}
+	return errors.New(msg)
 }
 
 // walkFilteredDir walks a directory, calling fn for each non-excluded file.
@@ -499,7 +518,7 @@ type ProjectSyncStatusResponse struct {
 // handleProjectSyncStatus returns the sync status for a project.
 func (s *Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

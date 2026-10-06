@@ -293,7 +293,7 @@ func TestSendAgentRouted_R3_MigratingPrimaryDuringProvisioningDeferred(t *testin
 	owner := NewAuthenticatedUser(userID, "r3-chatv2-owner@test.com", "Owner", "member", "cli")
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "r3-chatv2-owner@test.com", DisplayName: "Owner"}))
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, userID))
 
 	dispatcher := &brokerMockDispatcher{}
@@ -305,7 +305,7 @@ func TestSendAgentRouted_R3_MigratingPrimaryDuringProvisioningDeferred(t *testin
 	rr := httptest.NewRecorder()
 
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil)
+		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{})
 
 	require.NotEmpty(t, msgID, "the message must still be persisted; response: %d %s", rr.Code, rr.Body.String())
 	require.Empty(t, dispatcher.getMessages(), "a migrating primary during provisioning must not be dispatched to")

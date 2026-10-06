@@ -926,13 +926,13 @@ func TestR2_ProjectOwnerRetainsHumanAgentManagement(t *testing.T) {
 			"project-owner MUST retain human agent-management permission %s", p)
 	}
 
-	// R3 (miller79/scion#88): attach/port_access to another member's agent
-	// would expose that member's user-scoped secrets. Owners reach their own
-	// agents via relationship grants instead.
-	for _, p := range []string{"agent.attach", "agent.port_access"} {
-		assert.False(t, permSet[p],
-			"project-owner must NOT carry %s (cross-member secret exposure)", p)
-	}
+	// R3: attach to another member's agent would expose
+	// that member's user-scoped secrets. Owners reach their own agents via
+	// relationship grants instead.
+	assert.False(t, permSet["agent.attach"],
+		"project-owner must NOT carry agent.attach (cross-member secret exposure)")
+	// R5: forwarded ports are reachable project-wide.
+	assert.True(t, permSet["agent.port_access"], "project-owner must carry agent.port_access")
 }
 
 // TestR2_ProjectMemberExcludesStopAllAndSkillCreate verifies the explicit
@@ -963,8 +963,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-owner",
 			perms: projectOwnerPermissionIDs(),
 			want: []string{
+				"artifact.create", "artifact.read",
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
-				"agent.message", "agent.read",
+				"agent.message", "agent.port_access", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.delete",
@@ -983,8 +984,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-admin",
 			perms: projectAdminPermissionIDs(),
 			want: []string{
+				"artifact.create", "artifact.read",
 				"agent.create", "agent.lifecycle", "agent.list",
-				"agent.message", "agent.read",
+				"agent.message", "agent.port_access", "agent.read",
 				"agent.stop_all", "agent.update",
 				"gcp_service_account.assign",
 				"harness_config.create",
@@ -1003,6 +1005,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-member",
 			perms: projectMemberCuratedPermissionIDs(),
 			want: []string{
+				"artifact.create", "artifact.read",
 				"agent.create", "agent.list", "agent.read",
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.list", "harness_config.read",
@@ -1024,9 +1027,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:  4,
-		store.ProjectRoleAdmin:  4,
-		store.ProjectRoleMember: 4,
+		store.ProjectRoleOwner:  6,
+		store.ProjectRoleAdmin:  6,
+		store.ProjectRoleMember: 5,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
@@ -1049,9 +1052,9 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 4, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 4, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 4, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 6, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 6, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
 	}
 
 	for _, pr := range projectRoles {
@@ -1527,4 +1530,82 @@ func TestNormalizedDefaultRole(t *testing.T) {
 	} {
 		assert.Equal(t, want, normalizedDefaultRole(in), "input %q", in)
 	}
+}
+
+// TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins simulates a
+// hub that last applied revision 4 of project-owner/project-admin (no
+// agent.port_access) and verifies that startup reconciliation upgrades the
+// stored roles, so an existing owner binding can open a member's ports
+// without any re-binding. project-member is left without port access.
+func TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	ctx := context.Background()
+
+	without := func(perms []string, drop string) []string {
+		out := make([]string, 0, len(perms))
+		for _, p := range perms {
+			if p != drop {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	r4 := map[string][]string{
+		store.ProjectRoleOwner: without(projectOwnerPermissionIDs(), "agent.port_access"),
+		store.ProjectRoleAdmin: without(projectAdminPermissionIDs(), "agent.port_access"),
+	}
+	for name, perms := range r4 {
+		rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+		require.NoError(t, err)
+		require.NoError(t, s.UpdateSystemRoleDefinitionPermissions(ctx, rd.ID, perms))
+		recordBuiltInRoleMarker(ctx, s, name, builtInRoleMarker{Revision: 4, PermHash: permListHash(perms)})
+	}
+
+	projectID := tid("r5-port-project")
+	ownerID := tid("r5-port-owner")
+	adminID := tid("r5-port-admin")
+	memberID := tid("r5-port-member")
+	createDelegateTestProject(t, s, projectID, "r5-port", ownerID)
+	createTestUserWithProjectRole(t, s, ownerID, "r5-owner@test.com", projectID, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, s, adminID, "r5-admin@test.com", projectID, store.ProjectRoleAdmin)
+	createTestUserWithProjectRole(t, s, memberID, "r5-member@test.com", projectID, store.ProjectRoleMember)
+
+	memberAgent := Resource{
+		Type: "agent", ID: tid("r5-member-agent"), OwnerID: memberID,
+		ParentType: "project", ParentID: projectID, Ancestry: []string{memberID},
+	}
+	callers := map[string]UserIdentity{
+		store.ProjectRoleOwner: NewAuthenticatedUser(ownerID, "r5-owner@test.com", "Owner", "member", "api"),
+		store.ProjectRoleAdmin: NewAuthenticatedUser(adminID, "r5-admin@test.com", "Admin", "member", "api"),
+	}
+	for name, caller := range callers {
+		d := authz.CheckAccess(ctx, caller, memberAgent, ActionPortAccess)
+		require.False(t, d.Allowed, "precondition: %s at revision 4 must lack port access: %s", name, d.Reason)
+	}
+
+	reconcileBuiltInRoles(ctx, s)
+
+	for name, caller := range callers {
+		rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+		require.NoError(t, err)
+		assert.Contains(t, rd.Permissions, "agent.port_access", "%s should carry agent.port_access after reconciliation", name)
+		assert.NotContains(t, rd.Permissions, "agent.attach", "%s must still lack agent.attach", name)
+		// R5 granted agent.port_access; the marker advances to the current
+		// revision (R6 added the artifact permissions).
+		assert.Equal(t, 6, getAppliedBuiltInRoleMarker(ctx, s, name).Revision, "%s marker should advance to the current revision", name)
+
+		d := authz.CheckAccess(ctx, caller, memberAgent, ActionPortAccess)
+		assert.True(t, d.Allowed, "%s should open a member's ports after reconciliation: %s", name, d.Reason)
+		d = authz.CheckAccess(ctx, caller, memberAgent, ActionAttach)
+		assert.False(t, d.Allowed, "%s must not attach to a member's agent: %s", name, d.Reason)
+	}
+
+	member := NewAuthenticatedUser(memberID, "r5-member@test.com", "Member", "member", "api")
+	member2ID := tid("r5-port-member-2")
+	createTestUserWithProjectRole(t, s, member2ID, "r5-member-2@test.com", projectID, store.ProjectRoleMember)
+	otherAgent := memberAgent
+	otherAgent.ID = tid("r5-member-2-agent")
+	otherAgent.OwnerID, otherAgent.Ancestry = member2ID, []string{member2ID}
+	d := authz.CheckAccess(ctx, member, otherAgent, ActionPortAccess)
+	assert.False(t, d.Allowed, "project-member must not gain port access on another member's agent: %s", d.Reason)
 }

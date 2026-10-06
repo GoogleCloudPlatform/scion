@@ -45,7 +45,7 @@ func (s *Server) handleHarnessConfigFiles(w http.ResponseWriter, r *http.Request
 		case http.MethodPost:
 			s.handleHarnessConfigFileUpload(w, r, hc)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
@@ -58,7 +58,7 @@ func (s *Server) handleHarnessConfigFiles(w http.ResponseWriter, r *http.Request
 	case http.MethodDelete:
 		s.handleHarnessConfigFileDelete(w, r, hc, filePath)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -237,6 +237,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 				hc.Config = &store.HarnessConfigData{}
 			}
 			hc.Config.Image = entry.Image
+			applyModelConfigFromEntry(hc, entry)
 		}
 	}
 
@@ -346,11 +347,14 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 	hc.Files = files
 	hc.ContentHash = computeContentHash(hc.Files)
 
-	if image := extractImageFromStorage(ctx, stor, hc.StoragePath); image != "" {
-		if hc.Config == nil {
-			hc.Config = &store.HarnessConfigData{}
+	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
+		if entry.Image != "" {
+			if hc.Config == nil {
+				hc.Config = &store.HarnessConfigData{}
+			}
+			hc.Config.Image = entry.Image
 		}
-		hc.Config.Image = image
+		applyModelConfigFromEntry(hc, entry)
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {

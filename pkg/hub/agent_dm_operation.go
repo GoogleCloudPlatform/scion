@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -70,11 +71,6 @@ type AgentDMInput struct {
 
 	// Msg is the plain text message body.
 	Msg string
-
-	// Raw requests that the target agent's runtime receive the message body
-	// verbatim via keystroke injection (no envelope, no automatic Enter).
-	// Deprecated client flag (`scion message --raw`), still functional.
-	Raw bool
 
 	// Plain requests that the target agent's runtime receive the message
 	// body verbatim, submitted normally (Enter), with no envelope.
@@ -141,7 +137,7 @@ type AgentDMInput struct {
 	// is false — set it only from the agent mention fan-out path
 	// (agent_mention_fanout.go), never from a primary send. Every other
 	// admission check (rate budget, message length, authorization, foreign
-	// attachment/raw rejection, dispatch availability) and every side
+	// attachment rejection, dispatch availability) and every side
 	// effect (persistence, SSE, audit, dispatch) is unaffected: a mention to
 	// a non-running agent — stopped, suspended, errored, or any other
 	// not-yet-running phase (created, provisioning, starting, etc.) — still
@@ -255,17 +251,14 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// ── Phase 1: Admission checks (no side effects) ─────────────────────
 	// All checks must pass before any content/lifecycle effects (AC-3).
 
-	// 1. Rate limit — aggregate send budget (AC-2).
-	// The traffic class is derived from the message type, but the aggregate
-	// ceiling is always charged, so switching type cannot bypass the budget.
-	class := chatSenderClassForMessageType(input.Type)
-	rateLimitDecision := s.chatSendLimiter.Allow(input.SenderAgent.ID, class)
+	// 1. Rate limit — the agent's send budget (AC-2).
+	rateLimitDecision := s.chatSendLimiter.Allow(input.SenderAgent.ID, chatSenderAgent)
 	if !rateLimitDecision.Allowed {
 		seconds := int(math.Ceil(rateLimitDecision.RetryAfter.Seconds()))
 		dmErr := &AgentDMError{
 			Code: ErrCodeRateLimited,
-			Message: fmt.Sprintf("send rate limit exceeded (%d %s per minute); retry in %ds",
-				int(rateLimitDecision.Limit), rateLimitDecision.LimitClass.noun(), seconds),
+			Message: fmt.Sprintf("send rate limit exceeded (%d messages per minute); retry in %ds",
+				int(rateLimitDecision.Limit), seconds),
 			HTTPStatus: http.StatusTooManyRequests,
 			RetryAfter: rateLimitDecision.RetryAfter,
 		}
@@ -342,30 +335,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 4b. Foreign raw keystroke-injection rejection.
-	//
-	// Raw skips the wrapped envelope and is delivered as literal
-	// keystrokes with no automatic Enter — the same isolation boundary
-	// concern that #1687 raised for attachments. Refuse it cross-project
-	// the same way, rather than downgrading the message or extending
-	// cross-project capabilities.
-	//
-	// This check is intentionally isolated (its own step, its own denial
-	// code) pending confirmation of the final cross-project policy for
-	// keystroke injection; it does not touch Plain, which is unaffected by
-	// this decision.
-	if input.Raw && input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
-		LogDMAdmission(DMAuditEntryForDenial(input, string(MessageDenialCrossProjectRawUnsupported),
-			"cross-project raw keystroke delivery not supported"))
-		return nil, &AgentDMError{
-			Code:       ErrCodeUnsupportedCapability,
-			Message:    "cross-project raw message delivery is not supported",
-			HTTPStatus: http.StatusUnprocessableEntity,
-			Details: map[string]interface{}{
-				"reason": string(MessageDenialCrossProjectRawUnsupported),
-			},
-		}
-	}
+	// 4b. Raw keystroke delivery through messages has been removed. Message
+	// ingresses reject a request carrying the retired raw field before this
+	// function is reached (raw_tombstone.go); keystrokes use the keys route.
 
 	// 5. Dispatch availability pre-check (#1689).
 	// Verify dispatch infrastructure before persistence so that missing
@@ -393,9 +365,17 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// dispatched (AC-4).
 	if !deferred {
 		if input.Wake {
-			_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
+			if denial := s.wakeResumeDenial(ctx, input.SenderIdentity, input.TargetAgent); denial != nil {
+				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
+				return nil, denial
+			}
+			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
 				return nil, wakeErr
+			}
+			if wakeResult != nil && wakeResult.Outcome == WakeDeferred {
+				// Another start is in progress: keep the message, deferred.
+				deferred = true
 			}
 		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
@@ -461,7 +441,6 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		Msg:                  storeMsg.Msg,
 		Type:                 storeMsg.Type,
 		Plain:                input.Plain,
-		Raw:                  input.Raw,
 		Urgent:               storeMsg.Urgent,
 		Attachments:          input.Attachments,
 		Channel:              input.Channel,
@@ -470,6 +449,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		ConversationID:       input.ConversationID,
 		ConversationAsserted: input.Asserted,
 	}
+
+	// #2257 step 7b (design auto-offload-large-dm §4.2 item 1): strip
+	// hub-reserved offload metadata keys before this StructuredMessage is
+	// rendered or dispatched, so a client can never spoof
+	// body_offloaded/body_chars/body_sha256. This covers the outbound
+	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
+	// fan-out (fanOutAgentMentions builds fresh metadata anyway, so this is
+	// a no-op on that path).
+	structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
 
 	// Stamp attachment metadata onto the structured message.
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
@@ -541,16 +529,59 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}, nil
 	}
 
+	// 10b. Offload (#2257, design auto-offload-large-dm §4.4): replace the
+	// DISPATCHED copy's body with a stub when it qualifies and a usable
+	// fetch form exists. The persisted row (storeMsg), the rendered
+	// structuredMsg.DeliveryText above, and every observer (step 13) keep
+	// the full body unchanged — dispatchMsg is used for render (just above,
+	// when offloaded) and dispatch only, never for anything derived after
+	// dispatch (mention fan-out, observers, responses).
+	dispatchMsg := structuredMsg
+	pol := s.offloadPolicy()
+	if messaging.Qualifies(storeMsg.Msg, structuredMsg.Plain, pol) {
+		// No caller has to remember to hold a *store.Conversation: this is
+		// the one place ExecuteAgentDM looks it up, and only on the
+		// over-threshold path — a small DM pays nothing extra (design §4.3).
+		var conv *store.Conversation
+		if input.ConversationID != "" {
+			conv, _ = s.store.GetConversation(ctx, input.ConversationID)
+		}
+		canRead := conv != nil && s.recipientCanReadConversation(ctx, conv, input.TargetAgent)
+
+		deliverMsg, off := messaging.OffloadForDelivery(messaging.OffloadInput{
+			Msg:                  structuredMsg,
+			PersistedBody:        storeMsg.Msg,
+			MessageID:            msgID,
+			ConversationID:       storeMsg.ConversationID,
+			RecipientCanReadConv: canRead,
+			FetchByID:            false, // P1/P2: literal false (design §8.1, §10 P1/P2).
+		}, pol)
+		if off.Offloaded {
+			if s.writeDenyEnabled() {
+				deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+					MessageID:  storeMsg.ID,
+					ConvResult: input.ConvResult,
+					Msg:        deliverMsg,
+					CreatedAt:  storeMsg.CreatedAt,
+					IsMention:  input.Type == messages.TypeMention,
+				})
+			}
+			dispatchMsg = deliverMsg
+		}
+	}
+
 	// Dispatch outcome determines the final message state:
 	//   - Success → CAS pending→dispatched (AC-1)
 	//   - Definite failure → persist failed state, return non-2xx (AC-2)
 	//   - Ambiguous (context cancelled) → leave pending, return ambiguous (AC-4)
 	var dispatchErr error
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
+		// D4: managed runtimes stay unconverted — a managed agent may not
+		// have the scion CLI to fetch with. Unchanged: input.Msg, full body.
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
 		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
-		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt, structuredMsg)
+		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 		retryCancel()
 	}
 
@@ -590,6 +621,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		if markErr := s.markFailed(ctx, msgID, dispatchErr.Error()); markErr != nil {
 			s.messageLog.Error("agent DM: failed to mark message failed",
 				"message_id", msgID, "error", markErr)
+		}
+		if isBrokerAgentNotFound(dispatchErr) {
+			return nil, agentNotRunningDispatchError(msgID)
 		}
 		return nil, dispatchFailedError(msgID)
 	}
@@ -660,6 +694,25 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		Recipient:   storeMsg.Recipient,
 		RecipientID: storeMsg.RecipientID,
 	}, nil
+}
+
+// wakeResumeDenial applies the rule that resuming a suspended agent to
+// deliver a message requires the lifecycle permission that starting the
+// agent requires (agentLifecycleAllowed). It returns a 403 error when target
+// is suspended and identity lacks that permission, and nil otherwise. A
+// target in any other phase needs no resume, so the rule does not apply.
+func (s *Server) wakeResumeDenial(ctx context.Context, identity Identity, target *store.Agent) *AgentDMError {
+	if state.Phase(target.Phase) != state.PhaseSuspended {
+		return nil
+	}
+	if s.agentLifecycleAllowed(ctx, identity, target) {
+		return nil
+	}
+	return &AgentDMError{
+		Code:       ErrCodeForbidden,
+		Message:    fmt.Sprintf("not permitted to resume agent %s", target.Slug),
+		HTTPStatus: http.StatusForbidden,
+	}
 }
 
 // WriteAgentDMError writes an AgentDMError as an HTTP response. Adapters

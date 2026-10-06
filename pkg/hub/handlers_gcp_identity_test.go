@@ -949,7 +949,7 @@ func setupGCPAuthzTest(t *testing.T) (*Server, store.Store, *store.User, *store.
 	require.NoError(t, s.CreateProject(ctx, project))
 
 	// Create project members group and policies (simulates project creation handler)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Add member to project members group
 	membersGroup, err := s.GetGroupBySlug(ctx, "project:gcp-authz-project:members")
@@ -1107,27 +1107,6 @@ func TestGCPSA_Verify_MemberDenied(t *testing.T) {
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", project.ID, sa.ID), nil)
 	require.Equal(t, http.StatusForbidden, rec.Code,
 		"project member should not be able to verify SA; got: %s", rec.Body.String())
-}
-
-// TestGCPSA_ProjectOwnerCanAddMembers verifies that project owners can add members
-// to the project's members group (regression test for missing OwnerID on group).
-func TestGCPSA_ProjectOwnerCanAddMembers(t *testing.T) {
-	srv, s, owner, _, outsider, project := setupGCPAuthzTest(t)
-	ctx := context.Background()
-
-	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-	require.NoError(t, err)
-
-	// Project owner should be able to add outsider as a member
-	body := AddGroupMemberRequest{
-		MemberType: "user",
-		MemberID:   outsider.ID,
-		Role:       "member",
-	}
-	rec := doRequestAsUser(t, srv, owner, http.MethodPost,
-		fmt.Sprintf("/api/v1/groups/%s/members", membersGroup.ID), body)
-	require.Equal(t, http.StatusCreated, rec.Code,
-		"project owner should be able to add members to project group; got: %s", rec.Body.String())
 }
 
 func TestVerifyGCPServiceAccount_NoTokenGenerator_Returns503(t *testing.T) {

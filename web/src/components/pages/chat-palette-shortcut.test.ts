@@ -17,11 +17,10 @@
 /**
  * Tests for the single Cmd/Ctrl+K shortcut owner in chat.ts: modifier/IME/
  * repeat guards, the terminal/xterm exclusion, the route and page-visibility
- * guards, the unrelated-modal guard, and dispatch to the legacy switcher vs.
- * the new palette under the rollout flag.
+ * guards, the unrelated-modal guard, and dispatch to the grouped palette.
  *
  * happy-dom does not retarget events across shadow roots (see the
- * chat-switcher tests), so real composedPath()-through-shadow-DOM and
+ * quick-palette tests), so real composedPath()-through-shadow-DOM and
  * focus-restore assertions live in e2e/chat-palette (Chromium) instead.
  * These tests build the composedPath() arrays directly, which is a fact
  * about how the code consumes the event (it only ever calls
@@ -30,14 +29,28 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+
+import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
+import { TOUCH_PRIMARY_QUERY } from '../../utils/input-modality.js';
+import { PALETTE_TYPEAHEAD_MAX_MS } from '../shared/palette/palette-typeahead.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
   stateManager: new EventTarget(),
 }));
+
+// The platform the shortcut handler sees; false (not a Mac) unless a test
+// sets it.
+const platform = vi.hoisted(() => ({ mac: false }));
+vi.mock('../../utils/platform.js', () => ({ isMacPlatform: () => platform.mac }));
 
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();
@@ -60,7 +73,7 @@ beforeAll(async () => {
   // warms the module cache so that background import resolves
   // near-instantly instead of running a first-time module transform that
   // can still be unresolved when this file's own tests finish and their
-  // environment tears down. `chat-switcher.js` is a different import —
+  // environment tears down. `quick-palette.js` is a different import —
   // `togglePalette`'s first-open lazy load, not `initV2()`'s — and every
   // test below that reaches it already awaits it to completion; it is
   // warmed here too so that a connected page can never leave it in flight
@@ -68,7 +81,7 @@ beforeAll(async () => {
   await Promise.all([
     import('../shared/chat/chat-space-rail.js'),
     import('../shared/chat/chat-members.js'),
-    import('../shared/chat/chat-switcher.js'),
+    import('../shared/palette/quick-palette.js'),
   ]);
 });
 
@@ -118,9 +131,16 @@ function ownDialogAfterHideEvent(): Event {
   return { composedPath: () => [dialog] } as unknown as Event;
 }
 
+// A connected page retains the agent store's hub list, which opens the
+// store's feed; it never connects here.
+beforeEach(() => {
+  vi.stubGlobal('EventSource', FakeEventSource);
+});
+
 afterEach(() => {
   document.body.innerHTML = '';
   Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+  platform.mac = false;
 });
 
 /**
@@ -129,7 +149,7 @@ afterEach(() => {
  * `createUnattachedPage()` directly, at the default (non-`/chat`) test
  * document URL, would let `_isOnChatRoute()` reject the event regardless of
  * whether the guard actually under test did anything — the same vacuity
- * that would otherwise mask the terminal-surface/visibility-call/isV2
+ * that would otherwise mask the terminal-surface/visibility-call
  * guards. Every test below uses this fixture and ends with a positive
  * control (the identical event with only the condition under test flipped)
  * to prove the rest of the guard chain is actually live.
@@ -145,83 +165,183 @@ function createEligiblePage(): any {
 describe('_handleGlobalKeydown: modifier/IME/repeat/key guards (eligible fixture + positive controls)', () => {
   it('ignores a key repeat, with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, repeat: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, repeat: false }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('ignores IME composition, with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, isComposing: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, isComposing: false }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('ignores an already-defaultPrevented event, with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, defaultPrevented: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, defaultPrevented: false }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('ignores Alt held alongside the modifier, with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, altKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, altKey: false }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('ignores Shift held alongside the modifier, with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, shiftKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, shiftKey: false }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('ignores neither Ctrl nor Meta held, with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({}));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('ignores both Ctrl and Meta held at once (some IMEs), with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, ctrlKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('ignores keys other than k, with a positive control', () => {
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ key: 'j', metaKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     page._handleGlobalKeydown(makeKeydownEvent({ key: 'k', metaKey: true }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('accepts uppercase K (Shift/Caps Lock does not itself block eligibility via key casing)', () => {
     // No shiftKey here — Shift itself is a separate, already-tested guard
     // above; this only proves key.toLowerCase() is used for the comparison.
     const page = createEligiblePage();
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ key: 'K', metaKey: true }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('_handleGlobalKeydown: macOS Ctrl+K in a text field keeps its native meaning', () => {
+  function editableTargets(): Array<[string, Element]> {
+    const editable = document.createElement('div');
+    editable.contentEditable = 'true';
+    // happy-dom has no editing host; the property is what the handler reads.
+    Object.defineProperty(editable, 'isContentEditable', { value: true });
+    return [
+      ['textarea', document.createElement('textarea')],
+      ['input', document.createElement('input')],
+      ['contenteditable', editable],
+    ];
+  }
+
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field, unprevented', () => {
+    platform.mac = true;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ ctrlKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).not.toHaveBeenCalled();
+      expect(e.defaultPrevented, name).toBe(false);
+    }
+  });
+
+  it('on a Mac, counts every text-taking input type as a text field', () => {
+    platform.mac = true;
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const input = document.createElement('input');
+      input.type = type;
+      page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [input] }));
+      expect(togglePalette, type).not.toHaveBeenCalled();
+    }
+  });
+
+  it('on a Mac, Ctrl+K on a non-text, read-only or disabled field opens the palette', () => {
+    platform.mac = true;
+    const fields: Array<[string, Element]> = [];
+    for (const type of ['checkbox', 'button', 'range']) {
+      const input = document.createElement('input');
+      input.type = type;
+      fields.push([`input ${type}`, input]);
+    }
+    const readOnlyInput = document.createElement('input');
+    readOnlyInput.readOnly = true;
+    const disabledInput = document.createElement('input');
+    disabledInput.disabled = true;
+    const readOnlyTextarea = document.createElement('textarea');
+    readOnlyTextarea.readOnly = true;
+    const disabledTextarea = document.createElement('textarea');
+    disabledTextarea.disabled = true;
+    fields.push(
+      ['read-only input', readOnlyInput],
+      ['disabled input', disabledInput],
+      ['read-only textarea', readOnlyTextarea],
+      ['disabled textarea', disabledTextarea]
+    );
+    for (const [name, field] of fields) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ ctrlKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented, name).toBe(true);
+    }
+  });
+
+  it('on a Mac, Cmd+K typed in a text field still opens the palette', () => {
+    platform.mac = true;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ metaKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented, name).toBe(true);
+    }
+  });
+
+  it('on a Mac, Ctrl+K outside a text field still opens the palette', () => {
+    platform.mac = true;
+    const page = createEligiblePage();
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+    page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [document.body] }));
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', () => {
+    platform.mac = false;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [field] }));
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+    }
   });
 });
 
@@ -252,14 +372,14 @@ describe('_eventFromTerminalSurface', () => {
     // identical event outside the terminal.
     const page = createUnattachedPage();
     window.history.pushState({}, '', '/chat');
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     const terminalPane = document.createElement('scion-terminal-pane');
 
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, path: [terminalPane] }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
 
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true, path: [] }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -279,43 +399,14 @@ describe('the _isPageVisible() call site in _handleGlobalKeydown, isolated from 
     const ancestor = document.createElement('div');
     ancestor.hidden = true;
     ancestor.appendChild(page);
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
 
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
 
     ancestor.hidden = false;
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('the isV2 guard in _handleGlobalKeydown', () => {
-  it('v1 (isV2 false) never toggles the palette/switcher or calls preventDefault, even on /chat, visible, flag on', () => {
-    // Asserting only that no switcher element renders proves nothing about
-    // this guard (v1 never renders one). Without it, v1 Ctrl+K would call
-    // preventDefault (stealing the browser's native Ctrl+K) and still run
-    // togglePalette (lazy import + agents/DM GETs).
-    const page = createUnattachedPage();
-    window.history.pushState({}, '', '/chat');
-    page.isV2 = false;
-    page.isPaletteEnabled = true;
-    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
-    const event = makeKeydownEvent({ metaKey: true });
-
-    page._handleGlobalKeydown(event);
-
-    expect(togglePalette).not.toHaveBeenCalled();
-    expect(toggleSwitcher).not.toHaveBeenCalled();
-    expect(event.defaultPrevented).toBe(false);
-
-    // Positive control: flip isV2 back on, identical event does toggle and preventDefault.
-    page.isV2 = true;
-    const event2 = makeKeydownEvent({ metaKey: true });
-    page._handleGlobalKeydown(event2);
     expect(togglePalette).toHaveBeenCalledTimes(1);
-    expect(event2.defaultPrevented).toBe(true);
   });
 });
 
@@ -337,9 +428,9 @@ describe('_isOnChatRoute', () => {
   it('blocks the shortcut end-to-end off the chat route', () => {
     const page = createUnattachedPage();
     window.history.pushState({}, '', '/terminals');
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
     window.history.pushState({}, '', '/chat');
   });
 });
@@ -413,29 +504,29 @@ describe('_isUnrelatedModalActive: live DOM query', () => {
     const dialog = document.createElement('sl-dialog') as HTMLElement & { open?: boolean };
     dialog.open = true;
     document.body.appendChild(dialog);
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
   });
 
-  it('the shortcut works again for the flag-off legacy switcher once that dialog is removed', () => {
+  it('the shortcut works again once the unrelated dialog is removed', () => {
     const page = createUnattachedPage();
     window.history.pushState({}, '', '/chat');
     const dialog = document.createElement('sl-dialog') as HTMLElement & { open?: boolean };
     dialog.open = true;
     document.body.appendChild(dialog);
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
 
     dialog.remove();
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('does not count the switcher/palette own dialog (inside its shadow root) as an unrelated modal', () => {
     const page = createUnattachedPage();
-    const switcherEl = document.createElement('scion-chat-switcher');
+    const switcherEl = document.createElement('scion-quick-palette');
     const shadow = switcherEl.attachShadow({ mode: 'open' });
     const ownDialog = document.createElement('sl-dialog') as HTMLElement & { open?: boolean };
     ownDialog.open = true;
@@ -447,32 +538,19 @@ describe('_isUnrelatedModalActive: live DOM query', () => {
   });
 });
 
-describe('shortcut dispatch: legacy switcher vs. palette', () => {
-  it('dispatches to toggleSwitcher when the palette flag is off', () => {
+describe('shortcut dispatch: the palette is the single shortcut owner', () => {
+  it('dispatches to togglePalette', () => {
     const page = createUnattachedPage();
     window.history.pushState({}, '', '/chat');
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
-    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
-    page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
-    expect(togglePalette).not.toHaveBeenCalled();
-  });
-
-  it('dispatches to togglePalette when the palette flag is on', () => {
-    const page = createUnattachedPage();
-    window.history.pushState({}, '', '/chat');
-    page.isPaletteEnabled = true;
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
     const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ metaKey: true }));
     expect(togglePalette).toHaveBeenCalledTimes(1);
-    expect(toggleSwitcher).not.toHaveBeenCalled();
   });
 
   it('preventDefault is called once eligibility is established', () => {
     const page = createUnattachedPage();
     window.history.pushState({}, '', '/chat');
-    vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     const event = makeKeydownEvent({ metaKey: true });
     page._handleGlobalKeydown(event);
     expect(event.defaultPrevented).toBe(true);
@@ -496,7 +574,7 @@ describe('shortcut dispatch: legacy switcher vs. palette', () => {
     const captureSpy = vi.spyOn(page, '_capturePaletteInvokerFocus');
 
     // Neither call is awaited individually — both presses land while the
-    // first press's `await loadChatSwitcher()` is still pending, reproducing
+    // first press's `await loadQuickPalette()` is still pending, reproducing
     // the exact race this guards against.
     const first = page.togglePalette();
     const second = page.togglePalette();
@@ -542,6 +620,711 @@ describe('shortcut dispatch: legacy switcher vs. palette', () => {
   });
 });
 
+describe('keys typed while the palette opens', () => {
+  /** A focused composer stand-in with its own keydown listener. */
+  function composer(): { el: HTMLTextAreaElement; onKeydown: ReturnType<typeof vi.fn> } {
+    const el = document.createElement('textarea');
+    document.body.appendChild(el);
+    const onKeydown = vi.fn();
+    el.addEventListener('keydown', onKeydown);
+    el.focus();
+    return { el, onKeydown };
+  }
+
+  function typeAt(el: Element, key: string): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    el.dispatchEvent(e);
+    return e;
+  }
+
+  it('are captured from the start of an open, before the lazy import resolves, and handed to the palette', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+
+    const opening = page.togglePalette();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(true);
+    await opening;
+    await page.updateComplete;
+
+    expect(onKeydown).not.toHaveBeenCalled();
+    const palette = page.shadowRoot.querySelector('scion-quick-palette');
+    expect(palette.typeahead).toBe(page._paletteTypeahead);
+    expect(page._paletteTypeahead.pending).toBe('a');
+  });
+
+  it('are not captured while the palette is not opening', () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('reach the composer again once a second press cancels the pending open', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el, onKeydown } = composer();
+    await Promise.all([page.togglePalette(), page.togglePalette()]);
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    expect(onKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it('reach the composer again once the page disconnects during the pending open', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    const opening = page.togglePalette();
+    page.remove();
+    // Before the suspended open resumes: the disconnect itself stops it.
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+    await opening;
+    expect(typeAt(el, 'b').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again once the palette closes', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(true);
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  function previewTarget(): unknown {
+    return {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+  }
+
+  it('are captured from a press queued behind the close animation, and become the reopened query', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette(); // close: animating
+    const { el, onKeydown } = composer();
+
+    await page.togglePalette(); // queued
+    expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(onKeydown).not.toHaveBeenCalled();
+    expect(page._paletteTypeahead.pending).toBe('c');
+  });
+
+  it('are captured from a press queued behind a closing document preview', async () => {
+    const page = createEligiblePage();
+    page._paletteFilePreviewTarget = previewTarget();
+    document.body.appendChild(page);
+    const { el } = composer();
+
+    await page.togglePalette({ mode: 'open' });
+    expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+    expect(page._paletteTypeahead.pending).toBe('c');
+  });
+
+  it('are captured for a full time limit from a reopen that runs late behind the document preview', async () => {
+    vi.useFakeTimers();
+    try {
+      const page = createEligiblePage();
+      page.v2SwitcherLoaded = true;
+      page._paletteFilePreviewTarget = previewTarget();
+      document.body.appendChild(page);
+      const { el, onKeydown } = composer();
+
+      await page.togglePalette({ mode: 'open' }); // queued
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS - 1000);
+      page._closePaletteFilePreview();
+      expect(page.v2PaletteOpen).toBe(true);
+      vi.advanceTimersByTime(2000);
+
+      expect(typeAt(el, 'c').defaultPrevented).toBe(true);
+      expect(onKeydown).not.toHaveBeenCalled();
+      expect(page._paletteTypeahead.pending).toBe('c');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reach the composer again once a second press cancels a queued reopen', async () => {
+    const page = createEligiblePage();
+    page._paletteCloseAnimating = true;
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    await page.togglePalette();
+    expect(page._palettePendingReopen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again once Escape cancels a queued reopen', async () => {
+    const page = createEligiblePage();
+    page._paletteCloseAnimating = true;
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'Escape' }));
+    expect(page._palettePendingReopen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again when a queued reopen is abandoned after the close animation', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    const { el } = composer();
+    await page.togglePalette(); // queued
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again when a reopen queued behind the document preview is abandoned', async () => {
+    const page = createEligiblePage();
+    page.v2SwitcherLoaded = true;
+    page._paletteFilePreviewTarget = previewTarget();
+    document.body.appendChild(page);
+    const { el } = composer();
+    await page.togglePalette();
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+
+    page._closePaletteFilePreview();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+
+  it('reach the composer again if the open fails', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const { el } = composer();
+    vi.spyOn(page, '_capturePaletteInvokerFocus').mockImplementation(() => {
+      throw new Error('boom');
+    });
+    await expect(page.togglePalette()).rejects.toThrow('boom');
+    expect(typeAt(el, 'a').defaultPrevented).toBe(false);
+  });
+});
+
+describe('togglePalette: a reopen queued behind a still-animating close never opens an invisible palette', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('closing (via toggle) marks the close as animating', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette(); // open
+    expect(page.v2PaletteOpen).toBe(true);
+
+    await page.togglePalette(); // close
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(page._paletteCloseAnimating).toBe(true);
+  });
+
+  it('a Ctrl+K that arrives while the close is still animating queues a reopen rather than opening immediately', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette(); // open
+    await page.togglePalette(); // close -> _paletteCloseAnimating = true
+    const captureSpy = vi.spyOn(page, '_capturePaletteInvokerFocus');
+
+    await page.togglePalette(); // reopen press during the pending close
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(page._palettePendingReopen).toBe(true);
+    // Never actually runs the open sequence while queued — an open here would
+    // flip `v2PaletteOpen` to true on a dialog Shoelace is still mid-hide on,
+    // leaving the palette open in JS state but visually still hidden.
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it('the `_paletteCloseAnimating` guard alone is what queues the reopen', async () => {
+    // Isolates the guard from an actual prior close, mirroring this
+    // codebase's convention of testing each condition independently rather
+    // than only end to end.
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    page._paletteCloseAnimating = true;
+    const captureSpy = vi.spyOn(page, '_capturePaletteInvokerFocus');
+
+    await page.togglePalette();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(page._palettePendingReopen).toBe(true);
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it('a second press during the same pending close cancels the queued reopen — the shortcut is still a toggle', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    page._paletteCloseAnimating = true;
+
+    await page.togglePalette(); // queues a reopen
+    expect(page._palettePendingReopen).toBe(true);
+    await page.togglePalette(); // cancels it — an even number of presses ends closed
+
+    expect(page._palettePendingReopen).toBe(false);
+    expect(page.v2PaletteOpen).toBe(false);
+
+    // A third press re-queues it — this isn't a one-shot latch, it keeps
+    // toggling with every press for as long as the close stays animating.
+    await page.togglePalette();
+    expect(page._palettePendingReopen).toBe(true);
+  });
+
+  it('a second Escape while a reopen is queued behind a still-animating close cancels the queue', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette(); // queue the reopen
+    expect(page._palettePendingReopen).toBe(true);
+
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'Escape' }));
+
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  it('a second Escape while a Ctrl+K is queued behind a closing document preview cancels the queue', () => {
+    const page = createUnattachedPage();
+    page._paletteFilePreviewTarget = {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+    page._palettePendingReopen = true;
+
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'Escape' }));
+
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  it('Escape while a close is animating but nothing is queued does not queue one', () => {
+    // Smoke check only: with nothing queued the guard's only effect
+    // (clearing _palettePendingReopen) is already a no-op, so no mutant of
+    // the guard can make this fail.
+    const page = createUnattachedPage();
+    page._paletteCloseAnimating = true;
+
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'Escape' }));
+
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  it('Escape does not touch a queued reopen once neither a palette close nor a document-preview close is still pending', () => {
+    // Isolates the (_paletteCloseAnimating || _paletteFilePreviewTarget)
+    // conjunct as a whole: a queued reopen with neither a palette close
+    // still animating nor a document preview still closing (a state a real
+    // sequence never leaves) must not be cleared.
+    const page = createUnattachedPage();
+    page._palettePendingReopen = true;
+
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'Escape' }));
+
+    expect(page._palettePendingReopen).toBe(true);
+  });
+
+  it('a non-Escape key does not cancel a queued reopen, even while a close is animating', () => {
+    // Isolates the `e.key === 'Escape'` half: without it, an unrelated
+    // keydown reaching this handler while both other conditions happen to
+    // hold (e.g. a genuine Ctrl+K, handled further down this same function)
+    // would wrongly cancel the queue too.
+    const page = createUnattachedPage();
+    page._paletteCloseAnimating = true;
+    page._palettePendingReopen = true;
+
+    page._handleGlobalKeydown(makeKeydownEvent({ key: 'a' }));
+
+    expect(page._palettePendingReopen).toBe(true);
+  });
+
+  it("the queued reopen actually opens once the pending close's sl-after-hide fires, with the open guards still holding", async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette(); // queue the reopen
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(page._palettePendingReopen).toBe(false);
+    expect(page._paletteCloseAnimating).toBe(false);
+  });
+
+  it('a queued reopen is abandoned, not opened, if an unrelated modal opened while it was queued', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette(); // queue the reopen
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true); // opened during the queued window
+    const captureSpy = vi.spyOn(page, '_capturePaletteInvokerFocus');
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(page._palettePendingReopen).toBe(false);
+    expect(captureSpy).not.toHaveBeenCalled();
+    expect(page._paletteInvoker).toBeNull();
+  });
+
+  it('a queued reopen is abandoned, not opened, if the route left /chat while it was queued', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette(); // queue the reopen
+    vi.mocked(page._isOnChatRoute).mockReturnValue(false); // navigated away during the queued window
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  it('a queued reopen is abandoned, not opened, if the page became hidden while it was queued', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette(); // queue the reopen
+    vi.mocked(page._isPageVisible).mockReturnValue(false); // hidden during the queued window
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  function pendingDocumentTarget() {
+    return {
+      kind: 'path' as const,
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace' as const, filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+  }
+
+  it('a pending document preview is abandoned, not opened, if an unrelated modal opened while it was queued', () => {
+    const page = createEligiblePage();
+    page._pendingDocumentPreviewTarget = pendingDocumentTarget();
+    page._paletteInvoker = document.createElement('textarea');
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true); // opened during the queued window
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page._paletteFilePreviewTarget).toBeNull();
+    expect(page._pendingDocumentPreviewTarget).toBeNull();
+    expect(page._paletteInvoker).toBeNull();
+  });
+
+  it('a pending document preview is abandoned, not opened, if the route left /chat while it was queued', () => {
+    const page = createEligiblePage();
+    page._pendingDocumentPreviewTarget = pendingDocumentTarget();
+    page._paletteInvoker = document.createElement('textarea');
+    vi.mocked(page._isOnChatRoute).mockReturnValue(false); // navigated away during the queued window
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page._paletteFilePreviewTarget).toBeNull();
+    expect(page._pendingDocumentPreviewTarget).toBeNull();
+    expect(page._paletteInvoker).toBeNull();
+  });
+
+  it('a pending document preview is abandoned, not opened, if the page became hidden while it was queued', () => {
+    const page = createEligiblePage();
+    page._pendingDocumentPreviewTarget = pendingDocumentTarget();
+    page._paletteInvoker = document.createElement('textarea');
+    vi.mocked(page._isPageVisible).mockReturnValue(false); // hidden during the queued window
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(page._paletteFilePreviewTarget).toBeNull();
+    expect(page._pendingDocumentPreviewTarget).toBeNull();
+    expect(page._paletteInvoker).toBeNull();
+  });
+
+  it('two Ctrl+K presses while the document preview is closing leave the reopen queue toggled back off', async () => {
+    const page = createEligiblePage();
+    page._paletteFilePreviewTarget = pendingDocumentTarget();
+
+    await page.togglePalette();
+    expect(page._palettePendingReopen).toBe(true);
+    await page.togglePalette();
+
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  it('closing the document preview with a queued reopen discards the invoker instead of opening, if the guards no longer hold', () => {
+    const page = createEligiblePage();
+    page.v2SwitcherLoaded = true;
+    page._paletteFilePreviewTarget = pendingDocumentTarget();
+    page._palettePendingReopen = true;
+    page._paletteInvoker = document.createElement('textarea');
+    page._paletteInvokerSelection = { start: 2, end: 5, direction: 'none' };
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true); // opened during the queued window
+
+    page._closePaletteFilePreview();
+
+    expect(page.v2PaletteOpen).toBe(false);
+    expect(page._palettePendingReopen).toBe(false);
+    expect(page._paletteInvoker).toBeNull();
+    expect(page._paletteInvokerSelection).toBeNull();
+  });
+
+  it("the queued reopen's after-hide runs neither the superseded close's composer-focus nor its invoker-restore disposition", async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette(); // queue the reopen
+    const restoreSpy = vi.spyOn(page, '_restorePaletteInvokerFocus');
+    const focusComposerSpy = vi.spyOn(page, '_focusComposerAfterPaletteSelection');
+    page._paletteClosedBySelection = true; // as if the superseded close had been a selection
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(restoreSpy).not.toHaveBeenCalled();
+    expect(focusComposerSpy).not.toHaveBeenCalled();
+    expect(page._paletteClosedBySelection).toBe(false);
+  });
+
+  it('a queued reopen also discards a superseded pending document-preview target', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette();
+    page._pendingDocumentPreviewTarget = {
+      kind: 'attachment',
+      id: 'att-1',
+      name: 'x.png',
+      mime: 'image/png',
+      size: 1,
+    };
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page._pendingDocumentPreviewTarget).toBeNull();
+    expect(page._paletteFilePreviewTarget).toBeNull();
+  });
+
+  it('a queued reopen clears the superseded close\'s "skip focus restore" flag, so the reopened palette\'s own later close still restores focus normally', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    await page.togglePalette(); // open
+    page._closePaletteWithoutFocusRestore(); // as a guard-initiated close would (modal opened, route changed)
+    expect(page._paletteSkipFocusRestore).toBe(true);
+    expect(page._paletteCloseAnimating).toBe(true);
+
+    await page.togglePalette(); // queue a reopen behind that close
+    expect(page._palettePendingReopen).toBe(true);
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent()); // dequeues, reopens
+    await Promise.resolve();
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(page._paletteSkipFocusRestore).toBe(false);
+
+    // A genuine later close on the *reopened* palette (e.g. Escape) — if the
+    // superseded close's flag had leaked through, this would wrongly skip
+    // the restore below instead of running it.
+    const restoreSpy = vi.spyOn(page, '_restorePaletteInvokerFocus');
+    page._closePaletteAndCancelLoad();
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(restoreSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a slow retarget poll does not overwrite a later open's own invoker once superseded", async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    // Every _openPalette() call below, including the fire-and-forget one
+    // inside _handlePaletteAfterHide, must settle synchronously rather than
+    // racing a real dynamic import.
+    page.v2SwitcherLoaded = true;
+
+    // Holds the retarget's own poll open indefinitely, simulating a
+    // composer mount slow enough that a whole later open/close cycle can
+    // complete before it resolves.
+    let resolvePoll: (el: HTMLElement | null) => void = () => {};
+    const pollPromise = new Promise<HTMLElement | null>((resolve) => {
+      resolvePoll = resolve;
+    });
+    vi.spyOn(page, '_pollForNewComposerTextarea').mockReturnValue(pollPromise);
+
+    page._paletteClosedBySelection = true;
+    page._palettePendingReopen = true;
+    page._paletteCloseAnimating = true;
+
+    // Dequeues: starts _openPalette (bumping the epoch) and kicks off the
+    // retarget poll, captured at that same epoch value.
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // A later open supersedes this one for real, through the same
+    // close/reopen path a fresh Cmd/Ctrl+K press takes — not a manual
+    // `_paletteOpenEpoch++`, which would bump the epoch without exercising
+    // `_openPalette`'s own bump, or the `v2PaletteOpen` check the guard also
+    // requires.
+    page._closePaletteAndCancelLoad();
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(true);
+
+    const freshInvoker = document.createElement('textarea');
+    document.body.appendChild(freshInvoker);
+    page._paletteInvoker = freshInvoker;
+
+    // The slow composer mount the original (now-superseded) retarget was
+    // waiting on finally resolves.
+    resolvePoll(document.createElement('textarea'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(page._paletteInvoker).toBe(freshInvoker);
+  });
+
+  it('a retarget poll that resolves while its own reopened palette is still the current open assigns the resolved composer as the invoker', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    page.v2SwitcherLoaded = true;
+
+    let resolvePoll: (el: HTMLElement | null) => void = () => {};
+    const pollPromise = new Promise<HTMLElement | null>((resolve) => {
+      resolvePoll = resolve;
+    });
+    vi.spyOn(page, '_pollForNewComposerTextarea').mockReturnValue(pollPromise);
+
+    page._paletteClosedBySelection = true;
+    page._palettePendingReopen = true;
+    page._paletteCloseAnimating = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(page.v2PaletteOpen).toBe(true);
+
+    // No later open supersedes this one — the poll resolves while the
+    // reopened palette (the one the retarget was captured for) is still the
+    // current open, so the resolved composer must actually be assigned.
+    const resolvedComposer = document.createElement('textarea');
+    resolvePoll(resolvedComposer);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(page._paletteInvoker).toBe(resolvedComposer);
+  });
+
+  it('a retarget poll that resolves after its own reopened palette has since been closed again does not assign a stale invoker', async () => {
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    page.v2SwitcherLoaded = true;
+
+    let resolvePoll: (el: HTMLElement | null) => void = () => {};
+    const pollPromise = new Promise<HTMLElement | null>((resolve) => {
+      resolvePoll = resolve;
+    });
+    vi.spyOn(page, '_pollForNewComposerTextarea').mockReturnValue(pollPromise);
+
+    page._paletteClosedBySelection = true;
+    page._palettePendingReopen = true;
+    page._paletteCloseAnimating = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(page.v2PaletteOpen).toBe(true);
+
+    // Nothing supersedes this open — the epoch the retarget captured is
+    // still current — but the reopened palette itself is closed again
+    // before the slow poll resolves. The epoch check alone cannot catch
+    // this: only the `v2PaletteOpen` check does.
+    page._closePaletteAndCancelLoad();
+    expect(page.v2PaletteOpen).toBe(false);
+    const invokerBeforePollResolves = page._paletteInvoker;
+
+    resolvePoll(document.createElement('textarea'));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(page._paletteInvoker).toBe(invokerBeforePollResolves);
+  });
+
+  it('a toggle press after the close has actually finished (sl-after-hide already delivered) opens immediately, not queued', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+    expect(page._paletteCloseAnimating).toBe(false);
+
+    await page.togglePalette();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  it('disconnecting the page while a reopen is queued clears it, so it cannot resume on a detached page', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    await page.togglePalette();
+    await page.togglePalette(); // queue the reopen
+    expect(page._palettePendingReopen).toBe(true);
+
+    page.remove();
+
+    expect(page._palettePendingReopen).toBe(false);
+  });
+
+  it('disconnecting while a close is still animating clears `_paletteCloseAnimating`, so a reconnected page opens on the next press instead of only ever queuing', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette(); // open
+    await page.togglePalette(); // close -> _paletteCloseAnimating = true
+    expect(page._paletteCloseAnimating).toBe(true);
+
+    page.remove(); // this close's own sl-after-hide will never arrive now
+
+    expect(page._paletteCloseAnimating).toBe(false);
+
+    document.body.appendChild(page); // reconnect
+    await page.togglePalette();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(page._palettePendingReopen).toBe(false);
+  });
+});
+
 describe('no duplicate document keydown listener after reconnect/disconnect', () => {
   afterEach(() => {
     document.body.innerHTML = '';
@@ -552,7 +1335,7 @@ describe('no duplicate document keydown listener after reconnect/disconnect', ()
     vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
     vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
     vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
 
     // Connect, disconnect, reconnect — main.ts's navigateTo recreates the
     // page this way on every route change. A listener added on every
@@ -566,7 +1349,7 @@ describe('no duplicate document keydown listener after reconnect/disconnect', ()
       new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })
     );
 
-    expect(toggleSwitcher).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledTimes(1);
   });
 
   it('a disconnected (removed) page does not react to a keydown at all', () => {
@@ -574,7 +1357,7 @@ describe('no duplicate document keydown listener after reconnect/disconnect', ()
     vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
     vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
     vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
-    const toggleSwitcher = vi.spyOn(page, 'toggleSwitcher').mockResolvedValue(undefined);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
 
     document.body.appendChild(page);
     document.body.removeChild(page);
@@ -583,7 +1366,7 @@ describe('no duplicate document keydown listener after reconnect/disconnect', ()
       new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true })
     );
 
-    expect(toggleSwitcher).not.toHaveBeenCalled();
+    expect(togglePalette).not.toHaveBeenCalled();
   });
 });
 
@@ -1087,7 +1870,7 @@ describe('palette closes proactively on route change or another modal opening', 
   it('the palette opening its own dialog does not close itself', () => {
     const page = createUnattachedPage();
     page.v2PaletteOpen = true;
-    const switcherEl = document.createElement('scion-chat-switcher');
+    const switcherEl = document.createElement('scion-quick-palette');
     Object.defineProperty(page, '_switcherEl', { value: switcherEl, configurable: true });
     const ownDialog = document.createElement('sl-dialog');
 
@@ -1143,5 +1926,298 @@ describe('palette load is cancelled on every close path', () => {
     const cancelSpy = vi.spyOn(page._paletteDataController, 'cancel');
     page._closePaletteWithoutFocusRestore();
     expect(cancelSpy).toHaveBeenCalled();
+  });
+});
+
+describe('_handlePaletteOpenRequest: the header button opens with { mode: "open" }, guarded the same as the shortcut', () => {
+  it('dispatches togglePalette({ mode: "open" }) when every guard holds', () => {
+    const page = createEligiblePage();
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+    expect(togglePalette).toHaveBeenCalledWith({ mode: 'open' });
+  });
+
+  it('does nothing — no togglePalette call — when the route guard fails, with a positive control', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isOnChatRoute).mockReturnValue(false);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).not.toHaveBeenCalled();
+
+    vi.mocked(page._isOnChatRoute).mockReturnValue(true);
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when the page is not visible, with a positive control', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isPageVisible).mockReturnValue(false);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).not.toHaveBeenCalled();
+
+    vi.mocked(page._isPageVisible).mockReturnValue(true);
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when an unrelated modal is active, with a positive control', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).not.toHaveBeenCalled();
+
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(false);
+    page._handlePaletteOpenRequest();
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('a blocked open-request issues no fetch — same no-state-change guarantee as the shortcut', () => {
+    const page = createEligiblePage();
+    vi.mocked(page._isUnrelatedModalActive).mockReturnValue(true);
+    const loadSpy = vi.spyOn(page, '_openPalette');
+
+    page._handlePaletteOpenRequest();
+
+    expect(loadSpy).not.toHaveBeenCalled();
+    expect(page.v2PaletteOpen).toBe(false);
+  });
+
+  it('the document-level listener registered in connectedCallback dispatches through to togglePalette', () => {
+    // Spies on togglePalette, not _handlePaletteOpenRequest itself: the
+    // document listener is a reference bound once in a field initializer,
+    // captured before any spy from inside a test could replace it — exactly
+    // like the existing keydown-listener tests below (dynamic `this.`
+    // dispatch inside the handler is what spying relies on instead).
+    const page = createUnattachedPage();
+    window.history.pushState({}, '', '/chat');
+    vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
+    vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
+    vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
+    document.body.appendChild(page);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    document.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+
+    expect(togglePalette).toHaveBeenCalledWith({ mode: 'open' });
+  });
+
+  it('a reconnected page reacts to exactly one dispatch, not a leaked extra listener from the first connect', () => {
+    // Re-adding the identical bound function via addEventListener is a
+    // silent no-op (the DOM dedupes it), so a stale listener left behind by
+    // a missing removeEventListener would not actually double-fire here —
+    // it would just make the *disconnected* page's listener a leak with no
+    // observable symptom in this specific reconnect shape. The dedicated
+    // "disconnected page does not react at all" test below is what actually
+    // proves removeEventListener ran; this test only establishes that a
+    // normal reconnect still works at all.
+    const page = createUnattachedPage();
+    window.history.pushState({}, '', '/chat');
+    vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
+    vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
+    vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
+    document.body.appendChild(page);
+    document.body.removeChild(page);
+    document.body.appendChild(page);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    document.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('a disconnected (removed) page does not react to an open-request dispatch at all', () => {
+    const page = createUnattachedPage();
+    window.history.pushState({}, '', '/chat');
+    vi.spyOn(page, '_isOnChatRoute').mockReturnValue(true);
+    vi.spyOn(page, '_isPageVisible').mockReturnValue(true);
+    vi.spyOn(page, '_isUnrelatedModalActive').mockReturnValue(false);
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+
+    document.body.appendChild(page);
+    document.body.removeChild(page);
+
+    document.dispatchEvent(
+      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+    );
+
+    expect(togglePalette).not.toHaveBeenCalled();
+  });
+});
+
+describe('togglePalette({ mode: "open" }): the button never closes or cancels, only ever (re)queues an open', () => {
+  it('open -> no-op: the palette stays open and the data controller is not cancelled', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette(); // open
+    const cancelSpy = vi.spyOn(page._paletteDataController, 'cancel');
+
+    await page.togglePalette({ mode: 'open' });
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(cancelSpy).not.toHaveBeenCalled();
+  });
+
+  it('pending-open -> no-op: a second button press during the first-open lazy import does not cancel it', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const captureSpy = vi.spyOn(page, '_capturePaletteInvokerFocus');
+
+    const first = page.togglePalette({ mode: 'open' });
+    const second = page.togglePalette({ mode: 'open' }); // must not cancel `first`
+    await Promise.all([first, second]);
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('closing (close-animating) -> queue set to true twice and still true: a double press during a closing animation does not cancel itself out', async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    page._paletteCloseAnimating = true;
+
+    await page.togglePalette({ mode: 'open' });
+    expect(page._palettePendingReopen).toBe(true);
+
+    await page.togglePalette({ mode: 'open' }); // a 'toggle' here would flip this back to false
+    expect(page._palettePendingReopen).toBe(true);
+  });
+
+  it('closing (document-preview queue) -> queue set to true twice and still true', () => {
+    const page = createUnattachedPage();
+    page._paletteFilePreviewTarget = {
+      kind: 'path',
+      projectId: 'p1',
+      containerPath: '/workspace/notes.txt',
+      location: { kind: 'workspace', filePath: 'notes.txt' },
+      name: 'notes.txt',
+    };
+
+    void page.togglePalette({ mode: 'open' });
+    expect(page._palettePendingReopen).toBe(true);
+
+    void page.togglePalette({ mode: 'open' });
+    expect(page._palettePendingReopen).toBe(true);
+  });
+
+  it("the existing 'toggle' behaviour (default, no options) is unchanged: open then toggle-close", async () => {
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(true);
+
+    await page.togglePalette();
+    expect(page.v2PaletteOpen).toBe(false);
+  });
+});
+
+describe('touch focus handoff: a conversation selection on touch does not focus the composer', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Stubs `window.matchMedia(TOUCH_PRIMARY_QUERY)` to report touch/desktop, independent of the real test environment. */
+  function stubTouchPrimary(matches: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY && matches,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+  }
+
+  it('on touch, a selection close falls back instead of focusing the composer', () => {
+    stubTouchPrimary(true);
+    const page = createUnattachedPage();
+    // TouchPrimaryController only reads matchMedia() once connected (it
+    // ties the query's change listener to the host's connected lifetime),
+    // so the stub above is only observed once the page is actually in the
+    // document -- an unconnected page would see the controller's default
+    // (false) regardless of the stub, defeating this test.
+    document.body.appendChild(page);
+    const focusComposerSpy = vi.spyOn(page, '_focusComposerAfterPaletteSelection');
+    const fallbackSpy = vi.spyOn(page, '_focusPaletteFallback').mockImplementation(() => {});
+    page._paletteClosedBySelection = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(fallbackSpy).toHaveBeenCalledTimes(1);
+    expect(focusComposerSpy).not.toHaveBeenCalled();
+    expect(page._paletteClosedBySelection).toBe(false);
+  });
+
+  it('on desktop (the default/positive control), a selection close still focuses the composer as before', () => {
+    stubTouchPrimary(false);
+    const page = createUnattachedPage();
+    document.body.appendChild(page);
+    const focusComposerSpy = vi
+      .spyOn(page, '_focusComposerAfterPaletteSelection')
+      .mockResolvedValue(undefined);
+    const fallbackSpy = vi.spyOn(page, '_focusPaletteFallback');
+    page._paletteClosedBySelection = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+
+    expect(focusComposerSpy).toHaveBeenCalledTimes(1);
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+
+  it('on touch, a reopen queued behind a selection-triggered close does not retarget the invoker to the new composer', async () => {
+    // The direct selection-close path above is not the only one that can
+    // hand focus to a composer: a reopen queued during the close (e.g. a
+    // second button press while the close from a selection is still
+    // animating) takes over instead, and has its own, separate retarget
+    // call — _retargetPaletteInvokerToNewComposer — that must respect the
+    // same touch rule, or a phone keyboard would pop open on the eventual
+    // close of the *reopened* palette instead.
+    stubTouchPrimary(true);
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    page.v2SwitcherLoaded = true;
+    const retargetSpy = vi.spyOn(page, '_retargetPaletteInvokerToNewComposer');
+
+    page._paletteClosedBySelection = true;
+    page._palettePendingReopen = true;
+    page._paletteCloseAnimating = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(retargetSpy).not.toHaveBeenCalled();
+  });
+
+  it('on desktop (positive control), the same queued reopen does retarget the invoker to the new composer', async () => {
+    stubTouchPrimary(false);
+    const page = createEligiblePage();
+    document.body.appendChild(page);
+    page.v2SwitcherLoaded = true;
+    const retargetSpy = vi
+      .spyOn(page, '_retargetPaletteInvokerToNewComposer')
+      .mockResolvedValue(undefined);
+
+    page._paletteClosedBySelection = true;
+    page._palettePendingReopen = true;
+    page._paletteCloseAnimating = true;
+
+    page._handlePaletteAfterHide(ownDialogAfterHideEvent());
+    await Promise.resolve();
+
+    expect(page.v2PaletteOpen).toBe(true);
+    expect(retargetSpy).toHaveBeenCalledTimes(1);
   });
 });

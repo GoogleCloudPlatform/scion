@@ -153,6 +153,7 @@ func TestProjectDefaultGate_CreatorWithActAsSucceeds(t *testing.T) {
 
 func TestProjectDefaultGate_HubScopedDefaultDeniedWhenModeOff(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	bindFixtureOwner(t, f)
 	// Mode=off (default) — hub-scoped SA assignment requires enforce
 	sa := hubScopedSAForAgent(t, f, true)
 	setProjectDefaultSA(t, f, sa.ID)
@@ -221,7 +222,7 @@ func TestProjectDefaultGate_NoDefaultProjectUnchanged(t *testing.T) {
 	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
 	srv, _, project := setupCreateAgentServer(t, disp)
 
-	// No project default set — agent should get block mode
+	// No project default and no hub default set.
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
 		Name:      "p10-no-default",
 		ProjectID: project.ID,
@@ -237,9 +238,13 @@ func TestProjectDefaultGate_NoDefaultProjectUnchanged(t *testing.T) {
 	got, err := srv.store.GetAgent(ctx, resp.Agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig)
-	require.NotNil(t, got.AppliedConfig.GCPIdentity)
-	assert.Equal(t, store.GCPMetadataModeBlock, got.AppliedConfig.GCPIdentity.MetadataMode,
-		"no project default → block mode, unchanged from pre-P10 behavior")
+	// With nothing configured at either the project or hub level,
+	// AppliedConfig.GCPIdentity is left unset (nil) rather than an explicit
+	// "block" record, so the broker can apply its own runtime-aware default
+	// (ptone/scion#2328 phase 1: "block" everywhere except Kubernetes,
+	// unchanged; "passthrough" on Kubernetes).
+	assert.Nil(t, got.AppliedConfig.GCPIdentity,
+		"no project default and no hub default → GCPIdentity left unset for the broker's runtime-aware default")
 }
 
 // ---------------------------------------------------------------------------

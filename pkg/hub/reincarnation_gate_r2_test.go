@@ -191,7 +191,7 @@ func TestSendAgentRouted_F2_MigratingSecondaryDeferred(t *testing.T) {
 	owner := NewAuthenticatedUser(userID, "f2@test.com", "Owner", "member", "cli")
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "f2@test.com", DisplayName: "Owner"}))
 	ensureHubMembership(ctx, s, userID)
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, userID))
 	dispatcher := &brokerMockDispatcher{}
 	srv.SetDispatcher(dispatcher)
@@ -201,7 +201,7 @@ func TestSendAgentRouted_F2_MigratingSecondaryDeferred(t *testing.T) {
 	rr := httptest.NewRecorder()
 	mentionResults := []messages.MentionResult{{Slug: "f2-second", Status: "delivered"}}
 	srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello @f2-second", "Owner", []*store.Agent{primary, second}, []string{"f2-second"}, mentionResults, nil, time.Now(), "", nil)
+		"hello @f2-second", "Owner", []*store.Agent{primary, second}, []string{"f2-second"}, mentionResults, nil, time.Now(), "", nil, chatSendOptions{})
 
 	for _, d := range dispatcher.getMessages() {
 		assert.NotEqual(t, "f2-second", d.agentSlug, "a migrating secondary must not be dispatched to")

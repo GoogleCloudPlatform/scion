@@ -63,7 +63,7 @@ func setupHarnessConfigScopeTest(t *testing.T) (srv *Server, s store.Store, alic
 		OwnerID: alice.ID, CreatedBy: alice.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, alice, carol, project
 }

@@ -102,7 +102,7 @@ func setupPatchPassthroughFixture(t *testing.T) *patchPassthroughFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroup(ctx, f.project)
+	srv.seedProjectCreatorMembership(ctx, f.project)
 
 	// Create a broker owned by the broker owner, with host SA (P8).
 	f.broker = &store.RuntimeBroker{
@@ -323,7 +323,7 @@ func TestPatchPassthrough_AutoProvideBrokerNonOwnerDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// AutoProvide broker: any user can dispatch to it, but that does NOT
 	// grant passthrough. The broker is owned by brokerOwner.
@@ -400,7 +400,7 @@ func TestPatchPassthrough_NoBrokerValidationError(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Agent with NO runtime broker
 	agent := &store.Agent{
@@ -448,4 +448,9 @@ func addProjectMember(t *testing.T, srv *Server, s store.Store, project *store.P
 		// Ignore if already a member
 		t.Logf("AddGroupMember: %v (may already be a member)", err)
 	}
+	// Project access is a project role binding; the members-group row alone
+	// is not one. The access-only binding grants no permission itself and
+	// satisfies the active project access that owner and ancestor
+	// relationships require (ptone/scion#2141).
+	grantProjectAccessOnly(t, s, user.ID, project.ID)
 }

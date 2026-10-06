@@ -126,6 +126,68 @@ warn()    { echo -e "${YELLOW}WARNING:${RESET} $*" >&2; }
 err()     { echo -e "${RED}ERROR:${RESET} $*" >&2; }
 section() { echo ""; echo -e "${BOLD}--- $* ---${RESET}"; }
 
+# hub_health_status BODY -- prints the top-level status of a hub /healthz
+# body: healthy, degraded, unhealthy, or unknown (no answer / not a scion
+# body). The hub always encodes "status" first on a single line, so matching
+# the start of the body reads the top-level status only, never a nested
+# "hub"/"broker" status.
+hub_health_status() {
+  case "$1" in
+    '{"status":"healthy"'*) echo healthy ;;
+    '{"status":"degraded"'*) echo degraded ;;
+    '{"status":"unhealthy"'*) echo unhealthy ;;
+    *) echo unknown ;;
+  esac
+}
+
+# wait_for_hub_health LABEL -- polls the hub's /healthz on the VM until it
+# reports healthy, up to HEALTH_CHECK_MAX_ATTEMPTS times. /healthz always
+# returns HTTP 200, so the body's status decides (ptone/scion#1094):
+#   - healthy: pass.
+#   - degraded at the last attempt: the hub is up but a non-critical check
+#     (e.g. colocated_broker) is failing -- pass with a visible warning and
+#     the response, so the failing checks are named.
+#   - unhealthy (a critical check such as the database failed), or no
+#     answer: fail (returns 1).
+# Keeps polling for healthy while degraded, since the co-located broker
+# registers just after startup.
+wait_for_hub_health() {
+  local label="$1" body="" status="unknown" i
+  for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
+    body="$(gcloud compute ssh "${INSTANCE_NAME}" \
+      --zone="${ZONE}" --project="${PROJECT_ID}" \
+      --command="curl -s http://localhost:8080/healthz" \
+      2>/dev/null || true)"
+    status="$(hub_health_status "$body")"
+    if [[ "$status" == "healthy" ]]; then
+      echo ""
+      echo -e "${GREEN}  ${label} passed.${RESET}"
+      return 0
+    fi
+    if [[ "$i" -lt "$HEALTH_CHECK_MAX_ATTEMPTS" ]]; then
+      echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} (status: ${status}) - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
+      sleep "$HEALTH_CHECK_RETRY_SECS"
+    fi
+  done
+  if [[ "$status" == "degraded" ]]; then
+    echo ""
+    warn "${label}: the hub is up but DEGRADED (a non-critical check is failing). Response:"
+    echo "  ${body}" >&2
+    echo "  Check the service logs:" >&2
+    echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\" >&2
+    echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'" >&2
+    return 0
+  fi
+  err "${label} did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s (last status: ${status})."
+  if [[ -n "$body" ]]; then
+    echo "  Last /healthz response: ${body}" >&2
+  fi
+  echo "  Check the service logs:" >&2
+  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\" >&2
+  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'" >&2
+  return 1
+}
+
 # print_gcloud_error TEXT -- prints TEXT (gcloud's captured stderr) to
 # stderr, each line indented by two spaces. Prints nothing when TEXT is
 # empty.
@@ -1405,8 +1467,11 @@ gcloud beta services identity create \
 # for the operator to make explicitly, not something to do silently on
 # their behalf -- so this fails fast, before any resource in this script
 # is created, rather than creating one itself. See the hardened-org
-# addendum doc for the exact command to create it (an auto-mode network,
-# which is all this script needs).
+# addendum doc for the exact commands to create it -- either an auto-mode
+# network, or (for organizations that block those) a custom-mode network
+# with an explicitly-created "default" subnet in this region. Either
+# shape works; this script only needs a subnet named "default" to exist
+# in REGION.
 #
 # Runs AFTER "Enable APIs" above, not before: on a brand-new project in an
 # ordinary (non-hardened) org, compute.googleapis.com has never been
@@ -1949,7 +2014,7 @@ DEFAULT_SUBNET_CIDR="$(gcloud compute networks subnets describe default \
   --format="value(ipCidrRange)" 2>/dev/null)" || true
 if [[ -z "$DEFAULT_SUBNET_CIDR" ]]; then
   err "Could not determine the IP range of the 'default' subnet in ${REGION}."
-  err "An auto-mode default network creates one subnet per region automatically; see https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout)."
+  err "An auto-mode default network creates one subnet per region automatically; a custom-mode network needs one created explicitly. See https://googlecloudplatform.github.io/scion/hosted/single-node/hub-setup-gce-hardened-org/ (docs-site/src/content/docs/hosted/single-node/hub-setup-gce-hardened-org.md in a checkout) for both."
   exit 1
 fi
 echo "  Default subnet CIDR (${REGION}): ${DEFAULT_SUBNET_CIDR}"
@@ -1965,9 +2030,10 @@ info "Creating proxy-to-VM firewall rule (if needed)..."
 # field case (an empty or absent field renders as nothing between the
 # tabs on either side of it, never omitted or reflowed). Split with plain
 # parameter expansion, not `read -d $'\t'`/`IFS=$'\t' read`: bash's `read`
-# classifies tab as "IFS whitespace" and silently strips/collapses a
-# leading or trailing empty field (verified by hand), which would shift
-# every field after it instead of just leaving one blank.
+# classifies tab as "IFS whitespace" and silently collapses a leading
+# empty field, or adjacent tabs around an empty middle field (verified by
+# hand), which would shift every field after it instead of just leaving
+# one blank. A trailing empty field alone splits fine.
 if FW_8080_DESCRIBE="$(gcloud compute firewall-rules describe "${FW_8080_RULE_NAME}" \
     --project="${PROJECT_ID}" \
     --format="value(sourceRanges,allowed[].map().firewall_rule().list(),targetTags)" \
@@ -2032,9 +2098,34 @@ else
     hybrid_ensure_internal_ip_new_vm "${HUB_NAME}" "${PROJECT_ID}" "${REGION}" "default"
     VM_EXTRA_CREATE_ARGS+=(--private-network-ip="${HYBRID_INTERNAL_IP}")
   fi
+  # --subnet=default is required, not cosmetic, for a custom-mode
+  # "default" network: the Compute API requires an explicit subnetwork
+  # for custom-mode networks and only makes it optional for auto-mode
+  # ones, so without this flag the create fails here -- after the SAs,
+  # IAM bindings, NAT and both firewall rules already exist -- on any
+  # project whose "default" network happens to be custom-mode (a
+  # hand-built network, a platform-team baseline, or an org that blocks
+  # auto-mode networks entirely; see the hardened-org addendum). In auto
+  # mode the per-region subnet is also named "default", so this changes
+  # nothing there. --network=default is passed alongside it: subnet names
+  # are unique per project and region regardless of which network owns
+  # them (a project can never have two subnets both named "default" in
+  # REGION), so --subnet=default alone can't be ambiguous, but it also
+  # doesn't check which network it resolves to. Per `gcloud compute
+  # instances create --help`, when both flags are given "subnet must be a
+  # subnetwork of the network specified by [--network]", so pairing them
+  # makes a misconfigured project (a "default" subnet in REGION that
+  # belongs to some other VPC) fail the create with a clear error instead
+  # of silently landing the VM in that other VPC's subnet. This also
+  # makes the VM create consistent with the Cloud Run Direct VPC egress
+  # deploy below (which already passes both flags), Cloud NAT and the
+  # CIDR lookup above, which already all assume a subnet named "default"
+  # in REGION owned by the network named "default".
   gcloud compute instances create "${INSTANCE_NAME}" \
     --zone="${ZONE}" \
     --project="${PROJECT_ID}" \
+    --network=default \
+    --subnet=default \
     --machine-type="${MACHINE_TYPE}" \
     --no-address \
     --service-account="${SA_EMAIL}" \
@@ -2374,6 +2465,11 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+# Explicit default harness. Boot already gets antigravity from the embedded
+# defaults via the operational-settings seed, but file-mode paths that read
+# settings.yaml directly (admin server-config page; reloadSettings after an
+# admin save) do not merge embedded defaults and would otherwise see \"\".
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
@@ -2421,29 +2517,7 @@ SERVICEEOF
 
 # --- Health check ---
 info "Running health check..."
-HEALTH_OK=false
-for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
-  if gcloud compute ssh "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="curl -sf http://localhost:8080/healthz" \
-      2>/dev/null; then
-    HEALTH_OK=true
-    break
-  fi
-  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
-  sleep "$HEALTH_CHECK_RETRY_SECS"
-done
-
-if [[ "$HEALTH_OK" == "true" ]]; then
-  echo ""
-  echo -e "${GREEN}  Health check passed.${RESET}"
-else
-  err "Health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
-  echo "  Check the service logs:"
-  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
-  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
-  exit 1
-fi
+wait_for_hub_health "Health check" || exit 1
 
 # --- Hub-scoped agent env vars (GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION) ---
 # Agents need these for Vertex AI inference. They go in the hub DB as
@@ -2988,6 +3062,11 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --command="
     sudo -u scion tee /home/scion/.scion/settings.yaml > /dev/null << 'SETTINGSEOF'
 schema_version: \"1\"
+# Explicit default harness. Boot already gets antigravity from the embedded
+# defaults via the operational-settings seed, but file-mode paths that read
+# settings.yaml directly (admin server-config page; reloadSettings after an
+# admin save) do not merge embedded defaults and would otherwise see \"\".
+default_harness_config: antigravity
 image_registry: \"${IMAGE_REGISTRY}\"
 ${HYBRID_GCP_IDENTITY_YAML:-"# Hub-wide default GCP identity mode for new agents (V1Settings.DefaultGCPIdentityMode
 # in pkg/config, a top-level settings.yaml key, not nested under agent_defaults).
@@ -3035,29 +3114,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 
 # --- Post-restart health check ---
 info "Running post-restart health check..."
-HEALTH_OK=false
-for i in $(seq 1 "$HEALTH_CHECK_MAX_ATTEMPTS"); do
-  if gcloud compute ssh "${INSTANCE_NAME}" \
-      --zone="${ZONE}" --project="${PROJECT_ID}" \
-      --command="curl -sf http://localhost:8080/healthz" \
-      2>/dev/null; then
-    HEALTH_OK=true
-    break
-  fi
-  echo "  Attempt ${i}/${HEALTH_CHECK_MAX_ATTEMPTS} - waiting ${HEALTH_CHECK_RETRY_SECS}s..."
-  sleep "$HEALTH_CHECK_RETRY_SECS"
-done
-
-if [[ "$HEALTH_OK" == "true" ]]; then
-  echo ""
-  echo -e "${GREEN}  Health check passed.${RESET}"
-else
-  err "Post-restart health check did not pass within $((HEALTH_CHECK_MAX_ATTEMPTS * HEALTH_CHECK_RETRY_SECS))s. The hub is not running."
-  echo "  Check the service logs:"
-  echo "  gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} \\"
-  echo "    --command='sudo journalctl -u scion-hub.service --no-pager -n 50'"
-  exit 1
-fi
+wait_for_hub_health "Post-restart health check" || exit 1
 
 # ===================================================================
 # Done

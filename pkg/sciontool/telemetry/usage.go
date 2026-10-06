@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -18,7 +19,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -27,6 +27,7 @@ import (
 	otelmetric "go.opentelemetry.io/otel/metric"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 )
 
 // usageDeriverFlushTimeout bounds how long ProcessResourceLogs waits for the
@@ -44,8 +45,16 @@ const (
 type usageIncrement struct {
 	Model  string
 	Status string           // telemetrycontract.StatusSuccess | StatusError
-	Calls  int64            // 0 or 1 for event rules
+	Calls  int64            // 0 or 1 for event rules; a delta count for metric rules
 	Tokens map[string]int64 // token_type -> n (n > 0)
+
+	// dedupeKey identifies the source data point for a metric-sourced
+	// increment (design §3.3's "interval-fingerprint idea", the same one
+	// metricStreams.remember uses): the metric name plus intervalKey's
+	// canonicalized (start, end, point) triple. Empty for a log-sourced
+	// increment, which dedupes on the log record itself (see
+	// UsageDeriver.fingerprint) instead.
+	dedupeKey string
 }
 
 // usageRule matches one per-request native event to a usageIncrement. Rules
@@ -134,8 +143,10 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 }
 
 // codexUsageEventName and codexUsageEventKind identify the codex.* events
-// this rule derives from: SSE frames of a model response, one of which is a
-// completed response carrying the turn's token usage (design §5).
+// this rule derives successful calls and tokens from: SSE frames of a model
+// response, one of which is a completed response carrying the turn's token
+// usage (design §5). codexAPIRequestEventName is the per-HTTP-attempt event
+// the rule derives pre-stream failures from (ptone/scion#2246).
 //
 // This rule does not gate on instrumentation scope. A local capture (see
 // loadCodexUsageFixture) shows codex's real log-export scope name is
@@ -152,20 +163,29 @@ func (claudeUsageRule) MatchLog(scopeName, eventName string, record *logspb.LogR
 // name changes again (design §5's codex row states no scope requirement,
 // unlike Claude's, which does name one).
 const (
-	codexUsageEventName = "codex.sse_event"
-	codexUsageEventKind = "response.completed"
+	codexUsageEventName      = "codex.sse_event"
+	codexUsageEventKind      = "response.completed"
+	codexAPIRequestEventName = "codex.api_request"
+	// codexResponsesEndpoint is the api_request endpoint attribute of a
+	// model-response request (core/src/client.rs
+	// RequestRouteTelemetry::for_endpoint("/responses")). Other endpoints
+	// that share the event (for example /memories/trace_summarize, a unary
+	// call whose success is never reported through sse_event_completed) are
+	// not counted, so the error rate is not skewed by failures of a request
+	// type whose successes are invisible to this rule.
+	codexResponsesEndpoint = "/responses"
 )
 
 // codexUsageRule implements the codex row of design §5: one completed
 // response is one call with tokens, or one call with no tokens and
 // Status=error for a failed request whose source reports it (design §3.2).
-// Verified against codex-rs/otel/src/events/session_telemetry.rs and
-// core/src/client.rs at tag rust-v0.158.0 (commit
-// 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff of github.com/openai/codex,
-// which is what @openai/codex resolves to on npm as of this writing --
-// harnesses/codex/Dockerfile does not pin a version). See
-// loadCodexUsageFixture in usage_codex_test.go for the fixture's capture
-// provenance.
+// Originally verified against codex-rs at tag rust-v0.158.0 (commit
+// 54e1bd264b4122fe9471ee7d54c4d021a76bb8ff of github.com/openai/codex), and
+// re-verified against rust-v0.160.0 (the api_request arm and cache_write
+// mapping were added then, ptone/scion#2245 and #2246) -- harnesses/codex's
+// Dockerfile installs @openai/codex@latest, unpinned. See
+// loadCodexUsageFixture and loadCodex160UsageFixture in usage_codex_test.go
+// for the fixtures' capture provenance.
 //
 // Three distinct emitters share event.name=codex.sse_event and
 // event.kind=response.completed, and this rule must tell them apart
@@ -195,22 +215,89 @@ const (
 // distinguishes a failed response from a successful, token-bearing one,
 // mirroring the Claude rule's api_request/api_error split.
 //
+// codex.api_request (record_api_request, emitted once per HTTP attempt by
+// codex-api's run_with_request_telemetry) is the fourth emitter. It counts
+// only a *failed* attempt: Status=error when error.message is set or
+// http.response.status_code is present and not 2xx. That never
+// double-counts the see_event_completed_failed arm for the same attempt,
+// because the two are disjoint by construction: the HTTP transport's
+// stream() returns Err for any non-2xx response before an SSE stream
+// exists (http-client/src/transport.rs), so a failed api_request never has
+// a stream that could also fail; and a stream that fails after a 2xx
+// response was preceded by an api_request with status 200 and no
+// error.message, which this rule ignores. A successful api_request is
+// ignored for the same reason: its call is the sse_event_completed that
+// follows. Each retried attempt is its own provider request, so a retry
+// loop (including codex's "waiting for network" reconnect loop) counts one
+// error call per failed attempt -- the same accounting codex's own
+// codex.api_request.count metric uses (success=false per attempt). The
+// codex-0.160.0 capture pins all three shapes: an HTTP 500 retried to
+// success, a 2xx stream cut before response.completed, and a transport
+// error with no status code.
+//
 // Token mapping (design §5, §3.2), for the success case only: input =
-// input_token_count − cached_token_count (Codex reports input_token_count
-// inclusive of cache hits, unlike Claude's exclusive counts); output =
-// output_token_count; cache_read = cached_token_count; reasoning =
-// reasoning_token_count, informational only. cache_write_token_count exists
-// in the source but has no mapping in design §5's codex row, so this rule
-// neither reads it nor emits it as a token_type; tool_token_count (the turn
-// total) is likewise not part of the canonical contract and is ignored.
+// input_token_count − cached_token_count − cache_write_token_count; output
+// = output_token_count; cache_read = cached_token_count; cache_write =
+// cache_write_token_count; reasoning = reasoning_token_count, informational
+// only. input_token_count is the Responses API's usage.input_tokens, and
+// both cached_token_count and cache_write_token_count come from
+// usage.input_tokens_details (codex-api/src/sse/responses.rs's
+// From<ResponseCompletedUsage> for TokenUsage), i.e. they are subsets of
+// input_token_count, not additions to it: codex's own
+// parses_cache_write_token_usage test pins input_tokens=100 with
+// cached_tokens=40 and cache_write_tokens=60, total_tokens=110 =
+// input+output. Subtracting both keeps the §3.2 invariant (total input =
+// input + cache_read + cache_write = input_token_count). codex's own
+// non_cached_input() (protocol.rs) subtracts only cached tokens, so its
+// "tokens used" display equals this rule's input + cache_write + output
+// (the capture's "tokens used 580" = 200 + 300 + 80). tool_token_count
+// (the turn total) is not part of the canonical contract and is ignored.
 type codexUsageRule struct{}
 
 func (codexUsageRule) Harness() string { return "codex" }
 
-func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
-	if record == nil || eventName != codexUsageEventName {
+func (r codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if record == nil {
 		return usageIncrement{}, false, nil
 	}
+	switch eventName {
+	case codexUsageEventName:
+		return r.matchSSEEvent(record)
+	case codexAPIRequestEventName:
+		return r.matchAPIRequest(record)
+	default:
+		return usageIncrement{}, false, nil
+	}
+}
+
+// matchAPIRequest counts a failed codex.api_request attempt as one error
+// call (see codexUsageRule's doc comment for why this never double-counts
+// the sse failure arm). A successful attempt, or one for an endpoint other
+// than /responses, does not match.
+func (codexUsageRule) matchAPIRequest(record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if logAttrPresent(record.Attributes, "endpoint") && logAttrString(record.Attributes, "endpoint") != codexResponsesEndpoint {
+		return usageIncrement{}, false, nil
+	}
+	failed := logAttrPresent(record.Attributes, "error.message")
+	if !failed && logAttrPresent(record.Attributes, "http.response.status_code") {
+		// A status that is present but not an integer is treated as not
+		// reported: only error.message or a parsed non-2xx status marks a
+		// failure, so a malformed status alone never invents an error call.
+		if status, err := logAttrInt(record.Attributes, "http.response.status_code"); err == nil {
+			failed = status < 200 || status > 299
+		}
+	}
+	if !failed {
+		return usageIncrement{}, false, nil
+	}
+	return usageIncrement{
+		Model:  logAttrString(record.Attributes, "model"),
+		Status: telemetrycontract.StatusError,
+		Calls:  1,
+	}, true, nil
+}
+
+func (codexUsageRule) matchSSEEvent(record *logspb.LogRecord) (usageIncrement, bool, error) {
 	if logAttrString(record.Attributes, "event.kind") != codexUsageEventKind {
 		return usageIncrement{}, false, nil
 	}
@@ -236,16 +323,19 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 	input, inputErr := logAttrInt(record.Attributes, "input_token_count")
 	output, outputErr := logAttrInt(record.Attributes, "output_token_count")
 	cached, cachedErr := logAttrInt(record.Attributes, "cached_token_count")
+	cacheWrite, cacheWriteErr := logAttrInt(record.Attributes, "cache_write_token_count")
 	reasoning, reasoningErr := logAttrInt(record.Attributes, "reasoning_token_count")
 
 	var malformed error
-	for _, err := range []error{inputErr, outputErr, cachedErr, reasoningErr} {
+	for _, err := range []error{inputErr, outputErr, cachedErr, cacheWriteErr, reasoningErr} {
 		if err != nil && malformed == nil {
 			malformed = fmt.Errorf("codex sse_event response.completed: %w", err)
 		}
 	}
-	if malformed == nil && cached > input {
-		malformed = fmt.Errorf("codex sse_event response.completed: cached_token_count %d exceeds input_token_count %d", cached, input)
+	// Written as cacheWrite > input-cached (after cached <= input holds)
+	// rather than cached+cacheWrite > input, so the check cannot overflow.
+	if malformed == nil && (cached > input || cacheWrite > input-cached) {
+		malformed = fmt.Errorf("codex sse_event response.completed: cached_token_count %d + cache_write_token_count %d exceeds input_token_count %d", cached, cacheWrite, input)
 	}
 
 	increment := usageIncrement{
@@ -254,8 +344,8 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 		Calls:  1,
 	}
 	if malformed == nil {
-		tokens := make(map[string]int64, 3)
-		if remaining := input - cached; remaining > 0 {
+		tokens := make(map[string]int64, 5)
+		if remaining := input - cached - cacheWrite; remaining > 0 {
 			tokens[telemetrycontract.TokenTypeInput] = remaining
 		}
 		if output > 0 {
@@ -263,6 +353,9 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 		}
 		if cached > 0 {
 			tokens[telemetrycontract.TokenTypeCacheRead] = cached
+		}
+		if cacheWrite > 0 {
+			tokens[telemetrycontract.TokenTypeCacheWrite] = cacheWrite
 		}
 		if reasoning > 0 {
 			tokens[telemetrycontract.TokenTypeReasoning] = reasoning
@@ -272,17 +365,226 @@ func (codexUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (u
 	return increment, true, malformed
 }
 
-// usageRuleRegistry lists every rule this build knows about. rulesForHarness
-// filters it to the active harness, so an unrelated harness (or none) gets
-// an empty, no-op deriver.
-var usageRuleRegistry = []usageRule{claudeUsageRule{}, codexUsageRule{}}
+// geminiCLIAPIResponseEvent and geminiCLIAPIErrorEvent are gemini-cli's
+// per-model-call log events (packages/core/src/telemetry/types.ts
+// EVENT_API_RESPONSE/EVENT_API_ERROR), emitted by LoggingContentGenerator
+// once per attempt: api_response when a (streamed or unary) generateContent
+// call completes, api_error when it throws -- either before the stream
+// opens or mid-stream, never both for one attempt (loggingStreamWrapper
+// logs api_response only after the stream finishes without error).
+// Retries (retryWithBackoff in geminiChat) wrap the content generator, so
+// every retried attempt emits its own event: the captured fixture shows
+// exactly that, one api_error for an HTTP 503 followed by one api_response
+// for the retried attempt.
+const (
+	geminiCLIAPIResponseEvent = "gemini_cli.api_response"
+	geminiCLIAPIErrorEvent    = "gemini_cli.api_error"
+)
+
+// geminiCLIUsageRule implements the gemini-cli row of design §5
+// (ptone/scion#2234). Verified against google-gemini/gemini-cli at tag
+// v0.62.0 and a capture from @google/gemini-cli@0.62.0 (see
+// loadGeminiCLIUsageFixture in usage_gemini_test.go).
+//
+// Like codex, it does not gate on instrumentation scope (gemini-cli's is
+// its SERVICE_NAME, "gemini-cli", per logs.getLogger(SERVICE_NAME) in
+// loggers.ts): the rule is filtered to the gemini-cli harness and both
+// event names are namespaced. gemini-cli also emits a
+// gen_ai.client.inference.operation.details record alongside every
+// api_response/api_error, carrying gen_ai.usage.input_tokens/
+// output_tokens; that record is deliberately not matched, or every call
+// would be counted twice.
+//
+// Token mapping. gemini-cli copies the Gemini API's usageMetadata verbatim
+// (ApiResponseEvent's constructor): input_token_count=promptTokenCount,
+// output_token_count=candidatesTokenCount,
+// cached_content_token_count=cachedContentTokenCount,
+// thoughts_token_count=thoughtsTokenCount,
+// tool_token_count=toolUsePromptTokenCount, and
+// total_token_count=totalTokenCount. In the Gemini API, promptTokenCount
+// already includes the cached content (so cached is subtracted, exactly as
+// the CLI's own /stats "input" does in uiTelemetry.ts), while
+// candidatesTokenCount, thoughtsTokenCount and toolUsePromptTokenCount are
+// each separate: totalTokenCount = prompt + candidates + thoughts +
+// tool-use prompt. The §3.2 contract defines output as *including*
+// reasoning and input as all non-cached prompt tokens, so:
+//
+//   - input = input_token_count − cached_content_token_count +
+//     tool_token_count (tool-use prompt tokens are model input the prompt
+//     count excludes; 0 unless a server-side tool such as grounding ran)
+//   - output = output_token_count + thoughts_token_count
+//   - cache_read = cached_content_token_count
+//   - reasoning = thoughts_token_count (informational subset of output)
+//
+// so input + cache_read + output = total_token_count. The design's original
+// §5 sketch (output = output_token_count, no tool term) predates this
+// check and was revised with it. Gemini has no cache-write count (explicit
+// caches are created out of band), so cache_write is never emitted.
+type geminiCLIUsageRule struct{}
+
+func (geminiCLIUsageRule) Harness() string { return "gemini-cli" }
+
+func (geminiCLIUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord) (usageIncrement, bool, error) {
+	if record == nil {
+		return usageIncrement{}, false, nil
+	}
+	switch eventName {
+	case geminiCLIAPIErrorEvent:
+		return usageIncrement{
+			Model:  logAttrString(record.Attributes, "model"),
+			Status: telemetrycontract.StatusError,
+			Calls:  1,
+		}, true, nil
+	case geminiCLIAPIResponseEvent:
+	default:
+		return usageIncrement{}, false, nil
+	}
+
+	prompt, promptErr := logAttrInt(record.Attributes, "input_token_count")
+	candidates, candidatesErr := logAttrInt(record.Attributes, "output_token_count")
+	cached, cachedErr := logAttrInt(record.Attributes, "cached_content_token_count")
+	thoughts, thoughtsErr := logAttrInt(record.Attributes, "thoughts_token_count")
+	toolPrompt, toolPromptErr := logAttrInt(record.Attributes, "tool_token_count")
+
+	var malformed error
+	for _, err := range []error{promptErr, candidatesErr, cachedErr, thoughtsErr, toolPromptErr} {
+		if err != nil && malformed == nil {
+			malformed = fmt.Errorf("gemini_cli.api_response: %w", err)
+		}
+	}
+	if malformed == nil && cached > prompt {
+		malformed = fmt.Errorf("gemini_cli.api_response: cached_content_token_count %d exceeds input_token_count %d", cached, prompt)
+	}
+	if malformed == nil && (toolPrompt > math.MaxInt64-(prompt-cached) || thoughts > math.MaxInt64-candidates) {
+		malformed = errors.New("gemini_cli.api_response: token count overflows int64")
+	}
+
+	increment := usageIncrement{
+		Model:  logAttrString(record.Attributes, "model"),
+		Status: telemetrycontract.StatusSuccess,
+		Calls:  1,
+	}
+	if malformed == nil {
+		tokens := make(map[string]int64, 4)
+		if input := prompt - cached + toolPrompt; input > 0 {
+			tokens[telemetrycontract.TokenTypeInput] = input
+		}
+		if output := candidates + thoughts; output > 0 {
+			tokens[telemetrycontract.TokenTypeOutput] = output
+		}
+		if cached > 0 {
+			tokens[telemetrycontract.TokenTypeCacheRead] = cached
+		}
+		if thoughts > 0 {
+			tokens[telemetrycontract.TokenTypeReasoning] = thoughts
+		}
+		increment.Tokens = tokens
+	}
+	return increment, true, malformed
+}
+
+// copilotCallsMetric is the histogram whose delta observation count stands
+// in for calls (design §5 copilot row): each observation is one model call.
+// A real capture confirms this is exactly one observation per model call
+// (its count matches the number of chat spans, and
+// gen_ai.invoke_agent.inference_calls' delta sum independently agrees).
+const copilotCallsMetric = "gen_ai.client.inference.operation.input_tokens"
+
+// copilotTokenCounters maps Copilot's per-type token usage counters to
+// canonical token_type values (design §3.2). This is the post-CLI-1.0.45
+// GenAI-semconv shape confirmed by `copilot help monitoring` on CLI 1.0.88
+// and 1.0.89, and by a real capture on 1.0.89 (design §5 copilot row): the
+// pre-1.0.45 gen_ai.client.token.usage histogram with a gen_ai.token.type
+// attribute does not exist in any of them and is not supported here.
+//
+// reasoning.output_tokens maps to the informational "reasoning" token_type
+// (§3.2: "never added to totals"): output_tokens is already the total,
+// inclusive of reasoning, by the same naming convention the capture proves
+// for cache_read.input_tokens/cache_write.input_tokens (both confirmed
+// subsets of the raw input_tokens counter -- see
+// copilotUsageRule.canonicalizeTokenGroups). input_tokens itself is NOT
+// exclusive of cached tokens -- see canonicalizeTokenGroups for the
+// subtraction this requires.
+var copilotTokenCounters = map[string]string{
+	"gen_ai.client.inference.usage.input_tokens":             telemetrycontract.TokenTypeInput,
+	"gen_ai.client.inference.usage.output_tokens":            telemetrycontract.TokenTypeOutput,
+	"gen_ai.client.inference.usage.cache_read.input_tokens":  telemetrycontract.TokenTypeCacheRead,
+	"gen_ai.client.inference.usage.cache_write.input_tokens": telemetrycontract.TokenTypeCacheWrite,
+	"gen_ai.client.inference.usage.reasoning.output_tokens":  telemetrycontract.TokenTypeReasoning,
+}
+
+// copilotUsageRule implements the copilot row of design §5 (revised): the
+// only metric-sourced rule in this project (design §3.3), and the only rule
+// that implements metricBatchDeriver (usage_copilot_metrics.go). It never
+// matches a log record (Copilot's usage signal is metrics, not native log
+// events).
+//
+// Unlike claudeUsageRule/codexUsageRule (stateless value types shared
+// through usageRuleFactories), copilotUsageRule carries per-process state --
+// converter, for cumulative-to-delta conversion, and the clamp diagnostics
+// below -- so it must be constructed fresh per UsageDeriver via
+// newCopilotUsageRule, never reused as a shared zero value.
+type copilotUsageRule struct {
+	converter     *cumulativeToDeltaConverter
+	clampedInput  atomic.Int64
+	clampWarnOnce sync.Once
+}
+
+// newCopilotUsageRule constructs a copilotUsageRule with a fresh converter
+// state, anchored to the current time: only a stream whose Copilot-reported
+// start_time is at or after this moment is trusted on first sighting (design
+// decision, restart baseline; see cumulativeToDeltaConverter).
+func newCopilotUsageRule() *copilotUsageRule {
+	return &copilotUsageRule{
+		converter: newCumulativeToDeltaConverter(uint64(time.Now().UnixNano()), copilotCumulativeStateCapacity),
+	}
+}
+
+func (*copilotUsageRule) Harness() string { return "copilot" }
+
+func (*copilotUsageRule) MatchLog(string, string, *logspb.LogRecord) (usageIncrement, bool, error) {
+	return usageIncrement{}, false, nil
+}
+
+// copilotPointModel resolves the model for one Copilot metric point. A real
+// capture confirms gen_ai.request.model/gen_ai.response.model are always on
+// the point itself, never only on the resource; the resource fallback below
+// is kept as a defensive no-op (design §3.2 names both attributes without
+// specifying placement), not because any observed payload has needed it.
+func copilotPointModel(pointAttrs, resourceAttrs []*commonpb.KeyValue) string {
+	for _, attrs := range [][]*commonpb.KeyValue{pointAttrs, resourceAttrs} {
+		if model := logAttrString(attrs, "gen_ai.request.model"); model != "" {
+			return model
+		}
+		if model := logAttrString(attrs, "gen_ai.response.model"); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+// usageRuleFactories lists a constructor for every rule this build knows
+// about. rulesForHarness calls each factory fresh and filters to the active
+// harness, so an unrelated harness (or none) gets an empty, no-op deriver.
+// A factory, rather than a shared prototype value, is required because
+// copilotUsageRule carries per-process state (usage_copilot_metrics.go's
+// converter): a package-level copilotUsageRule{} shared across every
+// UsageDeriver in the process (or across tests in the same binary) would
+// leak cumulative-to-delta state between otherwise-independent derivers.
+var usageRuleFactories = []func() usageRule{
+	func() usageRule { return claudeUsageRule{} },
+	func() usageRule { return codexUsageRule{} },
+	func() usageRule { return geminiCLIUsageRule{} },
+	func() usageRule { return newCopilotUsageRule() },
+}
 
 func rulesForHarness(harness string) []usageRule {
 	if harness == "" {
 		return nil
 	}
 	var out []usageRule
-	for _, rule := range usageRuleRegistry {
+	for _, factory := range usageRuleFactories {
+		rule := factory()
 		if rule.Harness() == harness {
 			out = append(out, rule)
 		}
@@ -309,9 +611,25 @@ type UsageDeriver struct {
 
 // UsageDiagnostics are fixed-cardinality usage-derivation counters, exposed
 // alongside the pipeline's other signal diagnostics (design §3.3
-// "Diagnostics").
+// "Diagnostics"). ClampedInput, StaleBackwards and BaselinedAfterCap are
+// populated only by a rule that tracks them (usageRuleDiagnostics; today
+// only copilotUsageRule, for its cumulative-to-delta conversion) and stay 0
+// for every other harness.
 type UsageDiagnostics struct {
 	Derived, Duplicate, Malformed int64
+	ClampedInput                  int64
+	StaleBackwards                int64
+	BaselinedAfterCap             int64
+}
+
+// usageRuleDiagnostics is implemented by a rule that tracks additional,
+// rule-specific data-quality counters beyond the deriver's own
+// derived/duplicate/malformed counts. Checked as an optional capability, the
+// same way metricBatchDeriver is.
+type usageRuleDiagnostics interface {
+	clampedInputCount() int64
+	staleBackwardsCount() int64
+	baselinedAfterCapCount() int64
 }
 
 // NewUsageDeriver constructs the deriver for the current process's
@@ -414,6 +732,115 @@ func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*
 	}
 }
 
+// ProcessResourceMetrics derives usage from native metrics matched by a
+// metric-sourced usage rule (design §3.3, "Consume semantics for
+// metric-sourced rules"; Copilot only in this project, via metricBatchDeriver)
+// and reports which metric names were matched, keyed by name alone (matching
+// is name-based, not scope- or shape-qualified). The caller uses the
+// returned set to apply the design's consume semantics itself: on GCP, strip
+// matched metrics from the request before metricStreams.add; on generic
+// OTLP, leave the request untouched. This method never mutates
+// resourceMetrics.
+//
+// Called from Pipeline.handleMetrics on the raw, pre-policy input (like
+// ProcessResourceLogs), so point attributes the deriver reads (for example
+// the model) are never distorted by the policy's redactor — there is no
+// metric-level event filter to route around here (processMetrics has none),
+// but reading raw keeps both signal types' derivation on the same footing.
+//
+// Returns nil (a no-op) whenever no active rule implements metricBatchDeriver
+// -- today that means every harness except copilot never even builds a
+// resourceAttrs/scope/metric walk over the batch, since claude and codex
+// have no metric-sourced rule at all.
+func (d *UsageDeriver) ProcessResourceMetrics(ctx context.Context, resourceMetrics []*metricpb.ResourceMetrics) map[string]bool {
+	if d == nil || len(d.rules) == 0 {
+		return nil
+	}
+	var batchRules []metricBatchDeriver
+	for _, rule := range d.rules {
+		if br, ok := rule.(metricBatchDeriver); ok {
+			batchRules = append(batchRules, br)
+		}
+	}
+	if len(batchRules) == 0 {
+		return nil
+	}
+
+	matched := make(map[string]bool)
+	recorded := false
+	for _, rm := range resourceMetrics {
+		if rm == nil {
+			continue
+		}
+		for _, br := range batchRules {
+			if d.observeMetricBatch(ctx, br, rm, matched) {
+				recorded = true
+			}
+		}
+	}
+	if !recorded {
+		return matched
+	}
+	// See ProcessResourceLogs: forces the derived points to reach
+	// metricStreams now rather than waiting for the periodic reader.
+	flushCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+	defer cancel()
+	if err := d.providers.MeterProvider.ForceFlush(flushCtx); err != nil {
+		log.Debug("Usage deriver flush failed: %v", err)
+	}
+	return matched
+}
+
+// observeMetricBatch is ProcessResourceMetrics' path for a rule that
+// implements metricBatchDeriver: called once per ResourceMetrics, since the
+// correlation copilotUsageRule needs (input minus its cache siblings)
+// requires seeing every sibling counter in the same export together. rule's
+// own DeriveBatch already returns fully-qualified dedupeKeys (its stream/
+// correlation keys already fold in the resource attributes and scope), so
+// this passes an empty scope to metricFingerprint rather than double-keying
+// on scope.
+func (d *UsageDeriver) observeMetricBatch(ctx context.Context, rule metricBatchDeriver, rm *metricpb.ResourceMetrics, matched map[string]bool) bool {
+	increments, names, err := rule.DeriveBatch(rm)
+	for name := range names {
+		matched[name] = true
+	}
+	if err != nil {
+		d.malformed.Add(1)
+		d.malformedWarnOnce.Do(func() {
+			slog.Warn("usage deriver observed a malformed native usage metric; the affected data points were dropped")
+		})
+	}
+	recorded := false
+	for _, increment := range increments {
+		if increment.Calls == 0 && len(increment.Tokens) == 0 {
+			continue
+		}
+		fingerprint := d.metricFingerprint("", increment.dedupeKey)
+		if d.seen.SeenBefore(fingerprint) {
+			d.duplicate.Add(1)
+			continue
+		}
+		d.record(ctx, increment)
+		d.derived.Add(1)
+		recorded = true
+	}
+	return recorded
+}
+
+// metricFingerprint implements the dedupe key for a metric-sourced increment
+// (design §3.3: "the same interval-fingerprint idea as metricStreams.remember"):
+// resource identity and scope (as fingerprint does for logs) plus the data
+// point's own dedupeKey (metric name and its canonicalized interval).
+func (d *UsageDeriver) metricFingerprint(scopeName, dedupeKey string) string {
+	h := sha256.New()
+	h.Write([]byte(d.resourceIdentity))
+	h.Write([]byte{0})
+	h.Write([]byte(scopeName))
+	h.Write([]byte{0})
+	h.Write([]byte(dedupeKey))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // observe matches one record against every rule and records at most one
 // increment. It reports whether anything was recorded.
 //
@@ -492,14 +919,7 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 // harness, model, status (matching the existing hook descriptor);
 // scion.usage.tokens gets harness, model, token_type only.
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
-	model := increment.Model
-	if model == "" {
-		model = os.Getenv("SCION_MODEL")
-	}
-	if model == "" {
-		model = "unknown"
-	}
-	model = truncateUTF8(model, 128)
+	model := telemetrycontract.ResolveModelLabel(increment.Model, os.Getenv("SCION_MODEL"))
 	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
@@ -538,11 +958,36 @@ func (d *UsageDeriver) Diagnostics() UsageDiagnostics {
 	if d == nil {
 		return UsageDiagnostics{}
 	}
-	return UsageDiagnostics{
+	diag := UsageDiagnostics{
 		Derived:   d.derived.Load(),
 		Duplicate: d.duplicate.Load(),
 		Malformed: d.malformed.Load(),
 	}
+	for _, rule := range d.rules {
+		if rd, ok := rule.(usageRuleDiagnostics); ok {
+			diag.ClampedInput += rd.clampedInputCount()
+			diag.StaleBackwards += rd.staleBackwardsCount()
+			diag.BaselinedAfterCap += rd.baselinedAfterCapCount()
+		}
+	}
+	return diag
+}
+
+// HasMetricRule reports whether the deriver has at least one rule that
+// derives from metrics (metricBatchDeriver) -- today, that means the active
+// harness is copilot. Pipeline.handleMetrics gates its extra validateMetrics
+// pass and the whole ProcessResourceMetrics walk on this, so claude/codex
+// (and every harness with no usage rule at all) pay neither cost.
+func (d *UsageDeriver) HasMetricRule() bool {
+	if d == nil {
+		return false
+	}
+	for _, rule := range d.rules {
+		if _, ok := rule.(metricBatchDeriver); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Shutdown releases the deriver's loopback providers, if any were created.
@@ -551,20 +996,6 @@ func (d *UsageDeriver) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	return d.providers.Shutdown(ctx)
-}
-
-// truncateUTF8 truncates s to at most maxBytes bytes without splitting a
-// multi-byte rune: it walks back from maxBytes to the nearest rune boundary
-// rather than cutting mid-rune, which would produce an invalid UTF-8 label
-// value.
-func truncateUTF8(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
-		maxBytes--
-	}
-	return s[:maxBytes]
 }
 
 func logAttrString(attrs []*commonpb.KeyValue, key string) string {
@@ -634,6 +1065,75 @@ func logAttrInt(attrs []*commonpb.KeyValue, key string) (int64, error) {
 		}
 	}
 	return 0, nil
+}
+
+// metricPointInt64 reads a NumberDataPoint's value as a non-negative int64,
+// the same tolerance logAttrInt applies to log attributes: an integral
+// double is accepted, a negative or non-integral value is malformed. Unlike
+// logAttrInt, absence has no meaning here (a data point always carries a
+// value), so there is no zero-value "not present" case to special-case.
+func metricPointInt64(point *metricpb.NumberDataPoint) (int64, error) {
+	switch v := point.GetValue().(type) {
+	case *metricpb.NumberDataPoint_AsInt:
+		if v.AsInt < 0 {
+			return 0, errors.New("value is negative")
+		}
+		return v.AsInt, nil
+	case *metricpb.NumberDataPoint_AsDouble:
+		if v.AsDouble < 0 {
+			return 0, errors.New("value is negative")
+		}
+		if math.Trunc(v.AsDouble) != v.AsDouble {
+			return 0, errors.New("value is not an integer")
+		}
+		return int64(v.AsDouble), nil
+	default:
+		return 0, errors.New("value is not numeric")
+	}
+}
+
+// stripMatchedUsageMetrics returns a copy of resourceMetrics with every
+// metric whose name is in matched removed (design §3.3 "Consume semantics
+// for metric-sourced rules", GCP only). resourceMetrics is assumed to
+// already be a policy-owned clone (Pipeline.handleMetrics calls this on
+// decision.Data), so mutating its ScopeMetrics/Metrics slices in place is
+// safe. A ScopeMetrics or ResourceMetrics left with nothing else in it is
+// dropped, consistent with how an already-empty batch is handled elsewhere
+// in this pipeline.
+func stripMatchedUsageMetrics(resourceMetrics []*metricpb.ResourceMetrics, matched map[string]bool) []*metricpb.ResourceMetrics {
+	if len(matched) == 0 {
+		return resourceMetrics
+	}
+	result := make([]*metricpb.ResourceMetrics, 0, len(resourceMetrics))
+	for _, rm := range resourceMetrics {
+		if rm == nil {
+			continue
+		}
+		keptScopes := rm.ScopeMetrics[:0]
+		for _, sm := range rm.ScopeMetrics {
+			if sm == nil {
+				continue
+			}
+			keptMetrics := sm.Metrics[:0]
+			for _, m := range sm.Metrics {
+				if m == nil || matched[m.Name] {
+					continue
+				}
+				keptMetrics = append(keptMetrics, m)
+			}
+			if len(keptMetrics) == 0 {
+				continue
+			}
+			sm.Metrics = keptMetrics
+			keptScopes = append(keptScopes, sm)
+		}
+		if len(keptScopes) == 0 {
+			continue
+		}
+		rm.ScopeMetrics = keptScopes
+		result = append(result, rm)
+	}
+	return result
 }
 
 // boundedLRU is a fixed-capacity, time-windowed "seen before" set used for

@@ -21,10 +21,38 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// loadUserPreferences reads a user's preferences live from the store (no
+// caching), for /auth/me on both the web server and the Hub API: a PATCH
+// from another tab, device or client is visible on the very next load. A nil
+// store or a store.ErrNotFound degrades to nil preferences rather than
+// failing the request (the caller's response then falls back to the session
+// or token fields alone, and the UI treats the display timezone as Auto).
+// Any other store error also degrades, but is logged, so a broken store does
+// not silently masquerade as "no preferences set".
+func loadUserPreferences(ctx context.Context, st store.Store, uid string) *store.UserPreferences {
+	if st == nil || uid == "" {
+		return nil
+	}
+	dbUser, err := st.GetUser(ctx, uid)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "loadUserPreferences: store error reading user; degrading to no preferences",
+				"user_id", uid, "error", err)
+		}
+		return nil
+	}
+	if dbUser == nil {
+		return nil
+	}
+	return dbUser.Preferences
+}
 
 type ListUsersResponse struct {
 	Users        []UserWithCapabilities `json:"users"`
@@ -40,7 +68,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createUser(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -89,6 +117,10 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		totalCount = len(users)
 	}
 
+	for i := range users {
+		stripPreferencesForViewer(ctx, &users[i].User, users[i].Cap)
+	}
+
 	writeJSON(w, http.StatusOK, ListUsersResponse{
 		Users:      users,
 		NextCursor: result.NextCursor,
@@ -114,7 +146,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	// Sub-resource actions
 	if action == "revoke-sessions" {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.revokeUserSessions(w, r, id)
@@ -129,14 +161,14 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteUser(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
 // revokeUserSessions increments the user's session generation, invalidating
 // all existing cookie-based sessions for that user.
 func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id string) {
-	admin, ok := s.requireAdmin(w, r)
+	admin, ok := s.requireAdminFor(w, r, authzop.ReasonSessionRecovery)
 	if !ok {
 		return
 	}
@@ -165,8 +197,33 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
 	}
+	stripPreferencesForViewer(ctx, &resp.User, resp.Cap)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// stripPreferencesForViewer clears u.Preferences in place unless the caller
+// in ctx is that same user, or cap (the capability set already computed by
+// the caller for this same resource — listUsers and getUser each compute it
+// once per user) includes ActionUpdate. That is the same permission
+// (user.update) that gates a cross-user PATCH, so read and write visibility
+// of preferences agree, and this does not issue a second Decide call or
+// duplicate its deny-audit record. Preferences (including the
+// display-timezone field) are personal: a member listing or viewing another
+// user must not see them (AC6).
+func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabilities) {
+	if u.Preferences == nil {
+		return
+	}
+	if userIdentity, ok := GetIdentityFromContext(ctx).(UserIdentity); ok && userIdentity.ID() == u.ID {
+		return
+	}
+	// capabilityAllows already treats a nil cap as "no actions allowed", so
+	// this is a redundant, zero-risk guard, not a behavior change.
+	if cap != nil && capabilityAllows(cap, ActionUpdate) {
+		return
+	}
+	u.Preferences = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +231,8 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 //
 // User mutation endpoints (PATCH, DELETE) require an interactive session JWT
 // or dev credential. Broker, agent, UAT, and federation credentials are
-// rejected at the boundary.
+// rejected at the boundary by requireSessionCredentialFor
+// (session_only_gate.go), which reports the session-only reason.
 // ---------------------------------------------------------------------------
 
 // allowedMutationCredentials is the closed set of credential kinds permitted
@@ -184,38 +242,15 @@ var allowedMutationCredentials = map[CredentialKind]bool{
 	CredentialKindDev:         true,
 }
 
-// requireSessionCredential verifies the request uses an interactive session
-// JWT or dev credential. Returns the actor UserIdentity on success, writes
-// an HTTP error and returns nil on failure.
-func (s *Server) requireSessionCredential(w http.ResponseWriter, ctx context.Context) (UserIdentity, bool) {
-	if s.authzService == nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"authorization service unavailable", nil)
-		return nil, false
+// updateUserSessionOnlyReason is the session-only reason of PATCH
+// /api/v1/users/{id}: INTERACTIVE_STATE when the path names the caller's
+// own record, GOV_PENDING for any other record. It depends only on the
+// path, so the credential check still runs before the body is read.
+func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.SessionOnlyReason {
+	if identity := GetIdentityFromContext(ctx); identity != nil && identity.ID() == id {
+		return authzop.ReasonInteractiveState
 	}
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return nil, false
-	}
-
-	actor, ok := identity.(UserIdentity)
-	if !ok {
-		Forbidden(w)
-		return nil, false
-	}
-
-	// Enforce credential boundary: only interactive session JWTs and dev
-	// tokens are allowed for user mutations.
-	cred := GetCredentialContextFromContext(ctx)
-	if !allowedMutationCredentials[cred.Kind] {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("user mutations require an interactive session; credential kind %q is not allowed", cred.Kind), nil)
-		return nil, false
-	}
-
-	return actor, true
+	return authzop.ReasonGovernancePending
 }
 
 // ---------------------------------------------------------------------------
@@ -234,17 +269,62 @@ func (s *Server) requireSessionCredential(w http.ResponseWriter, ctx context.Con
 
 // userPatchPayload is the strict set of allowed fields for PATCH /api/v1/users/{id}.
 type userPatchPayload struct {
-	DisplayName *string                `json:"displayName,omitempty"`
-	Role        *string                `json:"role,omitempty"`
-	Status      *string                `json:"status,omitempty"`
-	Preferences *store.UserPreferences `json:"preferences,omitempty"`
+	DisplayName *string `json:"displayName,omitempty"`
+	Role        *string `json:"role,omitempty"`
+	Status      *string `json:"status,omitempty"`
+}
+
+// userPreferencesPatch is a per-key partial update to store.UserPreferences.
+// A nil field means "leave unchanged"; a non-nil field (including a pointer
+// to "") is applied verbatim, so an explicit "" clears that preference.
+type userPreferencesPatch struct {
+	DefaultTemplate *string
+	DefaultProfile  *string
+	Theme           *string
+	Timezone        *string
+}
+
+// decodeStringPref unmarshals one preferences sub-field's raw JSON value
+// into a string, for the per-key preferences PATCH merge. A JSON null is a
+// no-op onto the freshly zero-valued result, so it decodes to "" — the same
+// as an explicit "" (both clear the preference). A non-string JSON value
+// (e.g. a number or object) is a decode error, which the caller reports as a
+// 400.
+func decodeStringPref(key string, rv json.RawMessage) (string, error) {
+	var v string
+	if err := json.Unmarshal(rv, &v); err != nil {
+		return "", fmt.Errorf("invalid preferences.%s: %w", key, err)
+	}
+	return v, nil
+}
+
+// validateUserTimezone validates a user display-timezone preference value.
+// "" means Auto (the browser-detected zone) and is always valid.
+//
+// Delegates the actual check to validateIANATimezone (timezone_validate.go),
+// shared with the hub-wide agent_defaults.default_timezone validator
+// (admin_settings.go's validateDefaultTimezone), so the two can't drift.
+// Each validator keeps its own wrapping here, because the right message
+// differs: this one points users at "" for Auto, which means nothing for
+// the hub-wide default.
+func validateUserTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	if err := validateIANATimezone(tz); err != nil {
+		if errors.Is(err, errNonPortableTimezone) {
+			return fmt.Errorf("timezone %q is not allowed; use an IANA zone name, or \"\" for Auto", tz)
+		}
+		return fmt.Errorf("invalid timezone %q: %v", tz, err)
+	}
+	return nil
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredential(w, ctx)
+	actor, ok := s.requireSessionCredentialFor(w, ctx, updateUserSessionOnlyReason(ctx, id))
 	if !ok {
 		return
 	}
@@ -275,6 +355,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	// Re-parse into typed struct.
 	var updates userPatchPayload
+	var prefsPatch *userPreferencesPatch
 	for field, raw := range rawFields {
 		switch field {
 		case "displayName":
@@ -299,12 +380,72 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			}
 			updates.Status = &v
 		case "preferences":
-			var v store.UserPreferences
-			if err := json.Unmarshal(raw, &v); err != nil {
+			// Decode as a raw map, not the typed struct, so that an absent
+			// key (leave unchanged) can be told apart from an explicit ""
+			// (clear). The PATCH merges per-key onto the stored preferences
+			// rather than replacing the whole struct.
+			var rawPrefs map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rawPrefs); err != nil {
 				BadRequest(w, "invalid preferences: "+err.Error())
 				return
 			}
-			updates.Preferences = &v
+			// hasFields tracks whether rawPrefs contained at least one
+			// recognized key. An empty object, a top-level null (which
+			// decodes to a nil rawPrefs and an empty loop below) and a body
+			// containing only unknown keys must all be true no-ops: they
+			// must not set prefsPatch, so they neither force a DB write nor
+			// initialize an empty store.UserPreferences record for a user
+			// that had none.
+			patch := &userPreferencesPatch{}
+			var hasFields bool
+			for key, rv := range rawPrefs {
+				switch key {
+				case "defaultTemplate":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.DefaultTemplate = &v
+					hasFields = true
+				case "defaultProfile":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.DefaultProfile = &v
+					hasFields = true
+				case "theme":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.Theme = &v
+					hasFields = true
+				case "timezone":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					if err := validateUserTimezone(v); err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.Timezone = &v
+					hasFields = true
+				default:
+					// Unknown preferences keys are silently ignored (200, no
+					// change). This keeps older hubs and newer clients
+					// compatible, unlike the top-level field switch above,
+					// which rejects unknown fields outright.
+				}
+			}
+			if hasFields {
+				prefsPatch = patch
+			}
 		}
 	}
 
@@ -335,7 +476,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	needsPromote := updates.Role != nil
 	needsSuspend := updates.Status != nil
-	needsUpdate := updates.DisplayName != nil || updates.Preferences != nil
+	needsUpdate := updates.DisplayName != nil || prefsPatch != nil
 
 	isSelf := actor.ID() == user.ID
 	needsCrossUserUpdate := needsUpdate && !isSelf
@@ -476,8 +617,22 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if updates.DisplayName != nil {
 			txUser.DisplayName = *updates.DisplayName
 		}
-		if updates.Preferences != nil {
-			txUser.Preferences = updates.Preferences
+		if prefsPatch != nil {
+			if txUser.Preferences == nil {
+				txUser.Preferences = &store.UserPreferences{}
+			}
+			if prefsPatch.DefaultTemplate != nil {
+				txUser.Preferences.DefaultTemplate = *prefsPatch.DefaultTemplate
+			}
+			if prefsPatch.DefaultProfile != nil {
+				txUser.Preferences.DefaultProfile = *prefsPatch.DefaultProfile
+			}
+			if prefsPatch.Theme != nil {
+				txUser.Preferences.Theme = *prefsPatch.Theme
+			}
+			if prefsPatch.Timezone != nil {
+				txUser.Preferences.Timezone = *prefsPatch.Timezone
+			}
 		}
 
 		// Persist all User record changes in the same transaction.
@@ -549,6 +704,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		return
 	}
+
+	// This response applies the same per-viewer preferences visibility rule
+	// as GET (stripPreferencesForViewer; used by getUser and listUsers).
+	cap := s.authzService.ComputeCapabilities(ctx, actor, userResource(user))
+	stripPreferencesForViewer(ctx, user, cap)
 
 	writeJSON(w, http.StatusOK, user)
 }
@@ -939,7 +1099,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredential(w, ctx)
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		return
 	}
@@ -993,9 +1153,33 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return err
 		}
 
+		// Last-project-owner guard plus role-binding cascade
+		// (ptone/scion#2598). Runs before the user row is deleted, in the
+		// same transaction; a concurrent grant or role change to the
+		// user's bindings that commits before the cascade aborts the
+		// delete with 409 conflict (a concurrent revoke does not; residual
+		// race: ptone/scion#2769).
+		if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
+			return err
+		}
+
 		// Clean up user-scoped skill injections.
 		if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
 			return fmt.Errorf("delete skill injections: %w", err)
+		}
+
+		// Remove the user's group memberships before the user row: the
+		// FK is ON DELETE SET NULL, so afterwards they would be orphans
+		// that still count toward group roles (ptone/scion#2769). Residual
+		// race on PostgreSQL: a concurrent AddGroupMember for this user can
+		// insert a row this delete does not see, which the FK then nulls.
+		// It is harmless: orphaned rows are excluded from counts and
+		// listings, and the startup sweep removes them. On PostgreSQL the
+		// call first locks the groups this user owns, so the transaction
+		// takes owned group rows before membership rows, like a concurrent
+		// project delete's group cascade (no 40P01 between the two).
+		if _, err := tx.DeleteGroupMembershipsForUser(ctx, id); err != nil {
+			return fmt.Errorf("delete group memberships: %w", err)
 		}
 
 		// Delete the user record.
@@ -1020,9 +1204,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
+		var lastOwnerErr *lastProjectOwnerDeleteError
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
+		} else if errors.As(err, &lastOwnerErr) {
+			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		} else if errors.Is(err, errUserRoleBindingsChanged) {
+			writeUserRoleBindingsChangedError(w)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user deletion failed: "+err.Error(), nil)
@@ -1031,4 +1220,267 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// lastOwnerProjectRef identifies a project that deleting a user would leave
+// without an owner.
+type lastOwnerProjectRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// lastProjectOwnerDeleteError is returned by
+// guardAndCascadeUserRoleBindingsTx when the user is the last owner of one
+// or more projects. The surrounding transaction rolls back, so neither the
+// user nor any binding is changed.
+type lastProjectOwnerDeleteError struct {
+	projects []lastOwnerProjectRef
+}
+
+func (e *lastProjectOwnerDeleteError) Error() string {
+	return lastProjectOwnerDeleteMessage
+}
+
+const lastProjectOwnerDeleteMessage = "cannot delete the last owner of a project — transfer ownership or add another usable (active, existing) owner first"
+
+// writeLastProjectOwnerDeleteError writes the 409 last_owner response for a
+// denied user deletion. The code and status match the members API last-owner
+// denial; details.projects lists the projects that would be left ownerless.
+func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwnerDeleteError) {
+	writeError(w, http.StatusConflict, ErrCodeLastOwner, lastProjectOwnerDeleteMessage,
+		map[string]interface{}{"projects": e.projects})
+}
+
+// guardAndCascadeUserRoleBindingsTx enforces the last-project-owner rule for
+// a user that is about to be deleted, then deletes every role binding held by
+// that user (system, hub and project scope). It must run inside WithTx before
+// the user row is deleted (ptone/scion#2598).
+//
+// For each project where userID holds a project-owner binding — including an
+// expired or not-yet-active one, since deleting it could otherwise take the
+// project to zero owner bindings and let the startup backfill re-grant the
+// creator — the deletion is denied when it would remove the project's last
+// usable (active, existing) owner, or its last owner binding of any kind
+// (userDeleteOrphansProjectTx, ptone/scion#2769). Each such project is
+// locked with LockProjectForMembership (in ID order) before the check, which
+// serializes against concurrent members-API mutations on those projects.
+//
+// The binding list is read before any lock, so a binding granted to userID
+// concurrently (for example a new owner binding on a project that was never
+// locked or checked, or the owner half of a TransferOwnership-style swap) is
+// not seen by the guard. The cascade therefore checks the set, not a count:
+// it first deletes each listed binding by ID (a listed binding that is
+// already gone was revoked concurrently; that is harmless, because every
+// project the user owns is locked, so it is ignored), then runs a predicate
+// delete by principal, which must remove nothing. If it removes any row, a
+// binding the guard did not check was committed in the meantime; the
+// function returns errUserRoleBindingsChanged and the caller rolls back the
+// whole transaction (409 conflict, retry).
+//
+// The by-ID pass relies on role bindings being immutable: a change to a
+// binding's role, principal or scope is always a delete plus a create with a
+// new ID (replaceBindingTx, SetMemberRoles and TransferOwnership all work this
+// way, and the store has no UpdateRoleBinding). The only in-place UPDATE of
+// role_bindings today is the startup membership_kind backfill in
+// runMembershipMigration, which runs before the server serves requests and
+// changes neither role, principal nor scope, so it is harmless. As hardening,
+// each listed binding is re-read in the transaction just before its by-ID
+// delete; if its role definition, principal or scope no longer matches the
+// listed one (an in-place change under the same ID), the function returns
+// errUserRoleBindingsChanged instead of deleting a binding the guard never
+// checked. The validity window (NotBefore/ExpiresAt) is not compared, although
+// it does feed the guard: whether the target's own owner binding is usable
+// (removedUsable in userDeleteOrphansProjectTx) depends on its window, read
+// from the pre-lock list. That is safe only because bindings are immutable: a
+// window change is a delete plus a create with a new ID, which the by-ID
+// re-read catches (the listed ID is gone, and the predicate delete below then
+// finds the new ID and aborts with errUserRoleBindingsChanged). On
+// PostgreSQL an in-place change that commits between that re-read and the
+// delete is still not detected, so the immutability invariant remains the
+// primary guarantee.
+//
+// The by-ID pass deletes in binding ID order. On PostgreSQL a concurrent
+// change that deletes several of the user's bindings (for example
+// replaceBindingTx on a multi-role member) can still deadlock with this pass;
+// the database aborts one side, so either the delete returns 500 or the
+// other change fails, and no data is corrupted.
+//
+// What is guaranteed: a concurrent grant or role change to the user's
+// bindings that commits before the predicate delete aborts the delete with
+// 409 (a concurrent revoke is ignored and the delete proceeds). A grant
+// that commits after that statement but before the delete transaction
+// commits is not detected and can leave a stale binding on the deleted user;
+// that residual race is tracked in ptone/scion#2769.
+//
+// On denial it returns *lastProjectOwnerDeleteError listing every affected
+// project. role_bindings.principal_id has no foreign key, so without the
+// cascade the bindings would dangle after the user is deleted.
+func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
+	bindings, err := tx.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return fmt.Errorf("list role bindings: %w", err)
+	}
+
+	var ownerProjectIDs []string
+	var ownerRD *store.RoleDefinition
+	if len(bindings) > 0 {
+		ownerRD, err = tx.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		if err != nil {
+			return fmt.Errorf("resolve project-owner role definition: %w", err)
+		}
+		if ownerRD == nil {
+			return fmt.Errorf("resolve project-owner role definition: not found")
+		}
+		seen := make(map[string]bool)
+		for _, b := range bindings {
+			if b.ScopeType != store.RoleScopeProject || b.RoleDefinitionID != ownerRD.ID || seen[b.ScopeID] {
+				continue
+			}
+			seen[b.ScopeID] = true
+			ownerProjectIDs = append(ownerProjectIDs, b.ScopeID)
+		}
+		sort.Strings(ownerProjectIDs)
+	}
+
+	var orphaned []lastOwnerProjectRef
+	for _, projectID := range ownerProjectIDs {
+		if err := tx.LockProjectForMembership(ctx, projectID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Binding on a project that no longer exists: nothing to
+				// orphan, the cascade below removes the stale binding.
+				continue
+			}
+			return fmt.Errorf("lock project %s: %w", projectID, err)
+		}
+		denied, err := userDeleteOrphansProjectTx(ctx, tx, projectID, ownerRD.ID, bindings, userID, now)
+		if err != nil {
+			return err
+		}
+		if !denied {
+			continue
+		}
+		ref := lastOwnerProjectRef{ID: projectID}
+		if p, err := tx.GetProject(ctx, projectID); err == nil && p != nil {
+			ref.Name = p.Name
+		} else if err != nil {
+			slog.Debug("last-owner delete guard: project name lookup failed",
+				"project_id", projectID, "error", err)
+		}
+		orphaned = append(orphaned, ref)
+	}
+	if len(orphaned) > 0 {
+		return &lastProjectOwnerDeleteError{projects: orphaned}
+	}
+
+	// Delete the listed bindings by ID, then require the predicate delete to
+	// find nothing: any row it removes is a binding the guard never saw.
+	// Always run the predicate delete, even when the list was empty, so a
+	// binding granted concurrently after the list is detected.
+	// Deterministic lock order for the by-ID pass (see the doc comment).
+	sort.Slice(bindings, func(i, j int) bool { return bindings[i].ID < bindings[j].ID })
+	for _, b := range bindings {
+		// Re-read the binding so an in-place change under the same ID is
+		// not deleted unchecked (see the immutability note above).
+		cur, err := tx.GetRoleBinding(ctx, b.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked concurrently; see below.
+				continue
+			}
+			return fmt.Errorf("re-read role binding %s: %w", b.ID, err)
+		}
+		if cur.RoleDefinitionID != b.RoleDefinitionID || cur.ScopeType != b.ScopeType ||
+			cur.ScopeID != b.ScopeID || cur.PrincipalType != b.PrincipalType || cur.PrincipalID != b.PrincipalID {
+			return fmt.Errorf("%w: binding %s changed in place", errUserRoleBindingsChanged, b.ID)
+		}
+		if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				// Revoked concurrently; it can only be on a project the
+				// user does not own (owned projects are locked above).
+				continue
+			}
+			return fmt.Errorf("delete role binding %s: %w", b.ID, err)
+		}
+	}
+	n, err := tx.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return fmt.Errorf("delete role bindings: %w", err)
+	}
+	if n != 0 {
+		return fmt.Errorf("%w: %d unlisted binding(s) found", errUserRoleBindingsChanged, n)
+	}
+	return nil
+}
+
+// userDeleteOrphansProjectTx applies the last-owner rule of
+// ptone/scion#2769 to the deletion of userID, for one project it owns,
+// inside the delete transaction and after LockProjectForMembership on that
+// project. userBindings are userID's role bindings; ownerRDID is the
+// project-owner role definition. The deletion orphans the project, and is
+// denied, when:
+//
+//   - one of userID's owner bindings on the project is usable (active window,
+//     user exists and is active) and no other usable owner remains (I1), or
+//   - no other owner binding of any kind remains (I2, the ptone/scion#2554
+//     floor: zero owner bindings re-arms the startup creator backfill).
+//
+// So deleting a suspended co-owner is allowed while another owner binding
+// remains, even when the project has no usable owner left. Lookup errors
+// are returned (500, nothing changed).
+func userDeleteOrphansProjectTx(ctx context.Context, tx store.Store, projectID, ownerRDID string, userBindings []*store.RoleBinding, userID string, now time.Time) (bool, error) {
+	var own []*store.RoleBinding
+	for _, b := range userBindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID && b.RoleDefinitionID == ownerRDID {
+			own = append(own, b)
+		}
+	}
+	// ownerRDID is passed through, so the role definition is not resolved
+	// again for every owned project.
+	removedUsable := false
+	for _, b := range own {
+		ok, err := bindingIsUsableOwner(ctx, tx, b, ownerRDID, now)
+		if err != nil {
+			return false, fmt.Errorf("check owner bindings of project %s: %w", projectID, err)
+		}
+		if ok {
+			removedUsable = true
+			break
+		}
+	}
+	if removedUsable {
+		ok, err := projectHasUsableOwner(ctx, tx, projectID, now, userID)
+		if err != nil {
+			return false, fmt.Errorf("check usable owners of project %s: %w", projectID, err)
+		}
+		// A usable other owner is itself another owner binding, so I2
+		// holds too and the binding count is not needed.
+		return !ok, nil
+	}
+	others, err := projectOwnerBindingCount(ctx, tx, projectID, userID)
+	if err != nil {
+		return false, fmt.Errorf("count owner bindings of project %s: %w", projectID, err)
+	}
+	return others == 0, nil
+}
+
+// errUserRoleBindingsChanged is returned by guardAndCascadeUserRoleBindingsTx
+// when the cascade finds a binding the guard did not list, meaning the
+// user's bindings changed concurrently. Callers map it to
+// 409 conflict; the transaction rolls back so nothing is deleted.
+var errUserRoleBindingsChanged = errors.New("the user's role bindings changed concurrently; retry")
+
+// writeUserRoleBindingsChangedError writes the 409 conflict response for
+// errUserRoleBindingsChanged.
+func writeUserRoleBindingsChangedError(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, ErrCodeConflict, errUserRoleBindingsChanged.Error(), nil)
+}
+
+// membershipNow returns the membership service clock, so the delete guard
+// and the members API agree on which bindings are active, including under an
+// injected clock. It falls back to the wall clock if the service is unset.
+func (s *Server) membershipNow() time.Time {
+	if s.membershipService != nil && s.membershipService.nowFunc != nil {
+		return s.membershipService.nowFunc()
+	}
+	return time.Now()
 }

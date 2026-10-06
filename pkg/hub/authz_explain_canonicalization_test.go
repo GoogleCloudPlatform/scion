@@ -48,7 +48,7 @@ func TestResolveResourcePermission_Contract(t *testing.T) {
 		{"canonical user.list", "user", ActionList, "user.list"},
 		{"canonical agent.create", "agent", ActionCreate, "agent.create"},
 		{"canonical project.read", "project", ActionRead, "project.read"},
-		{"reviewed unregistered agent.manage", "agent", ActionManage, "agent.manage"},
+		{"agent+manage has no permission", "agent", ActionManage, ""},
 
 		// Non-canonical and unknown pairs are not resolvable.
 		{"hub+user.read", "hub", "user.read", ""},

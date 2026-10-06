@@ -16,8 +16,13 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/url"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
@@ -53,7 +58,114 @@ type RuntimeBrokerService interface {
 	// into its delivery buffer but failed to deliver, so the hub can mark
 	// them failed instead of leaving them "dispatched".
 	ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error
+
+	// ReportAgentLaunch sends one broker->hub launch report (design
+	// t1-async-create-v11.md §3.2, §7 P1b-1): a claim, checkpoint, progress
+	// update, keepalive, or terminal (succeeded/failed) for an async-launch
+	// agent create. The returned error is non-nil only for a condition the
+	// sender must treat as "unreachable, retry" (design §3.8.2 table): a
+	// transport failure, a 5xx, or a 404 that is not the structured
+	// agent_launch_unknown body (an old Hub node without this route,
+	// design §5 N-9). Every other outcome — the 200 result, the 403 (another
+	// broker owns the agent), the definitive 404 agent_launch_unknown, or the
+	// 409 stale_launch with its reason — is returned in the result with a nil
+	// error, so the sender can switch on it directly.
+	ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *AgentLaunchReport) (*AgentLaunchReportResult, error)
 }
+
+// AgentLaunchReport is the broker->hub launch report wire type (design §3.2).
+// It mirrors pkg/hub.AgentLaunchReport field for field; the two cannot share
+// a Go type because pkg/hub cannot depend on pkg/hubclient (and vice versa).
+type AgentLaunchReport struct {
+	LaunchID   string                 `json:"launchId"`
+	InstanceID string                 `json:"instanceId"`
+	Seq        int64                  `json:"seq"`
+	State      string                 `json:"state"` // claim | checkpoint | progress | succeeded | failed
+	Phase      string                 `json:"phase,omitempty"`
+	Step       string                 `json:"step,omitempty"`
+	Message    string                 `json:"message,omitempty"`
+	ErrorCode  string                 `json:"errorCode,omitempty"`
+	Agent      *AgentLaunchReportInfo `json:"agent,omitempty"` // succeeded only
+	At         time.Time              `json:"at,omitzero"`
+}
+
+// AgentLaunchReport.State values.
+const (
+	AgentLaunchReportStateClaim      = "claim"
+	AgentLaunchReportStateCheckpoint = "checkpoint"
+	AgentLaunchReportStateProgress   = "progress"
+	AgentLaunchReportStateSucceeded  = "succeeded"
+	AgentLaunchReportStateFailed     = "failed"
+)
+
+// AgentLaunchReportInfo is the succeeded report's agent echo (design §3.2's
+// AgentLaunchReport.Agent, a RemoteAgentInfo on the Hub side). Fuller
+// broker-response application (the complete echo) is explicitly P1b-1's
+// wire-plumbing job (pkg/store.LaunchReport's doc comment); the Hub's P1a-ii
+// ApplyLaunchReport applies only Runtime and RuntimeState from it today
+// (store.LaunchReport's two documented fields) and ignores the rest, so
+// sending the full shape now is forward-compatible and costs nothing.
+type AgentLaunchReportInfo struct {
+	ID              string `json:"id,omitempty"`
+	Slug            string `json:"slug,omitempty"`
+	ContainerID     string `json:"containerId,omitempty"`
+	Name            string `json:"name,omitempty"`
+	Template        string `json:"template,omitempty"`
+	HarnessConfig   string `json:"harnessConfig,omitempty"`
+	HarnessAuth     string `json:"harnessAuth,omitempty"`
+	Image           string `json:"image,omitempty"`
+	Runtime         string `json:"runtime,omitempty"`
+	RuntimeState    string `json:"runtimeState,omitempty"`
+	Profile         string `json:"profile,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+	Activity        string `json:"activity,omitempty"`
+	ContainerStatus string `json:"containerStatus,omitempty"`
+	// RunID is the run the launched entry is labelled with
+	// (ptone/scion#3176), so the hub can settle exactly that run.
+	RunID string `json:"runId,omitempty"`
+	// WorkspacePlacement is where the launch's start placed the agent's
+	// workspace (api.WorkspacePlacementExport or WorkspacePlacementLocal).
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
+}
+
+// AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
+// decoded from whichever of the four response shapes the Hub returned.
+type AgentLaunchReportResult struct {
+	// HTTPStatus is 0 for the 200 case; otherwise 403, 404 or 409.
+	HTTPStatus int
+	// Result is set when HTTPStatus == 0: "applied" | "duplicate" | "completed".
+	Result string
+	// Code is set for 404/409: "agent_launch_unknown" | "stale_launch".
+	Code string
+	// Reason is set for a 409 stale_launch: superseded | deleted | stopped |
+	// timed_out | lost | failed | not_launched | other_owner.
+	Reason string
+}
+
+// AgentLaunchReportResult.Result values.
+const (
+	AgentLaunchReportResultApplied   = "applied"
+	AgentLaunchReportResultDuplicate = "duplicate"
+	AgentLaunchReportResultCompleted = "completed"
+)
+
+// AgentLaunchReportResult.Code values.
+const (
+	AgentLaunchReportCodeUnknownLaunch = "agent_launch_unknown"
+	AgentLaunchReportCodeStaleLaunch   = "stale_launch"
+)
+
+// AgentLaunchReportResult.Reason values (409 stale_launch only).
+const (
+	AgentLaunchReportReasonSuperseded  = "superseded"
+	AgentLaunchReportReasonDeleted     = "deleted"
+	AgentLaunchReportReasonStopped     = "stopped"
+	AgentLaunchReportReasonTimedOut    = "timed_out"
+	AgentLaunchReportReasonLost        = "lost"
+	AgentLaunchReportReasonFailed      = "failed"
+	AgentLaunchReportReasonNotLaunched = "not_launched"
+	AgentLaunchReportReasonOtherOwner  = "other_owner"
+)
 
 // MessageFailure is one buffered delivery that failed on the broker.
 type MessageFailure struct {
@@ -114,6 +226,74 @@ type BrokerHeartbeat struct {
 	// snapshot alone (the pre-A2 state) is never refreshed for an
 	// already-registered broker until it re-registers with --force.
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
+	// Inventory reports, per runtime target, whether the agent list in
+	// Projects is that target's complete inventory. The Hub only treats an
+	// agent missing from Projects as having no container when the agent's
+	// recorded target is listed here as complete. An older broker omits the
+	// field, and the Hub then never draws that conclusion.
+	Inventory *BrokerInventory `json:"inventory,omitempty"`
+	// WorkspaceStorage refreshes the broker's workspace storage descriptor
+	// (backend, NFS export identity and share health) on every heartbeat.
+	// An older broker omits it and the hub keeps the stored value.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// ProfileAttach refreshes the attach capability of the broker's
+	// registered profiles (store.BrokerProfile.Attach) on every heartbeat,
+	// so a change is seen without re-registering. It lists only profiles
+	// whose attach support the broker knows; a profile it cannot answer
+	// for yet is left out, and the hub keeps that profile's stored value.
+	// An older broker omits the field and the hub keeps every stored
+	// value.
+	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
+	// ProfileSAMappings: see ProfileSAMappingsState.
+	ProfileSAMappings []ProfileSAMappingsState `json:"profileSAMappings,omitempty"`
+	// StartsInFlight lists the agent starts still running on the broker
+	// when this heartbeat was built, read before the agents were listed, so
+	// a start that finishes between the two reads is either listed here or
+	// its container is in Projects. Meaningful only when
+	// Capabilities.StartsInFlight is true; an older broker omits both.
+	StartsInFlight []StartInFlight `json:"startsInFlight,omitempty"`
+	// DefaultProfile refreshes the broker's default (active) profile name
+	// on every heartbeat. Nil (an older broker) keeps the stored value; a
+	// non-nil empty string reports that the broker has no active profile.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
+}
+
+// StartInFlight identifies one agent start running on a broker.
+type StartInFlight struct {
+	ProjectID string `json:"projectId"`
+	Slug      string `json:"slug"`
+}
+
+// ProfileAttachState is one profile's attach capability in a heartbeat.
+type ProfileAttachState struct {
+	// Name is the profile name, matching store.BrokerProfile.Name.
+	Name string `json:"name"`
+	// Attach reports whether the profile's runtime supports interactive
+	// attach.
+	Attach bool `json:"attach"`
+}
+
+// BrokerInventory describes which runtime targets a heartbeat's agent list
+// covers.
+type BrokerInventory struct {
+	// Targets has one entry per runtime target the broker manages (its
+	// default runtime and each auxiliary runtime). It is empty when the
+	// heartbeat is filtered (multi-hub mode) and so claims no target.
+	Targets []InventoryTarget `json:"targets,omitempty"`
+}
+
+// InventoryTarget is one runtime target in a heartbeat inventory.
+type InventoryTarget struct {
+	// ID identifies the target: the runtime name for Docker, Podman and
+	// similar runtimes, and the runtime name with the cluster context and
+	// namespace for Kubernetes.
+	ID string `json:"id"`
+	// Runtime is the runtime name (runtime.Runtime.Name()).
+	Runtime string `json:"runtime,omitempty"`
+	// Complete is true only when the target was listed without error, so an
+	// agent on this target that is absent from the heartbeat has no
+	// container.
+	Complete bool `json:"complete"`
 }
 
 // ProjectHeartbeat is per-project status in a heartbeat.
@@ -135,6 +315,9 @@ type AgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	// RuntimeTarget is the ID of the inventory target whose listing reported
+	// this agent (see InventoryTarget.ID).
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
 }
 
 // CreateBrokerRequest is the request to create a new broker registration.
@@ -162,6 +345,12 @@ type JoinBrokerRequest struct {
 	Version      string          `json:"version"`
 	Capabilities []string        `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile `json:"profiles,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor at
+	// registration time. Share health is refreshed by heartbeats.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// DefaultProfile is the broker's default (active) profile name. Nil
+	// (an older broker) keeps the stored value.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
 }
 
 // JoinBrokerResponse is returned after completing broker registration.
@@ -282,4 +471,62 @@ func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, broker
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// ReportAgentLaunch posts one launch report. See the RuntimeBrokerService
+// doc comment for the error-vs-result split.
+func (s *runtimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *AgentLaunchReport) (*AgentLaunchReportResult, error) {
+	path := "/api/v1/runtime-brokers/" + url.PathEscape(brokerID) + "/agents/" + url.PathEscape(agentID) + "/launch"
+	resp, err := s.c.post(ctx, path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		var body struct {
+			Result string `json:"result"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			return nil, fmt.Errorf("decode launch report response: %w", err)
+		}
+		return &AgentLaunchReportResult{Result: body.Result}, nil
+
+	case http.StatusForbidden:
+		return &AgentLaunchReportResult{HTTPStatus: http.StatusForbidden}, nil
+
+	case http.StatusNotFound, http.StatusConflict:
+		var body struct {
+			Code   string `json:"code"`
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if resp.StatusCode == http.StatusNotFound && body.Code != AgentLaunchReportCodeUnknownLaunch {
+			// design §5 N-9: a plain 404 from a Hub node without this route
+			// (e.g. a mixed-version HA cluster) means "no endpoint", which the
+			// broker must treat as retryable, never as a definitive unknown
+			// launch.
+			return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: "no_endpoint", Message: "launch report route not found"}
+		}
+		if resp.StatusCode == http.StatusConflict && body.Code != AgentLaunchReportCodeStaleLaunch {
+			// A 409 the wire contract does not define (its code is not
+			// stale_launch) is not something the sender can classify by
+			// Reason; treat it as retryable rather than guessing.
+			return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: "unrecognized_conflict", Message: "409 response had an unrecognized code"}
+		}
+		return &AgentLaunchReportResult{HTTPStatus: resp.StatusCode, Code: body.Code, Reason: body.Reason}, nil
+
+	case http.StatusBadRequest, http.StatusUnauthorized:
+		// These are definitive protocol/auth failures, never transient like
+		// an unreachable Hub or a 5xx -- retrying them would not help, so the
+		// sender must not loop on them like it does for
+		// errLaunchReportUnreachable. Reported as a result (nil error), not
+		// an error, so the caller's gate classification sees a definitive
+		// answer rather than treating it as retryable.
+		return &AgentLaunchReportResult{HTTPStatus: resp.StatusCode}, nil
+
+	default:
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
 }

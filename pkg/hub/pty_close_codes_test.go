@@ -133,6 +133,7 @@ func TestPTYCloseCode_BrokerStreamClose(t *testing.T) {
 	}{
 		{"session gone passes through", 4410, "session_ended", 4410},
 		{"upstream unavailable passes through", 4503, "runtime_stream_dropped", 4503},
+		{"attach unsupported passes through", 4501, "attach_unsupported", 4501},
 		{"normal closure passes through", 1000, "", 1000},
 		{"legacy 0 maps to 1000", 0, "", 1000},
 		{"legacy 404 maps to 4404", 404, "agent not found", 4404},

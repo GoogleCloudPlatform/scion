@@ -95,6 +95,8 @@ scion start my-review --type code-reviewer --harness-config gemini
 
 # Provision without starting (writes the agent dir + prompt.md for later)
 scion create my-review my task... --type code-reviewer
+# ...then start it
+scion start my-review
 ```
 
 `--type` also accepts an **absolute path** or a **remote URI**, so you can run a template straight from a repository without importing it first:
@@ -132,7 +134,7 @@ To ensure consistent and reliable agent execution across the platform, Scion enf
 - **What it is:** Scion automatically loads all Markdown files from an embedded boilerplate filesystem (`mandatory_boilerplate/`) and **prepends** them directly to the final `agent_instructions` file inside the agent's home directory.
 - **Why it exists:** This guarantees that every provisioned agent — regardless of template, role, or harness choice — is seeded with critical platform contracts before starting.
 - **Embedded contents:**
-  - **Workspace Orientation:** Clear explanations of `SCION_WORKSPACE_MODE` (`shared-plain`, `worktree-per-agent`, `clone-per-agent`), `SCION_WORKSPACE_GIT`, and how directories/shared volumes are mounted.
+  - **Workspace Orientation:** Clear explanations of `SCION_WORKSPACE_MODE` (`shared-plain`, `worktree-per-agent`, `clone-per-agent`, `empty-per-agent`), `SCION_WORKSPACE_GIT`, and how directories/shared volumes are mounted.
   - **Agent Status Signals:** Exact protocols directing the agent to explicitly declare its execution states via `sciontool status` (e.g. `sciontool status ask_user "<question>"`, `sciontool status blocked "<reason>"`, or `sciontool status task_completed "<task>"`). This prevents false stall timeouts, handles notifications routing, and tracks progress.
 - **Template Isolation:** Because this preamble is injected programmatically by the Hub or CLI, it cannot be overridden, removed, or bypassed by custom templates, securing baseline platform behaviors across all agents.
 
@@ -309,7 +311,7 @@ scion templates pull code-reviewer --to .scion/templates/code-reviewer
 scion templates status
 ```
 
-`sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). 
+`sync` is content-aware: it hashes files and uploads only what changed, and templates carry a content hash for traceability (visible in `scion templates list`, `scion templates show`, and the Web UI). Syncing an existing template mirrors the local directory: files deleted locally are removed from the Hub copy, and sync lists them as it removes them.
 
 Beyond the CLI, project templates are a **fully managed Hub-level resource** with full CRUD, SDK, and Web UI support. A connected Hub can import a whole repository of templates server-side via the **Load Templates** action in the Web UI, and imported templates can be browsed, edited, and deleted directly within the dashboard.
 
@@ -324,7 +326,7 @@ A **harness-config** is the counterpart to a template: it holds the runtime *mec
 
 ### Model size aliases
 
-Templates should express model choice with abstract **size aliases** — `small`, `medium`, `large`, `extra-large` (`xl`) — rather than provider model names. Each harness-config maps those aliases to real models:
+Templates should express model choice with abstract **size aliases** — `small`, `medium`, `large`, `extra-large` — rather than provider model names. The shorthand tiers `s`, `m`, `l`, and `xl` are accepted too, case-insensitively (so `L` means `large`). Each harness-config maps those aliases to real models:
 
 ```yaml
 # ~/.scion/harness-configs/claude/config.yaml
@@ -349,7 +351,7 @@ model_aliases:
 A template that sets `model: large` then resolves to `opus` under Claude and `gemini-pro` under Gemini — the same role, portable across harnesses. Concrete model names still pass through unchanged (for backward compatibility) but tie the template to one harness.
 
 :::note
-Model aliases are resolved by the Hub before they are stored in the agent's `AppliedConfig` and injected as the `SCION_MODEL` environment variable. This ensures harness provision scripts receive the fully resolved concrete model name (such as `gemini-pro`) rather than an unresolved alias.
+Model aliases are resolved by the Hub before they are stored in the agent's `AppliedConfig` and injected as the `SCION_MODEL` environment variable. This ensures harness provision scripts receive the fully resolved concrete model name (such as `gemini-pro`) rather than an unresolved alias. The Hub keeps a harness-config's `model_aliases` and `model` on every write path, so tier picks resolve correctly whether an agent is created, edited, or restarted. As a fallback, harness provision scripts resolve any size alias that still reaches them through `SCION_MODEL` with the shared `scion_harness.resolve_model` helper.
 :::
 
 ### Customizing and creating variants

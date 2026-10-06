@@ -28,8 +28,8 @@ import (
 )
 
 // setBrokerAgentCeiling overrides the seeded max_agents_per_broker limit
-// (default 12, see seedLimitDefinitions) to a small value so tests can hit it
-// without creating a dozen agents.
+// (default 100, see seedLimitDefinitions) to a small value so tests can hit
+// it without creating dozens of agents.
 func setBrokerAgentCeiling(t *testing.T, s store.Store, value int64) {
 	t.Helper()
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)

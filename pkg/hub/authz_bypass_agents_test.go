@@ -116,6 +116,16 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	return srv, s
 }
 
+// bindFixtureOwner gives f.owner the project-owner binding on f.proj, for
+// tests whose intent is project-owner access. Project.OwnerID alone grants
+// nothing (ptone/scion#2586). It is not part of bypassAgentsSetup because
+// many tests bind f.owner to a narrower project role themselves, and a
+// principal holds at most one built-in membership per project.
+func bindFixtureOwner(t *testing.T, f *bypassAgentsFixture) {
+	t.Helper()
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
+}
+
 func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 	t.Helper()
 	srv, s := bypassAgentsServer(t)
@@ -147,6 +157,10 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 		OwnerID: f.owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, f.other))
+	// The owner relationship on a project agent requires active project
+	// access (ptone/scion#2141); the binding grants no permissions itself.
+	grantProjectAccessOnly(t, s, f.owner.ID, f.proj.ID)
+	grantProjectAccessOnly(t, s, f.owner.ID, f.other.ID)
 
 	// An auto-provide broker, so that agent creation can resolve a broker and
 	// the create tests exercise the authorization gate rather than dying at
@@ -568,6 +582,9 @@ func TestBypassAgents_UpdateAgentServiceAccountChecks(t *testing.T) {
 			Created:     time.Now(),
 		}
 		require.NoError(t, f.store.CreateUser(context.Background(), updater))
+		// Active project access for the owner relationship (ptone/scion#2141);
+		// the binding grants no permission, including no service account read.
+		grantProjectAccessOnly(t, f.store, updater.ID, f.proj.ID)
 
 		owned := &store.Agent{
 			ID:        uuid.New().String(),
@@ -705,9 +722,10 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("agent reads a project peer", func(t *testing.T) {
 		// CO1: same as self-read — agent.read has no AgentScopes mapping,
 		// so the credential scope restriction blocks individual agent reads.
+		// An agent caller's denial reads as not found (ptone/scion#3409).
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
+		assert.Equal(t, http.StatusNotFound, rec.Code,
 			"CO1: agent.read has no AgentScopes mapping; agent must be denied; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
@@ -784,6 +802,7 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("project owner retains full access", func(t *testing.T) {
 		// The conversion must not change the user path at all.
 		f := bypassAgentsSetup(t)
+		bindFixtureOwner(t, f)
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
 			"/api/v1/projects/"+f.proj.ID, map[string]interface{}{"name": "Renamed By Owner"})
 		assert.Equal(t, http.StatusOK, rec.Code,
@@ -814,7 +833,7 @@ func TestGetAgent_SelfRead(t *testing.T) {
 	t.Run("baseline role still cannot read a peer", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil, ScopesForRole(AgentRoleBaseline)...)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "peer read: %s", rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, "peer read: %s", rec.Body.String())
 	})
 
 	t.Run("token without project:read cannot read itself", func(t *testing.T) {
@@ -1221,6 +1240,16 @@ type bypassAgentsDevIdentity struct {
 }
 
 func (d *bypassAgentsDevIdentity) Type() string { return "dev" }
+
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification (reached through CheckAccess
+// inside canDispatchToBroker's own "user"/"dev" switch, which keys on
+// Type()). Those two classifier functions key on concrete type, not Type(),
+// so a wrapper type distinct from the production DevUser must opt in
+// explicitly, naming the dev principal/credential kinds directly.
+func (d *bypassAgentsDevIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindDev, CredentialKindDev
+}
 
 // TestBypassAgents_UnauthenticatedDenied is the floor. authorize() answers 401
 // rather than 403 for a caller with no identity at all, and no converted site

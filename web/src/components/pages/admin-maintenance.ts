@@ -27,7 +27,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface MaintenanceOperation {
   id: string;
@@ -107,6 +109,9 @@ interface UpdateAvailableResponse {
 
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state()
   private loading = true;
 
@@ -149,6 +154,14 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Whether maintenance mode is enabled. */
   @state()
   private maintenanceEnabled = false;
+
+  /**
+   * True when the hub reports break_glass: a workstation hub started in
+   * admin mode (SCION_SERVER_ADMIN_MODE / settings.yaml admin_mode) stays in
+   * maintenance whatever is saved here.
+   */
+  @state()
+  private maintenanceBreakGlass = false;
 
   /** Run detail currently being viewed. */
   @state()
@@ -700,6 +713,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (res.ok) {
         const data = await res.json();
         this.maintenanceEnabled = data.enabled;
+        this.maintenanceBreakGlass = data.break_glass === true;
       }
     } catch {
       // Silently ignore — toggle will default to off.
@@ -717,6 +731,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (res.ok) {
         const data = await res.json();
         this.maintenanceEnabled = data.enabled;
+        this.maintenanceBreakGlass = data.break_glass === true;
       }
     } catch {
       // Silently ignore — keep current state on failure.
@@ -742,14 +757,11 @@ export class ScionPageAdminMaintenance extends LitElement {
   private async applyUpdate(): Promise<void> {
     this.applyUpdateLoading = true;
     try {
-      const response = await apiFetch(
-        '/api/v1/admin/maintenance/operations/update-binary/run',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ params: {} }),
-        }
-      );
+      const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params: {} }),
+      });
 
       if (!response.ok) {
         const errMsg = await extractApiError(response, `HTTP ${response.status}`);
@@ -847,61 +859,17 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private formatDate(dateString: string | undefined): string {
     if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString, 'date');
   }
 
   private formatDateTime(dateString: string | undefined): string {
     if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString);
   }
 
   private formatRelativeTime(dateString: string | undefined): string {
-    if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (!dateString || Number.isNaN(new Date(dateString).getTime())) return '';
+    return formatRelative(dateString);
   }
 
   private formatDuration(startStr: string, endStr?: string): string {
@@ -1397,6 +1365,14 @@ export class ScionPageAdminMaintenance extends LitElement {
           </button>
           <span class="toggle-label"> ${this.maintenanceEnabled ? 'Enabled' : 'Disabled'} </span>
         </div>
+        ${this.maintenanceBreakGlass
+          ? html`<p class="section-description break-glass-notice">
+              Maintenance mode is forced on by the server's startup configuration
+              (SCION_SERVER_ADMIN_MODE or <code>admin_mode</code> in settings.yaml). Turning it off
+              here is saved but has no effect until the server is restarted without that setting.
+              <code>admin_mode</code> in settings.yaml can only be cleared by editing the file.
+            </p>`
+          : nothing}
       </div>
     `;
   }
@@ -1500,11 +1476,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         </p>
         ${ops.length === 0
           ? html`<div class="empty-inline">No operations registered.</div>`
-          : html`
-              <div class="card-list">
-                ${ops.map((op) => this.renderOperationCard(op))}
-              </div>
-            `}
+          : html` <div class="card-list">${ops.map((op) => this.renderOperationCard(op))}</div> `}
       </div>
     `;
   }

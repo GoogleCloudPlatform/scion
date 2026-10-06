@@ -1,0 +1,207 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Terraform CI — validates the HA deployment module set at deploy/terraform.
+#
+# This never touches real cloud credentials and never plans against a real
+# project. `validate` and `terraform test` both run with `-backend=false`
+# and mock providers (see configurations/*/tests/*.tftest.hcl), so nothing
+# here needs GCP access. tflint runs against local .tf files only.
+#
+# Like chart-ci.yml, this workflow does not filter by base branch: ci.yml's
+# `branches: [ main ]` filter on pull_request looks at the PR's base branch,
+# which stacked phase branches don't target. Path filtering (below) plus no
+# branch filter means this still runs on PRs based on other work-in-progress
+# branches.
+
+name: Terraform CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'deploy/terraform/**'
+      - '.github/workflows/terraform-ci.yml'
+  pull_request:
+    paths:
+      - 'deploy/terraform/**'
+      - '.github/workflows/terraform-ci.yml'
+
+permissions:
+  contents: read
+
+env:
+  # Matches configurations/*/versions.tf's required_version floor (>= 1.9)
+  # and the .terraform.lock.hcl provider hashes, which were generated
+  # against this version.
+  TF_VERSION: '1.9.8'
+  TF_IN_AUTOMATION: 'true'
+
+jobs:
+  fmt-validate-test:
+    name: fmt / validate / terraform test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        working-directory: deploy/terraform
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform init + validate (shared-infra root)
+        working-directory: deploy/terraform/configurations/shared-infra
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: terraform init + validate (hub root)
+        working-directory: deploy/terraform/configurations/hub
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: terraform init + validate (every module)
+        run: |
+          set -euo pipefail
+          checked=0
+          while IFS= read -r moddir; do
+            checked=$((checked + 1))
+            echo "::group::validate $moddir"
+            (cd "$moddir" && terraform init -backend=false -input=false && terraform validate)
+            echo "::endgroup::"
+          done < <(find deploy/terraform/modules -mindepth 1 -maxdepth 1 -type d | sort)
+          echo "validated $checked module(s)"
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no modules found under deploy/terraform/modules -- the discovery loop is broken"
+            exit 1
+          fi
+
+      # Both roots' tests use mock_provider (google, google-beta, kubernetes,
+      # tls, random, time) -- see the header comments in
+      # configurations/*/tests/*.tftest.hcl for exactly what this does and
+      # does not prove. No credentials, no network access to GCP.
+      - name: terraform test (shared-infra root)
+        working-directory: deploy/terraform/configurations/shared-infra
+        run: terraform test
+
+      - name: terraform test (hub root)
+        working-directory: deploy/terraform/configurations/hub
+        run: terraform test
+
+  tflint:
+    name: tflint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
+        with:
+          tflint_version: v0.64.0
+
+      - name: tflint (both roots and every module)
+        run: |
+          set -euo pipefail
+          checked=0
+          failed=0
+          while IFS= read -r dir; do
+            checked=$((checked + 1))
+            echo "::group::tflint $dir"
+            if ! tflint --chdir="$dir"; then
+              failed=$((failed + 1))
+            fi
+            echo "::endgroup::"
+          done < <(
+            {
+              echo deploy/terraform/configurations/shared-infra
+              echo deploy/terraform/configurations/hub
+              find deploy/terraform/modules -mindepth 1 -maxdepth 1 -type d
+            } | sort
+          )
+          echo "tflint: $((checked - failed))/${checked} director(ies) passed"
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no directories found to lint -- the discovery loop is broken"
+            exit 1
+          fi
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::tflint reported issues in ${failed} director(ies)"
+            exit 1
+          fi
+
+  destroy-protection-selftest:
+    name: verify-destroy-protection.sh --selftest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      # Invoked by path, never piped into a shell: the script's own
+      # self-lints (see its header) only mean something when it can read
+      # its own source via $0, which piping into `bash -s` would break.
+      #
+      # Any non-zero exit is a failure here, including exit 2 ("the harness
+      # could not run"). That is NOT a neutral/skipped result -- a harness
+      # that silently couldn't run its safety checks is exactly the false
+      # green this script exists to prevent.
+      - name: Run --selftest
+        run: |
+          set +e
+          deploy/terraform/tools/verify-destroy-protection.sh --selftest
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::verify-destroy-protection.sh --selftest exited $rc (non-zero is always a failure, including exit 2 'harness could not run' -- see the script's header)"
+            exit 1
+          fi
+
+  settingscheck:
+    name: settingscheck (settings.yaml.tftpl decode)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # settingscheck renders settings.yaml.tftpl via the real `terraform`
+      # CLI (see the package doc comment for why), so terraform must be on
+      # PATH here, unlike the plain `go test ./...` in ci.yml's main job.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: go test ./deploy/terraform/tools/settingscheck/...
+        run: go test -v -count=1 ./deploy/terraform/tools/settingscheck/...

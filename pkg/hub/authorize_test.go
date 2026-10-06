@@ -249,9 +249,19 @@ func TestAuthorize_DenialIsLogged(t *testing.T) {
 }
 
 func TestAuthorize_NoDenialLogWhenAllowed(t *testing.T) {
+	// authzHelperCaptureLogs must run before testServer: testServer's New()
+	// call binds the Server's subsystem loggers (logging.Subsystem) to
+	// whatever slog.Default() is at that moment, and that binding does not
+	// follow a later slog.SetDefault swap. Capturing afterward could leave
+	// logs written through a subsystem logger unobserved by buf.
+	buf := authzHelperCaptureLogs(t)
 	srv, s := testServer(t)
 	authzHelperSeedAdmin(t, s)
-	buf := authzHelperCaptureLogs(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// the capture must have observed something. This guards against a
+	// misrouted capture making the "no denial" check below pass vacuously.
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	rec := httptest.NewRecorder()
 	if !srv.authorize(rec, authzHelperRequest(authzHelperAdmin()), Resource{Type: "agent", ID: "x"}, ActionRead) {
@@ -727,7 +737,18 @@ func TestAuthorizeAgentLifecycle_DenialIsLogged(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRequireAdmin_IdentityKinds(t *testing.T) {
+	// authzHelperCaptureLogs must run before testServer: testServer's New()
+	// call binds the Server's subsystem loggers (logging.Subsystem) to
+	// whatever slog.Default() is at that moment, and that binding does not
+	// follow a later slog.SetDefault swap. Capturing afterward could leave
+	// logs written through a subsystem logger unobserved by buf.
+	buf := authzHelperCaptureLogs(t)
 	srv, _ := testServer(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// the capture must have observed something. This guards against a
+	// misrouted capture making the "no denial" checks below pass vacuously.
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	tests := []struct {
 		name       string
@@ -778,7 +799,9 @@ func TestRequireAdmin_IdentityKinds(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			buf := authzHelperCaptureLogs(t)
+			// The subtests run sequentially (none call t.Parallel), so a
+			// shared buffer reset at the start of each case is safe.
+			buf.Reset()
 			rec := httptest.NewRecorder()
 
 			_, ok := srv.requireAdmin(rec, authzHelperRequest(tc.identity))

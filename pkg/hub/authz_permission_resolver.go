@@ -52,10 +52,6 @@ type resourceActionKey struct {
 // relationship rows use for it. Adding an entry requires naming its call
 // sites; a newly registered permission should be used instead.
 var unregisteredResourcePermissions = map[resourceActionKey]string{
-	// handlers_messages.go (message list, message stream) and
-	// handlers_logs.go (agent log read): full-visibility check.
-	// TODO(ptone/scion#2120): drop this entry once agent.manage is registered.
-	{ResourceType: "agent", Action: ActionManage}: "agent.manage",
 	// handlers_env_secrets.go and handlers_runtime_brokers.go: runtime
 	// broker scoped env/secret and broker record checks.
 	{ResourceType: "runtime_broker", Action: ActionRead}:   "runtime_broker.read",

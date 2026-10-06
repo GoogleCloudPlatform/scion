@@ -22,7 +22,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 var doctorCmd = &cobra.Command{
@@ -33,9 +35,13 @@ authentication tokens, hub connectivity, and ancillary services.
 
 Checks performed:
   - Environment variables (SCION_HUB_ENDPOINT, SCION_AGENT_ID, etc.)
+  - Transport credential (IAP / Cloud Run invoker): header mode, audience,
+    source in effect, expiry of the injected and refreshed values, and the
+    outcome of the last refresh (never the token itself)
   - Token file presence, format, and expiry
   - Hub reachability (unauthenticated health check)
-  - Token validity (authenticated status update and a read-only agent lookup)
+  - Token validity (authenticated status update and a read-only agent lookup),
+    telling a platform-proxy rejection apart from a hub rejection
   - GCP metadata server (if configured)
   - GitHub App token (if configured)
 
@@ -58,7 +64,11 @@ func runDoctor() int {
 	failures += checkEnvironment()
 
 	// --- Transport Auth ---
-	transportSrc := checkTransportAuth()
+	var diag doctorDiag
+	transportSrc := checkTransportAuth(&diag)
+	if diag.transportFailed() {
+		failures++
+	}
 
 	// --- Token ---
 	tokenExpiry, tokenSubject := checkToken()
@@ -73,7 +83,7 @@ func runDoctor() int {
 	// --- Authentication ---
 	tokenValid := false
 	if hubURL != "" && hubReachable {
-		tokenValid = checkAuthentication(hubURL, &failures, transportSrc)
+		tokenValid = checkAuthentication(hubURL, &failures, transportSrc, &diag)
 	}
 
 	// --- GCP Metadata ---
@@ -92,7 +102,7 @@ func runDoctor() int {
 	checkHarnessProcess(&failures)
 
 	// --- Remediation ---
-	printRemediation(tokenExpiry, tokenSubject, tokenValid)
+	printRemediation(tokenExpiry, tokenSubject, tokenValid, diag)
 
 	if failures > 0 {
 		fmt.Printf("\n[RESULT] %d check(s) FAILED\n", failures)
@@ -213,38 +223,84 @@ func resolveHubURL() string {
 	return hubURL
 }
 
-func checkTransportAuth() transportauth.TokenSource {
+// checkTransportAuth reports how the transport credential (IAP / Cloud Run
+// invoker) is configured: the header mode, audience, which source is in
+// effect and its expiry. It never prints token values. Findings are
+// recorded in diag.
+func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 	fmt.Println("\n--- Transport Auth ---")
 
-	src, err := transportauth.FromEnv()
+	// Both file-backed steps read with sciontool's guarded reader, as for
+	// the agent token file.
+	src, err := transportauth.FromEnvWithReader(hub.ReadTransportTokenFileGuarded)
 	if err != nil {
 		fmt.Printf("[WARN] Transport auth error: %v\n", err)
 		return nil
 	}
 	if src == nil {
+		src = scionHomeLateFileSource()
+	}
+	if src == nil {
+		if mode := os.Getenv(transportauth.EnvTransportMode); transportauth.IsProxyMode(mode) {
+			// A proxy guards the hub but no transport token has been
+			// received yet (for example the dispatch-time mint failed).
+			// A later refresh or reset-auth installs one.
+			// The path shown is the scion user's file, which is where the
+			// agent writes it, even when doctor runs with another HOME.
+			diag.transportConfigured = true
+			diag.transportMissing = true
+			fmt.Println("[INFO] Transport Auth: hub-provided token (awaiting first token)")
+			printTransportModeAndAudience()
+			fmt.Printf("[FAIL] Transport credential: none received yet (no %s value and no file at %s)\n",
+				transportauth.EnvTransportToken, hub.TransportTokenFilePath())
+			reportTransportRefreshStatus(diag)
+			return nil
+		}
 		fmt.Println("[INFO] Transport Auth: none")
 		return nil
 	}
 
-	switch src.(type) {
+	diag.transportConfigured = true
+
+	switch s := src.(type) {
+	case *transportauth.FileSource:
+		fmt.Println("[INFO] Transport Auth: hub-provided token")
+		printTransportModeAndAudience()
+		reportFileSource(s.Status(), diag)
 	case *transportauth.InjectedSource:
-		expiry := src.Expiry()
-		if expiry.IsZero() {
-			fmt.Println("[ OK ] Transport Auth: injected")
-		} else {
-			fmt.Printf("[ OK ] Transport Auth: injected (expires %s)\n", expiry.Format(time.RFC3339))
-		}
+		fmt.Println("[INFO] Transport Auth: hub-provided token")
+		printTransportModeAndAudience()
+		printExpiryLine("injected value", src.Expiry(), diag)
 	case *transportauth.MetadataSource:
-		audience := os.Getenv(transportauth.EnvTransportAudience)
-		if audience == "" {
-			audience = os.Getenv(transportauth.EnvHubOIDCAudience)
-		}
-		fmt.Printf("[ OK ] Transport Auth: metadata (audience: %s)\n", audience)
+		fmt.Println("[ OK ] Transport Auth: metadata server (self-refreshing)")
+		printTransportModeAndAudience()
 	default:
 		fmt.Println("[ OK ] Transport Auth: active")
+		printTransportModeAndAudience()
 	}
 
 	return src
+}
+
+// scionHomeLateFileSource returns a file-backed source for the scion
+// user's transport token file when a proxy mode is set and that file
+// exists. FromEnv looks under $HOME, so doctor run with another HOME (for
+// example exec'd as root) would otherwise miss a token the agent received
+// after start. The file is read with sciontool's guarded reader, as for
+// the agent token file. It returns nil outside a proxy mode or when the
+// file is absent.
+func scionHomeLateFileSource() transportauth.TokenSource {
+	if !transportauth.IsProxyMode(os.Getenv(transportauth.EnvTransportMode)) {
+		return nil
+	}
+	path := hub.TransportTokenFilePath()
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return nil
+	}
+	return hub.NewTransportTokenFileSource()
 }
 
 func wrapTransport(client *http.Client, src transportauth.TokenSource) {
@@ -261,16 +317,26 @@ func wrapTransport(client *http.Client, src transportauth.TokenSource) {
 func checkHubConnectivity(hubURL string, transportSrc transportauth.TokenSource) bool {
 	fmt.Println("\n--- Hub Connectivity ---")
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	wrapTransport(client, transportSrc)
+	client := newDoctorHTTPClient(transportSrc)
 	healthURL := strings.TrimSuffix(hubURL, "/") + "/healthz"
 
 	resp, err := client.Get(healthURL)
 	if err != nil {
-		fmt.Printf("[FAIL] Hub unreachable at %s: %v\n", hubURL, err)
+		fmt.Printf("[FAIL] Hub unreachable at %s: %s\n", hubURL, describeRequestError(err))
 		return false
 	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
+
+	if by := classifyRejection(resp, body); by == rejectedByProxy {
+		fmt.Printf("[WARN] Hub endpoint answered %d at %s: %s\n", resp.StatusCode, healthURL, describeRejection(by))
+		return true
+	}
+	if target, ok := redirectTarget(resp); ok {
+		fmt.Printf("[WARN] Hub endpoint answered %d at %s: redirected to %s (redirects are not followed)\n",
+			resp.StatusCode, healthURL, target)
+		return true
+	}
 
 	if resp.StatusCode < 400 {
 		fmt.Printf("[ OK ] Hub reachable at %s\n", hubURL)
@@ -278,10 +344,28 @@ func checkHubConnectivity(hubURL string, transportSrc transportauth.TokenSource)
 	}
 
 	fmt.Printf("[WARN] Hub returned %d at %s\n", resp.StatusCode, healthURL)
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Println("[INFO] Some platforms reserve /healthz (Cloud Run, for example, may answer it itself), " +
+			"so a 404 here does not by itself mean the hub is down. The Authentication checks below use real hub routes.")
+	}
 	return true
 }
 
-func checkAuthentication(hubURL string, failures *int, transportSrc transportauth.TokenSource) bool {
+// newDoctorHTTPClient returns a client that adds the transport credential
+// (when configured) and does not follow redirects, so a platform proxy's
+// redirect to a sign-in page is visible rather than followed.
+func newDoctorHTTPClient(transportSrc transportauth.TokenSource) *http.Client {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	wrapTransport(client, transportSrc)
+	return client
+}
+
+func checkAuthentication(hubURL string, failures *int, transportSrc transportauth.TokenSource, diag *doctorDiag) bool {
 	fmt.Println("\n--- Authentication ---")
 
 	agentID := os.Getenv("SCION_AGENT_ID")
@@ -293,8 +377,7 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 		return false
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	wrapTransport(client, transportSrc)
+	client := newDoctorHTTPClient(transportSrc)
 
 	// Test with a heartbeat (least disruptive authenticated call)
 	statusURL := fmt.Sprintf("%s/api/v1/agents/%s/status",
@@ -309,18 +392,23 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("[FAIL] Auth check failed: %v\n", err)
+		fmt.Printf("[FAIL] Auth check failed: %s\n", describeRequestError(err))
 		*failures++
 		return false
 	}
 	respBody, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	if resp.StatusCode < 400 {
-		fmt.Println("[ OK ] Authenticated successfully (heartbeat accepted)")
-	} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		fmt.Printf("[FAIL] Token rejected by hub (%d): %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
+	if by := classifyRejection(resp, respBody); by != rejectedByNone {
+		diag.authRejectedBy = by
+		fmt.Printf("[FAIL] Heartbeat rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), rejectionDetail(resp, respBody))
 		*failures++
+	} else if target, ok := redirectTarget(resp); ok {
+		diag.authRedirectedTo = target
+		fmt.Printf("[FAIL] Heartbeat not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
+		*failures++
+	} else if resp.StatusCode < 400 {
+		fmt.Println("[ OK ] Authenticated successfully (heartbeat accepted)")
 	} else {
 		fmt.Printf("[WARN] Hub returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 	}
@@ -348,21 +436,29 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 
 	resp, err = client.Do(req)
 	if err != nil {
-		fmt.Printf("[FAIL] Agent lookup check failed: %v\n", err)
+		fmt.Printf("[FAIL] Agent lookup check failed: %s\n", describeRequestError(err))
 		*failures++
 		return false
 	}
 	respBody, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
+	by := classifyRejection(resp, respBody)
+	target, redirected := redirectTarget(resp)
 	switch {
+	case by != rejectedByNone:
+		diag.authRejectedBy = by
+		fmt.Printf("[FAIL] Agent lookup rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), rejectionDetail(resp, respBody))
+		*failures++
+		return false
+	case redirected:
+		diag.authRedirectedTo = target
+		fmt.Printf("[FAIL] Agent lookup not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
+		*failures++
+		return false
 	case resp.StatusCode < 400:
 		fmt.Println("[ OK ] Agent record accessible (read-only check; credentials untouched)")
 		return true
-	case resp.StatusCode == 401 || resp.StatusCode == 403:
-		fmt.Printf("[FAIL] Agent lookup rejected (%d): %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
-		*failures++
-		return false
 	default:
 		fmt.Printf("[WARN] Agent lookup returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 		return false
@@ -479,7 +575,7 @@ func checkGCPTokenAcquisition(port int, failures *int) {
 }
 
 func checkGitHubToken(failures *int) {
-	if os.Getenv("SCION_GITHUB_APP_ENABLED") != "true" {
+	if !hub.IsGitHubAppEnabled() {
 		return
 	}
 
@@ -536,15 +632,36 @@ func checkTelemetryPipeline(failures *int) {
 }
 
 func checkWorkspaceGit(failures *int) {
-	if os.Getenv("SCION_WORKSPACE_GIT") == "" {
+	if !util.ParseBoolEnv("SCION_WORKSPACE_GIT", false) {
 		return
 	}
 
 	fmt.Println("\n--- Workspace/Git State ---")
 
+	if os.Geteuid() == 0 {
+		// This check passes HOME through so `git status` picks up the
+		// invoking user's own gitconfig (needed for a normal, non-root
+		// doctor run against a shared workspace with a different owning
+		// uid — see safe.directory below). Doing that as root would let a
+		// workload-writable ~/.gitconfig ("safe.directory=*") or
+		// /workspace/.git/config ("core.fsmonitor=<cmd>") run arbitrary
+		// code as root; no shipped path runs doctor as root, so this is a
+		// belt-and-suspenders refusal for a human invoking it that way
+		// directly, not a case this binary needs to actually support.
+		fmt.Println("[INFO] Running as root — skipping git workspace check (would trust a workload-controlled gitconfig)")
+		return
+	}
+
 	gitCtx, gitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer gitCancel()
-	cmd := exec.CommandContext(gitCtx, "git", "-C", "/workspace", "status", "--porcelain")
+	gitPath, err := rootexec.Resolve("git")
+	if err != nil {
+		fmt.Printf("[FAIL] could not resolve a trusted git binary: %v\n", err)
+		*failures++
+		return
+	}
+	cmd := exec.CommandContext(gitCtx, gitPath, "-C", "/workspace", "status", "--porcelain")
+	cmd.Env = rootexec.Env("HOME=" + os.Getenv("HOME"))
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("[FAIL] Git workspace corrupted: %v\n", err)
 		*failures++
@@ -580,7 +697,13 @@ func checkHarnessProcess(failures *int) {
 	}
 
 	// Fallback: search for known harness process names.
-	cmd := exec.Command("pgrep", "-f", "claude|gemini|codex")
+	pgrepPath, err := rootexec.Resolve("pgrep")
+	if err != nil {
+		fmt.Println("[INFO] Cannot determine harness process status")
+		return
+	}
+	cmd := exec.Command(pgrepPath, "-f", "claude|gemini|codex")
+	cmd.Env = rootexec.Env()
 	output, err := cmd.Output()
 	if err != nil {
 		fmt.Println("[INFO] Cannot determine harness process status")
@@ -595,16 +718,36 @@ func checkHarnessProcess(failures *int) {
 	}
 }
 
-func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid bool) {
+func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid bool, diag doctorDiag) {
 	now := time.Now()
 
 	// Only print remediation if there's a problem
 	expired := !tokenExpiry.IsZero() && now.After(tokenExpiry)
-	if !expired && tokenValid {
+	transportProblem := diag.transportFailed() || diag.authRejectedBy == rejectedByProxy
+	if !expired && tokenValid && !transportProblem && diag.authRedirectedTo == "" {
 		return
 	}
 
 	fmt.Println("\n--- Remediation ---")
+
+	// A redirect means the probes never reached an endpoint that answered
+	// them, so neither credential was checked.
+	if diag.authRedirectedTo != "" && diag.authRejectedBy == rejectedByNone && !transportProblem {
+		fmt.Printf("[!] The hub endpoint redirected authenticated requests to %s, so authentication could not be confirmed.\n",
+			diag.authRedirectedTo)
+		fmt.Println("[!] Check that SCION_HUB_ENDPOINT uses the hub's final URL (scheme and host), " +
+			"and that nothing between the agent and the hub redirects API requests.")
+		if expired {
+			fmt.Println("[!] The agent token has also expired. Run from the host:  scion agent reset-auth <agent-name>")
+		}
+		return
+	}
+
+	// A platform proxy rejection means the agent token never reached the
+	// hub, so hub-side advice (signing keys) would be misleading.
+	if printTransportRemediation(diag) && diag.authRejectedBy != rejectedByHub && !expired {
+		return
+	}
 
 	if expired && !tokenValid {
 		fmt.Println("[!] Token is expired and cannot be refreshed.")

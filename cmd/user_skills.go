@@ -153,23 +153,23 @@ func runUserSkillsList(cmd *cobra.Command, args []string) error {
 func runUserSkillsAdd(cmd *cobra.Command, args []string) error {
 	if userSkillsFromDir != "" {
 		if userSkillsAs != "" || userSkillsOptional {
-			return fmt.Errorf("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
+			return newUsageError("--as and --optional cannot be used with --from-directory (they apply only to single-skill add)")
 		}
 		if len(args) > 0 {
-			return fmt.Errorf("cannot combine a skill URI argument with --from-directory; choose one")
+			return newUsageError("cannot combine a skill URI argument with --from-directory; choose one")
 		}
 		return runUserSkillsFromDirectory(cmd, userSkillsFromDir)
 	}
 
 	if len(args) == 0 {
-		return fmt.Errorf("skill URI or --from-directory is required")
+		return newUsageError("skill URI or --from-directory is required")
 	}
 
 	skillURI := args[0]
 
 	normalized, err := api.NormalizeSkillURI(skillURI)
 	if err != nil {
-		return fmt.Errorf("invalid skill URI: %w", err)
+		return newUsageError("invalid skill URI: %w", err)
 	}
 	if normalized != skillURI {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Note: URI transformed → %s\n", normalized)
@@ -247,7 +247,7 @@ func runUserSkillsFromDirectory(cmd *cobra.Command, dirURL string) error {
 
 	// Fix 2: Client-side URL validation.
 	if !looksLikeGitHubDirectoryURL(dirURL) {
-		return fmt.Errorf("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
+		return newUsageError("--from-directory must be an https://github.com/.../tree/<ref>/... URL")
 	}
 
 	// Fix 4: Split nil-error check.

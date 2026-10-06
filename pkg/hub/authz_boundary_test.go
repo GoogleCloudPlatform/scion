@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -50,6 +51,59 @@ func TestTokenBoundary_Valid(t *testing.T) {
 				t.Errorf("TokenBoundary(%+v).Valid() = %v, want %v", c.b, got, c.want)
 			}
 		})
+	}
+}
+
+// TestUATBoundary_StoreAndHubValidityAgree pins that pkg/hub's
+// TokenBoundary.Valid() and pkg/store's UserAccessToken.ValidateBoundary
+// agree on the shared kind/project-id-presence rule (permissions.
+// ValidBoundary) they both call. pkg/store cannot import pkg/hub, so this
+// test, which imports both, compares the two validators over the full
+// cross-product of kinds and project IDs. store's ValidateBoundary
+// additionally requires a "project" boundary's ID to parse as a non-nil
+// UUID, since pkg/store owns that ID's wire representation. That is a strict
+// narrowing, never a disagreement: whenever store accepts, hub accepts, and
+// hub accepts while store rejects only for a project ID that is not a
+// non-nil UUID.
+func TestUATBoundary_StoreAndHubValidityAgree(t *testing.T) {
+	const (
+		validUUID = "3f8e2b0a-6c1d-4a2f-9e77-9d3b1c5a2e10"
+		nonUUID   = "not-a-uuid"
+		nilUUID   = "00000000-0000-0000-0000-000000000000"
+	)
+	kinds := []string{"project", "hub", "", "bogus"}
+	ids := []string{"", validUUID, nonUUID, nilUUID}
+
+	for _, kind := range kinds {
+		for _, projectID := range ids {
+			// Expected results, stated from the rule rather than from
+			// either implementation.
+			wantHubValid := (kind == "project" && projectID != "") || (kind == "hub" && projectID == "")
+			wantStoreOK := (kind == "project" && projectID == validUUID) || (kind == "hub" && projectID == "")
+
+			t.Run(fmt.Sprintf("kind=%q/project_id=%q", kind, projectID), func(t *testing.T) {
+				hubValid := TokenBoundary{Kind: BoundaryKind(kind), ProjectID: projectID}.Valid()
+				if hubValid != wantHubValid {
+					t.Errorf("TokenBoundary.Valid() = %v, want %v", hubValid, wantHubValid)
+				}
+
+				storeErr := (&store.UserAccessToken{BoundaryKind: kind, ProjectID: projectID}).ValidateBoundary()
+				storeOK := storeErr == nil
+				if storeOK != wantStoreOK {
+					t.Errorf("store.ValidateBoundary() ok = %v (err=%v), want %v", storeOK, storeErr, wantStoreOK)
+				}
+				if !storeOK && !errors.Is(storeErr, store.ErrInvalidUATBoundary) {
+					t.Errorf("store.ValidateBoundary() error %v does not wrap ErrInvalidUATBoundary", storeErr)
+				}
+
+				if storeOK && !hubValid {
+					t.Errorf("store accepted but hub rejected: validators disagree")
+				}
+				if hubValid && !storeOK && (kind != "project" || (projectID != nonUUID && projectID != nilUUID)) {
+					t.Errorf("hub accepted but store rejected for a reason other than the project ID's UUID form")
+				}
+			})
+		}
 	}
 }
 
@@ -2218,20 +2272,31 @@ func TestValidRealProjectScopeKinds_MatchesReviewedScopeKindResourceTypes(t *tes
 	}
 }
 
-// TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered
-// pins the documented status of the three pre-registered material-delivery
-// rows: registryResourceType returns "" for a permission ID that does not
-// exist in Registry, so no permission today can produce a class whose
-// ResourceType equals "secret"/"env_var"/"skill_injection" — these rows
-// cannot be reached through validateRealProjectClass until F.2 adds the
-// corresponding Registry permission rows.
-func TestValidRealProjectScopeKinds_MaterialDeliveryRowsAreInertUntilRegistered(t *testing.T) {
-	for _, rt := range []string{"secret", "env_var", "skill_injection"} {
+// TestValidRealProjectScopeKinds_MaterialRowsNowLive pins that the three
+// material resource types resolve to live Registry permissions, so
+// validateRealProjectClass accepts a registered scope kind for them and
+// still rejects a mismatched resource type. A real material permission
+// paired with one of its registered ScopeKind values validates; a class
+// whose ResourceType does not match the permission's own resource type is
+// rejected.
+func TestValidRealProjectScopeKinds_MaterialRowsNowLive(t *testing.T) {
+	for _, rt := range []string{permissions.ResourceSecret, permissions.ResourceEnvVar, permissions.ResourceSkillInjection} {
+		found := false
 		for _, p := range permissions.Registry {
 			if p.Resource == rt {
-				t.Errorf("resource type %q now has a live Registry permission (%q) — validRealProjectScopeKinds's comment describing it as inert is stale and must be updated", rt, p.ID)
+				found = true
+				break
 			}
 		}
+		if !found {
+			t.Errorf("resource type %q has no live Registry permission", rt)
+		}
+	}
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject}); err != nil {
+		t.Errorf("secret.deliver with a registered scope kind should validate: %v", err)
+	}
+	if err := validateRealProjectClass("secret.deliver", ProjectTargetClass{ResourceType: permissions.ResourceEnvVar, ScopeKind: store.ScopeProject}); err == nil {
+		t.Error("a class resource type mismatched with the permission's own resource type must still be rejected")
 	}
 }
 

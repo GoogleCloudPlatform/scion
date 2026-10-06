@@ -59,12 +59,29 @@ func doRequestAsUser(t *testing.T, srv *Server, user *store.User, method, path s
 // Both are hub-members. Returns the server, store, users, and project.
 func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *store.User, *store.Project) {
 	t.Helper()
-
 	srv, s := testServer(t)
+	alice, bob, project := setupDemoPolicyOn(t, srv, s)
+	return srv, s, alice, bob, project
+}
+
+// setupDemoPolicyTestWithFault is setupDemoPolicyTest with a switch-gated
+// store wrapper (see installStoreFault) installed before the fixture's
+// audited setup (seedProjectCreatorMembership emits a mutation audit whose
+// goroutine reads srv.store). Tests call fault.Arm() where they used to
+// assign srv.store, which would race that goroutine (ptone/scion#3184).
+func setupDemoPolicyTestWithFault[W store.Store](t *testing.T, wrap func(inner store.Store, fault *storeFaultSwitch) W) (*Server, store.Store, *store.User, *store.User, *store.Project, W, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, wrapped, fault := testServerWithStoreFault(t, wrap)
+	alice, bob, project := setupDemoPolicyOn(t, srv, s)
+	return srv, s, alice, bob, project, wrapped, fault
+}
+
+func setupDemoPolicyOn(t *testing.T, srv *Server, s store.Store) (alice, bob *store.User, project *store.Project) {
+	t.Helper()
 	ctx := context.Background()
 
 	// Create users
-	alice := &store.User{
+	alice = &store.User{
 		ID:          tid("user-alice"),
 		Email:       "alice@test.com",
 		DisplayName: "Alice",
@@ -74,7 +91,7 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	}
 	require.NoError(t, s.CreateUser(ctx, alice))
 
-	bob := &store.User{
+	bob = &store.User{
 		ID:          tid("user-bob"),
 		Email:       "bob@test.com",
 		DisplayName: "Bob",
@@ -89,7 +106,7 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	ensureHubMembership(ctx, s, bob.ID)
 
 	// Create a project owned by alice
-	project := &store.Project{
+	project = &store.Project{
 		ID:        tid("project-demo"),
 		Name:      "Demo Project",
 		Slug:      "demo-project",
@@ -100,9 +117,9 @@ func setupDemoPolicyTest(t *testing.T) (*Server, store.Store, *store.User, *stor
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// Create project members group and policy (simulates what project creation handler does).
-	// Phase 1F: createProjectMembersGroup now also creates the role binding.
-	srv.createProjectMembersGroup(ctx, project)
+	// Create the creator's owner binding and the members group (simulates
+	// what the project creation handler does).
+	srv.seedProjectCreatorMembership(ctx, project)
 
-	return srv, s, alice, bob, project
+	return alice, bob, project
 }

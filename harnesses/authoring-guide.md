@@ -184,24 +184,31 @@ model_aliases:
 Templates reference abstract sizes. Provide all four conventional aliases.
 
 Scion delivers the agent's model to the container in the `SCION_MODEL` env
-var — that is the only live channel. (`ctx.model_resolution` reads a manifest
-key that the Go side never writes; see changelog 2026-07-20. Don't build on
-it.) `SCION_MODEL` may still carry a raw tier name, so resolve it in
-`provision.py`:
+var — that is the only live channel. `SCION_MODEL` may still carry a raw tier
+name (e.g. on resume/restart paths where the Go side had no alias table to
+resolve against), so resolve it in `provision.py` with the shared helper:
 
 ```python
-raw = os.environ.get("SCION_MODEL", "").strip()
-aliases = ctx.harness_config.get("model_aliases") or {}
-model = aliases.get(raw.lower(), raw) or "<your default>"
+model = scion_harness.resolve_model(ctx) or "<your default>"
 ```
 
-Mirror `config.NormalizeModelAlias` / `config.ResolveModelAlias`
-(`pkg/config/templates.go`) when you normalize: Scion also passes
-`--model <resolved>` on the CLI command line when the agent has a model
-configured, and a harness-side spelling the Go side does not accept would
-make the two disagree. Then write the result to the tool's native settings
-file or the env overlay. Do **not** pin the tool's model env var in the `env`
-block below — see the precedence note there.
+`scion_harness.resolve_model(ctx)` (`harnesses/scion_harness.py`) is a Python
+port of `config.NormalizeModelAlias` / `config.ResolveModelAlias`
+(`pkg/config/templates.go`): it reads `SCION_MODEL`, normalizes shorthand
+(s/m/l/xl and case) the same way Go does to recognize a size tier, and maps
+a recognized tier through `ctx.harness_config["model_aliases"]`, returning
+`""` when nothing is set. Concrete, non-tier names are returned with their
+original case — unlike Go, which lower-cases them too — because `SCION_MODEL`
+can arrive un-normalized from a path Go never touches (an explicit
+template/hub `env:` entry), and case-sensitive concrete IDs are real (e.g.
+OpenAI fine-tuned model suffixes). Scion also passes `--model <resolved>` on
+the CLI command line when the agent has a model configured, so a harness-side
+spelling the Go side does not accept for a *tier* would make the two
+disagree — that is why tier normalization must stay in lockstep with the Go
+side, which `resolve_model` already does for you. Then write the result to
+the tool's native settings file or the env overlay.
+Do **not** pin the tool's model env var in the `env` block below — see the
+precedence note there.
 
 ### Environment
 
@@ -430,9 +437,10 @@ helpers), never from `os.environ`.
 `agent_name`, `agent_home`, `agent_workspace`, `harness_bundle_dir`,
 `harness_config` (your parsed config.yaml — read `instructions_file`,
 `system_prompt_mode`, etc. from here rather than hardcoding), `inputs` /
-`outputs` paths, and `platform`. (`ProvisionContext.model_resolution` reads a
-`model_resolution` key that `ProvisionManifest` does not emit — it is always
-empty; use `SCION_MODEL` instead.)
+`outputs` paths, and `platform`. For the model, use
+`scion_harness.resolve_model(ctx)`, which reads `SCION_MODEL` and maps it
+through `harness_config["model_aliases"]` — see the Model resolution section
+above.
 
 ### What provision.py must do
 
@@ -492,8 +500,12 @@ assert scion_harness.INTERFACE_VERSION >= 2
 ```
 
 (Bundles inside the scion repo itself are kept in sync mechanically via
-`go generate ./harnesses/`, which stamps a `GENERATED FILE` header; external
-bundles just track the canonical file.)
+`go run ./harnesses/gen`, which stamps a `GENERATED FILE` header; external
+bundles just track the canonical file. Run it from the repo root — the
+`//go:generate` directive on this file resolves `gen`'s paths against the
+package directory, not the repo root, so `go generate ./harnesses/...`
+itself fails with "no such file or directory"; `go run ./harnesses/gen` is
+the command that actually works.)
 
 Key API surface:
 
@@ -503,12 +515,24 @@ Key API surface:
   unknown commands).
 - **`ProvisionContext`** — properties: `bundle_dir`, `inputs_dir`, `home`,
   `workspace`, `harness_config`, `candidates`, `explicit_type`, `env_keys`,
-  `file_paths`, `env_secret_files`, `file_secret_files`, `telemetry`,
-  `model_resolution` (always empty — see above). Methods:
-  `read_secret(name)` / `read_file_secret(name)`
+  `file_paths`, `env_secret_files`, `file_secret_files`, `telemetry`.
+  Methods: `read_secret(name)` / `read_file_secret(name)`
   (staged secret values, trailing newline stripped), `read_input_text(name)`,
   `select_auth(spec)`, `write_outputs(resolved, env=, extra=)`,
   `info()` / `warn()` (stderr).
+- **`resolve_model(ctx)`** — reads `SCION_MODEL`, normalizes shorthand (see
+  the Model resolution section above), and maps the result through
+  `ctx.harness_config["model_aliases"]`; returns `""` when nothing is set.
+- **`resolve_thinking(ctx)`** — reads `SCION_THINKING_LEVEL` (0-100), parses
+  and clamps it with `parse_thinking_level`, and maps it through
+  `ctx.harness_config["thinking"]` (the config.yaml `thinking:` block:
+  `levels: [{max, value}]` plus optional `default`) via `map_thinking_level`.
+  Returns the native value string, or `None` when the provisioner should emit
+  nothing. Writing the value to the harness's native knob stays in
+  provision.py. Requires `INTERFACE_VERSION >= 3`. Three writers ship as
+  examples: codex writes a TOML key (`model_reasoning_effort`), antigravity
+  adds a CLI flag in its wrapper script (`agy --effort`), and claude adds an
+  env var to the `write_outputs(env=...)` overlay (`CLAUDE_CODE_EFFORT_LEVEL`).
 - **Auth engine** — `AuthSpec(harness, [methods])` with
   `env_method(name, any_of=/all_of=, hint=, env_fallback=)` and
   `file_method(name, path=, secret_key=, hint=)`. `select_auth` honors an
@@ -532,8 +556,60 @@ Key API surface:
 - **File helpers** — `atomic_write_json`, `atomic_write_text` (tmp +
   `os.replace`), `expand_path`, `load_json`,
   `read_json_skipping_comment_lines`; TOML emit/reconcile helpers:
-  `toml_escape`, `toml_inline_table`, `toml_string_array`,
-  `strip_toml_sections` (tomllib is read-only, so TOML editing is manual).
+  `toml_escape`, `toml_inline_table`, `toml_string_array` (tomllib is
+  read-only, so TOML editing is manual, line-oriented text surgery).
+  `strip_toml_sections(content, header_predicate)` removes whole
+  `[table]`/`[[table]]` sections whose (comment-stripped,
+  whitespace-normalized) header matches the predicate; it tracks
+  bracket-nesting depth so a nested-array element line isn't mistaken for a
+  header, and it tracks multi-line (`"""`/`'''`) strings across lines —
+  including escaped closing-delimiter sequences inside a multi-line *basic*
+  string — so a header-shaped line, or an unbalanced bracket in ordinary
+  prose, inside one of those is correctly treated as string content rather
+  than TOML structure. It is still not a full TOML tokenizer, so every TOML
+  writer must still validate before persisting: parse the original and the
+  edited content with `tomllib` and require everything you don't own to be
+  unchanged. Use `toml_edit_preserves(original, content, managed_keys)` for
+  the check alone, or `write_toml_if_preserves(ctx, path, original,
+  content, managed_keys, what=...)` to check-and-write-or-warn-and-leave-
+  untouched in one call. `managed_keys` accepts two kinds of entries:
+  a bare top-level key (`str`), exempting the whole top-level table or
+  value (e.g. `{"mcp_servers"}` for an MCP writer that fully replaces that
+  table each time); or a key-path (`tuple[str, ...]`, e.g.
+  `("model", "vertex-grok")`), exempting only that one nested subtree while
+  still requiring every sibling under the same parent to stay unchanged —
+  use a key-path whenever your write owns only one sub-table of a larger,
+  potentially-shared top-level table, so it can't be fooled into accepting
+  damage to an unrelated sibling (e.g. another tool's `[model.custom]`).
+  `what` is a short label (e.g. `"vertex-ai auth/model config"`) included
+  in the warning on a rejected write, alongside the managed keys, so the
+  log names which step failed and what it owned. `strip_toml_top_level_key
+  (content, key)` and `insert_toml_top_level_line(content, line)` do the
+  equivalent surgery for bare top-level `key = value` lines rather than
+  whole sections (codex uses these for `model`/`model_reasoning_effort`);
+  both also skip lines inside a multi-line string (including a
+  backslash-escaped closing-delimiter sequence inside a `"""` (basic)
+  string, on any line including the one that opens it — `'''` (literal)
+  strings have no escapes in TOML at all, so no such handling applies
+  there), and correctly consume the 1-2 extra content quote characters
+  TOML allows immediately before a closing delimiter (`""""`/`'''''`, e.g.
+  `"""say "hi""""` is the content `say "hi"`) instead of stopping after the
+  first 3-quote run. There are no known residual gaps in this scanner as of
+  ptone/scion#2427; the `tomllib` round-trip check above remains the
+  backstop regardless, since this is still a line-oriented scanner rather
+  than a full TOML tokenizer. A seeded, bounded fuzz test
+  (`TestTomlScannerFuzz` in `harnesses/scion_harness_test.py`) checks
+  `strip_toml_sections`'s output against a fresh `tomllib` parse across a
+  generated corpus of tricky multi-line-string/bracket/quote fragments on
+  every test run, to catch the next scanner edge automatically rather than
+  by manual review. See `harnesses/scion_harness_test.py`'s
+  `TestStripTomlSections` / `TestTomlEnteringArrayDepths` /
+  `TestTomlEditPreserves` / `TestWriteTomlIfPreserves` /
+  `TestTomlScannerFuzz` for worked examples, including the fragility repro
+  cases (trailing comments on headers, nested arrays, multi-line strings
+  with header-shaped lines, unbalanced brackets, escaped delimiters, or
+  extra closing quotes, header whitespace variants like `[ models ]`) this
+  API was hardened against (ptone/scion#2426, ptone/scion#2427).
 - **`capture_auth_main()`** — the whole capture-auth flow; your
   `capture_auth.py` is a two-line shim around it. Exit codes: 0 captured,
   1 error, 2 no credentials found, 3 conflict (secret exists; `--force`).
@@ -583,8 +659,8 @@ Map into the normalized event vocabulary: `session-start`, `session-end`,
 `prompt-submit`, `tool-start`, `tool-end`, `model-start`, `model-end`,
 `agent-end`, `subagent-end`, `response-complete`, `notification`.
 Extractable fields include `prompt`, `tool_name`, `tool_input`,
-`tool_output`, `message`, `session_id`, `success`, `error`, `assistant_text`,
-`file_path`, and the token fields `input_tokens` (→ `input`), `output_tokens`
+`tool_output`, `message`, `session_id`, `success`, `error`, `file_path`,
+and the token fields `input_tokens` (→ `input`), `output_tokens`
 (→ `output`), `cached_tokens` (→ `cache_read`), `cache_write_tokens` (→
 `cache_write`) and `reasoning_tokens` (→ `reasoning`, informational only).
 `output_tokens` must be the *total* output including reasoning (canonical
@@ -715,7 +791,7 @@ permanent; check whether they've been fixed.
   line. Claude's simple mapping is the only project-scope path exercised.
 - **Version numbering is not unified**: `provisioner.interface_version` in
   config.yaml (1), the manifest `schema_version` (1), and
-  `scion_harness.INTERFACE_VERSION` (2) are three separate counters. Guard on
+  `scion_harness.INTERFACE_VERSION` (3) are three separate counters. Guard on
   the library's `INTERFACE_VERSION`; the other two are effectively constant
   today.
 - **`outputs/status.json`** is declared in the manifest outputs but nothing
@@ -739,8 +815,8 @@ permanent; check whether they've been fixed.
   dialects; bundled `dialect.yaml` dialects work but are undocumented there.
 - **Vendored-lib drift for external bundles** is manual: nothing warns when
   your vendored `scion_harness.py` falls behind the canonical copy (in-repo
-  bundles are covered by `go generate` + a sync test). The host logs the
-  staged `LIB_VERSION` at provision time — check it when debugging.
+  bundles are covered by `go run ./harnesses/gen` + a sync test). The host
+  logs the staged `LIB_VERSION` at provision time — check it when debugging.
 - **`HasSystemPrompt`** checks for the native system-prompt file on disk, but
   the file is only written at pre-start, so host-side checks before first
   start can misreport.

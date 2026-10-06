@@ -16,6 +16,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -25,6 +26,24 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
+
+// authenticatingHubConnCtxKey is the context key MultiKeyBrokerAuthMiddleware
+// uses to record which hub connection's key authenticated an incoming
+// request (design t1-async-create-v11.md §3.8.5 routing rule 2). It is the
+// second-priority source (after the X-Scion-Hub-Connection header) the
+// broker uses to pick which hub connection owns a launch, so later reports
+// for it are sent directly to that connection instead of fanning out.
+type authenticatingHubConnCtxKey struct{}
+
+// authenticatingHubConnFromContext returns the name of the hub connection
+// whose secret key verified the request's HMAC signature, or "" when
+// authentication is disabled, unauthenticated requests are allowed through,
+// or no context value was set (e.g. a request built by a test without
+// routing it through the middleware).
+func authenticatingHubConnFromContext(ctx context.Context) string {
+	name, _ := ctx.Value(authenticatingHubConnCtxKey{}).(string)
+	return name
+}
 
 // BrokerAuthConfig configures host-side HMAC authentication.
 type BrokerAuthConfig struct {
@@ -271,6 +290,9 @@ func (m *MultiKeyBrokerAuthMiddleware) Middleware(next http.Handler) http.Handle
 		// Try each key until one matches
 		for _, entry := range keys {
 			if apiclient.VerifyHMAC(entry.secretKey, canonical, sigBytes) {
+				if entry.hubName != "" {
+					r = r.WithContext(context.WithValue(r.Context(), authenticatingHubConnCtxKey{}, entry.hubName))
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

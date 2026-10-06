@@ -157,7 +157,7 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	session := newPTYSession(ctx, agent.Slug, agent.ProjectID, agent.RuntimeBrokerID, conn, s.controlChannel, cols, rows)
 	defer session.Close()
 
-	slog.Info("PTY session started", "agent_id", agentID, "slug", agent.Slug, "user", identity.ID())
+	logPTYSessionStarted(agentID, agent.Slug, agent.RuntimeBrokerID, identity.ID())
 
 	// Run the session
 	if err := session.Run(); err != nil && !isExpectedPTYEnd(err) {
@@ -165,7 +165,26 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code, reason := session.CloseCause()
-	slog.Info("PTY session ended", "agent_id", agentID, "slug", agent.Slug,
+	logPTYSessionEnded(agentID, agent.Slug, agent.RuntimeBrokerID, code, reason)
+}
+
+// logPTYSessionStarted logs the start of a PTY session. routedBrokerID is
+// agent.RuntimeBrokerID, the broker ControlChannelManager.OpenStream
+// actually routes this session's stream to. It is logged under its own
+// field name rather than "broker_id" so it is never confused with the
+// process-wide broker_id attr a combo-mode server attaches to every log
+// line (see the slog.SetDefault call in cmd/server_foreground.go): that
+// attr names the locally co-located broker, which is not necessarily the
+// one that ends up enforcing (or refusing) this particular attach.
+func logPTYSessionStarted(agentID, slug, routedBrokerID, userID string) {
+	slog.Info("PTY session started", "agent_id", agentID, "slug", slug, "user", userID, "routed_broker_id", routedBrokerID)
+}
+
+// logPTYSessionEnded logs the end of a PTY session. See logPTYSessionStarted
+// for why routedBrokerID is carried under its own field rather than the
+// process-wide broker_id attr.
+func logPTYSessionEnded(agentID, slug, routedBrokerID string, code int, reason string) {
+	slog.Info("PTY session ended", "agent_id", agentID, "slug", slug, "routed_broker_id", routedBrokerID,
 		"close_code", code, "close_reason", reason)
 }
 

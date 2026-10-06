@@ -20,8 +20,9 @@ package permissions
 // reference the same rows here, so there is never a second, drifting
 // action allowlist for the same rule. At most two rows per (Relationship,
 // PrincipalKind, ResourceType), and only with disjoint PermissionIDs and
-// differing MintEligible (enforced by TestRelationshipPolicy_Consistency in
-// pkg/hub); ResourceType is always explicit, never a wildcard.
+// differing in MintEligible or ReadOnly (enforced by
+// TestRelationshipPolicy_Consistency in pkg/hub); ResourceType is always
+// explicit, never a wildcard.
 type RelationshipPolicy struct {
 	// Relationship is the canonical rule name: "owner", "ancestor",
 	// "progeny", "hub_member_sa_assign" — matching
@@ -72,7 +73,6 @@ var RelationshipPolicies = []RelationshipPolicy{
 	// TestRelationshipPolicy_MatchesCharacterization.
 	{
 		// owner/user/agent: the remaining agent permissions (not mint-eligible).
-		// agent.manage is a reviewed unregistered ID (relationshipPolicyReviewedExceptions).
 		Relationship:   "owner",
 		PrincipalKinds: []string{"user"},
 		ResourceType:   ResourceAgent,
@@ -80,20 +80,14 @@ var RelationshipPolicies = []RelationshipPolicy{
 			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
 			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
-			"agent.token_refresh", "agent.port_forward", "agent.identity_token", "agent.manage",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
 	},
-	{
-		// owner/user/project (TestRelationshipCharacterization_Owner).
-		Relationship:   "owner",
-		PrincipalKinds: []string{"user"},
-		ResourceType:   ResourceProject,
-		PermissionIDs: []string{
-			"project.create", "project.read", "project.update", "project.delete",
-			"project.manage", "project.register", "project.set_messaging_policy",
-			"project.clone", "project.list", "project.secret_read",
-		},
-	},
+	// There is deliberately no owner/user/project row (ptone/scion#2586).
+	// Project authority comes only from project-scoped role bindings;
+	// Project.OwnerID is display metadata and grants nothing, so a stale
+	// OwnerID (a creator removed without a transfer) confers no access.
+	// TestRelationshipCharacterization_OwnerProjectGrantsNothing pins this.
 	{
 		// owner/user/template (TestRelationshipCharacterization_Owner).
 		Relationship:   "owner",
@@ -163,7 +157,7 @@ var RelationshipPolicies = []RelationshipPolicy{
 			"agent.create", "agent.read", "agent.list", "agent.update", "agent.delete",
 			"agent.lifecycle", "agent.stop_all", "agent.message", "agent.set_message_mode",
 			"agent.grant_hub_mode", "agent.status_update", "agent.log_append", "agent.notify",
-			"agent.token_refresh", "agent.port_forward", "agent.identity_token", "agent.manage",
+			"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
 	},
 	{
@@ -177,6 +171,16 @@ var RelationshipPolicies = []RelationshipPolicy{
 			"agent.set_message_mode", "agent.status_update", "agent.log_append",
 			"agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
 		},
+	},
+	{
+		// launcher/agent/agent (ptone/scion#3409): an agent reads the status
+		// of an agent it directly launched, in the same project. The rule
+		// produces a candidate only on the single-agent GET routes.
+		Relationship:   "launcher",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   ResourceAgent,
+		PermissionIDs:  []string{"agent.read"},
+		ReadOnly:       true,
 	},
 	{
 		// progeny/agent/secret (TestRelationshipCharacterization_Progeny). The
@@ -205,6 +209,23 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ResourceType:   ResourceSkill,
 		PermissionIDs:  []string{"skill.read"},
 		ReadOnly:       true,
+	},
+	{
+		// progeny/agent/secret exact pairs (ptone/scion#2129): runtime use and
+		// launch delivery of an opted-in user-scope secret. Not read only;
+		// each ID is a reviewed exact pair in pkg/hub progenyExactPairs.
+		Relationship:   "progeny",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"secret.use", "secret.deliver"},
+	},
+	{
+		// progeny/agent/env_var exact pair (ptone/scion#2129): launch delivery
+		// of an opted-in user-scope env var. Not read only.
+		Relationship:   "progeny",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "env_var",
+		PermissionIDs:  []string{"env_var.deliver"},
 	},
 }
 

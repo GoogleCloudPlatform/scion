@@ -49,6 +49,9 @@ the GCP SM secrets instead of storing values locally.
 
 This operation is idempotent - existing GCP SM secrets will be overwritten.
 
+Does not require a scion project; it can be run from any directory or
+environment, for example a Cloud Run job.
+
 Examples:
   # Dry run to see what would be migrated
   scion hub secret migrate --gcp-project=my-project --dry-run
@@ -61,8 +64,8 @@ Examples:
 
   # Force re-migration of already-migrated secrets (e.g., after naming scheme change)
   scion hub secret migrate --gcp-project=my-project --force`,
-	PreRunE: checkGCPProjectFlag,
-	RunE:    runSecretMigrate,
+	Args: gcpProjectArgs(cobra.ArbitraryArgs),
+	RunE: runSecretMigrate,
 }
 
 func init() {
@@ -78,8 +81,15 @@ func init() {
 }
 
 func runSecretMigrate(cmd *cobra.Command, args []string) error {
+	// Offline hub-store writer: opens the hub database directly (entc.OpenSQLite
+	// below) and writes rows, so it is pinned like the other offline
+	// store-writing subcommands.
+	pinProcessUTC()
+
+	// MarkFlagRequired only checks that --gcp-project was given, so an
+	// explicit empty value (--gcp-project="") still reaches here.
 	if migrateProject == "" {
-		return fmt.Errorf("--gcp-project flag is required")
+		return newUsageError("--gcp-project flag is required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

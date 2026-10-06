@@ -59,7 +59,7 @@ func (s *Server) handleSkillRegistries(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createSkillRegistry(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -92,7 +92,7 @@ func (s *Server) handleSkillRegistryByID(w http.ResponseWriter, r *http.Request)
 	case http.MethodDelete:
 		s.deleteSkillRegistry(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -280,7 +280,7 @@ func (s *Server) deleteSkillRegistry(w http.ResponseWriter, r *http.Request, id 
 
 func (s *Server) pinSkillHash(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -324,7 +324,7 @@ func (s *Server) pinSkillHash(w http.ResponseWriter, r *http.Request, id string)
 
 func (s *Server) listPinnedHashes(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -360,7 +360,7 @@ func (s *Server) listPinnedHashes(w http.ResponseWriter, r *http.Request, id str
 
 func (s *Server) unpinSkillHash(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

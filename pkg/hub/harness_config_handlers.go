@@ -167,7 +167,7 @@ func (s *Server) handleHarnessConfigs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createHarnessConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -279,6 +279,13 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		createScope = store.HarnessConfigScopeGlobal
 	}
 	if !s.authorize(w, r, harnessConfigScopeResource(createScope, req.ScopeID), ActionCreate) {
+		return
+	}
+
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
 		return
 	}
 
@@ -484,7 +491,7 @@ func (s *Server) handleHarnessConfigCRUD(w http.ResponseWriter, r *http.Request,
 	case http.MethodDelete:
 		s.deleteHarnessConfig(w, r, hc)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -514,25 +521,44 @@ func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
 }
 
 func extractImageFromStorage(ctx context.Context, stor storage.Storage, storagePath string) string {
-	objectPath := storagePath + "/config.yaml"
-	reader, _, err := stor.Download(ctx, objectPath)
-	if err != nil || reader == nil {
-		return ""
-	}
-	defer func() { _ = reader.Close() }()
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return ""
-	}
-	entry, err := config.ParseHarnessConfigYAML(data)
-	if err != nil {
+	entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, storagePath)
+	if !ok {
 		return ""
 	}
 	return entry.Image
 }
 
+// extractHarnessConfigEntryFromStorage downloads and parses config.yaml from
+// a harness config's storage path, returning ok=false if it can't be
+// downloaded or parsed. Callers that only need one field (extractImageFromStorage)
+// or that need to stamp several fields at once (the file upload and finalize
+// handlers, via applyModelConfigFromEntry) share this single download+parse.
+func extractHarnessConfigEntryFromStorage(ctx context.Context, stor storage.Storage, storagePath string) (config.HarnessConfigEntry, bool) {
+	objectPath := storagePath + "/config.yaml"
+	reader, _, err := stor.Download(ctx, objectPath)
+	if err != nil || reader == nil {
+		return config.HarnessConfigEntry{}, false
+	}
+	defer func() { _ = reader.Close() }()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return config.HarnessConfigEntry{}, false
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil {
+		return config.HarnessConfigEntry{}, false
+	}
+	return entry, true
+}
+
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
 	ctx := r.Context()
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
 
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
@@ -550,6 +576,17 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	hc.StoragePath = existing.StoragePath
 	hc.StorageURI = existing.StorageURI
 	hc.StorageBucket = existing.StorageBucket
+	// Content state is computed by the server during upload/finalize and
+	// is carried over from the existing record.
+	hc.ContentHash = existing.ContentHash
+	hc.Files = existing.Files
+	// Lifecycle and image-check state are managed by the server and are
+	// carried over from the existing record.
+	hc.Status = existing.Status
+	hc.ImageStatus = existing.ImageStatus
+	hc.ImageStatusCheckedAt = existing.ImageStatusCheckedAt
+	// The updater is the authenticated caller.
+	hc.UpdatedBy = identity.ID()
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
@@ -641,7 +678,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, existing.StoragePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
 		}
 	}
 
@@ -656,7 +693,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 // handleHarnessConfigUpload handles requests for upload URLs.
 func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -686,6 +723,9 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 
 	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, hc.StoragePath, req.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
 		return
 	}
@@ -703,7 +743,7 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 // handleHarnessConfigFinalize finalizes a harness config after file upload.
 func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -730,19 +770,26 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	contentHash, err := verifyAndFinalizeFiles(ctx, stor, hc.StoragePath, req.Manifest.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		ValidationError(w, err.Error(), nil)
 		return
 	}
 
+	previousFiles := hc.Files
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
 
-	if image := extractImageFromStorage(ctx, stor, hc.StoragePath); image != "" {
-		if hc.Config == nil {
-			hc.Config = &store.HarnessConfigData{}
+	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
+		if entry.Image != "" {
+			if hc.Config == nil {
+				hc.Config = &store.HarnessConfigData{}
+			}
+			hc.Config.Image = entry.Image
 		}
-		hc.Config.Image = image
+		applyModelConfigFromEntry(hc, entry)
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
@@ -750,14 +797,58 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The manifest is the complete file list, so files the previous record
+	// listed but the manifest does not (deleted locally before a sync) are
+	// removed from storage. Brokers with local storage hydrate the whole
+	// storage directory, so a stale object would otherwise still reach agents.
+	s.deleteRemovedHarnessConfigFiles(ctx, stor, hc, previousFiles)
+
 	writeJSON(w, http.StatusOK, hc)
+}
+
+// deleteRemovedHarnessConfigFiles deletes the storage objects of files listed
+// in previousFiles but no longer in hc.Files. Only those exact paths are
+// deleted, never a prefix sweep: other harness-configs (clones, or a config
+// whose slug was renamed) can live under hc.StoragePath. Failures are logged
+// and do not fail the request, because the record is already updated.
+func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, previousFiles []store.TemplateFile) {
+	if hc.StoragePath == "" {
+		return
+	}
+	current := make(map[string]struct{}, len(hc.Files))
+	for _, f := range hc.Files {
+		current[f.Path] = struct{}{}
+	}
+	var failed, skipped []string
+	for _, f := range previousFiles {
+		if _, ok := current[f.Path]; ok {
+			continue
+		}
+		// Records written before manifest paths were validated may hold
+		// paths that resolve outside this config or alias a kept file.
+		if !isCanonicalResourceFilePath(f.Path) {
+			skipped = append(skipped, f.Path)
+			continue
+		}
+		if err := stor.Delete(ctx, hc.StoragePath+"/"+f.Path); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			failed = append(failed, f.Path)
+		}
+	}
+	if len(skipped) > 0 {
+		s.resourceLog.Warn("harness-config finalize: skipped deleting removed files with invalid paths",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", skipped)
+	}
+	if len(failed) > 0 {
+		s.resourceLog.Warn("harness-config finalize: failed to delete removed files from storage",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", failed)
+	}
 }
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.
 // POST /api/v1/harness-configs/{id}/check-image
 func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -861,7 +952,7 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.
 func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -894,7 +985,7 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 // handleHarnessConfigValidate validates a harness-config's storage consistency.
 func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -914,7 +1005,7 @@ func (s *Server) handleHarnessConfigValidate(w http.ResponseWriter, r *http.Requ
 // handleHarnessConfigClone creates a copy of a harness config.
 func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request, source *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1055,7 +1146,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			srcPath := source.StoragePath + "/" + file.Path
 			dstPath := storagePath + "/" + file.Path
 			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 				RuntimeError(w, "Failed to copy files: "+err.Error())
 				return
 			}
@@ -1067,7 +1158,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 
 	if err := s.store.CreateHarnessConfig(ctx, clone); err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storagePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
@@ -1089,7 +1180,7 @@ type ReimportHarnessConfigRequest struct {
 // source_url (or an override URL). POST /api/v1/harness-configs/{id}/reimport
 func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1195,7 +1286,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 // GET /api/v1/harness-configs/{id}/image-status
 func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1383,7 +1474,7 @@ func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage
 // DELETE /api/v1/harness-configs/{id}/local-image?broker_id=...
 func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -1449,7 +1540,7 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 // POST /api/v1/harness-configs/{id}/pull-image?broker_id=...
 func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

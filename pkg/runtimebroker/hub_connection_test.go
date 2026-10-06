@@ -210,6 +210,76 @@ func TestMultiKeyBrokerAuth_MatchesAnyKey(t *testing.T) {
 	}
 }
 
+// TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue covers the
+// middleware setting authenticatingHubConnCtxKey to the name of the hub
+// connection whose key verified the request, not just letting the request
+// through, so resolveHubNameForLaunch's routing rule 2 (design §3.8.5) has
+// something real to read.
+func TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue(t *testing.T) {
+	secret1 := []byte("secret-key-for-hub-1-32bytes!!!!")
+	secret2 := []byte("secret-key-for-hub-2-32bytes!!!!")
+
+	middleware := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, false)
+	middleware.UpdateKeys([]secretKeyEntry{
+		{hubName: "hub-1", secretKey: secret1},
+		{hubName: "hub-2", secretKey: secret2},
+	})
+
+	var gotHubName string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHubName = authenticatingHubConnFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	signRequest(req, "broker-1", secret2)
+	rr := httptest.NewRecorder()
+	middleware.Middleware(handler).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if gotHubName != "hub-2" {
+		t.Fatalf("authenticatingHubConnFromContext = %q, want hub-2 (the key that verified the request)", gotHubName)
+	}
+}
+
+// TestMultiKeyBrokerAuth_NoContextValueWhenUnauthenticated covers the
+// disabled/allow-unauthenticated paths, where there is no key to attribute
+// the request to.
+func TestMultiKeyBrokerAuth_NoContextValueWhenUnauthenticated(t *testing.T) {
+	middleware := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, true)
+
+	var gotHubName string
+	var sawContextValue bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHubName, sawContextValue = ctxValueOK(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil) // no HMAC headers at all
+	rr := httptest.NewRecorder()
+	middleware.Middleware(handler).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (allowUnauthenticated), got %d", rr.Code)
+	}
+	if sawContextValue {
+		t.Fatalf("expected no authenticatingHubConnCtxKey value, got %q", gotHubName)
+	}
+}
+
+// ctxValueOK is authenticatingHubConnFromContext with an explicit "was it
+// set at all" bit, for the unauthenticated-path test above.
+func ctxValueOK(ctx context.Context) (string, bool) {
+	v := ctx.Value(authenticatingHubConnCtxKey{})
+	if v == nil {
+		return "", false
+	}
+	name, ok := v.(string)
+	return name, ok
+}
+
 func TestMultiKeyBrokerAuth_Disabled(t *testing.T) {
 	middleware := NewMultiKeyBrokerAuthMiddleware(false, 5*time.Minute, false)
 

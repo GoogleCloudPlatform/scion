@@ -15,7 +15,10 @@
     "terminal-reconnect.test.ts",
     "terminal-close-codes.test.ts",
     "terminal-workspace-root.test.ts",
-    "terminal-foreground-reconnect.test.ts"
+    "terminal-foreground-reconnect.test.ts",
+    "terminal-persistence.test.ts",
+    "terminal-palette-data.test.ts",
+    "terminal-palette-open.test.ts"
   ],
   "exclude": []
 }

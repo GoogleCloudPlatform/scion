@@ -64,6 +64,7 @@ func storePrefsToEnt(p *store.UserPreferences) *entschema.UserPreferences {
 		DefaultTemplate: p.DefaultTemplate,
 		DefaultProfile:  p.DefaultProfile,
 		Theme:           p.Theme,
+		Timezone:        p.Timezone,
 	}
 }
 
@@ -76,6 +77,7 @@ func entPrefsToStore(p *entschema.UserPreferences) *store.UserPreferences {
 		DefaultTemplate: p.DefaultTemplate,
 		DefaultProfile:  p.DefaultProfile,
 		Theme:           p.Theme,
+		Timezone:        p.Timezone,
 	}
 }
 

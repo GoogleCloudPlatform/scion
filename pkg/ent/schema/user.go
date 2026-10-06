@@ -108,5 +108,8 @@ func (User) Edges() []ent.Edge {
 			Ref("user"),
 		edge.To("external_identities", ExternalIdentity.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
+		edge.To("terminal_workspace", UserTerminalWorkspace.Type).
+			Unique().
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }

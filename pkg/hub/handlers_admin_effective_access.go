@@ -72,7 +72,7 @@ type adminEffectiveAccessRestriction struct {
 // handleAdminEffectiveAccess serves GET /api/v1/admin/effective-access.
 func (s *Server) handleAdminEffectiveAccess(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodHead)
 		return
 	}
 

@@ -21,6 +21,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -272,14 +273,17 @@ func (sc *saScopeContext) ref(id string) hubclient.GCPServiceAccountRef {
 }
 
 func runSAScopedList(cmd *cobra.Command, args []string) error {
+	// A flag conflict: the hub scope comes only from --global
+	// (saScopeFromGlobalFlag), so check it before resolving the scope
+	// against the hub, and report it as a usage error.
+	if saGlobalListAssignable && saScopeFromGlobalFlag() == store.ScopeHub {
+		return newUsageError("--assignable asks which accounts an agent in a PROJECT could be " +
+			"assigned; it has no meaning with --global, which already lists every hub-scoped account")
+	}
+
 	sc, err := resolveSAScope()
 	if err != nil {
 		return err
-	}
-
-	if saGlobalListAssignable && sc.scope == store.ScopeHub {
-		return fmt.Errorf("--assignable asks which accounts an agent in a PROJECT could be " +
-			"assigned; it has no meaning with --global, which already lists every hub-scoped account")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -375,7 +379,7 @@ func runSAScopedShow(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  Verified:    %v\n", sa.Verified)
 	if !sa.VerifiedAt.IsZero() {
-		fmt.Printf("  Verified At: %s\n", sa.VerifiedAt.Format(time.RFC3339))
+		fmt.Printf("  Verified At: %s\n", clitime.Format(sa.VerifiedAt, clitime.Full))
 	}
 	if sa.VerificationError != "" {
 		fmt.Printf("  Error:       %s\n", sa.VerificationError)
@@ -418,7 +422,7 @@ func runSAScopedVerify(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Scope:       %s\n", sa.Scope)
 	fmt.Printf("  Verified:    %v\n", sa.Verified)
 	if !sa.VerifiedAt.IsZero() {
-		fmt.Printf("  Verified At: %s\n", sa.VerifiedAt.Format(time.RFC3339))
+		fmt.Printf("  Verified At: %s\n", clitime.Format(sa.VerifiedAt, clitime.Full))
 	}
 
 	return nil

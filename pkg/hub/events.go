@@ -31,6 +31,11 @@ import (
 type EventPublisher interface {
 	PublishAgentStatus(ctx context.Context, agent *store.Agent)
 	PublishAgentCreated(ctx context.Context, agent *store.Agent)
+	// PublishAgentRestored publishes agent.created for a restored
+	// (un-soft-deleted) agent, marked with RestoredAt (ptone/scion#2951).
+	// It is a second created publisher: a wrapper or recorder that
+	// intercepts PublishAgentCreated must wrap this method too.
+	PublishAgentRestored(ctx context.Context, agent *store.Agent, restoredAt time.Time)
 	PublishAgentDeleted(ctx context.Context, agentID, projectID string)
 	PublishProjectCreated(ctx context.Context, project *store.Project)
 	PublishProjectUpdated(ctx context.Context, project *store.Project)
@@ -63,6 +68,17 @@ type EventPublisher interface {
 	// participants of a DM on user.<peerID>.chat.read-state so the sender can
 	// render "seen" without polling.
 	PublishChatReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
+	// PublishChatOwnReadStateEvent publishes a watermark change to the
+	// caller's OWN other sessions on user.<userID>.chat.read-state — the same
+	// event and subject convention as PublishChatReadStateEvent, just
+	// addressed to the reader instead of a DM peer. Used ONLY by "mark
+	// unread" so a user's other open tabs learn their own conversation went
+	// unread; it always sets the event's Unread field, which the client uses
+	// as the sole discriminator for "this is a mark-unread notification",
+	// distinct from a userId match alone. Unlike PublishChatReadStateEvent it fires for
+	// topic keys too: a self-notification has no "no peer, so no audience"
+	// case to exclude.
+	PublishChatOwnReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
 	// PublishChatMessageEdited publishes a message-edited event so SSE
 	// subscribers can update the message content in real time.
 	PublishChatMessageEdited(ctx context.Context, projectID, conversationKey string, evt ChatMessageEditedEvent)
@@ -87,16 +103,17 @@ type EventPublisher interface {
 // The Server initializes events to this so handlers never need nil checks.
 type noopEventPublisher struct{}
 
-func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)              {}
-func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)             {}
-func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                {}
-func (noopEventPublisher) PublishProjectCreated(_ context.Context, _ *store.Project)         {}
-func (noopEventPublisher) PublishProjectUpdated(_ context.Context, _ *store.Project)         {}
-func (noopEventPublisher) PublishProjectDeleted(_ context.Context, _ string)                 {}
-func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string) {}
-func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string) {}
-func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                {}
-func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)      {}
+func (noopEventPublisher) PublishAgentStatus(_ context.Context, _ *store.Agent)                {}
+func (noopEventPublisher) PublishAgentCreated(_ context.Context, _ *store.Agent)               {}
+func (noopEventPublisher) PublishAgentRestored(_ context.Context, _ *store.Agent, _ time.Time) {}
+func (noopEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string)                  {}
+func (noopEventPublisher) PublishProjectCreated(_ context.Context, _ *store.Project)           {}
+func (noopEventPublisher) PublishProjectUpdated(_ context.Context, _ *store.Project)           {}
+func (noopEventPublisher) PublishProjectDeleted(_ context.Context, _ string)                   {}
+func (noopEventPublisher) PublishBrokerConnected(_ context.Context, _, _ string, _ []string)   {}
+func (noopEventPublisher) PublishBrokerDisconnected(_ context.Context, _ string, _ []string)   {}
+func (noopEventPublisher) PublishBrokerStatus(_ context.Context, _, _ string)                  {}
+func (noopEventPublisher) PublishNotification(_ context.Context, _ *store.Notification)        {}
 func (noopEventPublisher) PublishChatNotification(_ context.Context, _ *store.Notification, _ ChatMessageContext) {
 }
 func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message, _ []AttachmentRef) {
@@ -107,7 +124,8 @@ func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)        {}
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
-func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string)    {}
+func (noopEventPublisher) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {}
 func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, _ string, _ ChatMessageEditedEvent) {
 }
 func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string, _ string, _ ChatMessageDeletedEvent) {
@@ -143,13 +161,22 @@ type AgentDetail struct {
 
 // AgentStatusEvent is published when an agent's status changes.
 type AgentStatusEvent struct {
-	AgentID           string       `json:"agentId"`
-	ProjectID         string       `json:"projectId"`
-	Phase             string       `json:"phase,omitempty"`
-	Activity          string       `json:"activity,omitempty"`
-	Detail            *AgentDetail `json:"detail,omitempty"`
-	ContainerStatus   string       `json:"containerStatus,omitempty"`
-	LastActivityEvent string       `json:"lastActivityEvent,omitempty"`
+	AgentID           string             `json:"agentId"`
+	ProjectID         string             `json:"projectId"`
+	Phase             string             `json:"phase,omitempty"`
+	Activity          string             `json:"activity,omitempty"`
+	Detail            *AgentDetail       `json:"detail,omitempty"`
+	ContainerStatus   string             `json:"containerStatus,omitempty"`
+	LastActivityEvent string             `json:"lastActivityEvent,omitempty"`
+	Launch            *store.AgentLaunch `json:"launch,omitempty"` // design §3.2; a snapshot taken at publish time
+	// Deletion is the delete view (design ptone/scion#2483 §2.2), a
+	// snapshot taken at publish time. Always present on the wire: an
+	// explicit null when no delete is active or failed, so the web's delta
+	// merge clears it.
+	Deletion *store.DeletionInfo `json:"deletion"`
+	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
+	// No omitempty: false must reach the web to clear a merged true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -171,6 +198,20 @@ type AgentCreatedEvent struct {
 	TaskSummary     string   `json:"taskSummary,omitempty"`
 	Created         string   `json:"created,omitempty"`
 	Ancestry        []string `json:"ancestry,omitempty"`
+	// Launch is the async-launch view (design §3.2), nil when the agent has
+	// no launch (e.g. a synchronous create, or before any dispatch path
+	// starts one).
+	Launch *store.AgentLaunch `json:"launch,omitempty"`
+	// RestoredAt is set only when the event announces a restore of a
+	// soft-deleted agent (same ID). Clients that tombstoned the ID on
+	// deleted may bring it back only on a created that carries it; an
+	// unmarked created for a tombstoned ID is stale (ptone/scion#2951).
+	RestoredAt string `json:"restoredAt,omitempty"`
+	// ProvisionedOnly mirrors the agent's computed provisionedOnly view
+	// (ptone/scion#2929), so a browser shows a provision-only create as
+	// "provisioned, not started" without a refetch. No omitempty, as on
+	// the status event: a false must clear a value merged onto an existing row.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -462,15 +503,19 @@ func (p *ChannelEventPublisher) Close() {
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent) {
+	now := time.Now()
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
+		Launch:          store.ComputeAgentLaunch(agent, now),
+		Deletion:        store.ComputeAgentDeletion(agent, now),
+		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.LastActivityEvent.IsZero() {
-		evt.LastActivityEvent = agent.LastActivityEvent.Format("2006-01-02T15:04:05Z07:00")
+		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	detail := AgentDetail{
@@ -481,7 +526,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		CurrentModelCalls: agent.CurrentModelCalls,
 	}
 	if !agent.StartedAt.IsZero() {
-		detail.StartedAt = agent.StartedAt.Format("2006-01-02T15:04:05Z07:00")
+		detail.StartedAt = agent.StartedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	if detail != (AgentDetail{}) {
 		evt.Detail = &detail
@@ -495,6 +540,18 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 // PublishAgentCreated publishes an agent created event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent) {
+	p.publishAgentCreated(newAgentCreatedEvent(agent))
+}
+
+// PublishAgentRestored publishes agent.created for a restored agent, with
+// RestoredAt set, on the same subjects as PublishAgentCreated.
+func (p *eventBuilder) PublishAgentRestored(_ context.Context, agent *store.Agent, restoredAt time.Time) {
+	evt := newAgentCreatedEvent(agent)
+	evt.RestoredAt = restoredAt.UTC().Format(time.RFC3339)
+	p.publishAgentCreated(evt)
+}
+
+func newAgentCreatedEvent(agent *store.Agent) AgentCreatedEvent {
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
@@ -510,13 +567,19 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		CreatedBy:       agent.CreatedBy,
 		TaskSummary:     agent.TaskSummary,
 		Ancestry:        agent.Ancestry,
+		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
+		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.Created.IsZero() {
-		evt.Created = agent.Created.Format("2006-01-02T15:04:05Z07:00")
+		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
-	p.sink("agent."+agent.ID+".created", evt)
-	if agent.ProjectID != "" {
-		p.sink("project."+agent.ProjectID+".agent.created", evt)
+	return evt
+}
+
+func (p *eventBuilder) publishAgentCreated(evt AgentCreatedEvent) {
+	p.sink("agent."+evt.AgentID+".created", evt)
+	if evt.ProjectID != "" {
+		p.sink("project."+evt.ProjectID+".agent.created", evt)
 	}
 }
 
@@ -703,7 +766,7 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		Urgent:        msg.Urgent,
 		Broadcasted:   msg.Broadcasted,
 		AgentID:       msg.AgentID,
-		CreatedAt:     msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		CreatedAt:     msg.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Channel:       msg.Channel,
 		ThreadID:      msg.ThreadID,
 		GroupID:       msg.GroupID,
@@ -797,6 +860,28 @@ func (p *eventBuilder) PublishChatReadStateEvent(_ context.Context, conversation
 		}
 		p.sink("user."+participantID+".chat.read-state", evt)
 	}
+}
+
+// PublishChatOwnReadStateEvent fans a watermark change out to the CALLER's
+// own other sessions on user.<userID>.chat.read-state. Used by "mark
+// unread": the caller's other open tabs need to learn their own watermark
+// moved, the same way a DM peer learns theirs did above — just addressed to
+// the reader instead. It fires for both DM and topic keys; a topic watermark
+// is per-user state with no peer to notify, but the reader's own other tabs
+// are still an audience.
+func (p *eventBuilder) PublishChatOwnReadStateEvent(_ context.Context, conversationKey, userID, messageID string) {
+	evt := ChatReadStateEvent{
+		ConversationKey: conversationKey,
+		UserID:          userID,
+		MessageID:       messageID,
+		ReadAt:          time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		// Always true: this publisher exists only for mark-unread. If it is
+		// ever reused for a different self-notification, that caller must
+		// add its own way to say "not unread" rather than let this default
+		// silently become ambiguous again.
+		Unread: true,
+	}
+	p.sink("user."+userID+".chat.read-state", evt)
 }
 
 // PublishChatMessageEdited publishes a message-edited event on the project and

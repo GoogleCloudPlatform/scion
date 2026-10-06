@@ -827,3 +827,206 @@ describe('generation validation', () => {
     f.coordinator.stop();
   });
 });
+
+// ---------------------------------------------------------------------------
+// claimOwnership() / subscribeSessions() / restoreEntries() — added for the
+// terminal-persistence restore path.
+// ---------------------------------------------------------------------------
+const agentId2 = '22222222-2222-4222-8222-222222222222';
+
+describe('claimOwnership()', () => {
+  it('gets and reuses the lock', async () => {
+    const locks = createLockMock();
+    const f = fixture({ locks });
+
+    const first = await f.coordinator.claimOwnership();
+    expect(first).toBe(true);
+    expect(f.coordinator.isOwner).toBe(true);
+    expect(locks.request).toHaveBeenCalledTimes(1);
+
+    const generation = f.coordinator.generation;
+    const second = await f.coordinator.claimOwnership();
+    expect(second).toBe(true);
+    // Reuses the existing claim: no second lock request, same generation.
+    expect(locks.request).toHaveBeenCalledTimes(1);
+    expect(f.coordinator.generation).toBe(generation);
+
+    f.coordinator.stop();
+  });
+
+  it('resolves false without calling navigator.locks.request when unsupported', async () => {
+    FakeSocket.instances = [];
+    FakeBroadcastChannel.instances = [];
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel);
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        close(): void {}
+      }
+    );
+    // Insecure context: coordination is unsupported from construction.
+    vi.stubGlobal('isSecureContext', false);
+    const locksRequest = simpleLocksRequest();
+    vi.stubGlobal('navigator', { ...navigator, locks: { request: locksRequest } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(json(agent)))
+    );
+
+    const coordinator = new TerminalCoordinator(scope, {
+      initialize: vi.fn(() => Promise.resolve({} as TerminalResources)),
+      select: vi.fn(),
+    });
+
+    await expect(coordinator.claimOwnership()).resolves.toBe(false);
+    expect(locksRequest).not.toHaveBeenCalled();
+  });
+
+  it('resolves false without calling navigator.locks.request once torn down', async () => {
+    const locks = createLockMock();
+    const f = fixture({ locks });
+    f.coordinator.stop();
+
+    const callsBefore = locks.request.mock.calls.length;
+    await expect(f.coordinator.claimOwnership()).resolves.toBe(false);
+    expect(locks.request.mock.calls.length).toBe(callsBefore);
+  });
+
+  it('resolves false, and does not reject, when navigator.locks.request rejects', async () => {
+    FakeSocket.instances = [];
+    FakeBroadcastChannel.instances = [];
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel);
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        close(): void {}
+      }
+    );
+    vi.stubGlobal('isSecureContext', true);
+    const rejecting = vi.fn(() => Promise.reject(new Error('lock request failed')));
+    vi.stubGlobal('navigator', { ...navigator, locks: { request: rejecting } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(json(agent)))
+    );
+
+    const coordinator = new TerminalCoordinator(scope, {
+      initialize: vi.fn(() => Promise.resolve({} as TerminalResources)),
+      select: vi.fn(),
+    });
+
+    await expect(coordinator.claimOwnership()).resolves.toBe(false);
+    // The rejection is treated the same as route()'s own catch: available
+    // flips to false, so a later call short-circuits without retrying.
+    expect(coordinator.supported).toBe(false);
+  });
+});
+
+describe('subscribeSessions()', () => {
+  it('delivers nothing to a non-owner, including the immediate first call', () => {
+    const f = fixture();
+    const calls: (readonly TerminalSession[])[] = [];
+    const unsubscribe = f.coordinator.subscribeSessions((sessions) => calls.push(sessions));
+    expect(calls).toHaveLength(0);
+    unsubscribe();
+    f.coordinator.stop();
+  });
+
+  it('delivers to the owner, including the immediate first call, and stops once torn down', async () => {
+    const locks = createLockMock();
+    const f = fixture({ locks });
+    await f.coordinator.claimOwnership();
+
+    const calls: (readonly TerminalSession[])[] = [];
+    f.coordinator.subscribeSessions((sessions) => calls.push(sessions));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(0);
+
+    f.coordinator.restoreEntries([agentId], { connectAgentId: null });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toHaveLength(1);
+
+    const callsBeforeStop = calls.length;
+    // stop() sets stopped = true before closing sessions (terminal-coordinator.ts),
+    // so the registry notification from sessions closing must not reach a
+    // subscribeSessions callback.
+    f.coordinator.stop();
+    expect(calls).toHaveLength(callsBeforeStop);
+  });
+});
+
+describe('restoreEntries()', () => {
+  it('returns [] and creates nothing for a non-owner', () => {
+    const f = fixture();
+    const result = f.coordinator.restoreEntries([agentId], { connectAgentId: null });
+    expect(result).toEqual([]);
+    f.coordinator.stop();
+  });
+
+  it('returns [] and creates nothing after teardown', async () => {
+    const locks = createLockMock();
+    const f = fixture({ locks });
+    await f.coordinator.claimOwnership();
+    f.coordinator.stop();
+
+    const result = f.coordinator.restoreEntries([agentId], { connectAgentId: null });
+    expect(result).toEqual([]);
+  });
+
+  it('passes deferConnect for every id except connectAgentId', async () => {
+    FakeSocket.instances = [];
+    FakeBroadcastChannel.instances = [];
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('BroadcastChannel', FakeBroadcastChannel);
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        close(): void {}
+      }
+    );
+    vi.stubGlobal('isSecureContext', true);
+    vi.stubGlobal('navigator', { ...navigator, locks: { request: simpleLocksRequest() } });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(json(agent)))
+    );
+
+    const created: Array<{ agentId: string; deferConnect: boolean | undefined }> = [];
+    const initialize = vi.fn(() => Promise.resolve({} as TerminalResources));
+    const adapter: TerminalCoordinatorAdapter = {
+      initialize,
+      select: vi.fn(),
+      create: (registry, id, options): TerminalSession => {
+        created.push({ agentId: id, deferConnect: options?.deferConnect });
+        return registry.open(id, initialize, options);
+      },
+    };
+    const coordinator = new TerminalCoordinator(scope, adapter);
+    await coordinator.claimOwnership();
+
+    const result = coordinator.restoreEntries([agentId, agentId2], { connectAgentId: agentId2 });
+
+    expect(result.map((session) => session.state.agentId)).toEqual([agentId, agentId2]);
+    expect(created).toEqual([
+      { agentId, deferConnect: true },
+      { agentId: agentId2, deferConnect: false },
+    ]);
+
+    coordinator.stop();
+  });
+
+  it('reuses an already-open session instead of recreating it', async () => {
+    const locks = createLockMock();
+    const f = fixture({ locks });
+    await f.coordinator.claimOwnership();
+    await f.coordinator.open(agentId, undefined, 5000);
+    const openedSession = f.coordinator.sessions[0];
+
+    const result = f.coordinator.restoreEntries([agentId], { connectAgentId: null });
+    expect(result).toEqual([openedSession]);
+
+    f.coordinator.stop();
+  });
+});

@@ -106,7 +106,7 @@ existing value.
 | `SCION_MAX_TURNS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_MODEL_CALLS` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
 | `SCION_MAX_DURATION` | from the resolved `ScionConfig` | **Unconditional** — overwrites the hub-supplied value |
-| `SCION_WORKSPACE_MODE` | canonical workspace sharing mode (`shared-plain`, `clone-per-agent`, or `worktree-per-agent`) | **Unconditional** — overwrites |
+| `SCION_WORKSPACE_MODE` | canonical workspace sharing mode (`shared-plain`, `clone-per-agent`, `worktree-per-agent`, or `empty-per-agent`) | **Unconditional** — overwrites |
 | `SCION_WORKSPACE_GIT` | `"true"` when the workspace is a git repository, absent otherwise | **Unconditional** — overwrites |
 | `SCION_TEMPLATE` | full template reference, for debugging | Set only when a template reference exists |
 | `SCION_BROKER_NAME` | broker name, defaults to `local` | **Guarded** — defers to an existing value |
@@ -123,16 +123,20 @@ not the environment variable.
 
 ### `Known gap` — the gemini-cli harness does not consume `SCION_THINKING_LEVEL`
 
-Repo-wide, `SCION_THINKING_LEVEL` is read by exactly two harnesses:
-`harnesses/codex/provision.py` and `harnesses/antigravity/provision.py`. There is no gemini-cli
-harness file that reads it. So even with correct end-to-end delivery from the hub, **setting a
-thinking level for a gemini-cli agent has no effect inside the container.** This is a harness
-feature request, not a precedence bug.
+Repo-wide, `SCION_THINKING_LEVEL` is honoured by exactly three harnesses: codex, antigravity and
+claude.
+Each declares a `thinking:` block in its `config.yaml` that maps the level to a native tier, and
+its `provision.py` resolves it with `scion_harness.resolve_thinking` (see [Thinking Level
+Map](/scion/reference/harness-settings/#thinking-level-map-thinking)). The gemini-cli
+`config.yaml` has no `thinking:` block, and no gemini-cli harness file reads the variable. So
+even with correct end-to-end delivery from the hub, **setting a thinking level for a gemini-cli
+agent has no effect inside the container.** This is a harness feature request, not a precedence
+bug.
 
 *(Control for that absence claim: `SCION_MODEL` **is** read by
 `harnesses/gemini-cli/provision.py`, where it resolves a `small`/`medium`/`large` alias against
-the harness `config.yaml` — so the search does find gemini-cli's environment reads when they
-exist.)*
+the harness `config.yaml`, and falls back to that file's `model` default when `SCION_MODEL` is
+empty — so the search does find gemini-cli's environment reads when they exist.)*
 
 ### `Known gap` — the gemini-cli redaction allowlist key is misspelled and inert
 
@@ -393,6 +397,50 @@ tracked as [issue #624](https://github.com/ptone/scion/issues/624).
 it lowest. The ladder above is taken from the resolver implementation, not from those comments.
 :::
 
+### A6. `SCION_AUTO_EXPOSE_PORTS` has its own four-tier order
+
+`SCION_AUTO_EXPOSE_PORTS`, which turns on the in-container
+[auto-expose scanner](/scion/hosted/user/port-forwarding/#auto-expose-ports), is the one
+environment variable that the hub also sets from a project annotation and a hub-wide default. It
+resolves in the same order as [B1](#b1-harness-configuration-model-thinking-level-and-scalar-limits),
+not the storage-scope ladder above. Higher tiers win; a lower tier applies only when every tier
+above it left the key unset:
+
+| Priority | Source | Where it is recorded |
+| --- | --- | --- |
+| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's configure page | the agent's explicit config, so it survives reincarnate |
+| | the project annotation `scion.io/auto-expose-ports-enabled` | written by the hub at create and re-derived at reincarnate, never recorded as explicit |
+| | template env and harness-config env (in broker mode harness-config env wins between the two; see [harness-config env now outranks template env](#changed-in-this-release--harness-config-env-now-outranks-template-env-in-broker-mode)) | the template and harness config |
+| Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it last |
+
+Because the hub default is read at each dispatch, changing it changes what an agent that inherits
+it gets at its next start. Reincarnate re-reads the project annotation, so an annotation changed
+since the agent was created takes effect there; a value the user set explicitly carries over
+unchanged.
+
+Agents created by an older hub may still carry a project or hub value stamped into their inline
+config, where it looks explicit. The rerunnable maintenance migration `auto-expose-env-normalize` (run it
+from the hub admin maintenance page, or with
+`POST /api/v1/admin/maintenance/migrations/auto-expose-env-normalize/run`) removes such a stamp and re-derives the value from the project and
+template exactly as reincarnate would. A running agent keeps the old value in its container until
+it is next provisioned or reincarnated. A run that had to skip agents (its log reports
+`skipped N agent(s)`) still shows as completed, and the maintenance page does not offer completed
+migrations again, so re-run it with the `POST` call above.
+
+The other auto-expose variables (`SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PORTS_LIST`,
+`SCION_AUTO_EXPOSE_INTERVAL`, `SCION_AUTO_EXPOSE_MIN_PORT`) have no project or hub tier and follow
+the ordinary env rules on this page.
+
+:::caution[Two edges of this order]
+- **A storage-scope value outranks template and harness-config env.** A
+  `SCION_AUTO_EXPOSE_PORTS` set with `scion hub env set` (any scope) fills the key before the
+  broker applies the template and harness-config tiers, so it beats both. It still loses to an
+  explicit value and to the project annotation, and it beats the hub default.
+- **A local CLI start on the broker host gets no hub default.** The hub default reaches the broker
+  only with a hub dispatch. An agent started from the `scion` CLI on the broker machine itself
+  does not receive it; with no higher tier set, auto-expose stays off.
+:::
+
 ### `Changed in this release` — harness-config env now outranks template env in broker mode
 
 **Before:** for hub-dispatched (broker-mode) agents, template env won over harness-config env.
@@ -613,6 +661,13 @@ only what is still unset:
 | | hub `agent_defaults` — **see [Bucket 4](#bucket-4--operatoradmin-settings), the position is not settled** |
 | Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
 
+For `model`, one more layer sits below the template on the broker. `ProvisionAgent`
+(`pkg/agent/provision.go`) uses the harness-config's own `model` field (`config.yaml`) as the base
+layer, so it fills in only when nothing above it sets a model. The broker then resolves that value
+through the harness-config's `model_aliases` and injects the result as `SCION_MODEL`. The codex and
+gemini-cli harness-configs both declare `model: medium` this way. The hub does not apply this
+default itself: it resolves only an explicit tier.
+
 #### `Changed in this release` — project `default-harness-config` correctly outranks template harness config
 
 **Before:** The project default setting `scion.io/default-harness-config` was silently outranked by the template's own `harness_config` on both interactive and scheduled agent-create paths.
@@ -690,7 +745,11 @@ lower tier.
 The floor, `BuiltinDefaultResources()`, fills in a CPU limit only when nothing else supplied one —
 an agent that reached the container with no CPU limit would otherwise be able to saturate every
 core on the host. It is gated by `runtime.enforce_resource_defaults` (default `true`) if an
-operator needs the previous unlimited behaviour.
+operator needs the previous unlimited behaviour. The floor never sits below a larger CPU request:
+a larger `requests.cpu` raises it to the request, and a larger `kubernetes.resources.requests.cpu`
+sets `kubernetes.resources.limits.cpu` instead when `kubernetes.resources.limits.cpu` is unset,
+leaving the limit Docker and Podman use at `2`. A CPU limit set at any tier is never changed, so
+keep it at or above the CPU request.
 
 ### `Known gap` — `ScionConfig.Secrets` is inert
 
@@ -948,13 +1007,11 @@ go test ./pkg/hub -count=1          # slow (~3 min); do not add -race, it hangs
 ```
 
 :::caution[A whole-repo `go test ./...` is not currently green]
-`internal/fixturegen`'s `TestFixtureCoverage` is **failing on `main`** for reasons unrelated to
-settings precedence — the schema has one more domain table than the expected count, and one table
-has no fixture row. This is tracked as
-[issue #625](https://github.com/ptone/scion/issues/625) and is **excluded** from the checks above.
+Some tests outside the precedence packages fail on `main` for reasons unrelated to settings
+precedence, and they are **excluded** from the checks above.
 
-Do not treat a whole-repo green as an achievable baseline right now, and do not "fix" it as part
-of a settings change.
+Do not treat a whole-repo green as an achievable baseline right now, and do not "fix" such
+failures as part of a settings change.
 :::
 
 ## See also

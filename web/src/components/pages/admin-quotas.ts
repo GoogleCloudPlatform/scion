@@ -24,6 +24,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatRelative } from '../../utils/time.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,6 +76,34 @@ interface UsageReservation {
   reserved: number;
   createdAt: string;
   releasedAt?: string;
+  /**
+   * The broker's current effective max_agents_per_broker limit, present only
+   * for broker-scoped reservations under that limit (ptone/scion#2061 P2.2,
+   * design.md §5.9). Mirrors Go usageReservationView.BrokerAgentLimit
+   * (pkg/hub/handlers_quota.go) exactly — hand-written since there is no
+   * Go->TS generator (design.md §6). Absent for every other reservation.
+   */
+  brokerAgentLimit?: number;
+  /**
+   * The precedence step that produced brokerAgentLimit: "broker" |
+   * "entitlement" | "hub_default" | "unlimited" | "not_enforced". This names
+   * the step, not whether the result is a cap: when the broker is
+   * unlimited, brokerAgentLimit is absent but brokerAgentLimitSource is
+   * still whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide, a state in which this reservation (which requires
+   * quota enforcement to have run) would not exist to display in the first
+   * place.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: brokerAgentLimit keeps whatever the precedence steps
+   * resolved (a cap, or absent when that resolves to unlimited, exactly as
+   * above), but the value is informational only — it is not currently
+   * applied. The usage detail must show this visibly, not only in a
+   * tooltip.
+   */
+  brokerAgentLimitSource?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +128,18 @@ export class ScionPageAdminQuotas extends LitElement {
   // --- Create/Edit limit dialog ---
   @state() private showLimitDialog = false;
   @state() private editingLimit: LimitDefinition | null = null;
-  @state() private limitForm = {
+  @state() private limitForm: {
+    name: string;
+    resourceType: string;
+    unit: string;
+    description: string;
+    // null means the field is empty or not a valid non-negative integer, so
+    // saveLimitDefinition can tell "cleared by the user" apart from an
+    // explicit 0 (= unlimited) and reject it instead of silently sending 0
+    // (ptone/scion#2061 P1a review F1: clearing this on a system row like
+    // max_agents_per_broker would otherwise turn off the crash ceiling).
+    defaultValue: number | null;
+  } = {
     name: '',
     resourceType: '',
     unit: '',
@@ -247,6 +287,21 @@ export class ScionPageAdminQuotas extends LitElement {
       font-weight: 600;
       background: var(--sl-color-neutral-100, #f1f5f9);
       color: var(--sl-color-neutral-600, #475569);
+    }
+
+    /* Visible marker for a broker cap whose source is "not_enforced"
+     * (design.md Amendment A1): the value shown is a real, resolved cap,
+     * but it is not currently enforced. Must not be tooltip-only. */
+    .not-enforced-marker {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 0.375rem;
+      padding: 0.0625rem 0.375rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
     }
 
     .meta-text {
@@ -605,6 +660,10 @@ export class ScionPageAdminQuotas extends LitElement {
       this.limitDialogError = 'Resource type is required';
       return;
     }
+    if (this.limitForm.defaultValue === null) {
+      this.limitDialogError = 'Default Value is required and must be a non-negative integer (0 = unlimited)';
+      return;
+    }
 
     this.limitDialogSaving = true;
     this.limitDialogError = null;
@@ -615,7 +674,7 @@ export class ScionPageAdminQuotas extends LitElement {
         resourceType: this.limitForm.resourceType,
         unit: this.limitForm.unit.trim(),
         description: this.limitForm.description.trim(),
-        defaultValue: Number(this.limitForm.defaultValue) || 0,
+        defaultValue: this.limitForm.defaultValue,
       });
 
       let res: Response;
@@ -783,29 +842,6 @@ export class ScionPageAdminQuotas extends LitElement {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   private resourceTypeBadgeClass(rt: string): string {
     if (rt === 'agent') return 'agent';
     if (rt === 'project') return 'project';
@@ -909,8 +945,16 @@ export class ScionPageAdminQuotas extends LitElement {
   private renderLimitRow(limit: LimitDefinition) {
     const activeCount = this.usageSummary.get(limit.id) ?? 0;
     const isExpanded = this.expandedLimitId === limit.id;
+    // max_agents_per_broker's activeCount is a sum across every broker
+    // (ptone/scion#2061 P2.2), while defaultValue is the *per-broker* cap —
+    // dividing one by the other (e.g. "36 / 30" for three brokers at 12
+    // each) reads as a breached quota when no single broker is near its
+    // cap, and ignores per-broker overrides/entitlements entirely. Render
+    // just the count for this one limit; the per-broker expansion below
+    // still shows each broker's real effective cap and source.
+    const isPerBrokerLimit = limit.name === 'max_agents_per_broker';
     const pct =
-      limit.defaultValue > 0
+      !isPerBrokerLimit && limit.defaultValue > 0
         ? Math.min(100, Math.round((activeCount / limit.defaultValue) * 100))
         : 0;
 
@@ -941,23 +985,34 @@ export class ScionPageAdminQuotas extends LitElement {
         </td>
         <td class="hide-mobile usage-bar-cell">
           <div class="usage-info">
-            <span>${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span>
-            ${limit.defaultValue > 0
-              ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
-              : nothing}
+            ${isPerBrokerLimit
+              ? html`
+                  <span>${activeCount}</span>
+                  <span class="meta-text" style="font-size: 0.75rem"
+                    >across all brokers; cap is per broker</span
+                  >
+                `
+              : html`
+                  <span
+                    >${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span
+                  >
+                  ${limit.defaultValue > 0
+                    ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
+                    : nothing}
+                `}
           </div>
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(limit.updatedAt)}</span>
+          <span class="meta-text">${formatRelative(limit.updatedAt)}</span>
         </td>
         <td class="actions-cell">
+          <sl-icon-button
+            name="pencil"
+            label="Edit"
+            @click=${(e: Event) => this.openEditLimit(limit, e)}
+          ></sl-icon-button>
           ${!limit.system
             ? html`
-                <sl-icon-button
-                  name="pencil"
-                  label="Edit"
-                  @click=${(e: Event) => this.openEditLimit(limit, e)}
-                ></sl-icon-button>
                 <sl-icon-button
                   name="trash"
                   label="Delete"
@@ -1028,9 +1083,7 @@ export class ScionPageAdminQuotas extends LitElement {
                                 <span class="meta-text">${b.createdBy || '—'}</span>
                               </td>
                               <td class="hide-mobile">
-                                <span class="meta-text"
-                                  >${this.formatRelativeTime(b.createdAt)}</span
-                                >
+                                <span class="meta-text">${formatRelative(b.createdAt)}</span>
                               </td>
                               <td class="actions-cell">
                                 <sl-icon-button
@@ -1079,6 +1132,39 @@ export class ScionPageAdminQuotas extends LitElement {
                             <div class="meta-text" style="font-size: 0.75rem">
                               Resource: <span class="mono">${r.resourceId}</span>
                             </div>
+                            ${r.brokerAgentLimitSource
+                              ? html`
+                                  <div class="meta-text" style="font-size: 0.75rem">
+                                    Broker cap:
+                                    <span class="mono"
+                                      >${r.brokerAgentLimit != null
+                                        ? this.formatValue(r.brokerAgentLimit)
+                                        : 'unlimited'}</span
+                                    >
+                                    <!-- Defensive: brokerAgentLimitSource is
+                                    "unlimited" only when no limit definition
+                                    or quota service is configured hub-wide,
+                                    a state this reservation (which requires
+                                    quota enforcement to have run) can't
+                                    actually reach — kept to avoid ever
+                                    rendering the redundant "(unlimited)".
+                                    "not_enforced" is suppressed here too: the
+                                    ".not-enforced-marker" pill below already
+                                    says "not enforced", so showing the raw
+                                    "(not_enforced)" token alongside it would
+                                    render the same fact twice. -->
+                                    ${r.brokerAgentLimitSource === 'unlimited' ||
+                                    r.brokerAgentLimitSource === 'not_enforced'
+                                      ? nothing
+                                      : html`<span title="Precedence source"
+                                          >(${r.brokerAgentLimitSource})</span
+                                        >`}
+                                    ${r.brokerAgentLimitSource === 'not_enforced'
+                                      ? html`<span class="not-enforced-marker">not enforced</span>`
+                                      : nothing}
+                                  </div>
+                                `
+                              : nothing}
                           </div>
                         `
                       )}
@@ -1095,6 +1181,11 @@ export class ScionPageAdminQuotas extends LitElement {
 
   private renderLimitDialog() {
     const title = this.editingLimit ? 'Edit Limit Definition' : 'Create Limit Definition';
+    // System-seeded limit definitions: only default_value and description
+    // can be changed (enforced server-side too, pkg/hub/handlers_quota.go
+    // updateLimitDefinition). Keep name/resourceType/unit read-only here so
+    // the form can't produce a request the server will 403.
+    const isSystemEdit = !!this.editingLimit?.system;
 
     return html`
       <sl-dialog
@@ -1109,6 +1200,12 @@ export class ScionPageAdminQuotas extends LitElement {
               >${this.limitDialogError}</sl-alert
             >`
           : nothing}
+        ${isSystemEdit
+          ? html`<sl-alert variant="neutral" open class="dialog-error"
+              >This is a system limit definition. Only default value and description can be
+              changed.</sl-alert
+            >`
+          : nothing}
 
         <div class="form-row">
           <sl-input
@@ -1118,6 +1215,7 @@ export class ScionPageAdminQuotas extends LitElement {
             @sl-input=${(e: Event) => {
               this.limitForm = { ...this.limitForm, name: (e.target as HTMLInputElement).value };
             }}
+            ?readonly=${isSystemEdit}
             required
           ></sl-input>
         </div>
@@ -1133,10 +1231,12 @@ export class ScionPageAdminQuotas extends LitElement {
                 resourceType: (e.target as HTMLSelectElement).value,
               };
             }}
+            ?disabled=${isSystemEdit}
             required
           >
             <sl-option value="agent">agent</sl-option>
             <sl-option value="project">project</sl-option>
+            <sl-option value="group">group</sl-option>
             <sl-option value="group_member">group_member</sl-option>
           </sl-select>
         </div>
@@ -1149,6 +1249,7 @@ export class ScionPageAdminQuotas extends LitElement {
             @sl-input=${(e: Event) => {
               this.limitForm = { ...this.limitForm, unit: (e.target as HTMLInputElement).value };
             }}
+            ?readonly=${isSystemEdit}
           ></sl-input>
         </div>
 
@@ -1158,11 +1259,14 @@ export class ScionPageAdminQuotas extends LitElement {
             type="number"
             min="0"
             placeholder="0 = unlimited"
-            value=${String(this.limitForm.defaultValue)}
+            help-text="Required. Use 0 for unlimited."
+            value=${this.limitForm.defaultValue === null ? '' : String(this.limitForm.defaultValue)}
             @sl-input=${(e: Event) => {
+              const raw = (e.target as HTMLInputElement).value.trim();
+              const parsed = raw === '' ? NaN : Number(raw);
               this.limitForm = {
                 ...this.limitForm,
-                defaultValue: Number((e.target as HTMLInputElement).value) || 0,
+                defaultValue: Number.isInteger(parsed) && parsed >= 0 ? parsed : null,
               };
             }}
           ></sl-input>

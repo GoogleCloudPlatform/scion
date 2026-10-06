@@ -14,6 +14,17 @@ export default defineConfig({
     environment: 'happy-dom',
     include: ['src/**/*.test.ts'],
     setupFiles: ['./vitest.setup.ts'],
+    // Pin the process timezone so tests are deterministic regardless of the
+    // CI host's or developer's ambient TZ (tz-refactor task 11). Explicitly
+    // overrides any `TZ` already set in the invoking shell, so running with
+    // e.g. `TZ=Asia/Tokyo npx vitest run` exercises the exact same pinned
+    // zone here — time.ts tests that need a specific zone pass it explicitly
+    // to the function under test (`formatInstant`, `parseWallClock`, etc.)
+    // rather than relying on this value, which only backs `browserTimeZone()`
+    // and anything that falls back to it.
+    env: {
+      TZ: 'UTC',
+    },
     // Belt-and-braces guard for a known intermittent CI failure: a
     // stray console call that lands after a worker starts tearing down can
     // leave the "onUserConsoleLog" RPC pending when the worker's channel

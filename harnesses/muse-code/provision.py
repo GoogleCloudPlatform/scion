@@ -133,9 +133,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     # --- Model resolution -----------------------------------------------------
     # Model is passed via the host-side --model CLI flag; no env overlay needed.
-    raw_model = os.environ.get("SCION_MODEL", "").strip()
-    aliases = ctx.harness_config.get("model_aliases") or {}
-    model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
+    model = scion_harness.resolve_model(ctx)
 
     # --- Settings.json merge ---------------------------------------------------
     # Read the existing settings.json (seed file provides hooks + schema_version).

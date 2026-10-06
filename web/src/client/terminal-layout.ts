@@ -146,6 +146,48 @@ export class TerminalLayoutManager {
   }
 
   /**
+   * Add a session the way the "Jump to agent" palette does: fill the first
+   * empty slot in the active multi preset exactly like {@link open}, but —
+   * unlike `open`, which overflows a full grid to `single` — REPLACE
+   * `focusedSessionKey`'s slot (or slot 0, if that key is absent or not in
+   * the active preset) when the preset is already at capacity. `open`'s
+   * overflow-to-single contract stays unchanged for every other caller
+   * (coordinator-driven navigation, rail clicks); this method exists only
+   * for the palette, which must keep the grid intact when it is full rather
+   * than silently collapsing it to one pane.
+   *
+   * In single mode, or if the session is already assigned in the active
+   * preset, delegates to {@link select} exactly like `open` does — there is
+   * no "full grid" to preserve in either case.
+   */
+  addOrReplaceFocused(sessionKey: string, focusedSessionKey: string | null): void {
+    const preset = this.state.active;
+    if (preset === 'single') {
+      this.select(sessionKey);
+      return;
+    }
+    const slots = this.getPresetSlots(preset);
+    if (slots.includes(sessionKey)) {
+      this.select(sessionKey);
+      return;
+    }
+    const emptyIndex = slots.findIndex((s) => s === null);
+    const updated = [...slots] as (string | null)[];
+    if (emptyIndex !== -1) {
+      updated[emptyIndex] = sessionKey;
+    } else {
+      const focusedIndex = focusedSessionKey ? slots.indexOf(focusedSessionKey) : -1;
+      updated[focusedIndex !== -1 ? focusedIndex : 0] = sessionKey;
+    }
+    this.zoomed = null;
+    this.commit({
+      ...this.state,
+      ...this.withPresetSlots(preset, updated),
+      single: [sessionKey],
+    });
+  }
+
+  /**
    * Select a session: sets single[0] without changing the active preset.
    *
    * Used for navigation between existing sessions (rail clicks, coordinator

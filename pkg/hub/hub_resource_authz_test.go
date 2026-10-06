@@ -41,7 +41,7 @@ func newOtherProjectMember(t *testing.T, srv *Server, s store.Store, owner *stor
 	other := &store.Project{ID: tid(slug), Name: slug, Slug: slug,
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, other))
-	srv.createProjectMembersGroup(ctx, other)
+	srv.seedProjectCreatorMembership(ctx, other)
 	return makeProjectMemberUser(t, s, other, tid(slug+"-member"), "Other Member", store.GroupMemberRoleMember)
 }
 
@@ -428,7 +428,7 @@ func TestChatSearchDMAuthz(t *testing.T) {
 	proj := &store.Project{ID: tid("search-dm"), Name: "search-dm", Slug: "search-dm",
 		Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, proj))
-	srv.createProjectMembersGroup(ctx, proj)
+	srv.seedProjectCreatorMembership(ctx, proj)
 	carol := makeProjectMemberUser(t, s, proj, tid("search-carol"), "Carol", store.GroupMemberRoleMember)
 
 	agent := &store.Agent{ID: tid("search-dm-agent"), ProjectID: proj.ID, Name: "Bot",

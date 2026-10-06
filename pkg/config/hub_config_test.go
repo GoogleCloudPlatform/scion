@@ -18,6 +18,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -989,6 +991,94 @@ hub:
 	}
 }
 
+func TestLoadServerFromSettingsFile_QuotasEnforceBrokerQuotas(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+quotas:
+  enforce_broker_quotas: false
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas != false {
+		t.Errorf("expected EnforceBrokerQuotas=false, got %v", gc.EnforceBrokerQuotas)
+	}
+}
+
+func TestLoadServerFromSettingsFile_QuotasAbsent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.EnforceBrokerQuotas != nil {
+		t.Errorf("expected EnforceBrokerQuotas=nil when absent, got %v", *gc.EnforceBrokerQuotas)
+	}
+}
+
+func TestLoadServerFromSettingsFile_AgentSecretsUserScopeOnly(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+agent_secrets:
+  user_scope_only: true
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.AgentSecretsUserScopeOnly == nil || *gc.AgentSecretsUserScopeOnly != true {
+		t.Errorf("expected AgentSecretsUserScopeOnly=true, got %v", gc.AgentSecretsUserScopeOnly)
+	}
+}
+
+func TestLoadServerFromSettingsFile_AgentSecretsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.AgentSecretsUserScopeOnly != nil {
+		t.Errorf("expected AgentSecretsUserScopeOnly=nil when absent, got %v", *gc.AgentSecretsUserScopeOnly)
+	}
+}
+
 // TestApplyDatabasePoolDefaults_PostgresOverridesLeakedSqliteDefault is a
 // regression test for the production incident where both hubs served every API
 // request in ~55s. The struct-level default for MaxOpenConns/MaxIdleConns is 1
@@ -1255,5 +1345,651 @@ func TestResolveHubIDFromEnv_WorkstationFallback(t *testing.T) {
 	expected := DefaultHubID()
 	if id != expected {
 		t.Errorf("ResolveHubIDFromEnv() = %q on workstation, want %q", id, expected)
+	}
+}
+
+// TestResolveHubIDFromEnvReadOnly covers ResolveHubIDFromEnvReadOnly
+// directly (ptone/scion#2152 round-5 review nit 5): previously it was only
+// exercised indirectly through cmd's migrate-names tests.
+func TestResolveHubIDFromEnvReadOnly(t *testing.T) {
+	cases := []struct {
+		name          string
+		explicitEnv   string
+		kService      string
+		persistedFile string // if non-empty, pre-create ~/.scion/hub-id with this content
+		wantOK        bool
+		wantID        string // only checked when wantOK
+	}{
+		{
+			name:        "explicit env var wins",
+			explicitEnv: "explicit-hub-id",
+			kService:    "my-cloud-run-service", // must be ignored
+			wantOK:      true,
+			wantID:      "explicit-hub-id",
+		},
+		{
+			name:     "K_SERVICE derives without persisting",
+			kService: "my-cloud-run-service",
+			wantOK:   true,
+		},
+		{
+			name:          "persisted file is read, not derived",
+			persistedFile: "persisted-hub-id",
+			wantOK:        true,
+			wantID:        "persisted-hub-id",
+		},
+		{
+			name:   "nothing available refuses rather than deriving and persisting",
+			wantOK: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
+			t.Setenv("SCION_SERVER_HUB_HUBID", c.explicitEnv)
+			t.Setenv("K_SERVICE", c.kService)
+
+			if c.persistedFile != "" {
+				scionDir := filepath.Join(tmpDir, ".scion")
+				if err := os.MkdirAll(scionDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(scionDir, "hub-id"), []byte(c.persistedFile+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			id, ok := ResolveHubIDFromEnvReadOnly()
+			if ok != c.wantOK {
+				t.Fatalf("ResolveHubIDFromEnvReadOnly() ok = %v, want %v (id=%q)", ok, c.wantOK, id)
+			}
+			if c.wantOK && c.wantID != "" && id != c.wantID {
+				t.Errorf("ResolveHubIDFromEnvReadOnly() id = %q, want %q", id, c.wantID)
+			}
+
+			// Never writes, regardless of outcome.
+			if _, statErr := os.Stat(filepath.Join(tmpDir, ".scion", "hub-id")); c.persistedFile == "" && !os.IsNotExist(statErr) {
+				t.Errorf("ResolveHubIDFromEnvReadOnly must not create ~/.scion/hub-id; stat error: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestServerConfigSources_OmitsMissingFiles(t *testing.T) {
+	// Neither the global dir nor "." has a server.yaml/yml: nothing should
+	// be reported, matching settingsHierarchySources' "omit missing files"
+	// behavior. Round-2 review finding 2.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	got := serverConfigSources("")
+	if len(got) != 0 {
+		t.Errorf("serverConfigSources(\"\") with no files present = %v, want empty", got)
+	}
+}
+
+func TestServerConfigSources_ResolvesGlobalDirFile(t *testing.T) {
+	// A real server.yaml in the global dir must be reported as that exact
+	// file path, not the bare directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	globalDir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalServerYAML := filepath.Join(globalDir, "server.yaml")
+	if err := os.WriteFile(globalServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources("")
+	if len(got) != 1 || got[0] != globalServerYAML {
+		t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, globalServerYAML)
+	}
+}
+
+func TestServerConfigSources_ResolvesConfigPathDirFile(t *testing.T) {
+	// configPath naming a directory with a server.yaml resolves to that
+	// file's absolute path, not the bare directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	localDir := t.TempDir()
+	localServerYAML := filepath.Join(localDir, "server.yaml")
+	if err := os.WriteFile(localServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(localDir)
+	if len(got) != 1 || got[0] != localServerYAML {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", localDir, got, localServerYAML)
+	}
+}
+
+func TestServerConfigSources_ResolvesConfigPathFileDirectly(t *testing.T) {
+	// configPath naming a file directly (not a directory) is reported as its
+	// absolute path, mirroring loadGlobalConfigLegacy loading it as-is.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := t.TempDir()
+	explicitFile := filepath.Join(localDir, "my-server-config.yaml")
+	if err := os.WriteFile(explicitFile, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(explicitFile)
+	if len(got) != 1 || got[0] != explicitFile {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", explicitFile, got, explicitFile)
+	}
+}
+
+func TestServerConfigSources_ResolvesRelativeConfigPathFileToAbsolute(t *testing.T) {
+	// A relative, file-valued configPath goes through its own filepath.Abs
+	// call, separate from the directory/cwd branch's. Every other
+	// file-valued-configPath test passes an already-absolute t.TempDir()
+	// path, so removing just this branch's Abs call would otherwise leave
+	// the suite green. Round-4 review finding 1.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	relFile := "my-server.yaml"
+	if err := os.WriteFile(filepath.Join(cwd, relFile), []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(cwd, relFile)
+	got := serverConfigSources(relFile)
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(%q) = %v, want exactly one path", relFile, got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(%q) = %v, want an absolute path", relFile, got)
+	}
+	if got[0] != want {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", relFile, got, want)
+	}
+}
+
+func TestServerConfigSources_ResolvesRelativeConfigPathDirToAbsolute(t *testing.T) {
+	// A relative, directory-valued configPath (distinct from both the
+	// file-valued case above and the configPath=="" default) also resolves
+	// through the dir/cwd branch's filepath.Abs call.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	relDir := "cfg"
+	if err := os.MkdirAll(filepath.Join(cwd, relDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(cwd, relDir, "server.yaml")
+	if err := os.WriteFile(want, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(relDir)
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(%q) = %v, want exactly one path", relDir, got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(%q) = %v, want an absolute path", relDir, got)
+	}
+	if got[0] != want {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", relDir, got, want)
+	}
+}
+
+func TestServerConfigSources_DedupesWhenLocalLocationIsGlobalDir(t *testing.T) {
+	// When configPath resolves to the same server.yaml as the global dir
+	// (either passed explicitly, or via an empty configPath whose cwd
+	// default happens to be the global dir), the file must be listed once,
+	// not twice. Round-3 review finding 1.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	globalDir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalServerYAML := filepath.Join(globalDir, "server.yaml")
+	if err := os.WriteFile(globalServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("configPath is the global dir", func(t *testing.T) {
+		got := serverConfigSources(globalDir)
+		if len(got) != 1 || got[0] != globalServerYAML {
+			t.Errorf("serverConfigSources(%q) = %v, want [%q]", globalDir, got, globalServerYAML)
+		}
+	})
+
+	t.Run("configPath is empty and cwd is the global dir", func(t *testing.T) {
+		t.Chdir(globalDir)
+		got := serverConfigSources("")
+		if len(got) != 1 || got[0] != globalServerYAML {
+			t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, globalServerYAML)
+		}
+	})
+}
+
+func TestServerConfigSources_ResolvesRelativeCwdToAbsolute(t *testing.T) {
+	// configPath == "" (the default relative ".") resolves the cwd's
+	// server.yaml to an absolute path. Round-3 review finding 2.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	cwdServerYAML := filepath.Join(cwd, "server.yaml")
+	if err := os.WriteFile(cwdServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	got := serverConfigSources("")
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(\"\") = %v, want exactly one path", got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(\"\") = %v, want an absolute path", got)
+	}
+	if got[0] != cwdServerYAML {
+		t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, cwdServerYAML)
+	}
+}
+
+// TestLoadGlobalConfig_TopLevelSectionsWithoutServerKey guards
+// ptone/scion#2284: a settings.yaml with no "server" key must still
+// contribute its top-level hub sections to LoadGlobalConfig, exactly as the
+// same file with a "server" key does.
+func TestLoadGlobalConfig_TopLevelSectionsWithoutServerKey(t *testing.T) {
+	const topLevel = `quotas:
+  enforce_broker_quotas: false
+agent_secrets:
+  user_scope_only: true
+default_timezone: Europe/Berlin
+default_harness_config: claude
+project_defaults:
+  default_scratchpad: true
+default_gcp_identity_mode: block
+`
+	load := func(t *testing.T, content string) *GlobalConfig {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		scionDir := filepath.Join(home, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		gc, err := LoadGlobalConfig(t.TempDir())
+		if err != nil {
+			t.Fatalf("LoadGlobalConfig: %v", err)
+		}
+		return gc
+	}
+
+	withServer := load(t, "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n"+topLevel)
+	without := load(t, "schema_version: \"1\"\n"+topLevel)
+
+	for name, gc := range map[string]*GlobalConfig{"with server": withServer, "without server": without} {
+		if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
+			t.Errorf("%s: EnforceBrokerQuotas = %s, want false", name, boolPtrString(gc.EnforceBrokerQuotas))
+		}
+		if gc.AgentSecretsUserScopeOnly == nil || !*gc.AgentSecretsUserScopeOnly {
+			t.Errorf("%s: AgentSecretsUserScopeOnly = %s, want true", name, boolPtrString(gc.AgentSecretsUserScopeOnly))
+		}
+		if gc.DefaultTimezone != "Europe/Berlin" {
+			t.Errorf("%s: DefaultTimezone = %q, want Europe/Berlin", name, gc.DefaultTimezone)
+		}
+		if gc.DefaultHarnessConfig != "claude" {
+			t.Errorf("%s: DefaultHarnessConfig = %q, want claude", name, gc.DefaultHarnessConfig)
+		}
+		if gc.DefaultScratchpad == nil || !*gc.DefaultScratchpad {
+			t.Errorf("%s: DefaultScratchpad = %s, want true", name, boolPtrString(gc.DefaultScratchpad))
+		}
+		if gc.DefaultGCPIdentityMode != "block" {
+			t.Errorf("%s: DefaultGCPIdentityMode = %q, want block", name, gc.DefaultGCPIdentityMode)
+		}
+	}
+}
+
+// writeGlobalFiles creates a temp HOME and writes the given files into its
+// ~/.scion directory, skipping empty contents.
+func writeGlobalFiles(t *testing.T, files map[string]string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range files {
+		if content == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestLoadGlobalConfig_TelemetryEnvBeatsTopLevelSettings checks that
+// SCION_SERVER_TELEMETRYENABLED beats settings.yaml telemetry.enabled on both
+// load paths, so the legacy fallback added for ptone/scion#2284 keeps the
+// same file < env precedence as the settings.yaml "server" path.
+func TestLoadGlobalConfig_TelemetryEnvBeatsTopLevelSettings(t *testing.T) {
+	const tel = "telemetry:\n  enabled: false\n"
+	for name, settings := range map[string]string{
+		"with server":    "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n" + tel,
+		"without server": "schema_version: \"1\"\n" + tel,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalFiles(t, map[string]string{"settings.yaml": settings})
+
+			gc, err := LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.TelemetryEnabled == nil || *gc.TelemetryEnabled {
+				t.Errorf("file only: TelemetryEnabled = %s, want false", boolPtrString(gc.TelemetryEnabled))
+			}
+
+			t.Setenv("SCION_SERVER_TELEMETRYENABLED", "true")
+			gc, err = LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
+				t.Errorf("with env: TelemetryEnabled = %s, want true (env beats file)", boolPtrString(gc.TelemetryEnabled))
+			}
+		})
+	}
+}
+
+// TestLoadGlobalConfig_ServerYAMLWithServerlessSettings covers the
+// server.yaml interplay of ptone/scion#2284: Layer-0 values still come from
+// server.yaml, top-level sections come from the server-less settings.yaml,
+// and settings.yaml telemetry.enabled beats server.yaml telemetryEnabled (as
+// the boot-time opsettings snapshot already does).
+func TestLoadGlobalConfig_ServerYAMLWithServerlessSettings(t *testing.T) {
+	writeGlobalFiles(t, map[string]string{
+		"server.yaml":   "hub:\n  port: 7777\ntelemetryEnabled: true\n",
+		"settings.yaml": "schema_version: \"1\"\nquotas:\n  enforce_broker_quotas: false\ndefault_timezone: Europe/Paris\ntelemetry:\n  enabled: false\n",
+	})
+	gc, err := LoadGlobalConfig(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gc.Hub.Port != 7777 {
+		t.Errorf("Hub.Port = %d, want 7777 from server.yaml", gc.Hub.Port)
+	}
+	if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
+		t.Errorf("EnforceBrokerQuotas = %s, want false from settings.yaml", boolPtrString(gc.EnforceBrokerQuotas))
+	}
+	if gc.DefaultTimezone != "Europe/Paris" {
+		t.Errorf("DefaultTimezone = %q, want Europe/Paris from settings.yaml", gc.DefaultTimezone)
+	}
+	if gc.TelemetryEnabled == nil || *gc.TelemetryEnabled {
+		t.Errorf("TelemetryEnabled = %s, want false (settings.yaml beats server.yaml)", boolPtrString(gc.TelemetryEnabled))
+	}
+}
+
+// TestLoadGlobalConfig_ServerYAMLOnlyUnchanged checks that a server.yaml-only
+// deployment loads exactly as the legacy loader did before ptone/scion#2284.
+func TestLoadGlobalConfig_ServerYAMLOnlyUnchanged(t *testing.T) {
+	writeGlobalFiles(t, map[string]string{
+		"server.yaml": "hub:\n  port: 7777\ntelemetryEnabled: true\n",
+	})
+	configDir := t.TempDir()
+	gc, err := LoadGlobalConfig(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := loadGlobalConfigLegacy(configDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gc, legacy) {
+		t.Errorf("LoadGlobalConfig differs from the plain legacy load:\n got  %+v\n want %+v", gc, legacy)
+	}
+	if gc.Hub.Port != 7777 || gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
+		t.Errorf("server.yaml values lost: port=%d telemetry=%s", gc.Hub.Port, boolPtrString(gc.TelemetryEnabled))
+	}
+	if gc.EnforceBrokerQuotas != nil || gc.DefaultTimezone != "" {
+		t.Errorf("top-level sections set without a settings.yaml: quotas=%s tz=%q", boolPtrString(gc.EnforceBrokerQuotas), gc.DefaultTimezone)
+	}
+}
+
+// boolPtrString renders a *bool for test failure messages.
+func boolPtrString(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	return strconv.FormatBool(*b)
+}
+
+// TestLoadGlobalConfig_TelemetryYAML11Bool checks that a YAML 1.1 boolean
+// (enabled: yes) in settings.yaml's top-level telemetry section is read the
+// same on the settings.yaml path and the legacy path, including over a
+// server.yaml telemetryEnabled.
+func TestLoadGlobalConfig_TelemetryYAML11Bool(t *testing.T) {
+	const tel = "telemetry:\n  enabled: yes\n"
+	for name, files := range map[string]map[string]string{
+		"with server":    {"settings.yaml": "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n" + tel},
+		"without server": {"settings.yaml": "schema_version: \"1\"\n" + tel},
+		"over server.yaml": {
+			"server.yaml":   "telemetryEnabled: false\n",
+			"settings.yaml": "schema_version: \"1\"\n" + tel,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalFiles(t, files)
+			gc, err := LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.TelemetryEnabled == nil || !*gc.TelemetryEnabled {
+				t.Errorf("TelemetryEnabled = %s, want true", boolPtrString(gc.TelemetryEnabled))
+			}
+			if gc.TelemetryConfig == nil || gc.TelemetryConfig.Enabled == nil || !*gc.TelemetryConfig.Enabled {
+				t.Errorf("TelemetryConfig.Enabled disagrees with TelemetryEnabled")
+			}
+		})
+	}
+}
+
+// TestLoadGlobalConfig_ListFieldNormalization pins normalizeListSettings on
+// both load paths. CORS lists are normalized at every length (each item
+// split on commas, trimmed, empty items dropped). authorized_domains keeps
+// its original behaviour exactly: only a single comma-containing element is
+// split; empty, blank and padded values are left as loaded, because an empty
+// list means "allow every domain" in checkUserAuthorized.
+func TestLoadGlobalConfig_ListFieldNormalization(t *testing.T) {
+	type row struct {
+		name   string
+		env    map[string]string
+		legacy string // server.yaml body (legacy path)
+		v1     string // appended under settings.yaml "server:" (settings path)
+		get    func(*GlobalConfig) []string
+		want   []string
+	}
+	hubOrigins := func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedOrigins }
+	domains := func(gc *GlobalConfig) []string { return gc.Auth.AuthorizedDomains }
+	domainsFile := func(list string) (string, string) {
+		return "auth:\n  authorizedDomains: " + list + "\n", "  auth:\n    authorized_domains: " + list + "\n"
+	}
+	rows := []row{
+		// CORS: normalized.
+		{name: "env origins split and trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "https://a, https://b"},
+			get: hubOrigins, want: []string{"https://a", "https://b"}},
+		{name: "env single origin trimmed", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": "  https://only.example  "},
+			get: hubOrigins, want: []string{"https://only.example"}},
+		{name: "env empty origin dropped", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDORIGINS": ""},
+			get: hubOrigins, want: []string{}},
+		{name: "env hub methods", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDMETHODS": "GET,POST"},
+			get: func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods }, want: []string{"GET", "POST"}},
+		{name: "env hub headers", env: map[string]string{"SCION_SERVER_HUB_CORSALLOWEDHEADERS": "X-A, X-B"},
+			get: func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedHeaders }, want: []string{"X-A", "X-B"}},
+		{name: "env broker methods", env: map[string]string{"SCION_SERVER_RUNTIMEBROKER_CORSALLOWEDMETHODS": "GET,PUT"},
+			get: func(gc *GlobalConfig) []string { return gc.RuntimeBroker.CORSAllowedMethods }, want: []string{"GET", "PUT"}},
+		{name: "env broker headers", env: map[string]string{"SCION_SERVER_RUNTIMEBROKER_CORSALLOWEDHEADERS": "X-C,X-D"},
+			get: func(gc *GlobalConfig) []string { return gc.RuntimeBroker.CORSAllowedHeaders }, want: []string{"X-C", "X-D"}},
+		{name: "file single comma-joined origin split",
+			legacy: "hub:\n  corsAllowedOrigins: [\"https://f1,https://f2\"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_origins: [\"https://f1,https://f2\"]\n",
+			get:    hubOrigins, want: []string{"https://f1", "https://f2"}},
+		{name: "file multi-element origins padded and empty items",
+			legacy: "hub:\n  corsAllowedOrigins: [\" https://f1 \", \"\", \"  \", \"https://f2\"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_origins: [\" https://f1 \", \"\", \"  \", \"https://f2\"]\n",
+			get:    hubOrigins, want: []string{"https://f1", "https://f2"}},
+		{name: "file multi-element methods with blank",
+			legacy: "hub:\n  corsAllowedMethods: [\"GET\", \" \", \" POST\"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_methods: [\"GET\", \" \", \" POST\"]\n",
+			get:    func(gc *GlobalConfig) []string { return gc.Hub.CORSAllowedMethods }, want: []string{"GET", "POST"}},
+
+		// A padded "*" now takes effect (CORS normalization only widens matching).
+		{name: "file padded star origin hub",
+			legacy: "hub:\n  corsAllowedOrigins: [\" * \"]\n",
+			v1:     "  hub:\n    cors:\n      allowed_origins: [\" * \"]\n",
+			get:    hubOrigins, want: []string{"*"}},
+		{name: "file padded star origin broker",
+			legacy: "runtimeBroker:\n  corsAllowedOrigins: [\" * \"]\n",
+			v1:     "  broker:\n    cors:\n      allowed_origins: [\" * \"]\n",
+			get:    func(gc *GlobalConfig) []string { return gc.RuntimeBroker.CORSAllowedOrigins }, want: []string{"*"}},
+
+		// authorized_domains: unchanged behaviour.
+		{name: "domains env comma list split", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": "a.com, b.com"},
+			get: domains, want: []string{"a.com", "b.com"}},
+		{name: "domains env empty kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": ""},
+			get: domains, want: []string{""}},
+		{name: "domains env blank kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": "   "},
+			get: domains, want: []string{"   "}},
+		{name: "domains env padded single kept", env: map[string]string{"SCION_SERVER_AUTH_AUTHORIZEDDOMAINS": " a.com "},
+			get: domains, want: []string{" a.com "}},
+	}
+	// admin_emails: unchanged behaviour (comma split of a single element,
+	// then SanitizeEmailList trims, lowercases and drops empty entries).
+	admins := func(gc *GlobalConfig) []string { return gc.Hub.AdminEmails }
+	rows = append(rows,
+		row{name: "admins env empty", env: map[string]string{"SCION_SERVER_HUB_ADMINEMAILS": ""}, get: admins, want: []string{}},
+		row{name: "admins env padded single", env: map[string]string{"SCION_SERVER_HUB_ADMINEMAILS": "  A@x.com  "}, get: admins, want: []string{"a@x.com"}},
+	)
+	for _, f := range []struct {
+		name, list string
+		want       []string
+	}{
+		{"admins file two blanks", `["", " "]`, []string{}},
+		{"admins file padded comma-joined single", `[" a@x.com,b@x.com "]`, []string{"a@x.com", "b@x.com"}},
+		{"admins file multi-element with comma kept", `["a@x.com,b@x.com", "c@x.com"]`, []string{"a@x.com,b@x.com", "c@x.com"}},
+	} {
+		rows = append(rows, row{name: f.name,
+			legacy: "hub:\n  adminEmails: " + f.list + "\n",
+			v1:     "  hub:\n    admin_emails: " + f.list + "\n",
+			get:    admins, want: f.want})
+	}
+	for _, f := range []struct {
+		name, list string
+		want       []string
+	}{
+		{"domains file one empty kept", `[""]`, []string{""}},
+		{"domains file two blanks kept", `["", " "]`, []string{"", " "}},
+		{"domains file padded multi-element kept", `[" a.com ", "b.com"]`, []string{" a.com ", "b.com"}},
+	} {
+		legacy, v1 := domainsFile(f.list)
+		rows = append(rows, row{name: f.name, legacy: legacy, v1: v1, get: domains, want: f.want})
+	}
+
+	for _, r := range rows {
+		for _, mode := range []string{"legacy", "settings"} {
+			t.Run(r.name+"/"+mode, func(t *testing.T) {
+				files := map[string]string{}
+				if mode == "legacy" {
+					files["server.yaml"] = r.legacy
+				} else {
+					files["settings.yaml"] = "schema_version: \"1\"\nserver:\n  mode: workstation\n" + r.v1
+				}
+				writeGlobalFiles(t, files)
+				for k, v := range r.env {
+					t.Setenv(k, v)
+				}
+				gc, err := LoadGlobalConfig(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := r.get(gc); !reflect.DeepEqual(got, r.want) {
+					t.Errorf("got %q, want %q", got, r.want)
+				}
+			})
+		}
+	}
+}
+
+// TestLoadGlobalConfig_TopLevelYAML11Bools checks that YAML 1.1 booleans
+// (no/yes/on/off) in the top-level quotas, project_defaults and
+// agent_secrets sections are honoured on both load paths, as for telemetry.
+func TestLoadGlobalConfig_TopLevelYAML11Bools(t *testing.T) {
+	const top = "quotas:\n  enforce_broker_quotas: no\nproject_defaults:\n  default_scratchpad: off\nagent_secrets:\n  user_scope_only: yes\n"
+	for name, settings := range map[string]string{
+		"with server":    "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n" + top,
+		"without server": "schema_version: \"1\"\n" + top,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalFiles(t, map[string]string{"settings.yaml": settings})
+			gc, err := LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
+				t.Errorf("EnforceBrokerQuotas = %s, want false", boolPtrString(gc.EnforceBrokerQuotas))
+			}
+			if gc.DefaultScratchpad == nil || *gc.DefaultScratchpad {
+				t.Errorf("DefaultScratchpad = %s, want false", boolPtrString(gc.DefaultScratchpad))
+			}
+			if gc.AgentSecretsUserScopeOnly == nil || !*gc.AgentSecretsUserScopeOnly {
+				t.Errorf("AgentSecretsUserScopeOnly = %s, want true", boolPtrString(gc.AgentSecretsUserScopeOnly))
+			}
+		})
+	}
+}
+
+// TestLoadGlobalConfig_TopLevelQuotedBools pins that quoted "no"/"yes"
+// decode as booleans in the top-level sections (yaml.v3 behaviour via
+// decodeTopLevelSection; the pre-ptone/scion#2284 raw .(bool) path ignored them), and
+// that a non-boolean value is still ignored, on both load paths.
+func TestLoadGlobalConfig_TopLevelQuotedBools(t *testing.T) {
+	const top = "quotas:\n  enforce_broker_quotas: \"no\"\nagent_secrets:\n  user_scope_only: \"yes\"\nproject_defaults:\n  default_scratchpad: maybe\n"
+	for name, settings := range map[string]string{
+		"with server":    "schema_version: \"1\"\nserver:\n  hub:\n    port: 9810\n" + top,
+		"without server": "schema_version: \"1\"\n" + top,
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeGlobalFiles(t, map[string]string{"settings.yaml": settings})
+			gc, err := LoadGlobalConfig(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas {
+				t.Errorf("EnforceBrokerQuotas = %s, want false", boolPtrString(gc.EnforceBrokerQuotas))
+			}
+			if gc.AgentSecretsUserScopeOnly == nil || !*gc.AgentSecretsUserScopeOnly {
+				t.Errorf("AgentSecretsUserScopeOnly = %s, want true", boolPtrString(gc.AgentSecretsUserScopeOnly))
+			}
+			if gc.DefaultScratchpad != nil {
+				t.Errorf("DefaultScratchpad = %s, want <nil> for a non-boolean value", boolPtrString(gc.DefaultScratchpad))
+			}
+		})
 	}
 }

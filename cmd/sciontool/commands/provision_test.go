@@ -7,8 +7,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 )
 
 func TestProvisionCmd_WaitForSentinel_Found(t *testing.T) {
@@ -151,6 +154,11 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 	if err := os.WriteFile(sentinelPath, []byte("provisioned_at=test\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// A provisioned workspace with content. (A marked but completely empty
+	// workspace is cloned into instead.)
+	if err := os.WriteFile(filepath.Join(wsDir, "README.md"), []byte("existing\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	oldWorkspace := provisionWorkspace
 	oldMode := provisionMode
@@ -173,6 +181,7 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 
 	t.Setenv("SCION_CLONE_URL", "https://nonexistent.example.com/repo.git")
 	t.Setenv("SCION_CLONE_BRANCH", "main")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj")
 
 	if err := runProvision(context.Background()); err != nil {
@@ -209,6 +218,7 @@ func TestProvisionCmd_SharedDirPaths_ParsedAndProvisioned(t *testing.T) {
 	provisionGID = os.Getgid()
 
 	t.Setenv("SCION_CLONE_URL", "")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj-shared-dirs")
 	t.Setenv("SCION_SHARED_DIR_PATHS", "scratchpad="+sharedRootA+",other-scratchpad="+sharedRootB)
 
@@ -247,6 +257,7 @@ func TestProvisionCmd_Clone_NoURL(t *testing.T) {
 
 	t.Setenv("SCION_CLONE_URL", "")
 	t.Setenv("SCION_CLONE_BRANCH", "")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
 	t.Setenv("SCION_PROJECT_ID", "test-proj-no-url")
 
 	if err := runProvision(context.Background()); err != nil {
@@ -256,5 +267,82 @@ func TestProvisionCmd_Clone_NoURL(t *testing.T) {
 	sentinelPath := filepath.Join(dir, ".scion-provisioned")
 	if _, err := os.Stat(sentinelPath); err != nil {
 		t.Errorf("sentinel should be written for non-git project: %v", err)
+	}
+}
+
+// runProvisionWithFailingChown runs the real provisioning path with a chown
+// target uid this (non-root) test process cannot chown to, so the chown
+// fails for real, and reports the error and whether the sentinel was written.
+func runProvisionWithFailingChown(t *testing.T, bestEffortValue *string) (error, bool) {
+	t.Helper()
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chown to another uid would succeed")
+	}
+	workspace := filepath.Join(t.TempDir(), "workspace")
+
+	t.Setenv("SCION_CLONE_URL", "")
+	t.Setenv("SCION_SHARED_DIR_PATHS", "")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
+	t.Setenv("SCION_PROJECT_ID", "proj-chown")
+	if bestEffortValue != nil {
+		t.Setenv(provision.ChownBestEffortEnv, *bestEffortValue)
+	} else {
+		t.Setenv(provision.ChownBestEffortEnv, "")
+		_ = os.Unsetenv(provision.ChownBestEffortEnv)
+	}
+
+	oldWorkspace, oldMode, oldUID, oldGID := provisionWorkspace, provisionMode, provisionUID, provisionGID
+	t.Cleanup(func() {
+		provisionWorkspace, provisionMode, provisionUID, provisionGID = oldWorkspace, oldMode, oldUID, oldGID
+	})
+	provisionWorkspace = workspace
+	provisionMode = "shared-plain"
+	provisionUID = os.Getuid() + 1
+	provisionGID = os.Getgid()
+
+	err := runProvision(context.Background())
+	_, statErr := os.Stat(filepath.Join(workspace, provision.ProvisionSentinelFile))
+	return err, statErr == nil
+}
+
+// Without the variable (what an older pod spec, or any pod whose workspace
+// directory the broker did not create, looks like) a failed chown stays
+// fatal and no sentinel is written: the behavior before this change.
+func TestRunProvision_ChownFailure_FatalByDefault(t *testing.T) {
+	err, sentinel := runProvisionWithFailingChown(t, nil)
+	if err == nil || !strings.Contains(err.Error(), "chown") {
+		t.Fatalf("expected a chown error, got %v", err)
+	}
+	if sentinel {
+		t.Error("sentinel must not be written when the chown is required and fails")
+	}
+}
+
+// Only the exact value "1" relaxes the chown; anything else stays strict.
+func TestRunProvision_ChownFailure_UnrecognizedValueStaysFatal(t *testing.T) {
+	for _, v := range []string{"", "0", "true", "yes", " 1", "1 "} {
+		t.Run("value="+v, func(t *testing.T) {
+			value := v
+			err, sentinel := runProvisionWithFailingChown(t, &value)
+			if err == nil {
+				t.Fatalf("value %q: expected a chown error", v)
+			}
+			if sentinel {
+				t.Errorf("value %q: sentinel must not be written", v)
+			}
+		})
+	}
+}
+
+// With the variable set to "1" (broker-created workspace directory) the
+// failed chown is logged, provisioning completes and the sentinel is written.
+func TestRunProvision_ChownFailure_BestEffortWhenRequested(t *testing.T) {
+	value := "1"
+	err, sentinel := runProvisionWithFailingChown(t, &value)
+	if err != nil {
+		t.Fatalf("expected provisioning to succeed despite the chown failure, got %v", err)
+	}
+	if !sentinel {
+		t.Error("sentinel must be written after best-effort provisioning")
 	}
 }

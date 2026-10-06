@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,9 +25,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
+
+// newTestHydrator returns a *templatecache.Hydrator suitable only for
+// satisfying resolveHubConnection's non-nil check in tests that exercise
+// hydrateTemplate's LocalStorage branch, which resolves before ever calling
+// into the returned Hydrator.
+func newTestHydrator(t *testing.T) *templatecache.Hydrator {
+	t.Helper()
+	cache, err := templatecache.New(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatalf("templatecache.New: %v", err)
+	}
+	return templatecache.NewHydrator(cache, nil)
+}
 
 // claudeAuthBlock is the declarative auth metadata for the claude harness,
 // matching the production harnesses/claude/config.yaml. Tests that need
@@ -484,8 +501,8 @@ runtimes:
 	if w1.Code != http.StatusCreated {
 		t.Fatalf("first create: expected 201, got %d: %s", w1.Code, w1.Body.String())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("first create: expected startCalls=1, got %d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("first create: expected startCalls=1, got %d", mgr.StartCalls())
 	}
 
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -495,8 +512,8 @@ runtimes:
 	if w2.Code != http.StatusCreated {
 		t.Fatalf("second create: expected 201 replay, got %d: %s", w2.Code, w2.Body.String())
 	}
-	if mgr.startCalls != 1 {
-		t.Fatalf("second create should replay without starting again, startCalls=%d", mgr.startCalls)
+	if mgr.StartCalls() != 1 {
+		t.Fatalf("second create should replay without starting again, startCalls=%d", mgr.StartCalls())
 	}
 }
 
@@ -541,6 +558,25 @@ func newTestServerWithHarnessConfig(t *testing.T, harnessConfigName, configYAML,
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
 	return New(cfg, mgr, rt), mgr, projectDir
+}
+
+// unsetHostGCPEnv temporarily removes the broker process's own GCP env vars
+// for the duration of the test (restored automatically via t.Setenv's
+// cleanup). authCandidateKeyValue (handlers.go) mirrors buildAgentEnv's
+// host-env passthrough for a literal empty dir/settings value, so any test
+// asserting that an empty GCP-key value does NOT satisfy a requirement needs
+// this — otherwise the result depends on whether the host running the test
+// happens to have these vars set, which this container's own broker
+// environment does.
+func unsetHostGCPEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{
+		"GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "ANTHROPIC_VERTEX_PROJECT_ID",
+		"GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION",
+	} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
 }
 
 // TestEnvGather_SettingsEmptyEnv tests that env-gather extracts required keys
@@ -600,6 +636,11 @@ profiles:
 // TestEnvGather_SettingsEmptyEnvVertexAI tests that env-gather extracts
 // project-related keys declared as empty in settings.
 func TestEnvGather_SettingsEmptyEnvVertexAI(t *testing.T) {
+	// GOOGLE_CLOUD_PROJECT is an auth-candidate key: an empty settings value
+	// falls through to a host-env passthrough (authCandidateKeyValue), so
+	// this test needs the broker process's own GCP env vars out of the way
+	// to be deterministic regardless of the host running it.
+	unsetHostGCPEnv(t)
 	// Settings declares GOOGLE_CLOUD_PROJECT as empty (needs gathering)
 	srv, _, projectDir := newTestServerWithHarnessConfig(t, "gemini",
 		"harness: gemini\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n",
@@ -2261,6 +2302,118 @@ profiles:
 	}
 }
 
+// TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC covers
+// ptone/scion#2328: a dispatch profile that resolves to the Kubernetes
+// runtime gets passthrough by default when no GCP identity is configured at
+// all (no GCPIdentity field here, unlike
+// TestEnvGather_VertexAI_GCPIdentitySkipsADC above). extractRequiredEnvKeys
+// must recognize that implicit passthrough as GCP-credentialed the same way
+// buildStartContext would at actual dispatch time — otherwise an
+// unconfigured Kubernetes agent using vertex-ai would be wrongly asked for
+// an ADC file it will never need.
+//
+// Calls extractRequiredEnvKeys directly rather than through the full HTTP
+// create handler: nothing else about the create path (template hydration,
+// hub connectivity, actual dispatch) is relevant to this preflight
+// computation. The preflight resolves the runtime's name via
+// resolveRuntimeNameForOpts, which never builds a real runtime client (see
+// that function's doc comment, handlers.go) — unlike resolveManagerForOpts,
+// a settings profile that resolves to "kubernetes" here does not attempt a
+// real cluster connection, so no resolveAuxiliaryRuntime mock is needed.
+func TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+`)
+
+	req := CreateAgentRequest{
+		Name:        "test-agent-vertex-k8s-implicit",
+		ProjectPath: projectDir,
+		ResolvedEnv: map[string]string{
+			"GOOGLE_CLOUD_PROJECT": "my-project",
+			"GOOGLE_CLOUD_REGION":  "us-central1",
+		},
+		Config: &CreateAgentConfig{
+			Template: "claude",
+			Profile:  "default",
+		},
+	}
+
+	required, secretInfo, _, _ := srv.extractRequiredEnvKeys(req, "")
+	if len(required) != 0 {
+		t.Errorf("expected no required keys once Kubernetes' implicit passthrough is recognized as GCP-credentialed, got %v (secretInfo: %v)", required, secretInfo)
+	}
+}
+
+// TestExtractRequiredEnvKeys_DockerResolvedEnvPassthroughSkipsADC is the
+// Docker-side counterpart of
+// TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC, and a
+// behavior-change regression pin: before ptone/scion#2328, this preflight's
+// GCP-credential check (gcpSAAssigned) only ever consulted req.Config.GCPIdentity,
+// so a mode carried in req.ResolvedEnv (e.g. a resolved project or hub
+// default GCP identity, supplied the same way buildStartContext's own
+// SCION_METADATA_MODE fallback reads it — see effectiveGCPMetadataMode) was
+// invisible to it on every runtime, not just Kubernetes. Routing this
+// preflight through effectiveGCPMetadataMode to add the Kubernetes-aware
+// default also picked up that resolvedEnv source for Docker and every other
+// runtime: a Docker dispatch with a resolvedEnv-carried "passthrough" (no
+// Config.GCPIdentity at all here) now also skips the ADC file requirement,
+// where previously it would not have. Disclosed in the PR body as a
+// Docker-visible behavior change, not just a Kubernetes one.
+//
+// The resolvedEnv here includes SCION_METADATA_MODE_SOURCE=hub, matching
+// what a real hub dispatch always sends alongside an elevated mode: absent
+// that marker, effectiveGCPMetadataMode now treats a resolvedEnv-carried
+// "passthrough"/"assign" as untrusted and downgrades it, so this preflight's
+// required-keys answer stays consistent with what buildStartContext will
+// actually resolve for the same dispatch.
+func TestExtractRequiredEnvKeys_DockerResolvedEnvPassthroughSkipsADC(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: docker
+runtimes:
+  docker:
+    type: docker
+`)
+
+	req := CreateAgentRequest{
+		Name:        "test-agent-vertex-docker-resolvedenv-passthrough",
+		ProjectPath: projectDir,
+		ResolvedEnv: map[string]string{
+			"GOOGLE_CLOUD_PROJECT":       "my-project",
+			"GOOGLE_CLOUD_REGION":        "us-central1",
+			"SCION_METADATA_MODE":        store.GCPMetadataModePassthrough,
+			"SCION_METADATA_MODE_SOURCE": "hub",
+		},
+		Config: &CreateAgentConfig{
+			Template: "claude",
+			Profile:  "default",
+		},
+	}
+
+	required, secretInfo, _, _ := srv.extractRequiredEnvKeys(req, "")
+	if len(required) != 0 {
+		t.Errorf("expected no required keys once a resolvedEnv-carried passthrough mode is recognized as GCP-credentialed on Docker, got %v (secretInfo: %v)", required, secretInfo)
+	}
+}
+
 // TestEnvGather_DefaultTypeCredentialBeatsGCPIdentity is the handler-level
 // regression pin for the extractRequiredEnvKeys change: a present credential
 // for the harness's own default_type (claude's ANTHROPIC_API_KEY) must
@@ -2446,4 +2599,1182 @@ profiles:
 	}
 	// Either 201 (started) or 202 (needs file secret AGY_TOKEN) is acceptable —
 	// the point is that GEMINI_API_KEY is NOT required.
+}
+
+// The tests below cover the env-gather preflight honouring settings-resolved
+// env (ptone/scion#2158): extractRequiredEnvKeys must count a non-empty
+// GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION as satisfied when it comes
+// from harness_configs.<h>.env, profiles.<p>.harness_overrides.<h>.env, or
+// the harness-config directory's own `env:` block — the same sources
+// agent.Start and ProvisionAgent already deliver to the pod. Each request
+// uses gcpIdentity passthrough to waive the separate gcloud-adc file
+// requirement, isolating the env-key check.
+
+// TestEnvGather_VertexAI_SatisfiedByHarnessConfigsEnv confirms a key
+// satisfied only by settings harness_configs.<h>.env passes.
+func TestEnvGather_VertexAI_SatisfiedByHarnessConfigsEnv(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      GOOGLE_CLOUD_PROJECT: "p1"
+      GOOGLE_CLOUD_LOCATION: "us-east5"
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-vertex-hc-env",
+		"id": "agent-uuid-vertex-hc-env",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (harness_configs.env should satisfy GOOGLE_CLOUD_PROJECT/LOCATION), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_VertexAI_SatisfiedByHarnessOverridesEnv confirms a key
+// satisfied only by profiles.<p>.harness_overrides.<h>.env passes.
+func TestEnvGather_VertexAI_SatisfiedByHarnessOverridesEnv(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+    harness_overrides:
+      claude:
+        env:
+          GOOGLE_CLOUD_PROJECT: "p1"
+          GOOGLE_CLOUD_LOCATION: "us-east5"
+`)
+
+	body := `{
+		"name": "test-agent-vertex-override-env",
+		"id": "agent-uuid-vertex-override-env",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (harness_overrides.env should satisfy GOOGLE_CLOUD_PROJECT/LOCATION), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_VertexAI_SatisfiedByHarnessConfigDirEnv confirms a key
+// satisfied only by the harness-config directory's own `env:` block passes.
+func TestEnvGather_VertexAI_SatisfiedByHarnessConfigDirEnv(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
+			"env:\n  GOOGLE_CLOUD_PROJECT: p1\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-vertex-dir-env",
+		"id": "agent-uuid-vertex-dir-env",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (harness-config dir env should satisfy GOOGLE_CLOUD_PROJECT/LOCATION), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_VertexAI_StillMissingSameError confirms that when none of the
+// settings sources declare GOOGLE_CLOUD_PROJECT/LOCATION, the preflight
+// returns the 202/needs response for both keys.
+func TestEnvGather_VertexAI_StillMissingSameError(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-vertex-still-missing",
+		"id": "agent-uuid-vertex-still-missing",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+	for _, want := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"} {
+		found := false
+		for _, k := range envReqs.Needs {
+			if k == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %q in needs, got %v", want, envReqs.Needs)
+		}
+	}
+}
+
+// TestEnvGather_VertexAI_EmptySettingsEnvValueDoesNotCount confirms that a
+// settings env entry with an empty value does not itself satisfy the
+// requirement when there is no harness-config directory entry to fall
+// through to (authCandidateKeyValue's last resort is a host-env passthrough,
+// which needs the broker process's own GCP env vars out of the way here to
+// be deterministic regardless of the host running the test).
+func TestEnvGather_VertexAI_EmptySettingsEnvValueDoesNotCount(t *testing.T) {
+	unsetHostGCPEnv(t)
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      GOOGLE_CLOUD_PROJECT: ""
+      GOOGLE_CLOUD_LOCATION: ""
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-vertex-empty-env",
+		"id": "agent-uuid-vertex-empty-env",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (empty settings env value must not satisfy the requirement), got %d: %s", w.Code, w.Body.String())
+	}
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+	for _, want := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"} {
+		found := false
+		for _, k := range envReqs.Needs {
+			if k == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected %q in needs (empty settings value must not count as satisfied), got %v", want, envReqs.Needs)
+		}
+	}
+}
+
+// TestEnvGather_VertexAI_EmptySettingsEnvFallsThroughToHarnessConfigDir
+// pins the launch model for an auth-candidate key: run.go's Start
+// deletes an empty GOOGLE_CLOUD_PROJECT entry from opts.Env after auth
+// resolves (its resolved.EnvVars only ever carries non-empty values), which
+// clears the way for finalScionCfg.Env — here, the harness-config
+// directory's own non-empty value — to reach the container. So an empty
+// settings value for an auth key does NOT block the directory's
+// fall-through the way it would for an ordinary key.
+func TestEnvGather_VertexAI_EmptySettingsEnvFallsThroughToHarnessConfigDir(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
+			"env:\n  GOOGLE_CLOUD_PROJECT: p1\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      GOOGLE_CLOUD_PROJECT: ""
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-vertex-fallthrough",
+		"id": "agent-uuid-vertex-fallthrough",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (an empty settings value for an auth key must fall through to the harness-config dir's value), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_NonAuthKey_EmptySettingsEnvBlocksHarnessConfigDir is the
+// control for the test above: for an ORDINARY (non-auth-candidate) key,
+// launch does not delete an empty opts.Env entry, so it keeps blocking a
+// lower-ranked source exactly as withDir models. CUSTOM_ENV_KEY is not part
+// of any harness auth block, so it takes the ordinary-key path.
+func TestEnvGather_NonAuthKey_EmptySettingsEnvBlocksHarnessConfigDir(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\n"+
+			"env:\n  CUSTOM_ENV_KEY: dir-value\n",
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      ANTHROPIC_API_KEY: ""
+      CUSTOM_ENV_KEY: ""
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-nonauth-blocks",
+		"id": "agent-uuid-nonauth-blocks",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-test"},
+		"config": {"template": "claude", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (settings' empty CUSTOM_ENV_KEY must still block the harness-config dir's value for an ordinary key), got %d: %s", w.Code, w.Body.String())
+	}
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+	found := false
+	for _, k := range envReqs.Needs {
+		if k == "CUSTOM_ENV_KEY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CUSTOM_ENV_KEY in needs, got %v", envReqs.Needs)
+	}
+}
+
+// The tests below cover: an empty ResolvedEnv/Config.Env entry must still
+// block a lower-ranked settings/dir fill, the hydrated harness-config
+// directory must be preferred over an on-disk one of the same name,
+// auto-detect must see settings env but not directory env, and the outer
+// needs/hubHas check must be exercised directly, not just the
+// auth-key-group path.
+
+// TestEnvGather_VertexAI_EmptyResolvedEnvBlocksSettingsFill pins the
+// documented conservative choice for an empty ResolvedEnv/Config.Env entry
+// on an auth-candidate key: at launch, run.go's Start deletes an empty
+// auth-candidate opts.Env entry after auth resolves regardless of where the
+// empty value came from, so the pod may still receive the settings or
+// directory value — this test's own value actually reaches the container.
+// The preflight deliberately reports the key as missing anyway, because it
+// cannot tell this case apart from the common real Hub-dispatch case where
+// the empty entry also outranks the directory/settings inside the
+// container's own config and the pod really does end up empty (see
+// authCandidateKeyValue).
+func TestEnvGather_VertexAI_EmptyResolvedEnvBlocksSettingsFill(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      GOOGLE_CLOUD_PROJECT: "p1"
+      GOOGLE_CLOUD_LOCATION: "us-east5"
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-empty-resolvedenv-blocks",
+		"id": "agent-uuid-empty-resolvedenv-blocks",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"resolvedEnv": {"GOOGLE_CLOUD_PROJECT": ""},
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (empty ResolvedEnv entry must block the settings fill), got %d: %s", w.Code, w.Body.String())
+	}
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+	found := false
+	for _, k := range envReqs.Needs {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected GOOGLE_CLOUD_PROJECT in needs, got %v", envReqs.Needs)
+	}
+}
+
+// TestEnvGather_VertexAI_EmptyConfigEnvBlocksSettingsFill is the same as
+// above but with the empty value coming from inline Config.Env instead of
+// ResolvedEnv.
+func TestEnvGather_VertexAI_EmptyConfigEnvBlocksSettingsFill(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      GOOGLE_CLOUD_PROJECT: "p1"
+      GOOGLE_CLOUD_LOCATION: "us-east5"
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-empty-configenv-blocks",
+		"id": "agent-uuid-empty-configenv-blocks",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"env": ["GOOGLE_CLOUD_PROJECT="],
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (empty Config.Env entry must block the settings fill), got %d: %s", w.Code, w.Body.String())
+	}
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+	found := false
+	for _, k := range envReqs.Needs {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected GOOGLE_CLOUD_PROJECT in needs, got %v", envReqs.Needs)
+	}
+}
+
+// writeHarnessConfigDirAt writes a minimal harness-config dir at an
+// arbitrary path (used to build a standalone "hydrated" dir separate from
+// the project's on-disk harness-configs/ tree).
+func writeHarnessConfigDirAt(t *testing.T, dir, yaml string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEnvGather_VertexAI_HydratedDirPreferredOverOnDisk confirms that when a
+// hydrated hub-managed harness-config is supplied, its env is what counts —
+// not an on-disk directory of the same name — matching
+// resolveHarnessConfigDir (pkg/agent/provision.go), which prefers the
+// dispatch-context hydrated copy unconditionally and never merges it with an
+// on-disk one.
+func TestEnvGather_VertexAI_HydratedDirPreferredOverOnDisk(t *testing.T) {
+	// On-disk dir has no env; hydrated dir has the vars launch will actually use.
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+profiles:
+  default:
+    runtime: mock
+`)
+	hydratedDir := filepath.Join(t.TempDir(), "claude")
+	writeHarnessConfigDirAt(t, hydratedDir,
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: p1\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock)
+
+	var req CreateAgentRequest
+	req.ProjectPath = projectDir
+	req.Config = &CreateAgentConfig{HarnessConfig: "claude", Profile: "default"}
+	required, _, _, _ := srv.extractRequiredEnvKeys(req, "", hydratedDir)
+	for _, k := range required {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			t.Errorf("hydrated dir env (what launch uses) was ignored: GOOGLE_CLOUD_PROJECT reported missing, required=%v", required)
+		}
+	}
+}
+
+// TestEnvGather_VertexAI_OnDiskEnvIgnoredWhenHydratedLacksIt is the reverse:
+// the on-disk dir has the vars, but the hydrated dir (what launch actually
+// reads) does not, so the preflight must report them missing rather than
+// crediting the on-disk copy launch will not use.
+func TestEnvGather_VertexAI_OnDiskEnvIgnoredWhenHydratedLacksIt(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: p1\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+profiles:
+  default:
+    runtime: mock
+`)
+	hydratedDir := filepath.Join(t.TempDir(), "claude")
+	writeHarnessConfigDirAt(t, hydratedDir,
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock)
+
+	var req CreateAgentRequest
+	req.ProjectPath = projectDir
+	req.Config = &CreateAgentConfig{HarnessConfig: "claude", Profile: "default"}
+	required, _, _, _ := srv.extractRequiredEnvKeys(req, "", hydratedDir)
+	found := false
+	for _, k := range required {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("on-disk env was counted although launch uses the hydrated dir, which lacks it; required=%v", required)
+	}
+}
+
+// TestEnvGather_AutoDetect_SeesSettingsEnvNotDirEnv confirms that auto-detect
+// (when auth_selected_type is unset) sees the resolved settings env — the
+// same as launch's autoDetectAuthSelectedType, which runs after
+// resolveAuthEnvOverlay has filled opts.Env from settings — but does not see
+// the harness-config directory's env, which never reaches opts.Env.
+func TestEnvGather_AutoDetect_SeesSettingsEnvNotDirEnv(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      ANTHROPIC_API_KEY: "sk-test"
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-autodetect-settings-env",
+		"id": "agent-uuid-autodetect-settings-env",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (auto-detect should pick api-key from settings env, needing no GCP keys), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_OuterCheck_SettingsEnvSatisfiesNonAuthRequiredKey exercises
+// the outer needs/hubHas fold-in directly: a key that Phase 2 marks
+// required because some OTHER harness_configs entry declares it with
+// an empty value (extractRequiredEnvKeys walks every harness_configs entry,
+// not just the selected one) must still be satisfied when the SELECTED
+// harness config's own resolved settings env supplies a non-empty value —
+// a path the auth-key-group tests above never exercise, since that key is
+// not part of any auth key group.
+func TestEnvGather_OuterCheck_SettingsEnvSatisfiesNonAuthRequiredKey(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\n",
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      CUSTOM_ENV_KEY: "provided-value"
+  other:
+    harness: claude
+    env:
+      CUSTOM_ENV_KEY: ""
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-outer-phase2-satisfied",
+		"id": "agent-uuid-outer-phase2-satisfied",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"resolvedEnv": {"ANTHROPIC_API_KEY": "sk-test"},
+		"config": {"template": "claude", "profile": "default"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (CUSTOM_ENV_KEY should be satisfied by the selected harness config's own resolved settings env), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// The tests below cover the harness-config directory's own ${VAR}
+// expansion, and the preflight's search of template-bundled harness-config
+// dirs (matching launch's resolveHarnessConfigDir).
+
+// TestEnvGather_HarnessConfigDirEnv_UnsetVarIsMissing confirms that a dir
+// env value referencing an unset variable is dropped, matching
+// buildAgentEnv (pkg/agent/run.go), which also drops it.
+func TestEnvGather_HarnessConfigDirEnv_UnsetVarIsMissing(t *testing.T) {
+	_ = os.Unsetenv("DIR_ENV_UNSET_VAR")
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
+			"env:\n  GOOGLE_CLOUD_PROJECT: \"${DIR_ENV_UNSET_VAR}\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-dirvar-unset",
+		"id": "agent-uuid-dirvar-unset",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (${DIR_ENV_UNSET_VAR} is unset; buildAgentEnv would drop it), got %d: %s", w.Code, w.Body.String())
+	}
+	var envReqs EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &envReqs); err != nil {
+		t.Fatal("failed to decode response:", err)
+	}
+	found := false
+	for _, k := range envReqs.Needs {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected GOOGLE_CLOUD_PROJECT in needs, got %v", envReqs.Needs)
+	}
+}
+
+// TestEnvGather_HarnessConfigDirEnv_SetVarIsSatisfied confirms a dir env
+// value referencing a set variable expands and satisfies the requirement.
+func TestEnvGather_HarnessConfigDirEnv_SetVarIsSatisfied(t *testing.T) {
+	t.Setenv("DIR_ENV_SET_VAR", "proj-x")
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
+			"env:\n  GOOGLE_CLOUD_PROJECT: \"${DIR_ENV_SET_VAR}\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-dirvar-set",
+		"id": "agent-uuid-dirvar-set",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (${DIR_ENV_SET_VAR} expands to a non-empty value), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_HarnessConfigDirEnv_EmptyValueHostPassthrough confirms a
+// literal empty dir env value falls back to the broker process's own env,
+// matching buildAgentEnv's host-env passthrough.
+func TestEnvGather_HarnessConfigDirEnv_EmptyValueHostPassthrough(t *testing.T) {
+	unsetHostGCPEnv(t)
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "host-proj")
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
+			"env:\n  GOOGLE_CLOUD_PROJECT: \"\"\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-dirvar-hostpass",
+		"id": "agent-uuid-dirvar-hostpass",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (empty dir value plus broker process env set means host passthrough), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_TemplateBundledHarnessConfigDirEnv confirms the preflight
+// searches a template-bundled harness-config dir before the project/global
+// one of the same name, matching config.FindHarnessConfigDir's own
+// precedence (checked by launch's resolveHarnessConfigDir,
+// pkg/agent/provision.go, via the same template chain).
+func TestEnvGather_TemplateBundledHarnessConfigDirEnv(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+	tplHC := filepath.Join(projectDir, "templates", "mytpl", "harness-configs", "claude")
+	if err := os.MkdirAll(tplHC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "templates", "mytpl", "scion-agent.yaml"), []byte("harness_config: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tplHC, "config.yaml"),
+		[]byte("harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: tpl-proj\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{
+		"name": "test-agent-template-hc-dir",
+		"id": "agent-uuid-template-hc-dir",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {"template": "mytpl", "harnessConfig": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (template-bundled harness-config env, what launch uses, should satisfy GOOGLE_CLOUD_PROJECT/LOCATION), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_HarnessDeclaredAuthKey_EmptySettingsEnvFallsThroughToHarnessConfigDir
+// covers authCandidateEnvKeys' harness-declared half (every required_env
+// name across authMeta.Types, not just the six GCP shared names).
+// CLAUDE_CODE_OAUTH_TOKEN is declared under the harness's "oauth-token"
+// auth type, not the selected "vertex-ai" one, so it is required only via
+// Phase 2 (settings declares it with an empty value) and checked only by
+// the outer needs/hubHas path — not by the auth-key-group loop, which only
+// ever sees the selected auth type's own groups. Settings' empty value
+// must still fall through to the harness-config directory's value, exactly
+// as for a GCP-shared key.
+func TestEnvGather_HarnessDeclaredAuthKey_EmptySettingsEnvFallsThroughToHarnessConfigDir(t *testing.T) {
+	unsetHostGCPEnv(t)
+	_ = os.Unsetenv("CLAUDE_CODE_OAUTH_TOKEN")
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
+			"env:\n  GOOGLE_CLOUD_PROJECT: p1\n  GOOGLE_CLOUD_LOCATION: us-east5\n  CLAUDE_CODE_OAUTH_TOKEN: dir-tok\n"+
+			strings.Replace(claudeAuthBlock, "    vertex-ai:\n",
+				"    oauth-token:\n      required_env:\n        - any_of: [\"CLAUDE_CODE_OAUTH_TOKEN\"]\n    vertex-ai:\n", 1),
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+    env:
+      CLAUDE_CODE_OAUTH_TOKEN: ""
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-harness-declared-fallthrough",
+		"id": "agent-uuid-harness-declared-fallthrough",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (CLAUDE_CODE_OAUTH_TOKEN, a harness-declared auth key, should fall through to the harness-config dir's value), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate covers:
+// for a hub-dispatched agent (TemplateID set), launch's own dispatch path
+// (start_context.go) hydrates the template and resolves the harness-config
+// chain from that hydrated local path, not from a same-named template slug
+// found on the broker's local disk. The preflight hydrates the
+// template the same way (createAgent, next to the harness-config
+// hydration) and uses the hydrated path in place of the slug — so a stale
+// local template of the same name, which launch will never actually use,
+// must be ignored in favor of the hydrated one.
+func TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate(t *testing.T) {
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+profiles:
+  default:
+    runtime: mock
+`)
+
+	// A stale local template of the same slug, bundling a harness-config
+	// without the needed env. Launch would never read this one for a
+	// hub-dispatched agent — it hydrates the template instead.
+	staleTplHC := filepath.Join(projectDir, "templates", "mytpl", "harness-configs", "claude")
+	if err := os.MkdirAll(staleTplHC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "templates", "mytpl", "scion-agent.yaml"), []byte("harness_config: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleTplHC, "config.yaml"),
+		[]byte("harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The hydrated (hub-managed) template of the SAME slug, in a separate
+	// local-storage backend, bundling the correct env — matching how a
+	// co-located Hub resolves a template hydration request (see
+	// TestHydrateTemplate_LocalStorageDirectRead in hub_connection_test.go).
+	stor, err := storage.NewLocal(storage.Config{
+		Provider:  storage.ProviderLocal,
+		LocalPath: t.TempDir(),
+		Bucket:    "local",
+	})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	hydratedDir := stor.ObjectFSPath(storage.TemplateStoragePath("", "global", "", "mytpl"))
+	hydratedHC := filepath.Join(hydratedDir, "harness-configs", "claude")
+	if err := os.MkdirAll(hydratedHC, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hydratedDir, "scion-agent.yaml"), []byte("harness_config: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hydratedHC, "config.yaml"),
+		[]byte("harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: hydrated-proj\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock),
+		0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := &HubConnection{
+		Name:         "hub-1",
+		IsColocated:  true,
+		LocalStorage: stor,
+		HubClient: &stubHubClient{templates: &stubTemplateService{
+			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
+				return &hubclient.Template{ID: "tpl-uuid", Slug: "mytpl", Scope: "global"}, nil
+			},
+		}},
+	}
+	cfg := &CreateAgentConfig{Template: "mytpl", TemplateID: "tpl-uuid", HarnessConfig: "claude", Profile: "default"}
+
+	// This is exactly what createAgent's env-gather preflight does before
+	// calling extractRequiredEnvKeys (handlers.go, next to the
+	// harness-config hydration): hydrate the template and pass the
+	// resulting path through in place of the slug.
+	hydratedPath, err := srv.hydrateTemplate(context.Background(), cfg, conn)
+	if err != nil {
+		t.Fatalf("hydrateTemplate failed: %v", err)
+	}
+	if hydratedPath != hydratedDir {
+		t.Fatalf("expected hydrated path %q, got %q", hydratedDir, hydratedPath)
+	}
+
+	var req CreateAgentRequest
+	req.ProjectPath = projectDir
+	req.Config = cfg
+	required, _, _, _ := srv.extractRequiredEnvKeys(req, hydratedPath)
+	for _, k := range required {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			t.Errorf("hydrated template's bundled harness-config env (what launch uses) was ignored: GOOGLE_CLOUD_PROJECT reported missing, required=%v", required)
+		}
+	}
+}
+
+// newTemplateHydrationFailureServer sets up a server with a hub connection
+// whose template metadata lookup fails with getErr, for the
+// TestEnvGather_TemplateHydrationFailure_* tests below.
+func newTemplateHydrationFailureServer(t *testing.T, getErr error) (*Server, string) {
+	t.Helper()
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+profiles:
+  default:
+    runtime: mock
+`)
+
+	stor, err := storage.NewLocal(storage.Config{
+		Provider:  storage.ProviderLocal,
+		LocalPath: t.TempDir(),
+		Bucket:    "local",
+	})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+
+	srv.hubMu.Lock()
+	srv.hubConnections["hub-1"] = &HubConnection{
+		Name:         "hub-1",
+		IsColocated:  true,
+		LocalStorage: stor,
+		HubClient: &stubHubClient{templates: &stubTemplateService{
+			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
+				return nil, getErr
+			},
+		}},
+		Hydrator: newTestHydrator(t),
+	}
+	srv.hubMu.Unlock()
+	return srv, projectDir
+}
+
+func postTemplateHydrationFailure(t *testing.T, srv *Server, projectDir string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{
+		"name": "test-agent-template-hydration-fails",
+		"id": "agent-uuid-template-hydration-fails",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "mytpl",
+			"templateId": "tpl-uuid",
+			"harnessConfig": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Hub-Connection", "hub-1")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// TestEnvGather_TemplateHydrationFailure_FailsPreflight confirms the
+// preflight does not silently fall back to the on-disk template slug when
+// hub template hydration errors: launch returns the same startContextError
+// mapping on a hydrateTemplate error (writeStartContextError — 500
+// template_error here, since this error is not a Hub-connectivity one), so a
+// graceful fallback here would make the preflight more lenient than launch —
+// scoring a slug launch would never actually reach, and possibly reporting
+// success for an agent whose real dispatch is about to fail.
+func TestEnvGather_TemplateHydrationFailure_FailsPreflight(t *testing.T) {
+	srv, projectDir := newTemplateHydrationFailureServer(t, fmt.Errorf("boom"))
+	w := postTemplateHydrationFailure(t, srv, projectDir)
+
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v: %s", err, w.Body.String())
+	}
+	if w.Code != http.StatusInternalServerError || resp.Error.Code != ErrCodeTemplateError {
+		t.Fatalf("expected 500 %s (matching launch's non-connectivity hydration error mapping), got %d %s: %s",
+			ErrCodeTemplateError, w.Code, resp.Error.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_TemplateHydrationConnectivityFailure_MatchesLaunch confirms
+// that a Hub-connectivity hydration error (e.g. the Hub is temporarily
+// unreachable) maps to the same retryable 503 hub_unreachable launch uses
+// (writeStartContextError), not a generic 500 — a transient outage should
+// not look identical to a real template error to a caller deciding whether
+// to retry.
+func TestEnvGather_TemplateHydrationConnectivityFailure_MatchesLaunch(t *testing.T) {
+	srv, projectDir := newTemplateHydrationFailureServer(t, fmt.Errorf("dial tcp 10.0.0.1:443: connection refused"))
+	w := postTemplateHydrationFailure(t, srv, projectDir)
+
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v: %s", err, w.Body.String())
+	}
+	if w.Code != http.StatusServiceUnavailable || resp.Error.Code != ErrCodeHubUnreachable {
+		t.Fatalf("expected 503 %s (matching launch's Hub-connectivity hydration error mapping), got %d %s: %s",
+			ErrCodeHubUnreachable, w.Code, resp.Error.Code, w.Body.String())
+	}
+}
+
+// TestEnvGather_CreateAgent_ScoresHydratedTemplate complements
+// TestEnvGather_HydratedTemplate_PreferredOverStaleLocalTemplate, which
+// calls hydrateTemplate and extractRequiredEnvKeys directly — exercising the
+// same logic createAgent's own preflight wiring uses, but not that wiring
+// itself. This one goes through the full HTTP handler with a real hub
+// connection, the same way TestEnvGather_TemplateHydrationFailure_*
+// already does for the error path, so createAgent's own use of the hydrated
+// path (not just extractRequiredEnvKeys accepting one) is covered end to
+// end. The region key is deliberately left unset in both the stale and
+// hydrated harness-configs, so the request always ends in 202 and never
+// reaches full dispatch: past buildStartContext, createAgent's
+// attachSkillResolver calls hubclient.Client.Skills(), which stubHubClient
+// does not implement (nil embedded interface), so it would panic.
+// The needs list shows which harness-config directory the preflight
+// actually scored.
+func TestEnvGather_CreateAgent_ScoresHydratedTemplate(t *testing.T) {
+	unsetHostGCPEnv(t)
+	hc := "harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n" + claudeAuthBlock
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude", hc,
+		"schema_version: \"1\"\nprofiles:\n  default:\n    runtime: mock\n")
+
+	// Stale local template "mytpl": bundled harness-config has no env.
+	stale := filepath.Join(projectDir, "templates", "mytpl")
+	writeHarnessConfigDirAt(t, filepath.Join(stale, "harness-configs", "claude"), hc)
+	if err := os.WriteFile(filepath.Join(stale, "scion-agent.yaml"), []byte("harness_config: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hydrated (hub-managed) template of the same slug: bundled
+	// harness-config sets GOOGLE_CLOUD_PROJECT only.
+	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, LocalPath: t.TempDir(), Bucket: "local"})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	hydratedDir := stor.ObjectFSPath(storage.TemplateStoragePath("", "global", "", "mytpl"))
+	writeHarnessConfigDirAt(t, filepath.Join(hydratedDir, "harness-configs", "claude"),
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\nenv:\n  GOOGLE_CLOUD_PROJECT: hydrated-proj\n"+claudeAuthBlock)
+	if err := os.WriteFile(filepath.Join(hydratedDir, "scion-agent.yaml"), []byte("harness_config: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv.hubMu.Lock()
+	srv.hubConnections["hub-1"] = &HubConnection{
+		Name:         "hub-1",
+		IsColocated:  true,
+		LocalStorage: stor,
+		HubClient: &stubHubClient{templates: &stubTemplateService{
+			getFunc: func(ctx context.Context, ref string) (*hubclient.Template, error) {
+				return &hubclient.Template{ID: "tpl-uuid", Slug: "mytpl", Scope: "global"}, nil
+			},
+		}},
+		Hydrator: newTestHydrator(t),
+	}
+	srv.hubMu.Unlock()
+
+	body := `{
+		"name": "test-agent-createagent-hydrated",
+		"id": "agent-uuid-createagent-hydrated",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {
+			"template": "mytpl",
+			"templateId": "tpl-uuid",
+			"harnessConfig": "claude",
+			"profile": "default",
+			"gcpIdentity": {"metadata_mode": "passthrough"}
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Hub-Connection", "hub-1")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 (region key stays missing, so the request never reaches full dispatch), got %d: %s", w.Code, w.Body.String())
+	}
+	var resp EnvRequirementsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range resp.Needs {
+		if k == "GOOGLE_CLOUD_PROJECT" {
+			t.Errorf("createAgent's own preflight wiring scored the stale local template, not the hydrated one: needs=%v", resp.Needs)
+		}
+	}
+}
+
+// TestEnvGather_AuthCandidateKeyValue_UsesExpandedDirEnvKey covers:
+// authCandidateKeyValue must consult the same expanded dir-env view
+// fillAbsentDirEnv uses (expandDirEnv), not look the directory up by a raw,
+// unexpanded key. A dir entry whose KEY is itself a ${VAR} reference that
+// expands to an auth-candidate name (here GOOGLE_CLOUD_PROJECT) reaches the
+// container under that expanded name — buildAgentEnv (pkg/agent/run.go)
+// expands dir-env keys too — so the preflight must find it. Looking the
+// directory up by the literal, unexpanded key would report a value the pod
+// actually receives as missing (false-missing).
+func TestEnvGather_AuthCandidateKeyValue_UsesExpandedDirEnvKey(t *testing.T) {
+	t.Setenv("DIR_ENV_KEY_NAME", "GOOGLE_CLOUD_PROJECT")
+	srv, _, projectDir := newTestServerWithHarnessConfig(t, "claude",
+		"harness: claude\nimage: test-image\nuser: scion\nauth_selected_type: vertex-ai\n"+
+			"env:\n  \"${DIR_ENV_KEY_NAME}\": dir-proj\n  GOOGLE_CLOUD_LOCATION: us-east5\n"+claudeAuthBlock,
+		`
+schema_version: "1"
+harness_configs:
+  claude:
+    harness: claude
+profiles:
+  default:
+    runtime: mock
+`)
+
+	body := `{
+		"name": "test-agent-dirkey-expand",
+		"id": "agent-uuid-dirkey-expand",
+		"gatherEnv": true,
+		"projectPath": "` + projectDir + `",
+		"config": {"template": "claude", "profile": "default", "gcpIdentity": {"metadata_mode": "passthrough"}}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 (a dir-env key that expands to GOOGLE_CLOUD_PROJECT should satisfy it, matching buildAgentEnv's own key expansion), got %d: %s", w.Code, w.Body.String())
+	}
 }

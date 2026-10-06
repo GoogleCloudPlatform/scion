@@ -57,16 +57,16 @@ func TestStartAgent_AttachesSkillResolver_PreResolvedSkills(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.lastStartCtx == nil {
+	if mgr.LastStartCtx() == nil {
 		t.Fatal("expected Start to be called with a captured context")
 	}
 
-	resolver := agent.SkillResolverFromContext(mgr.lastStartCtx)
+	resolver := agent.SkillResolverFromContext(mgr.LastStartCtx())
 	if resolver == nil {
 		t.Fatal("expected startAgent to attach a skill resolver to the dispatch context (#1960)")
 	}
 
-	result, err := resolver.Resolve(mgr.lastStartCtx, []api.SkillReference{{URI: uri}}, agent.ResolveOpts{})
+	result, err := resolver.Resolve(mgr.LastStartCtx(), []api.SkillReference{{URI: uri}}, agent.ResolveOpts{})
 	if err != nil {
 		t.Fatalf("resolver.Resolve returned error: %v", err)
 	}
@@ -89,16 +89,16 @@ func TestRestartAgent_AttachesSkillResolver_PreResolvedSkills(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.lastStartCtx == nil {
+	if mgr.LastStartCtx() == nil {
 		t.Fatal("expected Start (via restart) to be called with a captured context")
 	}
 
-	resolver := agent.SkillResolverFromContext(mgr.lastStartCtx)
+	resolver := agent.SkillResolverFromContext(mgr.LastStartCtx())
 	if resolver == nil {
 		t.Fatal("expected restartAgent to attach a skill resolver to the dispatch context (#1960)")
 	}
 
-	result, err := resolver.Resolve(mgr.lastStartCtx, []api.SkillReference{{URI: uri}}, agent.ResolveOpts{})
+	result, err := resolver.Resolve(mgr.LastStartCtx(), []api.SkillReference{{URI: uri}}, agent.ResolveOpts{})
 	if err != nil {
 		t.Fatalf("resolver.Resolve returned error: %v", err)
 	}
@@ -225,10 +225,10 @@ func TestStartAgent_NoResolverAttachedWithoutHubOrPreResolved(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
-	if mgr.lastStartCtx == nil {
+	if mgr.LastStartCtx() == nil {
 		t.Fatal("expected Start to be called with a captured context")
 	}
-	if resolver := agent.SkillResolverFromContext(mgr.lastStartCtx); resolver != nil {
+	if resolver := agent.SkillResolverFromContext(mgr.LastStartCtx()); resolver != nil {
 		t.Errorf("expected no skill resolver on ctx when neither a Hub connection nor PreResolvedSkills is present, got %T", resolver)
 	}
 }
@@ -299,10 +299,10 @@ func TestStartAgent_ProvisionCredentialsNotEchoedInResponse(t *testing.T) {
 	assertStartExtrasCanariesNotEchoed(t, "start", w.Body.String())
 	// Sanity: prove the resolver actually saw the credential (so this test
 	// would fail if the field were silently dropped instead of merely hidden).
-	if mgr.lastStartCtx == nil {
+	if mgr.LastStartCtx() == nil {
 		t.Fatal("expected Start to be called with a captured context")
 	}
-	if resolver := agent.SkillResolverFromContext(mgr.lastStartCtx); resolver == nil {
+	if resolver := agent.SkillResolverFromContext(mgr.LastStartCtx()); resolver == nil {
 		t.Fatal("expected a resolver to be attached")
 	}
 }
@@ -322,10 +322,10 @@ func TestRestartAgent_ProvisionCredentialsNotEchoedInResponse(t *testing.T) {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
 	}
 	assertStartExtrasCanariesNotEchoed(t, "restart", w.Body.String())
-	if mgr.lastStartCtx == nil {
+	if mgr.LastStartCtx() == nil {
 		t.Fatal("expected Start (via restart) to be called with a captured context")
 	}
-	if resolver := agent.SkillResolverFromContext(mgr.lastStartCtx); resolver == nil {
+	if resolver := agent.SkillResolverFromContext(mgr.LastStartCtx()); resolver == nil {
 		t.Fatal("expected a resolver to be attached")
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -538,17 +539,61 @@ func marshalScopes(scopes []string) string {
 	return string(b)
 }
 
+// marshalCeilingPermissionIDs serializes a FrozenPermissionCeiling's
+// PermissionIDs for the nillable ceiling_permission_ids column. A nil slice
+// (never backfilled / not yet resolved) serializes to a nil *string (SQL
+// NULL); an explicit, possibly-empty slice serializes to a JSON array
+// string, preserving the "NULL means not backfilled, [] means explicitly
+// denies" distinction end to end (see store.UserAccessToken.NormalizedCeiling).
+func marshalCeilingPermissionIDs(ids []string) *string {
+	if ids == nil {
+		return nil
+	}
+	b, _ := json.Marshal(ids)
+	s := string(b)
+	return &s
+}
+
+// unmarshalCeilingPermissionIDs is the inverse of
+// marshalCeilingPermissionIDs. A NULL column (raw == nil) returns nil —
+// "never backfilled." Malformed JSON in a non-NULL column returns a non-nil
+// empty slice rather than nil, so a corrupted value denies (via
+// FrozenPermissionCeiling.Allows on an explicit empty list) instead of being
+// mistaken for "never backfilled" and silently re-normalized from Scopes.
+func unmarshalCeilingPermissionIDs(raw *string) []string {
+	if raw == nil {
+		return nil
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(*raw), &ids); err != nil {
+		return []string{}
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids
+}
+
 // entUATToStore converts an Ent UserAccessToken to the store model.
 func entUATToStore(e *ent.UserAccessToken) *store.UserAccessToken {
 	t := &store.UserAccessToken{
-		ID:        e.ID.String(),
-		UserID:    e.UserID.String(),
-		Name:      e.Name,
-		Prefix:    e.Prefix,
-		KeyHash:   e.KeyHash,
-		ProjectID: e.ProjectID.String(),
-		Revoked:   e.Revoked,
-		Created:   e.Created,
+		ID:                   e.ID.String(),
+		UserID:               e.UserID.String(),
+		Name:                 e.Name,
+		Prefix:               e.Prefix,
+		KeyHash:              e.KeyHash,
+		BoundaryKind:         e.BoundaryKind,
+		Revoked:              e.Revoked,
+		Created:              e.Created,
+		CeilingVersion:       permissions.CeilingVersion(e.CeilingVersion),
+		CeilingPermissionIDs: unmarshalCeilingPermissionIDs(e.CeilingPermissionIds),
+	}
+	// ProjectID is set iff the row is a "project" boundary; a hub-boundary
+	// row has a NULL project_id column, which maps to the empty string —
+	// never interpreted as hub by anything reading this struct without
+	// also checking BoundaryKind (see store.UserAccessToken.ValidateBoundary).
+	if e.ProjectID != nil {
+		t.ProjectID = e.ProjectID.String()
 	}
 	if e.Scopes != "" {
 		_ = json.Unmarshal([]byte(e.Scopes), &t.Scopes)
@@ -582,8 +627,18 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 	if err != nil {
 		return err
 	}
-	projectUID, err := parseUUID(token.ProjectID)
-	if err != nil {
+
+	// A caller that sets only ProjectID and leaves BoundaryKind empty
+	// defaults to "project" here, so ValidateBoundary sees a
+	// fully-specified row rather than rejecting an under-specified one. A
+	// caller that explicitly sets BoundaryKind (including to an invalid
+	// value) is validated as given — this default never overrides an
+	// explicit value, and never turns an explicit, invalid value into a
+	// silently-accepted one.
+	if token.BoundaryKind == "" {
+		token.BoundaryKind = string(permissions.BoundaryKindProject)
+	}
+	if err := token.ValidateBoundary(); err != nil {
 		return err
 	}
 
@@ -597,11 +652,26 @@ func (s *ExternalStore) CreateUserAccessToken(ctx context.Context, token *store.
 		SetName(token.Name).
 		SetPrefix(token.Prefix).
 		SetKeyHash(token.KeyHash).
-		SetProjectID(projectUID).
+		SetBoundaryKind(token.BoundaryKind).
 		SetScopes(marshalScopes(token.Scopes)).
+		SetCeilingVersion(int32(token.CeilingVersion)).
 		SetRevoked(token.Revoked).
 		SetCreated(token.Created)
 
+	// ProjectID is parsed and set only for a "project" boundary; ValidateBoundary
+	// above already guarantees a "hub" boundary has an empty ProjectID, so
+	// the create mutation leaves the column NULL for hub tokens.
+	if token.ProjectID != "" {
+		projectUID, err := parseUUID(token.ProjectID)
+		if err != nil {
+			return err
+		}
+		create.SetProjectID(projectUID)
+	}
+
+	if ceilingIDs := marshalCeilingPermissionIDs(token.CeilingPermissionIDs); ceilingIDs != nil {
+		create.SetCeilingPermissionIds(*ceilingIDs)
+	}
 	if token.ExpiresAt != nil {
 		create.SetExpiresAt(*token.ExpiresAt)
 	}
@@ -720,14 +790,22 @@ func (s *ExternalStore) CountUserAccessTokens(ctx context.Context, userID string
 		Count(ctx)
 }
 
-// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
+// tokens scoped to a project. Hub-boundary tokens have a NULL project_id and
+// so would never match ProjectIDEQ anyway, but the explicit boundary_kind
+// predicate states that rule rather than relying on the incidental NULL
+// non-match, per project_deletion_service.go's use of this method: deleting
+// a project must never delete hub-boundary tokens belonging to its members.
 func (s *ExternalStore) DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error) {
 	uid, err := parseUUID(projectID)
 	if err != nil {
 		return 0, err
 	}
 	n, err := s.client.UserAccessToken.Delete().
-		Where(useraccesstoken.ProjectIDEQ(uid)).
+		Where(
+			useraccesstoken.ProjectIDEQ(uid),
+			useraccesstoken.BoundaryKindEQ(string(permissions.BoundaryKindProject)),
+		).
 		Exec(ctx)
 	if err != nil {
 		return 0, mapError(err)

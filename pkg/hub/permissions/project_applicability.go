@@ -124,7 +124,7 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.lifecycle_hooks.read": false, "hub.lifecycle_hooks.update": false,
 	"hub.allow_list.read": false, "hub.allow_list.update": false,
 	"hub.project_defaults.read": false, "hub.project_defaults.update": false,
-	"hub.messaging.update": false, "hub.auth_reset.execute": false,
+	"hub.messaging.update": false, "hub.experiments.update": false, "hub.auth_reset.execute": false,
 	"hub.scheduler.read": false, "hub.scheduler.update": false,
 	"hub.federation.read": false, "hub.federation.update": false,
 	"hub.teams_manifest.read": false, "hub.teams_manifest.update": false,
@@ -148,11 +148,23 @@ var ProjectTargetApplicability = map[string]bool{
 	// true for the same reason as role_binding.
 	"access_constraint.admin": true, "access_constraint.read": true,
 
+	// artifact.* — every artifact is homed in a project, and the hub's
+	// artifacts.Host checks each permission against that project
+	// (Resource{Type: artifact, ParentType: project}).
+	"artifact.read": true, "artifact.create": true, "artifact.update": true,
+	"artifact.delete": true, "artifact.manage": true,
+
 	// scheduled_event.* — always scoped to a project.
 	"scheduled_event.read": true, "scheduled_event.list": true, "scheduled_event.create": true,
 	"scheduled_event.delete": true, "scheduled_event.update": true,
 
 	"project.secret_read": true,
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129): every
+	// one of them can apply to an existing project target (a project-scope
+	// secret/env var/skill, or a project-parented GCP service account).
+	"secret.deliver": true, "env_var.deliver": true, "skill_injection.deliver": true,
+	"secret.use": true, "gcp_service_account.use": true,
 }
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for
@@ -189,6 +201,9 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
+	"artifact.read": {BoundaryKindProject, BoundaryKindHub}, "artifact.create": {BoundaryKindProject, BoundaryKindHub},
+	"artifact.update": {BoundaryKindProject, BoundaryKindHub}, "artifact.delete": {BoundaryKindProject, BoundaryKindHub},
+	"artifact.manage": {BoundaryKindProject, BoundaryKindHub},
 	"template.create": {BoundaryKindProject, BoundaryKindHub}, "template.read": {BoundaryKindProject, BoundaryKindHub},
 	"template.update": {BoundaryKindProject, BoundaryKindHub}, "template.delete": {BoundaryKindProject, BoundaryKindHub},
 	"template.list":         {BoundaryKindProject, BoundaryKindHub},
@@ -203,11 +218,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"gcp_service_account.read": {BoundaryKindHub}, "gcp_service_account.list": {BoundaryKindHub},
 	"gcp_service_account.verify": {BoundaryKindHub}, "gcp_service_account.assign": {BoundaryKindProject, BoundaryKindHub},
 
-	// broker.create has no Permission.UATScope yet (not a resolvable
-	// selector today) but is pre-reviewed here as hub-only:
-	// when a future Registry row adds UATScope: "broker:create",
-	// ResolveSelector starts succeeding immediately with the correct
-	// boundary, no second A.1-side change required.
+	// broker.create's selector "broker:create" is hub-only: a broker is a
+	// hub-level resource.
 	"broker.create": {BoundaryKindHub},
 }
 
@@ -291,6 +303,11 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
 	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource},
 
+	// artifact.* — project-homed, no scope-kind split and no global catalog.
+	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},
+	"artifact.update": {TargetClassKindProjectScoped}, "artifact.delete": {TargetClassKindProjectScoped},
+	"artifact.manage": {TargetClassKindProjectScoped},
+
 	// skill.* — read/list support both project and global catalog classes;
 	// create/update/delete are project-scoped only; register is a hub-level
 	// registry action.
@@ -350,9 +367,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"gcp_service_account.verify": {TargetClassKindHubResource, TargetClassKindProjectScoped},
 	"gcp_service_account.assign": {TargetClassKindProjectScoped},
 
-	// broker.create has no UATScope yet (see PermissionAllowedBoundaries);
-	// pre-reviewed here too so D.1 need only add the UATScope, matching the
-	// same rationale.
+	// broker.create targets the hub-level broker collection only.
 	"broker.create": {TargetClassKindHubResource},
 }
 

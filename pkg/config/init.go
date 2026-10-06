@@ -328,6 +328,9 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 			return fmt.Errorf("existing project marker is invalid: %w", err)
 		}
 		// External project already set up — just ensure directories exist
+		if err := mkdirUnderProjectConfigs(resolved, 0755); err != nil {
+			return fmt.Errorf("failed to create external project directory: %w", err)
+		}
 		return ensureProjectDirs(resolved, opt)
 	}
 
@@ -351,7 +354,7 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 	// Write settings with workspace-path and project_id before ensureProjectDirs
 	// (which would create a settings.yaml without workspace_path if one doesn't exist yet).
 	absProjectRoot, _ := filepath.Abs(projectRoot)
-	if err := os.MkdirAll(externalPath, 0755); err != nil {
+	if err := mkdirUnderProjectConfigs(externalPath, 0755); err != nil {
 		return fmt.Errorf("failed to create external project directory: %w", err)
 	}
 	if GetSettingsPath(externalPath) == "" {
@@ -403,6 +406,11 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	if err != nil {
 		return fmt.Errorf("failed to compute external config path: %w", err)
 	}
+	if externalConfigDir != "" {
+		if err := mkdirUnderProjectConfigs(externalConfigDir, 0755); err != nil {
+			return fmt.Errorf("failed to create external config directory: %w", err)
+		}
+	}
 	if err := ensureProjectSettingsFile(externalConfigDir, opt); err != nil {
 		return err
 	}
@@ -413,7 +421,7 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 		return fmt.Errorf("failed to compute external agents path: %w", err)
 	}
 	if externalAgentsDir != "" {
-		if err := os.MkdirAll(externalAgentsDir, 0755); err != nil {
+		if err := mkdirUnderProjectConfigs(externalAgentsDir, 0755); err != nil {
 			return fmt.Errorf("failed to create external agents directory: %w", err)
 		}
 	}

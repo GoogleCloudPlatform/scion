@@ -93,7 +93,7 @@ func (s *Server) handleAdminLifecycleHooks(w http.ResponseWriter, r *http.Reques
 		}
 		s.createLifecycleHook(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -123,7 +123,7 @@ func (s *Server) handleAdminLifecycleHookByID(w http.ResponseWriter, r *http.Req
 			s.deleteLifecycleHook(w, r, id, user)
 		}
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 

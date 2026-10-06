@@ -97,12 +97,21 @@ func TestAgent_JSON_CanonicalKeysOnly(t *testing.T) {
 		"id", "slug", "name", "template", "projectId", "detached",
 		"created", "updated", "startedAt", "lastSeen", "lastActivityEvent",
 		"deletedAt", "messageMode", "stateVersion", "generation",
+		// deletion is an explicit null when no delete is in view (design
+		// ptone/scion#2483 §2.4); the raw deletion_* columns never appear.
+		"deletion",
+		// provisionedOnly is always sent, false included, so a merging
+		// client clears a stale true (ptone/scion#2929).
+		"provisionedOnly",
 	})
 
 	var m map[string]interface{}
 	_ = json.Unmarshal(data, &m)
 	if m["projectId"] != "p-1" {
 		t.Errorf("projectId = %v, want %q", m["projectId"], "p-1")
+	}
+	if v, ok := m["deletion"]; !ok || v != nil {
+		t.Errorf("deletion = %v (present=%v), want explicit null", v, ok)
 	}
 
 	// Canonical round trip: marshal then unmarshal back into the same type.
@@ -360,7 +369,7 @@ func TestNotification_JSON_CanonicalKeysOnly(t *testing.T) {
 func TestUserAccessToken_JSON_CanonicalKeysOnly(t *testing.T) {
 	tok := UserAccessToken{
 		ID: "uat-1", UserID: "u-1", Name: "tok", Prefix: "scion_pat_ab",
-		ProjectID: "p-1", Scopes: []string{"agent:read"}, Revoked: false,
+		BoundaryKind: "project", ProjectID: "p-1", Scopes: []string{"agent:read"}, Revoked: false,
 	}
 	data, err := json.Marshal(tok)
 	if err != nil {
@@ -368,7 +377,7 @@ func TestUserAccessToken_JSON_CanonicalKeysOnly(t *testing.T) {
 	}
 	assertNoLegacyKeys(t, "UserAccessToken", data)
 	assertExactKeySet(t, "UserAccessToken", data, []string{
-		"id", "userId", "name", "prefix", "projectId", "scopes", "revoked", "created",
+		"id", "userId", "name", "prefix", "boundaryKind", "projectId", "scopes", "revoked", "created",
 	})
 
 	var rt UserAccessToken

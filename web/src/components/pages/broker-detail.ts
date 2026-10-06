@@ -21,12 +21,17 @@
  * profiles, and agents grouped by project.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData, RuntimeBroker, Agent } from '../../shared/types.js';
-import { getAgentDisplayStatus } from '../../shared/types.js';
-import type { StatusType } from '../shared/status-badge.js';
+import type {
+  PageData,
+  RuntimeBroker,
+  Agent,
+  BrokerSettingsResponse,
+  InheritedSetting,
+} from '../../shared/types.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -34,6 +39,8 @@ import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
 import '../shared/status-badge.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface BrokerProjectInfo {
   projectId: string;
@@ -45,6 +52,9 @@ interface BrokerProjectInfo {
 
 @customElement('scion-page-broker-detail')
 export class ScionPageBrokerDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -68,6 +78,22 @@ export class ScionPageBrokerDetail extends LitElement {
 
   @state()
   private unregisterLoading = false;
+
+  // Broker settings card (ptone/scion#2061 P2, ptone/scion#2177).
+  @state()
+  private brokerSettings: BrokerSettingsResponse | null = null;
+
+  @state()
+  private brokerSettingsMode: 'default' | 'custom' = 'default';
+
+  @state()
+  private brokerSettingsCustomValue = '';
+
+  @state()
+  private brokerSettingsSaving = false;
+
+  @state()
+  private brokerSettingsError: string | null = null;
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
@@ -107,21 +133,37 @@ export class ScionPageBrokerDetail extends LitElement {
 
       .header-title {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 0.75rem;
         margin-bottom: 0.5rem;
       }
 
-      .header-title sl-icon {
+      .header-title > sl-icon {
+        flex-shrink: 0;
         color: var(--scion-primary, #3b82f6);
         font-size: 1.5rem;
+        /* Centre the icon on the first line of the name: (1.95rem h1 line box
+           - 1.5rem icon) / 2. */
+        margin-top: 0.225rem;
+      }
+      /* A long name wraps on its own line; the badges then follow on the next
+         line instead of floating beside a multi-line name. */
+      .header-title-text {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 0.75rem;
+        min-width: 0;
       }
 
       .header h1 {
         font-size: 1.5rem;
         font-weight: 700;
+        line-height: 1.3;
         color: var(--scion-text, #1e293b);
         margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       .header-actions {
@@ -505,11 +547,13 @@ export class ScionPageBrokerDetail extends LitElement {
     this.error = null;
 
     try {
-      const [brokerResponse, projectsResponse, agentsResponse] = await Promise.all([
-        apiFetch(`/api/v1/runtime-brokers/${this.brokerId}`),
-        apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/projects`),
-        apiFetch(`/api/v1/agents?runtimeBrokerId=${this.brokerId}`),
-      ]);
+      const [brokerResponse, projectsResponse, agentsResponse, settingsResponse] =
+        await Promise.all([
+          apiFetch(`/api/v1/runtime-brokers/${this.brokerId}`),
+          apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/projects`),
+          apiFetch(`/api/v1/agents?runtimeBrokerId=${this.brokerId}`),
+          apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/settings`),
+        ]);
 
       if (!brokerResponse.ok) {
         throw new Error(
@@ -535,6 +579,15 @@ export class ScionPageBrokerDetail extends LitElement {
         this.agents = Array.isArray(agentsData) ? agentsData : agentsData.agents || [];
       } else {
         this.agents = [];
+      }
+
+      if (settingsResponse.ok) {
+        this.brokerSettings = (await settingsResponse.json()) as BrokerSettingsResponse;
+        this.initBrokerSettingsForm();
+      } else {
+        // Non-fatal: the Settings card simply doesn't render (e.g. broker
+        // was deleted between the list and this page load).
+        this.brokerSettings = null;
       }
 
       // Seed stateManager so SSE delta merging has full baseline data
@@ -572,44 +625,9 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
-  private formatDate(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+  /** Formats a timestamp for the header stats; "—" when missing or invalid. */
+  private formatDate(dateString: string | undefined): string {
+    return (dateString && formatInstantWithZone(dateString)) || '—';
   }
 
   private get isAdmin(): boolean {
@@ -687,13 +705,15 @@ export class ScionPageBrokerDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             <sl-icon name="hdd-rack"></sl-icon>
-            <h1>${this.broker.name}</h1>
-            ${this.renderBrokerTypeBadge()}
-            <scion-status-badge
-              status=${this.getBrokerStatusVariant(this.broker.status)}
-              label=${this.broker.status}
-              size="small"
-            ></scion-status-badge>
+            <div class="header-title-text">
+              <h1>${this.broker.name}</h1>
+              ${this.renderBrokerTypeBadge()}
+              <scion-status-badge
+                status=${this.getBrokerStatusVariant(this.broker.status)}
+                label=${this.broker.status}
+                size="small"
+              ></scion-status-badge>
+            </div>
           </div>
           ${subtitleParts.length > 0
             ? html`<div class="header-subtitle">${subtitleParts.join(' · ')}</div>`
@@ -728,11 +748,13 @@ export class ScionPageBrokerDetail extends LitElement {
         </div>
         <div class="stat">
           <span class="stat-label">Created</span>
-          <span class="stat-value-sm">${this.formatDate(this.broker.createdAt)}</span>
+          <span class="stat-value-sm"
+            >${this.formatDate(this.broker.created || this.broker.createdAt)}</span
+          >
         </div>
         <div class="stat">
           <span class="stat-label">Last Heartbeat</span>
-          <span class="stat-value-sm">${this.formatRelativeTime(this.broker.lastHeartbeat)}</span>
+          <span class="stat-value-sm">${formatRelative(this.broker.lastHeartbeat)}</span>
         </div>
         ${this.broker.createdBy
           ? html`
@@ -750,7 +772,245 @@ export class ScionPageBrokerDetail extends LitElement {
       ${this.broker.profiles && this.broker.profiles.length > 0
         ? this.renderProfiles(this.broker.profiles)
         : ''}
-      ${this.renderProjectSections()}
+      ${this.renderSettingsSection()} ${this.renderProjectSections()}
+    `;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Settings card (ptone/scion#2061 P2, ptone/scion#2177, design.md §5.6)
+  // ---------------------------------------------------------------------------
+
+  private sourceLabel(source: string): string {
+    switch (source) {
+      case 'broker':
+        return 'this broker’s own setting';
+      case 'entitlement':
+        return 'an entitlement binding';
+      case 'hub_default':
+        return 'the hub-wide default';
+      case 'not_enforced':
+        // No parentheses inside this label: it is always rendered inside
+        // its own "(from ...)" wrapper (see the Settings card below), and a
+        // nested "(from not enforced (...))" would read badly.
+        return 'not enforced — the quota switch is off';
+      case 'unlimited':
+        return 'unlimited (no quota configured)';
+      case '':
+        return 'unknown — resolution failed';
+      default:
+        return source;
+    }
+  }
+
+  /** Renders the "default" radio's label from EffectiveSetting.inherited —
+   * what clearing the override would produce — rather than from the
+   * currently-active effective value/source, so it is correct in every
+   * state, including while an override is active (design.md §5.6, review
+   * round 2, R2): the admin sees the real inherited value at exactly the
+   * moment they're deciding whether to clear the override, named by its
+   * actual source (hub default vs. entitlement), with 0 shown as
+   * "unlimited" rather than the bare number. */
+  private inheritedRadioLabel(inherited: InheritedSetting): string {
+    if (inherited.value === null) return 'Use hub default';
+    const value = inherited.value === 0 ? 'unlimited' : String(inherited.value);
+    const sourceName = inherited.source === 'entitlement' ? 'entitlement default' : 'hub default';
+    return `Use ${sourceName} (${value})`;
+  }
+
+  /** Whether the current form state would fail saveBrokerSettings's
+   * validation (review round 4, F1) — used to disable Save proactively
+   * rather than relying solely on the post-click rejection. */
+  private get customValueInvalid(): boolean {
+    if (this.brokerSettingsMode !== 'custom') return false;
+    const raw = this.brokerSettingsCustomValue.trim();
+    if (raw === '') return true;
+    const parsed = Number(raw);
+    return !Number.isInteger(parsed) || parsed < 0;
+  }
+
+  /** Syncs the radio/number-input form state from the loaded settings
+   * document. Called after every successful load/save, not on every
+   * re-render, so mid-edit user input isn't clobbered. */
+  private initBrokerSettingsForm(): void {
+    const stored = this.brokerSettings?.settings.maxAgents;
+    if (stored === undefined || stored === null) {
+      this.brokerSettingsMode = 'default';
+      this.brokerSettingsCustomValue = '';
+    } else {
+      this.brokerSettingsMode = 'custom';
+      this.brokerSettingsCustomValue = String(stored);
+    }
+  }
+
+  private async loadBrokerSettings(): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/settings`);
+      if (res.ok) {
+        this.brokerSettings = (await res.json()) as BrokerSettingsResponse;
+        this.initBrokerSettingsForm();
+      }
+    } catch (err) {
+      console.error('Failed to reload broker settings:', err);
+    }
+  }
+
+  private async saveBrokerSettings(): Promise<void> {
+    if (!this.brokerSettings) return;
+
+    let maxAgents: number | null;
+    if (this.brokerSettingsMode === 'default') {
+      maxAgents = null;
+    } else {
+      const raw = this.brokerSettingsCustomValue.trim();
+      if (raw === '') {
+        // Number('') is 0, which is a legitimate value (unlimited) — an
+        // empty/whitespace-only field must be rejected explicitly, or a
+        // blank Custom field (e.g. the initial state when there is no
+        // override) silently saves as maxAgents=0 (review round 4, F1).
+        this.brokerSettingsError = 'Enter a whole number 0 or greater (0 means unlimited).';
+        return;
+      }
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        this.brokerSettingsError = 'Enter a whole number 0 or greater (0 means unlimited).';
+        return;
+      }
+      maxAgents = parsed;
+    }
+
+    this.brokerSettingsSaving = true;
+    this.brokerSettingsError = null;
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${this.brokerId}/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          settings: { maxAgents },
+          expectedRevision: this.brokerSettings.revision,
+        }),
+      });
+
+      if (res.status === 409) {
+        this.brokerSettingsError = 'Settings were changed by someone else. Reloading…';
+        await this.loadBrokerSettings();
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, 'Failed to save broker settings'));
+      }
+      this.brokerSettings = (await res.json()) as BrokerSettingsResponse;
+      this.initBrokerSettingsForm();
+      showToast('Broker settings saved.', 'success');
+    } catch (err) {
+      this.brokerSettingsError =
+        err instanceof Error ? err.message : 'Failed to save broker settings';
+    } finally {
+      this.brokerSettingsSaving = false;
+    }
+  }
+
+  private renderSettingsSection() {
+    if (!this.brokerSettings) return nothing;
+
+    const settings = this.brokerSettings;
+    const canEdit = settings._capabilities.update;
+    const effective = settings.effective.maxAgents;
+    const hubDefaultLabel = this.inheritedRadioLabel(effective.inherited);
+
+    return html`
+      <div class="section">
+        <div class="section-header">
+          <h2>Settings</h2>
+        </div>
+        <p>Per-broker overrides for hub-wide limits. Currently: maximum concurrent agents.</p>
+
+        ${this.brokerSettingsError
+          ? html`<div
+              style="margin-bottom: 0.75rem; font-size: 0.8125rem; color: var(--scion-danger, #dc2626);"
+            >
+              ${this.brokerSettingsError}
+            </div>`
+          : ''}
+
+        <div>
+          <label
+            style="display: block; font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.375rem;"
+            >Max concurrent agents</label
+          >
+          <sl-radio-group
+            value=${this.brokerSettingsMode}
+            @sl-change=${(e: Event) => {
+              if (!canEdit) return;
+              this.brokerSettingsMode = (e.target as HTMLInputElement).value as
+                | 'default'
+                | 'custom';
+            }}
+          >
+            <sl-radio value="default" ?disabled=${!canEdit || this.brokerSettingsSaving}>
+              ${hubDefaultLabel}
+            </sl-radio>
+            <sl-radio value="custom" ?disabled=${!canEdit || this.brokerSettingsSaving}>
+              Custom
+            </sl-radio>
+          </sl-radio-group>
+          ${this.brokerSettingsMode === 'custom'
+            ? html`
+                <sl-input
+                  type="number"
+                  min="0"
+                  step="1"
+                  size="small"
+                  style="max-width: 8rem; margin-top: 0.5rem;"
+                  .value=${this.brokerSettingsCustomValue}
+                  ?disabled=${!canEdit || this.brokerSettingsSaving}
+                  help-text=${this.customValueInvalid
+                    ? 'Enter a whole number 0 or greater to enable Save (0 means unlimited)'
+                    : '0 means unlimited'}
+                  @sl-input=${(e: Event) => {
+                    this.brokerSettingsCustomValue = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
+              `
+            : ''}
+        </div>
+
+        <p
+          style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
+        >
+          ${effective.count === undefined || effective.count === null
+            ? 'Usage unknown.'
+            : html`Currently ${effective.count} agent${effective.count === 1 ? '' : 's'} counted
+              toward this broker’s cap.`}
+          Effective limit:
+          ${effective.value === null
+            ? 'unknown'
+            : effective.value === 0
+              ? 'unlimited'
+              : effective.value}
+          (from ${this.sourceLabel(effective.source)}).
+        </p>
+
+        ${canEdit
+          ? html`
+              <sl-button
+                variant="primary"
+                size="small"
+                style="margin-top: 0.5rem;"
+                ?loading=${this.brokerSettingsSaving}
+                ?disabled=${this.brokerSettingsSaving || this.customValueInvalid}
+                @click=${() => this.saveBrokerSettings()}
+              >
+                Save
+              </sl-button>
+            `
+          : html`
+              <p
+                style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b); font-style: italic;"
+              >
+                Only Hub administrators can change this setting.
+              </p>
+            `}
+      </div>
     `;
   }
 
@@ -851,11 +1111,7 @@ export class ScionPageBrokerDetail extends LitElement {
             </h3>
             <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${getAgentDisplayStatus(agent)}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
         </div>
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : ''}
       </a>

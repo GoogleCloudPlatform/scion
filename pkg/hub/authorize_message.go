@@ -43,7 +43,6 @@ const (
 	MessageDenialCrossProjectUnsupported         MessageDenialCode = "cross_project_surface_unsupported"
 	MessageDenialCrossProjectGroupsUnsupported   MessageDenialCode = "cross_project_groups_unsupported"
 	MessageDenialCrossProjectAttachUnsupported   MessageDenialCode = "cross_project_attachment_unsupported"
-	MessageDenialCrossProjectRawUnsupported      MessageDenialCode = "cross_project_raw_unsupported"
 	MessageDenialCrossProjectScheduledDenied     MessageDenialCode = "cross_project_scheduled_denied"
 	MessageDenialCrossProjectScheduledDisabled   MessageDenialCode = "cross_project_scheduled_disabled"
 	MessageDenialCrossProjectScheduledTarget     MessageDenialCode = "cross_project_scheduled_target" // reserved: scheduled message target validation
@@ -55,6 +54,7 @@ const (
 	MessageDenialAttachmentNotFound              MessageDenialCode = "attachment_not_found"
 	MessageDenialAttachmentUnauthorized          MessageDenialCode = "attachment_unauthorized"
 	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate" // reserved: delivery deduplication guard
+
 )
 
 // MessageDecision captures the outcome of an agent message authorization
@@ -77,7 +77,7 @@ type MessageDecision struct {
 // error. Both refuse delivery, but infrastructure failure should be retryable.
 type EffectiveMembershipResult struct {
 	IsMember bool
-	Role     string // highest built-in role found: owner, admin, member, or ""
+	Role     string // highest built-in role found: owner, admin, member, or "" (custom-only or non-member)
 	Err      error  // non-nil only for infrastructure/store errors
 }
 
@@ -85,17 +85,23 @@ type EffectiveMembershipResult struct {
 // project by examining direct and effective-group role bindings with
 // active-time checks.
 //
-// Membership means holding a built-in member, admin, or owner binding
-// (including valid group-derived member/admin). An owner counts as a member;
-// ownership does not permit piercing a target's mode.
+// Membership means holding any active project-scoped role binding, built-in
+// (owner/admin/member) or custom, either directly or via an effective group.
+// This matches ProjectMembershipEvidence. A group-bound owner role is the one
+// exception: groups never confer owner, and such a binding is ignored. An
+// owner counts as a member; ownership does not permit piercing a target's
+// mode.
 //
-// Ignored: expired, not-yet-active, revoked, custom additive role bindings.
+// Ignored: expired, not-yet-active, revoked, and unrelated (other-scope)
+// bindings.
 // NOT membership: public project visibility, generic read grant, shared
 // conversation, or Hub-admin status.
 //
-// Returns EffectiveMembershipResult with IsMember=true and the highest role if the
-// user is a member, IsMember=false with Err=nil for a definite non-member,
-// or IsMember=false with Err!=nil for infrastructure errors.
+// Returns EffectiveMembershipResult with IsMember=true if the user is a
+// member, IsMember=false with Err=nil for a definite non-member, or
+// IsMember=false with Err!=nil for infrastructure errors. Role reports the
+// highest built-in tier held and is "" when membership comes only from
+// custom roles.
 func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID string) EffectiveMembershipResult {
 	now := time.Now()
 
@@ -121,6 +127,7 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		return rd, nil
 	}
 
+	isMember := false
 	bestRole := ""
 	for _, rb := range directBindings {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
@@ -133,11 +140,12 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		if rdErr != nil {
 			return EffectiveMembershipResult{Err: rdErr}
 		}
-		// Only built-in membership roles count.
-		if !store.IsBuiltInProjectMembershipRole(rd.Name) {
-			continue
+		// Any active project binding confers membership; Role tracks only
+		// the built-in tier.
+		isMember = true
+		if store.IsBuiltInProjectMembershipRole(rd.Name) {
+			bestRole = higherProjectRole(bestRole, rd.Name)
 		}
-		bestRole = higherProjectRole(bestRole, rd.Name)
 	}
 
 	// 2. Group-derived bindings.
@@ -169,14 +177,14 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 			if rd.Name == store.ProjectRoleOwner {
 				continue
 			}
-			if !store.IsBuiltInProjectMembershipRole(rd.Name) {
-				continue
+			isMember = true
+			if store.IsBuiltInProjectMembershipRole(rd.Name) {
+				bestRole = higherProjectRole(bestRole, rd.Name)
 			}
-			bestRole = higherProjectRole(bestRole, rd.Name)
 		}
 	}
 
-	if bestRole == "" {
+	if !isMember {
 		return EffectiveMembershipResult{IsMember: false}
 	}
 	return EffectiveMembershipResult{IsMember: true, Role: bestRole}
@@ -192,8 +200,9 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 //  1. System-plane messages bypass all checks (D8).
 //  2. Agent self-messages are allowed (harness integration).
 //  3. Super-admin users pierce everything including mode=none (D6).
-//  4. User senders: ancestry and project-owner piercing for lineage/branch;
-//     agent.message permission check for project mode; none always denied.
+//  4. User senders: ancestry (with active project access) and
+//     project-owner piercing for lineage/branch; agent.message permission
+//     check for project mode; none always denied.
 //  5. Agent senders: both endpoints must be in the same project; both must
 //     be project mode (project cell) or both branch mode with a direct
 //     parent/child relationship (branch cell); lineage-mode agents have
@@ -280,6 +289,18 @@ func (s *Server) authorizeUserToAgent(
 
 	targetResource := agentResource(targetAgent)
 
+	// A UAT-backed sender is confined by its token before any allow below,
+	// including ancestry and project-owner piercing: the token boundary
+	// must allow the target's project, the ceiling must allow
+	// agent.message, and the holder must currently have access to the
+	// target's project. The project and hub branch below applies the same
+	// gate again through CheckAccess.
+	if scoped, ok := userIdent.(*ScopedUserIdentity); ok {
+		if denied := s.authzService.uatMessageGate(ctx, scoped, targetResource); denied != nil {
+			return false, "agent.message permission denied: " + denied.Reason
+		}
+	}
+
 	// D6 UAT caveat: piercing applies only when the token carries agent:message.
 	// Full-session users (non-UAT) always have piercing ability.
 	uatDeniesMessage := false
@@ -290,10 +311,25 @@ func (s *Server) authorizeUserToAgent(
 	}
 
 	// Ancestry check: U in target.Ancestry → ALLOW (lineage/branch/project)
-	// Only trust ancestry when hub-attested (not federated).
+	// Only trust ancestry when hub-attested (not federated). A full-session
+	// local user must also hold active access to the target's project
+	// (ptone/scion#2141), the check uatMessageGate applies to a UAT holder
+	// above. The ancestry allow requires both (ancestry AND admission).
+	// Without admission it does not apply, and evaluation continues to the
+	// checks below: project-owner piercing and the agent.message permission
+	// check are independent grants with their own conditions, not a
+	// fallback for the ancestry allow, and a sender that fails them gets
+	// the same refusal as any other unauthorized sender. A lookup fault
+	// denies.
 	if !uatDeniesMessage && AncestryIsHubAttested(senderIdentity) {
 		if canAccessAsAncestor(userIdent.ID(), targetResource) {
-			return true, "user in target ancestry"
+			admitted, fault := s.authzService.messageAncestorProjectAccess(ctx, senderIdentity, targetAgent.ProjectID, targetResource)
+			if fault {
+				return false, messageAncestorFaultReason(targetAgent.MessageMode)
+			}
+			if admitted {
+				return true, "user in target ancestry"
+			}
 		}
 	}
 
@@ -608,6 +644,12 @@ func (s *storedAgentIdentity) HasScope(_ AgentTokenScope) bool { return false }
 func (s *storedAgentIdentity) Ancestry() []string              { return s.agent.Ancestry }
 func (s *storedAgentIdentity) TokenID() string                 { return "" }
 
+// localAncestryProvenance reports that this ancestry chain was read back
+// from a hub-persisted store.Agent record, not from the request's JWT.
+func (s *storedAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceStoreAgent
+}
+
 func (s *storedAgentIdentity) OriginUserID() string {
 	if len(s.agent.Ancestry) > 0 {
 		return s.agent.Ancestry[0]
@@ -813,4 +855,68 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 		return false
 	}
 	return membership.Role == store.ProjectRoleOwner
+}
+
+// messageAncestorProjectAccess reports whether a full-session local user
+// sender (PrincipalKindUser or PrincipalKindDev, not a UAT holder) holds
+// active access to projectID for agent.message on target, using
+// ProjectTargetAdmission: current membership, or system authority that
+// applies to the target. It gates the messaging ancestry allow in
+// authorizeUserToAgent, mirroring the project-access stage of
+// uatMessageGate. A UAT holder is already checked by uatMessageGate and
+// reports admitted. Every other principal kind reports not admitted, so an
+// unclassified identity never receives the ancestry allow.
+//
+// It returns (false, false) when the user lacks access or the target does
+// not resolve to projectID, and (false, true) for a store or resolution
+// fault, which the caller denies on.
+func (a *AuthzService) messageAncestorProjectAccess(ctx context.Context, sender Identity, projectID string, target Resource) (admitted bool, fault bool) {
+	if _, scoped := sender.(*ScopedUserIdentity); scoped {
+		return true, false
+	}
+	principal := principalContextForIdentity(sender)
+	if principal.Kind != PrincipalKindUser && principal.Kind != PrincipalKindDev {
+		return false, false
+	}
+	res, err := a.ProjectTargetAdmission(ctx, principal, projectID, "agent.message", target, nil)
+	if err != nil {
+		if isProjectAccessLookupFault(err) {
+			if a.logger != nil {
+				a.logger.Warn("message ancestry project access check failed (fail-closed)", "project_id", projectID, "error", err)
+			}
+			return false, true
+		}
+		return false, false
+	}
+	return res.Admitted, false
+}
+
+// messageAncestorFaultReason is the deny reason for a lookup fault in the
+// messaging ancestry admission. The text records the fault for logs, and
+// its prefix maps (mapReasonToCode) to the same public code the mode's
+// ordinary refusal produces, so the response does not reveal that the
+// sender is in the target's ancestry.
+func messageAncestorFaultReason(mode string) string {
+	if mode == store.MessageModeProject || mode == store.MessageModeHub {
+		return "agent.message permission denied: project access check failed (fail-closed)"
+	}
+	return fmt.Sprintf("user not authorized for target agent with message_mode %q: project access check failed (fail-closed)", mode)
+}
+
+// uatMessageGate runs the bearer gate for agent.message on target for a
+// UAT-backed sender: the boundary is valid and allows the target's scope,
+// the ceiling allows agent.message, and for a project target the holder
+// currently has access to that project. It returns nil when every stage
+// passes. A nil scoped identity denies at entry with the reason the bearer
+// gate gives a missing credential. User message authorization calls it
+// before any ancestry or project-owner allow, so no messaging allow reaches
+// a target outside the token's boundary or the holder's current project
+// access.
+func (a *AuthzService) uatMessageGate(ctx context.Context, scoped *ScopedUserIdentity, target Resource) *Decision {
+	if scoped == nil {
+		return &Decision{Allowed: false, Reason: bearerReasonProjectAccessDenied}
+	}
+	principal := principalContextForIdentity(scoped)
+	in, _ := bearerGateInputsFor(principal, CredentialContext{})
+	return a.evaluateBearerGate(ctx, principal, in, target, TargetScopeEvidence{}, ActionMessage, "agent.message", nil, nil)
 }

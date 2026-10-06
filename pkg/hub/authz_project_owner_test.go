@@ -228,11 +228,10 @@ func TestAuthz_ProjectOwnerBypass_CreatorOwnerStillWorks(t *testing.T) {
 
 	user := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
 	decision := srv.authzService.CheckAccess(ctx, user, projectResource(project), ActionUpdate)
-	assert.True(t, decision.Allowed, "project creator (direct OwnerID) should still be allowed; reason=%q", decision.Reason)
-	// CO1: The AK1 kernel evaluates role bindings first; alice has a
-	// project-owner role binding (created by createProjectMembersGroup)
-	// which includes project.update, so the role binding fires before the
-	// resource-owner relationship check.
+	assert.True(t, decision.Allowed, "project creator holding the project-owner binding should be allowed; reason=%q", decision.Reason)
+	// Project.OwnerID grants nothing on a project resource (ptone/scion#2586);
+	// alice's access comes only from the project-owner role binding created by
+	// seedProjectCreatorMembership, which includes project.update.
 	assert.Equal(t, "role binding grant", decision.Reason)
 }
 
@@ -406,7 +405,7 @@ func TestProjectMembersGroup_AllowsExistingSystemGroupForSameProject(t *testing.
 		GroupType: store.GroupTypeExplicit,
 		ProjectID: project.ID,
 		Annotations: map[string]string{
-			systemProjectMembersGroupAnnotation: "true",
+			store.AnnotationProjectMembersGroup: "true",
 		},
 	}
 	require.NoError(t, s.CreateGroup(ctx, membersGroup))
@@ -713,8 +712,7 @@ func TestCapabilities_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testin
 // not carry; they come only from the owner or ancestor relationship to the
 // agent.
 var relationshipOnlyAgentActions = map[Action]bool{
-	ActionAttach:     true,
-	ActionPortAccess: true,
+	ActionAttach: true,
 }
 
 // TestCapabilities_GCPServiceAccount_ProjectOwnerAdmin_AssignAgreesWithKernel

@@ -278,7 +278,7 @@ func TestPhase4_ChatV2_UnresolvedMention_NoParticipant(t *testing.T) {
 func TestPhase4_ChatV2_DeniedMention_NoParticipant(t *testing.T) {
 	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
-	srv.createProjectMembersGroup(ctx, proj)
+	srv.seedProjectCreatorMembership(ctx, proj)
 
 	sender := &store.User{
 		ID: tid("phase4-denied-sender"), Email: "phase4-denied-sender@example.com",

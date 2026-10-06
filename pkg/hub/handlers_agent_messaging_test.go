@@ -276,16 +276,11 @@ func TestOutboundMessage_UnknownTypeIsChargedAsAgentTraffic(t *testing.T) {
 	}
 }
 
-// The automatic assistant-reply transcript mirror shares the agent's single
-// aggregate allowance with the messages the agent writes itself, but it may
-// only spend its own reservation of it: a chatty agent whose mirror is
-// flooding can still deliver a completion report or a blocker escalation. Low
-// value traffic must not starve high-value traffic.
-//
-// The mirror is driven well past the aggregate ceiling here, not merely up to
-// its reservation — otherwise the test would pass even with no reservation at
-// all and would prove nothing about starvation.
-func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T) {
+// The retired end-of-turn assistant-reply mirror is still sent on every turn
+// by agents running an older sciontool. The hub accepts and discards it: the
+// caller sees success, nothing is persisted, and it spends none of the
+// agent's send budget, so the agent's own messages are unaffected.
+func TestOutboundMessage_AssistantReplyIsDropped(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -319,26 +314,34 @@ func TestOutboundMessage_TranscriptMirrorDoesNotStarveAgentMessages(t *testing.T
 	srv.chatSendLimiter = newChatSendLimiterWithClock(clock.Now)
 
 	// Flood with hook-posted assistant replies, twice the agent's whole
-	// aggregate allowance. Only the mirror's reservation may get through.
-	accepted := 0
+	// allowance. Every one is accepted and dropped.
 	for range 2 * chatSendAgentRatePerMinute {
 		rr := postOutboundTyped(t, srv, project.ID, agent.ID, "mirrored transcript", messages.TypeAssistantReply)
-		switch rr.Code {
-		case http.StatusOK:
-			accepted++
-		case http.StatusTooManyRequests:
-		default:
-			t.Fatalf("mirror send: expected 200 or 429, got %d: %s", rr.Code, rr.Body.String())
+		if rr.Code != http.StatusOK {
+			t.Fatalf("assistant-reply: expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var body map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body["status"] != "dropped" {
+			t.Fatalf("assistant-reply: expected status dropped, got %v", body)
+		}
+		if _, ok := body["message_id"]; ok {
+			t.Fatalf("assistant-reply: a dropped send must not report a message_id: %v", body)
 		}
 	}
-	if accepted != chatSendAgentMirrorRatePerMinute {
-		t.Fatalf("the flooding mirror got %d sends through, want exactly its reservation of %d",
-			accepted, chatSendAgentMirrorRatePerMinute)
+	res, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(res.Items) != 0 {
+		t.Fatalf("assistant-reply must not be persisted, found %d rows", len(res.Items))
 	}
 
 	// The agent's own message to a human is unaffected.
 	if rr := postOutbound(t, srv, project.ID, agent.ID, "task complete"); rr.Code != http.StatusOK {
-		t.Fatalf("the agent's own message must not be starved by its transcript mirror: got %d: %s",
+		t.Fatalf("the agent's own message must be delivered: got %d: %s",
 			rr.Code, rr.Body.String())
 	}
 }
@@ -831,14 +834,14 @@ func TestBroadcast_B5F1a_SenderOverrideStoresAuthIdentity(t *testing.T) {
 
 	// Give the attacker minimum project membership so the ActionAttach authz
 	// check added by #1347 passes and broadcastDirect actually runs.
-	// Setting CreatedBy makes createProjectMembersGroup add the
+	// Setting CreatedBy makes seedProjectCreatorMembership add the
 	// attacker as the group owner, which grants sufficient project access.
 	ensureHubMembership(ctx, s, attacker.ID)
 	project.CreatedBy = attacker.ID
 	if err := s.UpdateProject(ctx, project); err != nil {
 		t.Fatalf("UpdateProject (set CreatedBy): %v", err)
 	}
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID: api.NewUUID(), Name: "a1", Slug: "a1",
@@ -2376,6 +2379,85 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	require.True(t, userFound, "expected webchat_dm row for user with key %s", expectedKey)
 }
 
+// alwaysDropUserBus is an eventbus.EventBus whose Publish always reports a
+// subscriber-buffer-full drop, simulating InProcessEventBus.Publish when a
+// project's user-message subscriber is saturated (ptone/scion#2311).
+type alwaysDropUserBus struct{}
+
+func (alwaysDropUserBus) Publish(context.Context, string, *messages.StructuredMessage) error {
+	return eventbus.ErrSubscriberBufferFull
+}
+
+func (alwaysDropUserBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+
+func (alwaysDropUserBus) Close() error { return nil }
+
+// TestHandleAgentOutboundMessage_BrokerDropReturnsServiceUnavailable is a
+// regression test for ptone/scion#2311: when the broker's user-message
+// publish is dropped because the recipient's subscriber buffer is full, the
+// outbound-message endpoint must report a retryable failure instead of
+// silently answering 200 while the message is lost.
+func TestHandleAgentOutboundMessage_BrokerDropReturnsServiceUnavailable(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "broker-drop-project",
+		Slug: "broker-drop-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	user := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "human-drop@example.com",
+		DisplayName: "Human Drop",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	agent := &store.Agent{
+		ID:              api.NewUUID(),
+		Name:            "broker-drop-agent",
+		Slug:            "broker-drop-agent",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: "test-broker",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Wire a broker proxy whose bus always reports a dropped delivery, so
+	// the handler takes the broker path and PublishUserMessage fails.
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(alwaysDropUserBus{}, s, events,
+		func() AgentDispatcher { return noopDispatcher{} }, slog.Default())
+	srv.SetMessageBrokerProxy(proxy)
+
+	body, _ := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "hello into a full buffer",
+	})
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/agents/"+agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: agent.ID},
+		ProjectID: project.ID,
+	}}))
+
+	rr := httptest.NewRecorder()
+	srv.handleAgentOutboundMessage(rr, req, agent.ID)
+
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code,
+		"handler response: %s", rr.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Equal(t, ErrCodeUnavailable, resp.Error.Code)
+}
+
 // TestAgentMessage_UserSenderUsesEmailNotDisplayName verifies that the Sender
 // field for a user-originated message uses "user:<email>" — never
 // "user:<display_name>". A display name like "Preston Holmes" is not routable;
@@ -2764,7 +2846,7 @@ func TestBroadcast_SenderUsesEmailNotDisplayName(t *testing.T) {
 	ensureHubMembership(ctx, s, user.ID)
 	project.CreatedBy = user.ID
 	require.NoError(t, s.UpdateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID:        api.NewUUID(),

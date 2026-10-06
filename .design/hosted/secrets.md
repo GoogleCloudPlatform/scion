@@ -261,6 +261,21 @@ The primary production implementation uses [Google Cloud Secret Manager](https:/
 
 ### 4.2 Secret Naming Convention
 
+> **Superseded.** This section predates both the hub-instance-ID namespacing in
+> `secret-id-hub-refactor.md` and the hub-prefix layer added on top of it by
+> `ptone/scion#2152`. The naming scheme actually implemented today is:
+>
+> ```
+> scion-{h12}-{scope}-{sha256(hubID:scopeID)[:12]}-{name}
+> ```
+>
+> where `h12` is the first 12 hex characters of `sha256(hubID)` — see
+> `pkg/secret/gcpbackend.go` (`secretNamePrefix`, `gcpSecretName`) and
+> `docs-site/src/content/docs/hosted/user/secrets.md` for the operator-facing
+> IAM-grant guidance. The rest of this section is kept for historical context
+> (the collision-avoidance rationale below still applies to the scope/name
+> segment) but the concrete name format and examples are out of date.
+
 GCP Secret Manager has a flat namespace per project. Scion secrets are mapped using a hashed naming convention to avoid collisions and stay within the 255-character GCP SM secret ID limit:
 
 ```
@@ -274,7 +289,7 @@ The `scopeID` is hashed using SHA-256, truncated to the first 12 hex characters 
 
 The full scope ID is preserved in GCP labels (see Section 4.4) for discoverability and cross-referencing.
 
-Examples:
+Examples (historical; see the superseded note above for the current format):
 - `scion-user-a1b2c3d4e5f6-ANTHROPIC_API_KEY`
 - `scion-grove-f9e8d7c6b5a4-DB_PASSWORD`
 - `scion-runtime_broker-1a2b3c4d5e6f-TLS_CERT`

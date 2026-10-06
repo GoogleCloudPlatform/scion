@@ -58,7 +58,7 @@ func grantGuardSetup(t *testing.T) (*Server, store.Store, string, *store.User) {
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, projectID, owner
 }
@@ -248,6 +248,13 @@ func (a *grantGuardAgentIdentity) OriginUserID() string {
 	return ""
 }
 func (a *grantGuardAgentIdentity) TokenID() string { return "test-token" }
+
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *grantGuardAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
 func (a *grantGuardAgentIdentity) Scopes() []AgentTokenScope {
 	return a.scopes
 }

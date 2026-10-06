@@ -18,14 +18,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 )
 
@@ -45,6 +48,7 @@ var (
 
 	convGetJSON        bool
 	convGetMessageJSON bool
+	convGetMessageBody bool
 
 	convParticipantsJSON bool
 
@@ -144,7 +148,12 @@ var conversationGetMessageCmd = &cobra.Command{
 
 Examples:
   scion conversation get-message conv:a1b2c3d4-... msg-uuid-here
-  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --json`,
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --json
+  scion conversation get-message conv:a1b2c3d4-... msg-uuid-here --body
+
+--body prints only the message's body (msg.Msg) to stdout, with no added
+bytes, and exits 0. It is the fetch command a large-DM offload stub names
+(ptone/scion#2257) — it is silent to make "> file" redirection exact.`,
 	Args: cobra.ExactArgs(2),
 	RunE: runConversationGetMessage,
 }
@@ -250,6 +259,7 @@ func init() {
 	// Get flags
 	conversationGetCmd.Flags().BoolVar(&convGetJSON, "json", false, "Output in JSON format")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageJSON, "json", false, "Output in JSON format")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageBody, "body", false, "Print only the message body to stdout (no added bytes)")
 
 	// Participants flags
 	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
@@ -317,7 +327,7 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 		if conv.DefaultAgentID != nil {
 			defaultAgent = truncateRunes(*conv.DefaultAgentID, 12, false)
 		}
-		lastActivity := formatTimeAgo(conv.LastActivityAt)
+		lastActivity := clitime.Ago(conv.LastActivityAt)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			shortID, conv.Kind, conv.Surface, name, defaultAgent, lastActivity)
 	}
@@ -365,7 +375,7 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
 	for _, msg := range result.Items {
-		timeStr := msg.CreatedAt.Format("15:04:05")
+		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
@@ -483,8 +493,8 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 	if conv.DefaultAgentID != nil {
 		fmt.Printf("Default Agent:  %s\n", *conv.DefaultAgentID)
 	}
-	fmt.Printf("Created:        %s\n", conv.CreatedAt.Format(time.RFC3339))
-	fmt.Printf("Last Activity:  %s\n", conv.LastActivityAt.Format(time.RFC3339))
+	fmt.Printf("Created:        %s\n", clitime.Format(conv.CreatedAt, clitime.Full))
+	fmt.Printf("Last Activity:  %s\n", clitime.Format(conv.LastActivityAt, clitime.Full))
 
 	if len(conv.Participants) > 0 {
 		fmt.Println("\nParticipants:")
@@ -497,6 +507,16 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 		_ = tw.Flush()
 	}
 	return nil
+}
+
+// writeMessageBody writes msg.Msg to w with no added bytes — no trailing
+// newline, no label — so a large-DM offload stub's fetch command
+// (ptone/scion#2257, `scion conversation get-message ... --body`) reproduces
+// exactly the persisted bytes when redirected to a file. Extracted from
+// runConversationGetMessage for direct unit testing.
+func writeMessageBody(w io.Writer, msg *store.Message) error {
+	_, err := io.WriteString(w, msg.Msg)
+	return err
 }
 
 func runConversationGetMessage(cmd *cobra.Command, args []string) error {
@@ -522,6 +542,10 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get message: %w", err)
 	}
 
+	if convGetMessageBody {
+		return writeMessageBody(os.Stdout, msg)
+	}
+
 	if isJSONOutput() {
 		return outputJSON(msg)
 	}
@@ -536,7 +560,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	}
 	dispatchedAt := ""
 	if msg.DispatchedAt != nil {
-		dispatchedAt = msg.DispatchedAt.Format(time.RFC3339)
+		dispatchedAt = clitime.Format(*msg.DispatchedAt, clitime.Full)
 	}
 	dispatchFailureReason := ""
 	if msg.DispatchFailureReason != nil {
@@ -562,7 +586,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(tw, "GROUP ID\t%s\n", msg.GroupID)
 	_, _ = fmt.Fprintf(tw, "CHANNEL\t%s\n", msg.Channel)
 	_, _ = fmt.Fprintf(tw, "THREAD ID\t%s\n", msg.ThreadID)
-	_, _ = fmt.Fprintf(tw, "CREATED\t%s\n", msg.CreatedAt.Format(time.RFC3339))
+	_, _ = fmt.Fprintf(tw, "CREATED\t%s\n", clitime.Format(msg.CreatedAt, clitime.Full))
 	_, _ = fmt.Fprintf(tw, "DISPATCH STATE\t%s\n", msg.DispatchState)
 	_, _ = fmt.Fprintf(tw, "DISPATCHED AT\t%s\n", dispatchedAt)
 	_, _ = fmt.Fprintf(tw, "DISPATCH FAILURE REASON\t%s\n", dispatchFailureReason)
@@ -628,7 +652,7 @@ func runConversationParticipants(cmd *cobra.Command, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tJOINED")
 	for _, p := range conv.Participants {
-		joined := formatTimeAgo(p.JoinedAt)
+		joined := clitime.Ago(p.JoinedAt)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, joined)
 	}
 	return tw.Flush()
@@ -703,7 +727,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 
 	since, err := time.ParseDuration(convCatchUpSince)
 	if err != nil {
-		return fmt.Errorf("invalid --since value %q: %w", convCatchUpSince, err)
+		return newUsageError("invalid --since value %q: %w", convCatchUpSince, err)
 	}
 
 	afterTime := time.Now().UTC().Add(-since).Format(time.RFC3339)
@@ -729,7 +753,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
 	for _, msg := range result.Items {
-		timeStr := msg.CreatedAt.Format("15:04:05")
+		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
@@ -743,7 +767,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr string) (string, error) {
 	ref, err := messaging.ParseReference(refStr)
 	if err != nil {
-		return "", fmt.Errorf("invalid conversation reference %q: %w", refStr, err)
+		return "", newUsageError("invalid conversation reference %q: %w", refStr, err)
 	}
 
 	switch ref.Kind {
@@ -783,7 +807,7 @@ func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr
 		return "", fmt.Errorf("no conversation found for #%s", ref.Value)
 
 	default:
-		return "", fmt.Errorf("unsupported conversation reference type: %s", refStr)
+		return "", newUsageError("unsupported conversation reference type: %s", refStr)
 	}
 }
 
@@ -799,31 +823,4 @@ func truncateRunes(s string, max int, ellipsis bool) string {
 		return string(runes[:max-3]) + "..."
 	}
 	return string(runes[:max])
-}
-
-// formatTimeAgo formats a time as a human-readable relative time string.
-func formatTimeAgo(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		m := int(d.Minutes())
-		if m == 1 {
-			return "1m ago"
-		}
-		return fmt.Sprintf("%dm ago", m)
-	case d < 24*time.Hour:
-		h := int(d.Hours())
-		if h == 1 {
-			return "1h ago"
-		}
-		return fmt.Sprintf("%dh ago", h)
-	default:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1d ago"
-		}
-		return fmt.Sprintf("%dd ago", days)
-	}
 }

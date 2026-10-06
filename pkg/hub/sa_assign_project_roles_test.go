@@ -107,7 +107,7 @@ func TestSAAssign2147_OtherProjectMember_Denied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectB))
-	srv.createProjectMembersGroup(ctx, projectB)
+	srv.seedProjectCreatorMembership(ctx, projectB)
 
 	memberOfA := makeProjectMemberUser(t, s, projectA, tid("2147-member-of-a"), "Member A", store.GroupMemberRoleMember)
 
@@ -187,7 +187,7 @@ func TestSAAssign2147_AgentCreatedByOwner_RealEdge_CanAssignProjectSA(t *testing
 	createDCProject(t, s, projectID, "2147-agent-owner-project")
 	createTestUserWithProjectRole(t, s, ownerID, "2147-agent-owner@test.com", projectID, store.ProjectRoleOwner)
 	createDCAgent(t, s, agentID, projectID, ownerID, AgentRoleFull)
-	createDCEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, ownerID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 
 	sa := &store.GCPServiceAccount{
@@ -222,7 +222,7 @@ func TestSAAssign2147_AgentCreatedByMember_RealEdge_CanAssignProjectSA(t *testin
 	createDCProject(t, s, projectID, "2147-agent-member-project")
 	createTestUserWithProjectRole(t, s, memberID, "2147-agent-member@test.com", projectID, store.ProjectRoleMember)
 	createDCAgent(t, s, agentID, projectID, memberID, AgentRoleFull)
-	createDCEdge(t, s, store.DelegationPrincipalUser, memberID, store.DelegationPrincipalAgent, agentID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, memberID, store.DelegationPrincipalAgent, agentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 
 	sa := &store.GCPServiceAccount{
@@ -366,8 +366,21 @@ func TestSAAssign2147_SeedReconciliation_ExistingHubGetsAssignPermission(t *test
 			"%s should have gcp_service_account.assign after reconciliation", roleName)
 
 		marker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
-		assert.Equal(t, 4, marker.Revision, "%s marker should advance to revision 4", roleName)
+		assert.Equal(t, builtInRoleRevision(t, roleName), marker.Revision,
+			"%s marker should advance to its current revision", roleName)
 	}
+}
+
+// builtInRoleRevision returns the declared revision of a built-in project role.
+func builtInRoleRevision(t *testing.T, name string) int {
+	t.Helper()
+	for _, role := range BuiltInRoles() {
+		if role.Name == name && role.ScopeType == store.RoleScopeProject {
+			return role.Revision
+		}
+	}
+	t.Fatalf("no built-in project role %q", name)
+	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +470,7 @@ type memberAssignFixture struct {
 func setupMemberAssign(t *testing.T) *memberAssignFixture {
 	t.Helper()
 	f := bypassAgentsSetup(t)
-	f.srv.createProjectMembersGroup(context.Background(), f.proj)
+	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 	member := makeProjectMemberUser(t, f.store, f.proj, tid("2147-path-member"), "Path Member", store.GroupMemberRoleMember)
 	return &memberAssignFixture{bypassAgentsFixture: f, member: member}
 }
@@ -679,7 +692,7 @@ func TestSAAssign2147_MemberAgentCreatesAgent_Enforce_EvaluatesCreatingSA(t *tes
 				},
 			}
 			require.NoError(t, m.store.CreateAgent(ctx, creator))
-			createDCEdge(t, m.store, store.DelegationPrincipalUser, m.member.ID, store.DelegationPrincipalAgent, creator.ID,
+			seedRecordedDelegationEdge(t, m.store, store.DelegationPrincipalUser, m.member.ID, store.DelegationPrincipalAgent, creator.ID,
 				store.RoleScopeProject, m.proj.ID, string(AgentRoleFull))
 
 			targetSA := wiringSA(t, m.store, store.ScopeProject, m.proj.ID, "2147-path-target-"+tc.name+"@p.iam.gserviceaccount.com")

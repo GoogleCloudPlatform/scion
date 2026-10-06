@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -178,7 +179,7 @@ func TestQueryDailyTimeSeriesBucketsByEndDay(t *testing.T) {
 		},
 	}}
 
-	points, err := svc.queryDailyTimeSeries(context.Background(), telemetrycontract.MetricAPICalls, day1.Add(-2*time.Hour), day2.Add(time.Hour), nil)
+	points, err := svc.queryDailyTimeSeries(context.Background(), telemetrycontract.MetricAPICalls, day1.Add(-2*time.Hour), day2.Add(time.Hour), nil, time.UTC)
 	require.NoError(t, err)
 	byDay := map[string]int64{}
 	for _, p := range points {
@@ -186,6 +187,88 @@ func TestQueryDailyTimeSeriesBucketsByEndDay(t *testing.T) {
 	}
 	assert.Equal(t, int64(4), byDay["2026-03-10"])
 	assert.Equal(t, int64(6), byDay["2026-03-11"], "second day's increment is 10-4=6, not the raw value 10")
+}
+
+// TestDailyBucketsAreUTCDays pins that day buckets are UTC days whatever
+// the hub process zone, which is what the dashboard's "(UTC)" labels
+// promise. It covers all three bucketing sites: queryDailyTimeSeries (Daily
+// Sessions), queryGroupedTimeSeries (API calls and tokens by model/harness)
+// and queryDailyUniqueCount (Active Agents per Day). 23:30Z on 10 March is
+// 08:30 on 11 March in Tokyo; it must still land in the 2026-03-10 bucket.
+func TestDailyBucketsAreUTCDays(t *testing.T) {
+	origLocal := time.Local
+	time.Local = time.FixedZone("JST", 9*60*60)
+	defer func() { time.Local = origLocal }()
+
+	end := time.Date(2026, 3, 10, 23, 30, 0, 0, time.UTC)
+	epoch := end.Add(-time.Hour)
+	queryStart, queryEnd := epoch.Add(-time.Hour), end.Add(time.Hour)
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		metric string
+		labels map[string]string
+		query  func(svc *MetricsDashboardService, metric string) (map[string]int64, error)
+	}{
+		{
+			name:   "queryDailyTimeSeries",
+			metric: telemetrycontract.MetricAPICalls,
+			query: func(svc *MetricsDashboardService, metric string) (map[string]int64, error) {
+				points, err := svc.queryDailyTimeSeries(ctx, metric, queryStart, queryEnd, nil, time.UTC)
+				return pointsByDay(points), err
+			},
+		},
+		{
+			name:   "queryGroupedTimeSeries",
+			metric: telemetrycontract.MetricAPICalls,
+			labels: map[string]string{telemetrycontract.ModelLabel: "m1"},
+			query: func(svc *MetricsDashboardService, metric string) (map[string]int64, error) {
+				series, err := svc.queryGroupedTimeSeries(ctx, metric, "metric.labels."+telemetrycontract.ModelLabel, queryStart, queryEnd, nil, time.UTC)
+				if err != nil {
+					return nil, err
+				}
+				if len(series) != 1 || series[0].Label != "m1" {
+					return nil, fmt.Errorf("want one series labelled m1, got %+v", series)
+				}
+				return pointsByDay(series[0].Points), nil
+			},
+		},
+		{
+			name:   "queryDailyUniqueCount",
+			metric: telemetrycontract.MetricSessionCount,
+			labels: map[string]string{telemetrycontract.AgentLabel: "agent-1"},
+			query: func(svc *MetricsDashboardService, metric string) (map[string]int64, error) {
+				points, err := svc.queryDailyUniqueCount(ctx, metric, "metric.labels."+telemetrycontract.AgentLabel, queryStart, queryEnd, nil, time.UTC)
+				return pointsByDay(points), err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newFakeMetricsClient()
+			svc := newContractTestService(client)
+			filter := `metric.type = "` + metricPrefix + tt.metric + `"`
+			client.seriesByFilter[filter] = []*monitoringpb.TimeSeries{{
+				Metric: &googlemetricpb.Metric{Type: metricPrefix + tt.metric, Labels: tt.labels},
+				Points: []*monitoringpb.Point{intPoint(epoch, end, 5)},
+			}}
+
+			byDay, err := tt.query(svc, tt.metric)
+			require.NoError(t, err)
+			require.Len(t, byDay, 1, "one point must make exactly one day bucket: %v", byDay)
+			assert.Contains(t, byDay, "2026-03-10", "23:30Z must bucket on its UTC day, not the JST day")
+			assert.Positive(t, byDay["2026-03-10"])
+		})
+	}
+}
+
+func pointsByDay(points []TimeSeriesPoint) map[string]int64 {
+	byDay := make(map[string]int64, len(points))
+	for _, p := range points {
+		byDay[p.Timestamp] = p.Value
+	}
+	return byDay
 }
 
 // TestQuerySumTreatsNotFoundAsZero pins the "NotFound-as-zero" rule at the

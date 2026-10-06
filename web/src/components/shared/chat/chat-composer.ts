@@ -37,9 +37,20 @@ import { live } from 'lit/directives/live.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
 import type { SlashCommandDetail } from './slash-autocomplete.js';
+import { blurElement, focusElement } from '../focus-moved.js';
 import './mention-autocomplete.js';
 import './slash-autocomplete.js';
 import { showToast } from '../../../utils/toast.js';
+import { LongPressController } from './long-press.js';
+import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
+import './chat-action-sheet.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
+
+/** The touch presentation of the send button's right-click menu. */
+const SEND_SHEET_ITEMS: ActionSheetItem[] = [
+  { id: 'send-interrupt', label: 'Send with interruption', icon: 'lightning-charge' },
+];
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -208,6 +219,14 @@ export class ScionChatComposer extends LitElement {
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
 
+  /** Whether the send menu is open as an action sheet (a long-press on Send). */
+  @state() private showSendSheet = false;
+
+  /** "Send with interruption" was chosen from the sheet; sent once it has closed. */
+  private sendInterruptOnSheetClose = false;
+
+  private readonly sendLongPress = new LongPressController(this);
+
   /** W7: Pending file uploads before send. */
   @state() private pendingFiles: UploadedAttachment[] = [];
 
@@ -254,6 +273,13 @@ export class ScionChatComposer extends LitElement {
       this.resetMentionTracking();
       this.focusTextarea();
     }
+    // A new reply target (including switching from one message to another)
+    // must move focus into the textarea, caret at the end of the draft, so
+    // the user can start typing the reply immediately. Clearing `replyTo`
+    // (cancel/send) must not re-steal focus, hence the truthy check.
+    if (changedProperties.has('replyTo') && this.replyTo) {
+      this.focusTextareaCaretEnd();
+    }
     if (changedProperties.has('conversationKey')) {
       // Save the draft for the OLD conversation immediately before switching.
       const oldKey = changedProperties.get('conversationKey') as string;
@@ -271,17 +297,47 @@ export class ScionChatComposer extends LitElement {
   /** Debounce timer for saving drafts to localStorage. */
   private _draftTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * The draft text this composer last read from or wrote to storage for its
+   * conversation ('' for none). A flush only writes when `text` differs from
+   * it, so an entry written elsewhere (e.g. text handed over from the quick
+   * message dialog) is not overwritten or removed by a composer that never
+   * changed its draft.
+   */
+  private _persistedText = '';
+
   static override styles = css`
     :host {
       display: block;
     }
 
+    /* The rows are spaced by the context rows' own gap and bottom padding
+       and by the footer's top margin, not a gap here, so that context rows
+       which have shrunk away (see the end of the styles) leave no gap. */
     .composer {
       display: flex;
       flex-direction: column;
-      gap: 0.375rem;
-      padding: 0.75rem 1rem;
+      /* The vertical padding halves in a tight keyboard frame (see the
+         tight-frame rules below). */
+      --composer-pad-block: calc(0.75rem - 0.375rem * var(--scion-chat-tight, 0));
+      padding: var(--composer-pad-block) 1rem;
+      /* Clear the home indicator (the page uses viewport-fit=cover). While
+         the on-screen keyboard is open the composer sits on the keyboard,
+         not the screen edge, so the inset is dropped: --scion-kb-open is 1
+         then (set on the root by client/viewport.ts) and 0 otherwise. */
+      padding-bottom: max(
+        var(--composer-pad-block),
+        calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
+      );
       border-top: 1px solid var(--scion-border, #e2e8f0);
+      /* Clear a landscape phone's notch and rounded corners (the page uses
+         viewport-fit=cover) on whichever sides this column meets the screen
+         edge. Each inset is a transparent border, so the row's background still
+         paints to the screen edge and only its content moves in. The chat page
+         sets --chat-inset-left and --chat-inset-right for the edges the
+         conversation touches; both are 0 everywhere else. */
+      border-left: var(--chat-inset-left, 0px) solid transparent;
+      border-right: var(--chat-inset-right, 0px) solid transparent;
       background: var(--scion-surface, #ffffff);
     }
 
@@ -319,6 +375,116 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
+    /* On a phone or tablet the field grows with the draft only so far, then
+       scrolls inside itself. Uncapped, a long draft outgrows a frame the open
+       keyboard has shrunk: the caret ends up below the frame, and iOS pans
+       the page to reveal it, which pushes the header off the top and leaves
+       an empty band above the keyboard.
+       The cap is --composer-field-room, which the thread works out and
+       writes on this element (see composer-room.ts for how: it is a
+       continuous, growing function of the frame height, whatever chrome is
+       showing). Before the thread has measured, or without one, a simple
+       curve of the frame applies instead.
+       The floor is exactly one line: the line plus the field's 0.5em top
+       and bottom padding. Shoelace's line height is 1.4, which gives the
+       2.4em fallback for engines without the lh unit; the lh rule is in
+       @supports, since a var() in it would otherwise win the cascade and
+       drop the cap where lh is unknown.
+       The overflow also overrides Shoelace's own overflow-y: hidden for
+       resize="auto". */
+    @media (max-width: 768px), (pointer: coarse) {
+      sl-textarea::part(textarea) {
+        --composer-field-cap: var(
+          --composer-field-room,
+          calc(var(--scion-app-height, 100dvh) * 0.15 + 2.65rem)
+        );
+        max-height: max(2.4em, var(--composer-field-cap));
+        overflow-y: auto;
+      }
+
+      @supports (height: 1lh) {
+        sl-textarea::part(textarea) {
+          max-height: max(calc(1lh + 1em), var(--composer-field-cap));
+        }
+      }
+    }
+
+    /* In a tight keyboard frame inside the chat shell (it publishes
+       --scion-chat-tight, --scion-chat-tight-position and
+       --scion-chat-tight-visibility from the state client/viewport.ts sets;
+       nothing else does), the composer gives the draft and the thread as
+       much room as it can: the destination chip and the footer row (the
+       character counter) leave the flow, and the padding tightens. They are
+       taken out of flow and hidden (visibility: hidden also takes them out
+       of the tab order and the accessibility tree) rather than removed, so
+       their height stays measurable: tightSavings() reports what they free,
+       and the field's cap adds it back, so crossing the tight threshold
+       never moves the field. All of it is back as soon as the keyboard
+       closes. Each fallback is the element's own value (the footer row's
+       are in its own rule below). */
+    :host > sl-dropdown {
+      position: var(--scion-chat-tight-position, static);
+      visibility: var(--scion-chat-tight-visibility, visible);
+    }
+
+    :host > .destination-chip {
+      position: var(--scion-chat-tight-position, relative);
+      visibility: var(--scion-chat-tight-visibility, visible);
+    }
+
+    /* Stop iOS/Android focus-zoom: the composer's inner native textarea
+       computes at 16px or more on a coarse (touch) pointer, even though
+       the Shoelace font-size custom property (set app-wide in critical
+       CSS) only reaches ::part(base), not the inner textarea itself. */
+    @media (pointer: coarse) {
+      sl-textarea::part(textarea) {
+        font-size: max(16px, var(--chat-fs-lg));
+      }
+    }
+
+    @media (max-width: 768px) {
+      .attach-btn::part(base) {
+        min-height: 44px;
+      }
+
+      /* Icon-only on mobile: a square accent button, freeing the width the
+         text label used for the textarea. The label stays in the DOM
+         (visually hidden, not removed) so the accessible name is still
+         "Send" / "Save Edit" without a separate aria-label. */
+      .send-btn::part(base) {
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        padding: 0;
+        justify-content: center;
+      }
+
+      .send-btn::part(prefix) {
+        margin-inline-end: 0;
+      }
+
+      /* The label slot wrapper keeps its own padding even though the
+         slotted content (the clip-rect-hidden span) collapses to 1x1 —
+         without this, the icon sits visibly off-centre in the square
+         button instead of in the middle of it. */
+      .send-btn::part(label) {
+        padding: 0;
+      }
+
+      .send-btn sl-icon {
+        font-size: 20px;
+      }
+
+      .send-btn .send-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+    }
+
     .send-container {
       position: relative;
       flex-shrink: 0;
@@ -326,6 +492,16 @@ export class ScionChatComposer extends LitElement {
 
     .send-btn {
       flex-shrink: 0;
+    }
+
+    /* Long-press on Send opens its menu; keep iOS's callout and text
+       selection from claiming the press. */
+    @media (hover: none) {
+      .send-btn {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
     }
 
     .send-context-overlay {
@@ -363,8 +539,24 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
     }
 
-    .footer-row {
+    .composer-context {
       display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+    }
+
+    .composer-context-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 0.375rem;
+      padding-bottom: 0.375rem;
+    }
+
+    .footer-row {
+      margin-top: 0.375rem;
+      display: flex;
+      position: var(--scion-chat-tight-position, static);
+      visibility: var(--scion-chat-tight-visibility, visible);
       align-items: center;
       justify-content: space-between;
       gap: 0.5rem;
@@ -413,7 +605,9 @@ export class ScionChatComposer extends LitElement {
       border-radius: 0.5rem 0.5rem 0 0;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-bottom: none;
-      margin: 0 1rem;
+      /* Keep the tab over the composer's content, which moves in by the
+         chat page's side insets (see .composer). */
+      margin: 0 calc(1rem + var(--chat-inset-right, 0px)) 0 calc(1rem + var(--chat-inset-left, 0px));
       margin-bottom: -1px;
       position: relative;
       z-index: 1;
@@ -451,6 +645,31 @@ export class ScionChatComposer extends LitElement {
 
     .destination-chip.dm {
       background: var(--scion-primary-50, #eff6ff);
+    }
+
+    /* In a narrow composer the chip keeps to one line: a long agent name is
+       cut with an ellipsis (the full name is in its title) rather than
+       wrapping the tab into a block over the messages. */
+    @media (max-width: 768px) {
+      :host > sl-dropdown {
+        max-width: 100%;
+      }
+
+      .destination-chip {
+        min-width: 0;
+        white-space: nowrap;
+      }
+
+      .destination-chip > * {
+        flex: none;
+      }
+
+      .destination-chip > .agent-name {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
     }
 
     /* W7: File upload styles */
@@ -547,11 +766,15 @@ export class ScionChatComposer extends LitElement {
     }
 
     /* ---- Phase-3: Reply preview bar ---- */
+    /* While the keyboard is open inside the chat shell (it publishes
+       --scion-chat-kb-open) the bar is one line with less padding. Keying
+       this to the keyboard rather than to a frame size keeps the bar the
+       same height whatever the frame, so the field's cap stays monotonic. */
     .reply-bar {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.375rem 0.75rem;
+      padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
       background: var(--scion-surface-50, #f8fafc);
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
       border-radius: 0 0.25rem 0.25rem 0;
@@ -559,17 +782,33 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-neutral-600, #475569);
     }
 
+    /* The sender and a one-line excerpt: on two lines normally, side by
+       side while the keyboard is open, where the excerpt's basis drops from
+       the full width (which wraps it under the sender) to 0. */
     .reply-bar .reply-info {
       flex: 1;
       overflow: hidden;
+      display: flex;
+      flex-wrap: wrap;
+      column-gap: 0.375rem;
     }
 
+    /* While the keyboard is open the sender takes at most half the bar and
+       is cut with an ellipsis, so a long name never wraps the bar back to
+       two lines. */
     .reply-bar .reply-sender {
       font-weight: 600;
       color: var(--scion-primary-600, #2563eb);
+      max-width: calc(100% - 50% * var(--scion-chat-kb-open, 0));
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .reply-bar .reply-content {
+      flex: 1 1 calc(100% * (1 - var(--scion-chat-kb-open, 0)));
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -587,7 +826,7 @@ export class ScionChatComposer extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.375rem 0.75rem;
+      padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
       background: var(--scion-warning-50, #fffbeb);
       border-left: 3px solid var(--scion-warning-400, #fbbf24);
       border-radius: 0 0.25rem 0.25rem 0;
@@ -629,6 +868,111 @@ export class ScionChatComposer extends LitElement {
       font-weight: 600;
       color: var(--scion-primary, #3b82f6);
     }
+
+    /* (These rules come last so they override the base rules above.)
+       On a phone or tablet the column can never push the field out of the
+       frame: when there is not room for everything, the composer shrinks,
+       and inside it the rows above the input row (a reply or edit bar,
+       attachments, upload failures) give way together, clipped from the
+       top, while the input row keeps its height. Their wrapper has no
+       padding or border, so it can give way entirely. */
+    @media (max-width: 768px), (pointer: coarse) {
+      :host {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+
+      .composer-wrapper {
+        display: flex;
+        flex-direction: column;
+        flex: 0 1 auto;
+        min-height: 0;
+      }
+
+      .composer {
+        flex: 0 1 auto;
+        min-height: 0;
+      }
+
+      /* Clipped from the top when it has to give way: nothing in it
+         paints or takes taps outside it. The composer's top padding moves
+         inside it while it shows, so a cancel target can use that space
+         (see below) without reaching past the clip. */
+      .composer-context {
+        flex: 0 1 auto;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .composer:has(> .composer-context) {
+        padding-top: 0;
+      }
+
+      .composer-context-rows {
+        flex: none;
+        padding-top: 0.75rem;
+      }
+
+      .input-row {
+        flex-shrink: 0;
+      }
+
+      /* Attachments are one row that scrolls sideways, whatever the frame,
+         so the row's height never changes as the frame does. */
+      .pending-files {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: none;
+      }
+
+      .pending-file {
+        flex: none;
+      }
+
+      /* A reply or edit bar's cancel button is a 44px square target with
+         the icon at its usual size. The bar (always the first row) is at
+         least 44px less the space above it in the wrapper (the composer's
+         0.75rem top padding, which stays whole here even in a tight frame)
+         and below it (the rows' 0.375rem gap), and the button reaches into
+         both with negative margins: the whole target is inside the
+         wrapper's clip, over nothing else interactive. padding-top
+         re-centres the icon on the bar. */
+      .reply-bar,
+      .edit-bar {
+        min-height: calc(44px - 1.125rem);
+        box-sizing: border-box;
+      }
+
+      .reply-bar sl-icon-button,
+      .edit-bar sl-icon-button {
+        flex: none;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        width: 44px;
+        height: 44px;
+        margin: -0.75rem -0.75rem -0.375rem 0;
+        padding-top: 0.375rem;
+      }
+    }
+
+    /* Touch targets: an attachment's remove button is 44px square on a
+       coarse pointer, inside its chip. */
+    @media (pointer: coarse) {
+      .pending-file {
+        min-height: 44px;
+        box-sizing: border-box;
+      }
+
+      .pending-file .remove-btn {
+        min-width: 44px;
+        min-height: 44px;
+        margin: -0.25rem -0.5rem -0.25rem 0;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -644,10 +988,12 @@ export class ScionChatComposer extends LitElement {
 
   /** Restore a draft from localStorage for the current conversationKey. */
   private restoreDraft(): void {
+    this._persistedText = '';
     if (!this.conversationKey) return;
     try {
-      const key = `scion-chat-draft-${this.conversationKey}`;
+      const key = chatDraftStorageKey(this.conversationKey);
       const saved = localStorage.getItem(key);
+      this._persistedText = saved ?? '';
       if (saved !== null) {
         this.text = saved;
         this.runeCount = countRunes(this.text);
@@ -663,12 +1009,13 @@ export class ScionChatComposer extends LitElement {
     if (this._draftTimer !== null) clearTimeout(this._draftTimer);
     this._draftTimer = setTimeout(() => {
       try {
-        const key = `scion-chat-draft-${this.conversationKey}`;
+        const key = chatDraftStorageKey(this.conversationKey);
         if (this.text) {
           localStorage.setItem(key, this.text);
         } else {
           localStorage.removeItem(key);
         }
+        this._persistedText = this.text;
       } catch {
         // localStorage may throw in private browsing mode — silently ignore.
       }
@@ -684,7 +1031,8 @@ export class ScionChatComposer extends LitElement {
     }
     if (!this.conversationKey) return;
     try {
-      localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
+      localStorage.removeItem(chatDraftStorageKey(this.conversationKey));
+      this._persistedText = '';
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -693,6 +1041,11 @@ export class ScionChatComposer extends LitElement {
   /**
    * Immediately persist the current draft text under the given key.
    * Cancels any pending debounced save so it is not double-written. (#1152)
+   *
+   * Writes only when `text` differs from what this composer last persisted
+   * (see `_persistedText`): an unchanged composer leaves the stored entry
+   * alone, while a composer whose text was cleared (sent, edit saved or
+   * cancelled) still removes it.
    */
   private flushDraft(key: string): void {
     if (this._draftTimer !== null) {
@@ -701,12 +1054,14 @@ export class ScionChatComposer extends LitElement {
     }
     if (!key) return;
     try {
-      const storageKey = `scion-chat-draft-${key}`;
+      if (this.text === this._persistedText) return;
+      const storageKey = chatDraftStorageKey(key);
       if (this.text) {
         localStorage.setItem(storageKey, this.text);
       } else {
         localStorage.removeItem(storageKey);
       }
+      this._persistedText = this.text;
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -741,11 +1096,7 @@ export class ScionChatComposer extends LitElement {
           ? html`<div class="drop-zone-overlay"><span>Drop files here</span></div>`
           : nothing}
         <div class="composer">
-          ${this.replyTo ? this.renderReplyBar() : nothing}
-          ${this.editMessage ? this.renderEditBar() : nothing}
-          ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
-          ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
-          ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
+          ${this.renderContextRows()}
           <div class="input-row">
             ${this.conversationMode && !inEditMode
               ? html`
@@ -793,10 +1144,11 @@ export class ScionChatComposer extends LitElement {
                 variant=${sendVariant}
                 ?disabled=${!canSend}
                 @click=${this.handleSend}
+                @pointerdown=${this.handleSendPointerDown}
                 @contextmenu=${this.handleSendContextMenu}
               >
                 <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
-                ${sendLabel}
+                <span class="send-label">${sendLabel}</span>
               </sl-button>
               ${this.showSendContextMenu && !inEditMode
                 ? html`
@@ -809,6 +1161,13 @@ export class ScionChatComposer extends LitElement {
                     </div>
                   `
                 : nothing}
+              <scion-action-sheet
+                heading="Send options"
+                .items=${SEND_SHEET_ITEMS}
+                .open=${this.showSendSheet && !inEditMode}
+                @action-sheet-select=${this.handleSendSheetSelect}
+                @action-sheet-close=${this.handleSendSheetClose}
+              ></scion-action-sheet>
             </div>
           </div>
           <div class="footer-row">
@@ -820,6 +1179,37 @@ export class ScionChatComposer extends LitElement {
                 `
               : nothing}
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * The rows above the input row: a reply or edit bar, attachments, upload
+   * failures and progress. They sit in one wrapper so that on a phone or
+   * tablet they can give way together (see the end of the styles): the
+   * wrapper has no padding or border of its own, so it can shrink to
+   * nothing, clipping from the top.
+   */
+  private renderContextRows(): TemplateResult | typeof nothing {
+    const inEditMode = !!this.editMessage;
+    if (
+      !this.replyTo &&
+      !inEditMode &&
+      this.pendingFiles.length === 0 &&
+      this.uploadFailures.length === 0 &&
+      !this.uploading
+    ) {
+      return nothing;
+    }
+    return html`
+      <div class="composer-context">
+        <div class="composer-context-rows">
+          ${this.replyTo ? this.renderReplyBar() : nothing}
+          ${inEditMode ? this.renderEditBar() : nothing}
+          ${this.pendingFiles.length > 0 ? this.renderPendingFiles() : nothing}
+          ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
+          ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
         </div>
       </div>
     `;
@@ -879,7 +1269,7 @@ export class ScionChatComposer extends LitElement {
       return html`
         <div class="destination-chip dm">
           <span class="arrow">&rarr;</span>
-          <span class="agent-name">@${this.peerName}</span>
+          <span class="agent-name" title=${'@' + this.peerName}>@${this.peerName}</span>
         </div>
       `;
     }
@@ -894,7 +1284,7 @@ export class ScionChatComposer extends LitElement {
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
             <span style="font-size: var(--chat-fs-base)">🤖</span>
-            <span class="agent-name">${this.defaultAgent}</span>
+            <span class="agent-name" title=${this.defaultAgent}>${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
               ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
@@ -1235,7 +1625,7 @@ export class ScionChatComposer extends LitElement {
       const ta = this.getTextareaElement();
       if (ta) {
         ta.setSelectionRange(newCursorPos, newCursorPos);
-        ta.focus();
+        focusElement(ta);
       }
     });
   }
@@ -1468,10 +1858,8 @@ export class ScionChatComposer extends LitElement {
 
   /** Send the current message with the given interrupt flag. */
   private doSend(interrupt: boolean): void {
+    if (!this.hasSendableContent()) return;
     const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
-      return;
 
     // Phase-3: If in edit mode, dispatch chat-edit instead of chat-send.
     if (this.editMessage) {
@@ -1489,7 +1877,7 @@ export class ScionChatComposer extends LitElement {
       this.runeCount = 0;
       this.resetMentionTracking();
       this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
-      this.focusTextarea();
+      this.settleFocusAfterSend();
       return;
     }
 
@@ -1527,7 +1915,9 @@ export class ScionChatComposer extends LitElement {
         if (savedReplyTo) {
           this.replyTo = savedReplyTo;
         }
-        this.focusTextarea();
+        // A failed send must not pop the keyboard back up on touch; the
+        // user taps to retry or edit instead.
+        this.settleFocusAfterSend();
       },
     };
     if (this.replyTo) {
@@ -1548,7 +1938,7 @@ export class ScionChatComposer extends LitElement {
     this.resetMentionTracking();
     this.pendingFiles = [];
     this.clearDraft();
-    this.focusTextarea();
+    this.settleFocusAfterSend();
 
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {
@@ -1559,27 +1949,164 @@ export class ScionChatComposer extends LitElement {
     );
   }
 
+  /**
+   * After a send (successful or failed) or a saved edit, touch devices
+   * blur the composer so the on-screen keyboard retracts instead of
+   * staying up over the thread the user is waiting to read. Desktop keeps
+   * today's re-focus, since Enter still sends there and the user is likely
+   * to keep typing.
+   */
+  private settleFocusAfterSend(): void {
+    if (isPrimaryInputTouch()) {
+      this.blurTextarea();
+    } else {
+      this.focusTextarea();
+    }
+  }
+
+  /** Blur the composer's textarea, retracting the on-screen keyboard. */
+  private blurTextarea(): void {
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    blurElement(slTextarea as HTMLElement | null);
+  }
+
+  /**
+   * Whether the user is mid-composition, used to hold off server-pushed
+   * navigation that would pull the conversation out from under them: there
+   * is draft text, or — on a touch-primary device only — focus is inside the
+   * composer, which there means the on-screen keyboard is up. On desktop the
+   * textarea keeps focus after every send, so focus alone says nothing.
+   */
+  get isComposing(): boolean {
+    if (this.text.trim().length > 0) return true;
+    const touchPrimary =
+      typeof window !== 'undefined' && !!window.matchMedia?.(TOUCH_PRIMARY_QUERY).matches;
+    return touchPrimary && this.shadowRoot?.activeElement != null;
+  }
+
   /** Focus the textarea after send/cancel. */
   private focusTextarea(): void {
     void this.updateComplete.then(() => {
       requestAnimationFrame(() => {
         const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
         if (slTextarea) {
-          (slTextarea as HTMLElement).focus();
+          // preventScroll: this is not the fix for the off-screen-panel
+          // horizontal drift (overflow:clip + inert on the panels is), but it
+          // stops the message list from jumping when this runs while the
+          // composer's panel isn't the one on screen.
+          focusElement(slTextarea as HTMLElement, { preventScroll: true });
         }
       });
     });
   }
 
-  /** Show the right-click send context menu. */
-  private handleSendContextMenu(e: MouseEvent): void {
-    e.preventDefault();
-    const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
+  /**
+   * Focus the textarea with the caret placed after the last character of the
+   * current draft. Used for entry points (e.g. Reply) that must not disturb
+   * the existing draft text but still need the caret at a predictable spot
+   * so typing continues the message rather than landing mid-draft.
+   */
+  private focusTextareaCaretEnd(): void {
+    void this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        void this.applyCaretEndFocus();
+      });
+    });
+  }
+
+  /**
+   * Does the actual work for `focusTextareaCaretEnd()`. If `<sl-textarea>`
+   * has not finished its own first render yet — e.g. `replyTo` is already
+   * set on initial mount, before the child element has upgraded —
+   * `getTextareaElement()` returns null because its shadow DOM doesn't exist
+   * yet. In that case, wait once for the child's own `updateComplete` (if it
+   * exposes one) and retry before giving up. If the inner textarea is still
+   * unavailable, fall back to focusing the `<sl-textarea>` host so focus is
+   * not silently dropped.
+   */
+  private async applyCaretEndFocus(): Promise<void> {
+    let ta = this.getTextareaElement();
+    if (!ta) {
+      const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+      const pendingUpdate = (slTextarea as { updateComplete?: Promise<unknown> } | null)
+        ?.updateComplete;
+      if (pendingUpdate) {
+        await pendingUpdate;
+      }
+      ta = this.getTextareaElement();
+    }
+    if (ta) {
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+      focusElement(ta, { preventScroll: true });
       return;
+    }
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    if (slTextarea) {
+      focusElement(slTextarea as HTMLElement, { preventScroll: true });
+    }
+  }
+
+  /** Text or attachments, within the length limit, while the composer is enabled. */
+  private hasSendableContent(): boolean {
+    const hasContent = this.text.trim() !== '' || this.pendingFiles.length > 0;
+    return hasContent && this.runeCount <= MAX_MESSAGE_LENGTH && !this.disabled;
+  }
+
+  /** Is there something sendable, so the send menu has an action to offer? */
+  private canOfferSendMenu(): boolean {
+    return this.hasSendableContent() && !this.editMessage;
+  }
+
+  /**
+   * Show the send menu: the popup for a right-click, the action sheet for
+   * the browser's own touch long-press (Android fires `contextmenu` for it).
+   */
+  private handleSendContextMenu(e: MouseEvent): void {
+    const fromTouchPress = this.sendLongPress.pressing;
+    if (this.sendLongPress.contextMenu(e)) return;
+    e.preventDefault();
+    if (!this.hasSendableContent()) return;
+    if (fromTouchPress) {
+      if (this.canOfferSendMenu()) this.showSendSheet = true;
+      return;
+    }
     this.showSendContextMenu = true;
   }
+
+  /**
+   * A touch long-press on Send opens the send menu as an action sheet. The
+   * long-press swallows the press's own click, so it never also sends.
+   */
+  private readonly handleSendPointerDown = (e: PointerEvent): void => {
+    if (!this.canOfferSendMenu()) {
+      this.sendLongPress.cancel();
+      return;
+    }
+    this.sendLongPress.pointerDown(e, () => {
+      if (!this.canOfferSendMenu()) return;
+      this.showSendContextMenu = false;
+      this.showSendSheet = true;
+    });
+  };
+
+  private readonly handleSendSheetSelect = (e: CustomEvent<ActionSheetSelectDetail>): void => {
+    if (e.detail.id === 'send-interrupt') this.sendInterruptOnSheetClose = true;
+  };
+
+  /**
+   * The sheet has closed, by a choice, Cancel, Esc or the backdrop. The
+   * send runs only now: closing the dialog hands focus back to whatever
+   * had it before (often the textarea), and sending first would let that
+   * restore undo the send's touch blur and bring the keyboard back up.
+   * Cancel sends nothing and leaves the draft and focus as they were.
+   */
+  private readonly handleSendSheetClose = (): void => {
+    this.showSendSheet = false;
+    if (!this.sendInterruptOnSheetClose) return;
+    this.sendInterruptOnSheetClose = false;
+    this.doSend(true);
+  };
 
   /** Send the message with interruption from the context menu. */
   private handleSendWithInterrupt(): void {
@@ -1590,6 +2117,92 @@ export class ScionChatComposer extends LitElement {
   /** Close the send context menu. */
   private closeSendContextMenu(): void {
     this.showSendContextMenu = false;
+  }
+
+  /**
+   * The text field's border-box height in CSS px, or null before it
+   * renders. Read by the thread to work out how much room the field has
+   * (composer-room.ts).
+   */
+  fieldHeight(): number | null {
+    const field = this.getTextareaElement();
+    return field ? field.getBoundingClientRect().height : null;
+  }
+
+  /**
+   * The height in CSS px the tight-frame compaction frees (see the
+   * tight-frame styles): the destination chip and footer row, taken out of
+   * flow but still measurable, plus the padding it trims. 0 outside a tight
+   * frame. Read by the thread, which adds it back to the field's cap so
+   * crossing the tight threshold never moves the field (composer-room.ts).
+   */
+  tightSavings(): number {
+    const root = this.shadowRoot;
+    if (!root) return 0;
+    const outOfFlow = (el: Element | null | undefined): el is HTMLElement =>
+      !!el && getComputedStyle(el).position === 'absolute';
+    let saved = 0;
+    const chip = [...root.children].find(
+      (el) => el.localName === 'sl-dropdown' || el.classList.contains('destination-chip')
+    );
+    if (outOfFlow(chip)) saved += chip.getBoundingClientRect().height;
+    const footer = root.querySelector('.footer-row');
+    if (outOfFlow(footer)) {
+      saved +=
+        footer.getBoundingClientRect().height +
+        (parseFloat(getComputedStyle(footer).marginTop) || 0);
+    }
+    // The padding the tight frame trims: measured against its usual
+    // 0.75rem, top (in the context rows while they show) and bottom.
+    const tight = parseFloat(getComputedStyle(this).getPropertyValue('--scion-chat-tight')) || 0;
+    const column = root.querySelector('.composer');
+    if (tight > 0 && column) {
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      const rows = root.querySelector('.composer-context-rows');
+      const top = parseFloat(getComputedStyle(rows ?? column).paddingTop) || 0;
+      const bottom = parseFloat(getComputedStyle(column).paddingBottom) || 0;
+      saved += 0.75 * rem - top + (0.75 * rem - bottom);
+    }
+    return saved;
+  }
+
+  /**
+   * How much of the composer is cut off when the frame is too short for it,
+   * in CSS px: the context rows' height their wrapper clips away, plus any
+   * content past the composer's own box. 0 while everything shows. Read by
+   * the thread so it sizes the field from the composer's natural height,
+   * not the clipped one (composer-room.ts).
+   */
+  clippedHeight(): number {
+    const root = this.shadowRoot;
+    if (!root) return 0;
+    let clipped = Math.max(0, this.scrollHeight - this.clientHeight);
+    const wrapper = root.querySelector('.composer-context');
+    const rows = root.querySelector('.composer-context-rows');
+    if (wrapper && rows) {
+      clipped += Math.max(
+        0,
+        rows.getBoundingClientRect().height - wrapper.getBoundingClientRect().height
+      );
+    }
+    return clipped;
+  }
+
+  /**
+   * The field's border-box height in CSS px for `lines` lines of draft: the
+   * lines at the field's line height plus its vertical padding. Read by the
+   * thread for the field's two-line floor (composer-room.ts).
+   */
+  fieldLinesHeight(lines: number): number {
+    const field = this.getTextareaElement();
+    if (!field) return 0;
+    const style = getComputedStyle(field);
+    const lineHeight = parseFloat(style.lineHeight) || 1.4 * parseFloat(style.fontSize) || 0;
+    return (
+      lines * lineHeight +
+      (parseFloat(style.paddingTop) || 0) +
+      (parseFloat(style.paddingBottom) || 0)
+    );
   }
 
   /**

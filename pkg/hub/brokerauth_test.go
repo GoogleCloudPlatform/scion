@@ -22,6 +22,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -31,6 +32,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -157,6 +159,119 @@ func TestCompleteBrokerJoin_PersistsCapabilities(t *testing.T) {
 	}
 	if broker.Capabilities.WebPTY {
 		t.Errorf("expected webPty false (not in the reported list), got true")
+	}
+}
+
+// TestCompleteBrokerJoin_PersistsAsyncLaunchCapability covers the new
+// "asynclaunch" capability string (design t1-async-create-v11.md §3.2, §7
+// P1b-1): capabilitiesFromStrings parses it into
+// store.BrokerCapabilities.AsyncLaunch, exactly like the existing
+// "reprovision" case. Nothing else about CompleteBrokerJoin changes: the
+// capability is stored and nothing reads it yet (dispatchLaunching's use of
+// it is P1b-3), so this also demonstrates that advertising the bit has no
+// behavior effect on its own.
+func TestCompleteBrokerJoin_PersistsAsyncLaunchCapability(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	req := CreateBrokerRegistrationRequest{Name: "cap-test-host-async"}
+	resp, err := svc.CreateBrokerRegistration(ctx, req, "admin-user-id")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration failed: %v", err)
+	}
+
+	joinReq := BrokerJoinRequest{
+		BrokerID:     resp.BrokerID,
+		JoinToken:    resp.JoinToken,
+		Hostname:     "cap-test-host-async",
+		Version:      "1.0.0",
+		Capabilities: []string{"sync", "attach", "asynclaunch"},
+	}
+	joinResp, err := svc.CompleteBrokerJoin(ctx, joinReq, "http://localhost:9810")
+	if err != nil {
+		t.Fatalf("CompleteBrokerJoin failed: %v", err)
+	}
+	if joinResp.SecretKey == "" {
+		t.Error("SecretKey should not be empty; advertising asynclaunch must not disturb the rest of the join")
+	}
+
+	broker, err := s.GetRuntimeBroker(ctx, resp.BrokerID)
+	if err != nil {
+		t.Fatalf("GetRuntimeBroker failed: %v", err)
+	}
+	if broker.Capabilities == nil {
+		t.Fatal("expected broker.Capabilities to be set")
+	}
+	if !broker.Capabilities.Sync || !broker.Capabilities.Attach || !broker.Capabilities.AsyncLaunch {
+		t.Errorf("expected sync/attach/asyncLaunch all true, got %+v", broker.Capabilities)
+	}
+	if broker.Capabilities.Reprovision {
+		t.Errorf("expected reprovision false (not in the reported list), got true")
+	}
+}
+
+// TestCapabilitiesFromStrings_AsyncLaunchAliases covers both accepted wire
+// spellings ("asynclaunch" and "async_launch") and that an unrecognized name
+// is ignored rather than rejected (design §5's old-broker/old-hub
+// compatibility rule, unchanged by this addition).
+func TestCapabilitiesFromStrings_AsyncLaunchAliases(t *testing.T) {
+	for _, name := range []string{"asynclaunch", "ASYNCLAUNCH", "async_launch", " async_launch "} {
+		caps := capabilitiesFromStrings([]string{name})
+		if !caps.AsyncLaunch {
+			t.Errorf("capabilitiesFromStrings([%q]).AsyncLaunch = false, want true", name)
+		}
+	}
+
+	caps := capabilitiesFromStrings([]string{"sync", "some-future-capability"})
+	if caps.AsyncLaunch {
+		t.Error("expected AsyncLaunch false when not reported")
+	}
+	if !caps.Sync {
+		t.Error("expected Sync true")
+	}
+}
+
+// TestCapabilitiesFromStrings_EmptyPerAgentWorkspace covers the
+// "emptyPerAgentWorkspace" capability string a remote broker reports at
+// join (design #2703 P2), including the case-folded and snake_case forms.
+func TestCapabilitiesFromStrings_EmptyPerAgentWorkspace(t *testing.T) {
+	for _, name := range []string{"emptyPerAgentWorkspace", "emptyperagentworkspace", "empty_per_agent_workspace", " EMPTY_PER_AGENT_WORKSPACE "} {
+		if !capabilitiesFromStrings([]string{name}).EmptyPerAgentWorkspace {
+			t.Errorf("capabilitiesFromStrings([%q]).EmptyPerAgentWorkspace = false, want true", name)
+		}
+	}
+	if capabilitiesFromStrings([]string{"sync", "attach", "reprovision"}).EmptyPerAgentWorkspace {
+		t.Error("expected EmptyPerAgentWorkspace false when not reported")
+	}
+}
+
+// TestCapabilitiesFromStrings_ReprovisionEmptyPerAgent covers the
+// "reprovisionEmptyPerAgent" capability (miller79/scion#167): the join-time
+// string in its case-folded and snake_case forms, that neither Reprovision
+// nor EmptyPerAgentWorkspace implies it, and the heartbeat's JSON round trip
+// from the broker's hubclient struct into the hub's store struct.
+func TestCapabilitiesFromStrings_ReprovisionEmptyPerAgent(t *testing.T) {
+	for _, name := range []string{"reprovisionEmptyPerAgent", "reprovisionemptyperagent", "reprovision_empty_per_agent", " REPROVISION_EMPTY_PER_AGENT "} {
+		if !capabilitiesFromStrings([]string{name}).ReprovisionEmptyPerAgent {
+			t.Errorf("capabilitiesFromStrings([%q]).ReprovisionEmptyPerAgent = false, want true", name)
+		}
+	}
+	if capabilitiesFromStrings([]string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}).ReprovisionEmptyPerAgent {
+		t.Error("expected ReprovisionEmptyPerAgent false when not reported")
+	}
+
+	for _, want := range []bool{true, false} {
+		raw, err := json.Marshal(hubclient.BrokerCapabilities{Reprovision: true, ReprovisionEmptyPerAgent: want})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got store.BrokerCapabilities
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.ReprovisionEmptyPerAgent != want {
+			t.Errorf("heartbeat round trip: ReprovisionEmptyPerAgent = %v, want %v (json %s)", got.ReprovisionEmptyPerAgent, want, raw)
+		}
 	}
 }
 

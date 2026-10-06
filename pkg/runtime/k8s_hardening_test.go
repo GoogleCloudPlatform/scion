@@ -16,8 +16,11 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -120,6 +123,12 @@ func TestIsSyncTransientError(t *testing.T) {
 		{"i/o timeout", true},
 		{"TLS handshake failure", true},
 		{"use of closed network connection", true},
+		// F15: a scale-from-zero node's exec tunnel (e.g. GKE konnectivity)
+		// isn't up yet when the first exec runs right after the container
+		// starts.
+		{"stream failed: error dialing backend: No agent available", true},
+		{"error dialing backend", true},
+		{"No agent available", true},
 		{"permission denied", false},
 		{"pod not found", false},
 		{"", false},
@@ -129,6 +138,401 @@ func TestIsSyncTransientError(t *testing.T) {
 		if got != tt.transient {
 			t.Errorf("isSyncTransientError(%q) = %v, want %v", tt.err, got, tt.transient)
 		}
+	}
+}
+
+// --- F15: exec-readiness wait (waitForExecReady / execReadyWithRetry) ---
+
+// execReadySafetyValveSleeps caps how many backoff sleeps
+// fakeExecReadyClock.Sleep tolerates before failing the test outright. The
+// worst case exercised below (TestExecReadyWithRetry_GivesUpAtCap) needs 14;
+// this is a generous multiple of that so a broken loop (e.g. a backoff/cap
+// bug that never reaches execReadyMaxWait) fails fast with a clear test
+// error instead of hanging until the package-level test timeout.
+const execReadySafetyValveSleeps = 50
+
+// fakeExecReadyClock is a controllable execReadyClock for tests: Sleep
+// advances a virtual clock instead of actually blocking, so the 90s cap and
+// multi-step backoff can be exercised without the test taking 90s.
+type fakeExecReadyClock struct {
+	t           *testing.T
+	virtualTime time.Time
+	slept       []time.Duration
+	calls       int // every Sleep invocation, regardless of outcome
+}
+
+func newFakeExecReadyClock(t *testing.T) *fakeExecReadyClock {
+	return &fakeExecReadyClock{t: t, virtualTime: time.Unix(0, 0)}
+}
+
+func (f *fakeExecReadyClock) Now() time.Time { return f.virtualTime }
+
+func (f *fakeExecReadyClock) Sleep(ctx context.Context, d time.Duration) error {
+	// Count and valve-check before the ctx.Done() check below, so a caller
+	// that ignores this method's returned error (e.g. a retry loop with the
+	// "if err := clock.sleep(...); err != nil { return err }" check dropped)
+	// still trips the valve. If the count were only incremented on the
+	// success path (after the ctx check), an already-cancelled ctx would
+	// make every call return early via ctx.Err() without ever advancing
+	// f.calls or f.virtualTime — the loop would then spin forever on a
+	// frozen clock, and this valve would never fire.
+	f.calls++
+	if f.calls > execReadySafetyValveSleeps {
+		f.t.Fatalf("exec-ready retry loop did not terminate after %d Sleep calls (last backoff %v) — looks like a broken backoff/cap, or a dropped sleep error, not a slow pod",
+			f.calls, d)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	f.slept = append(f.slept, d)
+	f.virtualTime = f.virtualTime.Add(d)
+	return nil
+}
+
+func newExecReadyTestRuntime(clock *fakeExecReadyClock) *KubernetesRuntime {
+	rt, _, _ := newTestK8sRuntime()
+	rt.execReadyClock = execReadyClock{now: clock.Now, sleep: clock.Sleep}
+	return rt
+}
+
+func TestExecReadyWithRetry_SucceedsOnFirstAttempt(t *testing.T) {
+	clock := newFakeExecReadyClock(t)
+	rt := newExecReadyTestRuntime(clock)
+
+	calls := 0
+	err := rt.execReadyWithRetry(context.Background(), func() error {
+		calls++
+		return nil
+	}, "test-agent", "default", "test-pod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call, got %d", calls)
+	}
+	if len(clock.slept) != 0 {
+		t.Errorf("expected no backoff sleeps, got %v", clock.slept)
+	}
+}
+
+func TestExecReadyWithRetry_RetriesOnTransientError(t *testing.T) {
+	clock := newFakeExecReadyClock(t)
+	rt := newExecReadyTestRuntime(clock)
+
+	calls := 0
+	err := rt.execReadyWithRetry(context.Background(), func() error {
+		calls++
+		if calls < 3 {
+			return fmt.Errorf("stream failed: error dialing backend: No agent available")
+		}
+		return nil
+	}, "test-agent", "default", "test-pod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("expected 3 calls, got %d", calls)
+	}
+	// Two failures before success → two backoffs: 1s, then 2s.
+	wantBackoffs := []time.Duration{1 * time.Second, 2 * time.Second}
+	if len(clock.slept) != len(wantBackoffs) {
+		t.Fatalf("expected %d backoff sleeps, got %v", len(wantBackoffs), clock.slept)
+	}
+	for i, want := range wantBackoffs {
+		if clock.slept[i] != want {
+			t.Errorf("backoff[%d] = %v, want %v", i, clock.slept[i], want)
+		}
+	}
+}
+
+func TestExecReadyWithRetry_NonTransientErrorFailsFast(t *testing.T) {
+	clock := newFakeExecReadyClock(t)
+	rt := newExecReadyTestRuntime(clock)
+
+	calls := 0
+	err := rt.execReadyWithRetry(context.Background(), func() error {
+		calls++
+		return fmt.Errorf("permission denied: you do not have access")
+	}, "test-agent", "default", "test-pod")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call (no retry on permanent error), got %d", calls)
+	}
+	if len(clock.slept) != 0 {
+		t.Errorf("expected no backoff sleeps, got %v", clock.slept)
+	}
+}
+
+// TestExecReadyWithRetry_GivesUpAtCap pins the exact backoff schedule, not
+// just its bounds: 1s, 2s, 4s, then ten 8s steps, then one final step
+// clamped to whatever is left of the 90s budget (3s) — 14 sleeps summing to
+// exactly execReadyMaxWait, followed by one last probe (15 calls total)
+// that observes the cap reached and gives up. Asserting the exact schedule
+// (not just "total >= cap" and "each step <= 8s") catches a dropped
+// remaining-time clamp, which would silently overshoot the cap instead of
+// failing any bound check.
+func TestExecReadyWithRetry_GivesUpAtCap(t *testing.T) {
+	clock := newFakeExecReadyClock(t)
+	rt := newExecReadyTestRuntime(clock)
+
+	calls := 0
+	err := rt.execReadyWithRetry(context.Background(), func() error {
+		calls++
+		return fmt.Errorf("error dialing backend: No agent available")
+	}, "test-agent", "default", "test-pod")
+	if err == nil {
+		t.Fatal("expected error after the cap is reached")
+	}
+	if !strings.Contains(err.Error(), "gave up after") {
+		t.Errorf("expected error to explain the exec tunnel never came up, got: %v", err)
+	}
+
+	wantBackoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	for i := 0; i < 10; i++ {
+		wantBackoffs = append(wantBackoffs, execReadyMaxBackoff)
+	}
+	wantBackoffs = append(wantBackoffs, 3*time.Second) // clamped to the remaining budget
+	if len(clock.slept) != len(wantBackoffs) {
+		t.Fatalf("expected %d backoff sleeps, got %d: %v", len(wantBackoffs), len(clock.slept), clock.slept)
+	}
+	for i, want := range wantBackoffs {
+		if clock.slept[i] != want {
+			t.Errorf("backoff[%d] = %v, want %v", i, clock.slept[i], want)
+		}
+	}
+
+	if wantCalls := len(wantBackoffs) + 1; calls != wantCalls {
+		t.Errorf("expected %d calls (one per sleep, plus the final cap-triggering probe), got %d", wantCalls, calls)
+	}
+
+	if total := clock.virtualTime.Sub(time.Unix(0, 0)); total != execReadyMaxWait {
+		t.Errorf("expected cumulative backoff to equal the %s cap exactly, got %s", execReadyMaxWait, total)
+	}
+}
+
+func TestExecReadyWithRetry_RespectsContextCancellation(t *testing.T) {
+	clock := newFakeExecReadyClock(t)
+	rt := newExecReadyTestRuntime(clock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the first backoff wait
+
+	calls := 0
+	err := rt.execReadyWithRetry(ctx, func() error {
+		calls++
+		return fmt.Errorf("error dialing backend: No agent available")
+	}, "test-agent", "default", "test-pod")
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected exactly 1 attempt before the cancelled context aborts the wait, got %d", calls)
+	}
+	if len(clock.slept) != 0 {
+		t.Errorf("expected no completed sleeps once ctx is already cancelled, got %v", clock.slept)
+	}
+}
+
+// TestExecReadyWithRetry_NilClockFallsBackToReal pins the nil-clock fallback
+// in execReadyWithRetry: a KubernetesRuntime built as a bare struct literal
+// (not via NewKubernetesRuntime) has a zero-value execReadyClock, whose
+// now/sleep funcs are nil. Without the fallback, this panics on the first
+// clock.now() call; every other test here goes through newTestK8sRuntime
+// (which does call NewKubernetesRuntime), so none of them would catch that
+// fallback being removed.
+func TestExecReadyWithRetry_NilClockFallsBackToReal(t *testing.T) {
+	rt := &KubernetesRuntime{}
+
+	calls := 0
+	err := rt.execReadyWithRetry(context.Background(), func() error {
+		calls++
+		return nil
+	}, "test-agent", "default", "test-pod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call, got %d", calls)
+	}
+}
+
+// TestRealExecReadyClock_SleepRespectsContextCancellation covers the real
+// (non-fake) clock's own ctx handling directly — fakeExecReadyClock does its
+// own ctx.Done() check up front, so a break in realExecReadyClock's select
+// would not otherwise be caught by any test above.
+func TestRealExecReadyClock_SleepRespectsContextCancellation(t *testing.T) {
+	clock := realExecReadyClock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err := clock.sleep(ctx, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("expected sleep to return promptly on an already-cancelled context, took %v", elapsed)
+	}
+}
+
+// TestWaitForExecReady_NoTransport_FailsFast pins that waitForExecReady,
+// wired through the real execInPod, still fails immediately (not after
+// retrying for up to execReadyMaxWait) when there is no exec transport at
+// all — the same "K8s REST config not available" guard execInPod already
+// has for fake test clientsets. This is a wiring check for waitForExecReady
+// itself; the retry/backoff/cap logic is covered above via
+// execReadyWithRetry with a test-supplied op.
+func TestWaitForExecReady_NoTransport_FailsFast(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+
+	err := rt.waitForExecReady(context.Background(), "default", "some-pod", "test-agent")
+	if err == nil {
+		t.Fatal("expected error with no exec transport available")
+	}
+	if !strings.Contains(err.Error(), "REST config not available") {
+		t.Errorf("expected the no-transport guard error, got: %v", err)
+	}
+}
+
+// TestWaitForExecReady_ProbeIsBoundedByItsOwnTimeout pins that waitForExecReady
+// really does run each probe under its own execReadyProbeTimeout-bounded
+// context (via context.WithTimeout), not an unbounded one. execProbe lets a
+// test substitute a probe that blocks until its ctx argument is done,
+// instead of a real exec transport: if the per-probe timeout were replaced
+// with an unbounded derived context (e.g. context.WithCancel and no
+// deadline), that ctx would never become done on its own, the probe would
+// block forever, and this test would hang instead of completing in
+// milliseconds. execReadyProbeTimeout is temporarily shrunk so the timeout
+// actually firing doesn't require waiting anywhere near its 10s production
+// value, and a goroutine plus an explicit test-level timeout bounds the
+// hang risk if the per-probe timeout is ever removed.
+func TestWaitForExecReady_ProbeIsBoundedByItsOwnTimeout(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+
+	origProbeTimeout := execReadyProbeTimeout
+	execReadyProbeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { execReadyProbeTimeout = origProbeTimeout })
+
+	clock := newFakeExecReadyClock(t)
+	rt.execReadyClock = execReadyClock{now: clock.Now, sleep: clock.Sleep}
+
+	calls := 0
+	rt.execProbe = func(ctx context.Context, namespace, podName string) error {
+		calls++
+		if calls < 3 {
+			<-ctx.Done() // only the probe's own bounded timeout should end this
+			return ctx.Err()
+		}
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- rt.waitForExecReady(context.Background(), "default", "some-pod", "test-agent")
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected the wait to succeed once the probe stops stalling, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForExecReady did not return — the per-probe timeout may not be bounding the probe's context (e.g. WithCancel instead of WithTimeout)")
+	}
+
+	if calls != 3 {
+		t.Errorf("expected 3 probe calls, got %d", calls)
+	}
+	// Two probe timeouts before success → two backoffs via the fake clock,
+	// proving each timeout was classified transient (via wrapProbeTimeout)
+	// and retried, rather than failing the whole wait outright.
+	if len(clock.slept) != 2 {
+		t.Errorf("expected 2 backoff sleeps (one per timed-out probe), got %v", clock.slept)
+	}
+}
+
+// --- F15: per-probe timeout treated as transient (wrapProbeTimeout) ---
+
+// TestWrapProbeTimeout_RewritesProbeOwnDeadline pins that a probe hitting
+// its own execReadyProbeTimeout comes back as a "timeout" error (so
+// isSyncTransientError retries it), not Go's plain "context deadline
+// exceeded" (which that classifier does not otherwise recognize).
+func TestWrapProbeTimeout_RewritesProbeOwnDeadline(t *testing.T) {
+	parent := context.Background()
+	probeCtx, cancel := context.WithDeadline(parent, time.Now().Add(-time.Second)) // already expired
+	defer cancel()
+	<-probeCtx.Done()
+
+	origErr := errors.New("exec failed: context deadline exceeded")
+	err := wrapProbeTimeout(parent, probeCtx, origErr)
+	if err == nil {
+		t.Fatal("expected a non-nil error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		t.Errorf("expected the rewritten error to contain the word isSyncTransientError matches on (timeout), got: %v", err)
+	}
+	if !isSyncTransientError(err) {
+		t.Errorf("expected the rewritten probe timeout to classify as transient: %v", err)
+	}
+	if !errors.Is(err, origErr) {
+		t.Errorf("expected the original error to still be in the chain (%%w), got: %v", err)
+	}
+}
+
+// TestWrapProbeTimeout_LeavesParentCancellationAlone pins that when the
+// *parent's own* deadline has expired (not just the probe's bounded child
+// context — a child always inherits DeadlineExceeded once its parent's does,
+// so probeCtx.Err() alone can't tell the two apart), the error is returned
+// unchanged. That case must propagate up and end the retry loop via
+// clock.sleep's ctx check, not be retried forever as if it were an ordinary
+// transient probe failure, and rewriting it would also discard the real
+// exec error in favor of a bare ctx.Err() once the loop does exit.
+func TestWrapProbeTimeout_LeavesParentCancellationAlone(t *testing.T) {
+	parent, cancelParent := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelParent()
+	<-parent.Done()
+
+	probeCtx, cancel := context.WithTimeout(parent, execReadyProbeTimeout)
+	defer cancel()
+	<-probeCtx.Done()
+
+	// Confirm the test actually sets up the case it claims to: both the
+	// parent and the derived probe context must already report
+	// DeadlineExceeded, so the only thing distinguishing "the probe's own
+	// timeout" from "the parent's own deadline" is the ctx.Err() != nil
+	// check inside wrapProbeTimeout, not probeCtx.Err() alone.
+	if parent.Err() != context.DeadlineExceeded {
+		t.Fatalf("test setup invalid: parent.Err() = %v, want context.DeadlineExceeded", parent.Err())
+	}
+	if probeCtx.Err() != context.DeadlineExceeded {
+		t.Fatalf("test setup invalid: probeCtx.Err() = %v, want context.DeadlineExceeded", probeCtx.Err())
+	}
+
+	origErr := errors.New("exec failed: context deadline exceeded")
+	if err := wrapProbeTimeout(parent, probeCtx, origErr); err != origErr {
+		t.Errorf("expected the original error unchanged when the parent ctx's own deadline (not just the probe's) has expired, got: %v", err)
+	}
+}
+
+// TestWrapProbeTimeout_NilErrorPassthrough pins the err == nil guard
+// specifically: even with a live parent and an already-expired probeCtx
+// (otherwise exactly the "rewrite" case), a nil err must stay nil rather
+// than being turned into a non-nil wrapped error.
+func TestWrapProbeTimeout_NilErrorPassthrough(t *testing.T) {
+	parent := context.Background()
+	probeCtx, cancel := context.WithDeadline(parent, time.Now().Add(-time.Second))
+	defer cancel()
+	<-probeCtx.Done()
+
+	if err := wrapProbeTimeout(parent, probeCtx, nil); err != nil {
+		t.Errorf("expected nil passthrough when err is nil, even with an expired probeCtx, got: %v", err)
 	}
 }
 
@@ -332,8 +736,9 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 
 	tests := []struct {
-		name   string
-		config RunConfig
+		name      string
+		config    RunConfig
+		wantField string
 	}{
 		{
 			name: "invalid CPU request",
@@ -341,6 +746,23 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 				Name: "test", Image: "test:latest",
 				Resources: &api.ResourceSpec{Requests: api.ResourceList{CPU: "not-a-cpu"}},
 			},
+			wantField: "requests.cpu",
+		},
+		{
+			name: "invalid memory request",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Resources: &api.ResourceSpec{Requests: api.ResourceList{Memory: "lots"}},
+			},
+			wantField: "requests.memory",
+		},
+		{
+			name: "invalid CPU limit",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "two"}},
+			},
+			wantField: "limits.cpu",
 		},
 		{
 			name: "invalid memory limit",
@@ -348,6 +770,7 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 				Name: "test", Image: "test:latest",
 				Resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "xyz"}},
 			},
+			wantField: "limits.memory",
 		},
 		{
 			name: "invalid disk",
@@ -355,6 +778,31 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 				Name: "test", Image: "test:latest",
 				Resources: &api.ResourceSpec{Disk: "bogus"},
 			},
+			wantField: "disk (ephemeral-storage)",
+		},
+		{
+			name: "invalid k8s memory request",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Kubernetes: &api.KubernetesConfig{
+					Resources: &api.K8sResources{
+						Requests: map[string]string{"memory": "plenty"},
+					},
+				},
+			},
+			wantField: "kubernetes.resources.requests.memory",
+		},
+		{
+			name: "empty k8s memory limit",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Kubernetes: &api.KubernetesConfig{
+					Resources: &api.K8sResources{
+						Limits: map[string]string{"memory": ""},
+					},
+				},
+			},
+			wantField: "kubernetes.resources.limits.memory",
 		},
 		{
 			name: "invalid k8s extended resource",
@@ -366,6 +814,7 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 					},
 				},
 			},
+			wantField: "kubernetes.resources.limits.nvidia.com/gpu",
 		},
 	}
 
@@ -373,7 +822,10 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := rt.buildPod("default", tt.config)
 			if err == nil {
-				t.Error("expected error for invalid resource value, got nil")
+				t.Fatal("expected error for invalid resource value, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantField) {
+				t.Errorf("expected error to name %q, got %v", tt.wantField, err)
 			}
 		})
 	}
@@ -654,7 +1106,7 @@ func TestDelete_NamespaceSlashFormat(t *testing.T) {
 
 	rt := NewKubernetesRuntime(client)
 
-	err := rt.Delete(context.Background(), "production/test-agent")
+	err := rt.Delete(context.Background(), RunRef{ID: "production/test-agent"})
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}

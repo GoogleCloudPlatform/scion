@@ -15,6 +15,8 @@
 package config
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -216,6 +218,98 @@ unknown_field: value
 	assert.True(t, found, "should report error about unknown_field, got: %v", errors)
 }
 
+// Review finding O1 (ptone/scion#2270 round 3): design 4.4 lists the
+// settings-v1 schema as in scope for the quotas.enforce_broker_quotas
+// toggle. Without a "quotas" entry, the top-level "additionalProperties":
+// false rejected a saved settings.yaml as soon as an admin flipped the
+// switch in file mode, so `scion config validate` (and `config migrate`)
+// would report it as invalid even though the hub itself loads and applies
+// it fine.
+func TestValidateSettings_Quotas(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  enforce_broker_quotas: false
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "a valid quotas.enforce_broker_quotas should produce no errors, got: %v", errors)
+}
+
+func TestValidateSettings_QuotasInvalidType(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  enforce_broker_quotas: "yes"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a non-boolean enforce_broker_quotas should produce a validation error")
+}
+
+func TestValidateSettings_QuotasUnknownField(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  unknown_field: true
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an unknown field under quotas should produce a validation error")
+}
+
+// TestValidateSettings_AgentSecrets, TestValidateSettings_AgentSecretsInvalidType and
+// TestValidateSettings_AgentSecretsUnknownField mirror the three Quotas tests above
+// (round-1 review Rec1, ptone/scion#2291): the hand-written opsettings schema for
+// agent_secrets is covered by opsettings_test.go's TestValidateValidDoc/InvalidDoc, but the
+// separate settings-v1.schema.json entry — the one scion config validate and a saved
+// settings.yaml actually go through — had no regression test, the same gap round 3 of
+// ptone/scion#2270 found and fixed for quotas.
+//
+// TestValidateSettings_AgentSecrets is table-driven over true, false, and an
+// empty agent_secrets object (round-2 review nit 1): all three are valid
+// documents and must produce no errors.
+func TestValidateSettings_AgentSecrets(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"user_scope_only true", "agent_secrets:\n  user_scope_only: true\n"},
+		{"user_scope_only false", "agent_secrets:\n  user_scope_only: false\n"},
+		{"empty agent_secrets", "agent_secrets: {}\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte("schema_version: \"1\"\n" + tt.yaml)
+			errors, err := ValidateSettings(data, "1")
+			require.NoError(t, err)
+			assert.Empty(t, errors, "a valid agent_secrets document should produce no errors, got: %v", errors)
+		})
+	}
+}
+
+func TestValidateSettings_AgentSecretsInvalidType(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+agent_secrets:
+  user_scope_only: "yes"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a non-boolean user_scope_only should produce a validation error")
+}
+
+func TestValidateSettings_AgentSecretsUnknownField(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+agent_secrets:
+  unknown_field: true
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an unknown field under agent_secrets should produce a validation error")
+}
+
 func TestValidateSettings_InvalidSchemaVersion(t *testing.T) {
 	data := []byte(`
 schema_version: "2"
@@ -315,6 +409,71 @@ server:
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
 	assert.Empty(t, errors, "valid server section should produce no errors")
+}
+
+func TestValidateSettings_WorkspaceStorageNFSAutoMount(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/nfs
+      auto_mount: true
+      shares:
+        - id: ws1
+          server: 10.0.0.2
+          export: /scion-workspaces
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "workspace_storage with nfs.auto_mount should validate")
+
+	bad := []byte(`
+schema_version: "1"
+server:
+  workspace_storage:
+    nfs:
+      auto_mount: "yes"
+`)
+	errors, err = ValidateSettings(bad, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "non-boolean nfs.auto_mount should produce a validation error")
+}
+
+func TestValidateSettings_WorkspaceStorageVolumeNameRequired(t *testing.T) {
+	// The requirement is conditional on backend, like ValidateWorkspaceStorage:
+	// only the selected volume block must name its volume.
+	for backend, block := range map[string]string{"cloudrun-volume": "cloudrun_volume", "gke-shared-volume": "gke_shared_volume"} {
+		t.Run(block, func(t *testing.T) {
+			doc := func(backend, body string) []byte {
+				return []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    backend: " + backend + "\n" + body)
+			}
+			blockWith := func(field string) string { return "    " + block + ":\n      " + field + "\n" }
+
+			valid := map[string][]byte{
+				"selected block with volume_name": doc(backend, blockWith("volume_name: workspaces")),
+				"unselected leftover block":       doc("nfs", blockWith("subpath_root: projects")),
+				"unselected empty volume_name":    doc("local", blockWith(`volume_name: ""`)),
+			}
+			for name, data := range valid {
+				errors, err := ValidateSettings(data, "1")
+				require.NoError(t, err)
+				assert.Empty(t, errors, name)
+			}
+
+			invalid := map[string][]byte{
+				"missing volume_name": doc(backend, blockWith("subpath_root: projects")),
+				"empty volume_name":   doc(backend, blockWith(`volume_name: ""`)),
+				"missing block":       doc(backend, ""),
+			}
+			for name, data := range invalid {
+				errors, err := ValidateSettings(data, "1")
+				require.NoError(t, err)
+				assert.NotEmpty(t, errors, name)
+			}
+		})
+	}
 }
 
 func TestValidateSettings_InvalidServerLogLevel(t *testing.T) {
@@ -493,6 +652,32 @@ max_duration: "2 hours"
 	errors, err := ValidateAgentConfig(data, "1")
 	require.NoError(t, err)
 	assert.NotEmpty(t, errors, "invalid max_duration format should produce validation error")
+}
+
+func TestValidateAgentConfig_InvalidPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+harness_config: gemini
+kubernetes:
+  priorityClassName: "Not_A_Valid_Name"
+`)
+	errors, err := ValidateAgentConfig(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "invalid priorityClassName should produce validation error")
+}
+
+func TestValidateAgentConfig_EmptyPriorityClassName(t *testing.T) {
+	// An explicit empty string means "unset" to buildPod and
+	// mergeKubernetesConfig and must not fail schema validation.
+	data := []byte(`
+schema_version: "1"
+harness_config: gemini
+kubernetes:
+  priorityClassName: ""
+`)
+	errors, err := ValidateAgentConfig(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "an empty priorityClassName means unset and must pass validation")
 }
 
 func TestValidateAgentConfig_InvalidMaxTurns(t *testing.T) {
@@ -930,6 +1115,7 @@ kubernetes:
   namespace: "scion-agents"
   runtimeClassName: "gvisor"
   serviceAccountName: "scion-agent-sa"
+  priorityClassName: "scion-agent-priority"
   resources:
     requests:
       cpu: "2"
@@ -956,6 +1142,185 @@ runtimes:
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
 	assert.Empty(t, errors, "runtime with gke field should pass validation")
+}
+
+func TestValidateSettings_RuntimeWithPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: scion-agent-priority
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "runtime with a valid priority_class_name should pass validation")
+}
+
+func TestValidateSettings_RuntimeWithInvalidPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: Not_A_Valid_Name
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "runtime with an invalid priority_class_name should fail validation")
+}
+
+func TestValidateSettings_RuntimeWithEmptyPriorityClassName(t *testing.T) {
+	// An explicit empty string means "unset" to the runtime (buildPod and
+	// mergeKubernetesConfig both treat "" as unset) and must not fail
+	// schema validation the way a real invalid name does — for example
+	// after settings migration or a round-trip that writes the zero value.
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: ""
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "an empty priority_class_name means unset and must pass validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: agent-worker-ksa
+profiles:
+  prod:
+    runtime: k8s
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: profile-ksa
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "kubernetes_service_account_mappings on both runtimes and profiles should pass schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_InvalidKeyRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      not-a-gsa-email: agent-worker-ksa
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a key that is not a well-formed GCP service account email should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_InvalidValueRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: "Not_A_Valid_KSA_Name"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a value that is not a valid DNS-1123 subdomain KSA name should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_UppercaseKeyRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      Agent-Worker@my-project.iam.gserviceaccount.com: agent-worker-ksa
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an uppercase GCP service account email key should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_EmptyValueRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: ""
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an empty KSA name value should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_ValueTooLongRejected(t *testing.T) {
+	longName := strings.Repeat("a", 254)
+	data := []byte(fmt.Sprintf(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: %q
+`, longName))
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a 254-character KSA name value should fail schema validation (max 253)")
+}
+
+func TestValidateSettings_RuntimeNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		namespace string
+		wantValid bool
+	}{
+		{name: "label", namespace: "scion-agents", wantValid: true},
+		{name: "empty means unset", namespace: "", wantValid: true},
+		{name: "63 characters", namespace: strings.Repeat("a", 63), wantValid: true},
+		{name: "64 characters", namespace: strings.Repeat("a", 64)},
+		{name: "uppercase", namespace: "Scion-Agents"},
+		{name: "dotted", namespace: "scion.agents"},
+		{name: "leading hyphen", namespace: "-scion"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(fmt.Sprintf(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    namespace: %q
+`, tc.namespace))
+			errors, err := ValidateSettings(data, "1")
+			require.NoError(t, err)
+			if tc.wantValid {
+				assert.Empty(t, errors)
+			} else {
+				assert.NotEmpty(t, errors)
+			}
+		})
+	}
+}
+
+func TestValidateSettings_ProfileKubernetesNamespaceRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+profiles:
+  prod:
+    runtime: k8s
+    kubernetes_namespace: scion-agents
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "profiles carry no namespace; a profile selects a runtime entry that sets one")
 }
 
 func TestValidateSettings_ServerHubSoftDelete(t *testing.T) {
@@ -1045,4 +1410,70 @@ services:
 	errors, err := ValidateAgentConfig(data, "1")
 	require.NoError(t, err)
 	assert.Empty(t, errors, "service with delay ready_check should pass validation")
+}
+
+// --- Substrate runtime schema tests ---
+
+func TestValidateSettings_SubstrateEgressTrustBundleValid(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      egress_trust_bundle: egress-mitm.ate.dev
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "documented egress_trust_bundle value should pass validation")
+}
+
+func TestValidateSettings_SubstrateEgressTrustBundleEmpty(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      egress_trust_bundle: ""
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "empty egress_trust_bundle (off) should pass validation")
+}
+
+func TestValidateSettings_SubstrateEgressTrustBundleInvalidValue(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      egress_trust_bundle: some-other-bundle
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "unsupported egress_trust_bundle value should fail validation")
+}
+
+func TestValidateSettings_SubstrateBogusKey(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      bogus_field: "nope"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "unknown key in the substrate object should fail validation")
 }

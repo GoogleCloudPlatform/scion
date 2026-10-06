@@ -37,6 +37,7 @@
         "node_modules",
         "dist",
         "public",
-        "src/**/*.test.ts"
+        "src/**/*.test.ts",
+        "src/**/__fixtures__/**"
     ]
 }

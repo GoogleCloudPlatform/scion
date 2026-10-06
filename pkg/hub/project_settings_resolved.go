@@ -59,7 +59,7 @@ import (
 // hub has no default for this" and "this build could not determine it". The
 // distinction is real in this codebase and is not hypothetical:
 //
-//   - In file/SQLite mode there is no OperationalSettings at all, so no
+//   - On a hub with no OperationalSettings at all, no
 //     agent_defaults document can be read. Every key backed by that section is
 //     genuinely UNKNOWN, not absent.
 //   - Six of the eight opsettings.AgentDefaultsSettings fields are non-pointer
@@ -291,6 +291,11 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 		path:              []string{"default_gcp_identity_service_account_id"},
 		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
+	// No hub-level per-profile default exists; the hub default is the
+	// single default_gcp_identity_service_account_id above.
+	projectSettingDefaultGCPIdentitySAIDByProfile: {
+		source: hubSourceNone,
+	},
 
 	// Default resource spec. The registry's five flat annotation keys face a
 	// single agent_defaults "default_resources" object, so the mapping is 5:1
@@ -348,7 +353,7 @@ func (s *Server) handleProjectSettingsResolved(w http.ResponseWriter, r *http.Re
 	ctx := r.Context()
 
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -629,7 +634,7 @@ func isJSONNull(raw json.RawMessage) bool {
 func (s *Server) hubAgentDefaultsDoc() (map[string]json.RawMessage, bool) {
 	ops := s.GetOperationalSettings()
 	if ops == nil {
-		// File/SQLite mode: the agent_defaults section does not exist as a
+		// No OperationalSettings: the agent_defaults section does not exist as a
 		// document here. A missing hint must never fail the request.
 		return nil, false
 	}

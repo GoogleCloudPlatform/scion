@@ -115,8 +115,8 @@ func (d *acceptanceDispatcher) DispatchAgentMessage(_ context.Context, agent *st
 	return d.returnErr
 }
 
-func (d *acceptanceDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
+func (d *acceptanceDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *acceptanceDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
@@ -152,11 +152,11 @@ func (d *acceptanceDispatcher) DispatchAgentExec(_ context.Context, _ *store.Age
 func (d *acceptanceDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *acceptanceDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *acceptanceDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *acceptanceDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *acceptanceDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 var _ AgentDispatcher = (*acceptanceDispatcher)(nil)
@@ -224,7 +224,7 @@ func acceptanceSetup(t *testing.T) acceptanceFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pA))
-	srv.createProjectMembersGroup(ctx, pA)
+	srv.seedProjectCreatorMembership(ctx, pA)
 	msgAuthzAddProjectMember(t, s, ownerA.ID, projectA, "acc-project-a", store.GroupMemberRoleOwner)
 
 	// Create project B.
@@ -239,7 +239,7 @@ func acceptanceSetup(t *testing.T) acceptanceFixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pB))
-	srv.createProjectMembersGroup(ctx, pB)
+	srv.seedProjectCreatorMembership(ctx, pB)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, projectB, "acc-project-b", store.GroupMemberRoleOwner)
 
 	// Set inbound policies to "any" by default.

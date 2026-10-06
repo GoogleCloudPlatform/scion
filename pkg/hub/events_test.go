@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,6 +199,98 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for project agent created event")
+	}
+}
+
+// TestChannelEventPublisher_LaunchSnapshotAtPublishTime covers design §6
+// H-4: "the event snapshot carries the values at publish time" --
+// PublishAgentStatus and PublishAgentCreated compute Launch from the
+// *store.Agent passed to them, not from some later read, so a caller that
+// mutates its copy afterward cannot retroactively change what subscribers
+// already received. Proven below by mutating agent.LaunchStep after both
+// publish calls and asserting the already-received events still show the
+// pre-mutation value.
+func TestChannelEventPublisher_LaunchSnapshotAtPublishTime(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	statusCh, unsub1 := pub.Subscribe("agent.a1.status")
+	defer unsub1()
+	createdCh, unsub2 := pub.Subscribe("agent.a1.created")
+	defer unsub2()
+
+	deadline := time.Now().Add(90 * time.Second)
+	agent := &store.Agent{
+		ID: "a1", ProjectID: "g1", Phase: "provisioning",
+		LaunchID: "L1", LaunchState: store.LaunchStateActive, LaunchKind: store.LaunchKindCreate,
+		LaunchStep: "cloning", LaunchDeadline: deadline,
+	}
+
+	pub.PublishAgentStatus(context.Background(), agent)
+	pub.PublishAgentCreated(context.Background(), agent)
+
+	// Mutate the caller's copy after both publish calls. Since publish
+	// marshals synchronously before returning (ChannelEventPublisher.publish),
+	// this must have no effect on what was already sent to subscribers.
+	agent.LaunchStep = "mutated-after-publish"
+
+	select {
+	case evt := <-statusCh:
+		var data AgentStatusEvent
+		if err := json.Unmarshal(evt.Data, &data); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if data.Launch == nil {
+			t.Fatal("expected a launch snapshot on the status event")
+		}
+		if data.Launch.ID != "L1" || !data.Launch.Active || data.Launch.Step != "cloning" {
+			t.Errorf("unexpected launch snapshot: %+v", data.Launch)
+		}
+		if data.Launch.Step == "mutated-after-publish" {
+			t.Error("status event reflects a mutation made after PublishAgentStatus returned; snapshot isolation is broken")
+		}
+		if data.Launch.RemainingSeconds == nil || *data.Launch.RemainingSeconds <= 0 {
+			t.Errorf("expected a positive remainingSeconds snapshot, got %v", data.Launch.RemainingSeconds)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent status event")
+	}
+
+	select {
+	case evt := <-createdCh:
+		var data AgentCreatedEvent
+		if err := json.Unmarshal(evt.Data, &data); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if data.Launch == nil || data.Launch.ID != "L1" {
+			t.Errorf("expected a launch snapshot on the created event, got %+v", data.Launch)
+		}
+		if data.Launch != nil && data.Launch.Step == "mutated-after-publish" {
+			t.Error("created event reflects a mutation made after PublishAgentCreated returned; snapshot isolation is broken")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent created event")
+	}
+}
+
+// TestChannelEventPublisher_NoLaunchOmitsLaunchField covers the "absent when
+// there is no launch" half of H-4.
+func TestChannelEventPublisher_NoLaunchOmitsLaunchField(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	statusCh, unsub := pub.Subscribe("agent.a1.status")
+	defer unsub()
+
+	pub.PublishAgentStatus(context.Background(), &store.Agent{ID: "a1", Phase: "running"})
+
+	select {
+	case evt := <-statusCh:
+		if strings.Contains(string(evt.Data), `"launch"`) {
+			t.Errorf("expected no launch field in the wire payload, got %s", evt.Data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent status event")
 	}
 }
 

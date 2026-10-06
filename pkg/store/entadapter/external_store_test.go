@@ -225,6 +225,179 @@ func TestExternalStore_UserAccessToken(t *testing.T) {
 	assert.ErrorIs(t, s.RevokeUserAccessToken(ctx, token.ID), store.ErrNotFound)
 }
 
+// TestExternalStore_UserAccessToken_HubBoundaryRoundTrip pins that a
+// hub-boundary token (NULL project_id) round-trips through create/get/
+// by-hash/list/count identically to a project-boundary one, and its NULL
+// project_id reads back as the empty string, never as the nil UUID.
+func TestExternalStore_UserAccessToken_HubBoundaryRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	userID := uuid.NewString()
+	hub := &store.UserAccessToken{
+		ID:           uuid.NewString(),
+		UserID:       userID,
+		Name:         "hub-token",
+		Prefix:       "scion_pat_hub",
+		KeyHash:      "hub-hash-1",
+		BoundaryKind: "hub",
+		ProjectID:    "",
+		Scopes:       []string{"broker:create"},
+	}
+	require.NoError(t, s.CreateUserAccessToken(ctx, hub))
+
+	got, err := s.GetUserAccessToken(ctx, hub.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "hub", got.BoundaryKind)
+	assert.Equal(t, "", got.ProjectID)
+	assert.NotEqual(t, uuid.Nil.String(), got.ProjectID)
+	assert.NoError(t, got.ValidateBoundary())
+
+	byHash, err := s.GetUserAccessTokenByHash(ctx, "hub-hash-1")
+	require.NoError(t, err)
+	assert.Equal(t, hub.ID, byHash.ID)
+	assert.Equal(t, "", byHash.ProjectID)
+
+	list, err := s.ListUserAccessTokens(ctx, userID)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "hub", list[0].BoundaryKind)
+	assert.Equal(t, "", list[0].ProjectID)
+
+	count, err := s.CountUserAccessTokens(ctx, userID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+// TestExternalStore_CreateUserAccessToken_DefaultsMissingBoundaryKindToProject
+// pins the backward-compatibility default: a caller that sets only
+// ProjectID and leaves BoundaryKind empty gets it defaulted to "project" by
+// CreateUserAccessToken, rather than having the row rejected as
+// under-specified.
+func TestExternalStore_CreateUserAccessToken_DefaultsMissingBoundaryKindToProject(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	tok := &store.UserAccessToken{
+		ID: uuid.NewString(), UserID: uuid.NewString(), Name: "legacy-caller",
+		Prefix: "scion_pat_legacy", KeyHash: uuid.NewString(),
+		ProjectID: uuid.NewString(), Scopes: []string{"agent:read"},
+	}
+	require.NoError(t, s.CreateUserAccessToken(ctx, tok))
+
+	got, err := s.GetUserAccessToken(ctx, tok.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "project", got.BoundaryKind)
+	assert.Equal(t, tok.ProjectID, got.ProjectID)
+}
+
+// TestExternalStore_CreateUserAccessToken_RejectsInvalidBoundary pins that
+// an explicitly invalid boundary combination is rejected at create, and
+// nothing is written.
+func TestExternalStore_CreateUserAccessToken_RejectsInvalidBoundary(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+	userID := uuid.NewString()
+
+	cases := []struct {
+		name string
+		tok  *store.UserAccessToken
+	}{
+		{
+			name: "hub boundary with a project id set",
+			tok: &store.UserAccessToken{
+				ID: uuid.NewString(), UserID: userID, Name: "bad-hub", Prefix: "scion_pat_bad",
+				KeyHash: uuid.NewString(), BoundaryKind: "hub", ProjectID: uuid.NewString(),
+				Scopes: []string{"broker:create"},
+			},
+		},
+		{
+			name: "project boundary with an empty project id",
+			tok: &store.UserAccessToken{
+				ID: uuid.NewString(), UserID: userID, Name: "bad-project", Prefix: "scion_pat_bad",
+				KeyHash: uuid.NewString(), BoundaryKind: "project", ProjectID: "",
+				Scopes: []string{"agent:read"},
+			},
+		},
+		{
+			name: "project boundary with a non-uuid project id",
+			tok: &store.UserAccessToken{
+				ID: uuid.NewString(), UserID: userID, Name: "bad-uuid", Prefix: "scion_pat_bad",
+				KeyHash: uuid.NewString(), BoundaryKind: "project", ProjectID: "not-a-uuid",
+				Scopes: []string{"agent:read"},
+			},
+		},
+		{
+			name: "unrecognized boundary kind",
+			tok: &store.UserAccessToken{
+				ID: uuid.NewString(), UserID: userID, Name: "bad-kind", Prefix: "scion_pat_bad",
+				KeyHash: uuid.NewString(), BoundaryKind: "org", ProjectID: uuid.NewString(),
+				Scopes: []string{"agent:read"},
+			},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := s.CreateUserAccessToken(ctx, c.tok)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, store.ErrInvalidUATBoundary)
+
+			_, getErr := s.GetUserAccessToken(ctx, c.tok.ID)
+			assert.ErrorIs(t, getErr, store.ErrNotFound, "a rejected create must not write a row")
+		})
+	}
+}
+
+// TestExternalStore_DeleteUserAccessTokensByProject_SparesHubTokens pins
+// that deleting a project's UATs removes only its project-boundary tokens;
+// a hub-boundary token belonging to one of that project's members must
+// survive, along with a project-boundary token scoped to a different
+// project.
+func TestExternalStore_DeleteUserAccessTokensByProject_SparesHubTokens(t *testing.T) {
+	ctx := context.Background()
+	s := newTestExternalStore(t)
+
+	userID := uuid.NewString()
+	projectP := uuid.NewString()
+	projectQ := uuid.NewString()
+
+	pToken := &store.UserAccessToken{
+		ID: uuid.NewString(), UserID: userID, Name: "p-token", Prefix: "scion_pat_p",
+		KeyHash: uuid.NewString(), BoundaryKind: "project", ProjectID: projectP,
+		Scopes: []string{"agent:read"},
+	}
+	qToken := &store.UserAccessToken{
+		ID: uuid.NewString(), UserID: userID, Name: "q-token", Prefix: "scion_pat_q",
+		KeyHash: uuid.NewString(), BoundaryKind: "project", ProjectID: projectQ,
+		Scopes: []string{"agent:read"},
+	}
+	hubToken := &store.UserAccessToken{
+		ID: uuid.NewString(), UserID: userID, Name: "hub-token", Prefix: "scion_pat_h",
+		KeyHash: uuid.NewString(), BoundaryKind: "hub", ProjectID: "",
+		Scopes: []string{"broker:create"},
+	}
+	require.NoError(t, s.CreateUserAccessToken(ctx, pToken))
+	require.NoError(t, s.CreateUserAccessToken(ctx, qToken))
+	require.NoError(t, s.CreateUserAccessToken(ctx, hubToken))
+
+	n, err := s.DeleteUserAccessTokensByProject(ctx, projectP)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	_, err = s.GetUserAccessToken(ctx, pToken.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the deleted project's own token must be gone")
+
+	got, err := s.GetUserAccessToken(ctx, qToken.ID)
+	require.NoError(t, err, "a different project's token must survive")
+	assert.Equal(t, projectQ, got.ProjectID)
+
+	got, err = s.GetUserAccessToken(ctx, hubToken.ID)
+	require.NoError(t, err, "a hub-boundary token belonging to the deleted project's member must survive")
+	assert.Equal(t, "hub", got.BoundaryKind)
+	assert.Equal(t, "", got.ProjectID)
+}
+
 // =============================================================================
 // verification_status / verification_error persistence (P0.1)
 // =============================================================================

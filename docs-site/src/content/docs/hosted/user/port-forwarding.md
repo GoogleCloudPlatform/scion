@@ -23,6 +23,14 @@ Port forwarding in Scion relies on a **reverse tunnel architecture**:
 4. **Local Forwarding**: The Hub sends this message over the WebSocket tunnel to the agent's in-container tunnel manager. The manager unwraps the request and makes a standard HTTP request to the local loopback address (`127.0.0.1` or `localhost`) on the specified port.
 5. **Response Delivery**: The local service's response is streamed back over the WebSocket tunnel, reconstructed by the Hub, and returned to the caller.
 
+:::note[Conduit transport (experimental)]
+When the `hub.conduit` [experiment](/scion/reference/experiments/) is on and the Hub runs the conduit relay (see [Conduit settings](/scion/reference/server-config/#conduit-serverhubconduit)), `sciontool` also connects to the relay at `GET /api/v1/conduit`, reconnecting with backoff. The Hub then proxies requests for loopback ports over the agent's conduit session, and admits only a session from the agent's current run. An agent without a conduit session, such as one running an older `sciontool`, still uses the tunnel described above. If the agent has neither, the request fails with `503` and error code `agent_offline`. With the experiment off, nothing changes.
+:::
+
+:::note[Proxied responses are sandboxed]
+Agent port responses are served from the Hub's own origin, so the Hub treats them as untrusted content. Every proxied response carries the Hub's sandbox `Content-Security-Policy` (`sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads`) and `X-Content-Type-Options: nosniff`, which the agent's service cannot override. The Hub never relays the service's `Set-Cookie`, `Content-Security-Policy`, `X-Content-Type-Options`, `Clear-Site-Data`, or CORS response headers. A forwarded web app therefore runs in an opaque origin: it cannot set cookies or use storage on the Hub origin, and apps that rely on cookies, `localStorage`, or same-origin requests may not work through the proxy.
+:::
+
 ```d2
 direction: right
 classes: {
@@ -154,8 +162,18 @@ SCION_AUTO_EXPOSE_PORTS_LIST=8000,8080,3000
 
 Administrators can control whether port forwarding and auto-expose are permitted at both the global Hub level and individual Project level.
 
+### Which Setting Wins
+`SCION_AUTO_EXPOSE_PORTS` can come from four places. Highest first:
+
+1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's configure page. This is recorded as the agent's explicit choice and survives reincarnate.
+2. **The project annotation** `scion.io/auto-expose-ports-enabled` (see below).
+3. **Template or harness-config env.**
+4. **The Hub default** `auto_expose_ports.enabled` (see below).
+
+A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks template and harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
+
 ### Global Server Configuration
-The global default for new agents is configured via `settings.yaml` under the operational (Layer-1) settings hierarchy:
+The Hub-wide default, the lowest tier above, is configured via `settings.yaml` under the operational (Layer-1) settings hierarchy:
 
 ```yaml
 # settings.yaml
@@ -165,7 +183,7 @@ auto_expose_ports:
 
 * **File Mode**: Editable directly in the global config file.
 * **Database Mode**: Managed via the Hub Admin Settings API (`PUT /api/v1/admin/server-config`) or UI.
-* **Seeds**: Can be seeded initially using the `SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED` environment variable.
+* **Seeds**: Seeded initially from `auto_expose_ports.enabled` in `settings.yaml`. No `SCION_SEED_*` variable maps to this key.
 
 ### Project-Level Overrides
 Project owners and admins can control the auto-expose feature for all agents within a specific project using project annotations:
@@ -175,7 +193,13 @@ Project owners and admins can control the auto-expose feature for all agents wit
 scion.io/auto-expose-ports-enabled: "true"
 ```
 
-If set to `true`, the Hub automatically injects `SCION_AUTO_EXPOSE_PORTS=true` into the environment of any new agent container started under that Project, unless the agent configuration explicitly defines it otherwise (agent-level settings take precedence).
+When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` with the annotation's value. It overrides template, harness-config and Hub-default values, but not a value set on the agent itself. The value is applied when the agent is created and re-read when it is reincarnated.
+
+### Precedence
+
+The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project or template value, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
+
+In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project or template, or Hub default), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project, template, and Hub default values.
 
 ---
 
@@ -205,6 +229,12 @@ Access to the proxy and port registration APIs requires authentication, verified
 * **Accessing Proxied Ports**:
   * An agent can only access its own port registrations.
   * A user must be authenticated and must hold the **`ActionPortAccess`** (or `ActionRead`) permission for that specific agent. Unauthorized users are blocked with an HTTP `403 Forbidden` response.
+  * When authenticating with a [user access token](/scion/hosted/user/personal-access-tokens/), the
+    token must have the `agent:port_access` scope selected, and the holder must currently have
+    access to that specific agent — your own agents and their descendants, or any agent in a
+    project where your role grants `agent.port_access` (the built-in `project-owner` and
+    `project-admin` roles do). Selecting the scope at
+    mint time is not by itself access to any agent; it is re-checked on every request.
 
 ---
 

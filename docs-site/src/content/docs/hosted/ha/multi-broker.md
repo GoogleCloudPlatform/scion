@@ -26,14 +26,18 @@ Each broker maintains a persistent WebSocket connection to the Hub. The Hub acts
 
 On each machine you want to register:
 
-1. **Install Scion** and configure the Hub endpoint (`scion login`).
-2. **Register the broker** with the Hub:
+1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion -g global config set --global hub.endpoint <hub-url>`).
+2. **Start the broker**:
    ```bash
-   scion broker register
+   scion runtime-broker start
    ```
-3. **Authorize projects** the broker should serve:
+3. **Register the broker** with the Hub:
    ```bash
-   scion broker provide <project>
+   scion runtime-broker register
+   ```
+4. **Authorize projects** the broker should serve:
+   ```bash
+   scion runtime-broker provide --project <project>
    ```
 
 Repeat for each machine. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for detailed setup.
@@ -56,8 +60,9 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
   ```
 - **Check broker availability** across all registered brokers:
   ```bash
-  scion broker status
+  scion hub brokers
   ```
+  On a broker machine, `scion runtime-broker status` shows that broker's own state.
 
 ## IAP-Protected Hubs
 
@@ -76,5 +81,5 @@ See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) fo
 - Each broker manages its own **port pools, container images, and local storage**. Images must be available on each broker independently.
 - **Shared directories** (mounted volumes) only work within a single broker by default. Agents on different brokers cannot share a local directory. To share them across brokers, set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs` in every broker's global settings, pointing at the same NFS export.
 - **Workspace strategy** may differ per broker: local brokers typically use git worktrees (`.scion_worktrees/`), while hub-hosted git projects use a single workspace checkout.
-- **Per-broker agent limit.** The Hub caps how many agents can be running on each broker with the `max_agents_per_broker` limit (default **12**). The limit is checked before an agent is created and again when it is started, resumed, or restarted. A request over the limit fails with `429 Too Many Requests` (`quota_exceeded`) instead of overloading the broker's host. Only running agents count: stopping, suspending, or exiting an agent frees its slot. Admins can change the default, or override it for a single broker, through the admin limits API (see [Admin API](/scion/reference/api/#admin-apiv1admin)). The Hub does not balance load across brokers; size the limit to each machine's resources.
+- **Per-broker agent limit.** The Hub caps how many agents can be running on each broker with the `max_agents_per_broker` limit (default **100**). The limit is checked before an agent is created and again when it is started, resumed, or restarted. A request over the limit fails with `429 Too Many Requests` (`quota_exceeded`) instead of overloading the broker's host. A restart that is refused this way leaves the running container alone; it is not stopped first. Only running agents count: stopping, suspending, or exiting an agent frees its slot. Admins can change the hub-wide default through the [admin limits API](/scion/reference/api/#admin-apiv1admin), and override it for a single broker — including to a value *lower* than the hub-wide default — through that broker's settings (see [Broker Settings](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings)). The Hub does not balance load across brokers; size the limit to each machine's resources, and lower it below the default if any broker in the fleet is a single-node Cloud Run deployment.
 - **Global project on multi-hub brokers.** A broker connected to more than one Hub rejects agents in the global project with `409 Conflict` and the error code `global_project_disabled` (formerly `global_grove_disabled`).

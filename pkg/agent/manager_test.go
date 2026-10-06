@@ -32,14 +32,14 @@ func TestStop_ResolvesNameToContainerID(t *testing.T) {
 				{Name: "test-agent", ContainerID: "abc123"},
 			}, nil
 		},
-		StopFunc: func(ctx context.Context, id string) error {
-			stoppedID = id
+		StopFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			stoppedID = ref.ID
 			return nil
 		},
 	}
 
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "test-agent", ""); err != nil {
+	if err := mgr.Stop(context.Background(), "test-agent", "", ""); err != nil {
 		t.Fatalf("Stop returned error: %v", err)
 	}
 
@@ -55,14 +55,14 @@ func TestStop_FallsBackToRawID(t *testing.T) {
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{}, nil
 		},
-		StopFunc: func(ctx context.Context, id string) error {
-			stoppedID = id
+		StopFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			stoppedID = ref.ID
 			return nil
 		},
 	}
 
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "unknown-agent", ""); err != nil {
+	if err := mgr.Stop(context.Background(), "unknown-agent", "", ""); err != nil {
 		t.Fatalf("Stop returned error: %v", err)
 	}
 
@@ -78,14 +78,14 @@ func TestStop_FallsBackOnListError(t *testing.T) {
 		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
 			return nil, fmt.Errorf("list failed")
 		},
-		StopFunc: func(ctx context.Context, id string) error {
-			stoppedID = id
+		StopFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			stoppedID = ref.ID
 			return nil
 		},
 	}
 
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "my-agent", ""); err != nil {
+	if err := mgr.Stop(context.Background(), "my-agent", "", ""); err != nil {
 		t.Fatalf("Stop returned error: %v", err)
 	}
 
@@ -103,12 +103,12 @@ func TestDelete_StopsContainerBeforeRemoving(t *testing.T) {
 				{Name: "test-agent", ContainerID: "abc123", ContainerStatus: "Up 5 minutes"},
 			}, nil
 		},
-		StopFunc: func(ctx context.Context, id string) error {
-			calls = append(calls, "stop:"+id)
+		StopFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			calls = append(calls, "stop:"+ref.ID)
 			return nil
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
-			calls = append(calls, "delete:"+id)
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			calls = append(calls, "delete:"+ref.ID)
 			return nil
 		},
 	}
@@ -139,12 +139,12 @@ func TestDelete_ProceedsWhenStopFails(t *testing.T) {
 				{Name: "test-agent", ContainerID: "abc123", ContainerStatus: "Exited (0)"},
 			}, nil
 		},
-		StopFunc: func(ctx context.Context, id string) error {
-			calls = append(calls, "stop:"+id)
+		StopFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			calls = append(calls, "stop:"+ref.ID)
 			return fmt.Errorf("container is not running")
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
-			calls = append(calls, "delete:"+id)
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			calls = append(calls, "delete:"+ref.ID)
 			return nil
 		},
 	}

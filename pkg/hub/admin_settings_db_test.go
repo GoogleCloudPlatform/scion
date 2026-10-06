@@ -1063,6 +1063,363 @@ func TestExtractKoanfKeys_AllFieldCategories(t *testing.T) {
 	}
 }
 
+func TestExtractKoanfKeys_Quotas(t *testing.T) {
+	enforced := false
+	req := &ServerConfigUpdateRequest{
+		Quotas: &config.QuotaSettings{EnforceBrokerQuotas: &enforced},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "quotas.enforce_broker_quotas" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected quotas.enforce_broker_quotas in keys, got %v", keys)
+	}
+}
+
+func TestExtractKoanfKeys_AgentSecrets(t *testing.T) {
+	on := true
+	req := &ServerConfigUpdateRequest{
+		AgentSecrets: &config.AgentSecretsSettings{UserScopeOnly: &on},
+	}
+	keys := extractKoanfKeysFromRequest(req)
+	found := false
+	for _, k := range keys {
+		if k == "agent_secrets.user_scope_only" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected agent_secrets.user_scope_only in keys, got %v", keys)
+	}
+}
+
+// Test 1/2/3 (design 4.7 P1b), DB-mode: PUT of the quotas section persists
+// it and the snapshot reflects the new value immediately (no restart).
+func TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	// Wire ops server for self-apply (F4): without this, Update()'s
+	// self-apply is a no-op and srv.brokerQuotasEnforced() is never
+	// exercised in DB mode.
+	ops.server = srv
+
+	if !srv.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true before any PUT (fail-safe default)")
+	}
+
+	body := `{"quotas": {"enforce_broker_quotas": false}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected 'quotas' section in store after PUT")
+	}
+	if row.Revision == 0 {
+		t.Error("expected revision > 0")
+	}
+
+	snap := ops.Snapshot()
+	if snap.EnforceBrokerQuotas == nil || *snap.EnforceBrokerQuotas != false {
+		t.Errorf("EnforceBrokerQuotas: want false, got %v", snap.EnforceBrokerQuotas)
+	}
+
+	// The self-apply on the writing node must take effect live, without a
+	// restart — this is the actual guarantee the switch provides.
+	if srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false immediately after the DB-mode PUT self-apply")
+	}
+
+	// GET must reflect it too.
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.Quotas == nil || resp.Quotas.EnforceBrokerQuotas == nil || *resp.Quotas.EnforceBrokerQuotas != false {
+		t.Errorf("GET quotas: want enforce_broker_quotas=false, got %+v", resp.Quotas)
+	}
+}
+
+// Test AC5 (design 4.8), simulated cross-replica: a second OperationalSettings
+// instance sharing the same store (standing in for a second Hub replica in
+// postgres mode) picks up the change via refreshAndApply — the same call the
+// LISTEN/NOTIFY subscription and the 60s poll backstop both make — without
+// going through its own PUT. No live Postgres is available in this sandbox
+// (per review F4); this exercises the same propagation code path
+// (`Refresh` -> `ApplySnapshot`) against a shared fake store instead of a
+// second real connection.
+func TestPutServerConfigDB_Quotas_CrossReplicaPropagation(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	opsA := NewOperationalSettings(fakeStore, fileK, envK)
+	srvA := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	opsA.server = srvA
+
+	opsB := NewOperationalSettings(fakeStore, fileK, envK)
+	srvB := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	// opsB.server is deliberately left unset: replica B applies only through
+	// refreshAndApply, exactly like a poll-backstop or NOTIFY tick would.
+
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=true on replica B before any propagation")
+	}
+
+	// Replica A writes the section (simulates the admin PUT landing on A).
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`)
+	rr := httptest.NewRecorder()
+	srvA.handlePutServerConfigDB(rr, req, opsA)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replica A, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srvA.brokerQuotasEnforced() {
+		t.Fatal("expected brokerQuotasEnforced()=false on replica A immediately after its own PUT")
+	}
+
+	// Replica B has not refreshed yet — still stale/enforced.
+	if !srvB.brokerQuotasEnforced() {
+		t.Fatal("replica B should not see the change before refreshAndApply runs")
+	}
+
+	// Simulate B's poll backstop (or a NOTIFY wakeup) picking up the change.
+	opsB.refreshAndApply(context.Background(), srvB)
+
+	if srvB.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=false on replica B after refreshAndApply propagated the change")
+	}
+}
+
+// Review finding N3 (ptone/scion#2270 round 2): an explicit end-to-end test
+// that PUT {"quotas":{}} in DB mode — not just DELETE /sections/quotas —
+// resets the live brokerQuotasEnforced() value back to enforced. The section
+// row remains (unlike a DELETE), but its document is now {}, so the next
+// Snapshot() sees no quotas.enforce_broker_quotas key, which is exactly the
+// "unset -> enforced" case F3 fixed.
+func TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	// First, turn enforcement off.
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {"enforce_broker_quotas": false}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the first PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false after the first PUT")
+	}
+
+	// PUT the section back to {} (no explicit value) — this is what the
+	// generic server-config PUT produces for a quotas object with no
+	// enforce_broker_quotas field, distinct from deleting the section
+	// entirely via the "reset to bootstrap" endpoint.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"quotas": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected the quotas row to still exist after PUT {} (replace, not delete)")
+	}
+	if string(row.Value) != "{}" {
+		t.Errorf("expected the stored quotas doc to be {}, got %s", row.Value)
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after PUT {\"quotas\":{}} (fail-safe default), not fail-open")
+	}
+}
+
+// Test 7 (design 4.7 P1b): a non-boolean enforce_broker_quotas is rejected.
+func TestPutServerConfigDB_Quotas_NonBooleanRejected(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{"quotas": {"enforce_broker_quotas": "yes"}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-boolean quotas.enforce_broker_quotas, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_WriteAndReflectInSnapshot mirrors
+// TestPutServerConfigDB_Quotas_WriteAndReflectInSnapshot (design ptone/scion#2291 §10 test 3).
+func TestPutServerConfigDB_AgentSecrets_WriteAndReflectInSnapshot(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	// Wire ops server for self-apply: without this, Update()'s self-apply
+	// is a no-op and srv.agentSecretsUserScopeOnly() is never exercised in
+	// DB mode.
+	ops.server = srv
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=false before any PUT (permissive default)")
+	}
+
+	body := `{"agent_secrets": {"user_scope_only": true}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected 'agent_secrets' section in store after PUT")
+	}
+	if row.Revision == 0 {
+		t.Error("expected revision > 0")
+	}
+
+	snap := ops.Snapshot()
+	if snap.AgentSecretsUserScopeOnly == nil || *snap.AgentSecretsUserScopeOnly != true {
+		t.Errorf("AgentSecretsUserScopeOnly: want true, got %v", snap.AgentSecretsUserScopeOnly)
+	}
+
+	// The self-apply on the writing node must take effect live, without a
+	// restart — this is the actual guarantee the switch provides.
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=true immediately after the DB-mode PUT self-apply")
+	}
+
+	// GET must reflect it too.
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(getRR.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	if resp.AgentSecrets == nil || resp.AgentSecrets.UserScopeOnly == nil || *resp.AgentSecrets.UserScopeOnly != true {
+		t.Errorf("GET agent_secrets: want user_scope_only=true, got %+v", resp.AgentSecrets)
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_CrossReplicaPropagation mirrors
+// TestPutServerConfigDB_Quotas_CrossReplicaPropagation. No live Postgres is
+// available in this sandbox; this exercises the same propagation code path
+// (Refresh -> ApplySnapshot) against a shared fake store instead of a
+// second real connection.
+func TestPutServerConfigDB_AgentSecrets_CrossReplicaPropagation(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fileK := emptyKoanf()
+	envK := emptyKoanf()
+
+	opsA := NewOperationalSettings(fakeStore, fileK, envK)
+	srvA := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	opsA.server = srvA
+
+	opsB := NewOperationalSettings(fakeStore, fileK, envK)
+	srvB := &Server{dbDriver: "postgres", maintenance: NewMaintenanceState(false, "")}
+	// opsB.server is deliberately left unset: replica B applies only through
+	// refreshAndApply, exactly like a poll-backstop or NOTIFY tick would.
+
+	if srvB.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=false on replica B before any propagation")
+	}
+
+	// Replica A writes the section (simulates the admin PUT landing on A).
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": true}}`)
+	rr := httptest.NewRecorder()
+	srvA.handlePutServerConfigDB(rr, req, opsA)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on replica A, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srvA.agentSecretsUserScopeOnly() {
+		t.Fatal("expected agentSecretsUserScopeOnly()=true on replica A immediately after its own PUT")
+	}
+
+	// Replica B has not refreshed yet — still stale/permissive.
+	if srvB.agentSecretsUserScopeOnly() {
+		t.Fatal("replica B should not see the change before refreshAndApply runs")
+	}
+
+	// Simulate B's poll backstop (or a NOTIFY wakeup) picking up the change.
+	opsB.refreshAndApply(context.Background(), srvB)
+
+	if !srvB.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=true on replica B after refreshAndApply propagated the change")
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive mirrors
+// TestPutServerConfigDB_Quotas_EmptyPutResetsEnforcementToTrue: PUT
+// {"agent_secrets":{}} — not just DELETE /sections/agent_secrets — resets
+// the live agentSecretsUserScopeOnly() value back to permissive.
+func TestPutServerConfigDB_AgentSecrets_EmptyPutResetsToPermissive(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	// First, turn the restriction on.
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {"user_scope_only": true}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the first PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true after the first PUT")
+	}
+
+	// PUT the section back to {} (no explicit value) — replace, not delete.
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_secrets": {}}`), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 on the clearing PUT, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	row, ok := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if !ok {
+		t.Fatal("expected the agent_secrets row to still exist after PUT {} (replace, not delete)")
+	}
+	if string(row.Value) != "{}" {
+		t.Errorf("expected the stored agent_secrets doc to be {}, got %s", row.Value)
+	}
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=false immediately after PUT {\"agent_secrets\":{}} (permissive default), not left on")
+	}
+}
+
+// TestPutServerConfigDB_AgentSecrets_NonBooleanRejected mirrors
+// TestPutServerConfigDB_Quotas_NonBooleanRejected.
+func TestPutServerConfigDB_AgentSecrets_NonBooleanRejected(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+
+	body := `{"agent_secrets": {"user_scope_only": "yes"}}`
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for non-boolean agent_secrets.user_scope_only, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 // ---- buildSingleSectionDoc tests ----
 
 func TestBuildSingleSectionDoc_Access(t *testing.T) {
@@ -1636,6 +1993,81 @@ func TestPutServerConfigDB_ServerEnv_422(t *testing.T) {
 	}
 }
 
+func TestExtractKoanfKeys_AsyncAgentLaunchSettings_AreLayer0(t *testing.T) {
+	// The three async-launch settings are documented as Layer 0 (restart
+	// required, not writable via the admin API) in server-config.md's
+	// Layer-0 table. They must be extracted so ClassifyKeys sees them.
+	asyncLaunch := true
+	keepalive := 20
+	req := &ServerConfigUpdateRequest{
+		Server: &config.V1ServerConfig{
+			Hub: &config.V1ServerHubConfig{
+				AsyncAgentLaunch:       &asyncLaunch,
+				LaunchTimeout:          "10m",
+				LaunchKeepaliveSeconds: &keepalive,
+			},
+		},
+	}
+
+	keys := extractKoanfKeysFromRequest(req)
+	keySet := make(map[string]bool)
+	for _, k := range keys {
+		keySet[k] = true
+	}
+	for _, want := range []string{
+		"server.hub.async_agent_launch",
+		"server.hub.launch_timeout",
+		"server.hub.launch_keepalive_seconds",
+	} {
+		if !keySet[want] {
+			t.Errorf("%s not extracted", want)
+		}
+	}
+}
+
+func TestPutServerConfigDB_AsyncAgentLaunchSettings_422(t *testing.T) {
+	// A PUT carrying any of the three async-launch settings must be rejected
+	// with 422 layer0_rejected, matching server-config.md's Layer-0 table,
+	// rather than silently dropping them.
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "async_agent_launch",
+			body: `{"server": {"hub": {"async_agent_launch": true}}}`,
+		},
+		{
+			name: "launch_timeout",
+			body: `{"server": {"hub": {"launch_timeout": "10m"}}}`,
+		},
+		{
+			name: "launch_keepalive_seconds",
+			body: `{"server": {"hub": {"launch_keepalive_seconds": 20}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for %s, got %d: %s", tt.name, rr.Code, rr.Body.String())
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to unmarshal response: %v", err)
+			}
+			if resp["error"] != "layer0_rejected" {
+				t.Errorf("expected error=layer0_rejected, got %v", resp["error"])
+			}
+		})
+	}
+}
+
 // ---- N6: Presence-aware field clearing tests ----
 
 func TestPutServerConfigDB_ExplicitEmptyAdminEmails_ClearsField(t *testing.T) {
@@ -2038,6 +2470,12 @@ func TestIsZeroStruct(t *testing.T) {
 	if !isZeroStruct(&config.V1MessageBrokerConfig{}) {
 		t.Error("expected zero V1MessageBrokerConfig")
 	}
+	if !isZeroStruct(&config.QuotaSettings{}) {
+		t.Error("expected zero QuotaSettings")
+	}
+	if !isZeroStruct(&config.AutoExposePortsSettings{}) {
+		t.Error("expected zero AutoExposePortsSettings")
+	}
 
 	// Non-zero structs.
 	if isZeroStruct(&config.V1DatabaseConfig{Driver: "postgres"}) {
@@ -2051,6 +2489,14 @@ func TestIsZeroStruct(t *testing.T) {
 	}
 	if isZeroStruct(&config.V1MessageBrokerConfig{Enabled: true}) {
 		t.Error("V1MessageBrokerConfig with enabled=true should not be zero")
+	}
+	enforced := false
+	if isZeroStruct(&config.QuotaSettings{EnforceBrokerQuotas: &enforced}) {
+		t.Error("QuotaSettings with EnforceBrokerQuotas set should not be zero")
+	}
+	autoExposeEnabled := true
+	if isZeroStruct(&config.AutoExposePortsSettings{Enabled: &autoExposeEnabled}) {
+		t.Error("AutoExposePortsSettings with Enabled set should not be zero")
 	}
 
 	// Nil.
@@ -2430,6 +2876,75 @@ func TestResetSection_DeletesManagedSection(t *testing.T) {
 	}
 }
 
+// Regression test for review finding F3 (ptone/scion#2270 round 1): DELETE
+// on the quotas section ("Reset to bootstrap") self-applies a snapshot with
+// EnforceBrokerQuotas==nil. That must flip a previously-set false back to
+// enforced live, on the node that issued the DELETE — not leave the old
+// false in place while GET/the UI both report "enforced" (fail-open).
+func TestResetSection_QuotasDeleteResetsEnforcementToTrue(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	fakeStore.seedWithOrigin("quotas", json.RawMessage(`{"enforce_broker_quotas":false}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+	// Self-apply the initial state, the same way Update()'s self-apply would
+	// after the PUT that produced this row.
+	ApplySnapshot(srv, ops.Snapshot())
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false before the reset")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/quotas", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["quotas"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected quotas row to be deleted after reset")
+	}
+
+	if !srv.brokerQuotasEnforced() {
+		t.Error("expected brokerQuotasEnforced()=true immediately after DELETE-ing the quotas section (fail-safe default), not fail-open")
+	}
+}
+
+// TestResetSection_AgentSecretsDeleteResetsToPermissive mirrors
+// TestResetSection_QuotasDeleteResetsEnforcementToTrue.
+func TestResetSection_AgentSecretsDeleteResetsToPermissive(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ops.server = srv
+
+	fakeStore.seedWithOrigin("agent_secrets", json.RawMessage(`{"user_scope_only":true}`), "managed")
+	_, _ = ops.Refresh(context.Background())
+	// Self-apply the initial state, the same way Update()'s self-apply would
+	// after the PUT that produced this row.
+	ApplySnapshot(srv, ops.Snapshot())
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true before the reset")
+	}
+
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfigSectionReset(rr, adminRequest(http.MethodDelete, "/api/v1/admin/server-config/sections/agent_secrets", ""))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	fakeStore.mu.Lock()
+	_, exists := fakeStore.settings["agent_secrets"]
+	fakeStore.mu.Unlock()
+	if exists {
+		t.Error("expected agent_secrets row to be deleted after reset")
+	}
+
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("expected agentSecretsUserScopeOnly()=false immediately after DELETE-ing the agent_secrets section (permissive default), not left on")
+	}
+}
+
 func TestResetSection_RejectsNonDelete(t *testing.T) {
 	srv, _, _ := newTestDBServer(t)
 
@@ -2776,43 +3291,6 @@ func TestPutThenGetServerConfigDB_RuntimesRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPutServerConfigDB_ProfileTimezone_Valid accepts a valid IANA timezone.
-func TestPutServerConfigDB_ProfileTimezone_Valid(t *testing.T) {
-	srv, _, ops := newTestDBServer(t)
-
-	body := `{
-		"profiles": {"pacific": {"runtime": "docker", "timezone": "America/Los_Angeles"}}
-	}`
-
-	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
-	rr := httptest.NewRecorder()
-	srv.handlePutServerConfigDB(rr, req, ops)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 for valid timezone, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
-
-// TestPutServerConfigDB_ProfileTimezone_Invalid rejects an invalid timezone.
-func TestPutServerConfigDB_ProfileTimezone_Invalid(t *testing.T) {
-	srv, _, ops := newTestDBServer(t)
-
-	body := `{
-		"profiles": {"broken": {"runtime": "docker", "timezone": "Foo/Bar"}}
-	}`
-
-	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
-	rr := httptest.NewRecorder()
-	srv.handlePutServerConfigDB(rr, req, ops)
-
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for invalid timezone, got %d: %s", rr.Code, rr.Body.String())
-	}
-	if !strings.Contains(rr.Body.String(), "Foo/Bar") {
-		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
-	}
-}
-
 // TestPutServerConfigDB_DefaultTimezone_Valid accepts a valid hub default timezone.
 func TestPutServerConfigDB_DefaultTimezone_Valid(t *testing.T) {
 	srv, _, ops := newTestDBServer(t)
@@ -2847,6 +3325,46 @@ func TestPutServerConfigDB_DefaultTimezone_Invalid(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "Not/A/Timezone") {
 		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
+	}
+}
+
+// TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected covers
+// time.LoadLocation accepting "Local", "localtime", "posixrules" and
+// "Factory" (Go's embedded tzdata ships those files) and, on a host with
+// the right/ and posix/ zoneinfo trees, any "right/..."- or "posix/..."-
+// prefixed name — but none of these name a portable IANA zone: "Local" is
+// the host's ambient zone, "localtime"/"posixrules"/"Factory" are tzdata's
+// own implementation files, and right/posix are whole-tree duplicates under
+// a path prefix that isn't part of any IANA name. So the hub default must
+// reject all of them explicitly, the same denylist the per-user
+// display-timezone preference uses (design §3 A (d)).
+//
+// The assertion below checks for errNonPortableTimezone's own message
+// rather than just the 422 status, so this test fails if the denylist
+// branch in validateIANATimezone is ever removed — including on a host
+// without the right/ and posix/ zoneinfo trees, where time.LoadLocation
+// would otherwise fail on those two names anyway for an unrelated reason
+// ("unknown time zone") and mask the regression.
+func TestPutServerConfigDB_DefaultTimezone_NonPortableNamesRejected(t *testing.T) {
+	for _, tz := range []string{"Local", "localtime", "posixrules", "Factory", "right/Asia/Tokyo", "posix/Asia/Tokyo"} {
+		t.Run(tz, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+
+			body := `{"default_timezone": "` + tz + `"}`
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422 for default_timezone %q, got %d: %s", tz, rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tz) {
+				t.Errorf("error message should mention %q: %s", tz, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), errNonPortableTimezone.Error()) {
+				t.Errorf("error message for %q should contain the denylist message %q, got: %s", tz, errNonPortableTimezone.Error(), rr.Body.String())
+			}
+		})
 	}
 }
 
@@ -3286,5 +3804,239 @@ func TestDropEnvOverriddenAccessFields(t *testing.T) {
 	}
 	if len(base.AdminEmails) != 1 || base.UserAccessMode != "open" {
 		t.Errorf("other fields must be untouched, got %+v", base)
+	}
+}
+
+// A shared_dir_size that is not a Kubernetes quantity is rejected on a
+// runtime entry and on a profile, naming the key; a valid one is accepted.
+func TestPutServerConfigDB_SharedDirSize(t *testing.T) {
+	tests := []struct {
+		name, body, wantKey string
+		wantCode            int
+	}{
+		{"runtime invalid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1TB"}}}`, "runtimes.gke.shared_dir_size", http.StatusUnprocessableEntity},
+		{"profile invalid", `{"profiles": {"big": {"runtime": "gke", "shared_dir_size": "lots"}}}`, "profiles.big.shared_dir_size", http.StatusUnprocessableEntity},
+		{"valid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1Ti", "shared_dir_storage_class": "standard-rwx"}},
+			"profiles": {"big": {"runtime": "gke", "shared_dir_size": "10Gi"}}}`, "", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+			if rr.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tt.wantCode, rr.Code, rr.Body.String())
+			}
+			if tt.wantKey != "" && !strings.Contains(rr.Body.String(), tt.wantKey) {
+				t.Errorf("error should name %s: %s", tt.wantKey, rr.Body.String())
+			}
+		})
+	}
+}
+
+// sdsWriteGlobalNFSBlock writes a global settings file whose
+// server.shared_dir_storage carries a complete nfs block (backend local).
+func sdsWriteGlobalNFSBlock(t *testing.T) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	dir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(`schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /srv/nfs
+      shares:
+        - id: share-1
+          pv_name: pv-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sdsGetProfilesDB(t *testing.T, srv *Server, ops *OperationalSettings) map[string]config.V1ProfileConfig {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return resp.Profiles
+}
+
+// shared_dir_storage_backend round-trips through the DB settings: it is
+// stored, returned by GET, kept when another profile field is edited and
+// written back, kept when another section is written, and reaches the
+// settings overlay that the co-located broker reads per dispatch.
+func TestPutServerConfigDB_SharedDirStorageBackend_RoundTrip(t *testing.T) {
+	sdsWriteGlobalNFSBlock(t)
+	old := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
+	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
+
+	srv, _, ops := newTestDBServer(t)
+	put := func(body string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT %s: expected 200, got %d: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+
+	put(`{"runtimes": {"k8s": {"type": "kubernetes"}}, "profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backend": "nfs"}}}`)
+	profiles := sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
+		t.Fatalf("GET after PUT: shared_dir_storage_backend = %q, want nfs", got)
+	}
+
+	// Edit another field of the same profile the way the admin form does:
+	// send back what GET returned with one field changed.
+	gke := profiles["gke"]
+	gke.DefaultTemplate = "edited-template"
+	profiles["gke"] = gke
+	body, err := json.Marshal(map[string]interface{}{"profiles": profiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(string(body))
+
+	// Write a different section.
+	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
+
+	profiles = sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
+		t.Errorf("after editing another field: shared_dir_storage_backend = %q, want nfs", got)
+	}
+	if got := profiles["gke"].DefaultTemplate; got != "edited-template" {
+		t.Errorf("default_template = %q, want edited-template", got)
+	}
+
+	// The overlay the co-located broker reads now resolves gke to nfs.
+	ApplySnapshot(srv, ops.Snapshot())
+	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, source := gs.ResolveSharedDirStorage("gke")
+	if cfg == nil || cfg.Backend != "nfs" {
+		t.Fatalf("overlay resolution for gke = %+v (%s), want nfs", cfg, source)
+	}
+}
+
+// shared_dir_storage_backend is checked on a DB-mode write: an unknown
+// value is rejected by the schema, and "nfs" without a complete
+// server.shared_dir_storage.nfs block in the global settings is rejected
+// naming the key.
+func TestPutServerConfigDB_SharedDirStorageBackend_Invalid(t *testing.T) {
+	t.Run("unknown value", func(t *testing.T) {
+		sdsWriteGlobalNFSBlock(t)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backend": "ceph"}}}`), ops)
+		if rr.Code < 400 {
+			t.Fatalf("expected a 4xx, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("nfs without an nfs block", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"runtimes": {"k8s": {"type": "kubernetes", "shared_dir_storage_backend": "nfs"}}}`), ops)
+		if rr.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "runtimes.k8s.shared_dir_storage_backend") {
+			t.Errorf("error should name the key: %s", rr.Body.String())
+		}
+	})
+}
+
+// home_storage_backend and home_storage_leaf round-trip through the DB
+// settings on profiles and runtime entries: stored, returned by GET, kept
+// when another profile field is edited and written back, kept when another
+// section is written, and present in the overlay the co-located broker
+// reads at each dispatch. A docker profile on the same hub still resolves
+// its own value, which the broker ignores for non-Kubernetes runtimes.
+func TestPutServerConfigDB_HomeStorage_RoundTrip(t *testing.T) {
+	sdsWriteGlobalNFSBlock(t)
+	old := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
+	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
+
+	srv, _, ops := newTestDBServer(t)
+	put := func(body string) string {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT %s: expected 200, got %d: %s", body, rr.Code, rr.Body.String())
+		}
+		return rr.Body.String()
+	}
+
+	resp := put(`{"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "broker"}, "docker": {"type": "docker", "home_storage_backend": "nfs"}},
+		"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "nfs", "home_storage_leaf": "pod"}, "local": {"runtime": "docker"}}}`)
+	if !strings.Contains(resp, "runtimes.docker.home_storage_backend") {
+		t.Errorf("an nfs value on a docker entry should be saved with a warning, got: %s", resp)
+	}
+	profiles := sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" {
+		t.Fatalf("GET after PUT: gke = %+v, want nfs/pod", got)
+	}
+
+	gke := profiles["gke"]
+	gke.DefaultTemplate = "edited-template"
+	profiles["gke"] = gke
+	body, err := json.Marshal(map[string]interface{}{"profiles": profiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(string(body))
+	put(`{"server": {"hub": {"auto_suspend_stalled": false}}}`)
+
+	profiles = sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"]; got.HomeStorageBackend != "nfs" || got.HomeStorageLeaf != "pod" || got.DefaultTemplate != "edited-template" {
+		t.Errorf("after editing another field: gke = %+v", got)
+	}
+
+	ApplySnapshot(srv, ops.Snapshot())
+	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gs.ResolveHomeStorage("gke"); got.Backend != "nfs" || got.Leaf != "pod" {
+		t.Fatalf("overlay resolution for gke = %+v, want nfs/pod", got)
+	}
+	if got := gs.Runtimes["k8s"].HomeStorageLeaf; got != "broker" {
+		t.Errorf("runtime entry home_storage_leaf = %q, want broker", got)
+	}
+}
+
+// Unknown home storage values are rejected on a DB-mode write.
+func TestPutServerConfigDB_HomeStorage_Invalid(t *testing.T) {
+	for _, body := range []string{
+		`{"profiles": {"gke": {"runtime": "k8s", "home_storage_backend": "ceph"}}}`,
+		`{"runtimes": {"k8s": {"type": "kubernetes", "home_storage_leaf": "node"}}}`,
+	} {
+		sdsWriteGlobalNFSBlock(t)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code < 400 {
+			t.Fatalf("%s: expected a 4xx, got %d: %s", body, rr.Code, rr.Body.String())
+		}
 	}
 }

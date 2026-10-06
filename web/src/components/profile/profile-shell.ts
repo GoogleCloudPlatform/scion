@@ -29,6 +29,7 @@ import '../shared/header.js';
 import type { User } from '../../shared/types.js';
 import { performLogout } from '../../utils/auth.js';
 import { setDocumentTitle } from '../../client/page-title.js';
+import { enterAppFrame, exitAppFrame } from '../shared/app-frame.js';
 
 const PROFILE_TITLES: Record<string, string> = {
   '/profile': 'Profile',
@@ -57,9 +58,9 @@ export class ScionProfileShell extends LitElement {
   static override styles = css`
     :host {
       display: flex;
-      height: 100vh;
-      height: 100dvh;
+      height: var(--scion-app-height, 100dvh);
       background: var(--scion-bg, #f8fafc);
+      touch-action: manipulation;
     }
 
     .sidebar {
@@ -67,12 +68,26 @@ export class ScionProfileShell extends LitElement {
       flex-shrink: 0;
       position: sticky;
       top: 0;
-      height: 100vh;
+      height: var(--scion-app-height, 100dvh);
+      /* Landscape on a notched phone (the page uses viewport-fit=cover):
+         the nav moves clear of the notch, and the sidebar paints the nav's
+         surface under the gap. 0 elsewhere. */
+      padding-left: env(safe-area-inset-left, 0px);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    /* The sidebar sits between the header and the left edge and takes the
+       left inset itself, so the header does not repeat it. */
+    scion-header {
+      --scion-header-inset-left: 0px;
     }
 
     @media (max-width: 768px) {
       .sidebar {
         display: none;
+      }
+      scion-header {
+        --scion-header-inset-left: env(safe-area-inset-left, 0px);
       }
     }
 
@@ -80,12 +95,16 @@ export class ScionProfileShell extends LitElement {
       display: none;
     }
 
+    /* The drawer grows by the left inset and pads it, so the nav keeps its
+       width and clears the notch in landscape. 0 elsewhere. */
     .mobile-drawer {
-      --size: 280px;
+      --size: calc(280px + env(safe-area-inset-left, 0px));
     }
 
     .mobile-drawer::part(panel) {
       background: var(--scion-surface, #ffffff);
+      padding-left: env(safe-area-inset-left, 0px);
+      box-sizing: border-box;
     }
 
     .mobile-drawer::part(close-button) {
@@ -103,17 +122,32 @@ export class ScionProfileShell extends LitElement {
       min-width: 0;
     }
 
+    /* Clear of the home indicator, notch and rounded corners (the page
+       uses viewport-fit=cover); every inset is 0 elsewhere. The left edge
+       meets the screen only once the sidebar gives way to the drawer, as
+       the sidebar takes the left inset itself. */
     .content {
       flex: 1;
       padding: 1.5rem;
+      padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));
+      padding-right: max(1.5rem, env(safe-area-inset-right, 0px));
       overflow: auto;
       display: flex;
       flex-direction: column;
     }
 
+    @media (max-width: 768px) {
+      .content {
+        padding-left: max(1.5rem, env(safe-area-inset-left, 0px));
+      }
+    }
+
     @media (max-width: 640px) {
       .content {
         padding: 1rem;
+        padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+        padding-inline: max(1rem, env(safe-area-inset-left, 0px))
+          max(1rem, env(safe-area-inset-right, 0px));
       }
     }
 
@@ -129,11 +163,17 @@ export class ScionProfileShell extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    enterAppFrame();
     try {
       this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
     } catch {
       // localStorage may be unavailable (SecurityError in restricted contexts)
     }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    exitAppFrame();
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -189,7 +229,6 @@ export class ScionProfileShell extends LitElement {
           </div>
         </div>
       </main>
-
     `;
   }
 

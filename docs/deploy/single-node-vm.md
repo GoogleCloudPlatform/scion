@@ -39,7 +39,7 @@ Key properties:
 | GCP project | A Google Cloud project with billing enabled |
 | `gcloud` CLI | Authenticated (`gcloud auth login`) with a project set (`gcloud config set project PROJECT_ID`) |
 | Required APIs | `compute`, `run`, `iap`, `cloudbuild`, `artifactregistry` — enabled automatically by the script |
-| Permissions | Project Editor or equivalent (create VMs, Cloud Run services, service accounts, IAM bindings). The script also grants `roles/iap.tunnelResourceAccessor` to the deployer for SSH access to the private VM. |
+| Permissions | Project Owner, or Editor plus `roles/resourcemanager.projectIamAdmin` and `roles/run.admin` (create VMs, Cloud Run services, service accounts, IAM bindings) — Editor alone lacks both `resourcemanager.projects.setIamPolicy` (the project-level IAM bindings this script creates) and `run.services.setIamPolicy` (the Cloud Run service's own invoker binding); `projectIamAdmin` covers the first but not the second, hence `run.admin` too. Both Owner and Editor already include `iam.serviceAccounts.actAs` on the service accounts the script uses, so no separate Service Account User grant is needed. The script also grants `roles/iap.tunnelResourceAccessor` to the deployer for SSH access to the private VM. With the optional hybrid tier enabled, also `roles/iam.serviceAccountAdmin` (`iam.serviceAccounts.setIamPolicy`, for the transport service account's token-creator binding) and `roles/iap.admin` (`iap.webServices.setIamPolicy`, for its IAP access grant). Owner already covers both. |
 | VM OS image | Ubuntu 22.04 LTS — pinned, not currently configurable (see [Architecture](#architecture)). |
 
 ## Quick Start
@@ -176,6 +176,10 @@ On the VM itself:
 | `/home/scion/.scion/workspace-storage/` | Local workspace storage directory |
 | `/home/scion/.scion/plugins/broker/` | Chat plugin binaries (if selected) |
 | `/etc/systemd/system/scion-hub.service` | systemd unit file |
+
+The unit runs as `User=scion` with `WorkingDirectory=/home/scion`, matching
+the paths above — the Hub's daemon working directory is that user's home
+directory, not `/`.
 
 ## Configuration
 
@@ -471,6 +475,83 @@ is not working:
 2. Confirm `auth.mode` is `proxy` and the `audience` string matches the
    project number and service name.
 3. Check that the Hub restarted successfully after the settings update.
+
+### Requests IAP rejects never reach Cloud Run or the Hub logs
+
+The proxy is deployed with `--iap` directly on the Cloud Run service (IAP
+enforcing access in front of it, not via a load-balancer backend service). A
+request IAP rejects — for example, the caller lacks the
+`roles/iap.httpsResourceAccessor` binding — never reaches the Cloud Run
+container. It will not appear in the Cloud Run service's own logs, and the
+Hub never sees it either, so from the operator's side the request simply
+vanishes with no local trace. (A mismatched `auth.proxy.iap.audience` is a
+different case: IAP lets that request through and the Hub itself rejects it,
+so it *does* show up in the Hub's logs — `sudo journalctl -u
+scion-hub.service` on the VM, as in *Health check fails after deployment*
+above. The audience check itself is covered in the previous section.)
+
+To get visibility into IAP's own decisions, enable [Data Access audit
+logs](https://cloud.google.com/logging/docs/audit/configure-data-access) for
+the `iap.googleapis.com` service:
+
+- **Console (simpler, recommended):** IAM & Admin > Audit Logs, select the
+  project, then in the **Data Access audit logs configuration** table select
+  **Identity-Aware Proxy** (use the filter to find it), open the **Permission
+  types** tab, enable **Data Read**, then **Save**.
+- **IAM policy (`auditConfigs`):** editing the policy directly requires a
+  read-modify-write so you don't drop existing bindings. `set-iam-policy`
+  replaces the *whole* policy, and the `etag` makes a concurrent change fail
+  loudly instead of being silently overwritten:
+
+  ```bash
+  gcloud projects get-iam-policy PROJECT_ID --format=yaml > /tmp/policy.yaml
+  # Edit /tmp/policy.yaml: add or merge into an `iap.googleapis.com` entry
+  # under `auditConfigs`. Leave `bindings` and `etag` untouched.
+  gcloud projects set-iam-policy PROJECT_ID /tmp/policy.yaml
+  ```
+
+  The `auditConfigs` entry to add or merge in:
+
+  ```yaml
+  auditConfigs:
+    - service: iap.googleapis.com
+      auditLogConfigs:
+        - logType: DATA_READ
+        # - logType: ADMIN_READ  # optional: IAP settings/IAM policy reads,
+        #                        # not needed to see rejected requests
+  ```
+
+Once enabled, IAP's per-request authorization decisions appear as Data Access
+entries in Cloud Logging. To see denials specifically:
+
+```
+log_id("cloudaudit.googleapis.com/data_access")
+protoPayload.serviceName="iap.googleapis.com"
+protoPayload.authorizationInfo.granted=false
+```
+
+**Caveat:** Google's [IAP audit logging
+guide](https://cloud.google.com/iap/docs/audit-log-howto) documents only
+admin API methods (for example `SetIamPolicy`, `GetIamPolicy`,
+`GetIapSettings`, `UpdateIapSettings`) and tunnel-destination-group methods
+in its audited-method list — not a per-request method name. It does,
+however, document `authorizationInfo.granted` as "a boolean representing
+whether IAP permitted the requested access," which is what the filter above
+relies on.
+In practice, per-request entries observed in Cloud Logging carry
+`protoPayload.methodName="AuthorizeUser"`; treat that specific method name as
+empirical rather than a documented guarantee. (Google's [access
+management guide](https://cloud.google.com/iap/docs/managing-access) does
+confirm the general behavior: granting public access, for example, means
+"IAP won't generate Cloud Audit Logs logs for the request".) For enabling
+IAP directly on a Cloud Run service — the mode this deployment uses — see
+[Identity-Aware Proxy for Cloud
+Run](https://cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run).
+
+**Cost note:** unlike Admin Activity audit logs (always on, no extra charge),
+Data Access audit logs are billed like other Cloud Logging ingestion beyond
+the free monthly allotment. Enable them deliberately rather than by default,
+and turn them off again once you're done diagnosing.
 
 ### Re-running the deploy script
 

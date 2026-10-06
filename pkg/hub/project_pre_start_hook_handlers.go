@@ -172,7 +172,7 @@ func (s *Server) handleProjectPreStartHooks(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusCreated, hook)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -219,7 +219,7 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 	// POST .../activate
 	if isActivate {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		if userIdent, ok := identity.(UserIdentity); ok {
@@ -360,6 +360,6 @@ func (s *Server) handleProjectPreStartHookByID(w http.ResponseWriter, r *http.Re
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }

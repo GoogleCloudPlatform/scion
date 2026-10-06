@@ -1,0 +1,97 @@
+schema_version: "1"
+# Top level, NOT under server: this field is read by ResolveImageRegistry
+# (settings_v1.go) before the server config is parsed. Without it, bare
+# agent harness images (scion-claude:latest etc.) are never rewritten
+# (pkg/agent/run.go), GKE pulls them from Docker Hub where they don't
+# exist, and agent start fails with ImagePullBackOff.
+image_registry: ${image_registry}
+active_profile: remote
+profiles:
+  # REQUIRED (proven via config.LoadGlobalSettings): without this, "remote"
+  # resolves to the embedded default 'kubernetes' runtime and the
+  # runtimes.remote block below (namespace, gke) is silently ignored.
+  remote:
+    runtime: remote
+server:
+  mode: hosted
+  hub:
+    port: 8080
+    public_url: ${public_url}
+    hub_id: ${hub_name}
+    admin_emails: ${jsonencode(admin_emails)}
+    # The default of 60s (pkg/config/hub_config.go:672) is too short for a
+    # slow agent create (cold Autopilot node/image pull) — the create
+    # succeeds, but the hub's own response gets silently discarded once
+    # WriteTimeout fires, and Cloud Run reports 503 for a request that
+    # actually worked.
+    write_timeout: ${hub_write_timeout}
+  database:
+    # url intentionally omitted: the DSN is supplied at Cloud Run boot as the
+    # SCION_SERVER_DATABASE_URL secret env var (hub-cloudrun's
+    # google_cloud_run_v2_service.hub), not embedded here. See
+    # pkg/config/hub_config.go's loadGlobalConfigFromSettings ->
+    # applyEnvOverrides, which fills database.url when the file has none.
+    # This settings secret therefore holds no credential, so keeping old
+    # secret versions around is harmless, and traffic-shift rollback across
+    # a settings change still works.
+    driver: postgres
+    max_open_conns: ${max_open_conns}
+    max_idle_conns: 5
+    conn_max_idle_time: 5m
+  storage:
+    provider: gcs
+    bucket: ${bucket}
+  secrets:
+    backend: gcpsm
+    gcp_project_id: ${project_id}
+  auth:
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: ${iap_audience}
+    transport:
+      mode: iap
+%{ if iap_oauth_client_id != null ~}
+      oidc_audience: ${iap_oauth_client_id}
+%{ endif ~}
+      platform_auth_sa: ${transport_sa_email}
+  oidc:
+    enabled: true
+    token_lifetime: 15m
+  broker:
+    enabled: true
+    port: 9800
+    host: 127.0.0.1
+    # Must be a UUID, not "<hub_name>-broker" — the Postgres store's
+    # runtime_brokers.id column rejects anything else, and Terraform
+    # (hub-cloudrun's local.broker_id) is the one source of truth for it, so
+    # it never diverges across max_instances replicas. broker_name carries
+    # the human-readable form instead, for the UI.
+    broker_id: ${broker_id}
+    broker_name: ${broker_name}
+    # The default of 120s (pkg/config/hub_config.go:685) is close enough to
+    # observed slow-create durations (113.66s) that the co-located broker's
+    # own response write could independently fail here even after
+    # server.hub.write_timeout above is raised.
+    write_timeout: ${broker_write_timeout}
+    auto_provide: true
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: ${nfs_mount_root}
+      uid: ${nfs_uid}
+      gid: ${nfs_gid}
+      subpath_root: ${nfs_subpath_root}
+      shares: ${jsonencode([{ id = hub_name, server = nfs_server, export = nfs_export, pv_name = pv_name }])}
+runtimes:
+  remote:
+    type: kubernetes
+    # false is deliberate: true would build a SecretProviderClass that the
+    # agent SA can no longer read, since the agent SA intentionally holds no
+    # Secret Manager role at all — that's what closes the cross-hub
+    # signing-key escalation where an agent in one hub could read another
+    # hub's signing key. Autopilot scheduling tolerance is auto-detected
+    # regardless (GKEAutoDetected), so nothing else depends on this being true.
+    gke: false
+    namespace: ${namespace}

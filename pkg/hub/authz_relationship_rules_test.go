@@ -71,6 +71,7 @@ func setUserStatus(t *testing.T, s store.Store, id, status string) {
 func TestRelationshipRules_UnlistedPermissionDenied(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-owner"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relrule-proj"))
 	agent := agentResource(&store.Agent{ID: tid("relrule-agent"), ProjectID: tid("relrule-proj"), OwnerID: owner.ID()})
 	tpl := templateResource(&store.Template{ID: tid("relrule-tpl"), OwnerID: owner.ID(), Scope: store.TemplateScopeUser, ScopeID: owner.ID()})
 
@@ -147,6 +148,7 @@ func TestRelationshipRules_AttachOnlyTokenCannotReachLifecycle(t *testing.T) {
 func TestRelationshipRules_AccessConstraintRestrictsOwner(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-ac-owner"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relrule-ac-proj"))
 	agent := agentResource(&store.Agent{ID: tid("relrule-ac-agent"), ProjectID: tid("relrule-ac-proj"), OwnerID: owner.ID()})
 
 	userType, userID := "user", owner.ID()
@@ -181,7 +183,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 	})
 	assert.False(t, decidePerm(authz, fed, desc, Action("notify"), "agent.notify", false).Allowed)
 
-	out := authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), desc, Action("notify"), "agent.notify", nil, false)
+	out := authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), desc, Action("notify"), "agent.notify", nil, false, nil)
 	assert.Nil(t, out.accepted)
 	require.Len(t, out.results, 1)
 	assert.Equal(t, RelationshipRuleAncestor, out.results[0].Rule)
@@ -193,7 +195,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 		ID: tid("relrule-fed-user-desc"), ProjectID: tid("relrule-fed-proj"),
 		Ancestry: []string{fedUser.ID()},
 	})
-	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fedUser), userDesc, ActionRead, "agent.read", nil, false)
+	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fedUser), userDesc, ActionRead, "agent.read", nil, false, nil)
 	assert.Nil(t, out.accepted)
 	require.NotEmpty(t, out.results)
 	assert.Equal(t, RelationshipRuleAncestor, out.results[0].Rule)
@@ -202,7 +204,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 	// The same shape with a hub-attested agent is accepted by the stage.
 	local := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("relrule-local")}, Scopes: allRegisteredAgentScopes()}}
 	localDesc := agentResource(&store.Agent{ID: tid("relrule-local-desc"), Ancestry: []string{tid("relrule-fed-root"), local.ID()}})
-	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(local), localDesc, Action("notify"), "agent.notify", nil, false)
+	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(local), localDesc, Action("notify"), "agent.notify", nil, false, nil)
 	require.NotNil(t, out.accepted)
 	assert.Equal(t, "relationship grant: ancestor access", out.accepted.Reason)
 }
@@ -226,18 +228,26 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 		resource Resource
 		action   Action
 		perm     string
+		// absent marks a rule that builds no candidate at all for a
+		// federated agent.
+		absent bool
 	}{
+		// The launcher status read applies to local agents only.
+		"launcher": {RelationshipRuleLauncher, agentStatusReadResource(&store.Agent{
+			ID: tid("relrule-fedrow-launched"), ProjectID: f.projectBeta.ID,
+			Ancestry: []string{f.projectOwnerID, fed.ID()},
+		}), ActionRead, "agent.read", true},
 		"ancestor": {RelationshipRuleAncestor, agentResource(&store.Agent{
 			ID: tid("relrule-fedrow-desc"), ProjectID: f.projectBeta.ID,
 			Ancestry: []string{f.projectOwnerID, fed.ID()},
-		}), Action("notify"), "agent.notify"},
+		}), Action("notify"), "agent.notify", false},
 		// ptone/scion#2128: personal skills are a progeny row too now
 		// (skillProgenyAdapter), sharing RelationshipRuleProgeny with the
 		// secret case below; kept as its own case for the skill shape.
 		"progeny_skill": {RelationshipRuleProgeny, skillResource(&store.Skill{
 			ID: tid("relrule-fedrow-skill"), Scope: store.SkillScopeUser, ScopeID: f.projectOwnerID,
-		}), ActionRead, "skill.read"},
-		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead},
+		}), ActionRead, "skill.read", false},
+		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead, false},
 	}
 
 	// Every relationship with an agent-kind row has a case here.
@@ -252,7 +262,7 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			out := f.authz.evaluateRelationshipCandidates(ctx, principal, tc.resource, tc.action, tc.perm, nil, false)
+			out := f.authz.evaluateRelationshipCandidates(ctx, principal, tc.resource, tc.action, tc.perm, nil, false, nil)
 			assert.Nil(t, out.accepted)
 			found := false
 			for _, r := range out.results {
@@ -262,7 +272,11 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 					assert.Equal(t, RelationshipRejectUntrustedAncestry, r.RejectedBy)
 				}
 			}
-			assert.True(t, found, "candidate %q must be evaluated", tc.rule)
+			if tc.absent {
+				assert.False(t, found, "candidate %q must not be built", tc.rule)
+			} else {
+				assert.True(t, found, "candidate %q must be evaluated", tc.rule)
+			}
 			assert.False(t, decidePerm(f.authz, fed, tc.resource, tc.action, tc.perm, false).Allowed)
 		})
 	}
@@ -271,9 +285,12 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 // A progeny read requires the sharing source's owner to be active.
 func TestRelationshipRules_ProgenySourceInactive(t *testing.T) {
 	f := newGoldenFixture(t)
+	// The execution source is a different active member of the agent's
+	// project, so the source-activity stage is the one under test.
+	seedExecutionAgent(t, f.store, tid("relrule-progeny-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectAdminID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-progeny-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -302,9 +319,12 @@ func TestRelationshipRules_ProgenySourceInactive(t *testing.T) {
 // The personal-skill progeny read requires an active origin user.
 func TestRelationshipRules_SkillProgenySourceInactive(t *testing.T) {
 	f := newGoldenFixture(t)
+	// The execution source is a different active member of the agent's
+	// project, so the source-activity stage is the one under test.
+	seedExecutionAgent(t, f.store, tid("relrule-skill-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectAdminID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-skill-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -349,7 +369,7 @@ func TestRelationshipRules_RuleIDsMatchPolicyNames(t *testing.T) {
 	ids := map[string]bool{}
 	for _, id := range []RelationshipRuleID{
 		RelationshipRuleOwner, RelationshipRuleAncestor, RelationshipRuleProgeny,
-		RelationshipRuleHubMemberSAAssign,
+		RelationshipRuleHubMemberSAAssign, RelationshipRuleLauncher,
 		RelationshipRuleProjectAssociation, RelationshipRuleHubAssociation, RelationshipRuleBrokerAssociation,
 	} {
 		ids[string(id)] = true
@@ -440,9 +460,10 @@ func TestRegisterProgenyAdapter_BuiltinKindsRefused(t *testing.T) {
 // lookup error denies.
 func TestProgenyAdapter_RegisteredSourcesDecide(t *testing.T) {
 	f := newGoldenFixture(t)
+	seedExecutionAgent(t, f.store, tid("relrule-adapter-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-adapter-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -465,9 +486,10 @@ func TestProgenyAdapter_RegisteredSourcesDecide(t *testing.T) {
 // fact stage, with an active owner and every other stage satisfied.
 func TestProgenyAdapter_SourcesErrorRejectsAtFactStage(t *testing.T) {
 	f := newGoldenFixture(t)
+	seedExecutionAgent(t, f.store, tid("relrule-adapter-err-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-adapter-err-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -497,9 +519,10 @@ func TestProgeny_ListAndPointReadConsistent(t *testing.T) {
 	require.NoError(t, f.store.CreateUser(context.Background(), &store.User{
 		ID: suspendedID, Email: "suspended@relrule.test", DisplayName: "s", Role: "member", Status: "suspended",
 	}))
+	seedExecutionAgent(t, f.store, tid("relrule-consistency-agent"), f.projectAlpha.ID, []string{f.projectOwnerID, suspendedID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-consistency-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID, suspendedID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -695,7 +718,7 @@ func TestRelationshipRules_ProgenySourceOwnerLookupAndAgentOwner(t *testing.T) {
 		Store: f.store,
 		users: map[string]*store.User{suspendedRoot: {ID: suspendedRoot, Status: "suspended"}},
 		agents: map[string]*store.Agent{
-			okAgent:   {ID: okAgent, Ancestry: []string{activeRoot, okAgent}},
+			okAgent:   {ID: okAgent, ProjectID: f.projectAlpha.ID, Ancestry: []string{activeRoot, okAgent}},
 			suspAgent: {ID: suspAgent, Ancestry: []string{suspendedRoot, suspAgent}},
 		},
 		userErr: map[string]bool{lookupErrOwner: true},
@@ -711,9 +734,11 @@ func TestRelationshipRules_ProgenySourceOwnerLookupAndAgentOwner(t *testing.T) {
 		optIn("s-agent-ok", okAgent),
 		optIn("s-agent-root-susp", suspAgent),
 	}}))
+	seedExecutionAgent(t, f.store, tid("srcdec-reader"), f.projectAlpha.ID,
+		[]string{activeRoot, lookupErrOwner, okAgent, suspAgent}, []string{activeRoot})
 	reader := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("srcdec-reader")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{activeRoot, lookupErrOwner, okAgent, suspAgent},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -793,9 +818,11 @@ func TestProgeny_RegisteredKindListAndPointParity(t *testing.T) {
 	releaseBuiltinProgenyAdapter(t, other.authz, "secret")
 	secretSrc := SharingSource{Kind: "secret", ID: other.secretID, OwnerID: other.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
 	require.NoError(t, other.authz.RegisterProgenyAdapter(fakeProgenyAdapter{kind: "secret", perms: []string{"skill.read"}, sources: []SharingSource{secretSrc}}))
+	seedExecutionAgent(t, other.store, tid("relrule-regkind-agent-2"), other.projectAlpha.ID,
+		[]string{other.projectOwnerID}, []string{other.projectOwnerID})
 	otherAgent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relrule-regkind-agent-2")},
-		ProjectID: other.projectBeta.ID,
+		ProjectID: other.projectAlpha.ID,
 		Ancestry:  []string{other.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -803,7 +830,7 @@ func TestProgeny_RegisteredKindListAndPointParity(t *testing.T) {
 	assert.False(t, d.Allowed, "reason %q", d.Reason)
 	r := relationshipResult(t, d, RelationshipRuleProgeny)
 	assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
-	assert.Equal(t, "permission is not a read permission of the sharing-source adapter", r.Detail)
+	assert.Equal(t, "permission is not served by the sharing-source adapter", r.Detail)
 	assert.False(t, other.authz.ProgenyListPredicate(ctx, principalContextForIdentity(otherAgent), "secret").Matches(secretSrc))
 }
 
@@ -823,7 +850,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 	newAgent := func(f *goldenFixture, name string) *agentIdentityWrapper {
 		return &agentIdentityWrapper{&AgentTokenClaims{
 			Claims:    jwt.Claims{Subject: tid(name)},
-			ProjectID: f.projectBeta.ID,
+			ProjectID: f.projectAlpha.ID,
 			Ancestry:  []string{f.projectOwnerID},
 			Scopes:    allRegisteredAgentScopes(),
 		}}
@@ -832,6 +859,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 	t.Run("registered set keeps serving", func(t *testing.T) {
 		f := newGoldenFixture(t)
 		agent := newAgent(f, "relrule-fixedperms-agent")
+		seedExecutionAgent(t, f.store, tid("relrule-fixedperms-agent"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 		src := SharingSource{Kind: "secret", ID: "fixed-opted", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
 		adapter := &changingPermsProgenyAdapter{fakeProgenyAdapter{
 			kind: "secret", perms: []string{permissionProjectSecretRead}, sources: []SharingSource{src},
@@ -851,6 +879,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 	t.Run("later set is not served", func(t *testing.T) {
 		f := newGoldenFixture(t)
 		agent := newAgent(f, "relrule-fixedperms-agent-2")
+		seedExecutionAgent(t, f.store, tid("relrule-fixedperms-agent-2"), f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
 		src := SharingSource{Kind: "secret", ID: "fixed-opted-2", OwnerID: f.projectOwnerID, Policy: SharingPolicyOptInRequired, OptedIn: true}
 		adapter := &changingPermsProgenyAdapter{fakeProgenyAdapter{
 			kind: "secret", perms: []string{"skill.read"}, sources: []SharingSource{src},
@@ -864,7 +893,7 @@ func TestProgeny_ReadPermissionsFixedAtRegistration(t *testing.T) {
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
 		r := relationshipResult(t, d, RelationshipRuleProgeny)
 		assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
-		assert.Equal(t, "permission is not a read permission of the sharing-source adapter", r.Detail)
+		assert.Equal(t, "permission is not served by the sharing-source adapter", r.Detail)
 		assert.False(t, f.authz.ProgenyListPredicate(ctx, principalContextForIdentity(agent), "secret").Matches(src))
 	})
 }
@@ -899,7 +928,8 @@ func (s *actorPathFailingStore) GetRoleDefinitionsByIDs(ctx context.Context, ids
 // without explain), a token project mismatch before the kernel, a
 // principal resolution error, a role-binding lookup error, a role
 // definition lookup error, a kernel role-binding allow, a relationship
-// allow with and without explain, and a deny with explain.
+// allow with and without explain, a relationship deny at the project-access
+// stage, and a deny with explain.
 func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-actor-path-owner"))
@@ -914,6 +944,12 @@ func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 	roleDefsFail := NewAuthzService(&actorPathFailingStore{Store: s, failRoleDefs: lookupErr}, authz.logger)
 	projectID := tid("relrule-actor-path-proj")
 	agent := agentResource(&store.Agent{ID: tid("relrule-actor-path-agent"), ProjectID: projectID, OwnerID: owner.ID()})
+	// The owner relationship requires active project access
+	// (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, owner.ID(), projectID)
+	// An owner without project access is denied at the project-access stage.
+	formerOwner := createCharacterizationUser(t, s, tid("relrule-actor-path-former-owner"))
+	formerAgent := agentResource(&store.Agent{ID: tid("relrule-actor-path-former-agent"), ProjectID: projectID, OwnerID: formerOwner.ID()})
 	otherProjectToken := NewScopedUserIdentity(owner, tid("relrule-actor-path-other-proj"), []string{"agent:read"})
 	actor := &DecisionActor{Kind: PrincipalKindAgent, ID: tid("relrule-actor-path-actor")}
 
@@ -948,6 +984,8 @@ func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 		{"relationship allow", nil, request(owner, agent, ActionRead, "agent.read", false), true, "relationship grant: resource owner"},
 		{"relationship allow explain", nil, request(owner, agent, ActionRead, "agent.read", true), true, "relationship grant: resource owner"},
 		{"relationship deny explain", nil, request(owner, agent, ActionUpdate, "hub.config.update", true), false, ""},
+		{"relationship project-access deny", nil, request(formerOwner, formerAgent, ActionRead, "agent.read", false), false, "relationship grant restricted by " + RelationshipRejectProjectAccess},
+		{"relationship project-access deny explain", nil, request(formerOwner, formerAgent, ActionRead, "agent.read", true), false, "relationship grant restricted by " + RelationshipRejectProjectAccess},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := authz

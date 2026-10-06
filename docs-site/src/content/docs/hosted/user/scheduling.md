@@ -50,8 +50,12 @@ scion schedule create \
 Recurring schedules fire repeatedly on a **5-field cron expression** (Minute, Hour, Day of Month, Month, Day of Week). 
 
 :::caution[Cron is UTC]
-Schedules evaluate using **UTC (Coordinated Universal Time)**. There is no local timezone configuration — convert from your local timezone to UTC before writing the cron expression.
+Schedules are evaluated in **UTC (Coordinated Universal Time) only**. A cron expression cannot carry a timezone, and there is no timezone setting — convert from your local timezone to UTC before writing the expression. A fixed UTC time shifts by an hour against local time across daylight-saving changes.
+
+An expression that starts with a `CRON_TZ=` or `TZ=` prefix is rejected with `400`. Schedules created with such a prefix before this rule were paused when the Hub upgraded, with a warning in the Hub log. To bring one back, edit its expression to UTC and resume it; a prefixed schedule cannot be resumed or enabled as is.
 :::
+
+For how Scion handles times and zones elsewhere (API timestamps, display zone, agent `TZ`), see [Times and Timezones](/scion/reference/times-and-timezones/).
 
 ### Creating a Recurring Schedule via CLI
 
@@ -146,7 +150,8 @@ To ensure platform security and isolate team activities, schedules and scheduled
 
 - **Owner-Based Access Control**: Only the creator (the owner) of a schedule or scheduled event, or a system-wide administrator, has the authority to retrieve, update, pause, resume, cancel, or delete a schedule/event. If another user or agent attempts to modify or view a schedule they do not own, the Hub API denies access immediately.
 - **Scheduled Agent Identity**: An agent created by a schedule is attributed to the schedule's creator: `CreatorName` is set to the creator's agent name or user email, as with manual creation. It also receives the project's default GCP identity. The same service-account authorization checks as manual agent creation run against the creator, and agent creation fails if they do not pass.
-- **Project-Scoped Group Policies**: Scheduled events require project-scoped policies. During project creation or template synchronization, Scion automatically backfills and seeds scheduled event policies bound directly to the project's members group (i.e. `project:<slug>:members`).
+- **Unscoped Credential Required**: Creating, updating, re-targeting or resuming a scheduled message or a scheduled `dispatch_agent` event or schedule requires an unscoped credential, such as a CLI or Web UI sign-in. A scoped [user access token](/scion/hosted/user/personal-access-tokens/) is denied with a 403, because the scheduler stores only the creator's identity and cannot re-apply the token's scopes when the event fires.
+- **Project-Scoped Role Permissions**: Scheduled event permissions come from project-scoped roles. The built-in `project-member` role carries `scheduled_event.create`, `scheduled_event.list` and `scheduled_event.read`, and `project-admin` also carries `scheduled_event.update`.
 - **Required Permissions**: To perform scheduler actions, the caller's token must have the appropriate permission in the project scope:
   - **Creating/Scheduling**: Requires `scheduled_event.create`
   - **Listing/Viewing**: Requires `scheduled_event.list` and `scheduled_event.read`

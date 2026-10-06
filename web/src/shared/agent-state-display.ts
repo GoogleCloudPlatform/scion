@@ -23,7 +23,12 @@
  * across the web UI.
  */
 
-import type { AgentPhase, AgentActivity } from './types.js';
+import { html } from 'lit';
+import type { TemplateResult } from 'lit';
+import { ifDefined } from 'lit/directives/if-defined.js';
+
+import { getAgentDisplayStatus } from './types.js';
+import type { Agent, AgentPhase, AgentActivity } from './types.js';
 
 /**
  * Color variant for status badge rendering
@@ -77,7 +82,16 @@ export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
     pulse: false,
     label: 'waiting for input',
   },
-  blocked: { emoji: '🚧', icon: 'clock-history', variant: 'neutral', pulse: false },
+  // Display only: the activity is still 'blocked' in the API and CLI. Users
+  // read 'blocked' as broken; it means waiting on an external dependency
+  // (another agent, a user reply, a scheduled event) (ptone/scion#1571).
+  blocked: {
+    emoji: '🕓',
+    icon: 'clock-history',
+    variant: 'neutral',
+    pulse: false,
+    label: 'waiting on others',
+  },
   completed: { emoji: '✅', icon: 'check-circle', variant: 'success', pulse: false },
   limits_exceeded: {
     emoji: '🚫',
@@ -106,4 +120,56 @@ export function getStateDisplay(status: string): StateDisplay {
     return ACTIVITY_DISPLAY[status as AgentActivity];
   }
   return { emoji: '', icon: '', variant: 'neutral', pulse: false };
+}
+
+/**
+ * Human-readable label for an agent phase or activity: the display label
+ * when one is defined (e.g. 'blocked' → 'waiting on others'), otherwise the
+ * raw value. Use this wherever a state name is shown as text, so no call
+ * site renders a raw state that has a display label.
+ */
+export function stateLabel(status: string): string {
+  return getStateDisplay(status).label ?? status;
+}
+
+// ---------------------------------------------------------------------------
+// Provisioned, not started (ptone/scion#2929)
+// ---------------------------------------------------------------------------
+
+/** Status label for a provision-only agent; the same wording as the CLI. */
+export const PROVISIONED_ONLY_LABEL = 'created (not started)';
+
+/**
+ * Whether to show `agent` as provisioned but not started. The hub computes
+ * `provisionedOnly`; the phase check hides a stale flag as soon as an SSE
+ * delta moves the agent out of `created` (a start is under way).
+ */
+export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'>): boolean {
+  return agent.provisionedOnly === true && agent.phase === 'created';
+}
+
+interface AgentStatusBadgeOptions {
+  /** Badge status; defaults to getAgentDisplayStatus(agent). */
+  status?: string;
+  /** Badge label; defaults to stateLabel(status). */
+  label?: string;
+  size?: 'small' | 'medium' | 'large';
+}
+
+/**
+ * An agent status badge. Use it for every agent status badge: it shows a
+ * provision-only agent as "created (not started)" with a start hint.
+ */
+export function agentStatusBadge(
+  agent: Agent,
+  { status = getAgentDisplayStatus(agent), label, size }: AgentStatusBadgeOptions = {}
+): TemplateResult {
+  const po = isProvisionedOnly(agent);
+  const hint = po ? `Not started yet. Use Start, or run: scion start ${agent.name}` : undefined;
+  return html`<scion-status-badge
+    status=${status}
+    label=${po ? PROVISIONED_ONLY_LABEL : (label ?? stateLabel(status))}
+    title=${ifDefined(hint)}
+    size=${ifDefined(size)}
+  ></scion-status-badge>`;
 }

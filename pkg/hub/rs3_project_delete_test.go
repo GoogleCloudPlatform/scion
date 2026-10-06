@@ -302,10 +302,16 @@ func TestRS3_ProjectDeleteStaleOwnerIDDenied(t *testing.T) {
 	}))
 	ensureHubMembership(ctx, s, staleOwnerID)
 
-	// Simulate stale OwnerID by updating the project record.
-	project, _ := s.GetProject(ctx, projectID)
-	project.OwnerID = staleOwnerID
-	_ = s.UpdateProject(ctx, project)
+	// Simulate a stale OwnerID with the dedicated owner writer. The general
+	// UpdateProject no longer writes OwnerID (ptone/scion#2597), so it cannot
+	// be used for this setup. Assert the precondition so the test cannot go
+	// vacuous if the setup stops taking effect.
+	require.NoError(t, s.SetProjectOwnerID(ctx, projectID, staleOwnerID))
+	project, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	require.Equal(t, staleOwnerID, project.OwnerID, "precondition: project.OwnerID names the stale user")
+	require.Empty(t, projectBindingsFor(t, s, projectID, staleOwnerID),
+		"precondition: the stale owner holds no project role bindings")
 
 	req := ProjectDeleteRequest{
 		ProjectID: projectID,
@@ -377,6 +383,40 @@ func TestRS3_ProjectDeleteScopedUATDenied(t *testing.T) {
 
 	_, decision := srv.deletionService.Delete(ctx, req)
 	require.NotNil(t, decision, "scoped UAT should be denied for project deletion")
+	assert.False(t, decision.Allowed)
+	assert.Equal(t, ErrCodeCredentialInsufficient, decision.DenialCode)
+	assert.Equal(t, 403, decision.HTTPStatus)
+	// Project delete is session-only with the IRREVERSIBLE_CASCADE reason.
+	assert.Equal(t, sessionOnlyDenialDetails(authzop.ReasonIrreversibleCascade), decision.Details)
+}
+
+// TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied: an unrecognized
+// credential kind — as credentialContextForIdentity's fail-closed default
+// produces for an unclassified identity — is denied by the same
+// session-only ceiling as a scoped UAT above, not silently admitted because
+// it isn't one of the specifically-named non-session kinds.
+// ProjectDeletionService.Delete enforces this credential ceiling directly,
+// independent of requireSessionCredential and
+// (*UserAccessTokenService).enforceSessionCredential.
+func TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projectID := tid("rs3-unrec-deny")
+	ownerID := tid("rs3-unrec-deny-user")
+
+	createRS3Project(t, s, projectID, ownerID)
+
+	req := ProjectDeleteRequest{
+		ProjectID: projectID,
+		Actor:     NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", "web"),
+	}
+
+	ctx = setTestIdentity(ctx, req.Actor)
+	ctx = setTestCredentialContext(ctx, CredentialContext{Kind: CredentialKind("bogus")})
+
+	_, decision := srv.deletionService.Delete(ctx, req)
+	require.NotNil(t, decision, "an unrecognized credential kind should be denied for project deletion")
 	assert.False(t, decision.Allowed)
 	assert.Equal(t, ErrCodeCredentialInsufficient, decision.DenialCode)
 	assert.Equal(t, 403, decision.HTTPStatus)

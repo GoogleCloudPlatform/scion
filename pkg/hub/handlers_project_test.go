@@ -96,6 +96,124 @@ func TestHubManagedProjectPath_EmptySlug(t *testing.T) {
 	assert.Contains(t, err.Error(), "slug must not be empty")
 }
 
+// TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath is the
+// regression test for agent.AppliedConfig.Workspace being uploaded to GCS
+// without validation: it starts as the caller-supplied req.Workspace
+// (buildAppliedConfig) and is only ever replaced by the resolved
+// hub-managed project path when the caller left it empty, so a non-empty
+// value the caller supplied directly must still be checked against the
+// project's own managed path before anything is read from it.
+func TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath(t *testing.T) {
+	srv, _ := testServer(t)
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	slug := "upload-guard-project"
+	expectedPath, err := hubManagedProjectPath(slug)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(expectedPath, 0755))
+
+	// A sibling directory under the same projects root, not the project's
+	// own managed path: exactly the shape a caller-supplied req.Workspace
+	// pointing at an unrelated or another project's directory would take.
+	unrelated := filepath.Join(filepath.Dir(expectedPath), "another-project")
+	require.NoError(t, os.MkdirAll(unrelated, 0755))
+
+	if _, err := srv.resolveHubManagedWorkspaceForUpload(unrelated, slug); err == nil {
+		t.Error("expected an unrelated workspace path to be rejected, got nil")
+	}
+
+	// The project's own managed path itself is accepted -- this floor must
+	// not over-refuse the legitimate case.
+	if resolved, err := srv.resolveHubManagedWorkspaceForUpload(expectedPath, slug); err != nil {
+		t.Errorf("expected the project's own managed path to be accepted, got error: %v", err)
+	} else if resolved != expectedPath {
+		t.Errorf("resolved path = %q, want %q", resolved, expectedPath)
+	}
+
+	// Its "workspace" subdirectory is one of the two named shapes the
+	// ~/.scion allow list admits under a project slug (isAllowedProjectSubtree)
+	// and so is also accepted directly, with no root-containment fallback
+	// needed. An unnamed subdirectory of the bare managed path (e.g.
+	// ".../upload-guard-project/sub") is NOT equivalent to this: the allow
+	// list only admits it when the whole bare "<slug>" directory is itself
+	// the value passed in, not some child path computed separately -- see
+	// isAllowedProjectSubtree's own doc comment.
+	workspaceSubdir := filepath.Join(expectedPath, "workspace")
+	require.NoError(t, os.MkdirAll(workspaceSubdir, 0755))
+	if resolved, err := srv.resolveHubManagedWorkspaceForUpload(workspaceSubdir, slug); err != nil {
+		t.Errorf("expected the project's workspace subdirectory to be accepted, got error: %v", err)
+	} else if resolved != workspaceSubdir {
+		t.Errorf("resolved path = %q, want %q", resolved, workspaceSubdir)
+	}
+}
+
+// TestCreateAgent_SkipsGCSUploadForUnrelatedWorkspace is the handler-level
+// companion to TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath:
+// that test drives the validation helper directly, proving the helper
+// itself works; this one drives a real POST /api/v1/agents request through
+// the hub-managed-project GCS-upload branch and asserts the upload function
+// itself is never invoked when the workspace is outside the project's
+// managed path, proving the handler actually calls the helper in front of
+// the upload rather than just containing correct logic nothing reaches.
+func TestCreateAgent_SkipsGCSUploadForUnrelatedWorkspace(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, _, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
+	srv.SetStorage(newContentMockStorage("test-bucket"))
+	t.Cleanup(func() {
+		if p, err := hubManagedProjectPath(project.Slug); err == nil {
+			_ = os.RemoveAll(p)
+		}
+	})
+
+	var uploadCalls int
+	previous := syncToGCSForWorkspaceUpload
+	syncToGCSForWorkspaceUpload = func(_ context.Context, _, _, _ string) error {
+		uploadCalls++
+		return nil
+	}
+	t.Cleanup(func() { syncToGCSForWorkspaceUpload = previous })
+
+	// A real, absolute, but entirely unrelated directory -- not under this
+	// project's own managed path -- supplied directly as the request's
+	// Workspace, the same shape TestResolveHubManagedWorkspaceForUpload_RejectsUnrelatedPath
+	// exercises at the helper level.
+	unrelated := t.TempDir()
+
+	agentRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "upload-guard-agent",
+		ProjectID: project.ID,
+		Workspace: unrelated,
+	})
+	require.Equal(t, http.StatusCreated, agentRec.Code, "body: %s", agentRec.Body.String())
+
+	if uploadCalls != 0 {
+		t.Errorf("expected the GCS upload to be skipped for an unrelated workspace, but it ran %d time(s)", uploadCalls)
+	}
+	require.NotNil(t, disp.capturedAgent, "fixture check: dispatch must have been reached")
+	if disp.capturedAgent.AppliedConfig != nil && disp.capturedAgent.AppliedConfig.WorkspaceStoragePath != "" {
+		t.Errorf("expected WorkspaceStoragePath to remain unset when the upload is skipped, got %q", disp.capturedAgent.AppliedConfig.WorkspaceStoragePath)
+	}
+
+	// Confirm the stub is actually wired to something real: a request whose
+	// workspace IS the project's own managed path must reach the upload.
+	// Without this, a test environment where the upload branch is never
+	// reached at all (a wrong condition earlier in the handler, for example)
+	// would also show zero calls above for the wrong reason.
+	legitimateAgentRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "upload-guard-agent-legit",
+		ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, legitimateAgentRec.Code, "body: %s", legitimateAgentRec.Body.String())
+	if uploadCalls != 1 {
+		t.Errorf("expected the GCS upload to run exactly once for the project's own managed workspace, ran %d time(s)", uploadCalls)
+	}
+}
+
 func TestCreateProject_HubManaged_NoGitRemote(t *testing.T) {
 	srv, _ := testServer(t)
 
@@ -168,7 +286,7 @@ func TestPopulateAgentConfig_HubManagedProject_SetsWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	expectedPath, err := hubManagedProjectPath("hub-managed")
 	require.NoError(t, err)
@@ -193,7 +311,7 @@ func TestPopulateAgentConfig_HubManagedProject_RemoteBroker_WorkspaceSet(t *test
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	// populateAgentConfig sets Workspace for hub-managed projects.
 	// For remote brokers, the createAgent handler later swaps this to
@@ -218,7 +336,7 @@ func TestPopulateAgentConfig_GitProject_NoWorkspace(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.Empty(t, agent.AppliedConfig.Workspace,
 		"Workspace should not be set for git-backed projects")
@@ -256,7 +374,7 @@ func TestPopulateAgentConfig_StampsHarnessConfigID(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(ctx, agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, nil))
 
 	if agent.AppliedConfig.HarnessConfigID != hcID {
 		t.Errorf("expected HarnessConfigID %q, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
@@ -294,7 +412,7 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{}, // no explicit harness-config
 	}
 
-	srv.populateAgentConfig(ctx, agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, template))
 
 	if agent.AppliedConfig.HarnessConfigID != hcID {
 		t.Errorf("expected HarnessConfigID %q from template default, got %q", hcID, agent.AppliedConfig.HarnessConfigID)
@@ -335,7 +453,7 @@ func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold template telemetry")
@@ -386,7 +504,7 @@ func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
 		},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
 
 	// Inline telemetry should NOT be overwritten by template telemetry
 	assert.Equal(t, "https://inline-otel.example.com",
@@ -418,7 +536,7 @@ func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig,
 		"InlineConfig should be created to hold hub telemetry")
@@ -462,7 +580,7 @@ func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) 
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, template)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
 
 	// Template telemetry should win over hub telemetry
 	assert.Equal(t, "https://template-otel.example.com",
@@ -496,7 +614,7 @@ func TestPopulateAgentConfig_ProjectTelemetryEnabledOverride(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
 	// Hub cloud config should still be present
@@ -525,7 +643,7 @@ func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testin
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	require.NotNil(t, agent.AppliedConfig.InlineConfig)
 	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
@@ -1528,7 +1646,7 @@ func TestProjectRegister_ExistingProject_DeniesNonMemberWithoutBroker(t *testing
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	membersSlug := "project:" + project.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
@@ -1579,7 +1697,7 @@ func TestProjectRegister_ExistingProject_DeniesNonMemberWithBroker(t *testing.T)
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	broker := &store.RuntimeBroker{
 		ID: tid("register-authz-broker-1"), Name: "Register Authz Broker", Slug: "register-authz-broker-1",
@@ -1642,7 +1760,7 @@ func TestProjectRegister_ExistingProject_OwnerCanLinkBroker(t *testing.T) {
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	broker := &store.RuntimeBroker{
 		ID: tid("register-authz-broker-2"), Name: "Owner Link Broker", Slug: "owner-link-broker-2",
@@ -1724,7 +1842,7 @@ func TestProjectRegister_GitRemoteMatch_DeniedFallsThroughToNewCallerOwnedProjec
 		GitRemote: util.NormalizeGitRemote(remote), OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, existing))
-	srv.createProjectMembersGroup(ctx, existing)
+	srv.seedProjectCreatorMembership(ctx, existing)
 
 	membersSlug := "project:" + existing.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
@@ -1793,7 +1911,7 @@ func TestProjectRegister_SlugMatch_DeniesNonMemberWithoutBroker(t *testing.T) {
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	other := seedHubMemberNoProjects(t, s, "register-authz-slug-other") // grants hub-scope project.create only
 
@@ -1829,7 +1947,7 @@ func TestProjectRegister_ExistingProject_DeprecatedBrokerFlow_DeniesNonMember(t 
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	brokerName := "register-authz-embedded-broker"
 	other := seedHubMemberNoProjects(t, s, "register-authz-embedded-other") // grants hub-scope project.create only
@@ -1881,7 +1999,7 @@ func TestProjectCreate_ExistingID_DeniesNonMemberWithoutBinding(t *testing.T) {
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	membersSlug := "project:" + project.Slug + ":members"
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
@@ -1950,8 +2068,8 @@ func TestProjectCreate_ExistingID_OwnerIdempotentSucceeds(t *testing.T) {
 
 // TestCreateProjectMembersGroup_OwnerNotInStore verifies that when the project
 // owner does not yet exist in the users table (e.g. legacy proxy auth on a
-// fresh Postgres deployment), the members group is still created without an
-// OwnerID rather than failing with an FK constraint violation.
+// fresh Postgres deployment), the members group is still created. The group
+// never carries an OwnerID (ptone/scion#2599), so there is no FK to violate.
 func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -1969,8 +2087,8 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// createProjectMembersGroup should not return an error even though
-	// the owner user does not exist. It should retry without OwnerID.
+	// createProjectMembersGroup must succeed even though the owner user
+	// does not exist.
 	srv.createProjectMembersGroup(ctx, project)
 
 	// The members group must still have been created.
@@ -1978,8 +2096,7 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
 	require.NoError(t, err, "members group should have been created despite missing owner")
 	assert.Equal(t, project.ID, group.ProjectID)
-	// OwnerID should be empty because the referenced user did not exist.
-	assert.Empty(t, group.OwnerID, "group OwnerID should be empty when owner user is not in store")
+	assert.Empty(t, group.OwnerID, "members group never carries an OwnerID")
 }
 
 // =============================================================================
@@ -2106,7 +2223,7 @@ func TestCreateProject_WorktreePerAgent_StampsLabel(t *testing.T) {
 	assert.False(t, project.IsSharedWorkspace(), "project should not report as shared workspace")
 }
 
-func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
+func TestCreateProject_WorktreePerAgent_NonGit_Rejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
@@ -2114,14 +2231,11 @@ func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
 		WorkspaceMode: "worktree-per-agent",
 	}
 
+	// Design #2703 §2.4: worktree-per-agent requires a git remote (it was
+	// silently ignored before).
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-
-	assert.Empty(t, project.Labels[store.LabelWorkspaceMode],
-		"worktree-per-agent label should not be set on non-git projects")
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a git remote")
 }
 
 func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T) {
@@ -2142,7 +2256,7 @@ func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T)
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	expectedPath, err := hubManagedProjectPath("shared-ws")
 	require.NoError(t, err)
@@ -2172,7 +2286,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.Equal(t, "develop", agent.AppliedConfig.Branch,
 		"Branch should default to project's default-branch label for shared workspace")
@@ -2183,7 +2297,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{Branch: "custom-branch"},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent2, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent2, project, nil))
 
 	assert.Equal(t, "custom-branch", agent2.AppliedConfig.Branch,
 		"Explicit branch should not be overridden by shared workspace default")
@@ -2204,7 +2318,7 @@ func TestPopulateAgentConfig_SharedWorkspace_DefaultsBranch(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent3, projectNoLabel, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent3, projectNoLabel, nil))
 
 	assert.Equal(t, "main", agent3.AppliedConfig.Branch,
 		"Branch should default to 'main' when no default-branch label is set")
@@ -2229,7 +2343,7 @@ func TestPopulateAgentConfig_WorktreePerAgent_SetsCloneNotWorkspace(t *testing.T
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
 
-	srv.populateAgentConfig(context.Background(), agent, project, nil)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
 	assert.NotNil(t, agent.AppliedConfig.GitClone,
 		"GitClone should be set for worktree-per-agent projects (broker decides how to use it)")

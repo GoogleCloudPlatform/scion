@@ -114,7 +114,7 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 		return nil, fmt.Errorf("hub is enabled but no endpoint configured\n\nConfigure via: scion config set hub.endpoint <url>")
 	}
 
-	client, err := createHubClient(settings, endpoint)
+	client, credentialKind, err := createHubClient(settings, endpoint)
 	if err != nil {
 		return nil, wrapHubError(fmt.Errorf("failed to create hub client: %w", err))
 	}
@@ -145,8 +145,9 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 		ProjectID: project.ID,
 		BrokerID:  brokerID,
 		// Use the fallback project path for settings access, not the target project
-		ProjectPath: fallbackPath,
-		IsGlobal:    isGlobal,
+		ProjectPath:    fallbackPath,
+		IsGlobal:       isGlobal,
+		CredentialKind: credentialKind,
 	}
 
 	debugf("resolveHubProjectRef: resolved project %s (ID: %s) via hub", project.Name, project.ID)

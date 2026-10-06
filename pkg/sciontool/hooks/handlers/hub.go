@@ -7,14 +7,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
-	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -32,9 +30,7 @@ func NewHubHandler() *HubHandler {
 	if client == nil || !client.IsConfigured() {
 		return nil
 	}
-	return &HubHandler{
-		client: client,
-	}
+	return &HubHandler{client: client}
 }
 
 // Handle processes an event and sends a status update to the Hub.
@@ -47,6 +43,11 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// callStart times the hub call this event triggers (if any), for
+	// start-time attribution of hook-driven status updates. Observability
+	// only: outcome and elapsed_ms, never the request body.
+	callStart := time.Now()
 
 	var err error
 	switch event.Name {
@@ -127,39 +128,6 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		})
 
 	case hooks.EventToolEnd, hooks.EventAgentEnd, hooks.EventModelEnd:
-		// Forward assistant text (when the dialect extracted it — e.g.
-		// Claude's Stop hook via transcript_path) to the hub message
-		// store as an outbound agent→user reply. This is what makes
-		// assistant responses show up in the Messages tab. Best-effort:
-		// failure here must not break the status update flow below.
-		//
-		// Content-type filtering: AssistantText is pre-filtered by the
-		// dialect layer (thinking/reasoning blocks stripped).
-		if event.Name == hooks.EventAgentEnd && event.Data.AssistantText != "" {
-			text := truncateAssistantText(event.Data.AssistantText)
-
-			// Build metadata tags for content classification.
-			metadata := map[string]string{
-				"source": "hook",
-			}
-			if event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking() {
-				metadata["has_thinking"] = "true"
-			}
-
-			msgCtx, msgCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer msgCancel()
-			if msgErr := h.client.SendOutboundMessage(msgCtx, hub.OutboundMessage{
-				Msg:      text,
-				Type:     "assistant-reply",
-				Metadata: metadata,
-			}); msgErr != nil {
-				log.Error("Hub: outbound assistant reply failed: %v", msgErr)
-			} else {
-				log.Debug("Hub: Forwarded assistant reply to message store (%d bytes, thinking_filtered=%v)",
-					len(text), event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking())
-			}
-		}
-
 		// Check if local activity is sticky before sending working
 		if h.isLocalActivitySticky() {
 			log.Debug("Hub: Skipping working (local activity is sticky)")
@@ -215,11 +183,25 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		return nil
 	}
 
+	elapsedMs := time.Since(callStart).Milliseconds()
 	if err != nil {
-		log.Error("Hub status update failed: %v", err)
+		// One structured line, not two: slog.Default() routes through this
+		// package's own log handler (see pkg/sciontool/log), so this already
+		// reaches agent.log and stderr exactly like the former log.Error call
+		// did — adding a second line here would double-log every failure,
+		// and hook events can fire once per tool call while the hub is down.
 		// Don't return error - we don't want Hub failures to break the hook chain
+		slog.Error("hub status update failed", "event", event.Name, "elapsed_ms", elapsedMs, "error", err)
 	} else {
 		log.Debug("Hub status update sent successfully")
+		// SessionStart is the one event currently used for start-time
+		// attribution (see pkg/hub's since_create_ms), so it logs at Info;
+		// every other event logs the same shape at Debug.
+		if event.Name == hooks.EventSessionStart {
+			slog.Info("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
+		} else {
+			slog.Debug("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
+		}
 	}
 
 	return nil
@@ -322,28 +304,6 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 		CurrentTurns:      &turnCount,
 		CurrentModelCalls: &modelCallCount,
 	})
-}
-
-// truncateAssistantText caps an assistant reply at the hub's message-length
-// limit, measured in runes as the hub measures it, keeping the start of the
-// reply and reserving room for a marker reporting how many were dropped.
-func truncateAssistantText(text string) string {
-	total := utf8.RuneCountInString(text)
-	if total <= messages.MaxMessageLength {
-		return text
-	}
-
-	marker := func(dropped int) string {
-		return fmt.Sprintf("\n[truncated, %d characters omitted]", dropped)
-	}
-	// Sized against the worst case: the dropped count can only shrink the marker.
-	keep := messages.MaxMessageLength - utf8.RuneCountInString(marker(total))
-	if keep <= 0 {
-		// Defensive: unreachable at the current limit, but a negative slice
-		// would panic and no caller up to dispatchEvent recovers.
-		return string([]rune(text)[:messages.MaxMessageLength])
-	}
-	return string([]rune(text)[:keep]) + marker(total-keep)
 }
 
 // truncateMessage truncates a message to the specified length.

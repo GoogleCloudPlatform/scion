@@ -228,7 +228,7 @@ func (s *Server) handleHubPreStartHooks(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusCreated, hook)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -261,7 +261,7 @@ func (s *Server) handleHubPreStartHookByID(w http.ResponseWriter, r *http.Reques
 		// fall through to the method switch below
 	case "activate":
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		if _, ok := s.requireHubAdmin(w, r); !ok {
@@ -391,6 +391,6 @@ func (s *Server) handleHubPreStartHookByID(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }

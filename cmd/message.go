@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -39,7 +42,6 @@ var msgInterrupt bool
 var msgIn string
 var msgAt string
 var msgPlain bool
-var msgRaw bool
 var msgAttach []string
 var msgNotify bool
 var msgWake bool
@@ -47,6 +49,10 @@ var msgChannel string
 var msgThreadID string
 var msgCC []string
 var msgBodyFile string
+
+// errRawFlagRemoved is returned for any use of the removed --raw flag.
+var errRawFlagRemoved = fmt.Errorf("--raw has been removed from 'scion message': raw keystroke delivery through messages is no longer supported; " +
+	"send keystrokes with 'scion keys <agent-name> <keystrokes>' instead (see 'scion keys --help')")
 
 // emitDeprecationWarning prints a deprecation notice to stderr.
 func emitDeprecationWarning(flag, replacement string) {
@@ -60,13 +66,12 @@ var deprecationReplacements = []struct {
 	Flag    string
 	Message string
 }{
-	{"raw", "use 'scion keys' instead"},
 	{"plain", "--plain is deprecated and will be removed"},
 	{"notify", "use 'scion notifications subscribe' instead"},
 	{"in", "use 'scion schedule create --in' instead"},
 	{"at", "use 'scion schedule create --at' instead"},
-	{"channel", "use @<agent-name> to message an agent directly"},
-	{"thread-id", "use @<agent-name> to message an agent directly"},
+	{"channel", "address the conversation with conv:<uuid> (see 'scion conversation list'), or use @<name> to message an agent directly"},
+	{"thread-id", "address the conversation with conv:<uuid> (see 'scion conversation list'); for user: recipients on the web channel, the Hub rejects a thread ID that does not match an existing conversation"},
 	{"cc", "--cc is deprecated and will be removed"},
 }
 
@@ -101,6 +106,18 @@ Message body can be provided as:
   - Positional arguments: scion message agent "hello world"
   - File: scion message agent --body-file msg.txt
   - Stdin: echo "hello" | scion message agent -
+           (or: scion message agent --body-file -)
+
+For --body-file and stdin, trailing CR/LF characters are trimmed; all other text,
+including interior newlines, is sent exactly as read.
+
+The shell expands backticks and $(...) inside double-quoted arguments before
+scion runs, executing them and splicing in their output. To send code or
+shell snippets verbatim, use --body-file or stdin with a quoted heredoc:
+
+  scion message my-agent - <<'EOF'
+  Run ` + "`make test`" + ` and check $(pwd)
+  EOF
 
 Examples:
   scion message my-agent "Please review the PR"
@@ -110,6 +127,12 @@ Examples:
   scion message my-agent --body-file /path/to/message.txt
   echo "message with backticks" | scion message my-agent -`,
 	Args: func(cmd *cobra.Command, args []string) error {
+		// --raw is removed. Reject it here, in argument validation, so the
+		// command fails before any hook, project resolution or network call
+		// runs: a --raw invocation never reaches the wire.
+		if cmd.Flags().Changed("raw") {
+			return errRawFlagRemoved
+		}
 		// --body-file provides the message, so we only need recipient
 		bodyFile, _ := cmd.Flags().GetString("body-file")
 		if bodyFile != "" {
@@ -134,15 +157,15 @@ Examples:
 		// explicitly instead.
 		if cmd.Flags().Changed("broadcast") {
 			if resolveMode() == ModeAgent {
-				return fmt.Errorf("--broadcast has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
+				return newUsageError("--broadcast has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
 			}
-			return fmt.Errorf("--broadcast has been removed from 'scion message'; use 'scion broadcast' instead")
+			return newUsageError("--broadcast has been removed from 'scion message'; use 'scion broadcast' instead")
 		}
 		if cmd.Flags().Changed("all") {
 			if resolveMode() == ModeAgent {
-				return fmt.Errorf("--all has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
+				return newUsageError("--all has been removed from 'scion message'; broadcasting is not available in agent mode — address your recipients explicitly (e.g. @agent-name)")
 			}
-			return fmt.Errorf("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
+			return newUsageError("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
 		}
 
 		// Emit deprecation warnings for any deprecated flags in use.
@@ -157,7 +180,7 @@ Examples:
 
 		{
 			if len(args) < 1 {
-				return fmt.Errorf("recipient is required")
+				return newUsageError("recipient is required")
 			}
 			recipient := args[0]
 			if len(args) > 1 {
@@ -176,15 +199,15 @@ Examples:
 			} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
 				// Looks like a conversation reference but failed to parse.
 				// Parse-failure-denies: fail loudly, do not fall through to legacy paths.
-				return fmt.Errorf("invalid conversation reference: %w", err)
+				return newUsageError("invalid conversation reference: %w", err)
 			} else if strings.HasPrefix(recipient, "@") {
 				// @ prefix is exclusively a conversation reference in the new grammar.
 				// A bare email without leading @ falls through to the legacy path below.
-				return fmt.Errorf("invalid conversation reference: %w", err)
+				return newUsageError("invalid conversation reference: %w", err)
 			} else if messages.IsGroupRecipient(recipient) {
 				parsed, err := messages.ParseGroupRecipient(recipient)
 				if err != nil {
-					return fmt.Errorf("invalid group recipient: %w", err)
+					return newUsageError("invalid group recipient: %w", err)
 				}
 				groupRecipients = parsed
 			} else if strings.HasPrefix(recipient, "user:") {
@@ -200,7 +223,7 @@ Examples:
 
 		// Validate --body-file conflicts
 		if msgBodyFile != "" && len(args) > 1 {
-			return fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+			return newUsageError("--body-file and positional message arguments are mutually exclusive")
 		}
 
 		// Resolve body from --body-file or stdin
@@ -211,31 +234,18 @@ Examples:
 		}
 
 		// Ensure we have a message body
-		if message == "" && !msgRaw {
+		if message == "" {
 			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
 		// Validate scheduling flags
 		if msgIn != "" && msgAt != "" {
-			return fmt.Errorf("--in and --at are mutually exclusive")
+			return newUsageError("--in and --at are mutually exclusive")
 		}
 
 		// Validate --thread-id requires --channel
 		if msgThreadID != "" && msgChannel == "" {
-			return fmt.Errorf("--thread-id requires --channel to be set")
-		}
-
-		// Validate --raw restrictions
-		if msgRaw {
-			if msgPlain {
-				return fmt.Errorf("--raw and --plain are mutually exclusive")
-			}
-			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--raw cannot be combined with --in or --at")
-			}
-			if len(msgAttach) > 0 {
-				return fmt.Errorf("--raw cannot be combined with --attach")
-			}
+			return newUsageError("--thread-id requires --channel to be set")
 		}
 
 		// Validate --cc restrictions: parse first so empty-string values
@@ -243,59 +253,47 @@ Examples:
 		// false-positive validation errors.
 		parsedCC := parseCCFlag(msgCC)
 		if len(parsedCC) > 0 {
-			if msgRaw {
-				return fmt.Errorf("--cc cannot be combined with --raw")
-			}
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--cc cannot be combined with --in or --at")
+				return newUsageError("--cc cannot be combined with --in or --at")
 			}
 			if userRecipient != "" {
-				return fmt.Errorf("--cc cannot be used with user recipients")
+				return newUsageError("--cc cannot be used with user recipients")
 			}
 		}
 
 		// Validate user-recipient restrictions
 		if userRecipient != "" {
-			if msgRaw {
-				return fmt.Errorf("--raw cannot be used with user recipients")
-			}
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--in/--at cannot be used with user recipients")
+				return newUsageError("--in/--at cannot be used with user recipients")
 			}
 		}
 
 		// Validate group recipient restrictions
 		if len(groupRecipients) > 0 {
-			if msgRaw {
-				return fmt.Errorf("--raw cannot be used with group[] recipients")
-			}
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--in/--at cannot be used with group[] recipients")
+				return newUsageError("--in/--at cannot be used with group[] recipients")
 			}
 			if msgNotify {
-				return fmt.Errorf("--notify cannot be used with group[] recipients")
+				return newUsageError("--notify cannot be used with group[] recipients")
 			}
 		}
 
 		// Validate --wake restrictions
 		if msgWake {
 			if msgIn != "" || msgAt != "" {
-				return fmt.Errorf("--wake cannot be combined with --in or --at")
-			}
-			if msgRaw {
-				return fmt.Errorf("--wake cannot be combined with --raw")
+				return newUsageError("--wake cannot be combined with --in or --at")
 			}
 			if userRecipient != "" {
-				return fmt.Errorf("--wake cannot be used with user recipients")
+				return newUsageError("--wake cannot be used with user recipients")
 			}
 		}
 
 		// Validate attachments
 		if len(msgAttach) > messages.MaxAttachments {
-			return fmt.Errorf("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
+			return newUsageError("too many attachments: %d (max %d)", len(msgAttach), messages.MaxAttachments)
 		}
 		if len(msgAttach) > 0 && (msgIn != "" || msgAt != "") {
-			return fmt.Errorf("--attach cannot be combined with --in or --at")
+			return newUsageError("--attach cannot be combined with --in or --at")
 		}
 
 		// Validate attachment file paths exist
@@ -337,15 +335,6 @@ Examples:
 			}
 		}
 
-		// --raw cannot cross a project boundary: the deprecated keystroke
-		// path skips the wrapped envelope, so a cross-project send must
-		// refuse it the same way `scion keys` refuses cross-project targets
-		// outright. This CLI check is UX only; the authoritative refusal is
-		// hub-side (ExecuteAgentDM).
-		if crossProjectTarget != "" && msgRaw {
-			return fmt.Errorf("--raw cannot be used with a cross-project target; message the agent from within its own project")
-		}
-
 		// conv:<id> with explicit --project mismatch in agent mode: reject.
 		// The conversation ID already identifies its project context;
 		// reinterpreting the sender context via --project would be silently
@@ -360,7 +349,7 @@ Examples:
 			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
 				(ownProjectID != "" && projectPath == ownProjectID)
 			if !isSameProject {
-				return fmt.Errorf("--project cannot be used with conv: references; the conversation already identifies its project context")
+				return newUsageError("--project cannot be used with conv: references; the conversation already identifies its project context")
 			}
 		}
 
@@ -479,12 +468,6 @@ Examples:
 		mgr := agent.NewManager(rt)
 		defer mgr.Close()
 
-		// Raw mode: send literal bytes via send-keys with no trailing Enter
-		if msgRaw {
-			fmt.Printf("Sending raw keys to agent '%s'...\n", agentName)
-			return mgr.MessageRaw(ctx, agentName, "", message)
-		}
-
 		fmt.Printf("Sending message to agent '%s'...\n", agentName)
 		if err := mgr.Message(ctx, agentName, "", message, msgInterrupt); err != nil {
 			return err
@@ -522,14 +505,12 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-// raw, plain and urgent are passed explicitly (rather than read from the
-// message-command package globals) so non-`scion message` callers — e.g.
-// `scion keys`, which always wants Raw=true and never sets the message
-// package's flag globals — can reuse this helper without forking it.
-func buildStructuredMessage(sender, recipient, message string, attachments []string, raw, plain, urgent bool) *messages.StructuredMessage {
+// plain and urgent are passed explicitly rather than read from the
+// message-command flag globals; channel and thread ID still come from the
+// deprecated --channel/--thread-id globals.
+func buildStructuredMessage(sender, recipient, message string, attachments []string, plain, urgent bool) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
 	msg.Plain = plain
-	msg.Raw = raw
 	msg.Urgent = urgent
 	if len(attachments) > 0 {
 		msg.Attachments = attachments
@@ -537,6 +518,23 @@ func buildStructuredMessage(sender, recipient, message string, attachments []str
 	msg.Channel = msgChannel
 	msg.ThreadID = msgThreadID
 	return msg
+}
+
+// agentMessageSendError renders a failed agent-message send. A 404 with the
+// hub's agent_not_found code means the recipient does not exist (deleted,
+// reaped, or misspelled), so the error states that plainly and names the
+// agent; the hub's own message is kept as the cause. Other 404s (e.g. a
+// stale project ID, "Project not found", or a bare 404 from an older hub or
+// a proxy) are not about the agent, so they and all other failures keep the
+// generic wording. Both go through wrapHubError, which (for a 404) adds no
+// local-only hint, and Execute prints no Usage block for hub failures; the
+// command exits 1.
+func agentMessageSendError(agentName string, err error) error {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.IsNotFound() && apiErr.Code == apiclient.ErrCodeAgentNotFound {
+		return wrapHubError(fmt.Errorf("agent '%s' not found; message not sent: %w", agentName, err))
+	}
+	return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 }
 
 func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, notify bool, wake bool) error {
@@ -568,7 +566,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgRaw, msgPlain, interrupt)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgPlain, interrupt)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
@@ -591,7 +589,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		Mentions:  mentions,
 	})
 	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
+		return agentMessageSendError(agentName, err)
 	}
 
 	if isJSONOutput() {
@@ -644,7 +642,7 @@ func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, messa
 
 	// Step 2: Build the structured message with the sender's identity.
 	sender := resolveSenderIdentity(hubCtx)
-	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments, msgRaw, msgPlain, interrupt)
+	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -720,7 +718,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// and the orphan rows.
 		if ref.Kind == messaging.RefAgent {
 			sender := "agent:" + senderAgent
-			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgPlain, interrupt)
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -733,7 +731,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				Mentions: mentions,
 			})
 			if err != nil {
-				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+				return agentMessageSendError(ref.Value, err)
 			}
 			if isJSONOutput() {
 				if resp != nil {
@@ -834,13 +832,13 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// message endpoint. The server derives the conversation from the
 	// sender/recipient principals (DEF-138 Rule 3).
 	sender := resolveSenderIdentity(hubCtx)
-	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
 
 	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
-		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+		return agentMessageSendError(ref.Value, err)
 	}
 	if !isJSONOutput() {
 		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
@@ -927,7 +925,13 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 		return nil
 	}
-	fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	// #2026: name the conversation the message landed in when the hub
+	// reports it, so a send with --channel/--thread-id shows where it went.
+	if result != nil && result.ConversationID != "" {
+		fmt.Printf("Message sent to %s via Hub (conversation %s).\n", userRecipient, result.ConversationID)
+	} else {
+		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	}
 	if result != nil {
 		printMentionResults(result.MentionResults)
 	}
@@ -985,7 +989,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgRaw, msgPlain, interrupt)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgPlain, interrupt)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
@@ -1166,7 +1170,7 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 	}
 
 	if !isJSONOutput() {
-		fmt.Printf("Message to agent '%s' scheduled for %s\n", agentName, evt.FireAt.Format(time.RFC3339))
+		fmt.Printf("Message to agent '%s' scheduled for %s\n", agentName, clitime.Format(evt.FireAt, clitime.Full))
 	}
 
 	return nil
@@ -1413,31 +1417,49 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 }
 
 // resolveMessageBody determines the message body from flags or positional args.
-// Priority: --body-file > positional args. If body is "-", read from stdin.
+// Priority: --body-file > positional args. A positional body of exactly "-",
+// or --body-file -, reads the body from stdin.
+//
+// Newline rule (the same for every non-positional source): trailing CR/LF
+// characters are trimmed, so the newline that echo, a heredoc, or an editor
+// adds at end-of-file is not sent. Interior newlines and leading
+// or trailing spaces are preserved exactly. Positional bodies are used as
+// given.
 func resolveMessageBody(bodyFile string, positionalBody string) (string, error) {
 	if bodyFile != "" {
 		if positionalBody != "" {
 			return "", fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+		if bodyFile == "-" {
+			return readMessageBody(os.Stdin, "stdin")
 		}
 		file, err := os.Open(bodyFile)
 		if err != nil {
 			return "", fmt.Errorf("failed to open body file: %w", err)
 		}
 		defer func() { _ = file.Close() }()
-		data, err := io.ReadAll(io.LimitReader(file, int64(messages.MaxMsgSize)+1))
-		if err != nil {
-			return "", fmt.Errorf("failed to read body file: %w", err)
-		}
-		return string(data), nil
+		return readMessageBody(file, "body file")
 	}
 	if positionalBody == "-" {
-		data, err := io.ReadAll(io.LimitReader(os.Stdin, int64(messages.MaxMsgSize)+1))
-		if err != nil {
-			return "", fmt.Errorf("failed to read message from stdin: %w", err)
-		}
-		return strings.TrimRight(string(data), "\n"), nil
+		return readMessageBody(os.Stdin, "stdin")
 	}
 	return positionalBody, nil
+}
+
+// readMessageBody reads up to messages.MaxMsgSize+1 bytes from r and rejects
+// anything over messages.MaxMsgSize before trimming, so a body that is cut
+// off at the read limit is never sent in truncated form (trimming first
+// could pull an over-limit read back under the limit). It then trims
+// trailing CR/LF characters. source names r in error messages.
+func readMessageBody(r io.Reader, source string) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, int64(messages.MaxMsgSize)+1))
+	if err != nil {
+		return "", fmt.Errorf("failed to read message from %s: %w", source, err)
+	}
+	if len(data) > messages.MaxMsgSize {
+		return "", fmt.Errorf("message body from %s exceeds maximum size of %d bytes", source, messages.MaxMsgSize)
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
 func init() {
@@ -1445,7 +1467,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args")
+	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward
@@ -1455,7 +1477,9 @@ func init() {
 	messageCmd.Flags().StringVar(&msgIn, "in", "", "Deprecated: use 'scion schedule create --in' instead")
 	messageCmd.Flags().StringVar(&msgAt, "at", "", "Deprecated: use 'scion schedule create --at' instead")
 	messageCmd.Flags().BoolVar(&msgPlain, "plain", false, "Deprecated: --plain is deprecated and will be removed")
-	messageCmd.Flags().BoolVar(&msgRaw, "raw", false, "Deprecated: use 'scion keys' instead")
+	// --raw is removed; the flag is kept (hidden) only so its use gets
+	// actionable guidance instead of an unknown-flag error. See Args.
+	messageCmd.Flags().Bool("raw", false, "Removed: use 'scion keys' instead")
 	messageCmd.Flags().BoolVar(&msgNotify, "notify", false, "Deprecated: use 'scion notifications subscribe' instead")
 	messageCmd.Flags().StringVar(&msgChannel, "channel", "", "Deprecated: use conversation references instead")
 	messageCmd.Flags().StringVar(&msgThreadID, "thread-id", "", "Deprecated: use conversation references instead")

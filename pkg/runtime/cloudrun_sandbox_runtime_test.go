@@ -1338,6 +1338,301 @@ func TestPrepareScionLayout_RelocatesHomeDir(t *testing.T) {
 	}
 }
 
+// TestPrepareScionLayout_SecondLaunchPreservesHomeContent covers a second
+// launch of the same sandbox agent: by then, cfg.HomeDir (unchanged from
+// the caller's perspective) is the symlink the first launch's relocation
+// created, pointing at this agent's own /scion home. relocateToScion must
+// still receive that original, still-symlinked path, not its resolved
+// form, so its own already-a-symlink check recognizes the restart and
+// leaves the home directory alone. Relocating the resolved path instead
+// would operate on the agent's real /scion home as both source and
+// destination, losing its contents and leaving a self-referential symlink
+// in their place.
+func TestPrepareScionLayout_SecondLaunchPreservesHomeContent(t *testing.T) {
+	rootDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(homeDir, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := RunConfig{HomeDir: homeDir}
+
+	paths1, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("first prepareScionLayout() error = %v", err)
+	}
+
+	// Second launch of the same agent: cfg is unchanged, but homeDir (and
+	// so cfg.HomeDir) is now the symlink the first launch created.
+	paths2, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("second prepareScionLayout() error = %v", err)
+	}
+	if paths2.agentHome != paths1.agentHome {
+		t.Fatalf("agentHome changed between launches: %q vs %q", paths1.agentHome, paths2.agentHome)
+	}
+
+	data, err := os.ReadFile(filepath.Join(paths2.agentHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("agent-info.json missing after second launch (home content lost): %v", err)
+	}
+	if string(data) != `{"test": true}` {
+		t.Errorf("agent-info.json content = %q, want %q", string(data), `{"test": true}`)
+	}
+
+	link, err := os.Readlink(homeDir)
+	if err != nil {
+		t.Fatalf("homeDir is not a symlink after second launch: %v", err)
+	}
+	if link != paths2.agentHome {
+		t.Errorf("symlink target = %q, want %q", link, paths2.agentHome)
+	}
+
+	// A self-referential symlink at paths2.agentHome (the bug this guards
+	// against) makes any stat through homeDir fail with ELOOP.
+	if _, err := os.Stat(homeDir); err != nil {
+		t.Errorf("os.Stat(%q) failed, possible symlink loop at %q: %v", homeDir, paths2.agentHome, err)
+	}
+}
+
+// TestPrepareScionLayout_SkipsRelocationWhenHomeDirResolvesUnderRootDir
+// covers a HomeDir whose OWN Lstat is an ordinary real directory -- not a
+// symlink itself, so relocateToScion's own already-a-symlink check cannot
+// catch it on the original path alone -- but which resolves, through a
+// symlinked ANCESTOR directory, to this agent's own /scion home. Only the
+// resolved-path skip (comparing what ValidateAgentHomeSource resolved to,
+// not the original path's own Lstat) protects this case.
+func TestPrepareScionLayout_SkipsRelocationWhenHomeDirResolvesUnderRootDir(t *testing.T) {
+	rootDir := t.TempDir()
+
+	seedHomeDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(seedHomeDir, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	paths1, err := prepareScionLayout(rootDir, "test-agent", RunConfig{HomeDir: seedHomeDir})
+	if err != nil {
+		t.Fatalf("first prepareScionLayout() error = %v", err)
+	}
+
+	// ancestorLink is a symlink to agentHome's own parent directory.
+	// Joining "home" onto it reaches the same real /scion home as
+	// paths1.agentHome, but os.Lstat on the joined path sees an ordinary
+	// directory: Lstat only leaves its own final path component
+	// unresolved, and that component (the ancestor symlink) is not it.
+	ancestorLink := filepath.Join(t.TempDir(), "ancestor-link")
+	if err := os.Symlink(filepath.Dir(paths1.agentHome), ancestorLink); err != nil {
+		t.Fatal(err)
+	}
+	homeDirThroughAncestor := filepath.Join(ancestorLink, filepath.Base(paths1.agentHome))
+
+	if info, err := os.Lstat(homeDirThroughAncestor); err != nil {
+		t.Fatalf("fixture check: homeDirThroughAncestor Lstat failed: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("fixture check: homeDirThroughAncestor must not itself be a symlink")
+	}
+
+	paths2, err := prepareScionLayout(rootDir, "test-agent", RunConfig{HomeDir: homeDirThroughAncestor})
+	if err != nil {
+		t.Fatalf("second prepareScionLayout() error = %v", err)
+	}
+	if paths2.agentHome != paths1.agentHome {
+		t.Fatalf("agentHome changed: %q vs %q", paths1.agentHome, paths2.agentHome)
+	}
+
+	data, err := os.ReadFile(filepath.Join(paths2.agentHome, "agent-info.json"))
+	if err != nil {
+		t.Fatalf("agent-info.json missing (home content lost): %v", err)
+	}
+	if string(data) != `{"test": true}` {
+		t.Errorf("agent-info.json content = %q, want %q", string(data), `{"test": true}`)
+	}
+
+	info, err := os.Lstat(paths2.agentHome)
+	if err != nil {
+		t.Fatalf("agentHome missing: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Errorf("agentHome became a symlink (self-reference); expected a plain directory")
+	}
+}
+
+// TestPrepareScionLayout_LeavesPreExistingHomeSymlinkUntouched covers a
+// HomeDir that is already a symlink to some other real directory entirely
+// outside rootDir -- not one relocateToScion itself created, just an
+// ordinary symlinked home. relocateToScion's own Lstat check, given the
+// original HomeDir, recognizes the symlink and does nothing, leaving the
+// real directory it points to exactly as it was. Passing the validator's
+// resolved form instead would hand relocateToScion the real directory
+// itself (Lstat on it never reports a symlink), so it would relocate that
+// unrelated directory's content into this agent's /scion home and replace
+// it with a symlink -- neither skip condition catches this, since the
+// resolved path is neither this agent's own /scion home nor under rootDir.
+func TestPrepareScionLayout_LeavesPreExistingHomeSymlinkUntouched(t *testing.T) {
+	rootDir := t.TempDir()
+	realTarget := t.TempDir()
+	if err := os.WriteFile(filepath.Join(realTarget, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	homeDir := filepath.Join(t.TempDir(), "home")
+	if err := os.Symlink(realTarget, homeDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := prepareScionLayout(rootDir, "test-agent", RunConfig{HomeDir: homeDir}); err != nil {
+		t.Fatalf("prepareScionLayout() error = %v", err)
+	}
+
+	info, err := os.Lstat(realTarget)
+	if err != nil {
+		t.Fatalf("realTarget missing: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("realTarget was replaced with a symlink; expected it to be left untouched")
+	}
+	if _, err := os.Stat(filepath.Join(realTarget, "agent-info.json")); err != nil {
+		t.Errorf("realTarget content missing: %v", err)
+	}
+
+	link, err := os.Readlink(homeDir)
+	if err != nil {
+		t.Fatalf("homeDir is no longer a symlink: %v", err)
+	}
+	if link != realTarget {
+		t.Errorf("homeDir symlink target changed: got %q, want %q", link, realTarget)
+	}
+}
+
+// TestPrepareScionLayout_RejectsUnsafeWorkspaceSource is the fail-closed
+// regression test for the workspace-copy site: cfg.Workspace already went
+// through pkg/agent Start()'s validation to reach this RunConfig, but this
+// call site should not depend on that alone. An unsafe value must be
+// refused before copyDirContents ever reads from it, not just logged.
+func TestPrepareScionLayout_RejectsUnsafeWorkspaceSource(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{Workspace: "/"}
+
+	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err == nil {
+		t.Fatal("expected prepareScionLayout to fail for a workspace source of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed workspace path") {
+		t.Errorf("expected the rejection to come from workspace source validation, got: %v", err)
+	}
+
+	// The workspace directory itself is created unconditionally (mkdir, not
+	// copy), so "nothing was copied" means it exists but is empty -- proving
+	// the rejected source was never actually read from.
+	entries, readErr := os.ReadDir(paths.workspace)
+	if readErr != nil {
+		t.Fatalf("ReadDir(%q): %v", paths.workspace, readErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected no files copied into %q after rejection, found: %v", paths.workspace, entries)
+	}
+}
+
+// TestPrepareScionLayout_CopiesLegitimateScionHomeWorkspace is the positive
+// acceptance-set counterpart: this call site has no per-project root (same
+// reasoning as buildCommonRunArgs and the k8s runtime's Run()), so it
+// depends entirely on the validator's named ~/.scion allow list to still
+// admit and copy from a real workspace under ~/.scion.
+func TestPrepareScionLayout_CopiesLegitimateScionHomeWorkspace(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	workspace := filepath.Join(tmpHome, ".scion", "projects", "my-project", "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "hello.txt"), []byte("hi"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rootDir := t.TempDir()
+	cfg := RunConfig{Workspace: workspace}
+
+	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err != nil {
+		t.Fatalf("expected %q to be accepted by workspace source validation, got error: %v", workspace, err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(paths.workspace, "hello.txt"))
+	if err != nil {
+		t.Fatalf("hello.txt not found at scion workspace path: %v", err)
+	}
+	if string(data) != "hi" {
+		t.Errorf("hello.txt content = %q, want %q", string(data), "hi")
+	}
+}
+
+// TestPrepareScionLayout_RejectsUnsafeHomeDir is
+// TestPrepareScionLayout_RejectsUnsafeWorkspaceSource's counterpart for
+// cfg.HomeDir: an unsafe value must be refused before relocateToScion ever
+// reads from it.
+func TestPrepareScionLayout_RejectsUnsafeHomeDir(t *testing.T) {
+	rootDir := t.TempDir()
+	cfg := RunConfig{HomeDir: "/"}
+
+	_, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	if err == nil {
+		t.Fatal("expected prepareScionLayout to fail for a home directory of '/'")
+	}
+	if !strings.Contains(err.Error(), "is not an allowed agent home path") {
+		t.Errorf("expected the rejection to come from agent home source validation, got: %v", err)
+	}
+}
+
+// TestPrepareScionLayout_AcceptsRealAgentHomes covers the positive
+// acceptance set for cfg.HomeDir: the three real shapes
+// config.GetAgentHomePath produces under ~/.scion, each relocated to the
+// sandbox's own /scion path the same way
+// TestPrepareScionLayout_RelocatesHomeDir already proves for a plain
+// directory.
+func TestPrepareScionLayout_AcceptsRealAgentHomes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	tests := []struct {
+		name    string
+		relPath []string
+	}{
+		{name: "global project agent home", relPath: []string{".scion", "agents", "a", "home"}},
+		{name: "hub-managed project agent home", relPath: []string{".scion", "projects", "p", ".scion", "agents", "a", "home"}},
+		{name: "externalized git project agent home", relPath: []string{".scion", "project-configs", "d__1", ".scion", "agents", "a", "home"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parts := append([]string{tmpHome}, tt.relPath...)
+			homeDir := filepath.Join(parts...)
+			if err := os.MkdirAll(homeDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(homeDir, "agent-info.json"), []byte(`{"test": true}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			rootDir := t.TempDir()
+			cfg := RunConfig{HomeDir: homeDir}
+			paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+			if err != nil {
+				t.Fatalf("expected %q to be accepted, got error: %v", homeDir, err)
+			}
+
+			data, err := os.ReadFile(filepath.Join(paths.agentHome, "agent-info.json"))
+			if err != nil {
+				t.Fatalf("agent-info.json not found at scion path: %v", err)
+			}
+			if string(data) != `{"test": true}` {
+				t.Errorf("agent-info.json content = %q, want %q", string(data), `{"test": true}`)
+			}
+		})
+	}
+}
+
 // -----------------------------------------------------------------------
 // List tests
 // -----------------------------------------------------------------------
@@ -1733,7 +2028,7 @@ func TestCloudRunSandboxRuntime_Delete(t *testing.T) {
 
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-del", AgentID: "agent-del"})
 
-	err := rt.Delete(context.Background(), "sb-del")
+	err := rt.Delete(context.Background(), RunRef{ID: "sb-del"})
 	if err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
@@ -1773,7 +2068,7 @@ func TestCloudRunSandboxRuntime_Stop(t *testing.T) {
 
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-stop", AgentID: "agent-stop"})
 
-	err := rt.Stop(context.Background(), "sb-stop")
+	err := rt.Stop(context.Background(), RunRef{ID: "sb-stop"})
 	if err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}

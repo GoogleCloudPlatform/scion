@@ -51,6 +51,7 @@ func newEventHandlerTestServer(st store.Store) *Server {
 	return &Server{
 		store:             st,
 		agentLifecycleLog: slog.Default(),
+		authzService:      NewAuthzService(st, slog.Default()),
 	}
 }
 
@@ -599,6 +600,16 @@ func (m *mockScheduledEventStore) ListSkillInjections(_ context.Context, _, _ st
 }
 
 func (m *mockScheduledEventStore) GetEffectiveGroups(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (m *mockScheduledEventStore) GetEffectiveGroupsForAgent(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+// GetDelegationEdgesForDelegate returns no edges; the mock store has no
+// backfill marker, so an agent without an edge is evaluated pre-backfill.
+func (m *mockScheduledEventStore) GetDelegationEdgesForDelegate(_ context.Context, _, _ string) ([]*store.DelegationEdge, error) {
 	return nil, nil
 }
 
@@ -1273,8 +1284,8 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.
@@ -1300,8 +1311,8 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.
@@ -1996,6 +2007,45 @@ func TestSchedulerMaxConcurrencyAcrossTicks(t *testing.T) {
 	}
 }
 
+// TestSchedulerTickCountConcurrentStatus is the race-detector regression for
+// ptone/scion#2042: the ticker goroutine advances tickCount while Status()
+// and the dispatched handlers read it. It needs no store, so it also runs in
+// the -tags no_sqlite race job; it reports a race only under -race, and here
+// just checks that ticks advance and Status() stays usable throughout.
+func TestSchedulerTickCountConcurrentStatus(t *testing.T) {
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
+	s.tickInterval = time.Millisecond
+	s.MaxJitter = 0
+
+	var runs atomic.Int64
+	s.RegisterRecurring("tick-reader", 1, func(_ context.Context) { runs.Add(1) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	deadline := time.Now().Add(50 * time.Millisecond)
+	var last uint64
+	for time.Now().Before(deadline) {
+		st := s.Status()
+		if st.TickCount < last {
+			t.Fatalf("tickCount went backwards: %d after %d", st.TickCount, last)
+		}
+		last = st.TickCount
+		// Yield so the loop cannot spin-starve the ticker goroutine on a
+		// loaded CI runner.
+		time.Sleep(time.Millisecond)
+	}
+	s.Stop()
+
+	if last == 0 {
+		t.Error("tickCount never advanced; the ticker did not run concurrently with Status()")
+	}
+	if runs.Load() == 0 {
+		t.Error("recurring handler never ran")
+	}
+}
+
 func TestSchedulerUnlimitedConcurrency(t *testing.T) {
 	// With MaxConcurrency=0 (unlimited), all handlers should run concurrently.
 	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
@@ -2095,6 +2145,252 @@ func TestSchedulerMultipleOptions(t *testing.T) {
 	if s.MaxConcurrency != 3 {
 		t.Errorf("expected MaxConcurrency 3, got %d", s.MaxConcurrency)
 	}
+}
+
+// ============================================================================
+// Launch Reaper Ticker Tests (design §3.7)
+//
+// These test RegisterLaunchReaper's Scheduler-level guarantees only: its own
+// interval independent of the root ticker, bypassing s.sem, no overlap
+// between ticks, and Stop lifecycle. The reaper's store-level behavior
+// (arming, deadline/staleness selection, per-row reap) is covered by
+// pkg/store/entadapter's H-2 tests; it is not re-verified here.
+// ============================================================================
+
+// waitForNTicks receives from ticks n times, each within perTickTimeout, and
+// fails the test if any single receive times out. Used instead of a fixed
+// sleep-then-count-atomics window so these tests aren't sensitive to CI
+// machine speed: a slow machine just takes longer per receive, rather than
+// asserting on a count sampled after a fixed wall-clock duration.
+func waitForNTicks(t *testing.T, ticks <-chan struct{}, n int, perTickTimeout time.Duration) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-ticks:
+		case <-time.After(perTickTimeout):
+			t.Fatalf("timed out waiting for tick %d/%d", i+1, n)
+		}
+	}
+}
+
+// TestSchedulerLaunchReaperOwnInterval verifies the reaper ticks on its own
+// interval, independent of a much longer root tickInterval: with the root
+// ticker effectively parked (tick 0 only, until the test ends), the reaper
+// still fires repeatedly on its own 20ms ticker.
+func TestSchedulerLaunchReaperOwnInterval(t *testing.T) {
+	s := NewScheduler(nil, slog.Default())
+	s.tickInterval = 10 * time.Second // root ticker: effectively never fires again after tick 0
+	s.MaxJitter = 0
+
+	ticks := make(chan struct{}, 16)
+	s.RegisterLaunchReaper(20*time.Millisecond, func(_ context.Context) {
+		ticks <- struct{}{}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	waitForNTicks(t, ticks, 4, 2*time.Second)
+	s.Stop()
+}
+
+// TestSchedulerLaunchReaperBypassesSemaphore verifies the reaper still ticks
+// promptly while s.sem (MaxConcurrency=1) is fully held by an unrelated slow
+// recurring handler — the design's justification for bypassing it entirely
+// (an unrelated handler must never be able to gate the deadline rule).
+func TestSchedulerLaunchReaperBypassesSemaphore(t *testing.T) {
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(1))
+	s.tickInterval = 20 * time.Millisecond
+	s.MaxJitter = 0
+
+	// A recurring handler that holds the only semaphore slot for the whole test.
+	held := make(chan struct{})
+	s.RegisterRecurring("hog", 1, func(ctx context.Context) {
+		select {
+		case <-held:
+		case <-ctx.Done():
+		}
+	})
+
+	ticks := make(chan struct{}, 16)
+	s.RegisterLaunchReaper(15*time.Millisecond, func(_ context.Context) {
+		ticks <- struct{}{}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	waitForNTicks(t, ticks, 4, 2*time.Second)
+	close(held)
+	s.Stop()
+}
+
+// TestSchedulerLaunchReaperTicksNeverOverlap verifies a slow reaper tick
+// delays the next tick rather than letting ticks run concurrently: with a
+// handler that sleeps longer than the ticker interval, no two invocations
+// ever run at the same time. The test waits for a fixed number of ticks via
+// a channel (rather than sleeping a fixed wall-clock window and sampling a
+// count) so it isn't sensitive to CI machine speed.
+func TestSchedulerLaunchReaperTicksNeverOverlap(t *testing.T) {
+	s := NewScheduler(nil, slog.Default())
+	s.tickInterval = 10 * time.Second
+	s.MaxJitter = 0
+
+	const handlerDuration = 40 * time.Millisecond
+	var (
+		running    atomic.Int32
+		overlapped atomic.Bool
+	)
+	ticks := make(chan struct{}, 16)
+	s.RegisterLaunchReaper(10*time.Millisecond, func(_ context.Context) {
+		if running.Add(1) > 1 {
+			overlapped.Store(true)
+		}
+		time.Sleep(handlerDuration)
+		running.Add(-1)
+		ticks <- struct{}{}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	// The ticker interval (10ms) is far shorter than handlerDuration (40ms),
+	// so if serialization ever failed, many overlapping ticks would already
+	// have piled up by the time these first few complete.
+	waitForNTicks(t, ticks, 4, 2*time.Second)
+	s.Stop()
+
+	if overlapped.Load() {
+		t.Error("expected launch reaper ticks to never overlap, but two invocations ran concurrently")
+	}
+}
+
+// TestSchedulerLaunchReaperStopsOnStop verifies Stop halts the reaper's
+// dedicated ticker goroutine (no further ticks fire after it returns) and
+// does not return while a tick is still in flight: it blocks the handler on
+// a channel, calls Stop in a goroutine, asserts Stop has NOT returned while
+// the handler is still blocked, then releases the handler and asserts Stop
+// returns promptly.
+func TestSchedulerLaunchReaperStopsOnStop(t *testing.T) {
+	s := NewScheduler(nil, slog.Default())
+	s.tickInterval = 10 * time.Second
+	s.MaxJitter = 0
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	var enteredOnce sync.Once
+	s.RegisterLaunchReaper(10*time.Millisecond, func(_ context.Context) {
+		calls.Add(1)
+		first := false
+		enteredOnce.Do(func() { first = true; close(entered) })
+		if first {
+			<-release
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the reaper's first tick to start")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while a tick was still blocked in its handler")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Wait for Stop to have actually run close(s.stopCh) before releasing the
+	// blocked handler — not just "100ms elapsed" — so the release can never
+	// race a not-yet-closed stopCh against ticker.C in the loop's select
+	// (in-package access to the unexported field is fine from this test).
+	select {
+	case <-s.stopCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop never signalled (stopCh was not closed)")
+	}
+
+	close(release)
+
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return after the in-flight tick's handler was released")
+	}
+
+	// runLaunchReaperLoop re-checks stopCh/ctx.Done() immediately before
+	// running a tick it read off ticker.C, so exactly the one tick Stop
+	// waited on must have run — a second tick cannot sneak in via the
+	// stopCh/ticker.C race in the loop's outer select.
+	afterStop := calls.Load()
+	if afterStop != 1 {
+		t.Fatalf("expected exactly 1 reaper tick by the time Stop returned, got %d", afterStop)
+	}
+
+	// Give a would-be leaked goroutine time to fire a spurious extra tick.
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != afterStop {
+		t.Errorf("reaper ticked %d more time(s) after Stop returned; expected the dedicated ticker goroutine to have exited", got-afterStop)
+	}
+
+	// Calling Stop twice must not panic (same contract as the root ticker).
+	s.Stop()
+}
+
+// TestSchedulerLaunchReaperPanicRecovery verifies a panicking reaper tick is
+// recovered and does not take down the ticker goroutine, so subsequent ticks
+// still fire — this is the launch reaper's safety net, so a code bug in it
+// must not itself become an outage.
+func TestSchedulerLaunchReaperPanicRecovery(t *testing.T) {
+	s := NewScheduler(nil, slog.Default())
+	s.tickInterval = 10 * time.Second
+	s.MaxJitter = 0
+
+	ticks := make(chan struct{}, 16)
+	s.RegisterLaunchReaper(15*time.Millisecond, func(_ context.Context) {
+		ticks <- struct{}{}
+		panic("test panic")
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	waitForNTicks(t, ticks, 3, 2*time.Second)
+	s.Stop()
+}
+
+// TestSchedulerNoLaunchReaperRegistered verifies Start/Stop are unaffected
+// when no launch reaper was registered on this Scheduler instance — no extra
+// goroutine, no panic, no hang. Every production Scheduler does register one
+// (Server.registerLaunchReaper, called unconditionally from
+// registerSchedulerHandlers — see TestRegisterSchedulerHandlers_RegistersLaunchReaper);
+// this test only covers a bare *Scheduler that never called
+// RegisterLaunchReaper, such as one built directly in a test.
+func TestSchedulerNoLaunchReaperRegistered(t *testing.T) {
+	s := newTestScheduler(20 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	s.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+	s.Stop()
 }
 
 // #1797: an agent creator's scheduled dispatch records the creator agent's

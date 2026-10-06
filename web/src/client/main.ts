@@ -30,12 +30,22 @@ import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
-import { chatUnread } from './chat-unread.js';
+import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
 import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
-import { isFeatureEnabled, setFeatureFlag } from '../utils/feature-flags.js';
+import {
+  TERMINAL_PALETTE_NEW_AGENT_EVENT,
+  type TerminalPaletteNewAgentDetail,
+} from './terminal-workspace-events.js';
+import { nonOwnerOpenStatus, openPalettePickedAgent } from './terminal-palette-open.js';
+import { showToast } from '../utils/toast.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
+import { applyServerFeatureFlags } from './server-feature-flags.js';
+import { setPreferredTimeZone } from '../utils/time.js';
+import { withTimeout } from './with-timeout.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -44,35 +54,21 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { chatRecentFiles } from './chat-recent-files.js';
+import { pushRouteEntry, type RouteShell } from './route-history.js';
+import { browserPath, stripBasePath } from './navigation.js';
+import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
+import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
   shouldClearRecentFilesOnTeardown,
 } from './chat-recent-files-lifecycle.js';
 
 /**
- * Strip the Vite base path prefix from a URL pathname so the client-side
- * router can match application routes when served behind a reverse proxy.
- * Uses import.meta.env.BASE_URL which Vite injects at build/dev time.
- * When base is '/' (no proxy), this is a no-op.
+ * Milliseconds `init()` waits for the SSR-path display-timezone refresh
+ * before proceeding with the first render in Auto and letting
+ * `DisplayZoneController` correct it late (review R3-1).
  */
-function stripBasePath(pathname: string): string {
-  const base = import.meta.env.BASE_URL;
-  if (!base || base === '/') return pathname;
-
-  // Normalize: strip trailing slash from base for comparison
-  const baseNoSlash = base.replace(/\/$/, '');
-
-  // Exact match (base path without trailing slash, e.g. /foo)
-  if (pathname === baseNoSlash) return '/';
-
-  // Prefix match (e.g. /foo/bar → /bar)
-  if (pathname.startsWith(base)) {
-    const stripped = pathname.slice(base.length - 1); // keep leading /
-    return stripped || '/';
-  }
-
-  return pathname;
-}
+const TZ_LOAD_BUDGET_MS = 1500;
 
 // Inject theme CSS so it loads regardless of whether the page is served by
 // the Vite dev server (index.html) or the Go SPA shell template (web.go).
@@ -150,6 +146,7 @@ let cachedAdminStatus: AdminStatus | null = null;
 let terminalWorkspaceEnabled = false;
 let terminalCoordinator: TerminalCoordinator | null = null;
 let terminalWorkspace: TerminalWorkspaceRoot | null = null;
+let terminalPersistence: TerminalWorkspacePersistence | null = null;
 /** Set after account teardown to prevent stale callbacks from recreating sessions. */
 let accountTornDown = false;
 let routeOutlet: HTMLElement | null = null;
@@ -157,11 +154,6 @@ const terminalNavigations = new Map<string, number>();
 const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const terminalAgentRoute = new RegExp(`^/terminals/(${uuidPath})$`, 'i');
 const legacyTerminalRoute = new RegExp(`^/agents/(${uuidPath})/terminal$`, 'i');
-
-function browserPath(path: string): string {
-  const base = import.meta.env.BASE_URL;
-  return base && base !== '/' ? base.replace(/\/$/, '') + path : path;
-}
 
 function ensureRoots(): HTMLElement | null {
   const app = document.getElementById('app');
@@ -190,7 +182,8 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
     {
       initialize: (): Promise<TerminalResources> =>
         Promise.reject(new Error('Retained pane initializer required.')),
-      create: (registry, agentId): TerminalSession => terminalWorkspace!.create(registry, agentId),
+      create: (registry, agentId, options): TerminalSession =>
+        terminalWorkspace!.create(registry, agentId, options),
       select: (session, signal, requestId): void => {
         if (signal.aborted) throw new Error('Terminal workspace stopped.');
         const expected = requestId && terminalNavigations.get(requestId);
@@ -202,6 +195,33 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
       },
     }
   );
+  terminalPersistence = new TerminalWorkspacePersistence({
+    coordinator: terminalCoordinator,
+    workspace: terminalWorkspace,
+    onRestoredSelection: (agentId): void => {
+      // Only while the route is still bare /terminals: restore() can settle
+      // after the user has already navigated elsewhere.
+      if (window.location.pathname !== browserPath('/terminals') || window.location.search) return;
+      window.history.replaceState(window.history.state, '', browserPath(`/terminals/${agentId}`));
+      terminalWorkspace!.setCurrentPath(`/terminals/${agentId}`);
+    },
+  });
+  // "Jump to agent" palette, new agent in a multi-pane layout only (the
+  // workspace places an already-open agent itself, and navigates like a rail
+  // click when only one pane is on screen — see its selectFromPalette).
+  terminalWorkspace.element.addEventListener(TERMINAL_PALETTE_NEW_AGENT_EVENT, (e) => {
+    const { agentId } = (e as CustomEvent<TerminalPaletteNewAgentDetail>).detail;
+    if (!terminalCoordinator || !terminalWorkspace) return;
+    void openPalettePickedAgent({
+      coordinator: terminalCoordinator,
+      workspace: terminalWorkspace,
+      agentId,
+      navigations: terminalNavigations,
+      navigationId,
+      currentNavigationId: () => navigationId,
+      notify: (message) => showToast(message, 'neutral'),
+    });
+  });
   return terminalCoordinator;
 }
 
@@ -240,6 +260,7 @@ async function fetchCurrentUser(): Promise<User | null> {
       name: data.displayName || data.name || '',
       avatar: data.avatarUrl || data.avatar,
       role: data.role || undefined,
+      preferences: data.preferences || undefined,
     };
   } catch {
     return null;
@@ -247,25 +268,41 @@ async function fetchCurrentUser(): Promise<User | null> {
 }
 
 /**
- * Apply server-published public settings to the client feature-flag layer.
+ * Refreshes the display-timezone preference and applies it to the
+ * effective-zone store (`setPreferredTimeZone`). Used when the SSR-injected
+ * user (`prefetchPageData`, `pkg/hub/web.go`) already supplied `currentUser`
+ * without `preferences` — that field is deliberately never cached on the
+ * session (`webSessionUser.Preferences`) and so is absent from SSR data,
+ * only ever populated by a live `/auth/me` read.
  *
- * The hub owns the native chat toggle (server.native_chat.enabled); when it is
- * off the chat API endpoints are not even registered, so the UI must not offer
- * chat. Resolving this before the first render keeps the /chat route gate in
- * renderRoute() honest. Failures leave the compiled defaults in place — a
- * transient settings fetch error should not hide a working feature.
+ * Callers should bound the wait with `withTimeout` (review R3-1): this
+ * fetch is cosmetic, but blocking first render on it unconditionally means
+ * a stalled `/auth/me` (a busy store, a stuck proxy) blocks the whole shell
+ * until the browser's own fetch timeout, which can be minutes. A timed-out
+ * wait still lets this promise keep running in the background — when it
+ * lands, `setPreferredTimeZone` fires `DISPLAY_TIMEZONE_CHANGED_EVENT`, and
+ * every mounted `DisplayZoneController` subscriber re-renders in the
+ * correct zone.
+ *
+ * That self-correction is **not universal** (review R4-1): it only helps a
+ * component that re-renders cleanly from a fresh formatter call. A
+ * component that *also* caches a wall-clock string derived from the zone
+ * (e.g. a `datetime-local` input pre-populated via `toWallClockInput`) needs
+ * its own re-derivation logic on top of the controller — see
+ * `access-boundary-schedule-editor.ts`'s `willUpdate` and `time.ts`'s
+ * "Effective-zone store" header — or a late arrival silently moves an
+ * untouched field's stored instant. A bounded wait is still strictly better
+ * than an unbounded one on every surface; it just isn't a complete fix by
+ * itself for every surface.
  */
-async function applyServerFeatureFlags(): Promise<void> {
+async function loadPreferredTimeZone(): Promise<void> {
   try {
-    const res = await fetch('/api/v1/settings/public', { credentials: 'include' });
+    const res = await fetch('/auth/me', { credentials: 'include' });
     if (!res.ok) return;
-    const settings = (await res.json()) as { nativeChatEnabled?: boolean };
-    if (settings.nativeChatEnabled === false) {
-      setFeatureFlag('web.native_chat', false);
-      setFeatureFlag('web.native_chat_v2', false);
-    }
+    const data = await res.json();
+    setPreferredTimeZone(data.preferences?.timezone);
   } catch {
-    // Public settings unavailable — keep the compiled defaults.
+    // Non-critical — the effective zone falls back to the browser zone.
   }
 }
 
@@ -568,6 +605,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/harness-config-detail.js'),
   },
   {
+    // Artifact page (experiment hub.artifacts; the page renders 404 when off).
+    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+$/,
+    tag: 'scion-page-artifact-detail',
+    load: () => import('../components/pages/artifact-detail.js'),
+  },
+  {
     pattern: /^\/projects\/[^/]+\/schedules$/,
     tag: 'scion-page-project-schedules',
     load: () => import('../components/pages/project-schedules.js'),
@@ -744,6 +787,11 @@ window.addEventListener('unhandledrejection', (event) => {
 async function init(): Promise<void> {
   console.info('[Scion] Initializing client...');
 
+  // Size the app frame to the visible area while the on-screen keyboard is
+  // open (iOS), and undo any page pan in frame mode. Installed for the life
+  // of the page, so the disposer is not kept.
+  installViewportFrame();
+
   // Get initial data from SSR and hydrate state manager
   const initialData = getInitialData();
   if (initialData) {
@@ -771,8 +819,27 @@ async function init(): Promise<void> {
   const featureFlagsReady = applyServerFeatureFlags();
 
   // Fetch current user from session if not provided by SSR
+  let tzReady: Promise<void> = Promise.resolve();
   if (!currentUser) {
     currentUser = await fetchCurrentUser();
+    if (currentUser) {
+      setPreferredTimeZone(currentUser.preferences?.timezone);
+    }
+  } else {
+    // SSR supplied the user without `preferences` (never cached on the
+    // session); refresh it from the live endpoint. Awaited below alongside
+    // featureFlagsReady, not fire-and-forget (review R2-1): a chat thread
+    // already in the DOM at first render would otherwise show at least its
+    // first messages in the browser zone instead of the preference, with
+    // nothing to correct it until some unrelated re-render (the
+    // DISPLAY_TIMEZONE_CHANGED_EVENT a late-arriving preference dispatches
+    // only helps a component that is listening for it, which a component
+    // not yet mounted cannot be). Bounded to TZ_LOAD_BUDGET_MS (review
+    // R3-1): a stalled `/auth/me` must not hang first render — past the
+    // budget, render in Auto and let a late result correct itself via
+    // DisplayZoneController once it lands (the fetch itself is not
+    // cancelled, only the wait for it).
+    tzReady = withTimeout(loadPreferredTimeZone(), TZ_LOAD_BUDGET_MS).then(() => undefined);
   }
 
   // Fetch admin status early so the route guard can use the cached result
@@ -827,8 +894,12 @@ async function init(): Promise<void> {
   // Render the initial page based on current URL (strip proxy prefix for route
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
-  await featureFlagsReady;
-  terminalWorkspaceEnabled = isFeatureEnabled('web.terminal_workspace');
+  // tzReady is awaited alongside it (review R2-1), bounded to
+  // TZ_LOAD_BUDGET_MS (review R3-1); both fetches started above and
+  // overlap, so this adds no latency beyond the slower of
+  // featureFlagsReady and min(the /auth/me refresh, the budget).
+  await Promise.all([featureFlagsReady, tzReady]);
+  terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
   // The tab-title unread badge is unread state, not notification state: it
@@ -836,15 +907,20 @@ async function init(): Promise<void> {
   // every page, because an unread mention is worth seeing from the dashboard.
   // After the flags settle — with chat disabled the endpoints it reads are
   // not even registered.
-  if (currentUser && isFeatureEnabled('web.native_chat')) {
-    chatUnread.start();
-  }
+  // On a chat first page the first refresh goes out now and the page shares
+  // it; elsewhere it waits for idle (see startChatUnreadIfEligible).
+  const initialPath = stripBasePath(window.location.pathname);
+  startChatUnreadIfEligible(
+    chatUnread,
+    !!currentUser,
+    isFeatureEnabled('web.native_chat'),
+    CHAT_ROUTES.has(resolveRoute(initialPath).tag)
+  );
 
   // Setup client-side router for navigation
   setupRouter();
   // Include query string on initial render so terminal layout state
   // from a shared/bookmarked URL can be restored on page load (#1715).
-  const initialPath = stripBasePath(window.location.pathname);
   const initialSearch = window.location.search;
   await renderRoute(initialSearch ? `${initialPath}${initialSearch}` : initialPath);
 
@@ -852,6 +928,8 @@ async function init(): Promise<void> {
   // The event fires synchronously from performLogout() or auth-expiry detection
   // so cross-tab teardown completes before the page navigates away.
   window.addEventListener(ACCOUNT_TEARDOWN_EVENT, (e) => {
+    // A chat scroll position belongs to this account's session.
+    clearChatScrollAnchor();
     // Explicit logout only: suspend ingestion and clear this account's
     // persisted key and memory before the logout POST runs, so nothing async
     // can race a response into a store that is no longer this identity's. An
@@ -978,6 +1056,16 @@ async function renderRoute(path: string): Promise<void> {
       // selection to avoid a flash of single → multi layout transition.
       const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
       const layoutUrl = parseLayoutUrl(queryString);
+
+      // ── Persisted terminal list restore (ptone/scion#2278) ──────────
+      // Runs for every render into /terminals…, before the URL-driven code
+      // below: an explicit URL decides what is visible and connected, and
+      // the saved list decides rail membership only.
+      if (coordinator && terminalPersistence) {
+        await terminalPersistence.restore(restoreUrlIntent(pathname, queryString));
+        if (thisNav !== navigationId) return;
+      }
+
       if (layoutUrl && coordinator && terminalWorkspace) {
         // Suppress URL sync while restoring to avoid feedback loops
         terminalWorkspace.setSuppressUrlSync(true);
@@ -1027,13 +1115,7 @@ async function renderRoute(path: string): Promise<void> {
         const result = await coordinator.open(agentId, requestId);
         if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
         if (thisNav === navigationId && !coordinator.isOwner) {
-          terminalWorkspace?.setStatus(
-            result.status === 'selected'
-              ? 'Terminal selected in its owning tab.'
-              : result.status === 'pending'
-                ? 'Waiting for the owning tab to select this terminal.'
-                : 'Terminal workspace is unavailable in this tab.'
-          );
+          terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
         }
       }
       return;
@@ -1152,12 +1234,14 @@ async function renderRoute(path: string): Promise<void> {
     // Only skip the swap when the tag matches AND the path matches what
     // was already rendered; explicit navigation to a different chat
     // destination (e.g. /chat/space/xyz) must still render normally.
+    // The fragment is ignored: it is a one-off jump target (`#msg-…`), not
+    // part of which page is showing.
     const oldPage = shell.querySelector('[data-scion-page]');
     if (
       returningFromTerminal &&
       oldPage &&
       oldPage.tagName.toLowerCase() === tag &&
-      shell.currentPath === path
+      shell.currentPath.split('#')[0] === path.split('#')[0]
     ) {
       shell.user = currentUser;
       return;
@@ -1284,6 +1368,40 @@ function navigateTo(path: string): void {
   void renderRoute(path);
 }
 
+/**
+ * Rewrites the current URL to an equivalent app path without rendering
+ * anything, keeping its query and hash, for a page that already shows what
+ * the new path names. Records the path as the active shell's rendered path,
+ * as a render would, so returning to it (e.g. from the terminal workspace)
+ * still reuses the page. Resolves once the shell has re-rendered for it.
+ */
+function replaceRoute(path: string): Promise<void> {
+  const search = window.location.search;
+  window.history.replaceState(
+    window.history.state,
+    '',
+    browserPath(path) + search + window.location.hash
+  );
+  const shell = activeShell?.element as
+    | (HTMLElement & { currentPath: string; updateComplete?: Promise<unknown> })
+    | undefined;
+  if (!shell) return Promise.resolve();
+  shell.currentPath = search ? `${path}${search}` : path;
+  return Promise.resolve(shell.updateComplete).then(() => undefined);
+}
+
+/**
+ * Pushes a new history entry for an app path without rendering anything, for
+ * a page that has already switched itself to what the path names (e.g. the
+ * chat page opening another thread in place). Records the path as the active
+ * shell's rendered path, as a render would, so the header's mode switch
+ * remembers it and returning from the terminal workspace reuses the page.
+ * Resolves once the shell has re-rendered for it.
+ */
+function pushRoute(path: string): Promise<void> {
+  return pushRouteEntry(activeShell?.element as RouteShell | undefined, path, browserPath(path));
+}
+
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
@@ -1298,4 +1416,4 @@ if (document.readyState === 'loading') {
 export { openTerminal, terminalHref } from './open-terminal.js';
 
 // Export for use in components and tests
-export { getInitialData, navigateTo, stateManager };
+export { getInitialData, navigateTo, pushRoute, replaceRoute, stateManager };

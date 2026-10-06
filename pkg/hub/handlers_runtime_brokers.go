@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -158,6 +159,12 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Looked up once and reused for every broker in this listing (design.md
+	// §5.9, AC-P2-10): the same convention listProjectProviders uses via
+	// lookupAgentLimitDefinition, so a per-broker cap never costs more than
+	// one extra limit-definition lookup for the whole page.
+	limitDef := s.lookupAgentLimitDefinition(ctx)
+
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
 	for i, broker := range result.Items {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
@@ -167,6 +174,11 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		if caps != nil && i < len(caps) {
 			resp.Cap = caps[i]
 		}
+		// Capacity fields carry no visibility check beyond the ActionRead
+		// filter above: whoever can already see this broker row sees its
+		// capacity too, matching the providers listing's rule
+		// (ptone/scion#2061 P2.2, design.md §5.6).
+		resp.AgentLimit, resp.AgentCount, resp.AgentLimitSource = s.resolveBrokerCapacity(ctx, broker.ID, limitDef)
 		brokersWithCaps = append(brokersWithCaps, resp)
 	}
 
@@ -220,6 +232,36 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 			s.handleBrokerSecretByKey(w, r, brokerID, secretPath)
 		}
 		return
+	}
+
+	// Check for the /settings path (ptone/scion#2061 P2, ptone/scion#2177,
+	// design.md §5.4). A dedicated subresource, not an extension of PATCH on
+	// the broker itself: it keeps settings out of the heartbeat-contended
+	// row and gives a clean per-key authorization point (design.md §5.4).
+	if subPath == "settings" {
+		s.handleBrokerSettings(w, r, brokerID)
+		return
+	}
+
+	// The broker->Hub launch report (design §3.2), POST
+	// .../agents/{agentId}/launch.
+	if agentPath, ok := strings.CutPrefix(subPath, "agents/"); ok {
+		if agentID, ok := strings.CutSuffix(agentPath, "/launch"); ok {
+			// Matches the sibling path-segment routing: an id that is empty
+			// or itself contains a "/" (an extra path segment, e.g.
+			// .../agents/x/y/launch) is 404, not passed through to the
+			// handler to fail on some other validation.
+			if agentID == "" || strings.Contains(agentID, "/") {
+				NotFound(w, "Agent")
+				return
+			}
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleAgentLaunchReport(w, r, brokerID, agentID)
+			return
+		}
 	}
 
 	// Delegate to the original handler for other operations
@@ -599,6 +641,127 @@ type brokerHeartbeatRequest struct {
 	// which case the store's capabilities are
 	// left exactly as CompleteBrokerJoin last set them.
 	Capabilities *store.BrokerCapabilities `json:"capabilities,omitempty"`
+	// Inventory reports, per runtime target, whether Projects is that
+	// target's complete inventory (see hubclient.BrokerInventory). Omitted by
+	// an older broker, in which case the missing-container reconcile never
+	// runs for it.
+	Inventory *brokerInventory `json:"inventory,omitempty"`
+	// WorkspaceStorage refreshes the broker's stored workspace storage
+	// descriptor (see hubclient.BrokerHeartbeat.WorkspaceStorage). Omitted
+	// by an older broker, in which case the stored descriptor is left
+	// unchanged.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// ProfileAttach refreshes the Attach field of the broker's stored
+	// profiles (see hubclient.BrokerHeartbeat.ProfileAttach). Omitted by
+	// an older broker, in which case the stored profiles are left
+	// unchanged.
+	ProfileAttach []brokerProfileAttach `json:"profileAttach,omitempty"`
+	// ProfileSAMappings refreshes the GSA mappings of the broker's stored
+	// Kubernetes profiles (see hubclient.ProfileSAMappingsState). Omitted
+	// by an older broker, or when unchanged since the broker last sent it,
+	// in which case the stored mappings are left unchanged.
+	ProfileSAMappings []brokerProfileSAMappings `json:"profileSAMappings,omitempty"`
+	// StartsInFlight lists the agent starts still running on the broker
+	// (see hubclient.BrokerHeartbeat.StartsInFlight). Trusted to be complete
+	// only when Capabilities.StartsInFlight is set.
+	StartsInFlight []brokerStartInFlight `json:"startsInFlight,omitempty"`
+	// DefaultProfile refreshes the broker's stored default profile name
+	// (see hubclient.BrokerHeartbeat.DefaultProfile). Omitted by an older
+	// broker, in which case the stored value is left unchanged.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
+}
+
+// brokerStartInFlight mirrors hubclient.StartInFlight.
+type brokerStartInFlight struct {
+	ProjectID string `json:"projectId"`
+	Slug      string `json:"slug"`
+}
+
+// brokerProfileAttach is one profile's attach capability in a heartbeat.
+type brokerProfileAttach struct {
+	Name   string `json:"name"`
+	Attach bool   `json:"attach"`
+}
+
+// applyProfileAttach sets the Attach field of each stored profile named in
+// reported to the reported value, and reports whether any stored value
+// changed. Only profiles already registered are updated: a reported name
+// with no stored profile is ignored (the profile set itself is still
+// recorded at registration), and a stored profile the heartbeat does not
+// name keeps its value, which may be nil (read as supported).
+func applyProfileAttach(profiles []store.BrokerProfile, reported []brokerProfileAttach) bool {
+	if len(reported) == 0 || len(profiles) == 0 {
+		return false
+	}
+	byName := make(map[string]bool, len(reported))
+	for _, r := range reported {
+		byName[r.Name] = r.Attach
+	}
+	changed := false
+	for i := range profiles {
+		v, ok := byName[profiles[i].Name]
+		if !ok {
+			continue
+		}
+		if profiles[i].Attach != nil && *profiles[i].Attach == v {
+			continue
+		}
+		profiles[i].Attach = boolPtr(v)
+		changed = true
+	}
+	return changed
+}
+
+// brokerProfileSAMappings is one profile's GSA mappings in a heartbeat.
+type brokerProfileSAMappings struct {
+	Name                   string                         `json:"name"`
+	ServiceAccountMappings []store.BrokerProfileSAMapping `json:"serviceAccountMappings"`
+}
+
+// applyProfileSAMappings stores each reported profile's GSA mappings on the
+// stored profile of the same name and marks it MappingsReported, and
+// reports whether anything changed. The report lists every Kubernetes
+// profile of the broker, so a stored profile it omits (for example one
+// switched from Kubernetes to docker) has its report cleared. Like
+// applyProfileAttach, a reported name with no stored profile is ignored, a
+// broker with no stored profiles (a flat Runtime Broker row) gets nothing,
+// and an absent report (an older broker, or an empty list, which the wire
+// format omits) changes nothing.
+func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerProfileSAMappings) bool {
+	if len(reported) == 0 || len(profiles) == 0 {
+		return false
+	}
+	byName := make(map[string][]store.BrokerProfileSAMapping, len(reported))
+	for _, r := range reported {
+		byName[r.Name] = r.ServiceAccountMappings
+	}
+	changed := false
+	for i := range profiles {
+		mappings, ok := byName[profiles[i].Name]
+		if !ok {
+			if profiles[i].MappingsReported || len(profiles[i].ServiceAccountMappings) > 0 {
+				profiles[i].MappingsReported = false
+				profiles[i].ServiceAccountMappings = nil
+				changed = true
+			}
+			continue
+		}
+		if profiles[i].MappingsReported && reflect.DeepEqual(profiles[i].ServiceAccountMappings, mappings) {
+			continue
+		}
+		if len(mappings) == 0 && len(profiles[i].ServiceAccountMappings) == 0 && profiles[i].MappingsReported {
+			continue
+		}
+		profiles[i].ServiceAccountMappings = mappings
+		profiles[i].MappingsReported = true
+		changed = true
+	}
+	return changed
+}
+
+// boolPtr returns a pointer to a copy of b.
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
@@ -610,6 +773,9 @@ type brokerProjectHeartbeat struct {
 
 // brokerAgentHeartbeat is per-agent status in a heartbeat.
 type brokerAgentHeartbeat struct {
+	// RuntimeTarget is the inventory target that listed the agent.
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+
 	Slug            string `json:"slug"`   // Agent's URL-safe identifier (name)
 	Status          string `json:"status"` // Session status (WORKING, THINKING, etc.)
 	Phase           string `json:"phase,omitempty"`
@@ -619,7 +785,7 @@ type brokerAgentHeartbeat struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", or "evicted" (see state.ExitReason)
 }
 
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
@@ -657,10 +823,43 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
+	// Snapshot the broker row before this heartbeat is stored: the
+	// missing-container reconcile needs to know whether the broker was
+	// already online and fresh, or is returning from a stale/offline period.
+	// Only read when the heartbeat could drive a reconcile.
+	var prevBroker *store.RuntimeBroker
+	if len(heartbeat.completeTargets()) > 0 {
+		if b, err := s.store.GetRuntimeBroker(ctx, id); err == nil {
+			prevBroker = b
+		}
+	}
+
 	// Update the broker's heartbeat status
 	if err := s.store.UpdateRuntimeBrokerHeartbeat(ctx, id, heartbeat.Status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// heartbeatBroker is loaded at most once per heartbeat, on first use: either
+	// eagerly right below when Capabilities need refreshing, or lazily by
+	// loadHeartbeatBroker the first time an agent's Runtime backfill actually
+	// needs it (ptone/scion#2262). Current brokers report Capabilities on
+	// every heartbeat, so this is normally the one read the Capabilities
+	// refresh already makes, and the Runtime backfill reuses it rather than
+	// adding another. A heartbeat without Capabilities reads the broker only
+	// if some agent needs a Runtime backfill. The error (if any) is cached
+	// alongside the broker so each caller can log it with its own message
+	// and level.
+	var heartbeatBroker *store.RuntimeBroker
+	var heartbeatBrokerErr error
+	var heartbeatBrokerLoaded bool
+	loadHeartbeatBroker := func() (*store.RuntimeBroker, error) {
+		if heartbeatBrokerLoaded {
+			return heartbeatBroker, heartbeatBrokerErr
+		}
+		heartbeatBrokerLoaded = true
+		heartbeatBroker, heartbeatBrokerErr = s.store.GetRuntimeBroker(ctx, id)
+		return heartbeatBroker, heartbeatBrokerErr
 	}
 
 	// Design §3.4 Amendment A2.2(b): refresh stored capabilities from every heartbeat that
@@ -670,20 +869,55 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// --force re-registration. An old broker sends no Capabilities field at
 	// all, and the store keeps whatever it already had (nil-safe: a missing
 	// field, not an empty struct, is the "don't touch" signal).
-	if heartbeat.Capabilities != nil {
-		if broker, err := s.store.GetRuntimeBroker(ctx, id); err != nil {
-			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
+	// WorkspaceStorage and DefaultProfile follow the same rule, so the hub
+	// sees share health and default-profile changes within one heartbeat.
+	// All are persisted in a single update, and only when something
+	// changed.
+	//
+	// Keeping an omitted descriptor means a broker downgraded to a version
+	// that does not report one keeps its last descriptor, Healthy included,
+	// indefinitely. That is safe because move eligibility never relies on
+	// the descriptor alone: the capability check reads AgentMove from the
+	// Capabilities every heartbeat refreshes (an old broker reports none),
+	// and the target health check also probes live reachability.
+	// ProfileAttach follows the same rule: only profiles the heartbeat
+	// names are updated, and only when their stored Attach differs.
+	// ProfileSAMappings likewise.
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 {
+		if broker, err := loadHeartbeatBroker(); err != nil {
+			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
-		} else if !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
-			broker.Capabilities = heartbeat.Capabilities
-			if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-				s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
-					"broker_id", id, "error", err)
+		} else {
+			changed := false
+			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
+				broker.Capabilities = heartbeat.Capabilities
+				changed = true
+			}
+			if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(broker.WorkspaceStorage, heartbeat.WorkspaceStorage) {
+				broker.WorkspaceStorage = heartbeat.WorkspaceStorage
+				changed = true
+			}
+			if heartbeat.DefaultProfile != nil && broker.DefaultProfile != *heartbeat.DefaultProfile {
+				broker.DefaultProfile = *heartbeat.DefaultProfile
+				changed = true
+			}
+			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
+				changed = true
+			}
+			if applyProfileSAMappings(broker.Profiles, heartbeat.ProfileSAMappings) {
+				changed = true
+			}
+			if changed {
+				if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
+					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
+						"broker_id", id, "error", err)
+				}
 			}
 		}
 	}
 
 	// Process agent status updates from each project
+	report := newHeartbeatReport()
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
 			// Look up the agent by name (slug) within the project
@@ -691,18 +925,22 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if err != nil {
 				// Agent not found in this project - skip silently
 				// This can happen if the agent exists locally but isn't registered on the Hub
+				report.unresolvedSlugs[agentHB.Slug] = true
 				continue
 			}
 
 			// Defense in depth: skip agents not assigned to the targeted broker.
 			// Caller authorization is handled above at the handler level.
 			if agent.RuntimeBrokerID != id {
+				report.unresolvedSlugs[agentHB.Slug] = true
 				slog.Warn("Broker attempted to update agent owned by different broker",
 					"brokerID", id,
 					"agentBrokerID", agent.RuntimeBrokerID,
 					"agent_id", agent.ID)
 				continue
 			}
+			report.present[agent.ID] = true
+			report.observed[agent.ID] = observedAgent{target: agentHB.RuntimeTarget, state: heartbeatObservedState(agentHB)}
 
 			// Build status update with agent status and container status.
 			// When the broker sends structured Phase/Activity fields, use
@@ -712,6 +950,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				ContainerStatus: agentHB.ContainerStatus,
 				Heartbeat:       true, // Ensures LastSeen is updated
 				Message:         agentHB.Message,
+			}
+			// A stop queued while the broker was offline keeps its
+			// stop_queued status and notice while it is still the agent's
+			// intent, until the stop is applied or the container is
+			// confirmed gone: any report of the agent means it has not been
+			// applied yet. A start recorded since supersedes the queued
+			// stop, and the report then applies as usual.
+			if agent.ContainerStatus == containerStatusStopQueued && agent.RunIntent == store.RunIntentStopped {
+				statusUpdate.ContainerStatus = ""
+				statusUpdate.Message = ""
 			}
 
 			// Guard: a heartbeat must never revert an agent out of a
@@ -746,8 +994,21 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				statusUpdate.Message = ""
 			}
 
+			// A delete in progress is sticky the same way (design
+			// ptone/scion#2483 §2.1): the delete engine owns the status
+			// fields while its lease is live. ContainerStatus and the
+			// Heartbeat/LastSeen bump still apply. UpdateAgentStatus repeats
+			// this check inside its transaction, but suppressing the phase
+			// here is what keeps reconcileBrokerQuotaOnPhaseChange below from
+			// acting on the reported phase. (Soft-deleted rows never get here:
+			// GetAgentBySlug skips them.)
+			agentDeleting := deletionActive(agent)
+			if agentDeleting {
+				statusUpdate.Message = ""
+			}
+
 			if agentHB.Phase != "" {
-				if agentSuspended || agentReincarnating {
+				if agentSuspended || agentReincarnating || agentDeleting {
 					// Do not let the heartbeat change the phase or propagate
 					// terminal activities while suspended or reincarnating; leave
 					// statusUpdate.Phase unset so the hub's authoritative phase is
@@ -766,6 +1027,38 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					if hbActivity.IsTerminal() && agentHB.Activity != agent.Activity {
 						statusUpdate.Activity = agentHB.Activity
 						statusUpdate.Message = agentHB.Message
+					}
+					// A Kubernetes pod disruption (preempted/evicted) is a
+					// graceful deletion: the pod gets SIGTERM, so sciontool
+					// reports a plain clean stop directly to the Hub before
+					// the broker's next heartbeat has a chance to observe
+					// the pod's disruption signal. By the time that
+					// heartbeat arrives the agent is already in a terminal
+					// phase, so without this the more specific reason is
+					// silently dropped and the agent is stuck reading as a
+					// plain stop — the exact symptom in #2528. Back it in
+					// only when nothing more specific is stored yet, and
+					// leave the phase itself untouched.
+					hbExitReason := state.ExitReason(agentHB.ExitReason)
+					isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+					if isDisruption && agent.ExitReason == "" {
+						statusUpdate.ExitReason = agentHB.ExitReason
+						statusUpdate.ExitCode = agentHB.ExitCode
+						if isGenericStopMessage(agent.Message) {
+							// The heartbeat's own ExitCode may be nil (for example
+							// a disruption observed after the agent container
+							// never started), while the agent already has one on
+							// record from an earlier update — the store update
+							// above leaves that stored value untouched when
+							// statusUpdate.ExitCode is nil, so fall back to it
+							// here too, or the message would undersell what is
+							// actually going to be stored.
+							exitCode := agentHB.ExitCode
+							if exitCode == nil {
+								exitCode = agent.ExitCode
+							}
+							statusUpdate.Message = exitStatusMessage(hbExitReason, exitCode)
+						}
 					}
 				} else {
 					// Structured path: broker sent Phase/Activity directly.
@@ -792,7 +1085,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
 							if statusUpdate.Message == "" {
-								statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", *agentHB.ExitCode)
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), agentHB.ExitCode)
 							}
 						} else if hbPhase == state.PhaseStopped && agentHB.ExitCode == nil {
 							// Legacy fallback: parse from ContainerStatus string (old broker).
@@ -802,9 +1095,21 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 								agentHB.Phase = string(state.PhaseError)
 								c := code
 								statusUpdate.ExitCode = &c
-								if statusUpdate.Message == "" {
-									statusUpdate.Message = fmt.Sprintf("Agent crashed with exit code %d", code)
-								}
+							}
+							// A structured ExitReason (for example a Kubernetes
+							// disruption, which may carry no meaningful exit code
+							// when the agent container never started) must still
+							// be persisted even when no legacy exit code parses
+							// above — a valid reason alone, with no non-zero
+							// code, is not something the ContainerStatus-parsing
+							// branch above accounts for.
+							if isValidExitReason(agentHB.ExitReason) {
+								statusUpdate.ExitReason = agentHB.ExitReason
+							} else if agentHB.ExitReason != "" {
+								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
+							}
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), statusUpdate.ExitCode)
 							}
 						} else {
 							// PhaseStopped with ExitCode == 0 (clean exit) or
@@ -815,6 +1120,38 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							} else if agentHB.ExitReason != "" {
 								slog.Debug("dropping invalid ExitReason from heartbeat", "exitReason", agentHB.ExitReason, "agent", agentHB.Slug)
 							}
+							if statusUpdate.Message == "" {
+								statusUpdate.Message = exitStatusMessage(state.ExitReason(statusUpdate.ExitReason), agentHB.ExitCode)
+							}
+						}
+					} else {
+						// The pod is still running (not yet Stopped/Error) but
+						// the broker already observed a committed Kubernetes
+						// disruption (List() reports preempted/evicted ahead of
+						// the pod actually terminating — a deletionTimestamp
+						// plus a live DisruptionTarget condition, since
+						// scheduler preemption and the eviction API usually
+						// delete the pod object outright once it does
+						// terminate, often before any heartbeat sees a
+						// terminal phase). Record the reason now so it is not
+						// lost; leave phase and message for the eventual
+						// terminal report to set, same as the
+						// agentInTerminalPhase backfill above.
+						//
+						// Known gap: a heartbeat gathered from the old pod
+						// while it was still terminating can land after a
+						// restart or create-resume has already cleared the
+						// reason for the new generation (ClearExit; see
+						// store.AgentStatusUpdate), writing the stale reason
+						// back onto it. This branch has no way to tell the
+						// old pod's identity from the new one. The window is
+						// narrow for Kubernetes: Start force-deletes a stale
+						// pod with no grace period before creating the
+						// replacement.
+						hbExitReason := state.ExitReason(agentHB.ExitReason)
+						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+						if isDisruption && agent.ExitReason == "" {
+							statusUpdate.ExitReason = agentHB.ExitReason
 						}
 					}
 
@@ -844,7 +1181,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating {
+			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating && !agentDeleting {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.
@@ -878,6 +1215,20 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 							statusUpdate.Phase = string(state.PhaseProvisioning)
 						}
 					}
+				}
+				// A non-terminal pod's structured Phase is "" by design (see
+				// List()'s committed-disruption branch in k8s_runtime.go,
+				// which reports a preempted/evicted reason while a pod is
+				// still Running), so that heartbeat lands in this legacy
+				// branch too whenever the broker's own phase tracking has
+				// nothing more specific to report. Record the reason the
+				// same way as the structured non-terminal branch above: only
+				// when nothing more specific is stored yet, without
+				// touching the phase or message derived from ContainerStatus.
+				hbExitReason := state.ExitReason(agentHB.ExitReason)
+				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
+				if isDisruption && agent.ExitReason == "" {
+					statusUpdate.ExitReason = agentHB.ExitReason
 				}
 			}
 
@@ -920,11 +1271,54 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				agent.AppliedConfig.Profile = agentHB.Profile
 				needsUpdate = true
 			}
+			// Companion to the Profile backfill above: when Runtime is
+			// still empty, resolve it from the applied profile (or from the
+			// broker's single shared profile type when the profile is
+			// unknown or unmatched) (ptone/scion#2262). This only fires for
+			// the broker sending this heartbeat, which is the broker the
+			// agent is actually running on.
+			//
+			// Runtime is persisted here (not left purely derived, the way
+			// display-time enrichment computes it on every read) because a
+			// couple of raw, unenriched reads of store.Agent surface it
+			// directly: restoreAgent publishes AgentCreatedEvent and returns
+			// agent.ToAPI() without enrichment (handlers_agent_messaging.go),
+			// and the agent-create path re-reads the row before publishing
+			// its own AgentCreatedEvent (handlers_agents_core.go) — so a
+			// heartbeat that backfills Runtime before either of those runs
+			// is reflected there.
+			//
+			// Only fires when Runtime is empty. The only other writer of a
+			// non-empty Runtime for a broker-hosted agent is the dispatch
+			// response path (httpdispatcher.go's applyBrokerResponse), which
+			// sets Runtime from the broker's own AgentInfo for the agent it
+			// actually started (recording Profile too when AppliedConfig
+			// exists), so it is authoritative and must never be overwritten
+			// by a resolveAgentRuntime guess here, even when a
+			// newly-backfilled Profile would resolve to a different value.
+			if agent.Runtime == "" {
+				broker, err := loadHeartbeatBroker()
+				if err != nil {
+					s.agentLifecycleLog.Debug("heartbeat: failed to load broker for runtime backfill", "broker_id", id, "error", err)
+				} else if rt := resolveAgentRuntime(agent, broker); rt != "" {
+					agent.Runtime = rt
+					needsUpdate = true
+				}
+			}
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
 					slog.Warn("Failed to backfill agent config from heartbeat",
-						"agent_id", agent.ID, "harnessAuth", agentHB.HarnessAuth, "profile", agentHB.Profile, "error", err)
+						"agent_id", agent.ID, "harnessAuth", agentHB.HarnessAuth, "profile", agentHB.Profile,
+						"error", err)
 				}
+			}
+			s.recordHeartbeatRuntimeTarget(ctx, agent, agentHB.RuntimeTarget)
+
+			// While a lifecycle dispatch runs, keep the phase the lifecycle
+			// path owns; the rest of the report still applies
+			// (ptone/scion#2014).
+			if s.heartbeatPhaseGuarded(agent, statusUpdate.Phase) {
+				statusUpdate.Phase = ""
 			}
 
 			// Reconcile the max_agents_per_broker reservation against the
@@ -942,13 +1336,33 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					"project_id", project.ProjectID,
 					"error", err)
 			} else {
-				// Publish SSE event so the frontend receives activity updates
-				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				// Publish SSE event so the frontend receives activity updates.
+				// A row soft-deleted between the slug lookup and this re-read
+				// (a delete finishing concurrently) publishes nothing.
+				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					s.events.PublishAgentStatus(ctx, updated)
 				}
 			}
 		}
 	}
+
+	// Reconcile running agents of this broker that the heartbeat no longer
+	// reports (their container is gone). Gated on a complete inventory and a
+	// fresh broker; see broker_heartbeat_reconcile.go.
+	s.reconcileMissingAgents(ctx, id, prevBroker, &heartbeat, report)
+
+	// Record runtime observations for start claims, once, outside the
+	// per-agent loop and in a single store transaction.
+	s.recordRecoveryObservations(ctx, id, prevBroker, &heartbeat, report)
+
+	// Stop agents that run although their run intent is stopped (a start
+	// that reached the broker after a stop).
+	s.stopAgentsRunningWithIntentStopped(ctx, id, prevBroker, &heartbeat, report)
+
+	// Settle queued stops of a broker reached over HTTP only: confirm the
+	// ones its complete inventory shows terminated, and apply the rest.
+	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
+	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -1112,4 +1526,48 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 // isValidExitReason reports whether reason is a valid ExitReason value.
 func isValidExitReason(reason string) bool {
 	return state.ExitReason(reason).IsValid()
+}
+
+// isGenericStopMessage reports whether msg is one of the stored agent.Message
+// values that carry no information beyond "the agent reported a plain stop":
+// empty (nothing recorded yet), or one of the fixed strings sciontool/the
+// hook handlers send for an ordinary graceful shutdown. A disruption reason
+// learned later from a heartbeat is strictly more informative than any of
+// these and may replace them; any other stored message is assumed to already
+// carry meaningful, possibly user-relevant text and is left alone.
+func isGenericStopMessage(msg string) bool {
+	switch msg {
+	case "", "Agent stopped", "Session ended":
+		return true
+	default:
+		return false
+	}
+}
+
+// exitStatusMessage returns the default human-readable status Message for a
+// terminal agent, derived from the resolved ExitReason and the structured
+// ExitCode reported by the broker. Kubernetes pod disruptions get their own
+// wording so a preempted or evicted agent is not reported as a generic
+// crash; every other reason (including the empty one) keeps the existing
+// "Agent crashed with exit code N" wording, and produces no message at all
+// when there is no non-zero exit code to report.
+func exitStatusMessage(reason state.ExitReason, exitCode *int) string {
+	hasNonZeroExit := exitCode != nil && *exitCode != 0
+	switch reason {
+	case state.ExitReasonPreempted:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent pod was preempted, exit code %d", *exitCode)
+		}
+		return "Agent pod was preempted"
+	case state.ExitReasonEvicted:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent pod was evicted, exit code %d", *exitCode)
+		}
+		return "Agent pod was evicted"
+	default:
+		if hasNonZeroExit {
+			return fmt.Sprintf("Agent crashed with exit code %d", *exitCode)
+		}
+		return ""
+	}
 }

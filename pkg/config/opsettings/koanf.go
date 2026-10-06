@@ -53,6 +53,7 @@ var layer0Prefixes = []string{
 	"server.storage",
 	"server.workspace_storage",
 	"server.shared_dir_storage",
+	"server.home_storage",
 	// Identity/mode
 	"server.mode",
 	"server.env",
@@ -68,6 +69,16 @@ var layer0Prefixes = []string{
 	"server.plugins",
 	// Native chat — routes are registered at startup, so toggling it needs a restart.
 	"server.native_chat",
+	// Async agent create (design §3.7) — the reaper's dedicated scheduler
+	// ticker and the clamp on LaunchTimeout are both established at startup.
+	"server.hub.async_agent_launch",
+	"server.hub.launch_timeout",
+	"server.hub.launch_keepalive_seconds",
+	// Missing-container reconcile grace — read into ServerConfig at startup.
+	"server.hub.missing_agent_grace",
+	// Conduit relay and grant settings — the relay, its internal listener and
+	// peer auth are built at startup.
+	"server.hub.conduit",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -93,13 +104,18 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.auth.authorized_domains": "authorized_domains",
 	},
 	"lifecycle": {
-		"server.hub.auto_suspend_stalled":     "auto_suspend_stalled",
-		"server.hub.stalled_threshold":        "stalled_threshold",
-		"server.hub.soft_delete_retention":    "soft_delete_retention",
-		"server.hub.soft_delete_retain_files": "soft_delete_retain_files",
+		"server.hub.auto_suspend_stalled":          "auto_suspend_stalled",
+		"server.hub.stalled_threshold":             "stalled_threshold",
+		"server.hub.soft_delete_retention":         "soft_delete_retention",
+		"server.hub.soft_delete_retain_files":      "soft_delete_retain_files",
+		"server.hub.start_claim_lease_ttl":         "start_claim_lease_ttl",
+		"server.hub.start_max_duration":            "start_max_duration",
+		"server.hub.start_unconfirmed_hold":        "start_unconfirmed_hold",
+		"server.hub.start_create_unconfirmed_hold": "start_create_unconfirmed_hold",
 	},
 	"endpoints": {
 		"server.hub.public_url": "public_url",
+		"server.hub.hub_name":   "hub_name",
 		"image_registry":        "image_registry",
 	},
 	"github_app": {
@@ -111,6 +127,12 @@ var koanfPathToJSONField = map[string]map[string]string{
 	},
 	"auto_expose_ports": {
 		"auto_expose_ports.enabled": "enabled",
+	},
+	"quotas": {
+		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
+	},
+	"agent_secrets": {
+		"agent_secrets.user_scope_only": "user_scope_only",
 	},
 	"project_defaults": {
 		"project_defaults.default_scratchpad": "default_scratchpad",
@@ -134,13 +156,18 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"authorized_domains": "server.auth.authorized_domains",
 	},
 	"lifecycle": {
-		"auto_suspend_stalled":     "server.hub.auto_suspend_stalled",
-		"stalled_threshold":        "server.hub.stalled_threshold",
-		"soft_delete_retention":    "server.hub.soft_delete_retention",
-		"soft_delete_retain_files": "server.hub.soft_delete_retain_files",
+		"auto_suspend_stalled":          "server.hub.auto_suspend_stalled",
+		"stalled_threshold":             "server.hub.stalled_threshold",
+		"soft_delete_retention":         "server.hub.soft_delete_retention",
+		"soft_delete_retain_files":      "server.hub.soft_delete_retain_files",
+		"start_claim_lease_ttl":         "server.hub.start_claim_lease_ttl",
+		"start_max_duration":            "server.hub.start_max_duration",
+		"start_unconfirmed_hold":        "server.hub.start_unconfirmed_hold",
+		"start_create_unconfirmed_hold": "server.hub.start_create_unconfirmed_hold",
 	},
 	"endpoints": {
 		"public_url":     "server.hub.public_url",
+		"hub_name":       "server.hub.hub_name",
 		"image_registry": "image_registry",
 	},
 	"github_app": {
@@ -152,6 +179,12 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"auto_expose_ports": {
 		"enabled": "auto_expose_ports.enabled",
+	},
+	"quotas": {
+		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"agent_secrets": {
+		"user_scope_only": "agent_secrets.user_scope_only",
 	},
 	"project_defaults": {
 		"default_scratchpad": "project_defaults.default_scratchpad",
@@ -216,6 +249,7 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 		"default_max_model_calls", "default_max_duration", "default_resources",
 		"default_model", "default_thinking_level",
 		"default_max_agent_role", "default_agent_role",
+		"default_runtime_broker", "default_timezone",
 		"default_gcp_identity_mode", "default_gcp_identity_service_account_id"}
 	for _, f := range fields {
 		if k.Exists(f) {

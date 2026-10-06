@@ -29,6 +29,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 // A stand-in for marked + DOMPurify. It reproduces the shapes the mention
 // post-processing has to cope with — paragraphs, fenced code, inline code and
@@ -917,6 +918,13 @@ describe('scion-chat-message delivery state', () => {
     return el.shadowRoot?.querySelector('.delivery-state');
   }
 
+  it('shows "Waking agent…" while a wake-and-send is in flight', async () => {
+    const el = await mountOutbound({ dispatchState: 'waking' });
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Waking agent');
+    expect(state?.classList.contains('waking')).toBe(true);
+  });
+
   it('shows "Agent unreachable" when dispatchFailureCode is agent_unreachable', async () => {
     const el = await mountOutbound({
       dispatchState: 'failed',
@@ -982,5 +990,389 @@ describe('scion-chat-message delivery state', () => {
     expect(state?.textContent).toContain('reincarnating');
     const icon = state?.querySelector('sl-icon');
     expect(icon?.getAttribute('name')).toBe('pause-circle');
+  });
+
+  it('shows a "Not delivered to any agent" hint for dispatchState=no_recipient', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'no_recipient',
+    });
+
+    const state = deliveryState(el);
+    expect(state).toBeTruthy();
+    expect(state?.classList.contains('no-recipient')).toBe(true);
+    expect(state?.classList.contains('dispatched')).toBe(false);
+    expect(state?.textContent).toContain('Not delivered to any agent');
+    expect(state?.textContent).toContain('mention an agent');
+    const icon = state?.querySelector('sl-icon');
+    expect(icon?.getAttribute('name')).toBe('info-circle');
+  });
+});
+
+declare global {
+  interface Window {
+    __SCION_FEATURES__?: Record<string, boolean>;
+  }
+}
+
+describe('scion-chat-message gs:// linkification', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    window.__SCION_FEATURES__ = { 'web.gcs_links': true };
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    delete window.__SCION_FEATURES__;
+  });
+
+  /**
+   * `senderIsAgent` defaults to `fromAgent` for every existing call site,
+   * where the two coincide (either both true, an agent's own message, or
+   * both false, the viewer's own message). A caller wanting to test the
+   * distinction directly — v2's "not me" `fromAgent` layout heuristic vs.
+   * the real sender kind gs:// linkification must gate on — passes it
+   * explicitly.
+   */
+  async function mountGcs(
+    body: string,
+    fromAgent: boolean,
+    senderIsAgent: boolean = fromAgent
+  ): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = body;
+    el.fromAgent = fromAgent;
+    el.senderIsAgent = senderIsAgent;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  function gcsLinks(el: ScionChatMessage): HTMLElement[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('.md-content .gcs-link') ?? []);
+  }
+
+  it('links a gs:// URI in an agent message', async () => {
+    const el = await mountGcs('see gs://bkt/dir/file.md', true);
+    const links = gcsLinks(el);
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.gcsUri).toBe('gs://bkt/dir/file.md');
+    expect(links[0].classList.contains('entity-link')).toBe(true);
+  });
+
+  it('links the cross-project-exchange URI as a single gcs link and no path link', async () => {
+    const el = await mountGcs('gs://scion-xproject-exchange/workspace-volumes/dev-brief.md', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+    expect(el.shadowRoot?.querySelectorAll('.md-content .path-link')).toHaveLength(0);
+    expect(gcsLinks(el)[0].dataset.gcsUri).toBe(
+      'gs://scion-xproject-exchange/workspace-volumes/dev-brief.md'
+    );
+  });
+
+  it('links a gs:// URI inside inline code', async () => {
+    const el = await mountGcs('run `gs://bkt/o.txt` now', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+  });
+
+  it('does not link inside a fenced code block', async () => {
+    const el = await mountGcs('```\ngs://bkt/o.txt\n```', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a directory-like trailing slash', async () => {
+    const el = await mountGcs('gs://bkt/dir/', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link a scheme-prefixed non-match', async () => {
+    const el = await mountGcs('xgs://bkt/o', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link the same text in a user-sent message', async () => {
+    const el = await mountGcs('gs://bkt/dir/file.md', false);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('does not link another user\'s message even when v2 renders it as "not me" (fromAgent=true)', async () => {
+    // v2's fromAgent means "not the viewer" for layout — true for both an
+    // agent's message and another user's message in the same topic.
+    // Linkification must gate on the real sender kind, not that heuristic.
+    const el = await mountGcs('gs://bkt/dir/file.md', true, false);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('links an agent message rendered the same way (fromAgent=true, senderIsAgent=true) as the positive control', async () => {
+    const el = await mountGcs('gs://bkt/dir/file.md', true, true);
+    expect(gcsLinks(el)).toHaveLength(1);
+  });
+
+  it('does not link when the web.gcs_links experiment is off, even for an agent message', async () => {
+    window.__SCION_FEATURES__ = { 'web.gcs_links': false };
+    const el = await mountGcs('gs://bkt/dir/file.md', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+  });
+
+  it('links a gs:// URI at the very start of the body', async () => {
+    const el = await mountGcs('gs://bkt/o.txt leads the message', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+  });
+
+  it('produces no extra attributes or elements for a hostile name (quote/onmouseover)', async () => {
+    const el = await mountGcs('gs://bkt/a"onmouseover=alert(1)', true);
+    const links = gcsLinks(el);
+    // The regex stops the object capture before the quote, so the link
+    // that renders is for "a", not the full hostile string, and no
+    // onmouseover attribute or handler is ever created.
+    expect(links).toHaveLength(1);
+    expect(links[0].dataset.gcsUri).toBe('gs://bkt/a');
+    expect(links[0].getAttribute('onmouseover')).toBeNull();
+  });
+
+  // A hostile `<img>`/`<script>` name needs the real sanitizing renderer
+  // (marked + DOMPurify) to HTML-escape the raw `<`/`>` before this pass
+  // ever sees them; this file's markdown mock renders raw markdown into
+  // `<p>` without that escaping, so it cannot validly exercise this case.
+  // Covered instead by chat-file-links.test.ts's regex-boundary unit test
+  // (the object capture stops before `<`) and by the real-Chromium spec in
+  // web/e2e/chat-file-preview/.
+
+  it('emits a composed gcs-link-click event with bucket, object, name and messageId', async () => {
+    const el = await mountGcs('gs://bkt/dir/report.md', true);
+    el.messageId = 'msg-123';
+
+    let detail: { bucket: string; object: string; name: string; messageId: string } | undefined;
+    document.addEventListener('gcs-link-click', (e) => {
+      detail = (e as CustomEvent).detail;
+    });
+
+    const link = gcsLinks(el)[0];
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(detail).toEqual({
+      bucket: 'bkt',
+      object: 'dir/report.md',
+      name: 'report.md',
+      messageId: 'msg-123',
+    });
+  });
+
+  it('gs:// link wins leftmost over an embedded /workspace path, with no path-link inside it', async () => {
+    const el = await mountGcs('gs://bkt/workspace/x.md', true);
+    expect(gcsLinks(el)).toHaveLength(1);
+    expect(el.shadowRoot?.querySelectorAll('.md-content .path-link')).toHaveLength(0);
+  });
+
+  it('does not dispatch when data-gcs-uri is present but empty', async () => {
+    const el = await mountGcs('gs://bkt/o.txt', true);
+    const link = gcsLinks(el)[0];
+    link.setAttribute('data-gcs-uri', '');
+
+    let dispatched = false;
+    document.addEventListener('gcs-link-click', () => {
+      dispatched = true;
+    });
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(dispatched).toBe(false);
+  });
+
+  it('does not dispatch when data-gcs-uri fails to parse', async () => {
+    const el = await mountGcs('gs://bkt/o.txt', true);
+    const link = gcsLinks(el)[0];
+    link.setAttribute('data-gcs-uri', 'not-a-valid-uri');
+
+    let dispatched = false;
+    document.addEventListener('gcs-link-click', () => {
+      dispatched = true;
+    });
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+
+    expect(dispatched).toBe(false);
+  });
+
+  function ghRefLinksIn(el: ScionChatMessage): HTMLAnchorElement[] {
+    return Array.from(
+      el.shadowRoot?.querySelectorAll('.md-content .gh-ref-link') ?? []
+    ) as HTMLAnchorElement[];
+  }
+
+  // Interplay with the separate GitHub shortform-ref pass (styleGithubRefs,
+  // applied after styleEntityLinks in renderContent): a fragment-shaped
+  // gs:// tail must not become a gcs-link AND then also feed a GitHub ref
+  // match, or vice versa.
+  //
+  // An extracted object immediately followed by `#` is VOID — no link at
+  // all, not a link truncated at the boundary — whenever a further
+  // non-whitespace character follows, exactly like the existing `a#frag`
+  // parity vector (chat-file-links.test.ts / pkg/hub/gcs_link_test.go, both
+  // `linked: false`). `o/r` followed by `#1` is that same shape, so the
+  // actual behaviour is zero `.gcs-link` elements here, not one truncated
+  // at `/r` with `#1` left as plain trailing text.
+  //
+  // With no gcs-link produced, styleGithubRefs runs on the entirely
+  // untouched raw text next. It does not match here either, independent of
+  // the gcs pass: GITHUB_REF_REGEX's leading boundary group rejects a
+  // preceding `/`, and both `o` (preceded by the bucket's own `/`) and `r`
+  // (preceded by `/` after `o`) are only ever reachable with a `/` right
+  // before them — the same rule already pinned by the "does not link the
+  // tail of a longer slash-separated path" case above for `a/b/c#12`.
+  //
+  // One further consequence worth noting: a cross-feature collision where
+  // the GitHub-ref pass reaches inside an existing gcs `<a>` and re-links
+  // its `#<number>` tail cannot arise from this vector shape at all — the
+  // continuation rule voids any gcs extraction at a `#` followed by a digit
+  // (or any other non-whitespace character), so a *successful* gcs-link can
+  // never itself display a trailing `#<number>` for GITHUB_REF_REGEX to even
+  // attempt matching against. The gh pass's existing `<a>`-skip
+  // (GITHUB_REF_SKIP_REGION) still exists as a general safeguard for other
+  // shapes (e.g. an object that merely resembles `owner/repo` with no `#` at
+  // all), but it is not what makes this particular case produce zero links
+  // — the void rule alone already does.
+  it('produces neither a gcs-link nor a GitHub-ref link for a gs:// URI with a fragment-continuation digit tail', async () => {
+    const el = await mountGcs('see gs://bkt/o/r#1 for details', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+    expect(ghRefLinksIn(el)).toHaveLength(0);
+    // The raw, unlinked text survives verbatim — proof this is "no link
+    // produced", not "linked then silently dropped by some other guard".
+    expect(el.shadowRoot?.querySelector('.md-content')?.textContent).toContain(
+      'see gs://bkt/o/r#1 for details'
+    );
+  });
+
+  it('positive control: a GitHub ref elsewhere in the same body still becomes a link, proving the absence above is specific to the gs:// URI, not a global GitHub-ref failure', async () => {
+    const el = await mountGcs('see gs://bkt/o/r#1 and also ptone/scion#2217', true);
+    expect(gcsLinks(el)).toHaveLength(0);
+    const links = ghRefLinksIn(el);
+    expect(links).toHaveLength(1);
+    expect(links[0].textContent).toBe('ptone/scion#2217');
+  });
+});
+
+// Review round 2, R2-3: AC4 ("sees native chat timestamps in Tokyo time,
+// with a zone label") was implemented (R1-3) but had no test pinning it.
+describe('scion-chat-message zone label (AC4, review R2-3)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    setPreferredTimeZone('');
+  });
+
+  it('renders the preferred-zone time and a title with the full instant and zone', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = true;
+    el.timestamp = '2026-09-23T15:00:00Z'; // -> 2026-09-24T00:00 JST
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const timeEl = el.shadowRoot?.querySelector('.msg-time');
+    expect(timeEl?.textContent).toBe('00:00');
+    expect(timeEl?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
+  });
+
+  // Review R2-1: a message already mounted (e.g. before /auth/me resolves,
+  // or before a later preference change) must not stay stuck in the
+  // browser zone — DisplayZoneController re-renders it.
+  it('re-renders in the new zone after a mounted message outlives a preference change', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.fromAgent = true;
+    el.timestamp = '2026-09-23T15:00:00Z';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.msg-time')?.textContent).toBe('15:00'); // UTC (Auto)
+
+    setPreferredTimeZone('Asia/Tokyo');
+    await el.updateComplete;
+
+    const timeEl = el.shadowRoot?.querySelector('.msg-time');
+    expect(timeEl?.textContent).toBe('00:00');
+    expect(timeEl?.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
+  });
+});
+
+describe('scion-chat-message wide tables', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('wraps each table in a named, keyboard-reachable sideways scroller, once', async () => {
+    const el = await mount(
+      '<table><tr><td>a</td></tr></table><table><caption> Agents </caption><tr><td>b</td></tr></table>'
+    );
+    const wrappers = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLElement>('.md-content .md-table-scroll') ?? []
+    );
+    expect(wrappers).toHaveLength(2);
+    for (const w of wrappers) {
+      expect(w.firstElementChild?.tagName).toBe('TABLE');
+      expect(w.tabIndex).toBe(0);
+      expect(w.getAttribute('role')).toBe('region');
+    }
+    expect(wrappers.map((w) => w.getAttribute('aria-label'))).toEqual(['Table', 'Agents']);
+
+    // A re-render of the same content does not wrap twice.
+    el.requestUpdate();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelectorAll('.md-table-scroll .md-table-scroll')).toHaveLength(0);
+  });
+});
+
+const { imageThumbStyle, knownImageSize } = await import('./chat-message.js');
+
+describe('inline image thumbnail box', () => {
+  const ref = (id: string, extra: { width?: number; height?: number } = {}) => ({
+    id,
+    name: `${id}.png`,
+    mime: 'image/png',
+    size: 10,
+    ...extra,
+  });
+
+  it('reserves the whole thumbnail box while the size is unknown', () => {
+    expect(knownImageSize(ref('unknown'))).toBeNull();
+    expect(imageThumbStyle(null)).toEqual({
+      width: '320px',
+      aspectRatio: '320 / 240',
+    });
+  });
+
+  it('scales a large image down into the thumbnail box, keeping its ratio', () => {
+    // Width-bound: 1200x500 fits at 320 wide.
+    expect(imageThumbStyle({ width: 1200, height: 500 })).toEqual({
+      width: '320px',
+      aspectRatio: '1200 / 500',
+    });
+    // Height-bound: 600x900 fits at 240 tall, so 160 wide.
+    expect(imageThumbStyle({ width: 600, height: 900 })).toEqual({
+      width: '160px',
+      aspectRatio: '600 / 900',
+    });
+  });
+
+  it('never enlarges a small image', () => {
+    expect(imageThumbStyle({ width: 40, height: 30 })).toEqual({
+      width: '40px',
+      aspectRatio: '40 / 30',
+    });
+  });
+
+  it('takes a size only from the server, never from an earlier load', () => {
+    expect(knownImageSize(ref('sent', { width: 800, height: 600 }))).toEqual({
+      width: 800,
+      height: 600,
+    });
+    expect(knownImageSize(ref('broken', { width: 0, height: 0 }))).toBeNull();
   });
 });

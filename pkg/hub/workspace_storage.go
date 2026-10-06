@@ -131,6 +131,62 @@ func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
 	if _, alreadyWarned := s.warnedEphemeralProjects.LoadOrStore(slug, struct{}{}); alreadyWarned {
 		return
 	}
-	s.projectsLogger().Warn("hub-managed project served from ephemeral local path; gke-shared-volume mount has no content yet",
-		"slug", slug, "local_path", localPath, "volume_path", volumePath)
+	backend := ""
+	if wsCfg := s.config.WorkspaceStorageConfig; wsCfg != nil {
+		backend = wsCfg.Backend
+	}
+	s.projectsLogger().Warn("hub-managed project served from ephemeral local path; workspace volume mount has no content yet",
+		"slug", slug, "backend", backend, "local_path", localPath, "volume_path", volumePath)
+}
+
+// volumeBackedProjectPath resolves the hub-managed project path for the
+// platform volume backends, "cloudrun-volume" and "gke-shared-volume". The
+// second return is false when wsCfg does not select one of them, or selects
+// one without a volume name; the caller then falls through to the local path.
+// A non-nil error (wrapping errWorkspaceContentTimeout) means the volume or
+// the legacy local path did not respond; see resolveDurableOrLegacyPath.
+//
+// Both backends share one guard. The mount root comes from workspaceMountRoot,
+// the same resolver checkWorkspaceStorageHealth probes for readiness, so the
+// two cannot drift. An empty root means no volume name was configured: there
+// is no mount point to build a path from, so the config is treated as unset.
+// A deployment in that state fails its readiness check and never serves, so
+// no deployment can hold content at a path built from an empty volume name
+// (which would collapse to /mnt/<subpath_root>/...; ptone/scion#1073).
+//
+// Unlike nfs, the volume backends include subpath_root in the hub-managed
+// path: <mount root>/<subpath_root>/hub-projects/<slug>.
+func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig, slug string) (string, bool, error) {
+	if wsCfg == nil {
+		return "", false, nil
+	}
+
+	var subPathRoot string
+	switch {
+	case wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil:
+		subPathRoot = wsCfg.CloudRunVolume.SubPathRoot
+	case wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil:
+		subPathRoot = wsCfg.GKESharedVolume.SubPathRoot
+	default:
+		return "", false, nil
+	}
+
+	mountRoot := workspaceMountRoot(wsCfg)
+	if mountRoot == "" {
+		return "", false, nil
+	}
+	// No validation here: ValidateWorkspaceStorage rejects a bad
+	// subpath_root at hub startup, before any path is built.
+	subPathRoot = config.SubPathRootOrDefault(subPathRoot)
+
+	volPath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
+	// The legacy local fallback (with warnEphemeral) is worth saying out
+	// loud: on Cloud Run and GKE the local path is always container-ephemeral
+	// storage, so its content disappears on the next restart or reschedule
+	// and the project silently moves to the volume.
+	path, err := s.resolveDurableOrLegacyPath(slug, volPath, true)
+	if err != nil {
+		return "", false, err
+	}
+	return path, true, nil
 }

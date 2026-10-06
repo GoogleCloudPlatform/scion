@@ -213,7 +213,7 @@ func (s *Server) handleEnvVars(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listEnvVars(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -276,7 +276,7 @@ func (s *Server) handleEnvVarByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteEnvVar(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -328,6 +328,13 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 
 	if req.Value == "" {
 		ValidationError(w, "value is required", nil)
+		return
+	}
+
+	// A plain env var's key is itself the container-env name it is projected
+	// under (same as an environment-type secret's target), whether or not
+	// req.Secret promotes it to the secret backend below.
+	if !validateEnvSecretTarget(w, store.SecretTypeEnvironment, key) {
 		return
 	}
 
@@ -613,7 +620,7 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listSecrets(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -671,7 +678,7 @@ func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteSecret(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -695,6 +702,27 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 	writeJSON(w, http.StatusOK, metaToStoreSecret(*meta))
+}
+
+// validateEnvSecretTarget rejects an environment-type secret whose target
+// falls under a reserved control-plane prefix (secret.IsReservedEnvTarget).
+// It is a no-op for every other secret type, since only environment-type
+// secrets are projected into the container environment by name. On success
+// it returns true; on rejection it writes a validation error response
+// (matching the shape used for the file-target checks below) and returns
+// false, so callers can simply `if !validateEnvSecretTarget(...) { return }`.
+func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) bool {
+	if secretType != store.SecretTypeEnvironment && secretType != "" {
+		return true
+	}
+	if !secret.IsReservedEnvTarget(target) {
+		return true
+	}
+	ValidationError(w, "target is reserved for scion's own control-plane environment variables", map[string]interface{}{
+		"field": "target",
+		"value": target,
+	})
+	return false
 }
 
 func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
@@ -756,6 +784,10 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	target := req.Target
 	if target == "" {
 		target = key
+	}
+
+	if !validateEnvSecretTarget(w, secretType, target) {
+		return
 	}
 
 	// Validate file-specific constraints
@@ -888,9 +920,11 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		effectiveType = existing.SecretType
 	}
 
-	// Validate file-specific target constraints (including stored target when type changes to file)
+	// Resolve the effective target (including the stored target when only
+	// the type is changing) so the file- and environment-specific checks
+	// below see the target the update will actually store.
 	effectiveTarget := req.Target
-	if effectiveType == store.SecretTypeFile && effectiveTarget == "" {
+	if (effectiveType == store.SecretTypeFile || effectiveType == store.SecretTypeEnvironment) && effectiveTarget == "" {
 		existing, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -910,6 +944,9 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 			})
 			return
 		}
+	}
+	if !validateEnvSecretTarget(w, effectiveType, effectiveTarget) {
+		return
 	}
 
 	// allowProgeny is only valid on user-scoped secrets.
@@ -1059,7 +1096,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 		// Fall through to existing PUT logic below.
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 		return
 	}
 
@@ -1131,6 +1168,30 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		return
 	}
 
+	// Hub admin policy: when agent_secrets.user_scope_only is on, agents may
+	// not write project-scope secrets at all. This is a blanket rule on
+	// every agent-originated project-scope write (design ptone/scion#2291
+	// §6) — it covers harness auth capture and ad-hoc `sciontool secret set`
+	// alike. It is checked before allowProgeny/base64-decode/type/conflict/
+	// GetMeta, so it cannot be bypassed by `force` and the request never
+	// reaches the backend. (Value/Encoding validation above still runs
+	// first and fails closed on its own terms — an empty value or an
+	// unrecognized encoding gets its own 400/422 either way.)
+	if scope == store.ScopeProject && s.agentSecretsUserScopeOnly() {
+		slog.Info("agent project-scope secret write rejected by policy",
+			"agent_id", agentID, "project_id", projectID, "key", key)
+		writeError(w, http.StatusForbidden, ErrCodeSecretScopeRestricted,
+			"The hub administrator has restricted agent-written secrets to user (profile) scope; "+
+				"project-scope writes are not allowed. Retry with scope \"user\" (sciontool: --scope user).",
+			map[string]interface{}{
+				"field":         "scope",
+				"value":         "project",
+				"allowedScopes": []string{"user"},
+				"setting":       "agent_secrets.user_scope_only",
+			})
+		return
+	}
+
 	// allowProgeny is only valid on user-scoped secrets. Only an explicit
 	// true is rejected; unset on a project-scoped write is fine and simply
 	// resolves to false below.
@@ -1179,6 +1240,10 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	target := req.Target
 	if target == "" {
 		target = key
+	}
+
+	if !validateEnvSecretTarget(w, secretType, target) {
+		return
 	}
 
 	// Validate file-specific constraints.
@@ -1624,7 +1689,7 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1661,6 +1726,11 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		}
 		if req.Value == "" {
 			ValidationError(w, "value is required", nil)
+			return
+		}
+
+		// See setEnvVar: the key is itself the container-env name.
+		if !validateEnvSecretTarget(w, store.SecretTypeEnvironment, key) {
 			return
 		}
 
@@ -1751,7 +1821,7 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -1872,7 +1942,7 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1936,6 +2006,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		if target == "" {
 			target = key
 		}
+		if !validateEnvSecretTarget(w, secretType, target) {
+			return
+		}
 		if secretType == store.SecretTypeFile {
 			if strings.Contains(target, "..") {
 				BadRequest(w, "target path must not contain '..'")
@@ -1983,7 +2056,7 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -2128,7 +2201,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 		case http.MethodPost:
 			s.addProjectProvider(w, r, projectID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
@@ -2139,7 +2212,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	case http.MethodDelete:
 		s.removeProjectProvider(w, r, projectID, brokerID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
@@ -2174,6 +2247,17 @@ type projectProviderView struct {
 	// max_agents_per_broker definition exists, or resolution failed for
 	// this provider — a zero count is reported as 0, not omitted.
 	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource reports which precedence step produced AgentLimit
+	// (ptone/scion#2061 P2, design.md §5.9): "broker" (a per-broker setting,
+	// pkg/hub/brokersettings), "entitlement" (an entitlement binding),
+	// "hub_default" (the limit definition's default value), "unlimited"
+	// (resolved with no cap), or "not_enforced" (Amendment A1: the P1b
+	// enforcement switch, GoogleCloudPlatform/scion#2115, is off — AgentLimit
+	// is then informational only: it is still the resolved cap from whichever
+	// step would otherwise apply, but Reserve does not reject agent creates
+	// against it). Omitted whenever resolution didn't run or failed — the
+	// same conditions that leave AgentLimit and AgentCount unset.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
 // listProjectProviders returns all providers for a project.
@@ -2195,7 +2279,7 @@ func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, pr
 	views := make([]projectProviderView, len(providers))
 	for i, p := range providers {
 		views[i] = projectProviderView{ProjectProvider: p}
-		views[i].AgentLimit, views[i].AgentCount = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
+		views[i].AgentLimit, views[i].AgentCount, views[i].AgentLimitSource = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -2224,51 +2308,35 @@ func (s *Server) lookupAgentLimitDefinition(ctx context.Context) *store.LimitDef
 	return limitDef
 }
 
-// resolveBrokerCapacity computes the effective max_agents_per_broker limit
-// and current active-reservation count for brokerID, mirroring exactly the
-// primitives checkAndReserveBrokerQuota uses to admit or reject an agent
-// start (pkg/hub/broker_quota.go): the same limit name, subject, and scope
-// (store.QuotaScopeBroker, scoped to the broker itself), and the same
-// "effectiveLimit <= 0 means unlimited" convention as
-// QuotaService.Reserve. This is a read: it never creates, updates, or
-// releases a reservation.
+// resolveBrokerCapacity is a thin wrapper over brokerCapacity
+// (broker_capacity.go) — the one read model shared by enforcement and every
+// read path (ptone/scion#2061 P2, design.md §5.9, AC-P2-10) — that adapts it
+// to the providers listing's pre-existing (agentLimit, agentCount, source)
+// field shape (ptone/scion#2161). It mirrors exactly the primitives
+// checkAndReserveBrokerQuota uses to admit or reject an agent start
+// (pkg/hub/broker_quota.go): the same limit name, subject, and scope
+// (store.QuotaScopeBroker, scoped to the broker itself). This is a read: it
+// never creates, updates, or releases a reservation.
 //
 // limitDef is looked up once by the caller (lookupAgentLimitDefinition) and
-// shared across every provider in a listing. A nil limitDef means "no limit
-// defined — no enforcement", the same convention QuotaService.Reserve uses
-// (quota.go).
+// shared across every provider in a listing.
 //
-// Returns (nil, nil) whenever either value can't be determined — no quota
-// service configured, no limit definition, or a store error — so that a
-// failure for one provider never fails the whole providers listing (per
-// ptone/scion#2161). Failures other than "no limit configured" are logged.
-//
-// This is the single capacity helper for the providers listing; keep it
-// that way — other work builds on it.
-func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (agentLimit, agentCount *int64) {
-	if s.quotaService == nil || limitDef == nil {
-		return nil, nil
+// The listing's pre-existing contract is all-or-nothing per provider: if
+// either half of BrokerCapacity couldn't be resolved, both agentLimit and
+// agentCount come back nil (never "an agentLimit with no matching count to
+// compare it against") — so that a failure for one provider never fails the
+// whole providers listing (per ptone/scion#2161), while also never reporting
+// half a picture for that provider. Count is nil exactly when either the
+// limit or the count resolution failed, or nothing is configured at all
+// (brokerCapacity skips counting when there's no limitDef/quotaService) —
+// all three collapse to the listing's existing "leave both unset" case here.
+// Failures are logged inside brokerCapacity, not duplicated here.
+func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (agentLimit, agentCount *int64, source string) {
+	bc := s.brokerCapacity(ctx, brokerID, limitDef)
+	if bc.Count == nil {
+		return nil, nil, ""
 	}
-
-	effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
-	if err != nil {
-		slog.WarnContext(ctx, "providers: failed to resolve effective agent limit",
-			"broker_id", brokerID, "error", err)
-		return nil, nil
-	}
-
-	count, err := s.store.CountActiveReservations(ctx, limitDef.ID, brokerID, store.QuotaScopeBroker, brokerID)
-	if err != nil {
-		slog.WarnContext(ctx, "providers: failed to count active reservations",
-			"broker_id", brokerID, "error", err)
-		return nil, nil
-	}
-
-	agentCount = &count
-	if effectiveLimit > 0 {
-		agentLimit = &effectiveLimit
-	}
-	return agentLimit, agentCount
+	return bc.Limit, bc.Count, bc.Source
 }
 
 // addProjectProvider adds a broker as a provider to a project.
@@ -2320,6 +2388,17 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 				return
 			}
 		}
+		// The global-directory check needs the project; a lookup failure
+		// fails the request rather than skipping the check.
+		target, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
+			return
+		}
 		info, err := os.Stat(cleanPath)
 		if err != nil || !info.IsDir() {
 			ValidationError(w, "localPath must be an existing directory", nil)
@@ -2346,7 +2425,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	// so agents and templates directories exist before the first agent starts.
 	if cleanPath != "" {
 		scionDir := filepath.Join(cleanPath, ".scion")
-		if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+		if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 			slog.Warn("failed to initialize .scion in linked project",
 				"project_id", projectID, "localPath", cleanPath, "error", err.Error())
 		}
@@ -2450,7 +2529,7 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -2558,7 +2637,7 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 

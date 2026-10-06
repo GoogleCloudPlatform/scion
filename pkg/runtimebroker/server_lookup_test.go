@@ -848,64 +848,149 @@ func (m *countingListManager) List(ctx context.Context, filter map[string]string
 // TestLookupAgent_AuxiliaryLoopStopsAfterFirstMatch covers the auxiliary-
 // runtime loop's early exit: once one auxiliary runtime's List call matches
 // the slug, the loop must not go on to call List on any other registered
-// runtime. Map iteration order is random, so both auxiliary runtimes here
-// are set up to match — whichever one iteration reaches first should be the
-// only one queried, regardless of which that turns out to be.
+// runtime. Iteration is over a snapshot sorted by identity key (see
+// sortedAuxiliaryRuntimes), so which runtime that could answer gets queried
+// is deterministic — the lexicographically-first key — not dependent on Go's
+// randomized map order. This matters because more than one auxiliary
+// runtime can share a type, so in overlap cases more than one could
+// plausibly answer for the same slug. Run repeatedly to guard against that
+// nondeterminism creeping back in.
+//
+// Eight registered runtimes are used here, every one of which would answer a
+// match if queried, rather than two: with only two entries, a missing sort
+// still picks the correct key about half the time by chance alone. With
+// eight, chance alone picks the lexicographically-first key only about 1 run
+// in 8, so a missing sort fails essentially every run here.
 func TestLookupAgent_AuxiliaryLoopStopsAfterFirstMatch(t *testing.T) {
+	keys := []string{"runtime-a", "runtime-b", "runtime-c", "runtime-d", "runtime-e", "runtime-f", "runtime-g", "runtime-h"}
+
+	for i := 0; i < 10; i++ {
+		defaultMgr := &filteringMockManager{}
+		defaultMgr.agents = []api.AgentInfo{}
+
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+		srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+		managers := make(map[string]*countingListManager, len(keys))
+		srv.auxiliaryRuntimesMu.Lock()
+		for _, key := range keys {
+			mgr := &countingListManager{}
+			mgr.agents = []api.AgentInfo{{
+				ContainerID: key + "-container",
+				Name:        "manyaux",
+				Labels:      map[string]string{"scion.name": "manyaux"},
+			}}
+			managers[key] = mgr
+			auxRT := &runtime.MockRuntime{NameFunc: func() string { return key }}
+			srv.auxiliaryRuntimes[key] = auxiliaryRuntime{Runtime: auxRT, Manager: mgr}
+		}
+		srv.auxiliaryRuntimesMu.Unlock()
+
+		result, err := srv.LookupAgent(context.Background(), "manyaux", "")
+		if err != nil {
+			t.Fatalf("run %d: unexpected error: %v", i, err)
+		}
+
+		for _, key := range keys {
+			wantCalls := 0
+			if key == "runtime-a" {
+				wantCalls = 1
+			}
+			if got := managers[key].listCalls; got != wantCalls {
+				t.Fatalf("run %d: expected %q to be queried %d time(s) (sorted order, stop at first match), got %d", i, key, wantCalls, got)
+			}
+		}
+		if want := "runtime-a-container"; result.ContainerID != want {
+			t.Fatalf("run %d: expected %s (the deterministically-first runtime), got %s", i, want, result.ContainerID)
+		}
+	}
+}
+
+// TestLookupAgent_RuntimeNameFromIdentityKeyedAux asserts that when the aux
+// runtime is registered under an IDENTITY-shaped key (as
+// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts do — see
+// auxiliaryRuntimeIdentity), not the bare type string "kubernetes",
+// AgentLookupResult.RuntimeName and the K8sConfig/K8sClientset attachment
+// that gates on it still come from the matched runtime's own Name(), not
+// from re-using that map key: using the identity string as RuntimeName
+// would silently drop K8sConfig.
+func TestLookupAgent_RuntimeNameFromIdentityKeyedAux(t *testing.T) {
 	defaultMgr := &filteringMockManager{}
 	defaultMgr.agents = []api.AgentInfo{}
 
-	auxA := &countingListManager{}
-	auxA.agents = []api.AgentInfo{{
-		ContainerID: "aux-a-container",
-		Name:        "twoaux",
-		Labels:      map[string]string{"scion.name": "twoaux"},
-	}}
-	auxB := &countingListManager{}
-	auxB.agents = []api.AgentInfo{{
-		ContainerID: "aux-b-container",
-		Name:        "twoaux",
-		Labels:      map[string]string{"scion.name": "twoaux"},
-	}}
+	auxMgr := &filteringMockManager{}
+	auxMgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "k8s-pod-1",
+			Name:        "k8sagent",
+			Labels:      map[string]string{"scion.name": "k8sagent"},
+			Kubernetes:  &api.AgentK8sMetadata{Namespace: "scion-ns", PodName: "k8s-pod-1"},
+		},
+	}
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	auxRtA := &runtime.MockRuntime{NameFunc: func() string { return "runtime-a" }}
-	auxRtB := &runtime.MockRuntime{NameFunc: func() string { return "runtime-b" }}
+	auxRt := fakeKubernetesRuntime("cluster-a", "scion-ns")
 	srv := New(DefaultServerConfig(), defaultMgr, rt)
 
+	identity := auxiliaryRuntimeIdentity(auxRt)
+	if identity == "kubernetes" {
+		t.Fatalf("test setup invalid: identity %q must differ from the bare type string for this regression test to mean anything", identity)
+	}
+
 	srv.auxiliaryRuntimesMu.Lock()
-	srv.auxiliaryRuntimes["runtime-a"] = auxiliaryRuntime{Runtime: auxRtA, Manager: auxA}
-	srv.auxiliaryRuntimes["runtime-b"] = auxiliaryRuntime{Runtime: auxRtB, Manager: auxB}
+	srv.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
 	srv.auxiliaryRuntimesMu.Unlock()
 
-	result, err := srv.LookupAgent(context.Background(), "twoaux", "")
+	result, err := srv.LookupAgent(context.Background(), "k8sagent", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if result.RuntimeName != "kubernetes" {
+		t.Errorf("expected RuntimeName %q (the runtime's own Name()), got %q (the identity map key, or something else)", "kubernetes", result.RuntimeName)
+	}
+	if result.Namespace != "scion-ns" {
+		t.Errorf("expected scion-ns namespace, got %s", result.Namespace)
+	}
+}
 
-	totalCalls := auxA.listCalls + auxB.listCalls
-	if totalCalls != 1 {
-		t.Fatalf("expected exactly one auxiliary List call once a match is found, got %d (auxA=%d, auxB=%d)",
-			totalCalls, auxA.listCalls, auxB.listCalls)
+// TestLookupAgent_RuntimeNameFromIdentityKeyedAux_ProjectFallbackBranch is
+// the same regression as TestLookupAgent_RuntimeNameFromIdentityKeyedAux,
+// exercised via the SECOND aux-runtime loop (the unlabeled-fallback branch
+// reached when the project-scoped lookup finds nothing) — the two loops
+// duplicate the runtimeName-assignment logic, so each needs its own test.
+func TestLookupAgent_RuntimeNameFromIdentityKeyedAux_ProjectFallbackBranch(t *testing.T) {
+	defaultMgr := &filteringMockManager{}
+	defaultMgr.agents = []api.AgentInfo{}
+
+	auxMgr := &filteringMockManager{}
+	auxMgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "k8s-pod-legacy",
+			Name:        "k8sagent",
+			// No project label: only matched via the unlabeled-fallback path.
+			Labels:     map[string]string{"scion.name": "k8sagent"},
+			Kubernetes: &api.AgentK8sMetadata{Namespace: "scion-ns", PodName: "k8s-pod-legacy"},
+		},
 	}
 
-	// Whichever aux was actually queried must be the one the result came
-	// from, and the other must never have been touched.
-	switch {
-	case auxA.listCalls == 1:
-		if result.ContainerID != "aux-a-container" {
-			t.Errorf("expected aux-a-container (the queried runtime), got %s", result.ContainerID)
-		}
-		if auxB.listCalls != 0 {
-			t.Errorf("aux runtime-b's List should not have been called, got %d calls", auxB.listCalls)
-		}
-	case auxB.listCalls == 1:
-		if result.ContainerID != "aux-b-container" {
-			t.Errorf("expected aux-b-container (the queried runtime), got %s", result.ContainerID)
-		}
-		if auxA.listCalls != 0 {
-			t.Errorf("aux runtime-a's List should not have been called, got %d calls", auxA.listCalls)
-		}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	auxRt := fakeKubernetesRuntime("cluster-a", "scion-ns")
+	srv := New(DefaultServerConfig(), defaultMgr, rt)
+
+	identity := auxiliaryRuntimeIdentity(auxRt)
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	// A non-empty projectID forces the project-scoped attempt to miss first
+	// (the aux agent carries no scion.project_id label), then fall through
+	// to the unlabeled-fallback loop.
+	result, err := srv.LookupAgent(context.Background(), "k8sagent", "some-project-id")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.RuntimeName != "kubernetes" {
+		t.Errorf("expected RuntimeName %q, got %q", "kubernetes", result.RuntimeName)
 	}
 }
 

@@ -15,7 +15,10 @@
 package agent
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1275,4 +1278,130 @@ func TestIsKubernetesRuntime(t *testing.T) {
 	for _, name := range []string{"docker", "podman", "container", "cloudrun", "cloudrun-sandbox", ""} {
 		assert.False(t, isKubernetesRuntime(name), "%s should not be the kubernetes runtime", name)
 	}
+}
+
+func TestSelectSharedDirStorage_NilSettingsIsError(t *testing.T) {
+	cfg, err := selectSharedDirStorage(nil, "", "", "a1")
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "a1")
+}
+
+// sdsRecordTempFiles lists leftover temporary record files in dir.
+func sdsRecordTempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, sharedDirStorageRecordFile+".tmp-*"))
+	require.NoError(t, err)
+	return matches
+}
+
+func TestWriteSharedDirStorageRecord_LeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, writeSharedDirStorageRecord(dir, "nfs"))
+	got, err := readSharedDirStorageRecord(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "nfs", got)
+	info, err := os.Stat(filepath.Join(dir, sharedDirStorageRecordFile))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+	assert.Empty(t, sdsRecordTempFiles(t, dir))
+}
+
+func TestWriteSharedDirStorageRecord_FailedRenameRemovesTempFile(t *testing.T) {
+	dir := t.TempDir()
+	// A non-empty directory at the record path makes the rename fail.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, sharedDirStorageRecordFile, "x"), 0o755))
+	require.Error(t, writeSharedDirStorageRecord(dir, "nfs"))
+	assert.Empty(t, sdsRecordTempFiles(t, dir))
+}
+
+// TestSharedDirLeafGroups_Guard pins the guard on leaf group ids read from
+// nfs shared-dir leaves (ptone/scion#3155): a leaf made outside scion can
+// carry any group, so system and overflow ids are never handed to agents,
+// and shared_dir_storage.nfs.gid, when set, is an allowlist.
+func TestSharedDirLeafGroups_Guard(t *testing.T) {
+	obs := func(gids ...uint32) []observedLeafGID {
+		out := make([]observedLeafGID, 0, len(gids))
+		for i, g := range gids {
+			out = append(out, observedLeafGID{name: fmt.Sprintf("d%d", i), gid: g})
+		}
+		return out
+	}
+	tests := []struct {
+		name     string
+		observed []observedLeafGID
+		allow    int
+		want     []int64
+	}{
+		{"no leaves", nil, 0, nil},
+		{"ordinary group kept", obs(1003), 0, []int64{1003}},
+		{"boundary 1000 kept", obs(1000), 0, []int64{1000}},
+		{"root group skipped", obs(0), 0, nil},
+		{"system group below 1000 skipped", obs(999, 27), 0, nil},
+		{"nobody 65534 skipped", obs(65534), 0, nil},
+		{"overflow 4294967294 skipped", obs(4294967294), 0, nil},
+		{"deduplicated in first-seen order", obs(2000, 1500, 2000), 0, []int64{2000, 1500}},
+		{"allowlist match kept", obs(1500), 1500, []int64{1500}},
+		{"allowlist mismatch skipped", obs(1500, 1600), 1600, []int64{1600}},
+		{"stat error skipped, others kept", append(obs(1500), observedLeafGID{name: "bad", err: errors.New("stat failed")}), 0, []int64{1500}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sharedDirLeafGroups(tt.observed, tt.allow))
+		})
+	}
+}
+
+// TestResolveSharedDirs_NFS_LeafGroupReadAtStart: the realization carries
+// the leaf's own group, read from the leaf fd at start, for both runtimes.
+func TestResolveSharedDirs_NFS_LeafGroupReadAtStart(t *testing.T) {
+	gid := os.Getgid()
+	if gid < minLeafGroupID || gid == 65534 {
+		t.Skipf("test process gid %d is filtered by the leaf-group guard", gid)
+	}
+	for _, rt := range []string{"docker", "kubernetes"} {
+		t.Run(rt, func(t *testing.T) {
+			mountRoot := newResolvedTempDir(t)
+			require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "scion-shared"), 0o775))
+			sdCfg := nfsSharedDirStorageCfg(mountRoot)
+			dirs := []api.SharedDir{{Name: "a"}, {Name: "b"}}
+
+			_, realization, err := resolveSharedDirs(sdCfg, "/unused", "pid-42", rt, dirs, "/workspace", false)
+			require.NoError(t, err)
+			require.NotNil(t, realization)
+			assert.Equal(t, []int64{int64(gid)}, realization.SupplementalGroups, "one entry for two leaves in the same group")
+
+			// Allowlist: a different shared_dir_storage.nfs.gid drops it.
+			sdCfg.NFS.GID = gid + 1
+			_, realization, err = resolveSharedDirs(sdCfg, "/unused", "pid-42", rt, dirs, "/workspace", false)
+			require.NoError(t, err)
+			assert.Empty(t, realization.SupplementalGroups)
+		})
+	}
+}
+
+// TestResolveSharedDirs_NFS_LeafGroupStatFails_StartsUnchanged: when the
+// leaf group cannot be read, the agent starts with no extra group.
+func TestResolveSharedDirs_NFS_LeafGroupStatFails_StartsUnchanged(t *testing.T) {
+	prev := fdGID
+	fdGID = func(int) (uint32, error) { return 0, errors.New("fstat failed") }
+	t.Cleanup(func() { fdGID = prev })
+
+	logs := &bytes.Buffer{}
+	prevLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLog) })
+
+	mountRoot := newResolvedTempDir(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "scion-shared"), 0o775))
+	volumes, realization, err := resolveSharedDirs(nfsSharedDirStorageCfg(mountRoot), "/unused", "pid-42", "docker",
+		[]api.SharedDir{{Name: "a"}}, "/workspace", false)
+	require.NoError(t, err)
+	require.Len(t, volumes, 1)
+	require.NotNil(t, realization)
+	assert.Empty(t, realization.SupplementalGroups)
+	// The warning names the read failure, not the guard.
+	assert.Contains(t, logs.String(), "could not read the group of a shared dir")
+	assert.Contains(t, logs.String(), "fstat failed")
+	assert.NotContains(t, logs.String(), "below 1000")
 }

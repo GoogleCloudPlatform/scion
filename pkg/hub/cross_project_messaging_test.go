@@ -40,6 +40,26 @@ import (
 func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB string, ownerA, ownerB *store.User, agentA, agentB *store.Agent) {
 	t.Helper()
 	srv, s = testServer(t)
+	projectA, projectB, ownerA, ownerB, agentA, agentB = cpmSetupOn(t, srv, s)
+	return srv, s, projectA, projectB, ownerA, ownerB, agentA, agentB
+}
+
+// cpmSetupWithFault is cpmSetup with a switch-gated store wrapper (see
+// installStoreFault) installed before the fixture's audited setup
+// (seedProjectCreatorMembership emits mutation audits whose goroutines read
+// srv.store). Tests call fault.Arm() where they used to assign srv.store,
+// which would race those goroutines (ptone/scion#3184). It returns only
+// what the fault tests use.
+func cpmSetupWithFault[W store.Store](t *testing.T, wrap func(inner store.Store, fault *storeFaultSwitch) W) (srv *Server, projectB string, wrapped W, fault *storeFaultSwitch) {
+	t.Helper()
+	var s store.Store
+	srv, s, wrapped, fault = testServerWithStoreFault(t, wrap)
+	_, projectB, _, _, _, _ = cpmSetupOn(t, srv, s)
+	return srv, projectB, wrapped, fault
+}
+
+func cpmSetupOn(t *testing.T, srv *Server, s store.Store) (projectA, projectB string, ownerA, ownerB *store.User, agentA, agentB *store.Agent) {
+	t.Helper()
 	ctx := context.Background()
 
 	// Create owners
@@ -77,7 +97,7 @@ func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB stri
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pA))
-	srv.createProjectMembersGroup(ctx, pA)
+	srv.seedProjectCreatorMembership(ctx, pA)
 	msgAuthzAddProjectMember(t, s, ownerA.ID, projectA, "project-a", store.GroupMemberRoleOwner)
 	// Set inbound policy to "any" (CreateProject doesn't persist this field; default revision is 1)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, projectA, store.CrossProjectInboundAny, 1)
@@ -95,7 +115,7 @@ func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB stri
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, pB))
-	srv.createProjectMembersGroup(ctx, pB)
+	srv.seedProjectCreatorMembership(ctx, pB)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, projectB, "project-b", store.GroupMemberRoleOwner)
 	// Set inbound policy to "any" (default revision is 1)
 	_, err = s.UpdateProjectMessagingPolicy(ctx, projectB, store.CrossProjectInboundAny, 1)
@@ -130,7 +150,7 @@ func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB stri
 	// Enable cross-project messaging via OperationalSettings.
 	enableCPM(t, srv, s)
 
-	return srv, s, projectA, projectB, ownerA, ownerB, agentA, agentB
+	return projectA, projectB, ownerA, ownerB, agentA, agentB
 }
 
 // enableCPM sets up OperationalSettings with cross_project_messaging_enabled=true.
@@ -196,6 +216,29 @@ func TestTargetResolve_InvalidTarget_PrivacyPreserving(t *testing.T) {
 
 	// Privacy-preserving: should return 404, indistinguishable from nonexistent
 	require.Equal(t, http.StatusNotFound, rr.Code, "expected 404 for nonexistent target")
+}
+
+// TestTargetResolve_TypedNilIdentity_Unauthorized covers
+// handleMessagingTargetsResolve's isNilIdentity guard: a request context
+// carrying a non-nil Identity interface value that holds a nil concrete
+// pointer (e.g. an Identity holding (*agentIdentityWrapper)(nil)) must be
+// rejected as unauthorized, the same as a plain nil interface, rather than
+// reaching the later AgentIdentity assertion that reuses this identity and
+// would otherwise dereference the nil pointer.
+func TestTargetResolve_TypedNilIdentity_Unauthorized(t *testing.T) {
+	srv, _, _, _, _, _, _, _ := cpmSetup(t)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/messaging/targets/resolve?project=project-b&agent=agent-beta", nil)
+	var nilAgent *agentIdentityWrapper
+	req = req.WithContext(contextWithIdentity(req.Context(), nilAgent))
+
+	rr := httptest.NewRecorder()
+	require.NotPanics(t, func() {
+		srv.handleMessagingTargetsResolve(rr, req)
+	}, "a typed-nil context identity must not panic the handler")
+
+	require.Equal(t, http.StatusUnauthorized, rr.Code, "a typed-nil context identity must be treated as unauthenticated")
 }
 
 func TestTargetResolve_MissingParams(t *testing.T) {
@@ -468,7 +511,7 @@ func TestCrossProjectAuth_InboundMembers_OriginNotMember(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, membersProject))
-	srv.createProjectMembersGroup(ctx, membersProject)
+	srv.seedProjectCreatorMembership(ctx, membersProject)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, membersProjectID, "members-project", store.GroupMemberRoleOwner)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, membersProjectID, store.CrossProjectInboundMembers, 1)
 	require.NoError(t, err, "failed to set inbound=members")
@@ -497,7 +540,7 @@ func TestCrossProjectAuth_InboundMembers_OriginIsMember(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, membersProject))
-	srv.createProjectMembersGroup(ctx, membersProject)
+	srv.seedProjectCreatorMembership(ctx, membersProject)
 	msgAuthzAddProjectMember(t, s, ownerB.ID, membersProjectID, "members2-project", store.GroupMemberRoleOwner)
 	_, err := s.UpdateProjectMessagingPolicy(ctx, membersProjectID, store.CrossProjectInboundMembers, 1)
 	require.NoError(t, err, "failed to set inbound=members")

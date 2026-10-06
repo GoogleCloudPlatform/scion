@@ -65,6 +65,12 @@ const (
 	// ClosePTYSessionGone (4410): the tmux session no longer exists (agent
 	// exited, container stopped or removed). Terminal.
 	ClosePTYSessionGone = 4410
+	// ClosePTYAttachUnsupported (4501): the matched runtime has no
+	// exec/attach/TTY primitive at all. Distinct from ClosePTYUpstreamUnavailable
+	// so a definitive "this runtime will never support attach" is never
+	// confused with a transient readiness failure that is worth retrying.
+	// Terminal.
+	ClosePTYAttachUnsupported = 4501
 	// ClosePTYUpstreamUnavailable (4503): the hop behind this one is
 	// temporarily gone (Hub <-> broker control channel dropped, stream open
 	// failed, tmux session not ready yet). Retry.
@@ -125,6 +131,26 @@ const (
 	CloseReasonRuntimeUnavailable = "runtime_unavailable"
 )
 
+// Close reason emitted by the broker's attach-support pre-check, before any
+// work against the matched runtime starts (both the control-channel gate
+// and the direct-connect pre-upgrade path apply this same policy).
+const (
+	// CloseReasonAttachUnsupported (4501): the matched runtime has no
+	// exec/attach/TTY primitive at all.
+	CloseReasonAttachUnsupported = "attach_unsupported"
+)
+
+// ErrCodeRuntimeAttachUnsupported is the JSON error code
+// (ErrorResponse.Error.Code) a broker's direct-connect PTY endpoint returns
+// with HTTP 501, before any WebSocket upgrade, for the same attach-support
+// pre-check ClosePTYAttachUnsupported/CloseReasonAttachUnsupported cover
+// once a connection is already upgraded. pkg/runtimebroker writes this
+// value; pkg/wsclient reads it back to map a failed handshake to the same
+// fixed, actionable message the post-upgrade close code produces, so a
+// caller sees one consistent "attach is not supported" outcome regardless
+// of which of the two points rejected it.
+const ErrCodeRuntimeAttachUnsupported = "runtime_attach_unsupported"
+
 // MaxCloseReasonBytes is the largest reason RFC 6455 allows in a close frame
 // (125-byte control payload minus the 2-byte code).
 const MaxCloseReasonBytes = 123
@@ -164,7 +190,8 @@ func ClassifyPTYClose(code int) CloseDisposition {
 	case code == ClosePTYNormal:
 		return DispositionDetached
 	case code == ClosePTYAuthRequired, code == ClosePTYForbidden,
-		code == ClosePTYAgentNotFound, code == ClosePTYSessionGone:
+		code == ClosePTYAgentNotFound, code == ClosePTYSessionGone,
+		code == ClosePTYAttachUnsupported:
 		return DispositionTerminal
 	case code == ClosePTYUpstreamUnavailable, code == ClosePTYUpstreamTimeout:
 		return DispositionRetry

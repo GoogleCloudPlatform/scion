@@ -78,35 +78,46 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		containerHubEndpoint string
 		runtimeName          string
 		want                 string
+		// wantTrusted is the trust bit resolveHubEndpointForCreate reports
+		// for the returned endpoint: true only for the request/connection/
+		// broker tiers, false for both the resolved-env and the project-
+		// settings tiers — see the "resolved env fallback" and "settings
+		// fallback" cases below.
+		wantTrusted bool
 	}{
 		{
-			name:       "req endpoint takes priority",
-			req:        "https://req.example.com",
-			connection: "https://conn.example.com",
-			broker:     "https://broker.example.com",
-			want:       "https://req.example.com",
+			name:        "req endpoint takes priority",
+			req:         "https://req.example.com",
+			connection:  "https://conn.example.com",
+			broker:      "https://broker.example.com",
+			want:        "https://req.example.com",
+			wantTrusted: true,
 		},
 		{
-			name:       "connection fallback when req absent",
-			connection: "https://conn.example.com",
-			broker:     "https://broker.example.com",
-			want:       "https://conn.example.com",
+			name:        "connection fallback when req absent",
+			connection:  "https://conn.example.com",
+			broker:      "https://broker.example.com",
+			want:        "https://conn.example.com",
+			wantTrusted: true,
 		},
 		{
-			name:   "broker fallback when req and connection absent",
-			broker: "https://broker.example.com",
-			want:   "https://broker.example.com",
+			name:        "broker fallback when req and connection absent",
+			broker:      "https://broker.example.com",
+			want:        "https://broker.example.com",
+			wantTrusted: true,
 		},
 		{
 			name:        "resolved env fallback",
 			resolved:    map[string]string{"SCION_HUB_ENDPOINT": "https://resolved.example.com"},
 			projectPath: projectDir,
 			want:        "https://resolved.example.com",
+			wantTrusted: false,
 		},
 		{
 			name:        "settings fallback when others absent",
 			projectPath: projectDir,
 			want:        "https://settings.example.com",
+			wantTrusted: false,
 		},
 		{
 			name:                 "localhost req overridden by non-localhost connection",
@@ -116,6 +127,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:8080",
 			runtimeName:          "podman",
 			want:                 "https://hub.remote.example.com",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "localhost req kept when connection is also localhost",
@@ -124,6 +136,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:9810",
 			runtimeName:          "podman",
 			want:                 "http://host.containers.internal:8080",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "localhost req kept when connection is empty",
@@ -131,6 +144,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:9810",
 			runtimeName:          "podman",
 			want:                 "http://host.containers.internal:8080",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "127.0.0.1 req overridden by non-localhost connection",
@@ -139,6 +153,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.docker.internal:8080",
 			runtimeName:          "docker",
 			want:                 "https://hub.remote.example.com",
+			wantTrusted:          true,
 		},
 		{
 			name:                 "non-localhost req preserved even with different connection",
@@ -147,6 +162,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			containerHubEndpoint: "http://host.containers.internal:8080",
 			runtimeName:          "podman",
 			want:                 "https://hub1.example.com",
+			wantTrusted:          true,
 		},
 	}
 
@@ -156,9 +172,12 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			if rn == "" {
 				rn = "docker"
 			}
-			got := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, rn)
+			got, gotTrusted := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, rn)
 			if got != tt.want {
 				t.Fatalf("resolveHubEndpointForCreate() = %q, want %q", got, tt.want)
+			}
+			if gotTrusted != tt.wantTrusted {
+				t.Errorf("resolveHubEndpointForCreate() trusted = %v, want %v", gotTrusted, tt.wantTrusted)
 			}
 		})
 	}
@@ -184,6 +203,20 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			endpoint:             "http://localhost:9810",
 			containerHubEndpoint: "http://host.containers.internal:9810",
 			runtimeName:          "kubernetes",
+			want:                 "http://localhost:9810",
+		},
+		{
+			name:                 "k8s alias keeps localhost endpoint",
+			endpoint:             "http://localhost:9810",
+			containerHubEndpoint: "http://host.containers.internal:9810",
+			runtimeName:          "k8s",
+			want:                 "http://localhost:9810",
+		},
+		{
+			name:                 "remote alias keeps localhost endpoint",
+			endpoint:             "http://localhost:9810",
+			containerHubEndpoint: "http://host.containers.internal:9810",
+			runtimeName:          "remote",
 			want:                 "http://localhost:9810",
 		},
 		{
@@ -276,6 +309,20 @@ func TestColocatedExtraHosts(t *testing.T) {
 			endpoint:  "https://hub.example.com",
 			colocated: true,
 			runtime:   "kubernetes",
+			wantLen:   0,
+		},
+		{
+			name:      "colocated k8s alias",
+			endpoint:  "https://hub.example.com",
+			colocated: true,
+			runtime:   "k8s",
+			wantLen:   0,
+		},
+		{
+			name:      "colocated remote alias",
+			endpoint:  "https://hub.example.com",
+			colocated: true,
+			runtime:   "remote",
 			wantLen:   0,
 		},
 		{
@@ -582,7 +629,7 @@ func TestResolveEffectiveHubEndpoint_AnchorRows(t *testing.T) {
 			t.Setenv("K_SERVICE", "") // deterministic: no real Cloud Run environment in tests
 			t.Setenv("SCION_METADATA_BIND_ADDRESS", "203.0.113.5")
 
-			got, err := resolveEffectiveHubEndpoint(context.Background(), tt.in)
+			got, _, err := resolveEffectiveHubEndpoint(context.Background(), tt.in)
 			if err != nil {
 				t.Fatalf("resolveEffectiveHubEndpoint() unexpected error: %v", err)
 			}
@@ -642,16 +689,16 @@ func TestResolveEffectiveHubEndpoint_CrossProduct(t *testing.T) {
 
 						createIn := base
 						createIn.Op = opCreate
-						wantVal, wantErr := resolveEffectiveHubEndpoint(context.Background(), createIn)
+						wantVal, _, wantErr := resolveEffectiveHubEndpoint(context.Background(), createIn)
 
 						startIn := base
 						startIn.Op = opHTTPStart
-						gotStart, errStart := resolveEffectiveHubEndpoint(context.Background(), startIn)
+						gotStart, _, errStart := resolveEffectiveHubEndpoint(context.Background(), startIn)
 						assertSameHubEndpointResult(t, "http-start vs create", gotStart, errStart, wantVal, wantErr)
 
 						restartIn := base
 						restartIn.Op = opHTTPRestart
-						gotRestart, errRestart := resolveEffectiveHubEndpoint(context.Background(), restartIn)
+						gotRestart, _, errRestart := resolveEffectiveHubEndpoint(context.Background(), restartIn)
 						assertSameHubEndpointResult(t, "http-restart vs create", gotRestart, errRestart, wantVal, wantErr)
 					})
 				}
@@ -668,7 +715,7 @@ func TestResolveEffectiveHubEndpoint_CrossProduct(t *testing.T) {
 		}
 		for _, op := range []startOperation{opHTTPStart, opHTTPRestart, opCreate} {
 			t.Run(string(op), func(t *testing.T) {
-				got, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+				got, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 					Op:          op,
 					ProjectPath: projectDir,
 					RuntimeName: "docker",
@@ -723,7 +770,7 @@ func TestResolveEffectiveHubEndpoint_HTTPOpsResolvedEnvRanksBelowBroker(t *testi
 
 	for _, op := range []startOperation{opHTTPStart, opHTTPRestart} {
 		t.Run(string(op)+": SCION_HUB_URL alone leaves the broker endpoint in place", func(t *testing.T) {
-			got, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+			got, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 				Op:                op,
 				BrokerHubEndpoint: brokerPublic,
 				ResolvedEnv:       map[string]string{"SCION_HUB_URL": urlOnly},
@@ -739,9 +786,11 @@ func TestResolveEffectiveHubEndpoint_HTTPOpsResolvedEnvRanksBelowBroker(t *testi
 
 		// The shared resolvedEnv fallback consults SCION_HUB_URL when
 		// broker, connection and settings are all empty; pinned here so a
-		// change to it is deliberate.
-		t.Run(string(op)+": SCION_HUB_URL is the last resort when broker, connection and settings are all empty", func(t *testing.T) {
-			got, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+		// change to it is deliberate. This is also the exact untrusted case:
+		// the value is delivered to the agent (documented last-resort
+		// fallback), but must never be reported as trusted.
+		t.Run(string(op)+": SCION_HUB_URL is the last resort when broker, connection and settings are all empty, and is untrusted", func(t *testing.T) {
+			got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 				Op:          op,
 				ResolvedEnv: map[string]string{"SCION_HUB_URL": urlOnly},
 				RuntimeName: "docker",
@@ -751,6 +800,9 @@ func TestResolveEffectiveHubEndpoint_HTTPOpsResolvedEnvRanksBelowBroker(t *testi
 			}
 			if got != urlOnly {
 				t.Errorf("resolveEffectiveHubEndpoint() = %q, want %q (documented last-resort fallback)", got, urlOnly)
+			}
+			if trusted {
+				t.Errorf("resolveEffectiveHubEndpoint() trusted = true, want false — a resolved-env-only value must never be trusted for egress")
 			}
 		})
 	}
@@ -770,7 +822,7 @@ func TestResolveEffectiveHubEndpoint_RequiresKnownOperation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+			_, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 				Op:                tt.op,
 				BrokerHubEndpoint: "https://broker.example.com",
 				RuntimeName:       "docker",
@@ -796,7 +848,7 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
 	t.Setenv("K_SERVICE", "")
 
 	t.Run("cloudrun runtime with a localhost result: override is attempted", func(t *testing.T) {
-		_, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+		_, _, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 			Op: opCreate, BrokerHubEndpoint: "http://localhost:8080", RuntimeName: "cloudrun",
 		})
 		if err == nil {
@@ -808,7 +860,7 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
 	})
 
 	t.Run("cloudrun runtime with a non-localhost result: override is skipped", func(t *testing.T) {
-		got, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+		got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 			Op: opCreate, BrokerHubEndpoint: "https://broker.example.com", RuntimeName: "cloudrun",
 		})
 		if err != nil {
@@ -817,10 +869,13 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
 		if got != "https://broker.example.com" {
 			t.Errorf("got %q, want the broker endpoint as-is (no override applies to a non-localhost result)", got)
 		}
+		if !trusted {
+			t.Error("trusted = false, want true (BrokerHubEndpoint is an operator-derived tier)")
+		}
 	})
 
 	t.Run("non-cloudrun runtime with a localhost result: override is skipped", func(t *testing.T) {
-		got, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+		got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 			Op: opCreate, BrokerHubEndpoint: "http://localhost:8080", RuntimeName: "kubernetes",
 		})
 		if err != nil {
@@ -828,6 +883,9 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverride(t *testing.T) {
 		}
 		if got != "http://localhost:8080" {
 			t.Errorf("got %q, want the localhost endpoint left alone on a non-cloudrun runtime", got)
+		}
+		if !trusted {
+			t.Error("trusted = false, want true (BrokerHubEndpoint is an operator-derived tier)")
 		}
 	})
 }
@@ -865,7 +923,7 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverrideValue(t *testing.T
 		{"kubernetes, localhost: kept", "kubernetes", "http://localhost:8080", "http://localhost:8080"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
+			got, trusted, err := resolveEffectiveHubEndpoint(context.Background(), hubEndpointInputs{
 				Op: opCreate, BrokerHubEndpoint: tt.broker, RuntimeName: tt.runtime,
 			})
 			if err != nil {
@@ -873,6 +931,12 @@ func TestResolveEffectiveHubEndpoint_CloudrunLocalhostOverrideValue(t *testing.T
 			}
 			if got != tt.want {
 				t.Errorf("got %q, want %q", got, tt.want)
+			}
+			// Both the cloudrun-instance override (infra-derived) and the
+			// underlying BrokerHubEndpoint tier it may replace (an
+			// operator-derived tier) are always trusted.
+			if !trusted {
+				t.Error("trusted = false, want true")
 			}
 		})
 	}

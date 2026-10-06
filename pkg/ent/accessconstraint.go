@@ -52,8 +52,29 @@ type AccessConstraint struct {
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
-	Updated      time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated,omitempty"`
+	// Edges holds the relations/edges for other nodes in the graph.
+	// The values are being populated by the AccessConstraintQuery when eager-loading is set.
+	Edges        AccessConstraintEdges `json:"edges"`
 	selectValues sql.SelectValues
+}
+
+// AccessConstraintEdges holds the relations/edges for other nodes in the graph.
+type AccessConstraintEdges struct {
+	// History holds the value of the history edge.
+	History []*AccessConstraintHistory `json:"history,omitempty"`
+	// loadedTypes holds the information for reporting if a
+	// type was loaded (or requested) in eager-loading or not.
+	loadedTypes [1]bool
+}
+
+// HistoryOrErr returns the History value or an error if the edge
+// was not loaded in eager-loading.
+func (e AccessConstraintEdges) HistoryOrErr() ([]*AccessConstraintHistory, error) {
+	if e.loadedTypes[0] {
+		return e.History, nil
+	}
+	return nil, &NotLoadedError{edge: "history"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -215,6 +236,11 @@ func (_m *AccessConstraint) assignValues(columns []string, values []any) error {
 // This includes values selected through modifiers, order, etc.
 func (_m *AccessConstraint) Value(name string) (ent.Value, error) {
 	return _m.selectValues.Get(name)
+}
+
+// QueryHistory queries the "history" edge of the AccessConstraint entity.
+func (_m *AccessConstraint) QueryHistory() *AccessConstraintHistoryQuery {
+	return NewAccessConstraintClient(_m.config).QueryHistory(_m)
 }
 
 // Update returns a builder for updating this AccessConstraint.

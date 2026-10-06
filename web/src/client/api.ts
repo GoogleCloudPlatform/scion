@@ -26,6 +26,7 @@
  */
 
 import { dispatchTeardown } from '../utils/auth.js';
+import { recordHubDateHeader } from '../shared/hub-clock.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
@@ -56,6 +57,14 @@ export interface ApiFetchOptions extends RequestInit {
 }
 
 /**
+ * User-safe reason for a 403 whose body could not be read because the
+ * request was aborted mid-read. Distinct from a server-sent 'Access denied'
+ * reason, which the toast shows as written; formatAccessDenied treats this
+ * one as generic.
+ */
+export const ACCESS_DENIED_UNREADABLE_REASON = "You don't have permission to perform this action.";
+
+/**
  * Fetch wrapper that includes credentials and handles 403 responses.
  *
  * Returns the raw Response object so callers can handle the body themselves.
@@ -81,11 +90,14 @@ export function _resetSuspendedState(): void {
 
 export async function apiFetch(path: string, options?: ApiFetchOptions): Promise<Response> {
   const start = performance.now();
+  const sentMs = Date.now();
   const response = await fetch(path, {
     ...options,
     credentials: 'include',
   });
   const elapsed = performance.now() - start;
+  // Hub clock estimate for the delete lease flip (ptone/scion#2952).
+  recordHubDateHeader(response.headers?.get?.('date'), sentMs, Date.now());
 
   if (elapsed > API_SLOW_THRESHOLD_MS) {
     console.warn(
@@ -139,7 +151,15 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
         };
       }
     } catch {
-      // Body wasn't JSON — use empty detail
+      if (options?.signal?.aborted) {
+        // The caller aborted the request (e.g. a paginateAll page timeout)
+        // while the 403 body was still arriving, so the read failed for a
+        // reason that says nothing about the body. Report a generic denial
+        // rather than empty detail; the body was never seen, so this is
+        // not treated as user_suspended (ptone/scion#2583).
+        detail = { reason: ACCESS_DENIED_UNREADABLE_REASON };
+      }
+      // Otherwise the body wasn't JSON — use empty detail.
     }
 
     // A suspended account is terminal: trigger a full page reload so the
@@ -237,22 +257,34 @@ export async function apiFetchAllPages<T>(
  */
 export async function extractApiError(res: Response, fallback: string): Promise<string> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data = (await res.json()) as any;
-    if (typeof data.error === 'object' && data.error?.message) {
-      let msg: string = data.error.message;
-      // Append guidance hint when available (e.g. clone/pull error details)
-      if (data.error?.details?.guidance) {
-        msg += ` — ${data.error.details.guidance}`;
-      }
-      return msg;
-    }
-    if (typeof data.message === 'string') return data.message;
-    if (typeof data.error === 'string') return data.error;
+    return apiErrorMessageFromBody(await res.json()) ?? fallback;
   } catch {
     // Response wasn't JSON
+    return fallback;
   }
-  return fallback;
+}
+
+/**
+ * The human-readable message in a parsed API error body, or undefined when
+ * it has none. Accepts the shapes the hub sends: `{error: {message}}` (with
+ * a string `error.details.guidance` appended when present, e.g. clone/pull
+ * errors), `{message}` and `{error: "..."}`. Empty strings are not messages.
+ */
+export function apiErrorMessageFromBody(data: unknown): string | undefined {
+  if (data === null || typeof data !== 'object') return undefined;
+  const body = data as { error?: unknown; message?: unknown };
+  if (body.error && typeof body.error === 'object') {
+    const error = body.error as { message?: unknown; details?: { guidance?: unknown } };
+    if (typeof error.message === 'string' && error.message) {
+      const guidance = error.details?.guidance;
+      return typeof guidance === 'string' && guidance
+        ? `${error.message} — ${guidance}`
+        : error.message;
+    }
+  }
+  if (typeof body.message === 'string' && body.message) return body.message;
+  if (typeof body.error === 'string' && body.error) return body.error;
+  return undefined;
 }
 
 /** Structured API error info returned by {@link parseApiError}. */

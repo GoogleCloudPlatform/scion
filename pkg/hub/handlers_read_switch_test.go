@@ -167,7 +167,6 @@ func (s *rsWebChatStore) SetThreadPrefs(context.Context, string, string, string,
 func (s *rsWebChatStore) GetThreads(context.Context, string, string, int) ([]WebChatThread, error) {
 	return nil, nil
 }
-func (s *rsWebChatStore) MarkThreadRead(context.Context, string, string, string) error { return nil }
 func (s *rsWebChatStore) GetTopicConversationID(_ context.Context, topicID string) (string, error) {
 	t, ok := s.topics[topicID]
 	if !ok || t.DeletedAt != nil {
@@ -184,6 +183,9 @@ func (s *rsWebChatStore) GetTopicConversationIDIncludingDeleted(_ context.Contex
 }
 func (s *rsWebChatStore) CreateTopic(context.Context, WebChatTopic) error { return nil }
 func (s *rsWebChatStore) ListTopics(context.Context, string) ([]WebChatTopic, error) {
+	return nil, nil
+}
+func (s *rsWebChatStore) ListTopicsByProjects(context.Context, []string) ([]WebChatTopic, error) {
 	return nil, nil
 }
 func (s *rsWebChatStore) UpdateTopic(context.Context, string, TopicUpdate) error { return nil }
@@ -876,20 +878,20 @@ func TestReadSwitch_S3_FlagOn_Manager_WithExistingDM_LosesVisibility(t *testing.
 		t.Fatalf("CreateMessage (other): %v", err)
 	}
 
-	// Positive control: verify the dev user actually has manage on this
-	// agent. If this fails, the visibility assertions below are testing a
-	// non-manager path and proving nothing about DEF-64. An unrelated
-	// change to admin role resolution would silently convert this test
-	// into a non-manager test without any assertion failing — this guard
-	// prevents that.
+	// Positive control: verify the dev user holds full message history
+	// (agent.attach) on this agent. If this fails, the visibility
+	// assertions below are testing a participant-filtered path and prove
+	// nothing about DEF-64. An unrelated change to admin role resolution
+	// would silently convert this test into a participant-filtered test
+	// without any assertion failing — this guard prevents that.
 	agent, err := s.GetAgent(context.Background(), agentID)
 	if err != nil {
 		t.Fatalf("GetAgent: %v", err)
 	}
 	devUser := NewDevUser(DevUserConfig{})
-	manageDecision := srv.authzService.CheckAccess(context.Background(), devUser, agentResource(agent), ActionManage)
+	manageDecision := srv.agentFullHistoryDecision(context.Background(), devUser, agent)
 	if !manageDecision.Allowed {
-		t.Fatalf("precondition failed: dev user does not have manage on agent — "+
+		t.Fatalf("precondition failed: dev user does not hold agent.attach on agent — "+
 			"this test requires a manager caller to exercise DEF-64 (reason: %s)", manageDecision.Reason)
 	}
 
@@ -947,16 +949,16 @@ func TestReadSwitch_S3_FlagOn_Manager_NoDM_ReturnsEmpty200(t *testing.T) {
 	projectID := rsProject(t, s, "s3-mgr-nodm-project")
 	agentID := rsAgent(t, s, "s3-agent-mgr-nodm", projectID)
 
-	// Positive control: verify the dev user actually has manage on this
-	// agent — same guard as the sibling test.
+	// Positive control: verify the dev user holds full message history
+	// (agent.attach) on this agent — same guard as the sibling test.
 	agent, err := s.GetAgent(context.Background(), agentID)
 	if err != nil {
 		t.Fatalf("GetAgent: %v", err)
 	}
 	devUser := NewDevUser(DevUserConfig{})
-	manageDecision := srv.authzService.CheckAccess(context.Background(), devUser, agentResource(agent), ActionManage)
+	manageDecision := srv.agentFullHistoryDecision(context.Background(), devUser, agent)
 	if !manageDecision.Allowed {
-		t.Fatalf("precondition failed: dev user does not have manage on agent — "+
+		t.Fatalf("precondition failed: dev user does not hold agent.attach on agent — "+
 			"this test requires a manager caller (reason: %s)", manageDecision.Reason)
 	}
 

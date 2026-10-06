@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -186,6 +187,31 @@ func TestLoadSettingsKoanfWithEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadSettingsKoanfWithAutoExposePortsEnvSet(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	require.NoError(t, os.MkdirAll(projectScionDir, 0755))
+
+	// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
+	// sciontool-only; they must never break the legacy Settings decode, and
+	// a real override (SCION_ACTIVE_PROFILE) must still apply alongside them.
+	// This is a guard, not a regression test: the legacy Settings struct has
+	// no auto_expose_ports field, so decoding never failed here even before
+	// the env key mapper excluded these two variables (see
+	// isSettingsExcludedEnv in settings_v1.go). It still passes with the
+	// mapper exclusion reverted.
+	t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+	t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+	t.Setenv("SCION_ACTIVE_PROFILE", "remote")
+
+	s, err := LoadSettingsKoanf(projectScionDir)
+	require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadSettingsKoanf decoding")
+	assert.Equal(t, "remote", s.ActiveProfile)
+}
+
 func TestLoadSettingsKoanfWithBucketEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -257,6 +283,26 @@ func TestGetSettingsPath(t *testing.T) {
 	_ = os.Remove(yamlPath)
 	if path := GetSettingsPath(tmpDir); path != jsonPath {
 		t.Errorf("expected JSON fallback '%s', got '%s'", jsonPath, path)
+	}
+}
+
+func TestSettingsHierarchySources_DedupsRelativeAndAbsolutePaths(t *testing.T) {
+	// A relative spelling of a directory and its absolute equivalent must
+	// resolve to the same settings file and collapse to a single entry,
+	// mirroring serverConfigSources' relative/absolute dedup behavior.
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	if err := os.WriteFile(filepath.Join(cwd, "settings.yaml"), []byte("active_profile: test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(cwd, "settings.yaml")
+	got := settingsHierarchySources(".", cwd)
+	if len(got) != 1 {
+		t.Fatalf("settingsHierarchySources(\".\", %q) = %v, want exactly one entry", cwd, got)
+	}
+	if got[0] != want {
+		t.Errorf("settingsHierarchySources(\".\", %q) = %v, want [%q]", cwd, got, want)
 	}
 }
 
@@ -379,9 +425,7 @@ hub:
 func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -389,9 +433,11 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// SCION_PROJECT_ID maps to the same key, so a value inherited from the
+	// environment could win depending on env order. Clear both first.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
 	// Set SCION_HUB_PROJECT_ID env var — should map to top-level project_id
-	_ = os.Setenv("SCION_HUB_PROJECT_ID", "env-project-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_PROJECT_ID") }()
+	t.Setenv("SCION_HUB_PROJECT_ID", "env-project-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -412,9 +458,7 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -422,8 +466,12 @@ func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// legitimately populate ProjectID and would make this test fail for a
+	// reason unrelated to the legacy variable.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -443,9 +491,7 @@ func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -458,8 +504,12 @@ func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars. The file
+	// value currently out-ranks them, but clear them so the assertion
+	// depends only on the file and the legacy variable.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -1208,6 +1258,7 @@ profiles:
 func TestLoadSettingsFromDir_KnownKeysOnly_NoWarning(t *testing.T) {
 	// When all keys in the settings file map to struct fields,
 	// no warning should be logged.
+	resetWarnedUnusedKeysCache()
 	var buf bytes.Buffer
 	oldLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -1231,6 +1282,7 @@ default_template: default
 func TestLoadSettingsFromDir_UnknownKey_WarnsButSucceeds(t *testing.T) {
 	// When a settings file contains an unknown key, a WARN should be logged
 	// but the unmarshal should still succeed with correct values for known keys.
+	resetWarnedUnusedKeysCache()
 	var buf bytes.Buffer
 	oldLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -1254,6 +1306,7 @@ default_runtime: docker
 func TestLoadSettingsFromDir_MixedKnownAndUnknown_WarnsOnlyUnknown(t *testing.T) {
 	// Known keys should be populated correctly and the warning should
 	// list only the unknown keys.
+	resetWarnedUnusedKeysCache()
 	var buf bytes.Buffer
 	oldLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -1281,4 +1334,316 @@ phantom_key: value
 		"known key active_profile should not appear in warning")
 	assert.NotContains(t, logged, "default_template",
 		"known key default_template should not appear in warning")
+}
+
+// v1SettingsWithAllKnownFields is a minimal v1 settings.yaml containing one
+// example of every field family reported as a false-positive "unrecognized
+// key" in ptone/scion#2258: top-level schema_version/server/image_registry/
+// default_gcp_identity_mode, plus runtimes[*].type and
+// profiles[*].image_registry.
+const v1SettingsWithAllKnownFields = `schema_version: "1"
+default_gcp_identity_mode: block
+image_registry: ghcr.io/example
+server:
+  broker:
+    broker_id: broker-1
+runtimes:
+  k8s:
+    type: kubernetes
+profiles:
+  local:
+    runtime: k8s
+    image_registry: ghcr.io/example/local
+`
+
+func TestLoadSettingsKoanf_V1KnownKeys_NoWarning(t *testing.T) {
+	// A v1 settings file that only uses valid, documented v1 fields must not
+	// produce an unrecognized-keys warning, even though LoadSettingsKoanf
+	// decodes into the legacy Settings struct, which does not itself carry
+	// these v1-only fields. Regression test for ptone/scion#2258.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(v1SettingsWithAllKnownFields), 0644))
+
+	_, err := LoadSettingsKoanf(dir)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Empty(t, logged, "expected no log output for a fully valid v1 settings file, got: %s", logged)
+
+	// Guard against the fixture drifting out of schema validity (it is
+	// documented as "fully valid"): assert it actually passes ValidateSettings.
+	validationErrs, err := ValidateSettings([]byte(v1SettingsWithAllKnownFields), "1")
+	require.NoError(t, err)
+	assert.Empty(t, validationErrs, "expected v1SettingsWithAllKnownFields to be schema-valid, got: %v", validationErrs)
+}
+
+func TestLoadSettingsKoanf_V1UnknownKey_StillWarnsAndNamesIt(t *testing.T) {
+	// A genuinely unknown key in an otherwise-valid v1 settings file — both
+	// at the top level and nested inside a map-of-structs field — must still
+	// produce a warning naming it. The false-positive fix must not swallow
+	// real typos.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+	dir := t.TempDir()
+	settingsYAML := `schema_version: "1"
+default_gcp_identity_mode: block
+image_registry: ghcr.io/example
+server:
+  broker:
+    broker_id: broker-1
+runtimes:
+  k8s:
+    type: kubernetes
+profiles:
+  local:
+    runtime: k8s
+    image_registry: ghcr.io/example/local
+    totally_bogus_nested_key: value
+totally_bogus_top_level_key: value
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	_, err := LoadSettingsKoanf(dir)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN", "expected a WARN log for the unknown keys")
+	assert.Contains(t, logged, "totally_bogus_top_level_key", "expected warning to name the unknown top-level key")
+	assert.Contains(t, logged, "totally_bogus_nested_key", "expected warning to name the unknown nested key")
+	// The known v1 fields present in the same file must not be reported.
+	assert.NotContains(t, logged, "schema_version", "known v1 key schema_version should not appear in warning")
+	assert.NotContains(t, logged, "image_registry", "known v1 key image_registry should not appear in warning")
+	assert.NotContains(t, logged, "runtimes[k8s].type", "known v1 key runtimes[k8s].type should not appear in warning")
+}
+
+func TestUnmarshalWithUnusedKeyCheck_WarnsOnceAcrossRepeatedCalls(t *testing.T) {
+	// A single CLI invocation loads settings from many call sites. The same
+	// unrecognized key must not be logged more than once per process.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	settingsYAML := `active_profile: local
+default_runtime: docker
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	_, err := LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+	_, err = LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+	_, err = LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Equal(t, 1, strings.Count(logged, "level=WARN"),
+		"expected exactly one WARN across repeated loads of the same settings, got: %s", logged)
+}
+
+func TestLoadSettingsFromDir_LegacyNestedTypo_StillWarnsAndNamesLeaf(t *testing.T) {
+	// A legacy-format file (no schema_version; "harnesses" key marks it
+	// legacy) with typos nested under legacy-only sections (harnesses,
+	// bucket — sections VersionedSettings does not have at all) must still
+	// warn and name the leaf key, not just the section. Regression test for
+	// round-1 review finding 1a on ptone/scion#2258's fix.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	settingsYAML := `active_profile: local
+harnesses:
+  claude:
+    imagee: foo
+bucket:
+  nmae: my-bucket
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	_, err := LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN", "expected a WARN log for the unknown keys")
+	assert.Contains(t, logged, "harnesses[claude].imagee", "expected warning to name the nested typo's leaf key, not just \"harnesses\"")
+	assert.Contains(t, logged, "bucket.nmae", "expected warning to name the nested typo's leaf key, not just \"bucket\"")
+}
+
+func TestLoadSettingsKoanf_V1NestedTypoUnderV1OnlySection_StillWarnsAndNamesLeaf(t *testing.T) {
+	// A v1-format file with typos nested under sections legacy Settings does
+	// not have at all (server, harness_configs) must still warn and name the
+	// leaf key. Regression test for round-1 review finding 1b: a coarse
+	// "section absent from the legacy struct" must not swallow the nested
+	// typo the other struct can see at full precision.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+	dir := t.TempDir()
+	settingsYAML := `schema_version: "1"
+server:
+  brokr:
+    broker_id: broker-1
+harness_configs:
+  x:
+    harness: claude
+    imagee: foo
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	_, err := LoadSettingsKoanf(dir)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN", "expected a WARN log for the unknown keys")
+	assert.Contains(t, logged, "server.brokr", "expected warning to name the nested typo's leaf key, not just \"server\"")
+	assert.Contains(t, logged, "harness_configs[x].imagee", "expected warning to name the nested typo's leaf key, not just \"harness_configs\"")
+}
+
+func TestLoadSettingsFromDir_V1OnlyKeyInLegacyFile_StillWarns(t *testing.T) {
+	// A legacy-format file ("harnesses" key present, no schema_version) that
+	// also has a v1-only top-level key (image_registry) must still warn about
+	// it: that key is genuinely unused by every loader that will ever read
+	// this file, since LoadEffectiveSettings sends a legacy-format hierarchy
+	// through LoadSettingsKoanf + AdaptLegacySettings, never
+	// LoadVersionedSettings. Regression test for round-1 review finding 2.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	dir := t.TempDir()
+	settingsYAML := `active_profile: local
+harnesses:
+  claude:
+    image: foo
+image_registry: ghcr.io/example
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	_, err := LoadSettingsFromDir(dir)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN", "expected a WARN log for the v1-only key in a legacy file")
+	assert.Contains(t, logged, "image_registry", "expected warning to name the v1-only key")
+}
+
+func TestUnmarshalWithUnusedKeyCheck_DifferentSourcesWarnIndependently(t *testing.T) {
+	// The dedup key must include the source path: two different settings
+	// files that happen to share the same unknown-key set (e.g. a broker
+	// loading several projects in one process) must each warn once, not
+	// have the second suppressed by the first. Regression test for round-1
+	// review finding 3.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	settingsYAML := `active_profile: local
+default_runtime: docker
+`
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir1, "settings.yaml"), []byte(settingsYAML), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir2, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	_, err := LoadSettingsFromDir(dir1)
+	require.NoError(t, err)
+	_, err = LoadSettingsFromDir(dir2)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Equal(t, 2, strings.Count(logged, "level=WARN"),
+		"expected each distinct settings file to warn once, got: %s", logged)
+	assert.Contains(t, logged, filepath.Join(dir1, "settings.yaml"), "expected warning to name the first file's path")
+	assert.Contains(t, logged, filepath.Join(dir2, "settings.yaml"), "expected warning to name the second file's path")
+}
+
+func TestIsSettingsKeyPrefix(t *testing.T) {
+	// Pins the path-separator rule combineSettingsUnused relies on to avoid
+	// exactly the false-positive class this PR fixes: a plain string-prefix
+	// check (no separator boundary) would treat "image" as a prefix of
+	// "image_registry", corroborating the unrelated valid key as if it were
+	// the same miss as a genuine "image" typo. Round-2 review finding 1.
+	tests := []struct {
+		name   string
+		prefix string
+		key    string
+		want   bool
+	}{
+		{"exact match", "server", "server", true},
+		{"dot-separated child", "server", "server.brokr", true},
+		{"bracket child of a map field", "runtimes", "runtimes[k8s].type", true},
+		{"dot-separated grandchild of a bracket child", "runtimes[k8s]", "runtimes[k8s].type", true},
+		{"different map key is not a match", "runtimes[k8s]", "runtimes[k8s2].type", false},
+		{"dot instead of bracket before the map key is not a match", "runtimes.k8s", "runtimes[k8s].type", false},
+		{"string-prefix without a separator boundary is not a path prefix", "image", "image_registry", false},
+		{"reversed substring is not a prefix", "serve", "server", false},
+		{"longer string is never a prefix of a shorter one", "server.brokr", "server", false},
+		{"empty prefix does not match a non-separator start", "", "a", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isSettingsKeyPrefix(tt.prefix, tt.key),
+				"isSettingsKeyPrefix(%q, %q)", tt.prefix, tt.key)
+		})
+	}
+}
+
+func TestLoadSettingsKoanf_V1ImageTypoNextToImageRegistry_WarnsOnlyTypo(t *testing.T) {
+	// A v1 file with a genuine typo ("image") sitting next to the real valid
+	// key it was probably meant to be close to ("image_registry") must warn
+	// about the typo only. Without the path-separator check in
+	// isSettingsKeyPrefix, "image" would appear to corroborate
+	// "image_registry" (a plain string prefix), producing a false positive
+	// on a valid key — exactly the bug class this PR fixes. Round-2 review
+	// finding 1's integration case.
+	resetWarnedUnusedKeysCache()
+	var buf bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(oldLogger)
+
+	t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+
+	dir := t.TempDir()
+	settingsYAML := `schema_version: "1"
+image: bogus
+image_registry: ghcr.io/example
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	_, err := LoadSettingsKoanf(dir)
+	require.NoError(t, err)
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN", "expected a WARN log for the \"image\" typo")
+	assert.Contains(t, logged, "keys=[image]", "expected the warning to name only the typo'd key")
+	assert.NotContains(t, logged, "image_registry", "valid key image_registry must not appear in the warning")
 }

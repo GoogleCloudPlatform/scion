@@ -32,6 +32,14 @@ type ChatReadStateEvent struct {
 	UserID    string `json:"userId"`
 	MessageID string `json:"messageId"`
 	ReadAt    string `json:"readAt"`
+	// Unread is true only when this event was published by mark-unread
+	// (PublishChatOwnReadStateEvent), never by a normal /read advance. It is
+	// the sole authority the client uses to decide "this is a mark-unread
+	// notification" — NOT the userId match, which also happens to be true
+	// today only because normal /read never self-notifies. Without this
+	// field, a future self-notifying /read would be silently misread by the
+	// client as a mark-unread.
+	Unread bool `json:"unread,omitempty"`
 }
 
 // ChatMessageEditedEvent is published when a message is edited.

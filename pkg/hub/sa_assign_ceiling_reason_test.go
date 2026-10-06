@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -61,6 +62,12 @@ func scaCreateSA(t *testing.T, s store.Store, projectID string) *store.GCPServic
 // constant must fail if the production constant's value ever drifts, not
 // just if it disappears.
 const scaGenericDenyMsg = "You don't have permission to assign this GCP service account"
+
+// scaUnrecordedDenyMsg is the Layer 1 body for DenyCauseCeilingUnrecorded,
+// spelled out literally for the same reason as scaGenericDenyMsg.
+const scaUnrecordedDenyMsg = "This agent cannot assign service accounts: its delegation chain includes an agent " +
+	"created without recorded provenance (this agent or one of the agents that created it). " +
+	"Have an authorized user recreate this agent directly (not from another agent)."
 
 // scaCreateDelegatorWithoutAssign creates an active, existing user bound to a
 // minimal custom project-scoped role that omits gcp_service_account.assign.
@@ -254,7 +261,7 @@ func TestEvaluateSAAssignment_OrdinaryDenialKeepsGenericMessage(t *testing.T) {
 
 // scaGetUserErrorStore wraps a real store and forces GetUser to fail with a
 // non-ErrNotFound error, simulating a genuine store fault (as opposed to a
-// definitively-missing delegator) inside checkUserHoldsPermission.
+// definitively-missing delegator) inside evaluateUserDelegatorAuthority.
 type scaGetUserErrorStore struct {
 	store.Store
 	failUserID string
@@ -351,6 +358,11 @@ func TestSAAssignForbiddenMessage_AllCauses(t *testing.T) {
 				"to assign this service account.",
 		},
 		{
+			name:  "ceiling_unrecorded names the missing provenance and the remedy",
+			cause: DenyCauseCeilingUnrecorded,
+			want:  scaUnrecordedDenyMsg,
+		},
+		{
 			name:  "an unrecognised cause falls through to the generic message",
 			cause: DenyCause("some_future_cause_nobody_wired_a_message_for"),
 			want:  scaGenericDenyMsg,
@@ -394,10 +406,10 @@ func TestEvaluateSAAssignment_CeilingOrphanedGrandparent(t *testing.T) {
 	createDCAgent(t, s, agentBID, projectID, agentAID, AgentRoleFull)
 	sa := scaCreateSA(t, s, projectID)
 
-	createDCEdge(t, s, store.DelegationPrincipalUser, goneUserID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, goneUserID,
 		store.DelegationPrincipalAgent, agentAID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
-	createDCEdge(t, s, store.DelegationPrincipalAgent, agentAID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalAgent, agentAID,
 		store.DelegationPrincipalAgent, agentBID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 
@@ -416,4 +428,189 @@ func TestEvaluateSAAssignment_CeilingOrphanedGrandparent(t *testing.T) {
 	assert.NotContains(t, denial.msg, goneUserID, "the 403 body must not name the missing principal's ID")
 	assert.NotContains(t, denial.msg, agentAID, "the 403 body must not name the intermediate agent's ID")
 	assert.NotContains(t, denial.msg, agentBID, "the 403 body must not name the requesting agent's ID")
+}
+
+// scaOrphanedDenyMsg and scaLacksPermissionDenyMsg are the literal
+// ceiling-cause 403 bodies (see scaGenericDenyMsg for why they are literals).
+const (
+	scaOrphanedDenyMsg = "This agent cannot assign service accounts: a principal in its delegation chain " +
+		"(the user or agent that created it, or one of their creators) does not exist. " +
+		"Ask an admin to recreate the agent under a current user."
+	scaLacksPermissionDenyMsg = "This agent cannot assign service accounts: a principal in its delegation chain " +
+		"(the user or agent that created it, or one of their creators) does not hold permission " +
+		"to assign this service account."
+)
+
+// TestEvaluateSAAssignment_CeilingCauseByDelegatorState pins the DenyCause
+// the delegation ceiling records for each non-live delegator shape, and the
+// SA-assign 403 body that cause selects:
+//   - the migration sentinel, a soft-deleted agent delegator (immediate or
+//     deeper) and a missing agent delegator do not resolve to a live
+//     principal: ceiling_orphaned, "does not exist";
+//   - a suspended user delegator exists but holds no permission, whether or
+//     not it is a super-admin: ceiling_delegator_lacks_permission, "does not
+//     hold permission".
+//
+// Where the chain can be live, the case first shows that it passes the Hub
+// policy layer, so the deny comes from the delegator's state alone.
+func TestEvaluateSAAssignment_CeilingCauseByDelegatorState(t *testing.T) {
+	type chainFixture struct {
+		s         store.Store
+		projectID string
+		userID    string
+	}
+	// chain stores agents ids[0..n-1]: the user delegates to ids[0] and each
+	// agent delegates to the next.
+	chain := func(t *testing.T, f chainFixture, ids ...string) {
+		t.Helper()
+		prev, prevType := f.userID, store.DelegationPrincipalUser
+		for _, id := range ids {
+			createDCAgent(t, f.s, id, f.projectID, prev, AgentRoleFull)
+			seedRecordedDelegationEdge(t, f.s, prevType, prev, store.DelegationPrincipalAgent, id,
+				store.RoleScopeProject, f.projectID, string(AgentRoleFull))
+			prev, prevType = id, store.DelegationPrincipalAgent
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		// setup builds the chain and returns the requesting agent. When
+		// live is true the chain is live on return; breakChain then makes
+		// it non-live.
+		setup      func(t *testing.T, f chainFixture) string
+		live       bool
+		breakChain func(t *testing.T, f chainFixture)
+		cause      DenyCause
+		msg        string
+	}{
+		{
+			name: "migration sentinel",
+			setup: func(t *testing.T, f chainFixture) string {
+				id := tid("sca-state-sentinel")
+				createDCAgent(t, f.s, id, f.projectID, f.userID, AgentRoleFull)
+				require.NoError(t, f.s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
+					DelegatorType: store.DelegationPrincipalUser, DelegatorID: "system/migration",
+					DelegateType: store.DelegationPrincipalAgent, DelegateID: id,
+					ScopeType: store.RoleScopeProject, ScopeID: f.projectID,
+					Role: string(AgentRoleFull), Active: true, Grandfathered: true,
+				}))
+				return id
+			},
+			cause: DenyCauseCeilingOrphaned,
+			msg:   scaOrphanedDenyMsg,
+		},
+		{
+			name: "soft-deleted immediate agent delegator",
+			setup: func(t *testing.T, f chainFixture) string {
+				chain(t, f, tid("sca-state-sdi-parent"), tid("sca-state-sdi-child"))
+				return tid("sca-state-sdi-child")
+			},
+			live:       true,
+			breakChain: func(t *testing.T, f chainFixture) { softDeleteStoredAgent(t, f.s, tid("sca-state-sdi-parent")) },
+			cause:      DenyCauseCeilingOrphaned,
+			msg:        scaOrphanedDenyMsg,
+		},
+		{
+			name: "soft-deleted deeper agent delegator",
+			setup: func(t *testing.T, f chainFixture) string {
+				chain(t, f, tid("sca-state-sdd-a"), tid("sca-state-sdd-b"), tid("sca-state-sdd-c"))
+				return tid("sca-state-sdd-c")
+			},
+			live:       true,
+			breakChain: func(t *testing.T, f chainFixture) { softDeleteStoredAgent(t, f.s, tid("sca-state-sdd-a")) },
+			cause:      DenyCauseCeilingOrphaned,
+			msg:        scaOrphanedDenyMsg,
+		},
+		{
+			name: "missing agent delegator",
+			setup: func(t *testing.T, f chainFixture) string {
+				id := tid("sca-state-missing-child")
+				createDCAgent(t, f.s, id, f.projectID, f.userID, AgentRoleFull)
+				createDCEdge(t, f.s, store.DelegationPrincipalAgent, tid("sca-state-missing-parent"),
+					store.DelegationPrincipalAgent, id, store.RoleScopeProject, f.projectID, string(AgentRoleFull))
+				return id
+			},
+			cause: DenyCauseCeilingOrphaned,
+			msg:   scaOrphanedDenyMsg,
+		},
+		{
+			name: "suspended user delegator",
+			setup: func(t *testing.T, f chainFixture) string {
+				chain(t, f, tid("sca-state-susp-agent"))
+				return tid("sca-state-susp-agent")
+			},
+			live:       true,
+			breakChain: func(t *testing.T, f chainFixture) { setUserStatus(t, f.s, f.userID, store.UserStatusSuspended) },
+			cause:      DenyCauseCeilingDelegatorLacksPermission,
+			msg:        scaLacksPermissionDenyMsg,
+		},
+		{
+			name: "suspended super-admin user delegator",
+			setup: func(t *testing.T, f chainFixture) string {
+				adminID := tid("sca-state-admin")
+				createTestUserWithRole(t, f.s, adminID, "sca-state-admin@example.com", "admin", store.SystemRoleSuperAdmin)
+				chain(t, chainFixture{s: f.s, projectID: f.projectID, userID: adminID}, tid("sca-state-admin-agent"))
+				return tid("sca-state-admin-agent")
+			},
+			live: true,
+			breakChain: func(t *testing.T, f chainFixture) {
+				setUserStatus(t, f.s, tid("sca-state-admin"), store.UserStatusSuspended)
+			},
+			cause: DenyCauseCeilingDelegatorLacksPermission,
+			msg:   scaLacksPermissionDenyMsg,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			f := chainFixture{s: s, projectID: tid("sca-state-proj"), userID: tid("sca-state-user")}
+			createDCProject(t, s, f.projectID, "sca-state-project")
+			createDCUser(t, s, f.userID, "sca-state-user@example.com", f.projectID, store.ProjectRoleOwner)
+			sa := scaCreateSA(t, s, f.projectID)
+
+			agentID := tc.setup(t, f)
+			agent := dcAgentIdentity(agentID, f.projectID, AgentRoleFull)
+			agentCtx := contextWithIdentity(ctx, agent)
+			// Layer 1 of the gate is CheckAccess on the service account.
+			layer1 := func() Decision {
+				return srv.authzService.CheckAccess(agentCtx, agent, gcpServiceAccountResource(sa), ActionAssign)
+			}
+			if tc.live {
+				live := layer1()
+				require.True(t, live.Allowed, "the live chain passes the Hub policy layer: reason %q", live.Reason)
+				tc.breakChain(t, f)
+			}
+
+			d := layer1()
+			require.False(t, d.Allowed, "reason %q", d.Reason)
+			assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
+			assert.Equal(t, tc.cause, d.DenyCause, "reason %q", d.Reason)
+
+			denial := srv.evaluateSAAssignment(agentCtx, nil, sa, SurfaceProjectDefault)
+			require.NotNil(t, denial, "the non-live chain denies the assignment")
+			assert.Equal(t, saAssignDenyForbiddenStructured, denial.kind)
+			assert.Equal(t, tc.msg, denial.msg)
+		})
+	}
+}
+
+// TestSAAssignUnrecordedChainHTTPBody covers the HTTP response when an agent
+// whose only delegation edge has kind unrecorded creates a child with an
+// assign-mode service account: a 403 with the unrecorded-provenance message
+// and the structured SA-assign details.
+func TestSAAssignUnrecordedChainHTTPBody(t *testing.T) {
+	f := newLegacyFixture(t, "sca-unrec")
+	edges, err := f.store.GetDelegationEdgesForDelegate(t.Context(), store.DelegationPrincipalAgent, f.legacy.ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	require.Equal(t, store.EffectCeilingUnrecorded, edges[0].Kind)
+
+	rec := f.createAsParent(t, f.agentToken(t, f.legacy.ID), f.assignBody("sca-unrec-c"))
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	apiErr := decodeTargetAPIError(t, rec)
+	assert.Equal(t, ErrCodeForbidden, apiErr.Code)
+	assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
+	assert.NotEqual(t, scaGenericDenyMsg, apiErr.Message)
+	assert.Equal(t, gcpServiceAccountResource(f.sa).Type, apiErr.Details["resource_type"])
+	assert.Equal(t, string(ActionAssign), apiErr.Details["denied_action"])
 }

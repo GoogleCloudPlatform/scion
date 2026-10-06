@@ -6,17 +6,15 @@ package handlers
 
 import (
 	"encoding/json"
-	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync"
 	"testing"
-	"unicode/utf8"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 )
 
 // scrubHubEnv clears all Hub-related environment variables for the
@@ -443,6 +441,79 @@ func TestHubHandler_StickyStatus(t *testing.T) {
 	}
 }
 
+// TestHubHandler_SessionStart_WirePayloadShape pins the exact wire body a
+// real Claude SessionStart hook produces, end to end through the dialect and
+// HubHandler (not a hand-built JSON literal). pkg/hub's since_create_ms
+// start-time attribution (handlers_agent_lifecycle.go's updateAgentStatus)
+// keys on exactly this phase/activity/message combination to recognize the
+// harness's SessionStart report; if this shape ever changes, that hub-side
+// match needs to change with it — this test is the tripwire for that.
+func TestHubHandler_SessionStart_WirePayloadShape(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	var mu sync.Mutex
+	var body []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		b, _ := io.ReadAll(r.Body)
+		body = b
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	scrubHubEnv(t)
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	t.Setenv("SCION_AGENT_ID", "test-agent")
+
+	handler := NewHubHandler()
+	if handler == nil {
+		t.Fatal("expected HubHandler to be created")
+	}
+
+	// Parse the raw Claude Code hook payload through the real dialect, the
+	// same way cmd/sciontool/commands/hook.go does for a live SessionStart
+	// invocation, rather than constructing a hooks.Event by hand.
+	dialect := dialects.NewClaudeDialect()
+	raw := map[string]interface{}{
+		"hook_event_name": "SessionStart",
+		"session_id":      "sess-123",
+		"source":          "startup",
+	}
+	event, err := dialect.Parse(raw)
+	if err != nil {
+		t.Fatalf("dialect.Parse: %v", err)
+	}
+	if event.Name != hooks.EventSessionStart {
+		t.Fatalf("dialect.Parse normalized SessionStart to %q, want %q", event.Name, hooks.EventSessionStart)
+	}
+
+	if err := handler.Handle(event); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	mu.Lock()
+	got := body
+	mu.Unlock()
+
+	var payload struct {
+		Phase    string `json:"phase"`
+		Activity string `json:"activity"`
+		Message  string `json:"message"`
+	}
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("unmarshal wire body %s: %v", got, err)
+	}
+
+	if payload.Phase != "running" || payload.Activity != "working" || payload.Message != "Session started" {
+		t.Errorf("SessionStart wire payload = %+v, want phase=running activity=working message=%q (pkg/hub's since_create_ms match depends on this exact shape)",
+			payload, "Session started")
+	}
+}
+
 // TestHubHandler_ModeBehavior verifies behavior differences between local and hub modes.
 func TestHubHandler_ModeBehavior(t *testing.T) {
 	t.Run("local mode: HubHandler is nil", func(t *testing.T) {
@@ -569,318 +640,94 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 	})
 }
 
-// TestHubHandler_AssistantTextForwarding tests that agent-end events with
-// AssistantText forward the text to the outbound-message endpoint, and that
-// very large texts are truncated.
-func TestHubHandler_AssistantTextForwarding(t *testing.T) {
-	t.Run("forwards assistant text to outbound-message endpoint", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
+// fakeHub is a test Hub that mirrors the real hub's outbound-message
+// contract: a request naming no addressee (recipient, recipient_id or
+// conversation_ref) is rejected with 400, as resolveOutboundRouting does.
+// GET /api/v1/agents/{id} returns the configured creator attribution.
+// outboundStatus, when set, scripts the status (and Retry-After) of
+// successive outbound-message requests before falling back to 200.
+// fakeHub records the requests a HubHandler makes.
+type fakeHub struct {
+	t *testing.T
 
-		var mu sync.Mutex
-		var outboundMsg string
-		var outboundType string
-		statusCalls := 0
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-
-			if msg, ok := payload["msg"].(string); ok {
-				// outbound-message endpoint
-				outboundMsg = msg
-				outboundType, _ = payload["type"].(string)
-			} else {
-				// status endpoint
-				statusCalls++
-			}
-
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
-
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
-		}
-
-		err := handler.Handle(&hooks.Event{
-			Name: hooks.EventAgentEnd,
-			Data: hooks.EventData{AssistantText: "Hello from the agent"},
-		})
-		if err != nil {
-			t.Fatalf("Handle returned error: %v", err)
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-		if outboundMsg != "Hello from the agent" {
-			t.Errorf("Expected outbound msg %q, got %q", "Hello from the agent", outboundMsg)
-		}
-		if outboundType != "assistant-reply" {
-			t.Errorf("Expected outbound type %q, got %q", "assistant-reply", outboundType)
-		}
-		if statusCalls != 1 {
-			t.Errorf("Expected 1 status call (working), got %d", statusCalls)
-		}
-	})
-
-	t.Run("truncates assistant text to the hub message limit", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
-
-		var mu sync.Mutex
-		var outboundMsg string
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-
-			if msg, ok := payload["msg"].(string); ok {
-				outboundMsg = msg
-			}
-
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
-
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
-		}
-
-		bigText := strings.Repeat("A", messages.MaxMessageLength*4)
-
-		err := handler.Handle(&hooks.Event{
-			Name: hooks.EventAgentEnd,
-			Data: hooks.EventData{AssistantText: bigText},
-		})
-		if err != nil {
-			t.Fatalf("Handle returned error: %v", err)
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		// Runes, not bytes: this is the unit the hub rejects on.
-		if got := utf8.RuneCountInString(outboundMsg); got > messages.MaxMessageLength {
-			t.Errorf("Expected outbound msg to be at most %d runes, got %d", messages.MaxMessageLength, got)
-		}
-		if !strings.Contains(outboundMsg, "[truncated,") {
-			t.Error("Expected the truncated message to carry a marker saying how much went")
-		}
-	})
+	mu            sync.Mutex
+	outboundCalls int
+	selfCalls     int
+	statusCalls   int
 }
 
-func TestTruncateAssistantText(t *testing.T) {
-	const marker = "[truncated,"
+func (f *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
-	t.Run("text at or under the limit is untouched", func(t *testing.T) {
-		for _, n := range []int{0, 1, messages.MaxMessageLength - 1, messages.MaxMessageLength} {
-			// Multi-byte: with ASCII, bytes and runes agree and a byte-counting
-			// implementation passes unnoticed.
-			in := strings.Repeat("\u3042", n)
-			if got := truncateAssistantText(in); got != in {
-				t.Errorf("%d runes was modified", n)
-			}
-		}
-	})
-
-	// Non-uniform input: a homogeneous repeat cannot tell head-truncation from
-	// tail-truncation.
-	t.Run("keeps the START of the reply", func(t *testing.T) {
-		in := "OPENING-SENTINEL" + strings.Repeat("x", messages.MaxMessageLength*2) + "CLOSING-SENTINEL"
-		got := truncateAssistantText(in)
-
-		if !strings.HasPrefix(got, "OPENING-SENTINEL") {
-			t.Error("the opening of the reply was discarded")
-		}
-		if strings.Contains(got, "CLOSING-SENTINEL") {
-			t.Error("kept the end of the reply instead of the start")
-		}
-		if body := got[:strings.LastIndex(got, "\n"+marker)]; !strings.HasPrefix(in, body) {
-			t.Error("the kept text is not a prefix of the input")
-		}
-	})
-
-	t.Run("result always fits the hub limit", func(t *testing.T) {
-		for _, in := range []string{
-			strings.Repeat("a", messages.MaxMessageLength+1),
-			strings.Repeat("\u3042", messages.MaxMessageLength+1),
-			strings.Repeat("a", messages.MaxMessageLength*10),
-			"\xff\xfe" + strings.Repeat("b", messages.MaxMessageLength+1),
-		} {
-			got := truncateAssistantText(in)
-			if n := utf8.RuneCountInString(got); n > messages.MaxMessageLength {
-				t.Errorf("%d runes exceeds the hub limit of %d", n, messages.MaxMessageLength)
-			}
-			if !strings.Contains(got, marker) {
-				t.Error("a truncated reply carries no marker")
-			}
-		}
-	})
-
-	t.Run("the marker reports how much went", func(t *testing.T) {
-		over := 500
-		got := truncateAssistantText(strings.Repeat("a", messages.MaxMessageLength+over))
-		var dropped int
-		if _, err := fmt.Sscanf(got[strings.LastIndex(got, marker):], "[truncated, %d characters omitted]", &dropped); err != nil {
-			t.Fatalf("marker is not parseable: %v", err)
-		}
-		if dropped < over {
-			t.Errorf("marker says %d dropped, but at least %d were", dropped, over)
-		}
-	})
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/test-agent-id":
+		f.selfCalls++
+		_, _ = w.Write([]byte(`{"id":"test-agent-id"}`))
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/test-agent-id/outbound-message":
+		f.outboundCalls++
+		_, _ = w.Write([]byte(`{}`))
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/test-agent-id/status":
+		f.statusCalls++
+		_, _ = w.Write([]byte(`{}`))
+	default:
+		f.t.Errorf("fakeHub: unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}
 }
 
-// TestHubHandler_AssistantTextMetadataTagging tests that automatic
-// assistant-reply messages include content classification metadata.
-func TestHubHandler_AssistantTextMetadataTagging(t *testing.T) {
-	t.Run("tags outbound message with metadata", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
+// start points the hub client env at f and returns a HubHandler.
+func (f *fakeHub) start() *HubHandler {
+	f.t.Helper()
+	f.t.Setenv("HOME", f.t.TempDir())
+	server := httptest.NewServer(f)
+	f.t.Cleanup(server.Close)
 
-		var mu sync.Mutex
-		var outboundPayload map[string]interface{}
+	// Clear real Hub env, then point at the test server (issue #123).
+	scrubHubEnv(f.t)
+	f.t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	f.t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	f.t.Setenv("SCION_AGENT_ID", "test-agent-id")
 
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
+	handler := NewHubHandler()
+	if handler == nil {
+		f.t.Fatal("Expected handler to be created")
+	}
+	return handler
+}
 
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
+// TestHubHandler_AgentEndSendsNoMessage verifies that an end-of-turn event
+// carrying the assistant's final text only updates status: the hook no
+// longer mirrors end-of-turn text to the hub as a message.
+func TestHubHandler_AgentEndSendsNoMessage(t *testing.T) {
+	fh := &fakeHub{t: t}
+	handler := fh.start()
 
-			if _, ok := payload["msg"]; ok {
-				outboundPayload = payload
-			}
+	payload := map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"session_id":             "s1",
+		"last_assistant_message": "Here is the final answer.",
+	}
+	event, err := dialects.NewClaudeDialect().Parse(payload)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if event.Name != hooks.EventAgentEnd {
+		t.Fatalf("expected %s, got %s", hooks.EventAgentEnd, event.Name)
+	}
+	if err := handler.Handle(event); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
 
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
-
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
-		}
-
-		err := handler.Handle(&hooks.Event{
-			Name: hooks.EventAgentEnd,
-			Data: hooks.EventData{AssistantText: "Agent response"},
-		})
-		if err != nil {
-			t.Fatalf("Handle returned error: %v", err)
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		if outboundPayload == nil {
-			t.Fatal("Expected outbound message to be sent")
-		}
-		// visibility field has been removed from outbound messages
-		if _, hasVis := outboundPayload["visibility"]; hasVis {
-			t.Errorf("Expected visibility field to be absent, got %v", outboundPayload["visibility"])
-		}
-		metadata, ok := outboundPayload["metadata"].(map[string]interface{})
-		if !ok {
-			t.Fatal("Expected metadata to be present")
-		}
-		if metadata["source"] != "hook" {
-			t.Errorf("Expected metadata source 'hook', got %v", metadata["source"])
-		}
-	})
-
-	t.Run("sets has_thinking metadata when thinking content was filtered", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
-
-		var mu sync.Mutex
-		var outboundPayload map[string]interface{}
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-
-			if _, ok := payload["msg"]; ok {
-				outboundPayload = payload
-			}
-
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
-
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
-		}
-
-		err := handler.Handle(&hooks.Event{
-			Name: hooks.EventAgentEnd,
-			Data: hooks.EventData{
-				AssistantText: "Filtered response",
-				AssistantContent: &hooks.AssistantContent{
-					Blocks: []hooks.ContentBlock{
-						{Type: hooks.ContentBlockThinking, Text: "I need to think..."},
-						{Type: hooks.ContentBlockText, Text: "Filtered response"},
-					},
-				},
-			},
-		})
-		if err != nil {
-			t.Fatalf("Handle returned error: %v", err)
-		}
-
-		mu.Lock()
-		defer mu.Unlock()
-
-		if outboundPayload == nil {
-			t.Fatal("Expected outbound message to be sent")
-		}
-		metadata, ok := outboundPayload["metadata"].(map[string]interface{})
-		if !ok {
-			t.Fatal("Expected metadata to be present")
-		}
-		if metadata["has_thinking"] != "true" {
-			t.Errorf("Expected has_thinking 'true', got %v", metadata["has_thinking"])
-		}
-	})
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if fh.outboundCalls != 0 || fh.selfCalls != 0 {
+		t.Errorf("expected no outbound message or self lookup, got outbound=%d self=%d",
+			fh.outboundCalls, fh.selfCalls)
+	}
+	if fh.statusCalls != 1 {
+		t.Errorf("expected 1 status update, got %d", fh.statusCalls)
+	}
 }
 
 // TestTruncateMessage tests the truncation helper function.

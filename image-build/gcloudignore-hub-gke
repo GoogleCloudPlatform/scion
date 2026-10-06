@@ -1,0 +1,97 @@
+# Cloud Build source upload filter for image-build/cloudbuild-hub-gke.yaml.
+#
+# Derived from gcloudignore-omni, which keeps the web source that the root
+# Dockerfile's frontend stage builds (`npm ci && npm run build`). It differs
+# in one way: every pattern that names a repo-root file or directory is
+# anchored with a leading "/".
+#
+# WHY: gcloudignore uses gitignore semantics, so a pattern without a slash
+# matches at any depth. Unanchored, `agents.md` and `.gemini/` also drop
+#   pkg/config/embeds/templates/default/agents.md
+#   pkg/config/embeds/templates/default/home/.gemini/
+#   resources/templates/default/agents.md
+#   resources/templates/default/home/.gemini/
+# which are under `//go:embed all:` roots (pkg/config/init.go,
+# resources/embed.go). The build still succeeds; those files are just
+# missing from the binary. The root .dockerignore anchors its equivalents, so
+# with this file the Cloud Build upload carries the same embed-root files as
+# a local `docker build --target hub-gke .`.
+#
+# gcloudignore-omni and the root .gcloudignore are shared by other builds
+# and still carry the unanchored patterns; they are deliberately unchanged
+# here. cmd/dockerfile_contract_test.go checks the anchoring in this file.
+#
+# Usage: pass --ignore-file=image-build/gcloudignore-hub-gke to
+# gcloud builds submit (see cloudbuild-hub-gke.yaml).
+
+#!include:.gitignore
+
+# ---------------------------------------------------------------------------
+# Directories not needed by omni builds
+# ---------------------------------------------------------------------------
+changelog/
+docs/
+docs-repo/
+docs-site/
+examples/
+extras/
+hack/
+/internal/
+reviews/
+scratch/
+/scripts/
+shared-dirs/
+/skills/
+
+# ---------------------------------------------------------------------------
+# Web frontend — INCLUDE source for omni (unlike .gcloudignore).
+# Only exclude build artifacts and tooling detritus.
+# ---------------------------------------------------------------------------
+web/node_modules/
+web/coverage/
+web/.screenshots/
+web/.env*
+
+# ---------------------------------------------------------------------------
+# Test files — Cloud Build compiles Go but never runs tests
+# ---------------------------------------------------------------------------
+*_test.go
+
+# ---------------------------------------------------------------------------
+# Build artifacts and tool state
+# ---------------------------------------------------------------------------
+.git/
+.claude/
+.design/
+.scratch/
+.tasks/
+.scion/
+build/
+.build/
+testdata/
+downloads/
+
+# ---------------------------------------------------------------------------
+# CI / IDE / config files not needed for image builds
+# ---------------------------------------------------------------------------
+/.gemini/
+/.geminiignore
+/.github/
+/.gitignore
+
+# ---------------------------------------------------------------------------
+# Root files not needed for image builds
+# ---------------------------------------------------------------------------
+/claude.md
+/gemini.md
+/.claudeignore
+/.dockerignore
+/.coordinator-state.md
+/.eng-manager-state.md
+/agents.md
+/CHANGELOG.md
+/GLOSSARY.md
+/LICENSE
+/Makefile
+/README.md
+/pr-*-review*.md

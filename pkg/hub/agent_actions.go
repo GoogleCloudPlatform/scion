@@ -23,7 +23,7 @@ import (
 var errNoRuntimeBrokerAssigned = errors.New("agent has no runtime broker assigned")
 
 func requireRuntimeBrokerAssigned(agent *store.Agent) error {
-	if agent.RuntimeBrokerID == "" {
+	if agent == nil || agent.RuntimeBrokerID == "" {
 		return errNoRuntimeBrokerAssigned
 	}
 	return nil

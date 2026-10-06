@@ -53,11 +53,76 @@ Effective communication requires balancing responsiveness with focus.
 
 ## Message Formatting
 
-The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, and no character substitution. Whatever bytes you pass are exactly what the recipient sees. Markdown is accepted and encouraged and is rendered properly in surfaces.
+The `scion message` CLI delivers the body argument **verbatim** — it performs no escape expansion, and no character substitution. Whatever bytes you pass are exactly what the recipient sees. Markdown is rendered in chat surfaces.
+
+### Use structured markdown
+
+Any message longer than a sentence or two **must** use structured markdown. Dense single paragraphs are hard to scan and act on in a chat surface.
+
+- **Headline first**: start with a short **bold** one-line summary of the message.
+- **Bullets for facts**: put status, findings and blockers in bullets, each starting with a short bold label (e.g. `**Status:**`, `**Blocker:**`, `**Found:**`, `**Cause:**`).
+- **Choices are always a list**: one option per bulleted or numbered item, each with its trade-off. Mark the recommended option, or add a separate `**Recommendation:**` line. Never write options inline in a paragraph ("A) ... B) ... C) ...").
+- **Ask on its own line**: end with the explicit question or decision needed, set apart from the rest (e.g. `**Ask:** ...`).
+- **Code formatting**: use `code` for identifiers, commands, branch names and paths. Put a command the reader should run in its own fenced block.
+- **Short paragraphs**: one idea per paragraph or bullet.
+
+A one-line reply or acknowledgment needs no structure — "Got it, starting on #42." is fine as is.
+
+Bad — one paragraph, options inline, the ask buried at the end:
+
+```text
+I looked into the flaky TestSync failure and it seems to be caused by the
+shared temp dir between parallel subtests, which I could fix by A) giving
+each subtest its own t.TempDir(), which is the cleanest but touches 12
+tests, B) removing t.Parallel() from the suite, which is a one-line change
+but slows CI by about 40s, or C) adding a mutex around the dir setup, which
+is quick but hides the real problem. Which do you want me to do?
+```
+
+Good — the same content, structured:
+
+```markdown
+**Flaky `TestSync` traced to a shared temp dir**
+
+- **Cause:** parallel subtests share one temp dir in `pkg/sync/sync_test.go`.
+- **Status:** reproduced locally; no fix applied yet.
+
+**Options:**
+1. Give each subtest its own `t.TempDir()`. Cleanest; touches 12 tests.
+2. Remove `t.Parallel()` from the suite. One-line change; CI ~40s slower.
+3. Add a mutex around dir setup. Quick; hides the real problem.
+
+**Recommendation:** option 1.
+
+**Ask:** OK to proceed with option 1?
+```
+
+### Newlines and quoting
 
 To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n sequences — those will appear as literal characters in the delivered message.
 
-Correct — real newlines in a quoted string:
+**Backticks and `$(...)` are executed by the shell.** Inside a double-quoted argument, the shell runs anything in backticks or `$(...)` *before* `scion` starts and splices the output into the body. Markdown inline code like `` `make test` `` in a double-quoted body therefore runs `make test` and sends its output (often empty) instead of the text. `scion` cannot detect this. Whenever a body contains backticks, `$`, or code, send it through stdin or a file:
+
+- `scion message <recipient> -` reads the body from stdin.
+- `scion message <recipient> --body-file <path>` reads it from a file. `--body-file -` also reads stdin.
+- For stdin and `--body-file`, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
+
+Correct — quoted heredoc on stdin (the `'EOF'` quotes stop all expansion; preferred for anything with markdown or code):
+```bash
+scion message --non-interactive @reviewer - <<'EOF'
+PR #42 is ready for review.
+
+Branch: fix/auth-bug
+CI: all green. Run `make test` to reproduce.
+EOF
+```
+
+Correct — body from a file:
+```bash
+scion message --non-interactive @reviewer --body-file /tmp/review-notes.md
+```
+
+Correct — plain text only (no backticks or `$`) in a double-quoted string with real newlines:
 ```bash
 scion message --non-interactive @reviewer "PR #42 is ready for review.
 
@@ -65,15 +130,10 @@ Branch: fix/auth-bug
 CI: all green"
 ```
 
-Correct — heredoc for longer messages:
+Wrong — backticks inside double quotes (the shell runs `make test`):
 ```bash
-scion message --non-interactive @reviewer "$(cat <<'EOF'
-PR #42 is ready for review.
-
-Branch: fix/auth-bug
-CI: all green
-EOF
-)"
+# BAD: `make test` executes in your shell; its output replaces it in the body
+scion message --non-interactive @reviewer "CI is green. Run `make test` to reproduce."
 ```
 
 Wrong — JSON-encoded body with literal \n:
@@ -87,10 +147,10 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 Every message should move work forward. High-signal messages are functional and concrete.
 
 - **Be Functional**: No banter, cheerleading, or "Ready to help!" filler.
-- **Keep tone conversational and short.** Messages should be functional but not robotic — write like a colleague, not a status report.
+- **Keep tone conversational and short.** Messages should be functional but not robotic — write like a colleague. Conversational wording still goes inside the structured layout above.
 - **You are identified as a sender** — the system already shows your identity with every message. Don't open with "Hi, this is agent-X" or restate who you are.
 - **Include Concrete Details**: Reference file paths, branch names, URLs, and specific error messages.
-- **Surface Decisions**: When asking a sender for input, provide 2-3 concrete options, state your recommendation, and include the timing impact of each.
+- **Surface Decisions**: When asking a sender for input, provide 2-3 concrete options as a list, state your recommendation, and include the timing impact of each. See [Use structured markdown](#use-structured-markdown).
 - **Keep it Concise**: Focus on key findings and links rather than lengthy narratives.
 - **Confirm receipt, then report completion.** When you receive a task, respond immediately to confirm you got it. Then report again when the work is done. Don't leave a sender wondering whether their message was received.
 
@@ -102,8 +162,9 @@ The `scion message` command provides the following flags:
 - **`--wake`**: Resumes a suspended agent before delivering the message.
 - **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
 - **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
+- **`--body-file <path>`**: Reads the message body from a file instead of a positional argument (`--body-file -` reads stdin). A positional body of `-` also reads stdin.
 **Capabilities that exist as separate commands:**
-- **Raw keystrokes**: Use `scion keys <agent> <keystrokes>` to send literal keystrokes to an agent's tmux terminal, with no envelope and no automatic Enter. Works for both local and Hub-managed agents. As an agent, you can only target agents in your own project — cross-project targets are refused.
+- **Literal keystrokes**: Use `scion keys <agent> <keys>` to send input to an agent's tmux terminal, with no envelope and no automatic Enter. One call sends exactly one tmux argument — there is no sequence syntax, so `scion keys <agent> "Up Up Enter"` types eleven literal characters, not three key presses; send each key press as a separate call. Works for container-backed agents in local and Hub mode; not supported for managed-runtime agents. As an agent, you can only target agents in your own project — cross-project targets are refused. **Authority:** in Hub mode, `scion keys` is authorized like terminal attach, not like messaging — being able to message an agent does not mean you can send it keys, and as an agent caller you also need a live attach relationship on the target, not just shared project membership. Each call reports `dispatched`, `rejected`, or `unknown`; on `unknown`, check with `scion look` before resending.
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery. See the `scion-scheduler` skill.
 - **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes.
 
@@ -131,10 +192,9 @@ characters** (counted as Unicode runes, not bytes — CJK and emoji each
 count as one character). Agent-to-agent messages have **no enforced cap
 in code** and are not subject to this limit, but remember to keep message content focused. Longer findings can be written to a shared file and sent as a reference.
 
-When the limit is exceeded, the command returns a non-zero exit code but
-also dumps the full CLI `--help` text to `stderr` — the actual error line
-(`validation_error: message exceeds 2000 character limit`) scrolls off if
-you pipe to `tail`. Redirect `stderr` and pipe to `head` (e.g., `2>&1 | head`) to surface it.
+When the limit is exceeded, the command returns a non-zero exit code and
+prints the error (`validation_error: message exceeds 2000 character limit`)
+to `stderr`. Redirect `stderr` (e.g., `2>&1`) to see it.
 
 If your user-directed message is long:
 - Split it into two or more messages, each under ~1800 characters.
@@ -209,6 +269,7 @@ When an agent calls `sciontool status ask_user`, the hub dispatches the question
 - **Red Flag**: An agent goes silent for >30 minutes without a milestone update or "blocked" status.
 - **Anti-Pattern**: Sending "I'm still here" or other low-signal filler messages.
 - **Anti-Pattern**: Using `sleep` to wait for something; use `sciontool status blocked` instead. For external processes that emit no notification (CI, builds, deploys), pair `status blocked` with a scheduled self-callback — see the `scion-scheduler` skill → **Waiting on external processes**.
+- **Anti-Pattern**: Sending a multi-sentence message as one dense paragraph, or listing choices inline ("A) ... B) ... Which?") instead of as a list.
 - **Anti-Pattern**: Repeating the entire original brief in a follow-up message (exhausts context).
 - **Anti-Pattern**: JSON-encoding or escaping the message body before passing to `scion message`. The CLI delivers the body verbatim — use real newlines in shell strings or heredocs.
 - **Anti-Pattern**: Replying to a group-conversation message by addressing the
@@ -221,6 +282,7 @@ When an agent calls `sciontool status ask_user`, the hub dispatches the question
 - [ ] Is the preferred `@<agent-name>` form used (rather than legacy `agent:<name>`)?
 - [ ] Is the message functional and free of filler/banter?
 - [ ] Does it include concrete references (paths, IDs, errors)?
-- [ ] If a decision is needed, are concrete options and a recommendation provided?
+- [ ] If the message is more than a sentence or two, does it start with a bold headline and use bullets?
+- [ ] If a decision is needed, are the options a list (one per item) with a marked recommendation, and is the ask on its own line?
 - [ ] For long tasks, has a milestone reporting cadence been established?
 - [ ] If this is a reply to an inbound message, am I using `conv:<id>` from that message's `conversation.id` — not addressing the sender directly?

@@ -39,13 +39,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends ripgrep \
 RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Hermes Agent with Vertex AI support (google-auth for ADC)
+# Install Hermes Agent with Vertex AI support (google-auth for ADC).
+#
+# --ignore-installed: this Dockerfile's own `apt-get install python3-pip`
+# step above pulls in python3-wheel, which pulls in python3-packaging — both
+# dpkg-managed, so neither has a pip RECORD file. hermes-agent[vertex]
+# transitively wants a newer packaging than dpkg's, and pip's normal
+# "uninstall the old version first" step fails on a RECORD-less package
+# ("Cannot uninstall packaging: uninstall-no-record-file"). -I/--ignore-installed
+# is a global flag — pip has no per-package form — so this installs the whole
+# resolved dependency set into /usr/local/lib/python3.X/dist-packages without
+# uninstalling anything. That path precedes /usr/lib/python3/dist-packages on
+# Debian's sys.path, so the dpkg copies are shadowed, not modified: apt/dpkg's
+# own records and files are untouched.
 RUN --mount=type=secret,id=pipconf,target=/etc/pip.conf,required=false \
     if [ -n "${HERMES_VERSION}" ]; then \
-      pip install --no-cache-dir --break-system-packages "hermes-agent[vertex]==${HERMES_VERSION}"; \
+      pip install --no-cache-dir --break-system-packages --ignore-installed "hermes-agent[vertex]==${HERMES_VERSION}"; \
     else \
-      pip install --no-cache-dir --break-system-packages "hermes-agent[vertex]"; \
+      pip install --no-cache-dir --break-system-packages --ignore-installed "hermes-agent[vertex]"; \
     fi
+
+# Build-time smoke check: prove the freshly installed CLI actually imports
+# and runs before the layer is considered good, rather than only discovering
+# an import-time break at container start.
+RUN hermes --version
 
 RUN mkdir -p /home/scion/.hermes /home/scion/.hermes/skills \
   && chown -R scion:scion /home/scion/.hermes

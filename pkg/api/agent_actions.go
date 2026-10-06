@@ -40,6 +40,31 @@ const (
 	AgentActionMetrics           = "metrics"
 	AgentActionSetMessageMode    = "set_message_mode"
 	AgentActionReincarnate       = "reincarnate"
+
+	// AgentActionKeys names the dedicated terminal-keystroke-injection route
+	// (POST /api/v1/agents/{id}/keys and the project-scoped equivalent),
+	// frozen by the agent-keys contract (.design/agent-keys-contract.md,
+	// ptone/scion#2191). It is a route/action name, not an independently
+	// grantable authorization permission — see agentActionPermission in
+	// pkg/hub/authorize.go, which maps it explicitly to ActionAttach.
+	//
+	// Added to RuntimeBrokerAgentActionMethod below by task 1.1, which wires
+	// the runtime broker's own dedicated keys handler
+	// (pkg/runtimebroker/handlers.go), with the Hub-to-broker route reachable
+	// via the Dispatcher/BrokerClient task 1.2 added. On the Hub side, both
+	// action-dispatch functions (handlers_agents_core.go's
+	// handleAgentAction, handlers_projects_core.go's
+	// handleProjectAgentAction) route this action early, straight to
+	// authorizeAgentKeys, the same way they already do for message/
+	// reincarnate/set_message_mode — a live POST /api/v1/agents/{id}/keys
+	// request no longer falls through to the generic authz block that
+	// resolves agentActionPermission for other actions. Neither
+	// action-dispatch switch has a case that calls a real keys handler yet
+	// (task 2.2 adds one), so an authorized call still 404s, not because it
+	// was denied. This constant exists so every task that touches the keys
+	// route (1.1, 1.2, 2.1, 2.2) references a single frozen action name
+	// rather than each inventing their own string.
+	AgentActionKeys = "keys"
 )
 
 // RuntimeBrokerAgentActionMethod returns the HTTP method for actions routed
@@ -49,9 +74,24 @@ func RuntimeBrokerAgentActionMethod(action string) (string, bool) {
 	switch action {
 	case AgentActionLogs, AgentActionStats, AgentActionHasPrompt:
 		return http.MethodGet, true
-	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth:
+	case AgentActionStart, AgentActionStop, AgentActionSuspend, AgentActionRestart, AgentActionMessage, AgentActionExec, AgentActionResetAuth, AgentActionKeys:
 		return http.MethodPost, true
 	default:
 		return "", false
 	}
 }
+
+// ProvisionFailedWarningPrefix starts the warning a Hub adds to a
+// provision-only create when the runtime broker could not provision the
+// agent. Clients use it to tell that the agent record exists but was not
+// provisioned.
+const ProvisionFailedWarningPrefix = "Failed to provision on runtime broker: "
+
+// RecordedRuntimeQueryParam is the query parameter the hub sets on runtime
+// broker requests for an existing agent (every action except start, plus the
+// bare GET and DELETE) to the runtime type it recorded for that agent
+// (ptone/scion#2748). The broker looks for the agent only in runtimes of that
+// type and returns a retryable 503 when none is registered. Absent or empty
+// means the hub has no recorded type: the broker searches every registered
+// runtime, as before.
+const RecordedRuntimeQueryParam = "runtime"

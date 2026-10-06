@@ -524,28 +524,58 @@ func TestScionConfig_ParseMaxDuration(t *testing.T) {
 
 // TestReincarnateEligible covers the design §3.4 Amendment A23 eligibility
 // predicate over the modes it distinguishes: clone-per-agent, an explicit
-// mount (shared-workspace or hub-managed), and "neither". Worktree-per-agent
+// mount (shared-workspace or hub-managed), empty-per-agent
+// (miller79/scion#167), and "none of these". Worktree-per-agent
 // and shared-workspace exclusion are layered on top by the Hub caller (see
 // ReincarnateEligible's doc comment) and are not this function's concern —
 // pkg/hub's handlers_agent_reincarnate_test.go covers those.
 func TestReincarnateEligible(t *testing.T) {
 	tests := []struct {
-		name        string
-		hasGitClone bool
-		workspace   string
-		want        bool
+		name          string
+		hasGitClone   bool
+		workspace     string
+		emptyPerAgent bool
+		want          bool
 	}{
-		{"clone-per-agent: GitClone set, no Workspace", true, "", true},
-		{"explicit mount: no GitClone, Workspace set", false, "/mnt/project", true},
-		{"both set (defensive; GitClone still wins)", true, "/mnt/project", true},
-		{"neither GitClone nor Workspace", false, "", false},
+		{"clone-per-agent: GitClone set, no Workspace", true, "", false, true},
+		{"explicit mount: no GitClone, Workspace set", false, "/mnt/project", false, true},
+		{"both set (defensive; GitClone still wins)", true, "/mnt/project", false, true},
+		{"empty-per-agent: no GitClone, no Workspace", false, "", true, true},
+		{"none of GitClone, Workspace, empty-per-agent", false, "", false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ReincarnateEligible(tt.hasGitClone, tt.workspace)
+			got := ReincarnateEligible(tt.hasGitClone, tt.workspace, tt.emptyPerAgent)
 			if got != tt.want {
-				t.Errorf("ReincarnateEligible(%v, %q) = %v, want %v", tt.hasGitClone, tt.workspace, got, tt.want)
+				t.Errorf("ReincarnateEligible(%v, %q, %v) = %v, want %v", tt.hasGitClone, tt.workspace, tt.emptyPerAgent, got, tt.want)
 			}
 		})
+	}
+}
+
+// ProvisionedOnly has no omitempty: false is sent explicitly so a client
+// merging responses clears a previously seen true (ptone/scion#2929).
+func TestAgentInfo_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
+	data, err := json.Marshal(AgentInfo{Name: "a"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"provisionedOnly":false`) {
+		t.Errorf("expected explicit provisionedOnly false, got %s", data)
+	}
+}
+
+// TestIsLocalDiskRuntime pins the shared local-disk runtime allow-list
+// (miller79/scion#167) used by the Hub's reincarnate gate and the broker's
+// Reprovision guard: everything not listed fails closed.
+func TestIsLocalDiskRuntime(t *testing.T) {
+	for name, want := range map[string]bool{
+		"docker": true, "podman": true, "container": true, "apple": true, " Docker ": true,
+		"kubernetes": false, "k8s": false, "cloudrun": false, "cloudrun-sandbox": false,
+		"substrate": false, "mock": false, "": false,
+	} {
+		if got := IsLocalDiskRuntime(name); got != want {
+			t.Errorf("IsLocalDiskRuntime(%q) = %v, want %v", name, got, want)
+		}
 	}
 }

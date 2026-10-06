@@ -18,10 +18,11 @@
  * Real paginated list adapter for the native chat quick command palette,
  * covering the Agents/DM, People, and Threads groups.
  *
- * Fetches GET /api/v1/agents, GET /api/v1/users (both fully paginated,
- * independent of current-space membership), GET /api/v1/chat/dms, GET
- * /api/v1/chat/spaces and per-space GET /api/v1/chat/spaces/{id}/threads,
- * joins them into normalized {@link PaletteCandidate}s, and exposes
+ * Reads the hub agent list from the shared agent store, fetches GET
+ * /api/v1/users (fully paginated, independent of current-space
+ * membership), GET /api/v1/chat/dms, GET /api/v1/chat/spaces and per-space
+ * GET /api/v1/chat/spaces/{id}/threads, joins them into normalized
+ * {@link PaletteCandidate}s, and exposes
  * cancellation so a page controller can discard a stale in-flight load
  * (identity change, palette closed before the response arrived, or a newer
  * load superseding an older one).
@@ -29,15 +30,22 @@
 
 import { apiFetch } from './api.js';
 import type { ApiFetchOptions } from './api.js';
+import { agentStore } from './agent-store.js';
+import type { AgentListSnapshot, AgentStore } from './agent-store.js';
 import type {
+  AgentActivity,
   AgentMessageability,
   AgentMessageabilityDetail,
+  AgentPhase,
   Capabilities,
 } from '../shared/types.js';
 import { canMessageAgent } from '../shared/types.js';
 import { activityMsFromTimestamp } from '../utils/chat-palette-match.js';
+import { formatFileSize } from '../utils/chat-file-links.js';
+import { formatInstant } from '../utils/time.js';
 import type { PaletteCandidate, PaletteThreadTarget } from './chat-palette-types.js';
-import { dmCandidateId, threadCandidateId } from './chat-palette-types.js';
+import { dmCandidateId, documentCandidateId, threadCandidateId } from './chat-palette-types.js';
+import type { RecentFile } from './chat-recent-files.js';
 
 /** Agents page size. The server default is much larger; 100 keeps pages small enough to show progress. */
 const AGENTS_PAGE_LIMIT = 100;
@@ -58,11 +66,49 @@ const MAX_USER_PAGES = 500;
 /** Maximum concurrent per-space thread-list requests. */
 const MAX_CONCURRENT_THREAD_REQUESTS = 4;
 
-/** The subset of the agent-list response shape this module reads. */
+/**
+ * Per-step idle (not total-duration) bound for one Agents-group load:
+ * independent of {@link MAX_AGENT_PAGES} (which guards against a pagination
+ * loop that never terminates, not a slow-but-terminating one). Resets on
+ * every agents page and covers the DM fetch that follows immediately after
+ * the last page's own reset, with no gap in between. A load that keeps
+ * making progress, however long overall, never trips it; a single step with
+ * no forward progress at all (a dropped connection, a proxy that never
+ * responds) is aborted and surfaced as a retryable error instead of leaving
+ * the group on "Loading…" forever.
+ *
+ * ~32s/page observed on a large real agent list; 90s is roughly 3x headroom
+ * per step. Exported so `chat.ts` can bound the People group's `/auth/me`
+ * identity fetch by the same value (see `_resolveSelfUserId` in chat.ts).
+ */
+export const AGENTS_IDLE_TIMEOUT_MS = 90 * 1000;
+
+/**
+ * Distinguishes an idle-timeout-triggered abort of the Agents group's
+ * controller from an explicit cancel/supersede, so
+ * {@link loadPaletteAgentsBounded} can surface the former
+ * as a load error rather than swallowing it the way an ordinary
+ * superseded/cancelled load is swallowed.
+ */
+const AGENTS_IDLE_TIMEOUT_REASON = Symbol('agents-group-idle-timeout');
+
+/**
+ * The subset of the agent-list response shape this module reads. Widened
+ * with `phase`/`activity`/`project` (all optional, all already
+ * present on every real `/api/v1/agents` row) so {@link fetchAllPaletteAgents}
+ * is reusable as-is by a non-chat caller that needs those fields too (the
+ * terminal view's own agents-only candidate source) without a parallel
+ * paginated fetch — this module's own candidate building
+ * ({@link buildAgentCandidates}, {@link isPaletteAgentViable}) reads none of
+ * the three.
+ */
 export interface RawPaletteAgent {
   id: string;
   name?: string;
   slug?: string;
+  project?: string;
+  phase?: AgentPhase;
+  activity?: AgentActivity;
   _capabilities?: Capabilities;
   _messageability?: AgentMessageability | AgentMessageabilityDetail;
 }
@@ -137,8 +183,18 @@ export class PaletteLoadError extends Error {
  * page can legitimately return zero items while still carrying a cursor.
  * A cursor value repeating across pages is treated as a load error rather
  * than an infinite loop.
+ *
+ * `onPage`, when given, is called once per page with that page's own agents
+ * (not the running total) as soon as it arrives — before the next page is
+ * requested. This lets a caller (see {@link loadPaletteAgentsBounded})
+ * publish results incrementally on a hub where the full list takes a long
+ * time to finish paginating, instead of holding every page back until the
+ * last one lands.
  */
-export async function fetchAllPaletteAgents(signal?: AbortSignal): Promise<RawPaletteAgent[]> {
+export async function fetchAllPaletteAgents(
+  signal?: AbortSignal,
+  onPage?: (pageAgents: RawPaletteAgent[]) => void
+): Promise<RawPaletteAgent[]> {
   const all: RawPaletteAgent[] = [];
   const seenCursors = new Set<string>();
   let cursor = '';
@@ -180,6 +236,7 @@ export async function fetchAllPaletteAgents(signal?: AbortSignal): Promise<RawPa
     const data = raw as AgentListResponse;
     if (Array.isArray(data.agents)) {
       all.push(...data.agents);
+      onPage?.(data.agents);
     }
     const next = typeof data.nextCursor === 'string' ? data.nextCursor : '';
     if (next) {
@@ -256,8 +313,8 @@ export function isPaletteAgentViable(agent: RawPaletteAgent): boolean {
  * API call needed (see `openDM` in chat.ts).
  */
 export function buildAgentCandidates(
-  agents: RawPaletteAgent[],
-  dms: RawPaletteDm[]
+  agents: readonly RawPaletteAgent[],
+  dms: readonly RawPaletteDm[]
 ): PaletteCandidate[] {
   const dmByAgentId = new Map<string, RawPaletteDm>();
   for (const dm of dms) {
@@ -530,6 +587,64 @@ export function buildThreadCandidates(
 }
 
 /**
+ * The secondary line for a Documents row: the project and container path for
+ * a detected path, or the project and attachment metadata for an attachment,
+ * so records that share a file name remain distinguishable.
+ */
+function documentSecondaryLabel(file: RecentFile): string {
+  const projectName = file.source.projectName;
+  if (file.target.kind === 'path') {
+    return projectName
+      ? `${projectName} — ${file.target.containerPath}`
+      : file.target.containerPath;
+  }
+  // Size and date, joined only where both are known — appended so two
+  // attachments sharing a name and project (the same filename reattached, or
+  // shared across conversations) are still distinguishable in the list. A Go
+  // zero timestamp (never a real send time) is treated the same as a missing
+  // one, matching activityMsFromTimestamp's own definition of "unknown" for
+  // this same field.
+  const activityMs = activityMsFromTimestamp(file.source.sentAt);
+  const metadata = [
+    formatFileSize(file.target.size),
+    activityMs > 0 ? formatInstant(new Date(activityMs).toISOString(), 'date') : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const label = metadata ? `Attachment · ${metadata}` : 'Attachment';
+  return projectName ? `${projectName} — ${label}` : label;
+}
+
+/**
+ * Build Documents candidates from the recent-files store's current
+ * snapshot. Unlike the other three groups, there is no network fetch here:
+ * `chatRecentFiles` is an already-live, identity-scoped index, and this only
+ * maps its records into the shared candidate shape so Documents matches
+ * share the same global ranking as Agents/Threads/People. Search fields are
+ * the file's display name (every record), its container path (path targets),
+ * and its captured project label when known.
+ */
+export function buildDocumentCandidates(records: readonly RecentFile[]): PaletteCandidate[] {
+  const candidates: PaletteCandidate[] = [];
+  for (const file of records) {
+    const searchFields = [file.name];
+    if (file.target.kind === 'path') searchFields.push(file.target.containerPath);
+    if (file.source.projectName) searchFields.push(file.source.projectName);
+
+    candidates.push({
+      id: documentCandidateId(file.key),
+      group: 'documents',
+      label: file.name,
+      secondaryLabel: documentSecondaryLabel(file),
+      searchFields,
+      activityMs: activityMsFromTimestamp(file.source.sentAt),
+      target: { kind: 'document', file },
+    });
+  }
+  return candidates;
+}
+
+/**
  * Run `fn` over `items` with at most `limit` concurrently in flight at once.
  * Unlike chunking items into fixed-size batches, a worker pool keeps exactly
  * `limit` requests in flight the whole time — a batch boundary never leaves
@@ -589,6 +704,113 @@ function reclassifyIfStale(err: unknown, aborted: boolean, stale: boolean): neve
   throw err;
 }
 
+/** Options for {@link loadPaletteAgentsBounded}. */
+export interface BoundedAgentsLoadOptions<T> {
+  /** The load's own controller: the caller aborts it to cancel or supersede the load. */
+  controller: AbortController;
+  /** Whether this load is still the caller's current one. */
+  isCurrent: () => boolean;
+  /**
+   * Called with every agent seen so far after each page of a still-current
+   * load arrives, so the caller can publish partial results before the
+   * walk finishes.
+   */
+  onProgress?: (agentsSoFar: readonly RawPaletteAgent[]) => void;
+  /**
+   * Turns the full agent list into the load's result. Runs straight after
+   * the last page, still under the same idle bound, so any follow-up fetch
+   * it makes with `signal` is covered too.
+   */
+  finish: (agents: RawPaletteAgent[], signal: AbortSignal) => T | Promise<T>;
+}
+
+/**
+ * The terminal palette's agents walk, bounded and progressive: fetches every page via
+ * {@link fetchAllPaletteAgents}, reports progress per page through
+ * `onProgress`, and aborts after {@link AGENTS_IDLE_TIMEOUT_MS} with no
+ * forward progress. The idle timer resets on every page and keeps running
+ * through `finish`.
+ *
+ * Rejects with {@link PaletteLoadError} when a still-current load fails or
+ * goes idle for too long, and with an AbortError-like error when the load
+ * was cancelled or superseded (`controller` aborted, or `isCurrent()`
+ * false), which the caller should treat as "no update".
+ */
+export async function loadPaletteAgentsBounded<T>({
+  controller,
+  isCurrent,
+  onProgress,
+  finish,
+}: BoundedAgentsLoadOptions<T>): Promise<T> {
+  let idleTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  const resetIdleTimeout = (): void => {
+    if (idleTimeoutId) clearTimeout(idleTimeoutId);
+    idleTimeoutId = setTimeout(
+      () => controller.abort(AGENTS_IDLE_TIMEOUT_REASON),
+      AGENTS_IDLE_TIMEOUT_MS
+    );
+  };
+  const stopIdleTimeout = (): void => {
+    if (idleTimeoutId) clearTimeout(idleTimeoutId);
+    idleTimeoutId = null;
+  };
+
+  resetIdleTimeout();
+  try {
+    const seen: RawPaletteAgent[] = [];
+    const agents = await fetchAllPaletteAgents(controller.signal, (pageAgents) => {
+      // Each page is forward progress, whether or not this load is still
+      // current — resetting here is harmless even for a stale load: either
+      // a newer load's own abort() already fired (a no-op on an
+      // already-aborted controller), or this one is still current and the
+      // reset is exactly the point.
+      resetIdleTimeout();
+      // A superseded/cancelled load's own trailing pages must not publish
+      // through a newer load's (or no load's) onProgress.
+      if (!isCurrent()) return;
+      seen.push(...pageAgents);
+      onProgress?.(seen);
+    });
+
+    if (!isCurrent()) {
+      throw new DOMException('superseded by a later load', 'AbortError');
+    }
+
+    // No separate reset before `finish`: it starts immediately after the
+    // last page's own reset above, with no gap in between, so that reset
+    // already covers it.
+    return await finish(agents, controller.signal);
+  } catch (err) {
+    // Only classify as a timeout for a load that is still current: a timer
+    // firing for an already-superseded load must still be reclassified as
+    // an AbortError below, not surfaced as a PaletteLoadError that could
+    // publish over a newer load's own state.
+    if (
+      controller.signal.aborted &&
+      controller.signal.reason === AGENTS_IDLE_TIMEOUT_REASON &&
+      isCurrent()
+    ) {
+      throw new PaletteLoadError('agents list took too long to load');
+    }
+    return reclassifyIfStale(err, controller.signal.aborted, !isCurrent());
+  } finally {
+    stopIdleTimeout();
+  }
+}
+
+/** The part of the agent store the palette's Agents group reads. */
+export type PaletteAgentSource = Pick<AgentStore, 'ensure' | 'peek'>;
+
+/** The store entry behind the palette's Agents group. */
+const PALETTE_AGENT_QUERY = { scope: 'hub' } as const;
+
+/**
+ * How long the DM list of the last Agents load serves later loads for
+ * recency, unless {@link ChatPaletteDataController.markAgentDmsStale} was
+ * called since.
+ */
+export const AGENT_DMS_CACHE_MS = 30 * 1000;
+
 /**
  * Per-open controller for the palette's Agents, People and Threads groups:
  * fetches each group's real list(s), builds candidates, and guards against a
@@ -600,6 +822,12 @@ function reclassifyIfStale(err: unknown, aborted: boolean, stale: boolean): neve
 export class ChatPaletteDataController {
   private agentsGeneration = 0;
   private agentsAbort: AbortController | null = null;
+  /** DMs from the last successful Agents load: the recency join for {@link deriveAgentCandidates}. */
+  private agentDms: RawPaletteDm[] | null = null;
+  private agentDmsAt = 0;
+  private agentDmsStale = false;
+  /** Bumped by {@link markAgentDmsStale}, so a mark during a DM fetch is not lost. */
+  private agentDmsMarks = 0;
   private peopleGeneration = 0;
   private peopleAbort: AbortController | null = null;
   private threadsGeneration = 0;
@@ -628,47 +856,127 @@ export class ChatPaletteDataController {
     this.threadsAbort = null;
   }
 
+  constructor(private readonly agents: PaletteAgentSource = agentStore) {}
+
   /**
    * Load the Agents group. Resolves to the candidate list, or rejects with
-   * {@link PaletteLoadError}. A load superseded by a later call to
-   * {@link loadAgentsGroup} or {@link cancel} rejects with an AbortError-like
-   * error the caller should treat as "no update", not a failure to display.
+   * the agent list's or DM list's load error. A load superseded by a later
+   * call to {@link loadAgentsGroup} or {@link cancel} rejects with an
+   * AbortError-like error the caller should treat as "no update", not a
+   * failure to display.
+   *
+   * The agent rows come from the shared store's hub entry, which answers
+   * from memory once loaded and keeps itself current from the agent feed.
+   * The DM list supplies recency; it is fetched unless the last one is
+   * still fresh (see {@link AGENT_DMS_CACHE_MS}).
+   *
+   * `onProgress`, when given, is called with a cumulative candidate list
+   * (recency unknown, `activityMs=0`, since DMs are not fetched yet) after
+   * each page of the store's first walk, so a caller can publish partial
+   * results before a long list finishes. Never called with a superseded
+   * load's data. The resolved value is always the DM-joined list.
+   *
+   * The DM fetch is bounded by {@link AGENTS_IDLE_TIMEOUT_MS}: a request
+   * that makes no progress for that long rejects with
+   * {@link PaletteLoadError} rather than leaving the group loading.
    */
-  async loadAgentsGroup(): Promise<PaletteCandidate[]> {
+  async loadAgentsGroup(
+    onProgress?: (candidates: PaletteCandidate[]) => void
+  ): Promise<PaletteCandidate[]> {
     this.agentsAbort?.abort();
     const controller = new AbortController();
     this.agentsAbort = controller;
     const myGeneration = ++this.agentsGeneration;
+    const isCurrent = (): boolean => myGeneration === this.agentsGeneration;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
     try {
-      const agents = await fetchAllPaletteAgents(controller.signal);
-
-      if (myGeneration !== this.agentsGeneration) {
+      const snapshot = await this.agents.ensure(PALETTE_AGENT_QUERY, {
+        signal: controller.signal,
+        ...(onProgress
+          ? {
+              onProgress: (progress: AgentListSnapshot): void => {
+                if (isCurrent()) onProgress(buildAgentCandidates(progress.agents, []));
+              },
+            }
+          : {}),
+      });
+      if (!isCurrent()) {
         throw new DOMException('superseded by a later load', 'AbortError');
       }
 
       // The DM join only supplies recency, not agent membership, but a
-      // failure here must still be visible rather than silently degrading
-      // every agent to activityMs=0 (which reads as "no agent has a DM yet"
-      // rather than "recency is unknown right now") — so it fails the whole
-      // group. The dialog's existing retry control reloads both fetches
-      // together. A softer "ready, but recency unavailable" state that keeps
-      // the agent list interactive while flagging the join failure would be a
-      // reasonable enhancement; deferred rather than added speculatively here.
-      const dms = await fetchPaletteDms(controller.signal);
-
-      if (myGeneration !== this.agentsGeneration) {
-        throw new DOMException('superseded by a later load', 'AbortError');
+      // failure here still fails the whole group: degrading every agent to
+      // activityMs=0 would read as "no agent has a DM yet" rather than
+      // "recency is unknown right now". The dialog's retry reloads both.
+      let dms = this.freshAgentDms();
+      if (!dms) {
+        const marks = this.agentDmsMarks;
+        idleTimer = setTimeout(
+          () => controller.abort(AGENTS_IDLE_TIMEOUT_REASON),
+          AGENTS_IDLE_TIMEOUT_MS
+        );
+        dms = await fetchPaletteDms(controller.signal);
+        if (!isCurrent()) {
+          throw new DOMException('superseded by a later load', 'AbortError');
+        }
+        this.agentDms = dms;
+        this.agentDmsAt = Date.now();
+        this.agentDmsStale = this.agentDmsMarks !== marks;
       }
 
-      return buildAgentCandidates(agents, dms);
-    } catch (err) {
-      return reclassifyIfStale(
-        err,
-        controller.signal.aborted,
-        myGeneration !== this.agentsGeneration
+      const latest = this.agents.peek(PALETTE_AGENT_QUERY);
+      return buildAgentCandidates(
+        latest?.status === 'ready' ? latest.agents : snapshot.agents,
+        dms
       );
+    } catch (err) {
+      if (
+        controller.signal.aborted &&
+        controller.signal.reason === AGENTS_IDLE_TIMEOUT_REASON &&
+        isCurrent()
+      ) {
+        throw new PaletteLoadError('direct messages took too long to load');
+      }
+      return reclassifyIfStale(err, controller.signal.aborted, !isCurrent());
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (this.agentsAbort === controller) this.agentsAbort = null;
     }
+  }
+
+  /**
+   * Rebuild the Agents group from a store snapshot, joined against the DMs
+   * of the last successful {@link loadAgentsGroup}. Returns `null` until a
+   * load has succeeded, or when an Agents load is in flight (its result
+   * supersedes any rebuild).
+   */
+  deriveAgentCandidates(snapshot: AgentListSnapshot): PaletteCandidate[] | null {
+    if (!this.agentDms || this.agentsAbort) return null;
+    return buildAgentCandidates(snapshot.agents, this.agentDms);
+  }
+
+  /**
+   * The Agents group as it can be shown at once: the store's ready hub
+   * snapshot joined with a fresh DM list. Returns `null` when either is
+   * missing; the caller then shows the group as loading.
+   */
+  peekAgentsGroup(): PaletteCandidate[] | null {
+    const dms = this.freshAgentDms();
+    const snapshot = this.agents.peek(PALETTE_AGENT_QUERY);
+    if (!dms || snapshot?.status !== 'ready') return null;
+    return buildAgentCandidates(snapshot.agents, dms);
+  }
+
+  /** A chat or DM change may have moved recency: the next Agents load fetches the DM list. */
+  markAgentDmsStale(): void {
+    this.agentDmsStale = true;
+    this.agentDmsMarks++;
+  }
+
+  private freshAgentDms(): RawPaletteDm[] | null {
+    if (!this.agentDms || this.agentDmsStale) return null;
+    return Date.now() - this.agentDmsAt < AGENT_DMS_CACHE_MS ? this.agentDms : null;
   }
 
   /**

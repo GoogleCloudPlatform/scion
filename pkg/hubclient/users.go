@@ -16,14 +16,15 @@ package hubclient
 
 import (
 	"context"
+	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
 // UserService handles user operations.
 type UserService interface {
-	// List returns users.
-	List(ctx context.Context, opts *apiclient.PageOptions) (*ListUsersResponse, error)
+	// List returns users matching opts.
+	List(ctx context.Context, opts *ListUsersOptions) (*ListUsersResponse, error)
 
 	// Get returns a user by ID.
 	Get(ctx context.Context, userID string) (*User, error)
@@ -35,6 +36,15 @@ type UserService interface {
 // userService is the implementation of UserService.
 type userService struct {
 	c *client
+}
+
+// ListUsersOptions configures user list filtering.
+type ListUsersOptions struct {
+	// Search matches against a user's email or display name (server-side
+	// substring match, case-insensitive). Used to resolve a name/email to an
+	// ID, e.g. for the CLI `--owner` flag (ptone/scion#2146).
+	Search string
+	Page   apiclient.PageOptions
 }
 
 // ListUsersResponse is the response from listing users.
@@ -49,9 +59,15 @@ type UpdateUserRequest struct {
 	Preferences *UserPreferences `json:"preferences,omitempty"`
 }
 
-// List returns users.
-func (s *userService) List(ctx context.Context, opts *apiclient.PageOptions) (*ListUsersResponse, error) {
-	query := opts.ToQuery(nil)
+// List returns users matching opts.
+func (s *userService) List(ctx context.Context, opts *ListUsersOptions) (*ListUsersResponse, error) {
+	var query url.Values
+	if opts != nil {
+		query = opts.Page.ToQuery(nil)
+		if opts.Search != "" {
+			query.Set("search", opts.Search)
+		}
+	}
 
 	resp, err := s.c.getWithQuery(ctx, "/api/v1/users", query, nil)
 	if err != nil {

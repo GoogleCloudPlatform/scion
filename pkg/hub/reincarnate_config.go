@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -40,12 +41,17 @@ import (
 //   - the requester's original explicit inputs (Image, Model, Env,
 //     InlineConfig, HarnessConfig, HarnessAuth, Profile, ThinkingLevel), from
 //     AppliedConfig.CreateInputs, or a heuristic reconstruction for an agent
-//     that predates that field. HarnessConfig and HarnessAuth are
-//     dual-purpose exactly like Model, NOT kept fields — left empty here
-//     (rather than copied from the live config) is what lets
-//     deriveAgentConfig's project/template/hub resolution below fill them
-//     fresh from the CURRENT catalog when the requester never set them,
-//     instead of freezing in whatever generation N happened to resolve;
+//     that predates that field. Since Option C (ptone/scion#2493),
+//     CreateInputs also picks up any later PATCH /api/v1/agents/{id} edit
+//     that changed one of these fields' (or an Env key's) live value — see
+//     recordExplicitEdits — so "explicit inputs" here means the create
+//     request plus any explicit edit made since, not just what create itself
+//     saw. HarnessConfig and HarnessAuth are dual-purpose exactly like Model,
+//     NOT kept fields — left empty here (rather than copied from the live
+//     config) is what lets deriveAgentConfig's project/template/hub
+//     resolution below fill them fresh from the CURRENT catalog when the
+//     requester never set them, instead of freezing in whatever generation N
+//     happened to resolve;
 //   - then deriveAgentConfig run on THAT fresh config: harness-config
 //     resolution, applyProjectDefaults, applyHubAgentDefaults, then
 //     populateAgentConfig/resolveDerivedConfig — so every derived slot is
@@ -56,8 +62,20 @@ import (
 //
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
-// AppliedConfig).
+// AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
+// which wraps errWorkspaceContentTimeout).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
+	return s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, nil)
+}
+
+// buildPatchedAppliedConfig is buildFreshAppliedConfig with an optional,
+// already-authorized reincarnate patch (ptone/scion#3302). The patch's
+// Image/Model/ThinkingLevel/HarnessAuth are recorded into a copy of
+// CreateInputs (recordReincarnatePatchEdits) before the pipeline runs, so
+// they take the explicit-input slot and the new generation keeps them; its
+// Role and GCPIdentity replace the kept values. A nil patch is exactly
+// buildFreshAppliedConfig. agent.AppliedConfig is never mutated.
+func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
 	old := agent.AppliedConfig
 	if old == nil {
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
@@ -82,20 +100,33 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		templateEnv = resolvedTemplate.Config.Env
 	}
 
+	// Adopt a legacy env TZ into ExplicitTimezone before anything reads
+	// old's env: legacyCreateInputsFromAppliedConfig below would otherwise
+	// replay it as a create-time env value instead of a carried-forward pin.
+	adoptLegacyTZ(old)
+
 	createInputs := old.CreateInputs
 	var warnings []string
 	if createInputs == nil {
 		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old, templateEnv)
+	}
+	if patch != nil {
+		// A copy: createInputs may be the outgoing generation's own record
+		// (old.CreateInputs, also saved as PreviousAppliedConfig).
+		createInputs = cloneCreateInputs(createInputs)
+		recordReincarnatePatchEdits(createInputs, patch)
 	}
 
 	fresh := &store.AgentAppliedConfig{
 		// Kept verbatim: identity-adjacent fields the pipeline never touches,
 		// and (for Phase 1, which accepts no --harness/--reset-overrides/etc.
 		// request overrides) never overridden by the request either.
-		// WorkspaceStoragePath and AgentRoleGrandfathered are kept too:
-		// without the storage path a remote broker gets the hub-local path
-		// populateAgentConfig stamps for an empty Workspace instead of the
-		// GCS path it actually needs, and grandfathered-role provenance is
+		// WorkspaceStoragePath (with its bucket) and AgentRoleGrandfathered
+		// are kept too: without the storage path a remote broker gets the
+		// hub-local path populateAgentConfig stamps for an empty Workspace
+		// instead of the GCS path it actually needs, without the bucket a
+		// broker with no bucket setting cannot download it
+		// (ptone/scion#3422), and grandfathered-role provenance is
 		// audit data, not something to re-derive.
 		Attach:                 old.Attach,
 		CreatorName:            old.CreatorName,
@@ -104,8 +135,18 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		GitClone:               old.GitClone,
 		Workspace:              old.Workspace,
 		WorkspaceStoragePath:   old.WorkspaceStoragePath,
+		WorkspaceStorageBucket: old.WorkspaceStorageBucket,
 		Branch:                 old.Branch,
 		GCPIdentity:            old.GCPIdentity,
+
+		// Writer (d) of ExplicitTimezone: the pin, its legacy label and the
+		// unpin record are carried forward. deriveAgentConfig's create-time
+		// capture never overwrites a non-empty pin and moves nothing when
+		// the agent was unpinned, so only an agent with neither re-derives
+		// its timezone from CreateInputs and the current template.
+		ExplicitTimezone:         old.ExplicitTimezone,
+		ExplicitTimezoneLegacy:   old.ExplicitTimezoneLegacy,
+		ExplicitTimezoneUnpinned: old.ExplicitTimezoneUnpinned,
 
 		// Explicit-only: empty here (rather than copied from `old`) is what
 		// lets deriveAgentConfig's pipeline fill these fresh from the CURRENT
@@ -127,6 +168,21 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		CreateInputs: createInputs,
 	}
 
+	// Kept fields a reincarnate patch replaces. Set before NoAuth is
+	// derived below (role=none implies NoAuth) and before deriveAgentConfig
+	// (GCPIdentity feeds its auto-no-auth check).
+	if patch != nil {
+		if patch.Role != "" {
+			fresh.AgentRole = string(patch.Role)
+			// An explicitly patched role is not a backfilled one.
+			fresh.AgentRoleGrandfathered = false
+		}
+		if patch.GCPIdentity != nil {
+			g := *patch.GCPIdentity
+			fresh.GCPIdentity = &g
+		}
+	}
+
 	// Design §3.5: make an empty (implicit-default) branch explicit, so a
 	// template change cannot silently rename it. Today's implicit default
 	// for clone-per-agent (init.go) and the value here are the same
@@ -137,14 +193,12 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		fresh.Branch = "scion/" + agent.Slug
 	}
 
-	// Unlike buildAppliedConfig, deliberately do NOT alias Image/Model/Env to
-	// InlineConfig's backing map (design §3.3 A1 addendum 2, rule 3):
-	// InlineConfig is a fresh, independent copy, and Env gets its own clone,
-	// so resolveDerivedConfig's template-env merge below cannot write through
-	// to CreateInputs.InlineConfig.Env or leave the new InlineConfig carrying
-	// merged values it didn't have explicitly. De-aliasing the create path
-	// itself is out of scope (unaudited downstream readers); CreateInputs
-	// makes it unnecessary there.
+	// Do NOT alias Image/Model/Env to InlineConfig's backing map (design
+	// §3.3 A1 addendum 2, rule 3): InlineConfig is a fresh, independent copy,
+	// and Env gets its own clone (as buildAppliedConfig does on create), so
+	// resolveDerivedConfig's template-env merge and auto-expose project tier
+	// below cannot write through to CreateInputs.InlineConfig.Env or leave the
+	// new InlineConfig carrying merged values it didn't have explicitly.
 	if createInputs.InlineConfig != nil {
 		fresh.InlineConfig = deepCopyScionConfig(createInputs.InlineConfig)
 		fresh.Image = fresh.InlineConfig.Image
@@ -162,7 +216,7 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// agent — reincarnate with NoAuth reset to false and regain injected
 	// secrets on its next start. This is OR'd, never overwritten: nothing
 	// here can flip a true back to false.
-	if createInputs.NoAuth || fresh.HarnessAuth == "none" || fresh.AgentRole == string(AgentRoleNone) {
+	if createInputs.NoAuth || harness.IsNoAuthType(fresh.HarnessAuth) || fresh.AgentRole == string(AgentRoleNone) {
 		fresh.NoAuth = true
 	}
 
@@ -179,7 +233,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// resolveDerivedConfig alone would skip the project/hub defaulting step
 	// and let the template win over a project or hub default (design §3.3
 	// Amendment A1 property 1).
-	s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate)
+	if err := s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate); err != nil {
+		return nil, nil, err
+	}
 
 	// Design §3.4 Amendment A11.1(a): fill Image from Hub settings, then the
 	// resolved harness config, when deriveAgentConfig still left it empty.
@@ -243,6 +299,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// and for an already-qualified name.
 	fresh.Image = config.RewriteImageRegistry(fresh.Image, imageRegistry)
 
+	// deriveAgentConfig's timezone capture already stripped TZ from the
+	// fresh env copies; strip again so no step after it can leave one.
+	stripAgentEnvTZ(fresh)
 	return fresh, warnings, nil
 }
 
@@ -312,12 +371,15 @@ func dispatchImageRegistry(dispatcher AgentDispatcher) string {
 //   - InlineConfig.Telemetry is dropped: it is always a hub/project/template
 //     default once populated (see resolveDerivedConfig), never something the
 //     requester provided directly in a way this reconstruction could trust.
-//   - InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] is stripped: it is a
-//     project- or hub-level default, never an explicit request input.
+//   - InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] is stripped: on a legacy
+//     agent it is usually the project or hub default an older hub stamped
+//     there, and cannot be told apart from an explicit value. The caller then
+//     re-derives the project and template tiers through deriveAgentConfig
+//     (resolveAutoExposeEnv), exactly as for an agent with CreateInputs.
 //   - Every other key InlineConfig.Env shares with templateEnv (the CURRENT
 //     template's env map) is also dropped, whatever its value (A1 addendum
-//     2, rule 2): buildAppliedConfig aliases AppliedConfig.Env to
-//     InlineConfig.Env, so a legacy agent's InlineConfig.Env is
+//     2, rule 2): the hub that created a legacy agent aliased
+//     AppliedConfig.Env to InlineConfig.Env, so its InlineConfig.Env is
 //     indistinguishable-by-inspection from a mix of explicit keys and
 //     template defaults merged in at create time. Assuming "the template
 //     still owns this key" errs toward template freshness — reincarnate's

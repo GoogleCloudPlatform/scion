@@ -4,14 +4,24 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of September 21 -- 27, 2026
+## Latest: Week of September 28 -- October 4, 2026
 
-The grove→project rename reached its breaking phase: legacy grove routes, CLI flags, API keys, event topics, container labels, environment variables and hub↔broker wire fields were removed, on-disk state now migrates automatically, and hub and broker must be upgraded together. Alongside it, a broad authorization sweep closed cross-member and cross-project exposure paths, single-node VM deployment became headless, self-updating and Vertex-ready out of the box, and the persistent terminal workspace gained shareable layouts and auto-reconnect.
+Raw keystroke messaging was replaced by a dedicated agent keys API (`scion keys`), and raw message delivery is now removed. A timezone overhaul pinned servers, storage and APIs to UTC and made the Hub the only source of an agent's `TZ`. Agent delete became asynchronous and failure-aware, and asynchronous create arrived as an opt-in. Kubernetes gained per-agent NFS workspaces, Workload Identity and a new Substrate runtime. Security work continued with user access token boundaries, frozen delegation ceilings and project access granted only through role bindings.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-09-21/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-09-28/)
+
+## Timezone handling changes
+
+During the week of September 28 ([release notes](/scion/release-notes/2026-09-28/)), timezone handling changed: the Hub sends every timestamp in UTC with `Z`, the web dashboard has a per-user display timezone and a 24-hour clock, and cron schedules are UTC only. The runtime-profile `timezone` setting introduced the week before ([release notes](/scion/release-notes/2026-09-21/)) has been removed: an agent's `TZ` now comes from its pin, `TZ` environment variables on the Hub, or the Hub default timezone. See [Times and Timezones](/scion/reference/times-and-timezones/) for the full behaviour and the operator steps after upgrading.
+
+## Migration guides
+
+- [Migrating from raw message delivery](/scion/reference/raw-message-removal/): raw keystroke delivery through messages is removed. `scion message --raw` fails before sending anything, and any message request that still carries `raw` is refused with `422 raw_input_removed`. Use `scion keys` or `POST .../keys` instead.
+- [Migrating from grove names](/scion/reference/grove-removal/): the grove→project rename.
 
 ## Previous Weeks
 
+- [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)
 - [Week of September 14 -- 20, 2026](/scion/release-notes/2026-09-14/)
 - [Week of September 7 -- 13, 2026](/scion/release-notes/2026-09-07/)
 - [Week of August 31 -- September 6, 2026](/scion/release-notes/2026-08-31/)

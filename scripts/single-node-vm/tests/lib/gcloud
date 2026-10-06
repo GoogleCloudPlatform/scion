@@ -666,6 +666,17 @@ print(json.dumps(out))
   "compute instances create")
     require_project "$@"
     require_flag zone "$@"
+    # Deliberately stricter than real gcloud: the real API only requires
+    # --subnet for a custom-mode network (auto-mode tolerates its
+    # absence). Required here unconditionally, as a regression guard,
+    # because deploy.sh always passes it now regardless of network mode
+    # -- no test should be able to create a VM without it. Same for
+    # --network: deploy.sh always pairs it with --subnet=default so the
+    # create fails clearly instead of silently landing in another VPC's
+    # "default" subnet (real gcloud would tolerate --subnet alone here
+    # too), so this stub requires both consistently.
+    require_flag subnet "$@"
+    require_flag network "$@"
     name="${4:-}"
     echo "us-central1-b" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}"
     # Record the actually-requested private IP, if any, so a later
@@ -1350,6 +1361,14 @@ STUBERR
         # The settings.yaml dev-mode write: this is the point create-mode
         # wiring tests that opt into GCLOUD_STUB_SSH_SUCCEEDS stop at.
         touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+        ;;
+      "curl -s http://localhost:8080/healthz")
+        # deploy.sh's wait_for_hub_health poll. GCLOUD_STUB_HEALTHZ_BODY
+        # overrides the answer (e.g. a degraded or unhealthy body); the
+        # default is a healthy combined-mode body. Matches only this exact
+        # command, not the `curl -sf` hub_id read.
+        default_healthz='{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy"}}'
+        printf '%s\n' "${GCLOUD_STUB_HEALTHZ_BODY-$default_healthz}"
         ;;
     esac
     exit 0

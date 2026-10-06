@@ -312,3 +312,49 @@ func TestWaitForAgentReady_UnexpectedPhase(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected phase")
 }
+
+// TestWaitForAgentReady_ResumedPhaseTransitional verifies that
+// waitForAgentReady tolerates the legacy non-standard "resumed" phase value
+// as transitional — e.g. during a rolling upgrade where a broker still
+// running an older build reports it instead of the canonical "running"
+// (see pkg/agent/run.go) — and still succeeds once activity is reported.
+func TestWaitForAgentReady_ResumedPhaseTransitional(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+
+	// Simulate an older broker reporting the non-standard "resumed" phase
+	// partway through the wait, then reporting activity once the harness
+	// has initialized.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Phase: "resumed",
+		})
+		time.Sleep(200 * time.Millisecond)
+		_ = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Activity: "idle",
+		})
+	}()
+
+	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	require.NoError(t, err)
+}
+
+// TestWaitForAgentReady_ErrorPhaseFails verifies that a genuinely bad phase
+// (error) is still rejected by waitForAgentReady, distinguishing it from the
+// tolerated legacy "resumed" transitional value above.
+func TestWaitForAgentReady_ErrorPhaseFails(t *testing.T) {
+	srv, s, agent := createWakeTestFixtures(t, string(state.PhaseStarting))
+	ctx := context.Background()
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		_ = s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseError),
+		})
+	}()
+
+	err := srv.waitForAgentReady(ctx, agent.ID, 2*time.Second)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unexpected phase")
+}

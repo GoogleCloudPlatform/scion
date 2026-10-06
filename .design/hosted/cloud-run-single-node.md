@@ -631,6 +631,15 @@ definition, not a redesign.
   No per-CPU or per-GiB scaling rule is derivable from these two points: 4× memory
   and 2× CPU bought roughly 3× idle and 2× working capacity — non-linear in both
   resources.
+
+  The Hub's `max_agents_per_broker` limit (`ptone/scion#2061` P1a) seeds at a
+  hub-wide default of 100, which is above the crash point of both sizes above and
+  does not by itself protect a single-node Cloud Run deployment. After deploying a
+  single-node Cloud Run hub, set this limit to about **16** — safely under the
+  4 CPU/8 GiB idle ceiling — via **Admin → Quotas**, or `PUT /api/v1/admin/limits/{id}`
+  on the `max_agents_per_broker` definition. There is no per-broker override yet
+  (`ptone/scion#2061` P2), so this value applies hub-wide; it is only safe to raise
+  above ~16 if every broker on the hub can absorb it.
 - **Image-pull failures on first deploy are hard to diagnose.** The messages come
   from the Cloud Run sandbox launcher, not from Scion, and name a cache mirror rather
   than the requested image. Routed as platform feedback.

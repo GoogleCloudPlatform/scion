@@ -42,7 +42,7 @@ func (s *Server) handleUserMeTemplates(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createUserTemplate(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -81,7 +81,7 @@ func (s *Server) handleUserTemplateCRUD(w http.ResponseWriter, r *http.Request, 
 	case http.MethodDelete:
 		s.deleteUserTemplate(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -162,6 +162,13 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	if slug == "" {
 		BadRequest(w, "invalid slug: name cannot be slugified")
+		return
+	}
+
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
 		return
 	}
 
@@ -329,7 +336,7 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	deleteFiles := r.URL.Query().Get("deleteFiles") == "true"
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, existing.StoragePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
 		}
 	}
 
@@ -344,7 +351,7 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 // handleUserTemplateUpload handles POST /api/v1/users/me/templates/{id}/upload.
 func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -375,7 +382,7 @@ func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request
 // handleUserTemplateFinalize handles POST /api/v1/users/me/templates/{id}/finalize.
 func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -406,7 +413,7 @@ func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Reque
 // handleUserTemplateDownload handles GET /api/v1/users/me/templates/{id}/download.
 func (s *Server) handleUserTemplateDownload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

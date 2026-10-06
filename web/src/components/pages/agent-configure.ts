@@ -21,11 +21,13 @@
  * that is in the 'created' phase (provisioned but not yet started).
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
+import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type {
   Agent,
@@ -34,11 +36,16 @@ import type {
   GCPServiceAccount,
   HarnessAdvancedCapabilities,
   MessageMode,
+  RuntimeBroker,
 } from '../../shared/types.js';
+import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import { isValidTimeZone } from '../../utils/time.js';
 import type { EnvEntry } from '../shared/env-editor.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import '../shared/env-editor.js';
+import '../shared/timezone-picker.js';
 import '../shared/message-mode-badge.js';
 
 interface ScionConfigPayload {
@@ -63,6 +70,119 @@ interface ScionConfigPayload {
   telemetry?: { enabled?: boolean };
 }
 
+/**
+ * Env var names the dedicated auto-expose UI controls own, rather than the
+ * generic env-row editor. populateForm filters them out of envEntries, and
+ * buildConfig sends them only when the user changed the auto-expose control:
+ * the hub treats an auto-expose key absent from a PATCH env as untouched.
+ */
+const AUTO_EXPOSE_ENV_KEYS = [
+  'SCION_AUTO_EXPOSE_PORTS',
+  'SCION_AUTO_EXPOSE_MODE',
+  'SCION_AUTO_EXPOSE_PORTS_LIST',
+  'SCION_AUTO_EXPOSE_INTERVAL',
+] as const;
+const AUTO_EXPOSE_ENV_KEYS_SET: ReadonlySet<string> = new Set(AUTO_EXPOSE_ENV_KEYS);
+
+/**
+ * The agent container timezone is not an env record: the hub keeps it in
+ * AppliedConfig.ExplicitTimezone, written only by the PATCH's top-level
+ * explicitTimezone field (the Timezone row below), and ignores config.env.TZ.
+ * The env table therefore never shows, sends or deletes this key.
+ */
+const TZ_ENV_KEY = 'TZ';
+
+/**
+ * The warning the hub's agent PATCH returns when an explicitTimezone edit
+ * changes the zone of an agent whose container is live
+ * (explicitTimezoneNextStartWarning in pkg/hub/agent_tz_writers.go).
+ */
+const TZ_NEXT_START_WARNING = "explicitTimezone applies at the agent's next start";
+
+/**
+ * Short labels for the hub's timezoneSource values (the rung of the agent
+ * timezone chain that supplied resolvedTimezone; see pkg/hub/agent_tz.go).
+ */
+const TIMEZONE_SOURCE_LABELS: Readonly<Record<string, string>> = {
+  explicit: 'Pinned on this agent',
+  legacy: 'Pinned (kept from an earlier TZ setting)',
+  user: 'Your TZ environment variable',
+  project: 'Project TZ environment variable',
+  hub: 'Hub TZ environment variable',
+  broker: 'Broker TZ environment variable',
+  progeny: 'Inherited TZ environment variable',
+  'hub-default': 'Hub default timezone',
+  none: 'Not set (container default)',
+};
+
+/** Human label for a timezoneSource value; unknown values are shown as-is. */
+function timezoneSourceLabel(source: string): string {
+  return TIMEZONE_SOURCE_LABELS[source] ?? source;
+}
+
+/** The agent PATCH response: the agent plus its resolved container timezone. */
+interface AgentPatchResponse {
+  appliedConfig?: AppliedConfig;
+  resolvedTimezone?: string;
+  timezoneSource?: string;
+  warnings?: string[];
+}
+
+/**
+ * Where the loaded auto-expose value comes from: the requester set it (the
+ * explicit record, see explicitEnvOf), the hub derived it from the project or
+ * a template config (AppliedConfig.Env only), or it is inherited. Inherited
+ * means AppliedConfig.Env lacks the key, so a template's scion-agent.json
+ * value, if any, applies, and otherwise the hub default.
+ */
+export type AutoExposeSource = 'explicit' | 'project/template' | 'inherited';
+
+/** The source label text for each AutoExposeSource. */
+const AUTO_EXPOSE_SOURCE_LABELS: Record<AutoExposeSource, string> = {
+  explicit: 'explicit',
+  'project/template': 'project/template',
+  inherited: 'inherited (hub default shown; template may override)',
+};
+
+/**
+ * Effective SCION_AUTO_EXPOSE_PORTS for the configure page and its source.
+ * AppliedConfig.Env holds the explicit or project-derived value. When it
+ * lacks the key the value is inherited: the page cannot see a template's
+ * scion-agent.json value, so it shows the hub default, which the broker
+ * applies only when no template sets the key.
+ */
+export function effectiveAutoExposePorts(
+  appliedEnv: Record<string, string> | undefined,
+  explicitEnv: Record<string, string> | undefined,
+  hubDefault: boolean
+): { enabled: boolean; source: AutoExposeSource } {
+  const value = appliedEnv?.SCION_AUTO_EXPOSE_PORTS;
+  if (value === undefined) {
+    return { enabled: hubDefault, source: 'inherited' };
+  }
+  const source: AutoExposeSource =
+    explicitEnv?.SCION_AUTO_EXPOSE_PORTS !== undefined ? 'explicit' : 'project/template';
+  return { enabled: value === 'true', source };
+}
+
+/**
+ * The explicit env record, as the hub reads it: CreateInputs.InlineConfig.Env
+ * when the agent has CreateInputs, else InlineConfig.Env. InlineConfig.Env
+ * alone can still hold a hub-stamped auto-expose value on older agents.
+ */
+function explicitEnvOf(ac: AppliedConfig | undefined): Record<string, string> | undefined {
+  if (ac?.createInputs) return ac.createInputs.inlineConfig?.env;
+  return ac?.inlineConfig?.env;
+}
+
+/** True when both env-keyed maps have exactly the same keys and values. */
+function envMapsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => a[k] === b[k]);
+}
+
 interface AppliedConfig {
   image?: string;
   model?: string;
@@ -76,6 +196,14 @@ interface AppliedConfig {
     harness_config?: string;
   };
   agentRole?: string;
+  /** The requester's explicit inputs, which reincarnate re-derives from. */
+  createInputs?: { inlineConfig?: { env?: Record<string, string> } };
+  /** The runtime profile this agent was dispatched with, if any (api/types.go RunConfig.Profile). */
+  profile?: string;
+  /** The agent's pinned container timezone (IANA name), if any. */
+  explicitTimezone?: string;
+  /** True when explicitTimezone was adopted from a TZ an older hub saved in env. */
+  explicitTimezoneLegacy?: boolean;
 }
 
 interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
@@ -108,6 +236,26 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
 
+  // Snapshots of the values above as populateForm last loaded them (from the
+  // live, derived config), so buildConfig can tell "the user changed this
+  // control" from "this is just what was already there". Both telemetryEnabled
+  // and the auto-expose fields are synthesized from global defaults when the
+  // live config doesn't set them (see populateForm), so they are almost never
+  // literally absent -- sending them unconditionally on every Save/Start
+  // would record an edit that never happened (ptone/scion#2493 R1-1).
+  private loadedTelemetryEnabled = false;
+  private loadedAutoExposePortsEnabled = false;
+  private loadedAutoExposePortsMode = 'allowlist';
+  private loadedAutoExposePortsList = '';
+  private loadedAutoExposePortsInterval = '3s';
+  // Source of the loaded auto-expose value, shown next to the control.
+  @state() private autoExposeSource: AutoExposeSource = 'inherited';
+  // Snapshot of this.envEntries as populateForm last loaded it (shallow
+  // copies, so later edits to this.envEntries can't retroactively change
+  // what "loaded" means). Lets buildConfig tell whether the user edited the
+  // custom env rows at all -- see the Env section of buildConfig.
+  private loadedEnvEntries: EnvEntry[] = [];
+
   // Form fields — Task & Prompts
   @state() private task = '';
   @state() private systemPrompt = '';
@@ -127,6 +275,27 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private envEntries: EnvEntry[] = [];
   @state() private requiredEnvKeys: string[] = [];
 
+  // Timezone row. Pin and Unpin write explicitTimezone with their own PATCH,
+  // separate from Save, so they work in any phase.
+  /** The stored pin (appliedConfig.explicitTimezone); '' when unpinned. */
+  @state() private tzPinned = '';
+  /**
+   * The zone the agent resolves to at its next start, and the rung that
+   * supplies it. The agent GET does not report these, so on load they are
+   * known only for a pinned agent (the pin itself); any PATCH response
+   * carries both.
+   */
+  @state() private tzResolved: string | null = null;
+  @state() private tzSource: string | null = null;
+  @state() private tzPicking = false;
+  @state() private tzDraft = '';
+  @state() private tzSaving = false;
+  @state() private tzError: string | null = null;
+  /** True when the last PATCH reported that the change applies on next start. */
+  @state() private tzNextStartWarned = false;
+  /** Bumped to remount the picker with a fresh value when Pin… opens. */
+  @state() private tzPickerRevision = 0;
+
   // Form fields — Message Mode
   @state() private messageMode = '';
 
@@ -134,11 +303,94 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
   @state() private gcpServiceAccountId = '';
   @state() private gcpServiceAccounts: GCPServiceAccount[] = [];
+  /**
+   * Whether gcpMetadataMode came from a real stored decision
+   * (appliedConfig.gcpIdentity.metadataMode) rather than this page's own
+   * "nothing configured" placeholder default. A stored "block" must display
+   * exactly as stored and must never be auto-corrected away — stored values
+   * are not migrated, the same as a project default (ptone/scion#2328
+   * Phase 2).
+   */
+  @state() private gcpMetadataModeFromStorage = false;
+  /**
+   * True once the user has explicitly interacted with the GCP Identity
+   * picker (either select) this session. Gates whether gcp_identity is sent
+   * at all on Save/Start: unless the user changed something, the request
+   * omits gcp_identity entirely. For PATCH this is a true no-op — a nil
+   * gcp_identity never touches the agent's stored config
+   * (handlers_agents_core.go applyAgentUpdate) — which is exactly what must
+   * happen both for a resave of an unrelated field and for a known-Kubernetes
+   * target with nothing explicitly chosen (which would otherwise route an
+   * explicit "passthrough" through the Hub's passthrough ownership gate).
+   */
+  @state() private gcpIdentityUserSet = false;
+
+  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
+  private static readonly gcpIdentityK8sHintText =
+    'Block is not supported on the Kubernetes runtime: this agent targets a Kubernetes ' +
+    'broker/profile. Choose Passthrough or Assign Service Account instead.';
+
+  /** The agent's own runtime broker, loaded to determine its runtime kind for the GCP Identity picker. */
+  @state() private targetBroker: RuntimeBroker | null = null;
 
   private agentId = '';
 
   private get verifiedGCPServiceAccounts(): GCPServiceAccount[] {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
+  }
+
+  /**
+   * Whether this agent's runtime broker/profile is reliably known to be
+   * Kubernetes. A NEW selection of Block is disabled in that case
+   * (ptone/scion#2328 Phase 2) — an already-stored Block stays selectable as
+   * the displayed value, see render(). Unknown until targetBroker has loaded,
+   * which reads as false — the same "do not guess" default as
+   * agent-create.ts.
+   */
+  private get targetRuntimeIsKubernetesOnly(): boolean {
+    return isTargetKubernetesOnly(
+      this.targetBroker ?? undefined,
+      this.agent?.appliedConfig?.profile ?? ''
+    );
+  }
+
+  /**
+   * Short explanation rendered into the GCP identity select's `help-text`
+   * slot when this agent's target is reliably known to be Kubernetes: block
+   * is disabled for a NEW selection in that case.
+   *
+   * Rendered as a slotted child of the `<sl-select>` (not a sibling
+   * `aria-describedby` reference) because the element that receives focus is
+   * the `role="combobox"` input inside Shoelace's shadow root, which an
+   * attribute on the host cannot reach across the shadow boundary. Shoelace
+   * wires its own `help-text` slot to that combobox's `aria-describedby`
+   * internally (mirrors project-settings.ts's renderKubernetesBlockHint).
+   */
+  private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
+    if (!this.targetRuntimeIsKubernetesOnly) return nothing;
+    if (this.gcpIdentityUserSet) {
+      return html`<div slot="help-text">${ScionPageAgentConfigure.gcpIdentityK8sHintText}</div>`;
+    }
+    // Untouched: name the actual effective identity rather than overclaiming
+    // the broker's own default applies — that is only true when this agent
+    // genuinely has nothing configured.
+    if (this.gcpMetadataModeFromStorage) {
+      const modeLabel =
+        this.gcpMetadataMode === 'assign'
+          ? 'Assign Service Account'
+          : this.gcpMetadataMode === 'passthrough'
+            ? 'Passthrough'
+            : 'Block';
+      return html`<div slot="help-text">
+        ${ScionPageAgentConfigure.gcpIdentityK8sHintText} This agent's current identity is
+        "${modeLabel}", as previously configured; it stays in effect until you change it here.
+      </div>`;
+    }
+    return html`<div slot="help-text">
+      ${ScionPageAgentConfigure.gcpIdentityK8sHintText} No explicit identity is configured for this
+      agent, so the broker's own Kubernetes default applies automatically; choosing Passthrough or
+      Assign here sends that choice explicitly instead.
+    </div>`;
   }
 
   private async loadGCPServiceAccounts(projectId: string): Promise<void> {
@@ -153,6 +405,19 @@ export class ScionPageAgentConfigure extends LitElement {
       }
     } catch {
       // Non-critical — just won't show assign option
+    }
+  }
+
+  /** Loads this agent's own runtime broker, to classify its runtime kind for the GCP Identity picker. */
+  private async loadTargetBroker(brokerId: string): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${brokerId}`);
+      if (res.ok) {
+        this.targetBroker = (await res.json()) as RuntimeBroker;
+      }
+    } catch {
+      // Non-critical — an unknown broker just leaves the target unknown,
+      // which is the same "do not guess" default as no broker at all.
     }
   }
 
@@ -288,6 +553,11 @@ export class ScionPageAgentConfigure extends LitElement {
       margin-bottom: 1.25rem;
     }
 
+    .notify-field .source-label {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .notify-field sl-checkbox::part(label) {
       font-size: 0.875rem;
       color: var(--scion-text, #1e293b);
@@ -339,6 +609,24 @@ export class ScionPageAgentConfigure extends LitElement {
       margin-top: 0.125rem;
     }
 
+    .phase-notice {
+      background: var(--sl-color-neutral-50, #f8fafc);
+      border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.25rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      color: var(--sl-color-neutral-700, #334155);
+      font-size: 0.875rem;
+    }
+
+    .phase-notice sl-icon {
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+
     .success-banner {
       background: var(--sl-color-success-50, #f0fdf4);
       border: 1px solid var(--sl-color-success-200, #bbf7d0);
@@ -377,6 +665,50 @@ export class ScionPageAgentConfigure extends LitElement {
       gap: 1rem;
     }
 
+    .timezone-current {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      font-size: 0.875rem;
+      color: var(--scion-text, #1e293b);
+    }
+
+    .timezone-current .spacer {
+      flex: 1;
+    }
+
+    .timezone-value {
+      font-weight: 600;
+    }
+
+    .timezone-source {
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.8125rem;
+    }
+
+    .timezone-picker-row {
+      margin-top: 0.75rem;
+    }
+
+    .timezone-picker-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .timezone-error {
+      margin-top: 0.375rem;
+      font-size: 0.8125rem;
+      color: var(--sl-color-danger-700, #b91c1c);
+    }
+
+    .env-tz-hint {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      margin-bottom: 0.75rem;
+    }
+
     sl-tab-group {
       --indicator-color: var(--scion-primary, #3b82f6);
     }
@@ -386,10 +718,53 @@ export class ScionPageAgentConfigure extends LitElement {
     }
   `;
 
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    super.willUpdate(changedProperties);
+    // Re-check whenever the target broker (loaded asynchronously, after
+    // populateForm has already read the agent's stored mode) or the mode
+    // itself changes. Unlike agent-create.ts, this does NOT correct away a
+    // value that came from storage (gcpMetadataModeFromStorage) — a stored
+    // "block" is not migrated, same as a project default. The Block option is
+    // always rendered here (merely disabled on a known-Kubernetes target, see
+    // render()), so there is no blank-select case to fix for a stored value;
+    // normalisation exists only to stop this page's own "nothing configured"
+    // placeholder default from looking and acting like an explicit choice.
+    if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
+      this.normalizeGcpModeForTarget();
+    }
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  /**
+   * Corrects the *displayed* gcpMetadataMode away from "block" when this
+   * agent's target is reliably known to be Kubernetes (see
+   * targetRuntimeIsKubernetesOnly) — but only when "block" is this page's own
+   * placeholder default (gcpMetadataModeFromStorage is false), never when it
+   * reflects a real stored decision.
+   *
+   * Also clears gcpIdentityUserSet when it rewrites the mode, for the same
+   * reason as agent-create.ts's normalizeGcpModeForTarget: the target broker
+   * loads asynchronously, so a user could explicitly pick "Block" while it is
+   * still unknown (Block is enabled until targetRuntimeIsKubernetesOnly is
+   * confirmed true) and then have the broker resolve as Kubernetes-only out
+   * from under that choice. Without clearing the flag, Save/Start would send
+   * the auto-substituted "passthrough" as if the user had picked it for this
+   * target, through the Hub's passthrough ownership gate.
+   */
+  private normalizeGcpModeForTarget(): void {
+    if (
+      this.gcpMetadataMode === 'block' &&
+      !this.gcpMetadataModeFromStorage &&
+      this.targetRuntimeIsKubernetesOnly
+    ) {
+      this.gcpMetadataMode = 'passthrough';
+      this.gcpIdentityUserSet = false;
     }
   }
 
@@ -433,12 +808,20 @@ export class ScionPageAgentConfigure extends LitElement {
       this.agent = (await agentRes.json()) as AgentWithConfig;
       dispatchPageTitle(this, 'Configure', this.agent.name || this.agentId);
 
+      // The timezone pin is accepted in any phase, so the Timezone row is
+      // loaded (and rendered) even when the rest of the form is not.
+      this.populateTimezone();
+
+      // Outside "created" only the Timezone row is editable; render()
+      // shows a phase notice instead of the form.
       if (this.agent.phase !== 'created') {
-        this.error = `This agent is in "${this.agent.phase}" phase and cannot be configured. Only agents in "created" phase can be edited.`;
         return;
       }
 
       void this.loadGCPServiceAccounts(this.agent.projectId);
+      if (this.agent.runtimeBrokerId) {
+        void this.loadTargetBroker(this.agent.runtimeBrokerId);
+      }
       this.populateForm();
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
@@ -467,6 +850,10 @@ export class ScionPageAgentConfigure extends LitElement {
     const ac = this.agent.appliedConfig;
     const ic = ac?.inlineConfig;
 
+    // AppliedConfig.Env is the live env: the custom env rows and the
+    // auto-expose controls both read it.
+    const env = ac?.env ?? {};
+
     // General
     this.model = ac?.model || ic?.model || '';
     const derived = this.deriveModelSelection(this.model);
@@ -479,15 +866,25 @@ export class ScionPageAgentConfigure extends LitElement {
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
-    this.autoExposePortsEnabled =
-      ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'true'
-        ? true
-        : ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'false'
-          ? false
-          : this.globalAutoExposePortsDefault;
-    this.autoExposePortsMode = ic?.env?.SCION_AUTO_EXPOSE_MODE || 'allowlist';
-    this.autoExposePortsList = ic?.env?.SCION_AUTO_EXPOSE_PORTS_LIST || '';
-    this.autoExposePortsInterval = ic?.env?.SCION_AUTO_EXPOSE_INTERVAL || '3s';
+    const autoExpose = effectiveAutoExposePorts(
+      ac?.env,
+      explicitEnvOf(ac),
+      this.globalAutoExposePortsDefault
+    );
+    this.autoExposePortsEnabled = autoExpose.enabled;
+    this.autoExposeSource = autoExpose.source;
+    this.autoExposePortsMode = env.SCION_AUTO_EXPOSE_MODE || 'allowlist';
+    this.autoExposePortsList = env.SCION_AUTO_EXPOSE_PORTS_LIST || '';
+    this.autoExposePortsInterval = env.SCION_AUTO_EXPOSE_INTERVAL || '3s';
+
+    // Snapshot what was just loaded, so buildConfig can later tell an actual
+    // edit to these controls apart from their loaded or defaulted starting
+    // value.
+    this.loadedTelemetryEnabled = this.telemetryEnabled;
+    this.loadedAutoExposePortsEnabled = this.autoExposePortsEnabled;
+    this.loadedAutoExposePortsMode = this.autoExposePortsMode;
+    this.loadedAutoExposePortsList = this.autoExposePortsList;
+    this.loadedAutoExposePortsInterval = this.autoExposePortsInterval;
 
     // Task & Prompts
     this.task = ac?.task || ic?.task || '';
@@ -504,17 +901,13 @@ export class ScionPageAgentConfigure extends LitElement {
     this.memoryLimit = ic?.resources?.limits?.memory || '';
     this.disk = ic?.resources?.disk || '';
 
-    // Environment — filter out auto-expose env vars managed by dedicated UI controls
-    const autoExposeEnvKeys = new Set([
-      'SCION_AUTO_EXPOSE_PORTS',
-      'SCION_AUTO_EXPOSE_MODE',
-      'SCION_AUTO_EXPOSE_PORTS_LIST',
-      'SCION_AUTO_EXPOSE_INTERVAL',
-    ]);
-    const env = ac?.env || ic?.env || {};
+    // Environment — filter out auto-expose env vars managed by dedicated UI
+    // controls, and TZ, which the Timezone row owns (an empty TZ left over
+    // from env gathering must not show up as a "required" row either).
     this.envEntries = Object.entries(env)
-      .filter(([key]) => !autoExposeEnvKeys.has(key))
+      .filter(([key]) => !AUTO_EXPOSE_ENV_KEYS_SET.has(key) && key !== TZ_ENV_KEY)
       .map(([key, value]) => ({ key, value }));
+    this.loadedEnvEntries = this.envEntries.map((e) => ({ ...e }));
 
     // Detect required keys that are empty (from env gathering)
     this.requiredEnvKeys = this.envEntries.filter((e) => e.key && !e.value).map((e) => e.key);
@@ -524,32 +917,142 @@ export class ScionPageAgentConfigure extends LitElement {
 
     // GCP Identity
     const gcpId = ac?.gcpIdentity;
+    this.gcpMetadataModeFromStorage = gcpId?.metadataMode != null;
     this.gcpMetadataMode = (gcpId?.metadataMode as 'block' | 'passthrough' | 'assign') || 'block';
     this.gcpServiceAccountId = gcpId?.serviceAccountId || '';
+    // Fresh load: nothing has been touched yet, regardless of what the
+    // stored/placeholder mode displays.
+    this.gcpIdentityUserSet = false;
+  }
+
+  /** Loads the Timezone row's state from the agent as fetched. */
+  private populateTimezone(): void {
+    const ac = this.agent?.appliedConfig;
+    this.tzPinned = ac?.explicitTimezone ?? '';
+    if (this.tzPinned) {
+      this.tzResolved = this.tzPinned;
+      this.tzSource = ac?.explicitTimezoneLegacy ? 'legacy' : 'explicit';
+    } else {
+      this.tzResolved = null;
+      this.tzSource = null;
+    }
+    this.tzPicking = false;
+    this.tzDraft = '';
+    this.tzError = null;
+    this.tzNextStartWarned = false;
+  }
+
+  /** Updates the Timezone row from an agent PATCH response. */
+  private applyTimezoneFromResponse(data: AgentPatchResponse): void {
+    if (data.appliedConfig) {
+      this.tzPinned = data.appliedConfig.explicitTimezone ?? '';
+    }
+    if (typeof data.resolvedTimezone === 'string' && data.timezoneSource) {
+      this.tzResolved = data.resolvedTimezone;
+      this.tzSource = data.timezoneSource;
+    }
+  }
+
+  /**
+   * Writes explicitTimezone: a zone name pins it, '' unpins it. Sent on its
+   * own, never together with config, so it neither depends on nor changes
+   * the rest of the form.
+   */
+  private async patchExplicitTimezone(value: string): Promise<void> {
+    // Never overlap the main form's Save/Start PATCH (the controls are
+    // disabled too; this guards programmatic calls).
+    if (this.tzSaving || this.saving || this.starting) return;
+    this.tzSaving = true;
+    this.tzError = null;
+    try {
+      const res = await apiFetch(`/api/v1/agents/${this.agentId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ explicitTimezone: value }),
+      });
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data = (await res.json()) as AgentPatchResponse;
+      // The hub's PATCH response reports the pin and the resolved zone. If a
+      // response lacks either part (an older hub, or a proxy), fall back to
+      // what was just written, so the row never shows the previous pin.
+      this.tzPinned = value;
+      if (typeof data.resolvedTimezone !== 'string' || !data.timezoneSource) {
+        this.tzResolved = value || null;
+        this.tzSource = value ? 'explicit' : null;
+      }
+      this.applyTimezoneFromResponse(data);
+      this.tzNextStartWarned = (data.warnings ?? []).includes(TZ_NEXT_START_WARNING);
+      this.tzPicking = false;
+    } catch (err) {
+      this.tzError = err instanceof Error ? err.message : 'Failed to update timezone';
+    } finally {
+      this.tzSaving = false;
+    }
+  }
+
+  private async handleTimezonePin(): Promise<void> {
+    const zone = this.tzDraft.trim();
+    if (!zone || !isValidTimeZone(zone)) {
+      this.tzError = zone
+        ? `"${zone}" is not a valid IANA timezone name.`
+        : 'Choose a timezone to pin.';
+      return;
+    }
+    await this.patchExplicitTimezone(zone);
+  }
+
+  private async handleTimezoneUnpin(): Promise<void> {
+    await this.patchExplicitTimezone('');
+  }
+
+  /** True when the user changed the auto-expose toggle or, while enabled, a sub-field. */
+  private autoExposeChanged(): boolean {
+    return (
+      this.autoExposePortsEnabled !== this.loadedAutoExposePortsEnabled ||
+      (this.autoExposePortsEnabled &&
+        (this.autoExposePortsMode !== this.loadedAutoExposePortsMode ||
+          this.autoExposePortsList !== this.loadedAutoExposePortsList ||
+          this.autoExposePortsInterval !== this.loadedAutoExposePortsInterval))
+    );
   }
 
   private buildConfig(): ScionConfigPayload {
     const config: ScionConfigPayload = {};
     const caps = this.harnessCapabilities;
 
+    // Fields below are either dual-purpose on the hub side (empty means
+    // "unchanged", not "clear" — model, image, auth_selectedType, task: see
+    // applyAgentUpdate) or not rendered by this page at all (e.g. volumes,
+    // skills, mcp_servers), so an omitted key is always the right way to say
+    // "I didn't touch this". They keep the truthy-only guard below.
     const model = this.modelSelection === 'other' ? this.customModelId : this.modelSelection;
     if (model) config.model = model;
     config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
-    if (this.branch) config.branch = this.branch;
-    if (this.containerUser) config.user = this.containerUser;
     if (this.authMethod && this.authMethodSupported(this.authMethod))
       config.auth_selectedType = this.authMethod;
     if (this.task) config.task = this.task;
-    if (this.systemPrompt && !this.isUnsupported(caps?.prompts.system_prompt))
-      config.system_prompt = this.systemPrompt;
-    if (this.agentInstructions) config.agent_instructions = this.agentInstructions;
-    if (this.maxTurns && !this.isUnsupported(caps?.limits.max_turns))
-      config.max_turns = this.maxTurns;
-    if (this.maxModelCalls && !this.isUnsupported(caps?.limits.max_model_calls))
+
+    // Fields below are plain, single-value fields this page owns outright
+    // (it is the only place that edits them, once a harness supports them)
+    // and clearing one back to empty is a meaningful, intentional edit — not
+    // "I never looked at this field". They must be sent even when empty, so
+    // the hub's recordExplicitEdits (ptone/scion#2493) can tell "present and
+    // cleared" apart from "absent", and record the clear as an explicit
+    // CreateInputs edit instead of silently leaving a stale value in place
+    // for `scion reincarnate` to restore. A harness-unsupported field is
+    // still omitted entirely, since this page gives the user no way to view
+    // or edit it in that case.
+    config.branch = this.branch;
+    config.user = this.containerUser;
+    config.agent_instructions = this.agentInstructions;
+    if (!this.isUnsupported(caps?.prompts.system_prompt)) config.system_prompt = this.systemPrompt;
+    if (!this.isUnsupported(caps?.limits.max_turns)) config.max_turns = this.maxTurns;
+    if (!this.isUnsupported(caps?.limits.max_model_calls))
       config.max_model_calls = this.maxModelCalls;
-    if (this.maxDuration && !this.isUnsupported(caps?.limits.max_duration))
-      config.max_duration = this.maxDuration;
+    if (!this.isUnsupported(caps?.limits.max_duration)) config.max_duration = this.maxDuration;
 
     // Resources
     const hasResources =
@@ -569,30 +1072,58 @@ export class ScionPageAgentConfigure extends LitElement {
       if (this.disk) config.resources.disk = this.disk;
     }
 
-    // Env
+    // Env. Built in two parts: the user-editable rows (env), and the
+    // auto-expose controls, which are written as plain env vars (matching
+    // agent-create) but owned by dedicated UI controls rather than the
+    // generic env-row editor.
+    //
+    // TZ is skipped on both sides: a TZ row typed into the table is never
+    // sent (the hub would ignore it anyway; the Timezone row writes the
+    // pin), and its presence alone never counts as an env edit.
     const env: Record<string, string> = {};
     for (const entry of this.envEntries) {
-      if (entry.key) {
+      if (entry.key && entry.key !== TZ_ENV_KEY) {
         env[entry.key] = entry.value;
       }
     }
+    const loadedEnvMap: Record<string, string> = {};
+    for (const entry of this.loadedEnvEntries) {
+      if (entry.key && entry.key !== TZ_ENV_KEY) loadedEnvMap[entry.key] = entry.value;
+    }
+    const customEnvChanged = !envMapsEqual(env, loadedEnvMap);
 
-    // Auto-expose ports (written as env vars, matching agent-create)
-    env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
-    if (this.autoExposePortsEnabled) {
-      env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-      if (this.autoExposePortsList) {
+    // The auto-expose keys are sent only when the user changed the control,
+    // and then as explicit values. An untouched control sends none of them,
+    // even when a custom row changed: the hub keeps the live and explicit
+    // auto-expose values for keys absent from the request and re-derives the
+    // project tier. `config.env` itself is sent only when a row or the
+    // control changed, so an untouched Save/Start records nothing.
+    const autoExposeChanged = this.autoExposeChanged();
+    if (autoExposeChanged) {
+      env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
+      if (this.autoExposePortsEnabled) {
+        env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
+        // Always sent, so clearing the list replaces the previous one; an
+        // empty list means unset, like an absent key.
         env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
+        env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
       }
-      env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
     }
 
-    if (Object.keys(env).length > 0) {
+    if (customEnvChanged || autoExposeChanged) {
       config.env = env;
     }
 
-    // Telemetry
-    if (!this.isUnsupported(caps?.telemetry.enabled)) {
+    // Telemetry — same reasoning as auto-expose above: telemetryEnabled is
+    // synthesized from a global default when the live config has no
+    // explicit telemetry, so only send it when the user actually toggled
+    // it. Sending {enabled: X} unconditionally would overwrite the live
+    // hub-stamped telemetry config (Cloud/Hub/filters) with a bare
+    // {enabled} object at reincarnate time.
+    if (
+      !this.isUnsupported(caps?.telemetry.enabled) &&
+      this.telemetryEnabled !== this.loadedTelemetryEnabled
+    ) {
       config.telemetry = { enabled: this.telemetryEnabled };
     }
 
@@ -606,7 +1137,28 @@ export class ScionPageAgentConfigure extends LitElement {
     });
   }
 
+  /**
+   * Returns null when nothing should be sent at all: the caller then omits
+   * gcp_identity from the PATCH body, which is a true no-op on the server
+   * (handlers_agents_core.go applyAgentUpdate only touches
+   * AppliedConfig.GCPIdentity when the field is present) — so the agent's
+   * stored identity, whatever it is, is left exactly as it was.
+   *
+   * This omission is scoped to a known-Kubernetes target with no explicit
+   * user choice — the same scope as agent-create.ts, not every runtime.
+   * Sending an explicit "passthrough" there would hit the Hub's passthrough
+   * ownership gate for a request that never asked for passthrough, and a
+   * resave of an untouched stored value must not rewrite it — Kubernetes is
+   * also where the Block option is disabled for a NEW selection, so an
+   * untouched value there is reliably either "nothing configured" or
+   * "stored", never a fresh pick. On every other runtime this method keeps
+   * the pre-existing behavior of always sending the current mode/service
+   * account explicitly: there is no passthrough-gate or block-migration
+   * concern to avoid there, and the request shape for non-Kubernetes agents
+   * must not change.
+   */
   private buildGCPIdentityPayload(): Record<string, unknown> | null {
+    if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) return null;
     if (this.gcpMetadataMode === 'assign') {
       if (!this.gcpServiceAccountId) return null;
       return { metadata_mode: 'assign', service_account_id: this.gcpServiceAccountId };
@@ -618,12 +1170,30 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   private async handleSave(): Promise<void> {
+    // Never overlap an in-flight timezone pin/unpin PATCH.
+    if (this.tzSaving || this.saving || this.starting) return;
     this.saving = true;
     this.error = null;
     this.successMessage = null;
 
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
+      this.saving = false;
+      return;
+    }
+
+    // Transition-only: a resave of an already-stored "block" (gcpIdentityUserSet
+    // false) must succeed — it is refused only when the user actively set
+    // "block" themselves, which the UI itself already prevents (the Block
+    // option is disabled for new selection on a known-Kubernetes target, see
+    // render()). This guard is defense-in-depth, not the primary control.
+    if (
+      this.gcpIdentityUserSet &&
+      this.gcpMetadataMode === 'block' &&
+      this.targetRuntimeIsKubernetesOnly
+    ) {
+      this.error =
+        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       this.saving = false;
       return;
     }
@@ -648,6 +1218,11 @@ export class ScionPageAgentConfigure extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
 
+      try {
+        this.applyTimezoneFromResponse((await res.json()) as AgentPatchResponse);
+      } catch {
+        // A body that is not the agent PATCH response leaves the row as is.
+      }
       this.successMessage = 'Configuration saved successfully.';
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to save configuration';
@@ -657,6 +1232,8 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   private async handleStart(): Promise<void> {
+    // Never overlap an in-flight timezone pin/unpin PATCH.
+    if (this.tzSaving || this.saving || this.starting) return;
     // Validate required env vars
     const missingKeys = this.validateRequiredEnv();
     if (missingKeys.length > 0) {
@@ -675,6 +1252,18 @@ export class ScionPageAgentConfigure extends LitElement {
 
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
+      this.starting = false;
+      return;
+    }
+
+    // Transition-only — see the identical guard in handleSave for why.
+    if (
+      this.gcpIdentityUserSet &&
+      this.gcpMetadataMode === 'block' &&
+      this.targetRuntimeIsKubernetesOnly
+    ) {
+      this.error =
+        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       this.starting = false;
       return;
     }
@@ -706,7 +1295,7 @@ export class ScionPageAgentConfigure extends LitElement {
       });
 
       if (!startRes.ok) {
-        throw new Error(await extractApiError(startRes, 'Failed to start agent'));
+        throw new Error(await lifecycleActionErrorMessage(startRes, 'Failed to start agent'));
       }
 
       // Navigate to agent detail
@@ -722,18 +1311,19 @@ export class ScionPageAgentConfigure extends LitElement {
     this.showDeleteDialog = false;
     this.error = null;
 
-    try {
-      const res = await apiFetch(`/api/v1/agents/${this.agentId}`, {
-        method: 'DELETE',
-      });
-
-      if (!res.ok) {
-        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
-      }
-
+    // The shared helper (ptone/scion#2483 phase 2) sends the DELETE; this
+    // page's own dialog is the confirm, and it keeps its behaviour of no
+    // force fallback. On 204 or 202 go to /agents, which shows "Deleting…"
+    // until the SSE `deleted` arrives.
+    const outcome = await runAgentDelete({
+      agentId: this.agentId,
+      confirm: false,
+      forceFallback: false,
+    });
+    if (outcome.kind === 'deleted' || outcome.kind === 'accepted') {
       navigateTo('/agents');
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to delete agent';
+    } else if (outcome.kind === 'failed') {
+      this.error = outcome.message;
     }
   }
 
@@ -770,7 +1360,39 @@ export class ScionPageAgentConfigure extends LitElement {
       `;
     }
 
-    const isBusy = this.saving || this.starting;
+    if (this.agent.phase !== 'created') {
+      // Reached from the agent-detail Configure button in any phase. Only the
+      // timezone pin can change after the agent has started, so the other
+      // settings are not rendered here.
+      return html`
+        <a href="/agents/${this.agent.id || this.agentId}" class="back-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          Back to Agent
+        </a>
+
+        <div class="page-header">
+          <h1>
+            <sl-icon name="sliders"></sl-icon>
+            Configure Agent: ${this.agent.name}
+          </h1>
+          <p class="subtitle">Status: ${this.agent.phase}</p>
+        </div>
+
+        <div class="form-card">
+          <div class="phase-notice" data-testid="phase-notice">
+            <sl-icon name="info-circle"></sl-icon>
+            <span
+              >This agent is in "${this.agent.phase}" phase, so only its timezone can be changed
+              here. This page edits other settings only while an agent is in "created" phase.</span
+            >
+          </div>
+          ${this.renderTimezoneRow()}
+        </div>
+      `;
+    }
+
+    // A timezone pin/unpin is its own PATCH; Save/Start wait for it.
+    const isBusy = this.saving || this.starting || this.tzSaving;
 
     return html`
       <a href="/agents" class="back-link">
@@ -975,6 +1597,8 @@ export class ScionPageAgentConfigure extends LitElement {
         ></sl-input>
       </div>
 
+      ${this.renderTimezoneRow()}
+
       <div class="form-field">
         <label>Branch</label>
         <sl-input
@@ -1084,9 +1708,9 @@ export class ScionPageAgentConfigure extends LitElement {
                   </div>`
                 : this.messageMode === 'hub'
                   ? html`<div class="hint">
-                      Hub mode enables messaging with permitted agents in other projects on this Hub,
-                      in addition to all agents and users in this project. External reach requires the
-                      Hub cross-project switch to be enabled.
+                      Hub mode enables messaging with permitted agents in other projects on this
+                      Hub, in addition to all agents and users in this project. External reach
+                      requires the Hub cross-project switch to be enabled.
                     </div>`
                   : html`<div class="hint">
                       Message authorization scope. Default inherits from the parent agent's mode.
@@ -1121,16 +1745,25 @@ export class ScionPageAgentConfigure extends LitElement {
               | 'block'
               | 'passthrough'
               | 'assign';
+            this.gcpIdentityUserSet = true;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
           }}
         >
-          <sl-option value="block">Block</sl-option>
+          <sl-option
+            value="block"
+            ?disabled=${this.targetRuntimeIsKubernetesOnly}
+            title=${this.targetRuntimeIsKubernetesOnly
+              ? ScionPageAgentConfigure.gcpIdentityK8sHintText
+              : nothing}
+            >Block</sl-option
+          >
           ${this.gcpServiceAccounts.length > 0
             ? html`<sl-option value="assign">Assign Service Account</sl-option>`
             : nothing}
           <sl-option value="passthrough">Passthrough</sl-option>
+          ${this.renderKubernetesBlockHint()}
         </sl-select>
         <div class="hint">
           ${this.gcpMetadataMode === 'block'
@@ -1155,14 +1788,16 @@ export class ScionPageAgentConfigure extends LitElement {
                         this.gcpServiceAccountId = (
                           e.target as HTMLElement & { value: string }
                         ).value;
+                        this.gcpIdentityUserSet = true;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(
                         (sa) =>
                           html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
-                              sa.scope === 'hub' ? ' (Hub)' : ''
-                            }
+                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
+                            'hub'
+                              ? ' (Hub)'
+                              : ''}
                           </sl-option>`
                       )}
                     </sl-select>
@@ -1214,11 +1849,17 @@ export class ScionPageAgentConfigure extends LitElement {
           Enable Auto-Expose Ports
         </sl-checkbox>
         <sl-tooltip
-          content="Automatically detect and expose TCP listening ports from this agent's container. The default reflects the global auto-expose setting."
+          content="Automatically detect and expose TCP listening ports from this agent's container. An explicit value wins over the project setting, then the template, then the hub default."
           hoist
         >
           <span class="help-badge">?</span>
         </sl-tooltip>
+        <span class="source-label" data-testid="auto-expose-source"
+          >Source:
+          ${this.autoExposeChanged()
+            ? 'explicit (unsaved)'
+            : AUTO_EXPOSE_SOURCE_LABELS[this.autoExposeSource]}</span
+        >
       </div>
 
       ${this.autoExposePortsEnabled
@@ -1482,8 +2123,125 @@ export class ScionPageAgentConfigure extends LitElement {
     `;
   }
 
+  /**
+   * The Timezone row: the agent's container timezone and where it comes
+   * from, with Pin… (the shared zone picker, no "Auto" entry) and Unpin.
+   */
+  private renderTimezoneRow(): TemplateResult {
+    const known = this.tzSource !== null;
+    // resolvedTimezone "" (source "none") means no TZ is sent, so the
+    // container runs its image default, UTC.
+    const value = known ? this.tzResolved || 'UTC' : 'Not pinned';
+    const sourceText = known
+      ? timezoneSourceLabel(this.tzSource ?? '')
+      : 'Resolved at start: a TZ environment variable (user, project, hub or broker scope), then the hub default timezone, then UTC.';
+    // Outside the created phase the agent has been started before, so a
+    // change reaches its container only at the next start (the hub also
+    // warns when the container is live).
+    const showNextStart = this.agent?.phase !== 'created' || this.tzNextStartWarned;
+    // Pin/unpin is a separate PATCH from Save/Start; never let the two overlap.
+    const busy = this.tzSaving || this.saving || this.starting;
+
+    return html`
+      <div class="form-field timezone-row" data-testid="timezone-row">
+        <label>Timezone</label>
+        <div class="timezone-current">
+          <sl-icon name="globe"></sl-icon>
+          <span class="timezone-value" data-testid="timezone-value">${value}</span>
+          <span class="timezone-source" data-testid="timezone-source">${sourceText}</span>
+          <span class="spacer"></span>
+          ${this.tzPicking
+            ? nothing
+            : html`
+                <sl-button
+                  size="small"
+                  variant="default"
+                  data-testid="timezone-pin-open"
+                  ?disabled=${busy}
+                  @click=${() => {
+                    this.tzDraft = this.tzPinned;
+                    this.tzError = null;
+                    this.tzPickerRevision++;
+                    this.tzPicking = true;
+                  }}
+                  >Pin…</sl-button
+                >
+                ${this.tzPinned
+                  ? html`
+                      <sl-button
+                        size="small"
+                        variant="default"
+                        data-testid="timezone-unpin"
+                        ?loading=${this.tzSaving}
+                        ?disabled=${busy}
+                        @click=${() => this.handleTimezoneUnpin()}
+                        >Unpin</sl-button
+                      >
+                    `
+                  : nothing}
+              `}
+        </div>
+        ${this.tzPicking
+          ? html`
+              <div class="timezone-picker-row">
+                ${keyed(
+                  this.tzPickerRevision,
+                  html`
+                    <scion-timezone-picker
+                      label="Pin timezone"
+                      .value=${this.tzDraft}
+                      ?disabled=${busy}
+                      @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>) => {
+                        this.tzDraft = e.detail.timezone;
+                        this.tzError = null;
+                      }}
+                    ></scion-timezone-picker>
+                  `
+                )}
+                <div class="timezone-picker-actions">
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    data-testid="timezone-pin-confirm"
+                    ?loading=${this.tzSaving}
+                    ?disabled=${busy}
+                    @click=${() => this.handleTimezonePin()}
+                    >Pin</sl-button
+                  >
+                  <sl-button
+                    size="small"
+                    variant="default"
+                    data-testid="timezone-pin-cancel"
+                    ?disabled=${busy}
+                    @click=${() => {
+                      this.tzPicking = false;
+                      this.tzError = null;
+                    }}
+                    >Cancel</sl-button
+                  >
+                </div>
+              </div>
+            `
+          : nothing}
+        ${showNextStart
+          ? html`<div class="hint" data-testid="timezone-next-start">
+              A timezone change applies on the agent's next start.
+            </div>`
+          : nothing}
+        ${this.tzError
+          ? html`<div class="timezone-error" role="alert" data-testid="timezone-error">
+              ${this.tzError}
+            </div>`
+          : nothing}
+      </div>
+    `;
+  }
+
   private renderEnvironmentTab() {
     return html`
+      <div class="hint env-tz-hint">
+        TZ is not set here: the agent's timezone is managed by the Timezone row on the General tab.
+      </div>
       <scion-env-editor
         .entries=${this.envEntries}
         .requiredKeys=${this.requiredEnvKeys}

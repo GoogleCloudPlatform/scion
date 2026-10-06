@@ -43,7 +43,13 @@ func newTestStore(url string) (store.Store, error) {
 	} else {
 		dsn = "file:" + url + "?cache=shared"
 	}
+	return newTestStoreAt(dsn)
+}
 
+// newTestStoreAt opens a fresh, migrated Ent-backed store on the given SQLite
+// DSN. Tests that need a second raw connection to the same database (for
+// example to write legacy column text) pick the DSN themselves.
+func newTestStoreAt(dsn string) (store.Store, error) {
 	// MaxOpenConns must be 1 for SQLite to serialize writes and avoid
 	// "database is locked" errors under concurrent access (e.g. the parallel
 	// per-agent writes in stop-all). This mirrors the production pool config in

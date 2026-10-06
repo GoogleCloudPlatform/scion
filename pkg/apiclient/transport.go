@@ -56,7 +56,12 @@ func WithTimeout(d time.Duration) TransportOption {
 	}
 }
 
-// WithRetry configures automatic retry behavior.
+// WithRetry configures automatic retry behavior for Do: up to maxRetries
+// further attempts after a transport error or a 5xx response, waiting wait
+// between attempts. Retries are off by default (MaxRetries 0). A retry
+// replays the whole request, body included, so only enable this for
+// transports whose Do callers are idempotent; DoNoRetry is never retried.
+// Pinning non-idempotent callers is tracked in ptone/scion#2955.
 func WithRetry(maxRetries int, wait time.Duration) TransportOption {
 	return func(t *Transport) {
 		t.MaxRetries = maxRetries
@@ -99,26 +104,44 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 
 // Do executes an HTTP request with configured behaviors.
 // Handles retries, timeout, and wraps errors.
+//
+// With MaxRetries > 0 (WithRetry), a transport error or a 5xx response is
+// retried. Each retry re-sends the full request body, rewound from
+// req.GetBody (which http.NewRequest populates for *bytes.Reader,
+// *bytes.Buffer and *strings.Reader bodies). A request whose body cannot be
+// rewound (non-empty Body, nil GetBody) is sent exactly once: its first
+// response is returned as-is, and its first transport error is returned
+// wrapped as "request failed: %w".
+//
+// A retry replays the request, so Do must only be used with retries enabled
+// for idempotent operations. Non-idempotent operations should use DoNoRetry
+// (or a *NoRetry helper such as PostNoRetry) instead.
 func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
-	// Set User-Agent
-	if t.UserAgent != "" {
-		req.Header.Set("User-Agent", t.UserAgent)
-	}
-
-	// Apply authentication
-	if t.Auth != nil {
-		if err := t.Auth.ApplyAuth(req); err != nil {
-			return nil, fmt.Errorf("failed to apply auth: %w", err)
-		}
+	if err := t.prepare(req); err != nil {
+		return nil, err
 	}
 
 	// Execute with retries
 	var resp *http.Response
 	var err error
 
+	canRewind := bodyRewindable(req)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
-		resp, err = t.HTTPClient.Do(req.WithContext(ctx))
+		attempt := req.WithContext(ctx)
+		if i > 0 && req.GetBody != nil {
+			// The previous attempt drained (and the client closed) the body;
+			// hand this attempt a fresh copy. attempt is a shallow copy, so
+			// the caller's req is left untouched.
+			body, gerr := req.GetBody()
+			if gerr != nil {
+				return nil, fmt.Errorf("request failed: rewinding body for retry: %w", gerr)
+			}
+			attempt.Body = body
+		}
+
+		resp, err = t.HTTPClient.Do(attempt)
+		retry := i < t.MaxRetries && canRewind
 		if err != nil {
 			// Check if context was cancelled
 			if ctx.Err() != nil {
@@ -126,7 +149,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 			}
 
 			// Retry on network errors
-			if i < t.MaxRetries {
+			if retry {
 				time.Sleep(t.RetryWait)
 				continue
 			}
@@ -134,7 +157,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 		}
 
 		// Retry on 5xx errors
-		if resp.StatusCode >= 500 && i < t.MaxRetries {
+		if resp.StatusCode >= 500 && retry {
 			_ = resp.Body.Close()
 			time.Sleep(t.RetryWait)
 			continue
@@ -143,6 +166,64 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 		break
 	}
 
+	return resp, nil
+}
+
+// bodyRewindable reports whether req can be re-sent with its full body: it
+// has no body at all, or its body can be recreated through GetBody.
+func bodyRewindable(req *http.Request) bool {
+	return req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+}
+
+// prepare applies the headers and authentication every send path (Do and
+// DoNoRetry) needs before handing req to an *http.Client.
+func (t *Transport) prepare(req *http.Request) error {
+	if t.UserAgent != "" {
+		req.Header.Set("User-Agent", t.UserAgent)
+	}
+	if t.Auth != nil {
+		if err := t.Auth.ApplyAuth(req); err != nil {
+			return fmt.Errorf("failed to apply auth: %w", err)
+		}
+	}
+	return nil
+}
+
+// DoNoRetry sends req once at this layer: no MaxRetries (even on a Transport
+// built with WithRetry) and no HTTP redirect following — a 3xx is returned
+// to the caller unchanged. Use this instead of Do for a non-idempotent
+// operation (e.g. agent keys injection) where any replay is unsafe.
+//
+// This governs this package's own behavior only: net/http can still retry
+// internally in the narrow cases where it can prove nothing was written
+// (a dead reused HTTP/1 connection, HTTP/2 REFUSED_STREAM/post-GOAWAY) —
+// those never reach the server, so they don't reopen a double-injection risk.
+func (t *Transport) DoNoRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if err := t.prepare(req); err != nil {
+		return nil, err
+	}
+
+	base := t.HTTPClient
+	if base == nil {
+		base = http.DefaultClient
+	}
+	// Shallow-copy the *http.Client so the underlying RoundTripper (and its
+	// connection pool) is shared with Do, but this one call's redirect policy
+	// is not: CheckRedirect is overridden to stop following at the first hop,
+	// regardless of whatever policy (including Go's default) the shared
+	// client would otherwise apply.
+	once := *base
+	once.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := once.Do(req.WithContext(ctx))
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
 	return resp, nil
 }
 
@@ -223,6 +304,14 @@ func (t *Transport) Post(ctx context.Context, path string, body interface{}, hea
 	return t.doJSON(ctx, http.MethodPost, path, body, headers)
 }
 
+// PostNoRetry performs an HTTP POST request with a JSON body via DoNoRetry:
+// exactly one attempt, no retry on network error or 5xx, no redirect
+// following. See DoNoRetry's doc comment for which callers need this instead
+// of Post.
+func (t *Transport) PostNoRetry(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSONVia(ctx, t.DoNoRetry, http.MethodPost, path, body, headers)
+}
+
 // Put performs an HTTP PUT request with JSON body.
 func (t *Transport) Put(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	return t.doJSON(ctx, http.MethodPut, path, body, headers)
@@ -249,6 +338,13 @@ func (t *Transport) Delete(ctx context.Context, path string, headers http.Header
 
 // doJSON performs an HTTP request with a JSON body.
 func (t *Transport) doJSON(ctx context.Context, method, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return t.doJSONVia(ctx, t.Do, method, path, body, headers)
+}
+
+// doJSONVia builds a JSON request exactly as doJSON does, then hands it to
+// send instead of always using Do — the one difference between Post and
+// PostNoRetry (and any future *NoRetry sibling).
+func (t *Transport) doJSONVia(ctx context.Context, send func(context.Context, *http.Request) (*http.Response, error), method, path string, body interface{}, headers http.Header) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
@@ -271,7 +367,7 @@ func (t *Transport) doJSON(ctx context.Context, method, path string, body interf
 		req.Header[k] = v
 	}
 
-	return t.Do(ctx, req)
+	return send(ctx, req)
 }
 
 // DecodeResponse reads and decodes a JSON response body.

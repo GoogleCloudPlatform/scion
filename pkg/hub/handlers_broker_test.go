@@ -91,7 +91,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// CO1: Add bob as a project member via role binding so he can create
 	// agents (project-level authz).
@@ -435,7 +435,12 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 			"runtimeBrokerId": "non-existent",
 		}
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		// A broker that does not exist at all is a 404, not a 503
+		// (ptone/scion#2715).
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, ErrCodeRuntimeBrokerNotFound, errResp.Error.Code)
 	})
 }
 

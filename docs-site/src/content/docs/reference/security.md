@@ -16,7 +16,7 @@ Scion operates in multiple contexts, each with specific security requirements. A
 | **Web Dashboard** | Browser | OAuth 2.0 + Session Cookie | HTTP-only cookie |
 | **CLI (Hub Commands)** | Terminal | OAuth 2.0 + Device Flow | `~/.scion/credentials.json` |
 | **Agent (sciontool)** | Container | Hub-issued JWT | Env Var (`SCION_HUB_TOKEN`) |
-| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/broker-credentials.json` |
+| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/hub-credentials/<name>.json` |
 | **Development** | Any | Developer Token (Bearer) | `~/.scion/dev-token` |
 
 ### 1.2 User Authentication (OAuth 2.0)
@@ -43,8 +43,10 @@ Agents running inside containers must report status back to the Hub without poss
 
 - **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`). An empty or unspecified agent role is securely enforced to resolve to the least-privilege role (`AgentRoleNone`) across all authorization paths. Scheduled dispatch children automatically persist this explicit role, and dispatches lacking a creator are refused.
     - `project:read` (Readonly): Allows reading project state (agents, templates, etc.).
+    - `project:artifact:read` (Readonly): Allows the agent to use the artifact service to read artifacts (`artifact.read`) when the `hub.artifacts` experiment is on; which artifacts it can read is decided by its project and by artifact grants. Artifact access uses dedicated agent scopes. Agents created from a credential issued before artifacts existed, and some agents created before then, do not carry it; refreshing such an agent's token is not enough. Recreate the agent from a current credential (for example a newly issued access token or a session) to give it artifact access.
+    - `project:artifact:write` (Baseline): Allows the agent to use the artifact service to publish artifacts (`artifact.create`, `artifact.update`) when the `hub.artifacts` experiment is on; where it can publish is decided by its project. Readonly agents do not get it. Like the read scope, agents created from a credential issued before artifacts existed do not carry it; recreate the agent from a current credential to give it artifact access.
     - `agent:status:update`, `agent:token:refresh`, `project:agent:notify`, `agent:port:forward` (Baseline): Standard operational scopes allowing the agent to report progress, refresh its token, and hold port tunnels.
-    - `project:agent:create`, `project:agent:lifecycle`, `project:secret:read`, `project:template:write` (Full): Complete programmatic control allowing the agent to spawn sub-agents, manage their phases, retrieve project secrets dynamically, and create or update templates within the project.
+    - `project:agent:create`, `project:agent:sa_assign`, `project:agent:lifecycle`, `project:secret:read`, `project:template:write` (Full): Complete programmatic control allowing the agent to spawn sub-agents, assign GCP service accounts to agents, manage their phases, retrieve project secrets dynamically, and create or update templates within the project.
 - **Transmission**: The token is injected into the container via the `SCION_HUB_TOKEN` environment variable and is used by `sciontool` for all API calls.
 
 ### 1.4 Runtime Broker Authentication (HMAC)
@@ -86,7 +88,7 @@ Scion implements a robust, hierarchical RBAC (Role-Based Access Control) and pol
 - **Resource Scopes**: Policies are attached to scopes (Hub, Project, or specific Resource) and follow a containment hierarchy.
 - **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Project level), allowing for granular delegation of authority.
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
-- **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks.
+- **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks. Each delegation edge also freezes the creating credential's permission ceiling and authority provenance at creation; the delegation walk applies every hop's frozen ceiling, and edges without recorded provenance are denied for sensitive-material permissions (see [Permissions](/scion/hosted/ha/permissions/#delegation-and-revocation)).
 
 ### 3.3 GCP Service Account Assignment Gates
 
@@ -117,6 +119,8 @@ To guarantee that no API endpoints or handlers can be accessed without explicit 
 - **Scope Boundary on Resource Reads**: User- and project-scoped skills, templates, and harness configs can be read only by their owner, members of the owning project, and Hub admins. Hub-wide member and viewer grants apply only to hub- and global-scoped records; they do not open up another user's or project's resources. The same scope check applies when a template is resolved at agent creation and when a template is cloned. There is no separate `visibility` setting on these resources, so access depends only on scope and grants.
 - **Project Agent Routes**: Project-scoped agent list, get, and update, and the resume and restart path, authorize each caller individually. Agent responses omit the environment in the agent's applied config unless the caller can attach to the agent, and `GITHUB_TOKEN` is never returned.
 - **Chat Search Visibility**: Chat search returns DM threads only to their participants.
+- **Project Authority From Role Bindings Only**: A project's `ownerId` field grants no access. Project authority, including project stop-all, comes only from project-scoped role bindings, so a removed creator whose only claim is `ownerId` is denied. See [Permissions & Policy](/scion/hosted/ha/permissions/#roles-and-bindings).
+- **Sandboxed Port-Forward Responses**: Responses proxied from an agent's exposed port always carry the Hub's sandbox `Content-Security-Policy` and `X-Content-Type-Options: nosniff`, and the agent's `Set-Cookie`, CSP, and CORS headers are never relayed onto the Hub origin. See [Port Forwarding](/scion/hosted/user/port-forwarding/).
 - **Project-Scoped Agent Deletion**: When a Runtime Broker deletes an agent, it resolves the agent within the requested project only, on every runtime. It never matches by bare slug across projects, so it cannot remove a same-slug agent's container, VM, or files in another project. The broker returns `404` when nothing matches and refuses the delete if the match is ambiguous.
 - **Agent Name Path Validation**: Wherever an agent name resolves to on-disk agent state, it must be a single, clean path element. Empty names, `.`, `..`, and names containing `/`, `\`, or NUL are rejected, so a name cannot escape the agents directory. Broker create and start requests that fail this check return a validation error. Broker dispatch and scheduled-event lookups address agents by slug.
 - **Sanitized Broker Failure Reasons**: Before a message failure reason reported by a Runtime Broker is stored or echoed into the sending agent's terminal, the Hub strips control characters and invalid UTF-8 and truncates it to 512 bytes.
@@ -135,6 +139,17 @@ The Hub's project file handlers serve project workspaces and shared directories.
 - **Attachment ingest and staging**: Attachments are resolved through an `os.Root` anchored on the project scratchpad, so a symlink at any intermediate directory component cannot redirect them. A shared directory that is itself a symlink is refused.
 - **Untrusted content isolation**: Workspace and shared-directory files are written by users and agents, not by the Hub. Responses that serve them, including `?view=true` previews, the project WebDAV endpoint, and chat attachments, carry a `Content-Security-Policy: sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads` header and `X-Content-Type-Options: nosniff`. The sandbox omits `allow-same-origin`, so a sandboxed document gets an opaque origin: `allow-scripts` lets its scripts run, so generated HTML reports keep working in the file browser's preview, but it cannot act with the viewer's Hub session. WebDAV reads (`GET`, `HEAD`) are served as attachments, so browsers download them instead of rendering them.
 - **NFS shared directories**: With `server.shared_dir_storage.backend: nfs`, shared-directory operations use an `O_NOFOLLOW` component walk anchored on the project tree's inode. See [Shared Directory Storage](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage).
+
+### 3.6 Workspace Host-Path Validation
+
+Before a Runtime Broker bind-mounts, syncs (for example, to GCS), uploads, or recursively `chown`s a workspace or agent-home host path, it resolves the path through any symlinks and validates the result. The check runs on every runtime and fails closed: a path that cannot be resolved, including when the home directory cannot be determined, is refused. The Runtime Broker then acts on the resolved path, not the original one. The following are always refused:
+
+- The filesystem root (`/`, or a Windows volume root).
+- Critical system directories.
+- The user's home directory, or any ancestor of it.
+- The scion home (`~/.scion`) or any ancestor of it, and anything under `~/.scion` except the subtrees that legitimately hold workspaces and agent homes, such as Hub-managed project workspaces under `~/.scion/projects/<slug>`.
+
+Where the broker knows the project's root, the resolved path must also fall under it, so a symlink inside a project that points elsewhere is judged by where it leads.
 
 ## 4. Secret Management
 
@@ -181,6 +196,22 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Tokens are prefixed with `scion_pat_` (a legacy artifact of the older "personal access token" name).
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
+- Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup, the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
+- Tokens can be minted with an explicit hub boundary (`"boundary": {"kind": "hub"}` on `POST /api/v1/auth/tokens`), which reaches hub-level resources and every project; a request naming no boundary is rejected rather than read as hub-bound. Hub-only selectors such as `broker:create` are mintable only on hub-bound tokens, and broker creation itself still refuses every UAT.
+- Every bearer request passes one gate: the boundary is valid, the target's scope is inside the boundary, the permission is inside the stored ceiling, the holder still has active access to a project target, and the holder's live authority allows the action. Any evaluation error denies.
+- At mint time, each requested scope is checked against the caller's live authority before the token is written; an ineligible scope is refused with `403 scope_violation`.
+- A token's selected scopes are a ceiling, not a grant: minting a token with a scope records it as
+  a restriction on what the token may do, and grants no access by itself. Every request the token
+  later makes is independently authorized against the holder's *current* authority on the specific
+  target, including active project access — this is re-checked on every request, not just at mint
+  time.
+- `agent:attach` and `agent:port_access` are resource-relative: they may be selected for a project
+  before the holder has created a single agent in it, but each later request against a specific
+  agent is authorized separately. An `agent:attach` request succeeds only for the holder's own
+  agents and their descendants. An `agent:port_access` request also succeeds for any agent in a
+  project where the holder's role grants `agent.port_access` (the built-in `project-owner` and
+  `project-admin` roles do). Losing project access denies every subsequent request against that project's
+  targets immediately, independent of the token's remaining validity period.
 
 ### 4.5 Credentials Propagation
 

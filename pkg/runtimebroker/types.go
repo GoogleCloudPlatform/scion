@@ -51,6 +51,9 @@ type BrokerInfoResponse struct {
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile     `json:"profiles,omitempty"`
 	Projects     []ProjectInfo       `json:"projects,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor, the
+	// same value it reports to the hub on every heartbeat.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -60,6 +63,17 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Attach reports whether this profile's runtime supports interactive
+	// attach (pkg/runtime.AttachCapableRuntime, via HasAttachSupport). A
+	// pointer, not a plain bool: this broker can only answer for a profile
+	// backed by a runtime instance it has already built (the default
+	// runtime, or an auxiliary runtime some prior request already
+	// constructed) — buildInfoProfiles never builds one just to answer this
+	// field. nil means unknown (no live instance to ask), which every
+	// consumer must read as supported, the same missing-capability default
+	// HasAttachSupport itself uses for a runtime that doesn't implement the
+	// interface.
+	Attach *bool `json:"attach,omitempty"`
 }
 
 // BrokerCapabilities describes what this runtime broker can do.
@@ -73,6 +87,32 @@ type BrokerCapabilities struct {
 	// §3.4). The hub gates `scion reincarnate` on this — see
 	// store.BrokerCapabilities.Reprovision and its 412 gate in pkg/hub.
 	Reprovision bool `json:"reprovision"`
+	// AsyncLaunch indicates this broker understands CreateAgentRequest's
+	// AsyncLaunch field and the launch-report protocol (design
+	// t1-async-create-v11.md §3.2, §7 P1b-1). The hub uses it only to skip
+	// BeginLaunch for a broker known to lack support; the create response's
+	// LaunchPending echo is authoritative either way.
+	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates this broker provisions the
+	// empty-per-agent workspace sharing mode: a private, initially empty
+	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
+	// hub refuses to dispatch such agents to a broker without it (412).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates this broker can take part in moving an agent to
+	// or from another broker on the same workspace export (`scion
+	// reincarnate --broker`). The hub refuses a move unless both brokers
+	// report it (412).
+	AgentMove bool `json:"agentMove"`
+	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
+	// empty-per-agent agent's private workspace in place (same-broker
+	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
+	// hub checks runtime suitability separately.
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -138,6 +178,20 @@ type AgentResponse struct {
 	Labels                map[string]string `json:"labels,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt,omitempty"`
 	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
+	// Warnings carries only the hub-only env drop warnings (a broker-local
+	// TZ value ignored for a hub-dispatched agent), so the hub can relay
+	// them in its own create and start responses. Other broker-local start
+	// warnings are deliberately not included.
+	Warnings []string `json:"warnings,omitempty"`
+	// RunID is the run identity the runtime entry carries (its scion.run_id
+	// label). It usually echoes the runId the hub sent, but a start that
+	// found the agent already running reports the existing run's ID, so
+	// the hub can record the run that actually exists (ptone/scion#2550).
+	RunID string `json:"runId,omitempty"`
+	// WorkspacePlacement is where the start this response answers placed
+	// the agent's workspace (api.WorkspacePlacementExport or
+	// WorkspacePlacementLocal). Empty when no start resolved it.
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -217,12 +271,24 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// ExpectExistingNFSWorkspace, on a ProvisionOnly request, says the agent
+	// is being moved here from another broker on the same NFS export: before
+	// provisioning, the broker confirms through its own mount that the
+	// workspace already exists ("agent-dir": <subPathRoot>/<projectID>/
+	// agents/<name>/workspace; "project": <subPathRoot>/<projectID>/
+	// workspace) and refuses with 409 when it does not, instead of
+	// provisioning an empty workspace (design ptone/scion#2727 A9).
+	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
 	// ProjectPath is the local filesystem path to the project on this runtime broker.
 	// This is provided by the Hub from the project provider record.
 	ProjectPath string `json:"projectPath,omitempty"`
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath,
+	// sent by the hub that uploaded it. When empty the broker falls back to
+	// its own StorageBucket setting (older hubs do not send it).
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/
@@ -272,6 +338,28 @@ type CreateAgentRequest struct {
 	// These are NEVER forwarded to the agent container environment or harness scripts.
 	// Populated by the Hub from project-scope secrets at dispatch time.
 	ProvisionCredentials map[string]string `json:"provisionCredentials,omitempty"`
+
+	// AsyncLaunch requests the non-blocking create path (design
+	// t1-async-create-v11.md §3.2, §7 P1b-1). With it absent or false,
+	// createAgent's behavior is unchanged. ProvisionOnly and Reprovision
+	// ignore it.
+	AsyncLaunch bool `json:"asyncLaunch,omitempty"`
+	// LaunchID is the Hub's launch identifier (BeginLaunch's return value),
+	// echoed back on every report for this launch.
+	LaunchID string `json:"launchId,omitempty"`
+	// RunID is the Hub-minted identity of the run this create starts
+	// (ptone/scion#2550), distinct from LaunchID. The broker labels the
+	// runtime entry with it (api.LabelRunID) so a later delete carrying it
+	// targets only this run. Empty from an older hub; pkg/agent then mints
+	// one itself.
+	RunID string `json:"runId,omitempty"`
+	// LaunchTimeoutSeconds is the remaining launch budget at send time
+	// (ceil(launch_deadline - send time)), not the Hub's configured
+	// launchTimeout setting.
+	LaunchTimeoutSeconds int `json:"launchTimeoutSeconds,omitempty"`
+	// LaunchKeepaliveSeconds is the Hub's configured keepalive interval. The
+	// broker defaults to 15 when absent (design §3.7).
+	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds,omitempty"`
 }
 
 // CreateAgentConfig contains configuration for agent creation.
@@ -321,6 +409,13 @@ type CreateAgentConfig struct {
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
 
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings, sent by the Hub alongside SharedWorkspace. It never turns on
+	// the per-agent clone mode GitClone does; it reaches the runtime only as
+	// the clone settings of the Kubernetes workspace-provision init container
+	// (api.StartOptions.SharedWorkspaceClone).
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
+
 	// SharedDirs contains project-level shared directory declarations.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
 
@@ -346,6 +441,18 @@ type GCPIdentityConfig struct {
 	MetadataMode string `json:"metadata_mode"`        // "block", "passthrough", "assign"
 	SAEmail      string `json:"sa_email,omitempty"`   // Service account email
 	ProjectID    string `json:"project_id,omitempty"` // GCP project ID
+
+	// RequireLocalRuntime marks a "passthrough" mode granted by the hub's
+	// hub-default identity rung, which resolves the runtime this agent will
+	// use from the broker's own registration data rather than from
+	// project-effective settings at dispatch time. When this is set, the
+	// broker re-checks the resolved runtime once it knows it (after
+	// resolveManagerForOpts) and downgrades passthrough to block itself if
+	// that runtime is not a local container runtime — see buildStartContext.
+	// Explicit and project-level passthrough are never flagged, so their
+	// behavior is unaffected. The JSON tag must match
+	// hub.RemoteGCPIdentityConfig's field of the same name.
+	RequireLocalRuntime bool `json:"require_local_runtime,omitempty"`
 }
 
 // CreateAgentResponse is the response for creating an agent.
@@ -361,6 +468,19 @@ type CreateAgentResponse struct {
 	// treats an absent echo on a reprovision dispatch as a failure, which is
 	// what keeps that failure mode closed instead of a silent no-op.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// LaunchPending is set true instead of running Manager.Start inline when
+	// the broker accepted an async launch (design §3.2, §7 P1b-1): the Hub
+	// writes MarkLaunchAccepted and the broker continues in runLaunch. Agent
+	// is nil on this branch — the launch is not running yet.
+	LaunchPending bool `json:"launchPending,omitempty"`
+	// LaunchID echoes the request's LaunchID, so the sending Hub node can
+	// confirm this is an answer to its own BeginLaunch before calling
+	// MarkLaunchAccepted (design §3.4 dispatchLaunching).
+	LaunchID string `json:"launchId,omitempty"`
+	// LaunchInstanceID is this broker process's launch-owner identity,
+	// generated once at broker start. The Hub stores it as launch_owner.
+	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
 }
 
 // EnvRequirementsResponse is returned by the broker when GatherEnv is true
@@ -446,6 +566,11 @@ type ExecRequest struct {
 // ResetAuthRequest is the request body for resetting auth on a running agent.
 type ResetAuthRequest struct {
 	Token string `json:"token"`
+	// TransportToken, when set, is a fresh hub-minted transport token
+	// (IAP / Cloud Run invoker). It is written to the agent's transport
+	// token file alongside the agent token, so a reset also recovers an
+	// agent whose transport token has expired.
+	TransportToken string `json:"transportToken,omitempty"`
 }
 
 // ResetAuthResponse is the response for auth reset.
@@ -517,6 +642,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		ID:                    info.ID,
 		Slug:                  info.Slug,
 		ContainerID:           info.ContainerID,
+		RunID:                 info.RunID,
 		Name:                  info.Name,
 		Template:              info.Template,
 		HarnessConfig:         info.HarnessConfig,
@@ -533,6 +659,10 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
+		WorkspacePlacement:    info.WorkspacePlacement,
+	}
+	if len(info.HubOnlyEnvWarnings) > 0 {
+		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)
 	}
 
 	if info.Template != "" || info.Image != "" {

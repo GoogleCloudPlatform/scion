@@ -46,10 +46,10 @@ func runHarnessConfigUpdate(cmd *cobra.Command, args []string) error {
 	all, _ := cmd.Flags().GetBool("all")
 
 	if len(args) == 0 && !all {
-		return fmt.Errorf("specify a harness-config name or use --all")
+		return newUsageError("specify a harness-config name or use --all")
 	}
 	if all && urlOverride != "" {
-		return fmt.Errorf("--all and --url cannot be used together")
+		return newUsageError("--all and --url cannot be used together")
 	}
 
 	var gp string

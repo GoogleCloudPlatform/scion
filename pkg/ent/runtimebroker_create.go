@@ -176,6 +176,34 @@ func (_c *RuntimeBrokerCreate) SetNillableRuntimes(v *string) *RuntimeBrokerCrea
 	return _c
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (_c *RuntimeBrokerCreate) SetDefaultProfile(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetDefaultProfile(v)
+	return _c
+}
+
+// SetNillableDefaultProfile sets the "default_profile" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableDefaultProfile(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetDefaultProfile(*v)
+	}
+	return _c
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (_c *RuntimeBrokerCreate) SetWorkspaceStorage(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetWorkspaceStorage(v)
+	return _c
+}
+
+// SetNillableWorkspaceStorage sets the "workspace_storage" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableWorkspaceStorage(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetWorkspaceStorage(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
 func (_c *RuntimeBrokerCreate) SetLabels(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetLabels(v)
@@ -534,6 +562,14 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldRuntimes, field.TypeString, value)
 		_node.Runtimes = value
 	}
+	if value, ok := _c.mutation.DefaultProfile(); ok {
+		_spec.SetField(runtimebroker.FieldDefaultProfile, field.TypeString, value)
+		_node.DefaultProfile = value
+	}
+	if value, ok := _c.mutation.WorkspaceStorage(); ok {
+		_spec.SetField(runtimebroker.FieldWorkspaceStorage, field.TypeString, value)
+		_node.WorkspaceStorage = value
+	}
 	if value, ok := _c.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
@@ -817,6 +853,42 @@ func (u *RuntimeBrokerUpsert) UpdateRuntimes() *RuntimeBrokerUpsert {
 // ClearRuntimes clears the value of the "runtimes" field.
 func (u *RuntimeBrokerUpsert) ClearRuntimes() *RuntimeBrokerUpsert {
 	u.SetNull(runtimebroker.FieldRuntimes)
+	return u
+}
+
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsert) SetDefaultProfile(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldDefaultProfile, v)
+	return u
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateDefaultProfile() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldDefaultProfile)
+	return u
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsert) ClearDefaultProfile() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldDefaultProfile)
+	return u
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (u *RuntimeBrokerUpsert) SetWorkspaceStorage(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldWorkspaceStorage, v)
+	return u
+}
+
+// UpdateWorkspaceStorage sets the "workspace_storage" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateWorkspaceStorage() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldWorkspaceStorage)
+	return u
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (u *RuntimeBrokerUpsert) ClearWorkspaceStorage() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldWorkspaceStorage)
 	return u
 }
 
@@ -1271,6 +1343,48 @@ func (u *RuntimeBrokerUpsertOne) UpdateRuntimes() *RuntimeBrokerUpsertOne {
 func (u *RuntimeBrokerUpsertOne) ClearRuntimes() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearRuntimes()
+	})
+}
+
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsertOne) SetDefaultProfile(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetDefaultProfile(v)
+	})
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateDefaultProfile() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateDefaultProfile()
+	})
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsertOne) ClearDefaultProfile() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearDefaultProfile()
+	})
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertOne) SetWorkspaceStorage(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetWorkspaceStorage(v)
+	})
+}
+
+// UpdateWorkspaceStorage sets the "workspace_storage" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateWorkspaceStorage() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateWorkspaceStorage()
+	})
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertOne) ClearWorkspaceStorage() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearWorkspaceStorage()
 	})
 }
 
@@ -1923,6 +2037,48 @@ func (u *RuntimeBrokerUpsertBulk) UpdateRuntimes() *RuntimeBrokerUpsertBulk {
 func (u *RuntimeBrokerUpsertBulk) ClearRuntimes() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.ClearRuntimes()
+	})
+}
+
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsertBulk) SetDefaultProfile(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetDefaultProfile(v)
+	})
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateDefaultProfile() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateDefaultProfile()
+	})
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsertBulk) ClearDefaultProfile() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearDefaultProfile()
+	})
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertBulk) SetWorkspaceStorage(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetWorkspaceStorage(v)
+	})
+}
+
+// UpdateWorkspaceStorage sets the "workspace_storage" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateWorkspaceStorage() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateWorkspaceStorage()
+	})
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (u *RuntimeBrokerUpsertBulk) ClearWorkspaceStorage() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearWorkspaceStorage()
 	})
 }
 

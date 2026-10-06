@@ -4,6 +4,7 @@ package ent
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math"
 
@@ -13,6 +14,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/google/uuid"
 )
@@ -20,11 +22,12 @@ import (
 // AccessConstraintQuery is the builder for querying AccessConstraint entities.
 type AccessConstraintQuery struct {
 	config
-	ctx        *QueryContext
-	order      []accessconstraint.OrderOption
-	inters     []Interceptor
-	predicates []predicate.AccessConstraint
-	modifiers  []func(*sql.Selector)
+	ctx         *QueryContext
+	order       []accessconstraint.OrderOption
+	inters      []Interceptor
+	predicates  []predicate.AccessConstraint
+	withHistory *AccessConstraintHistoryQuery
+	modifiers   []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -59,6 +62,28 @@ func (_q *AccessConstraintQuery) Unique(unique bool) *AccessConstraintQuery {
 func (_q *AccessConstraintQuery) Order(o ...accessconstraint.OrderOption) *AccessConstraintQuery {
 	_q.order = append(_q.order, o...)
 	return _q
+}
+
+// QueryHistory chains the current query on the "history" edge.
+func (_q *AccessConstraintQuery) QueryHistory() *AccessConstraintHistoryQuery {
+	query := (&AccessConstraintHistoryClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(accessconstraint.Table, accessconstraint.FieldID, selector),
+			sqlgraph.To(accessconstrainthistory.Table, accessconstrainthistory.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, accessconstraint.HistoryTable, accessconstraint.HistoryColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
 }
 
 // First returns the first AccessConstraint entity from the query.
@@ -248,15 +273,27 @@ func (_q *AccessConstraintQuery) Clone() *AccessConstraintQuery {
 		return nil
 	}
 	return &AccessConstraintQuery{
-		config:     _q.config,
-		ctx:        _q.ctx.Clone(),
-		order:      append([]accessconstraint.OrderOption{}, _q.order...),
-		inters:     append([]Interceptor{}, _q.inters...),
-		predicates: append([]predicate.AccessConstraint{}, _q.predicates...),
+		config:      _q.config,
+		ctx:         _q.ctx.Clone(),
+		order:       append([]accessconstraint.OrderOption{}, _q.order...),
+		inters:      append([]Interceptor{}, _q.inters...),
+		predicates:  append([]predicate.AccessConstraint{}, _q.predicates...),
+		withHistory: _q.withHistory.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
 	}
+}
+
+// WithHistory tells the query-builder to eager-load the nodes that are connected to
+// the "history" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *AccessConstraintQuery) WithHistory(opts ...func(*AccessConstraintHistoryQuery)) *AccessConstraintQuery {
+	query := (&AccessConstraintHistoryClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withHistory = query
+	return _q
 }
 
 // GroupBy is used to group vertices by one or more fields/columns.
@@ -335,8 +372,11 @@ func (_q *AccessConstraintQuery) prepareQuery(ctx context.Context) error {
 
 func (_q *AccessConstraintQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*AccessConstraint, error) {
 	var (
-		nodes = []*AccessConstraint{}
-		_spec = _q.querySpec()
+		nodes       = []*AccessConstraint{}
+		_spec       = _q.querySpec()
+		loadedTypes = [1]bool{
+			_q.withHistory != nil,
+		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
 		return (*AccessConstraint).scanValues(nil, columns)
@@ -344,6 +384,7 @@ func (_q *AccessConstraintQuery) sqlAll(ctx context.Context, hooks ...queryHook)
 	_spec.Assign = func(columns []string, values []any) error {
 		node := &AccessConstraint{config: _q.config}
 		nodes = append(nodes, node)
+		node.Edges.loadedTypes = loadedTypes
 		return node.assignValues(columns, values)
 	}
 	if len(_q.modifiers) > 0 {
@@ -358,7 +399,45 @@ func (_q *AccessConstraintQuery) sqlAll(ctx context.Context, hooks ...queryHook)
 	if len(nodes) == 0 {
 		return nodes, nil
 	}
+	if query := _q.withHistory; query != nil {
+		if err := _q.loadHistory(ctx, query, nodes,
+			func(n *AccessConstraint) { n.Edges.History = []*AccessConstraintHistory{} },
+			func(n *AccessConstraint, e *AccessConstraintHistory) { n.Edges.History = append(n.Edges.History, e) }); err != nil {
+			return nil, err
+		}
+	}
 	return nodes, nil
+}
+
+func (_q *AccessConstraintQuery) loadHistory(ctx context.Context, query *AccessConstraintHistoryQuery, nodes []*AccessConstraint, init func(*AccessConstraint), assign func(*AccessConstraint, *AccessConstraintHistory)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[uuid.UUID]*AccessConstraint)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+		if init != nil {
+			init(nodes[i])
+		}
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(accessconstrainthistory.FieldConstraintID)
+	}
+	query.Where(predicate.AccessConstraintHistory(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(accessconstraint.HistoryColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.ConstraintID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "constraint_id" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
 }
 
 func (_q *AccessConstraintQuery) sqlCount(ctx context.Context) (int, error) {

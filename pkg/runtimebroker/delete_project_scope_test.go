@@ -135,14 +135,14 @@ func TestDeleteAgent_SameSlugDifferentProjects_DeletesOnlyRequested(t *testing.T
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 1 {
-		t.Fatalf("expected exactly 1 delete, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 1 {
+		t.Fatalf("expected exactly 1 delete, got %d", mgr.DeleteCalls())
 	}
-	if mgr.lastDeleteContainerID != "cid-b" {
-		t.Errorf("deleted container %q, want cid-b", mgr.lastDeleteContainerID)
+	if mgr.LastDeleteContainerID() != "cid-b" {
+		t.Errorf("deleted container %q, want cid-b", mgr.LastDeleteContainerID())
 	}
-	if mgr.lastDeleteProjectPath != scionB {
-		t.Errorf("file deletion project path %q, want projB's %q", mgr.lastDeleteProjectPath, scionB)
+	if mgr.LastDeleteProjectPath() != scionB {
+		t.Errorf("file deletion project path %q, want projB's %q", mgr.LastDeleteProjectPath(), scionB)
 	}
 }
 
@@ -156,8 +156,8 @@ func TestDeleteAgent_NoMatchInProject_404NoSideEffects(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 {
-		t.Errorf("expected no delete call, got %d (container %q)", mgr.deleteCalls, mgr.lastDeleteContainerID)
+	if mgr.DeleteCalls() != 0 {
+		t.Errorf("expected no delete call, got %d (container %q)", mgr.DeleteCalls(), mgr.LastDeleteContainerID())
 	}
 	assertUntouched(t, scionA, "dev", infoA)
 }
@@ -186,8 +186,8 @@ func TestDeleteAgent_AuxiliarySubstrateProfile_NoMatchInProject_404(t *testing.T
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 || auxMgr.deleteCalls != 0 {
-		t.Errorf("expected no delete calls, got default=%d aux=%d", mgr.deleteCalls, auxMgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 || auxMgr.DeleteCalls() != 0 {
+		t.Errorf("expected no delete calls, got default=%d aux=%d", mgr.DeleteCalls(), auxMgr.DeleteCalls())
 	}
 	assertUntouched(t, scionA, "dev", infoA)
 }
@@ -209,11 +209,11 @@ func TestDeleteAgent_AuxiliaryRuntimeMatch_DeletesOnThatRuntime(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 {
-		t.Errorf("default runtime (projA) must not be touched, got %d deletes", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 {
+		t.Errorf("default runtime (projA) must not be touched, got %d deletes", mgr.DeleteCalls())
 	}
-	if auxMgr.deleteCalls != 1 || auxMgr.lastDeleteContainerID != "actor-b" {
-		t.Errorf("expected aux delete of actor-b, got %d calls, container %q", auxMgr.deleteCalls, auxMgr.lastDeleteContainerID)
+	if auxMgr.DeleteCalls() != 1 || auxMgr.LastDeleteContainerID() != "actor-b" {
+		t.Errorf("expected aux delete of actor-b, got %d calls, container %q", auxMgr.DeleteCalls(), auxMgr.LastDeleteContainerID())
 	}
 }
 
@@ -227,14 +227,14 @@ func TestDeleteAgent_FileOnlyAgentInRequestedProject_DeletesFiles(t *testing.T) 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 1 {
-		t.Fatalf("expected 1 delete call, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 1 {
+		t.Fatalf("expected 1 delete call, got %d", mgr.DeleteCalls())
 	}
-	if mgr.lastDeleteContainerID != "" {
-		t.Errorf("file-only delete must not target a container, got %q", mgr.lastDeleteContainerID)
+	if mgr.LastDeleteContainerID() != "" {
+		t.Errorf("file-only delete must not target a container, got %q", mgr.LastDeleteContainerID())
 	}
-	if mgr.lastDeleteProjectPath != scionB {
-		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, scionB)
+	if mgr.LastDeleteProjectPath() != scionB {
+		t.Errorf("file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), scionB)
 	}
 	assertUntouched(t, scionA, "dev", infoA)
 }
@@ -251,8 +251,8 @@ func TestDeleteAgent_MatchedEntryWithoutProjectPath_ResolvesOnlyOwnProject(t *te
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteContainerID != "actor-b" || mgr.lastDeleteProjectPath != scionB {
-		t.Errorf("got container %q path %q, want actor-b / %q", mgr.lastDeleteContainerID, mgr.lastDeleteProjectPath, scionB)
+	if mgr.LastDeleteContainerID() != "actor-b" || mgr.LastDeleteProjectPath() != scionB {
+		t.Errorf("got container %q path %q, want actor-b / %q", mgr.LastDeleteContainerID(), mgr.LastDeleteProjectPath(), scionB)
 	}
 }
 
@@ -266,11 +266,11 @@ func TestDeleteAgent_MatchedEntryWithoutProjectPath_NoProjectDir_SkipsFiles(t *t
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteContainerID != "actor-b" {
-		t.Errorf("deleted container %q, want actor-b", mgr.lastDeleteContainerID)
+	if mgr.LastDeleteContainerID() != "actor-b" {
+		t.Errorf("deleted container %q, want actor-b", mgr.LastDeleteContainerID())
 	}
-	if mgr.lastDeleteFiles || mgr.lastDeleteProjectPath != "" {
-		t.Errorf("expected file cleanup skipped, got deleteFiles=%v path=%q", mgr.lastDeleteFiles, mgr.lastDeleteProjectPath)
+	if mgr.LastDeleteFiles() || mgr.LastDeleteProjectPath() != "" {
+		t.Errorf("expected file cleanup skipped, got deleteFiles=%v path=%q", mgr.LastDeleteFiles(), mgr.LastDeleteProjectPath())
 	}
 	assertUntouched(t, scionA, "dev", infoA)
 }
@@ -285,8 +285,8 @@ func TestDeleteAgent_UnlabelledLegacyContainerAccepted(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteContainerID != "cid-legacy" {
-		t.Errorf("deleted container %q, want cid-legacy", mgr.lastDeleteContainerID)
+	if mgr.LastDeleteContainerID() != "cid-legacy" {
+		t.Errorf("deleted container %q, want cid-legacy", mgr.LastDeleteContainerID())
 	}
 }
 
@@ -302,8 +302,8 @@ func TestDeleteAgent_AmbiguousInProject_ConflictNoSideEffects(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 {
-		t.Errorf("expected no delete call, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 {
+		t.Errorf("expected no delete call, got %d", mgr.DeleteCalls())
 	}
 }
 
@@ -350,7 +350,7 @@ func TestDeleteAgent_ListFailure_NotReportedAs404(t *testing.T) {
 	if rec.Code == http.StatusNotFound || rec.Code/100 == 2 {
 		t.Fatalf("expected an error status when a runtime cannot be listed, got %d", rec.Code)
 	}
-	if mgr.deleteCalls != 0 || auxMgr.deleteCalls != 0 {
+	if mgr.DeleteCalls() != 0 || auxMgr.DeleteCalls() != 0 {
 		t.Errorf("expected no delete calls")
 	}
 }
@@ -392,11 +392,11 @@ func TestDeleteAgent_FileOnlyAgentInLinkedProject_UsesHubPathHint(t *testing.T) 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 1 || mgr.lastDeleteContainerID != "" {
-		t.Fatalf("expected 1 file-only delete, got %d calls, container %q", mgr.deleteCalls, mgr.lastDeleteContainerID)
+	if mgr.DeleteCalls() != 1 || mgr.LastDeleteContainerID() != "" {
+		t.Fatalf("expected 1 file-only delete, got %d calls, container %q", mgr.DeleteCalls(), mgr.LastDeleteContainerID())
 	}
-	if want := resolvedScionDir(t, root); mgr.lastDeleteProjectPath != want {
-		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, want)
+	if want := resolvedScionDir(t, root); mgr.LastDeleteProjectPath() != want {
+		t.Errorf("file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), want)
 	}
 }
 
@@ -411,8 +411,8 @@ func TestDeleteAgent_LinkedProjectHintForOtherProject_404NoSideEffects(t *testin
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 {
-		t.Fatalf("expected no delete calls, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 {
+		t.Fatalf("expected no delete calls, got %d", mgr.DeleteCalls())
 	}
 	if _, err := os.Stat(filepath.Join(rootA, ".scion", "agents", "dev")); err != nil {
 		t.Errorf("other project's agent dir was touched: %v", err)
@@ -433,15 +433,15 @@ func TestDeleteAgent_FileOnlyAgentInBrokerWorkingProject(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 1 || mgr.lastDeleteProjectPath == "" {
-		t.Fatalf("expected a file-only delete with a project path, got %d calls, path %q", mgr.deleteCalls, mgr.lastDeleteProjectPath)
+	if mgr.DeleteCalls() != 1 || mgr.LastDeleteProjectPath() == "" {
+		t.Fatalf("expected a file-only delete with a project path, got %d calls, path %q", mgr.DeleteCalls(), mgr.LastDeleteProjectPath())
 	}
 
 	// A different project ID does not match the working project.
-	mgr.deleteCalls = 0
+	mgr.SetDeleteCalls(0)
 	rec = doDelete(t, srv, "dev", "projectId="+scopeProjA+"&deleteFiles=true")
-	if rec.Code != http.StatusNotFound || mgr.deleteCalls != 0 {
-		t.Fatalf("expected 404 with no delete for another project, got %d / %d calls", rec.Code, mgr.deleteCalls)
+	if rec.Code != http.StatusNotFound || mgr.DeleteCalls() != 0 {
+		t.Fatalf("expected 404 with no delete for another project, got %d / %d calls", rec.Code, mgr.DeleteCalls())
 	}
 }
 
@@ -467,8 +467,8 @@ func TestDeleteAgent_FileOnlyAgentInLinkedMarkerProject(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteProjectPath != extDir {
-		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, extDir)
+	if mgr.LastDeleteProjectPath() != extDir {
+		t.Errorf("file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), extDir)
 	}
 }
 
@@ -499,13 +499,13 @@ func TestDeleteAgent_LegacyContainerFromOtherProject_404NoSideEffects(t *testing
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr.agents = []api.AgentInfo{tc.entry}
-			mgr.deleteCalls = 0
+			mgr.SetDeleteCalls(0)
 			rec := doDelete(t, srv, "worker", "projectId="+scopeProjB+"&deleteFiles=true")
 			if rec.Code != http.StatusNotFound {
 				t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 			}
-			if mgr.deleteCalls != 0 {
-				t.Fatalf("expected no delete calls, got %d", mgr.deleteCalls)
+			if mgr.DeleteCalls() != 0 {
+				t.Fatalf("expected no delete calls, got %d", mgr.DeleteCalls())
 			}
 		})
 	}
@@ -526,11 +526,11 @@ func TestDeleteAgent_UntrustedEntryProjectPathIgnored(t *testing.T) {
 	if rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
 		t.Fatalf("expected success, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteContainerID != "cid-b" {
-		t.Errorf("deleted container %q, want cid-b", mgr.lastDeleteContainerID)
+	if mgr.LastDeleteContainerID() != "cid-b" {
+		t.Errorf("deleted container %q, want cid-b", mgr.LastDeleteContainerID())
 	}
-	if mgr.lastDeleteProjectPath != "" || mgr.lastDeleteFiles {
-		t.Errorf("file deletion must not use an untrusted path, got path %q files=%v", mgr.lastDeleteProjectPath, mgr.lastDeleteFiles)
+	if mgr.LastDeleteProjectPath() != "" || mgr.LastDeleteFiles() {
+		t.Errorf("file deletion must not use an untrusted path, got path %q files=%v", mgr.LastDeleteProjectPath(), mgr.LastDeleteFiles())
 	}
 	assertUntouched(t, scionA, "dev", infoA)
 
@@ -542,8 +542,8 @@ func TestDeleteAgent_UntrustedEntryProjectPathIgnored(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteProjectPath != scionB {
-		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, scionB)
+	if mgr.LastDeleteProjectPath() != scionB {
+		t.Errorf("file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), scionB)
 	}
 }
 
@@ -574,8 +574,8 @@ func TestDeleteAgent_ExternalConfigDirProjectPath(t *testing.T) {
 	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true"); rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteProjectPath != extB {
-		t.Errorf("file deletion project path %q, want %q", mgr.lastDeleteProjectPath, extB)
+	if mgr.LastDeleteProjectPath() != extB {
+		t.Errorf("file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), extB)
 	}
 
 	// Labelled entry, another project's external dir: ignored.
@@ -583,18 +583,18 @@ func TestDeleteAgent_ExternalConfigDirProjectPath(t *testing.T) {
 	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true"); rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteProjectPath == extA {
+	if mgr.LastDeleteProjectPath() == extA {
 		t.Errorf("file deletion used another project's external dir %q", extA)
 	}
 
 	// Legacy entry: accepted only for the project its external dir encodes.
 	mgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-legacy", extA)}
-	mgr.deleteCalls = 0
-	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB); rec.Code != http.StatusNotFound || mgr.deleteCalls != 0 {
-		t.Fatalf("expected 404 with no delete, got %d / %d calls", rec.Code, mgr.deleteCalls)
+	mgr.SetDeleteCalls(0)
+	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB); rec.Code != http.StatusNotFound || mgr.DeleteCalls() != 0 {
+		t.Fatalf("expected 404 with no delete, got %d / %d calls", rec.Code, mgr.DeleteCalls())
 	}
-	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjA); rec.Code != http.StatusNoContent || mgr.lastDeleteContainerID != "cid-legacy" {
-		t.Fatalf("expected 204 deleting cid-legacy, got %d / %q", rec.Code, mgr.lastDeleteContainerID)
+	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjA); rec.Code != http.StatusNoContent || mgr.LastDeleteContainerID() != "cid-legacy" {
+		t.Fatalf("expected 204 deleting cid-legacy, got %d / %q", rec.Code, mgr.LastDeleteContainerID())
 	}
 }
 
@@ -633,8 +633,8 @@ func TestDeleteAgent_ExternalConfigDirProjectPath_ThroughLegacySymlink(t *testin
 	if rec := doDelete(t, srv, "dev", "projectId="+scopeProjB); rec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteContainerID != "cid-legacy" {
-		t.Errorf("deleted container %q, want cid-legacy", mgr.lastDeleteContainerID)
+	if mgr.LastDeleteContainerID() != "cid-legacy" {
+		t.Errorf("deleted container %q, want cid-legacy", mgr.LastDeleteContainerID())
 	}
 }
 
@@ -652,8 +652,8 @@ func TestDeleteAgent_SoftDeleteWithoutFiles_MarksAgentInfo(t *testing.T) {
 	if rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
 		t.Fatalf("expected success, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.lastDeleteContainerID != "cid-b" || mgr.lastDeleteFiles {
-		t.Errorf("got container %q files=%v, want cid-b without file deletion", mgr.lastDeleteContainerID, mgr.lastDeleteFiles)
+	if mgr.LastDeleteContainerID() != "cid-b" || mgr.LastDeleteFiles() {
+		t.Errorf("got container %q files=%v, want cid-b without file deletion", mgr.LastDeleteContainerID(), mgr.LastDeleteFiles())
 	}
 	data, err := os.ReadFile(infoB)
 	if err != nil {
@@ -682,8 +682,8 @@ func TestDeleteAgent_GlobalDirUnresolvable_NotReportedAs404(t *testing.T) {
 	if rec.Code == http.StatusNotFound || rec.Code < 400 {
 		t.Fatalf("expected a failure status other than 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 {
-		t.Fatalf("expected no delete calls, got %d", mgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 {
+		t.Fatalf("expected no delete calls, got %d", mgr.DeleteCalls())
 	}
 }
 
@@ -706,8 +706,81 @@ func TestDeleteAgent_ListFailureWithFilesPresent_FailsWithoutSideEffects(t *test
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected a runtime error (500) when a runtime cannot be listed, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if mgr.deleteCalls != 0 || auxMgr.deleteCalls != 0 {
-		t.Errorf("expected no delete calls, got %d / %d", mgr.deleteCalls, auxMgr.deleteCalls)
+	if mgr.DeleteCalls() != 0 || auxMgr.DeleteCalls() != 0 {
+		t.Errorf("expected no delete calls, got %d / %d", mgr.DeleteCalls(), auxMgr.DeleteCalls())
 	}
 	assertUntouched(t, scionB, "dev", infoB)
+}
+
+// makeHubMarkerProject creates a hub-managed project the way the broker's
+// start path does for a project with no git remote: ~/.scion/projects/<slug>/.scion
+// is a marker file, and the agent's provision directory lives under the
+// external project-configs agents directory. It returns the external .scion
+// dir and the agent's provision dir.
+func makeHubMarkerProject(t *testing.T, home, slug, projectID, agentName string) (string, string) {
+	t.Helper()
+	root := filepath.Join(home, ".scion", "projects", slug)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := &config.ProjectMarker{ProjectID: projectID, ProjectName: slug, ProjectSlug: slug}
+	if err := config.WriteProjectMarker(filepath.Join(root, ".scion"), marker); err != nil {
+		t.Fatal(err)
+	}
+	extDir, err := marker.ExternalProjectPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(extDir, "agents", agentName)
+	if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return extDir, agentDir
+}
+
+// ptone/scion#2839: an agent in a hub-managed (marker-file) project that has
+// no runtime entry -- provisioned but never started, or its container already
+// gone -- must still resolve to its project so its provision directory under
+// the project configs agents directory is removed.
+func TestDeleteAgent_FileOnlyAgentInHubMarkerProject_DeletesFiles(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	extA, _ := makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+	extB, _ := makeHubMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.LastDeleteProjectPath() != extB {
+		t.Errorf("file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), extB)
+	}
+	if mgr.LastDeleteProjectPath() == extA {
+		t.Errorf("delete resolved to the other project's dir %q", extA)
+	}
+}
+
+func TestFindAgentInHubManagedProjects_MarkerProjects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	extA, _ := makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+	extB, _ := makeHubMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+
+	for projectID, want := range map[string]string{scopeProjA: extA, scopeProjB: extB, "33333333-cccc": ""} {
+		got, err := findAgentInHubManagedProjects("dev", projectID)
+		if err != nil {
+			t.Fatalf("project %s: %v", projectID, err)
+		}
+		if got != want {
+			t.Errorf("project %s: got %q, want %q", projectID, got, want)
+		}
+	}
+	if got, err := findAgentInHubManagedProjects("other", scopeProjA); err != nil || got != "" {
+		t.Errorf("absent agent: got %q, %v; want empty", got, err)
+	}
+	// Without a project ID, each marker is checked against its own project
+	// ID; both projects hold the agent, so the lookup is ambiguous.
+	if got, err := findAgentInHubManagedProjects("dev", ""); err == nil || !strings.Contains(err.Error(), "found in 2 hub-managed projects") {
+		t.Errorf("unscoped lookup: got %q, %v; want the ambiguity error", got, err)
+	}
 }

@@ -114,6 +114,15 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("runtime_broker_id").
 			Optional(),
+		// workspace_placement is where the agent's last start placed its
+		// workspace, as reported by its broker: "export" (the broker's
+		// shared NFS workspace export) or "local". "" means unknown (not
+		// reported since the field existed). Validated as a string rather
+		// than an ent enum so future placements need no migration; readers
+		// treat an unrecognised value as not on the export.
+		field.String("workspace_placement").
+			Optional().
+			Default(""),
 		field.Bool("web_pty_enabled").
 			Default(false),
 		field.JSON("exposed_ports", []store.ExposedPort{}).
@@ -127,6 +136,36 @@ func (Agent) Fields() []ent.Field {
 		// JSON document (store.AgentAppliedConfig). Stored as text to keep the
 		// Ent schema decoupled from the store package's struct definition.
 		field.Text("applied_config").
+			Optional(),
+
+		// harness_config is a queryable shadow of applied_config's
+		// "harnessConfig" key, kept in sync by every write to applied_config
+		// (CreateAgent/UpdateAgent — see agent_store.go's harnessConfigOf
+		// helper) and reconciled at every startup for any row that hasn't
+		// caught up (CompositeStore.ReconcileHarnessConfigColumn). It exists
+		// solely so the CLI --harness filter (AgentFilter.HarnessConfig) can
+		// use a plain, dialect-independent equality predicate instead of
+		// parsing/pattern-matching the applied_config JSON document at query
+		// time (ptone/scion#2146). It is not part of store.Agent
+		// — nothing outside the HarnessConfig filter predicate reads it; the
+		// enriched, response-facing store.Agent.HarnessConfig field is
+		// unrelated and still derived from applied_config at response time,
+		// unchanged.
+		//
+		// NULL vs "": NULL means "never written by a binary that knows this
+		// column exists" — the reconcile's job is to find and fix exactly
+		// those rows. Every write that DOES know about the column
+		// (CreateAgent, UpdateAgent, the reconcile itself) always writes a
+		// real value, including "" for "no harness configured, or nothing
+		// usable could be extracted" — never NULL. "" can never match a
+		// --harness filter (the filter predicate is only emitted for a
+		// non-empty requested value), so this distinction is invisible to
+		// callers; it exists purely so the reconcile query
+		// (`harness_config IS NULL`) actually converges to empty once every
+		// row has been visited by a column-aware binary, instead of
+		// re-selecting and re-parsing every no-harness/invalid/legacy-key
+		// row on every single boot forever (ptone/scion#2146).
+		field.String("harness_config").
 			Optional(),
 
 		// ancestry is the ordered chain of ancestor principal IDs used for
@@ -206,6 +245,24 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_id").
 			Optional().
 			Default(""),
+		// run_id is the identity of the agent's current or most recent run
+		// (ptone/scion#2550): minted by the Hub for every create, start and
+		// restart dispatch, persisted before the broker call, and carried
+		// on the runtime entry as the scion.run_id label. A delete sends it
+		// so the broker never removes a different run of the same name. ""
+		// for rows that have not been dispatched since run IDs existed.
+		field.String("run_id").
+			Optional().
+			Default(""),
+		// previous_run_ids are the runs this agent's runtime entries may
+		// still carry besides run_id (ptone/scion#3097), oldest first: each
+		// run-ID write appends the run it replaced, and a write that settles
+		// the run (the broker reported or replaced the entry, or the dispatch
+		// reverted) clears them. A delete names each of them as well as
+		// run_id, so a start that never landed does not leave the previous
+		// entry behind. Empty for a settled run.
+		field.Strings("previous_run_ids").
+			Optional(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -263,6 +320,134 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_error").
 			Optional().
 			Default(""),
+
+		// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
+		// A leased, sticky delete marker. Every write goes through
+		// AgentStore.UpdateAgentDeletion (never UpdateAgent), which bumps
+		// state_version so a stale whole-row writer gets ErrVersionConflict.
+		//
+		// deletion_state is "" (no delete), "deleting", "finalizing" or
+		// "failed".
+		field.String("deletion_state").
+			Optional().
+			Default(""),
+		// deletion_claim is the claim epoch, bumped on every successful claim.
+		field.Int64("deletion_claim").
+			Default(0),
+		// deletion_lease_at is the lease expiry the live engine renews. A
+		// deleting/finalizing row whose lease has passed reads as failed.
+		field.Time("deletion_lease_at").
+			Optional().
+			Nillable(),
+		field.Time("deletion_started_at").
+			Optional().
+			Nillable(),
+		field.Time("deletion_failed_at").
+			Optional().
+			Nillable(),
+		// deletion_code is the failure code (runtime_error, conflict,
+		// in_doubt, revoke_failed, finalize_failed, ...).
+		field.String("deletion_code").
+			Optional().
+			Default(""),
+		field.String("deletion_error").
+			Optional().
+			Default(""),
+		// deletion_prior is JSON {phase, activity, launchId}, captured once
+		// per delete attempt so a failed delete can restore it.
+		field.String("deletion_prior").
+			Optional().
+			Default(""),
+		// deletion_request is JSON {deleteFiles, removeBranch, soft, force,
+		// requestedBy}.
+		field.String("deletion_request").
+			Optional().
+			Default(""),
+
+		// --- Run intent ---
+		// run_intent records whether the user (or the system acting for the
+		// user) wants this agent running: "running" or "stopped". NULL means
+		// unknown; nothing treats a NULL intent as wanting the agent to run.
+		// It is written only by AgentStore.SetRunIntent and RevertRunIntent
+		// (and the one-time boot backfill), never by UpdateAgent or
+		// CreateAgent, and writing it never bumps state_version.
+		field.String("run_intent").
+			Optional().
+			Nillable(),
+		// run_intent_at is the store-clock time of the last run_intent
+		// write. It strictly increases per row, so it orders intent writes.
+		field.Time("run_intent_at").
+			Optional().
+			Nillable(),
+		// run_intent_marked_at is set to run_intent_at by every intent write
+		// of code that maintains start claims, and by no other code. When the
+		// two differ, the intent was last written by earlier code (or the
+		// boot backfill), which could leave intent stopped on an agent that is
+		// meant to run; the hub's backstop does not stop such an agent.
+		field.Time("run_intent_marked_at").
+			Optional().
+			Nillable(),
+
+		// --- Start claim ---
+		// An owned, leased claim taken before any start is dispatched, so at
+		// most one start (or queued-stop drain) acts on an agent at a time.
+		// The start_claim_* columns are written only by the AgentStore
+		// start-claim methods (start_claim.go), never by UpdateAgent or
+		// CreateAgent, and writing them never bumps state_version.
+		//
+		// start_claim_id is NULL when no claim is held.
+		field.String("start_claim_id").
+			Optional().
+			Nillable(),
+		// start_claim_kind: user, restart, wake, create, recovery,
+		// reincarnate or stop.
+		field.String("start_claim_kind").
+			Optional().
+			Default(""),
+		// start_claim_state: live (the holder renews its lease) or
+		// unconfirmed (the outcome is unknown; held until the runtime shows
+		// what happened).
+		field.String("start_claim_state").
+			Optional().
+			Default(""),
+		// start_claim_owner is the hub instance that holds a live claim.
+		field.String("start_claim_owner").
+			Optional().
+			Default(""),
+		// start_claim_target is the runtime target the start is expected to
+		// use, for agents that have no recorded target yet.
+		field.String("start_claim_target").
+			Optional().
+			Default(""),
+		// Store-clock times: when the claim was taken, when its lease ends,
+		// when it became unconfirmed, and the end of the unconfirmed hold.
+		field.Time("start_claim_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_lease_until").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_unconfirmed_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_hold_until").
+			Optional().
+			Nillable(),
+		// start_claim_launch_id is the launch a create claim was linked to
+		// when that launch began, so only that launch's end settles it.
+		field.String("start_claim_launch_id").
+			Optional().
+			Default(""),
+
+		// soft_delete_op_id is the operation ID of the soft delete that
+		// produced the current DeletedAt. The soft delete deactivates the
+		// agent's delegation edges under this ID, and restore reactivates
+		// exactly those edges, then clears it. NULL on a live agent and on
+		// an agent soft-deleted before the column existed. Lifecycle
+		// bookkeeping only: no authorization decision reads it.
+		field.String("soft_delete_op_id").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -296,5 +481,36 @@ func (Agent) Indexes() []ent.Index {
 				entsql.IndexWhere("launch_state = 'active'"),
 			),
 		index.Fields("launch_id"),
+		// Lookup of agents on a broker by run intent.
+		index.Fields("runtime_broker_id", "run_intent"),
+		// The start-claim reaper's scan: only rows holding a claim.
+		index.Fields("start_claim_state", "start_claim_lease_until").
+			Annotations(
+				entsql.IndexWhere("start_claim_id IS NOT NULL"),
+			),
+		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
+		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
+		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered
+		// by id. The WHERE clause matches that predicate exactly, so the
+		// index holds only rows still needing reconciliation — it shrinks
+		// toward empty as they're caught up, instead of growing with the
+		// whole table forever the way an unconditional index on
+		// harness_config would. Same shape as this file's launch_deadline
+		// index above and notification.go's dispatched-false index.
+		//
+		// Deliberately does not serve the CLI --harness filter
+		// (agent.HarnessConfigEQ in agent_store.go): that predicate only
+		// ever matches a non-empty harness value, which this index excludes
+		// by construction. An index for that filter is a separate, still-open
+		// question — it would need to combine with the AuthorizedProjectIDs
+		// project scope every --harness query already carries, and the
+		// agents table has no project_id index today for it to pair with —
+		// not something this reconcile-only index should be widened to cover
+		// speculatively.
+		index.Fields("id").
+			StorageKey("agent_harness_config_reconcile_pending").
+			Annotations(
+				entsql.IndexWhere("harness_config IS NULL AND applied_config IS NOT NULL"),
+			),
 	}
 }

@@ -54,7 +54,7 @@ func (s *Server) handleAdminInvites(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleAdminInvitesCreate(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -79,7 +79,7 @@ func (s *Server) handleAdminInviteByID(w http.ResponseWriter, r *http.Request) {
 
 	if len(parts) == 2 && parts[1] == "revoke" {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleAdminInviteRevoke(w, r, id, user)
@@ -92,7 +92,7 @@ func (s *Server) handleAdminInviteByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.handleAdminInviteDelete(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -106,7 +106,9 @@ func (s *Server) handleAdminInvitesList(w http.ResponseWriter, r *http.Request) 
 
 	result, err := s.store.ListInviteCodes(r.Context(), opts)
 	if err != nil {
-		InternalError(w)
+		// writeErrorFromErr maps a malformed or unknown ?cursor
+		// (store.ErrInvalidInput) to 400; anything else stays a 500.
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
@@ -174,7 +176,7 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 	)
 	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteCreated, "", invite.ID, user.ID(), user.Email(), map[string]string{
 		"prefix":     invite.CodePrefix,
-		"expires_at": invite.ExpiresAt.Format(time.RFC3339),
+		"expires_at": invite.ExpiresAt.UTC().Format(time.RFC3339),
 		"max_uses":   fmt.Sprintf("%d", invite.MaxUses),
 	})
 

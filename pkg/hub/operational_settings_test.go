@@ -523,6 +523,130 @@ func TestApplySnapshot_UserAccessModeCleared(t *testing.T) {
 	}
 }
 
+// Regression test for review finding F3 (ptone/scion#2270 round 1): for
+// EnforceBrokerQuotas, nil is a meaningful value (the fail-safe "enforced"
+// default), not "leave whatever is currently in memory alone". A snapshot
+// that clears the switch (DELETE the section, or PUT {}) must flip a
+// previously-set false back to enforced, not leave the hub silently
+// fail-open while every read surface (GET, the UI) reports "enforced".
+func TestApplySnapshot_EnforceBrokerQuotasClearedResetsToEnforced(t *testing.T) {
+	off := false
+	srv := &Server{
+		config:      ServerConfig{EnforceBrokerQuotas: &off},
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	if srv.brokerQuotasEnforced() {
+		t.Fatal("test setup: expected brokerQuotasEnforced()=false before applying the cleared snapshot")
+	}
+
+	// A snapshot with EnforceBrokerQuotas==nil represents the section being
+	// absent (deleted, reset to bootstrap, or PUT as {}) — not "unchanged".
+	ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: nil})
+
+	if srv.config.EnforceBrokerQuotas != nil {
+		t.Errorf("want EnforceBrokerQuotas=nil after applying a cleared snapshot, got %v", *srv.config.EnforceBrokerQuotas)
+	}
+	if !srv.brokerQuotasEnforced() {
+		t.Error("want brokerQuotasEnforced()=true after applying a cleared snapshot (fail-safe default)")
+	}
+}
+
+// TestApplySnapshot_EnforceBrokerQuotasAppliedTracking asserts that the
+// "applied" list correctly reports a change both when the value flips
+// between concrete booleans and when it clears to nil, but not when the
+// snapshot repeats the same value (idempotent re-apply, e.g. from a
+// duplicate propagation event).
+func TestApplySnapshot_EnforceBrokerQuotasAppliedTracking(t *testing.T) {
+	on := true
+	off := false
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+
+	result := ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &off})
+	applied, _ := result["applied"].([]string)
+	if !containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("nil -> false should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &off})
+	applied, _ = result["applied"].([]string)
+	if containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("false -> false (idempotent re-apply) should not be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &on})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("false -> true should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: nil})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "enforce_broker_quotas") {
+		t.Errorf("true -> nil (cleared) should be reported as applied, got %v", applied)
+	}
+}
+
+// TestApplySnapshot_AgentSecretsUserScopeOnlyClearedResetsToPermissive
+// mirrors TestApplySnapshot_EnforceBrokerQuotasClearedResetsToEnforced: for
+// AgentSecretsUserScopeOnly, nil is a meaningful value (the permissive
+// default), not "leave whatever is currently in memory alone". A snapshot
+// that clears the switch (DELETE the section, or PUT {}) must flip a
+// previously-set true back to permissive, turning live enforcement off
+// without a restart (design ptone/scion#2291 §5).
+func TestApplySnapshot_AgentSecretsUserScopeOnlyClearedResetsToPermissive(t *testing.T) {
+	on := true
+	srv := &Server{
+		config:      ServerConfig{AgentSecretsUserScopeOnly: &on},
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	if !srv.agentSecretsUserScopeOnly() {
+		t.Fatal("test setup: expected agentSecretsUserScopeOnly()=true before applying the cleared snapshot")
+	}
+
+	ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: nil})
+
+	if srv.config.AgentSecretsUserScopeOnly != nil {
+		t.Errorf("want AgentSecretsUserScopeOnly=nil after applying a cleared snapshot, got %v", *srv.config.AgentSecretsUserScopeOnly)
+	}
+	if srv.agentSecretsUserScopeOnly() {
+		t.Error("want agentSecretsUserScopeOnly()=false after applying a cleared snapshot (permissive default)")
+	}
+}
+
+// TestApplySnapshot_AgentSecretsUserScopeOnlyAppliedTracking mirrors
+// TestApplySnapshot_EnforceBrokerQuotasAppliedTracking.
+func TestApplySnapshot_AgentSecretsUserScopeOnlyAppliedTracking(t *testing.T) {
+	on := true
+	off := false
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+
+	result := ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &on})
+	applied, _ := result["applied"].([]string)
+	if !containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("nil -> true should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &on})
+	applied, _ = result["applied"].([]string)
+	if containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("true -> true (idempotent re-apply) should not be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &off})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("true -> false should be reported as applied, got %v", applied)
+	}
+
+	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: nil})
+	applied, _ = result["applied"].([]string)
+	if !containsString(applied, "agent_secrets_user_scope_only") {
+		t.Errorf("false -> nil (cleared) should be reported as applied, got %v", applied)
+	}
+}
+
 func TestBuildLayer1SnapshotFromFile(t *testing.T) {
 	telEnabled := true
 	gc := &config.GlobalConfig{
@@ -554,6 +678,22 @@ func TestBuildLayer1SnapshotFromFile(t *testing.T) {
 	}
 	if snap.GitHubAppID != 99 {
 		t.Errorf("GitHubAppID: want 99, got %d", snap.GitHubAppID)
+	}
+}
+
+// TestBuildLayer1SnapshotFromFile_AgentSecrets verifies that
+// AgentSecretsUserScopeOnly is read from GlobalConfig, so a file-mode admin
+// save takes effect without a restart (design ptone/scion#2291 §5).
+func TestBuildLayer1SnapshotFromFile_AgentSecrets(t *testing.T) {
+	on := true
+	gc := &config.GlobalConfig{
+		AgentSecretsUserScopeOnly: &on,
+	}
+
+	snap := BuildLayer1SnapshotFromFile(gc)
+
+	if snap.AgentSecretsUserScopeOnly == nil || !*snap.AgentSecretsUserScopeOnly {
+		t.Errorf("AgentSecretsUserScopeOnly: want true, got %v", snap.AgentSecretsUserScopeOnly)
 	}
 }
 
@@ -592,6 +732,22 @@ func TestSnapshot_TelemetryFromDB(t *testing.T) {
 	}
 	if snap.TelemetryConfig == nil {
 		t.Fatal("want non-nil TelemetryConfig")
+	}
+}
+
+// TestSnapshot_AgentSecretsFromDB mirrors TestSnapshot_TelemetryFromDB and
+// exercises buildSnapshotFromKoanf's handling of the agent_secrets section
+// via the DB-backed Refresh path.
+func TestSnapshot_AgentSecretsFromDB(t *testing.T) {
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("agent_secrets", json.RawMessage(`{"user_scope_only":true}`))
+
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	_, _ = ops.Refresh(context.Background())
+
+	snap := ops.Snapshot()
+	if snap.AgentSecretsUserScopeOnly == nil || !*snap.AgentSecretsUserScopeOnly {
+		t.Error("want AgentSecretsUserScopeOnly true")
 	}
 }
 

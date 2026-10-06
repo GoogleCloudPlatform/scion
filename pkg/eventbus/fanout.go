@@ -101,7 +101,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 			go func() {
 				defer wg.Done()
 				if err := inproc.Bus.Publish(ctx, topic, msg); err != nil {
-					errs[0] = fmt.Errorf("inprocess bus publish failed: %w", err)
+					errs[0] = fmt.Errorf("%w: %w", ErrInProcessPublish, err)
 				}
 			}()
 		}
@@ -137,6 +137,9 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 				f.log.Error("fan-out publish failed",
 					"bus", b.Name, "topic", topic, "error", err)
 				if !b.Observer {
+					if b.Name == InProcessBusName {
+						err = fmt.Errorf("%w: %w", ErrInProcessPublish, err)
+					}
 					errs[idx] = err
 				}
 			}
@@ -150,8 +153,13 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 // The handler is only installed on the inprocess spoke; external spokes
 // receive the pattern with a nil handler so they can set up remote-side
 // filtering without invoking callbacks locally. This prevents double
-// delivery and nil-handler panics on external spokes.
+// delivery and nil-handler panics on external spokes. A nil handler is
+// rejected with ErrNilHandler, matching InProcessEventBus.
 func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
+	if handler == nil {
+		return nil, ErrNilHandler
+	}
+
 	f.mu.RLock()
 	buses := make([]NamedEventBus, len(f.buses))
 	copy(buses, f.buses)
@@ -164,8 +172,6 @@ func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscr
 		h := handler
 		if nb.Name != InProcessBusName {
 			h = nil
-		} else if h == nil {
-			continue
 		}
 		sub, err := nb.Bus.Subscribe(pattern, h)
 		if err != nil {

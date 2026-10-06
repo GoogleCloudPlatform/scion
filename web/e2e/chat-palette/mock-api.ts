@@ -99,9 +99,9 @@ export interface TrackedRequest {
 }
 
 /**
- * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo` and
- * `stateManager` from `client/main.js` — the app's real bootstrap module,
- * which self-initializes on `DOMContentLoaded` (SSR hydration, feature-flag
+ * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo`,
+ * `replaceRoute`, `pushRoute` and `stateManager` from `client/main.js` — the
+ * app's real bootstrap module, which self-initializes on `DOMContentLoaded` (SSR hydration, feature-flag
  * fetch, the full page router, admin-status probe...) the instant anything
  * imports it, real hub or not. That is exactly the router/bootstrap this
  * fixture deliberately does not run (it mounts scion-page-chat directly), so
@@ -132,6 +132,14 @@ export async function stubMainClientModule(page: Page): Promise<void> {
           history.pushState({}, '', url.pathname + url.search + url.hash);
           window.dispatchEvent(new PopStateEvent('popstate'));
         }
+        export function replaceRoute(path) {
+          history.replaceState(history.state, '', path + location.search + location.hash);
+          return Promise.resolve();
+        }
+        export function pushRoute(path) {
+          history.pushState({}, '', path);
+          return Promise.resolve();
+        }
       `,
     })
   );
@@ -153,6 +161,92 @@ export interface PaletteFixtureOverrides {
     string,
     { humans: Array<{ id: string; kind: 'user'; displayName: string }> }
   >;
+  /** `GET /api/v1/chat/attachments/{id}` bodies, for the Documents preview. */
+  attachmentsById?: Record<string, { mime: string; body: string }>;
+  /** `GET /api/v1/projects/{projectId}/workspace/files/{filePath}?format=json` bodies, for the Documents preview. */
+  workspaceFiles?: Record<string, Record<string, { content: string; size: number }>>;
+}
+
+/** A path-based Documents fixture: an existing text file at a known project/path. */
+export const DOC_TEXT_FILE = {
+  name: 'notes.txt',
+  projectId: SPACE_ALPHA.projectId,
+  projectName: SPACE_ALPHA.projectName,
+  containerPath: '/workspace/notes.txt',
+  filePath: 'notes.txt',
+  content: 'hello from the seeded recent file',
+  sentAt: '2026-09-28T12:00:00Z',
+};
+
+/**
+ * A binary attachment Documents fixture, well under the inline text-preview
+ * size limit — its MIME type, not its size, is what must classify it as
+ * binary, so a small non-text file is never fetched and rendered as text.
+ */
+export const DOC_BINARY_ATTACHMENT = {
+  id: 'att-binary-1',
+  name: 'archive.bin',
+  mime: 'application/octet-stream',
+  size: 2048,
+  sentAt: '2026-09-28T13:00:00Z',
+};
+
+declare global {
+  interface Window {
+    __fixtureEventSources: Array<EventTarget & { readyState: number }>;
+  }
+}
+
+/**
+ * Stand-in for the hub's `/events` stream, which the fixture server does not
+ * serve. Each `EventSource` opens on the next microtask, so the agent store's
+ * feed connects at once instead of waiting out its connect timeout. Streams
+ * are kept on `window.__fixtureEventSources`; {@link emitAgentEvent} delivers
+ * a hub update on the open ones.
+ */
+export async function stubEventSource(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    class FixtureEventSource extends EventTarget {
+      readonly url: string;
+      readyState = 0;
+      onopen: ((event: Event) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+        window.__fixtureEventSources.push(this);
+        queueMicrotask(() => {
+          if (this.readyState !== 0) return;
+          this.readyState = 1;
+          this.onopen?.(new Event('open'));
+        });
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+    }
+    window.__fixtureEventSources = [];
+    window.EventSource = FixtureEventSource as unknown as typeof EventSource;
+  });
+}
+
+/** Deliver `project.<projectId>.agent.<type>` on every open fixture stream. */
+export async function emitAgentEvent(
+  page: Page,
+  projectId: string,
+  type: string,
+  data: Record<string, unknown>
+): Promise<void> {
+  await page.evaluate(
+    ({ subject, data }) => {
+      for (const es of window.__fixtureEventSources) {
+        if (es.readyState !== 1) continue;
+        es.dispatchEvent(new MessageEvent('update', { data: JSON.stringify({ subject, data }) }));
+      }
+    },
+    { subject: `project.${projectId}.agent.${type}`, data }
+  );
 }
 
 /**
@@ -169,6 +263,7 @@ export async function setupApiMocks(
 ): Promise<TrackedRequest[]> {
   const requests: TrackedRequest[] = [];
   await stubMainClientModule(page);
+  await stubEventSource(page);
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
@@ -253,6 +348,18 @@ export async function setupApiMocks(
     if (path === '/api/v1/users') {
       return route.fulfill({ json: { users: overrides.users ?? [] } });
     }
+    if (path === '/api/v1/messages') {
+      // scion-inbox-tray, mounted by the real header in the `?shell=1`
+      // fixture — expects `{ items: [...] }`.
+      return route.fulfill({ json: { items: [] } });
+    }
+    if (path === '/api/v1/notifications') {
+      // scion-notification-tray, mounted by the real header in the
+      // `?shell=1` fixture — expects a bare array, not an envelope object;
+      // the generic unnamed-endpoint fallback below returns `{}`, which the
+      // tray's own `.map()` over the response would throw on.
+      return route.fulfill({ json: [] });
+    }
     const threadsMatch = path.match(/^\/api\/v1\/chat\/spaces\/([^/]+)\/threads$/);
     if (threadsMatch) {
       const projectId = decodeURIComponent(threadsMatch[1]);
@@ -290,6 +397,31 @@ export async function setupApiMocks(
     }
     if (path === '/api/v1/chat/presence') {
       return route.fulfill({ json: {} });
+    }
+    const attachmentMatch = path.match(/^\/api\/v1\/chat\/attachments\/([^/]+)$/);
+    if (attachmentMatch) {
+      const id = decodeURIComponent(attachmentMatch[1]);
+      const fixture = overrides.attachmentsById?.[id];
+      if (!fixture) {
+        return route.fulfill({
+          status: 404,
+          json: { error: { code: 'not_found', message: 'Attachment not found' } },
+        });
+      }
+      return route.fulfill({ contentType: fixture.mime, body: fixture.body });
+    }
+    const workspaceFileMatch = path.match(/^\/api\/v1\/projects\/([^/]+)\/workspace\/files\/(.+)$/);
+    if (workspaceFileMatch) {
+      const projectId = decodeURIComponent(workspaceFileMatch[1]);
+      const filePath = decodeURIComponent(workspaceFileMatch[2]);
+      const fixture = overrides.workspaceFiles?.[projectId]?.[filePath];
+      if (!fixture) {
+        return route.fulfill({
+          status: 404,
+          json: { error: { code: 'not_found', message: 'File not found' } },
+        });
+      }
+      return route.fulfill({ json: { content: fixture.content, size: fixture.size } });
     }
     // Unnamed endpoint: empty object keeps the real components' defensive
     // `data.foo ?? []`-style parsing harmless without asserting they call it.

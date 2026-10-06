@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/google/uuid"
 )
 
@@ -49,8 +50,19 @@ const (
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
 	FieldUpdated = "updated"
+	// EdgeHistory holds the string denoting the history edge name in mutations.
+	EdgeHistory = "history"
+	// AccessConstraintHistoryFieldID holds the string denoting the ID field of the AccessConstraintHistory.
+	AccessConstraintHistoryFieldID = "event_id"
 	// Table holds the table name of the accessconstraint in the database.
 	Table = "access_constraints"
+	// HistoryTable is the table that holds the history relation/edge.
+	HistoryTable = "access_constraint_history"
+	// HistoryInverseTable is the table name for the AccessConstraintHistory entity.
+	// It exists in this package in order to avoid circular dependency with the "accessconstrainthistory" package.
+	HistoryInverseTable = "access_constraint_history"
+	// HistoryColumn is the table column denoting the history relation/edge.
+	HistoryColumn = "constraint_id"
 )
 
 // Columns holds all SQL columns for accessconstraint fields.
@@ -241,4 +253,25 @@ func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdated orders the results by the updated field.
 func ByUpdated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdated, opts...).ToFunc()
+}
+
+// ByHistoryCount orders the results by history count.
+func ByHistoryCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newHistoryStep(), opts...)
+	}
+}
+
+// ByHistory orders the results by history terms.
+func ByHistory(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newHistoryStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
+func newHistoryStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(HistoryInverseTable, AccessConstraintHistoryFieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, HistoryTable, HistoryColumn),
+	)
 }

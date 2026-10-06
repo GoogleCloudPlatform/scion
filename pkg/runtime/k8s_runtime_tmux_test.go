@@ -30,8 +30,12 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
-// MockHarness for testing command generation
-type MockHarness struct{}
+// MockHarness for testing command generation. Env, when set, is returned
+// verbatim by GetEnv so tests can exercise harness-contributed env vars
+// (e.g. to prove de-duplication against other env sources).
+type MockHarness struct {
+	Env map[string]string
+}
 
 func (m *MockHarness) Name() string { return "mock" }
 func (m *MockHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
@@ -41,7 +45,7 @@ func (m *MockHarness) GetCommand(task string, resume bool, args []string) []stri
 	return []string{"/bin/echo", "hello"}
 }
 func (m *MockHarness) GetEnv(agentName, homeDir, username string) map[string]string {
-	return nil
+	return m.Env
 }
 func (m *MockHarness) DefaultConfigDir() string              { return ".mock" }
 func (m *MockHarness) SkillsDir() string                     { return ".mock/skills" }
@@ -156,15 +160,92 @@ func TestKubernetesRuntime_Run_Tmux(t *testing.T) {
 		t.Fatalf("failed to update pod status: %v", err)
 	}
 
-	// Wait for Run to return. The fake K8s clientset doesn't support exec,
-	// so the startup gate signal will fail — that's expected in tests. We
-	// only care about the pod spec assertions above.
+	// Wait for Run to return. The fake K8s clientset doesn't support exec, so
+	// the exec-readiness probe (waitForExecReady, F15) — which now runs
+	// before any other exec, including the startup-gate touch — is always
+	// the first and only failure point here. That's expected in tests; we
+	// only care about the pod spec assertions above. Requiring "exec tunnel"
+	// specifically (rather than also accepting "startup gate") pins that the
+	// wait actually runs and runs first: if Run() stopped calling it, this
+	// would fail at the startup-gate touch instead and this assertion would
+	// catch that.
 	select {
 	case err := <-errChan:
-		if err != nil && !strings.Contains(err.Error(), "startup gate") {
-			t.Errorf("Run failed with unexpected error: %v", err)
+		if err == nil {
+			t.Fatal("Run should fail at the exec-readiness wait (no exec transport in tests), got nil")
 		}
-	case <-time.After(2 * time.Second):
+		if !strings.Contains(err.Error(), "exec tunnel") {
+			t.Errorf("Run should fail at the exec-readiness wait (no exec transport in tests), got: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run timed out waiting for pod ready")
+	}
+}
+
+// TestKubernetesRuntime_Run_ExecReadyGatesHomeSync pins that the
+// exec-readiness wait (waitForExecReady, F15) runs, and runs before the home
+// sync, when HomeDir is set — not just in the no-HomeDir tmux case above.
+// With the fake clientset's exec transport unavailable, Run() must fail at
+// the exec-readiness wait, never reaching "failed to sync home".
+func TestKubernetesRuntime_Run_ExecReadyGatesHomeSync(t *testing.T) {
+	clientset := k8sfake.NewClientset()
+	scheme := k8sruntime.NewScheme()
+	fc := fake.NewSimpleDynamicClient(scheme)
+	client := k8s.NewTestClient(fc, clientset)
+	r := NewKubernetesRuntime(client)
+
+	config := RunConfig{
+		Name:         "exec-ready-agent",
+		Image:        "test-image",
+		Harness:      &MockHarness{},
+		HomeDir:      t.TempDir(),
+		UnixUsername: "scion",
+	}
+
+	errChan := make(chan error, 1)
+	go func() {
+		_, err := r.Run(context.Background(), config)
+		errChan <- err
+	}()
+
+	var pod *corev1.Pod
+	var err error
+	for i := 0; i < 10; i++ {
+		pod, err = clientset.CoreV1().Pods("default").Get(context.Background(), "exec-ready-agent", metav1.GetOptions{})
+		if err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if pod == nil {
+		t.Fatal("Pod was not created within timeout")
+	}
+
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: agentContainerName,
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{},
+			},
+		},
+	}
+	if _, err := clientset.CoreV1().Pods("default").Update(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("failed to update pod status: %v", err)
+	}
+
+	select {
+	case err := <-errChan:
+		if err == nil {
+			t.Fatal("Run should fail at the exec-readiness wait before any sync is attempted, got nil")
+		}
+		if !strings.Contains(err.Error(), "exec tunnel") {
+			t.Errorf("Run should fail at the exec-readiness wait before any sync is attempted, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "sync home") {
+			t.Errorf("home sync must not run before the exec-readiness wait succeeds, got: %v", err)
+		}
+	case <-time.After(10 * time.Second):
 		t.Fatal("Run timed out waiting for pod ready")
 	}
 }

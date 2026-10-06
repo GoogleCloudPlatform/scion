@@ -21,11 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -651,6 +654,22 @@ func (a *testAgentIdentity) HasScope(AgentTokenScope) bool { return true }
 func (a *testAgentIdentity) Ancestry() []string            { return nil }
 func (a *testAgentIdentity) OriginUserID() string          { return "" }
 func (a *testAgentIdentity) TokenID() string               { return a.tokenID }
+
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *testAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification (reached indirectly here
+// through ComputeCapabilities/ComputeCapabilitiesBatch), the same way it
+// opts into ancestry attestation above: neither is inherited from
+// Type() == "agent".
+func (a *testAgentIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindAgent, CredentialKindAgentJWT
+}
 
 // TestRS2_AgentJWTMineShared verifies that an agent JWT identity gets empty
 // Mine (since agents can't hold project-owner bindings) and full-scope Shared.
@@ -1768,3 +1787,453 @@ func TestRS2_EnrichmentOnlyFromAuthorized(t *testing.T) {
 
 // TestRS2_RoleBindingAgentPrincipalStatus removed (R2 item 11):
 // zero-assertion documentation function; status recorded in dev report only.
+
+// ==========================================================================
+// ptone/scion#2146: ownerId / ancestorId / harnessConfig / id (relationship)
+// list filters must narrow only, never widen, the authorized-project scope.
+// ==========================================================================
+
+// TestRS2_AgentList_NewFiltersDoNotWiden is the explicit no-widening
+// regression the design calls for: an agent living in a project the caller
+// cannot see must stay hidden from /api/v1/agents even when it also matches
+// ownerId, ancestorId, or an explicit id[] relationship restriction. Every
+// new predicate must compose with the authorized-project scope using AND,
+// never resurrect a match via OR.
+func TestRS2_AgentList_NewFiltersDoNotWiden(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("r2146-u"), Email: "r2146@test.com",
+		DisplayName: "Filter User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	visProj := &store.Project{
+		ID: tid("r2146-vp"), Name: "Visible", Slug: "r2146-vis",
+		OwnerID: user.ID, CreatedBy: user.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	hidProj := &store.Project{
+		ID: tid("r2146-hp"), Name: "Hidden", Slug: "r2146-hid",
+		OwnerID: tid("r2146-oth"), CreatedBy: tid("r2146-oth"), Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, visProj))
+	require.NoError(t, s.CreateProject(ctx, hidProj))
+
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          visProj.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	sharedOwner := tid("r2146-owner")
+	sharedAncestor := tid("r2146-ancestor")
+
+	sharedHarness := "shared-harness"
+
+	visible := &store.Agent{
+		ID: tid("r2146-visible"), Slug: "r2146-visible", Name: "visible",
+		ProjectID: visProj.ID, OwnerID: sharedOwner, Ancestry: []string{sharedAncestor},
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: sharedHarness},
+		Created:       time.Now(), Updated: time.Now(),
+	}
+	hidden := &store.Agent{
+		ID: tid("r2146-hidden"), Slug: "r2146-hidden", Name: "hidden",
+		ProjectID: hidProj.ID, OwnerID: sharedOwner, Ancestry: []string{sharedAncestor},
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: sharedHarness},
+		Created:       time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, visible))
+	require.NoError(t, s.CreateAgent(ctx, hidden))
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"ownerId", "/api/v1/agents?ownerId=" + sharedOwner},
+		{"ancestorId", "/api/v1/agents?ancestorId=" + sharedAncestor},
+		{"harnessConfig", "/api/v1/agents?harnessConfig=" + sharedHarness},
+		{"id relationship filter", "/api/v1/agents?id=" + visible.ID + "&id=" + hidden.ID},
+		{"lineageRootId", "/api/v1/agents?lineageRootId=" + sharedAncestor},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestAsUser(t, srv, user, http.MethodGet, tc.url, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			var resp ListAgentsResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+			gotIDs := make([]string, 0, len(resp.Agents))
+			for _, a := range resp.Agents {
+				gotIDs = append(gotIDs, a.ID)
+			}
+			assert.Equal(t, []string{visible.ID}, gotIDs,
+				"%s must not resurrect the agent in the unauthorized project", tc.name)
+			assert.Equal(t, 1, resp.TotalCount)
+		})
+	}
+
+	t.Run("lineageRootId naming the hidden agent itself as root reveals nothing", func(t *testing.T) {
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents?lineageRootId="+hidden.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp ListAgentsResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Empty(t, resp.Agents,
+			"an unauthorized agent used as the lineage root must not be revealed, even as the root itself")
+		assert.Equal(t, 0, resp.TotalCount)
+	})
+}
+
+// TestListAgents_AttributeFiltersNarrowCorrectly is the positive-path
+// counterpart to TestRS2_AgentList_NewFiltersDoNotWiden: within a single
+// authorized project, ownerId/ancestorId/harnessConfig must each narrow the
+// result to exactly the matching agent, via both the global list endpoint
+// and the project-scoped one. cmd/list.go's default (non-`--all`) path uses
+// the project-scoped endpoint, so the two must not drift apart
+// (ptone/scion#2146).
+func TestListAgents_AttributeFiltersNarrowCorrectly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("r2146-narrow-u"), Email: "r2146-narrow@test.com",
+		DisplayName: "Narrow User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	proj := &store.Project{
+		ID: tid("r2146-narrow-p"), Name: "Proj", Slug: "r2146-narrow",
+		OwnerID: user.ID, CreatedBy: user.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	target := tid("r2146-narrow-owner")
+	ancestor := tid("r2146-narrow-ancestor")
+
+	match := &store.Agent{
+		ID: tid("r2146-narrow-match"), Slug: "narrow-match", Name: "match",
+		ProjectID: proj.ID, OwnerID: target, Ancestry: []string{ancestor},
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+		Created:       time.Now(), Updated: time.Now(),
+	}
+	other := &store.Agent{
+		ID: tid("r2146-narrow-other"), Slug: "narrow-other", Name: "other",
+		ProjectID:     proj.ID,
+		OwnerID:       tid("r2146-narrow-other-owner"),
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "gemini"},
+		Created:       time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, match))
+	require.NoError(t, s.CreateAgent(ctx, other))
+
+	endpoints := []string{
+		"/api/v1/agents",
+		"/api/v1/projects/" + proj.ID + "/agents",
+	}
+	filters := []struct {
+		name  string
+		query string
+	}{
+		{"ownerId", "ownerId=" + target},
+		{"ancestorId", "ancestorId=" + ancestor},
+		{"harnessConfig", "harnessConfig=claude"},
+		{"id relationship filter", "id=" + match.ID},
+		{"lineageRootId via ancestry", "lineageRootId=" + ancestor},
+		{"lineageRootId via the agent's own ID", "lineageRootId=" + match.ID},
+	}
+
+	for _, ep := range endpoints {
+		for _, f := range filters {
+			t.Run(ep+"?"+f.name, func(t *testing.T) {
+				rec := doRequestAsUser(t, srv, user, http.MethodGet, ep+"?"+f.query, nil)
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+				var resp ListAgentsResponse
+				require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+				gotIDs := make([]string, 0, len(resp.Agents))
+				for _, a := range resp.Agents {
+					gotIDs = append(gotIDs, a.ID)
+				}
+				assert.Equal(t, []string{match.ID}, gotIDs)
+			})
+		}
+	}
+}
+
+// TestRS2_ProjectScopedAgentList_UnauthorizedCallersDenied covers: the
+// project-scoped list endpoint (the default, non-`--all` CLI path) needs
+// unauthorized-caller coverage for the new filters. A non-member user and a
+// wrong-project agent JWT must both be denied — never 200 with rows, and
+// never leaking whether the named id/owner exists in that project.
+func TestRS2_ProjectScopedAgentList_UnauthorizedCallersDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	owner := tid("r2146-psl-owner")
+	proj := &store.Project{
+		ID: tid("r2146-psl-p"), Name: "Proj", Slug: "r2146-psl",
+		OwnerID: owner, CreatedBy: owner, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	sharedOwner := tid("r2146-psl-shared-owner")
+	hidden := &store.Agent{
+		ID: tid("r2146-psl-hidden"), Slug: "r2146-psl-hidden", Name: "hidden",
+		ProjectID: proj.ID, OwnerID: sharedOwner, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, hidden))
+
+	t.Run("non-member user is denied, not shown an empty-but-200 page", func(t *testing.T) {
+		nonMember := &store.User{
+			ID: tid("r2146-psl-nonmember"), Email: "r2146-psl-nonmember@test.com",
+			DisplayName: "Non Member", Role: store.UserRoleMember, Status: "active",
+		}
+		require.NoError(t, s.CreateUser(ctx, nonMember))
+		ensureHubMembership(ctx, s, nonMember.ID)
+
+		for _, url := range []string{
+			"/api/v1/projects/" + proj.ID + "/agents?id=" + hidden.ID,
+			"/api/v1/projects/" + proj.ID + "/agents?ownerId=" + sharedOwner,
+		} {
+			rec := doRequestAsUser(t, srv, nonMember, http.MethodGet, url, nil)
+			assert.NotEqual(t, http.StatusOK, rec.Code,
+				"a non-member must not get a 200 response for %s (body: %s)", url, rec.Body.String())
+		}
+	})
+
+	t.Run("an agent JWT from a different project is denied (404, not a leak)", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		// f.stranger lives in f.other, a different project than f.proj —
+		// f.caller's token is scoped to f.proj.
+		for _, url := range []string{
+			"/api/v1/projects/" + f.other.ID + "/agents?id=" + f.stranger.ID,
+			"/api/v1/projects/" + f.other.ID + "/agents?ownerId=" + f.owner.ID,
+		} {
+			rec := f.asAgent(t, http.MethodGet, url, nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code,
+				"a token scoped to a different project must get 404, indistinguishable from a nonexistent project, for %s (body: %s)",
+				url, rec.Body.String())
+		}
+	})
+}
+
+// TestListAgents_MalformedOwnerIdReturns400 covers: a malformed ownerId must
+// fail loud with 400, not crash the query with a 500 — parseUUID wraps
+// store.ErrInvalidInput, which
+// writeErrorFromErr maps to 400 (pkg/hub/errors.go). Locks that path in
+// explicitly rather than relying on it holding by accident.
+func TestListAgents_MalformedOwnerIdReturns400(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("r2146-bad-owner-u"), Email: "r2146-bad-owner@test.com",
+		DisplayName: "Bad Owner User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// The user needs a non-None authorized scope, or listAgents short-circuits
+	// to an empty 200 before the filter (and its malformed ownerId) is even
+	// parsed — a project membership gives it one.
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	proj := &store.Project{
+		ID: tid("r2146-bad-owner-p"), Name: "Proj", Slug: "r2146-bad-owner",
+		OwnerID: user.ID, CreatedBy: user.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	for _, url := range []string{
+		"/api/v1/agents?ownerId=not-a-uuid",
+		"/api/v1/agents?lineageRootId=not-a-uuid",
+	} {
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, url, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: body: %s", url, rec.Body.String())
+	}
+}
+
+// TestApplyAgentAttributeAndRelationshipFilters_IDsCap covers: id[] is
+// capped at maxRelationshipIDs; unbounded, it would be limited only by the
+// ~1 MB HTTP header limit (~25k UUIDs) — one IN(...) bind list alongside
+// AuthorizedProjectIDs, far beyond what the real use (a CLI-resolved
+// Ancestry chain) ever needs.
+func TestApplyAgentAttributeAndRelationshipFilters_IDsCap(t *testing.T) {
+	ids := make([]string, maxRelationshipIDs+1)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+	}
+	var filter store.AgentFilter
+	err := applyAgentAttributeAndRelationshipFilters(&filter, url.Values{"id": ids})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too many")
+
+	// At exactly the cap, it must still succeed.
+	var okFilter store.AgentFilter
+	err = applyAgentAttributeAndRelationshipFilters(&okFilter, url.Values{"id": ids[:maxRelationshipIDs]})
+	require.NoError(t, err)
+	assert.Len(t, okFilter.IDs, maxRelationshipIDs)
+}
+
+// TestListAgents_TooManyIDsReturns400 is the HTTP-level counterpart: exceeding
+// the cap on a real request must fail with 400, not silently truncate or 500.
+func TestListAgents_TooManyIDsReturns400(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID: tid("r2146-idscap-u"), Email: "r2146-idscap@test.com",
+		DisplayName: "IDs Cap User", Role: store.UserRoleMember, Status: "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	proj := &store.Project{
+		ID: tid("r2146-idscap-p"), Name: "Proj", Slug: "r2146-idscap",
+		OwnerID: user.ID, CreatedBy: user.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: memberRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	params := make([]string, maxRelationshipIDs+1)
+	for i := range params {
+		params[i] = "id=" + uuid.NewString()
+	}
+	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/agents?"+strings.Join(params, "&"), nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+}
+
+// TestApplyAgentAttributeAndRelationshipFilters_IDsCanonicalizedForCursorBinding
+// covers: id[] is deduped and canonicalized before scopedCursorBinding, like
+// every other set-like field, so the same logical request in a different
+// order mints the same cursor.
+func TestApplyAgentAttributeAndRelationshipFilters_IDsCanonicalizedForCursorBinding(t *testing.T) {
+	idA, idB := uuid.NewString(), uuid.NewString()
+
+	var filterOrder1, filterOrder2 store.AgentFilter
+	require.NoError(t, applyAgentAttributeAndRelationshipFilters(&filterOrder1, url.Values{"id": {idB, idA}}))
+	require.NoError(t, applyAgentAttributeAndRelationshipFilters(&filterOrder2, url.Values{"id": {idA, idB}}))
+
+	assert.Equal(t, filterOrder1.IDs, filterOrder2.IDs,
+		"id[] must canonicalize (sort) identically regardless of query param order")
+
+	binding1 := scopedCursorBinding("agents", filterOrder1, nil)
+	binding2 := scopedCursorBinding("agents", filterOrder2, nil)
+	assert.Equal(t, binding1, binding2,
+		"cursor binding must be order-insensitive for id[], like every other set-like filter field")
+
+	// Duplicates are also collapsed, matching AuthorizedProjectIDs/
+	// ExcludedProjectIDs' existing canonicalization behavior.
+	var filterDup store.AgentFilter
+	require.NoError(t, applyAgentAttributeAndRelationshipFilters(&filterDup, url.Values{"id": {idA, idA, idB}}))
+	assert.Equal(t, filterOrder1.IDs, filterDup.IDs)
+}
+
+// TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden covers the
+// server-side fact that justifies cmd/list.go's resolveReferenceAgent
+// falling back to list-based resolution on 403 as well as 404: an agent
+// identity is denied a single-resource GET on any agent other than itself
+// (agent.read has no AgentScopes mapping — see
+// TestBypassAgents_LegitimateFlowsStillWork, authz_bypass_agents_test.go),
+// but the identical peer is visible through the authorized list endpoint,
+// both narrowed by id[] and in a bare page. Without that fallback,
+// --descendants=<peer> / --ancestors=<peer> would fail outright in agent
+// mode for exactly the audience these flags are built for.
+func TestListAgents_ListEndpointResolvesPeerWhenGetIsForbidden(t *testing.T) {
+	f := bypassAgentsSetup(t)
+
+	getRec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)
+	require.Equal(t, http.StatusNotFound, getRec.Code,
+		"baseline: GET on a project peer is denied (as a missing agent) for an agent identity")
+
+	// The PROJECT-scoped list endpoint is what cmd/list.go's
+	// resolveReferenceAgent actually resolves through outside --all (see
+	// listAgentsViaHub, which uses the project-scoped agentSvc whenever
+	// --all is not set): it carves out same-project agent tokens
+	// (listProjectAgents, pkg/hub/handlers_projects_core.go), independent
+	// of role bindings.
+	projPath := "/api/v1/projects/" + f.proj.ID + "/agents"
+
+	listByIDRec := f.asAgent(t, http.MethodGet, projPath+"?id="+f.sibling.ID, nil)
+	require.Equal(t, http.StatusOK, listByIDRec.Code, "body: %s", listByIDRec.Body.String())
+	var byIDResp ListAgentsResponse
+	require.NoError(t, json.NewDecoder(listByIDRec.Body).Decode(&byIDResp))
+	byIDIDs := make([]string, 0, len(byIDResp.Agents))
+	for _, a := range byIDResp.Agents {
+		byIDIDs = append(byIDIDs, a.ID)
+	}
+	assert.Contains(t, byIDIDs, f.sibling.ID,
+		"the project-scoped list endpoint's id[] filter must find a peer GET cannot reach")
+
+	bareListRec := f.asAgent(t, http.MethodGet, projPath, nil)
+	require.Equal(t, http.StatusOK, bareListRec.Code, "body: %s", bareListRec.Body.String())
+	var bareResp ListAgentsResponse
+	require.NoError(t, json.NewDecoder(bareListRec.Body).Decode(&bareResp))
+	bareIDs := make([]string, 0, len(bareResp.Agents))
+	for _, a := range bareResp.Agents {
+		bareIDs = append(bareIDs, a.ID)
+	}
+	assert.Contains(t, bareIDs, f.sibling.ID,
+		"a bare list page must also include the peer — the name/slug pagination fallback in resolveReferenceAgent relies on this")
+
+	// The GLOBAL list endpoint is a different story: a bare agent token
+	// carries no role-binding-derived hub-wide list authority (only the
+	// project-scoped route's same-project carve-out applies), so it finds
+	// nothing here — even the caller's own ID. This is exactly why
+	// listAgentsViaHub fails loudly instead of silently for `--all` combined
+	// with a relationship flag in agent mode: the final --all listing
+	// always goes through this global endpoint,
+	// which can't see this identity's own agents at all, so resolving the
+	// reference successfully (e.g. via the project-scoped endpoint) would
+	// not have made the overall command work end to end.
+	globalRec := f.asAgent(t, http.MethodGet, "/api/v1/agents?id="+f.sibling.ID, nil)
+	require.Equal(t, http.StatusOK, globalRec.Code, "body: %s", globalRec.Body.String())
+	var globalResp ListAgentsResponse
+	require.NoError(t, json.NewDecoder(globalRec.Body).Decode(&globalResp))
+	assert.Empty(t, globalResp.Agents,
+		"documents the global endpoint's limitation for a bare agent token — this is why reference resolution must not rely on it")
+}

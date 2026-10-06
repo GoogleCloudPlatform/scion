@@ -35,6 +35,8 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **Settings File**: `~/.gemini/settings.json` (inside the agent container). Scion automatically updates `security.auth.selectedType` in this file to match the resolved auth method.
 - **System Prompt**: `~/.gemini/system_prompt.md` is automatically seeded if `system_prompt` is provided in the agent config. Additionally, Scion injects the system prompt into the `GEMINI_SYSTEM_MD` environment variable to ensure direct pickup by the Gemini CLI tool during initialization.
 - **Model Aliases**: Supports both traditional alias sizes and single-letter model alias mappings (`S` / `M` / `L` for Small / Medium / Large). The `provision.py` script automatically maps and handles fallback alias resolution during startup.
+- **Default model**: the harness-config declares `model: medium`, so an agent started without a model runs on the model that the `medium` alias maps to in `model_aliases` (see `harnesses/gemini-cli/config.yaml`). The broker resolves that tier before it sets `SCION_MODEL`. The container image does not pin a model in `settings.json`.
+- **Model selection**: the model is resolved in this order: the agent's resolved model (`--model`, template `model:`, or `SCION_MODEL`), then `harness_config.model`. Tier aliases (`small`, `medium`, `large`, `extra-large`, and `S` / `M` / `L` / `XL`) are resolved through the harness's `model_aliases` table. The provisioner writes the resolved model to `model.name` in `~/.gemini/settings.json` on every provision. If neither source gives a model, it removes any existing `model.name`, so a stale value is never kept and the Gemini CLI uses its own built-in default.
 
 ### Known Limitations
 - The `gemini` CLI tool must be installed in the container image (included in default images).
@@ -72,6 +74,20 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **Claude Code version guard:** Claude Code versions older than 2.1.280 reject Opus 5.5 (`claude-opus-5-5*`, and the `opus` alias) with a `400 claude_code_version_too_old` error. If the container's `claude` binary is older than 2.1.280 and the resolved model is Opus 5.5, `provision.py` falls back to `claude-opus-4-8` and logs a warning. Rebuild the `scion-claude` image with Claude Code 2.1.280 or later to use Opus 5.5.
 - **Auto-updater disabled:** Scion sets `DISABLE_AUTOUPDATER=1` in the container, so Claude Code does not try to update itself in the background. To upgrade Claude Code, rebuild the harness image.
 
+### Effort (Thinking Level)
+When `SCION_THINKING_LEVEL` is set (0–100, from `--thinking-level` on `scion start` or Hub agent defaults), the provisioner sets `CLAUDE_CODE_EFFORT_LEVEL` in the environment of the `claude` process. The table comes from the `thinking:` block in the bundle's `config.yaml` (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)):
+
+| Thinking Level | `CLAUDE_CODE_EFFORT_LEVEL` |
+| :--- | :--- |
+| 0–25 | `low` |
+| 26–50 | `medium` |
+| 51–75 | `high` |
+| 76–100 | `xhigh` |
+
+Values outside the 0–100 range are clamped. The top tier is `xhigh` rather than `max` to avoid `max`'s excessive-token runs; `max` is still reachable by setting `CLAUDE_CODE_EFFORT_LEVEL` directly or with a custom `thinking:` table. When a model does not support a level, Claude Code uses the highest level it supports below that one (for example, `xhigh` runs as `high` on Sonnet 4.6). See [Claude Code model configuration](https://code.claude.com/docs/en/model-config).
+
+When the level is unset or blank, the variable is not set, so Claude Code keeps its own per-model default effort. A value that is not an integer (`abc`, `1.5`) also sets nothing, and logs a warning. The variable outranks `--effort`, `/effort` and the `effortLevel` setting in `settings.json`. If `CLAUDE_CODE_EFFORT_LEVEL` is already set in a template or harness-config `env:` block (even to an empty value), the provisioner leaves it alone, and logs a warning if a thinking level was also requested.
+
 ### Known Limitations
 - Claude Code is a beta tool and its configuration format may change.
 
@@ -87,9 +103,11 @@ OpenCode supports two authentication methods (auto-detected in this order):
 - **Auth File** (`auth-file`): Uses `~/.local/share/opencode/auth.json` if available. Scion copies this file from your host when the agent is created.
 
 ### Configuration
-- **Config File**: `~/.config/opencode/opencode.json`.
+- **Config File**: `~/.config/opencode/opencode.json`, in the current opencode schema. The provisioner merges `model`, MCP servers (under `mcp`) and, for Vertex AI, `google-vertex/...` default models plus `disabled_providers: ["github-copilot"]` into this file. An explicit `SCION_MODEL` wins over the Vertex default, and the Vertex default never replaces a `model` already in the file. A file that is not plain JSON (for example one with comments) is left unchanged, with a warning.
+- **Size aliases**: the bundled `model_aliases` are not yet in opencode's `provider/model` form, so the provisioner skips them with a warning and leaves `model` unchanged (ptone/scion#3065).
+- **`opencode.jsonc`**: opencode loads `opencode.jsonc` after `opencode.json`, so its keys (including `model`) override the file the provisioner writes.
 - **Environment**: Respects standard OpenCode environment variables.
-- **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. When `ctx.model_resolution` is empty, the provisioning script automatically falls back to `SCION_MODEL` to resolve and configure the underlying model.
+- **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. The provisioning script resolves it with `scion_harness.resolve_model`, which maps a size alias through the harness-config's `model_aliases` to configure the underlying model.
 - **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.
 
 ### Hooks
@@ -117,7 +135,7 @@ Codex supports two authentication methods (auto-detected in this order):
 - **OpenTelemetry**: When telemetry is enabled, Scion performs telemetry reconciliation at start to ensure consistent OTLP export (default `localhost:4317`).
 
 ### Reasoning Effort (Thinking Level)
-When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinking-level` on `scion start` or via Hub agent defaults), the Codex provisioner maps it to the `model_reasoning_effort` key in `~/.codex/config.toml` using four quartile buckets:
+When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinking-level` on `scion start` or via Hub agent defaults), the Codex provisioner maps it to the `model_reasoning_effort` key in `~/.codex/config.toml` using four quartile buckets. The table comes from the `thinking:` block in the bundle's `config.yaml` (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)):
 
 | Thinking Level | Reasoning Effort |
 | :--- | :--- |
@@ -127,6 +145,10 @@ When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinki
 | 76–100 | `xhigh` |
 
 Values outside the 0–100 range are clamped to the nearest boundary.
+
+When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` (the block's `default`) rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference. A non-integer value also logs a warning.
+
+If a customized Codex `config.yaml` has no `thinking:` block, the provisioner logs a warning and writes no `model_reasoning_effort`, so Codex's own default applies. Copy the block from the bundled `config.yaml`, or run `scion harness-config upgrade codex`, which merges missing top-level keys such as `thinking:` into a customized `config.yaml` without overwriting your values.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
@@ -192,7 +214,7 @@ with `capture_auth.py`.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Hermes has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
 - **MCP**: `~/.hermes/mcp.json`. Project-scoped MCP servers are not supported.
 - **Model aliases**: `small` → `google/gemini-3.5-flash`, `medium` → `anthropic/claude-sonnet-4`, `large` → `anthropic/claude-opus-4`.
-- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. When `ctx.model_resolution` is empty, the `provision.py` script falls back to `SCION_MODEL` to map size aliases to the correct Nous Research endpoints.
+- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. The `provision.py` script resolves it with `scion_harness.resolve_model`, which maps size aliases to the provider/model strings above.
 
 ### Known Limitations
 - **System Prompt**: approximated via `AGENTS.md` (no native override).
@@ -231,7 +253,22 @@ the Antigravity bundle's `capture_auth.py` (which can also extract the token fro
 - **MCP**: `~/.gemini/config/mcp_config.json`.
 - **Hooks**: Antigravity ships a hook dialect (`dialect.yaml`) mapping `agy` events to Scion lifecycle events. Hooks fire **project-locally** (wired via `/workspace/.agents/hooks.json`).
 - **Runtime**: requires gnome-keyring and D-Bus in the container (provided by the base image); a generated wrapper script bootstraps the keyring and injects the token before launching `agy`.
-- **Default model**: `Gemini 3.8 Flash (Medium)` (override via `AGY_MODEL`).
+- **Model selection**: the model is resolved in this order: the agent's model (`--model` / `SCION_MODEL`), then `harness_config.model`, then the operator-set `AGY_MODEL` env var, then the default `Gemini 3.8 Flash (Medium)`. Tier aliases (`small`, `medium`, `large`, `extra-large`) are resolved through the harness's `model_aliases` table. The resolved model is written into `settings.json` on every provision, including into an existing `settings.json`, so changing the model takes effect on the next start.
+
+### Effort (Thinking Level)
+When `SCION_THINKING_LEVEL` is set (0–100, from `--thinking-level` on `scion start` or Hub agent defaults), the provisioner adds `--effort <tier>` to the `agy` command in the generated wrapper script (`~/.scion/harness/agy-wrapper.sh`). The table comes from the `thinking:` block in the bundle's `config.yaml` (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)):
+
+| Thinking Level | `--effort` |
+| :--- | :--- |
+| 0–25 | `low` |
+| 26–50 | `medium` |
+| 51–100 | `high` |
+
+Values outside the 0–100 range are clamped, so `-5` maps to `low` and `150` to `high`. When the level is unset or blank, no `--effort` flag is passed and AGY's own default applies. A value that is not an integer (`abc`, `1.5`) also passes no flag, and logs a warning.
+
+:::note[Changed cut points]
+Before ptone/scion#2673 the cut points were 50 and 75 (0–49 `low`, 50–74 `medium`, 75–100 `high`), negative values were silently ignored, and non-integer values were dropped without a warning. Levels 26–49 now map to `medium` and 51–74 to `high`.
+:::
 
 ### Known Limitations
 - **System Prompt**: approximated via `GEMINI.md` (no native override).

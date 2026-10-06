@@ -104,6 +104,9 @@ type ResourceStore struct {
 	srv   *Server
 	pers  resourcePersistence
 	hubID string
+	// excludePatterns are extra transfer.CollectFiles exclude patterns for
+	// this kind (e.g. harness-config backups and temp files).
+	excludePatterns []string
 }
 
 // templateStore returns a ResourceStore for templates.
@@ -114,7 +117,18 @@ func (s *Server) templateStore() *ResourceStore {
 // harnessConfigStore returns a ResourceStore for harness-configs. harness is the
 // harness type already parsed from the directory's config.yaml by the caller.
 func (s *Server) harnessConfigStore(harness string) *ResourceStore {
-	return &ResourceStore{srv: s, pers: &harnessConfigPersistence{s: s, harness: harness}, hubID: s.HubID()}
+	return &ResourceStore{
+		srv:             s,
+		pers:            &harnessConfigPersistence{s: s, harness: harness},
+		hubID:           s.HubID(),
+		excludePatterns: config.HarnessConfigTransientPatterns,
+	}
+}
+
+// collectFiles collects the files of a resource directory, applying the
+// kind's exclude patterns on top of transfer.DefaultExcludePatterns.
+func (rs *ResourceStore) collectFiles(dir string) ([]transfer.FileInfo, error) {
+	return transfer.CollectFiles(dir, rs.excludePatterns)
 }
 
 // Bootstrap imports a new resource directory or syncs an existing one into the
@@ -133,7 +147,7 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	if err := transfer.NormalizeDir(dir); err != nil {
 		return false, fmt.Errorf("normalize dir: %w", err)
 	}
-	files, err := transfer.CollectFiles(dir, nil)
+	files, err := rs.collectFiles(dir)
 	if err != nil {
 		return false, err
 	}
@@ -385,6 +399,7 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 	}
 	extractNoAuthBehavior(hc, dir)
 	extractAuthMeta(hc, dir)
+	extractModelConfig(hc, dir)
 	rec.Harness = p.harness
 	p.model = hc
 	return p.s.store.CreateHarnessConfig(ctx, hc)
@@ -402,6 +417,7 @@ func (p *harnessConfigPersistence) Update(ctx context.Context, rec *ResourceReco
 	}
 	extractNoAuthBehavior(hc, dir)
 	extractAuthMeta(hc, dir)
+	extractModelConfig(hc, dir)
 	return p.s.store.UpdateHarnessConfig(ctx, hc)
 }
 
@@ -483,6 +499,61 @@ func extractAuthMeta(hc *store.HarnessConfig, dir string) {
 		hc.Config.AuthMeta = hcDir.Config.Auth
 	} else if hc.Config != nil {
 		hc.Config.AuthMeta = nil
+	}
+}
+
+// extractModelConfig loads config.yaml from dir and stamps its default
+// model and model_aliases onto the HarnessConfig's Config data, so the hub's
+// stored record reflects config.yaml as the source of truth for the
+// harness's default model and size-alias table. resolveModelAliasForAgent
+// (harness_capabilities.go) reads these instead of falling back to the
+// alias table baked into the hub binary at build time
+// (harness.DefaultModelAliases), which otherwise goes stale the moment
+// config.yaml's aliases are updated without a hub rebuild/redeploy.
+//
+// Like extractImage, a field is only overwritten when config.yaml declares
+// it (non-empty/non-nil) — an absent field preserves whatever value is
+// already stored, so a hub-side manual edit to Config.Model or
+// Config.ModelAliases (e.g. via the harness-config API) survives a re-sync
+// of a config.yaml that doesn't mention that field. This mirrors the
+// contract already exercised by TestSyncHarnessConfig_PreservesTypedConfig.
+//
+// One consequence: deleting model_aliases (or model) from config.yaml does
+// NOT clear the stored value — the record keeps resolving with the last
+// aliases it saw. If stale-alias drift shows up again, check whether
+// config.yaml actually still declares model_aliases before assuming this
+// stamping is broken; an intentional removal needs an explicit clear (e.g.
+// a hub-side PATCH), not just deleting the key from config.yaml.
+func extractModelConfig(hc *store.HarnessConfig, dir string) {
+	if dir == "" {
+		return
+	}
+	hcDir, err := config.LoadHarnessConfigDir(dir)
+	if err != nil {
+		return
+	}
+	applyModelConfigFromEntry(hc, hcDir.Config)
+}
+
+// applyModelConfigFromEntry stamps the Model and ModelAliases fields from a
+// parsed config.yaml entry onto hc.Config, initializing it if necessary.
+// Fields config.yaml doesn't declare are left untouched (see
+// extractModelConfig for why). Shared by the directory-based sync path
+// (extractModelConfig above) and the storage/content-based harness-config
+// file write, upload, and finalize handlers, so every path that can update a
+// harness config's config.yaml keeps Model/ModelAliases in sync.
+func applyModelConfigFromEntry(hc *store.HarnessConfig, entry config.HarnessConfigEntry) {
+	if entry.Model == "" && len(entry.ModelAliases) == 0 {
+		return
+	}
+	if hc.Config == nil {
+		hc.Config = &store.HarnessConfigData{}
+	}
+	if entry.Model != "" {
+		hc.Config.Model = entry.Model
+	}
+	if len(entry.ModelAliases) > 0 {
+		hc.Config.ModelAliases = entry.ModelAliases
 	}
 }
 

@@ -139,11 +139,16 @@ type ProjectMatch struct {
 
 // CreateProjectRequest is the request for creating a project without a broker.
 type CreateProjectRequest struct {
-	ID        string            `json:"id,omitempty"`
-	Slug      string            `json:"slug,omitempty"`
-	Name      string            `json:"name"`
-	GitRemote string            `json:"gitRemote,omitempty"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Slug      string `json:"slug,omitempty"`
+	Name      string `json:"name"`
+	GitRemote string `json:"gitRemote,omitempty"`
+	// WorkspaceMode is the create-only workspace sharing mode: "shared",
+	// "per-agent" or "worktree-per-agent" (git only). On a project without a
+	// git remote, "per-agent" gives each agent an empty private directory.
+	// The hub validates the value; empty means the server default.
+	WorkspaceMode string            `json:"workspaceMode,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 // UpdateProjectRequest is the request for updating a project.
@@ -296,6 +301,21 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 		}
 		for k, v := range opts.Labels {
 			query.Add("label", fmt.Sprintf("%s=%s", k, v))
+		}
+		if opts.OwnerID != "" {
+			query.Set("ownerId", opts.OwnerID)
+		}
+		if opts.AncestorID != "" {
+			query.Set("ancestorId", opts.AncestorID)
+		}
+		if opts.HarnessConfig != "" {
+			query.Set("harnessConfig", opts.HarnessConfig)
+		}
+		for _, id := range opts.IDs {
+			query.Add("id", id)
+		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
 		}
 		opts.Page.ToQuery(query)
 	}

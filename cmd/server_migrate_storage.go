@@ -63,6 +63,8 @@ func init() {
 }
 
 func runMigrateStorage(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -78,7 +80,7 @@ func runMigrateStorage(cmd *cobra.Command, _ []string) error {
 
 	hubID := cfg.Hub.ResolveHubID()
 	if hubID == "" {
-		return fmt.Errorf("hub_id is required for storage migration; set server.hub_id in config or SCION_SERVER_HUB_ID env var")
+		return fmt.Errorf("hub_id is required for storage migration; set server.hub.hub_id in settings.yaml or the SCION_SERVER_HUB_HUBID env var")
 	}
 	_, _ = fmt.Fprintf(out, "Hub ID: %s\n", hubID)
 

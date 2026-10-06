@@ -106,7 +106,7 @@ A single orchestrator script — `image-build/scripts/build-images.sh` — owns 
 | :--- | :--- | :--- | :--- |
 | `local-docker` (default) | `docker buildx` | yes (auto-promotes to `--push`) | honors `--push`; `--load` otherwise |
 | `local-podman` | `podman build` | single-arch by default; multi-arch errors out (manual QEMU setup required) | honors `--push`; built images live in the local store automatically |
-| `cloud-build` | `gcloud builds submit` against a static `cloudbuild-*.yaml` | always `linux/amd64` + `linux/arm64` (server-side) | always pushes |
+| `cloud-build` | `gcloud builds submit` against a static `cloudbuild-*.yaml` (group targets) or a config generated on the fly (individual harness targets) | always `linux/amd64` + `linux/arm64` (server-side) | always pushes |
 
 The orchestrator computes tags, threads `BASE_IMAGE` between layers, and dispatches to the selected builder. Switching backends is purely a `--builder` flag change — target names and other flags are uniform.
 
@@ -267,7 +267,7 @@ Targets resolve to an ordered list of step IDs (one step per image):
 | :--- | :--- | :--- |
 | `core-base` | `core-base` | Foundation tools layer. |
 | `scion-base` | `scion-base` | Adds sciontool. Reuses existing `core-base:<tag>`. |
-| `harnesses` | `scion-claude`, `scion-gemini-cli`, `scion-opencode`, `scion-codex` | Reuses existing `scion-base:<tag>`. |
+| `harnesses` | All catalog harness images with a `harnesses/<name>/Dockerfile` | Reuses existing `scion-base:<tag>`. |
 | `hub` | `scion-hub` | Hub server image. Reuses existing `scion-base:<tag>`. |
 | `common` (default) | `scion-base` + harnesses + hub | Skips `core-base`. Most common rebuild. |
 | `all` | Full DAG | Rebuilds everything from `core-base`. |
@@ -353,7 +353,7 @@ The workflow is a runner, not a builder — it shells out to `build-images.sh --
 
 ## Google Cloud Build Configs
 
-The `cloud-build` builder maps each `--target` to a static YAML file in `image-build/`:
+The `cloud-build` builder maps each group `--target` to a static YAML file in `image-build/`:
 
 | Target | Config file |
 | :--- | :--- |
@@ -363,6 +363,13 @@ The `cloud-build` builder maps each `--target` to a static YAML file in `image-b
 | `scion-base` | `cloudbuild-scion-base.yaml` |
 | `harnesses` | `cloudbuild-harnesses.yaml` |
 | `hub` | `cloudbuild-hub.yaml` |
+
+An individual harness step ID (`scion-claude`, `scion-muse-code`, etc.) is also
+a valid `--target` under `cloud-build`. Rather than a static file, the builder
+generates a one-step config for just that harness — mirroring the matching
+step in `cloudbuild-harnesses.yaml` — submits it, and removes it afterward.
+This rebuilds one harness on Cloud Build without resubmitting the whole
+`harnesses` group.
 
 These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_REGISTRY`, and (in the five that build `scion-base`: `all`, `common`, `scion-base`, `thick`/`thick-prep`, `omni`) `$_VERSION`, all forwarded by the orchestrator. `_TAG` defaults to `latest` in every YAML's `substitutions:` block; `_VERSION` defaults to `''` in the YAMLs that declare it, preserving the prior behavior when `--tag` or a version tag is omitted. The orchestrator only forwards a non-empty `_VERSION` when `HEAD` is on an exact git tag; off-tag, it relies on that default.
 

@@ -699,12 +699,21 @@ func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
 // fails, without needing a real deleted-row or connection-failure fixture.
 type getProjectErrStore struct {
 	store.Store
+	fault     *storeFaultSwitch // nil: always active
 	projectID string
 	err       error
 }
 
+// getProjectErrWrap returns an installStoreFault wrap func for a
+// getProjectErrStore failing with err; set projectID before arming.
+func getProjectErrWrap(err error) func(store.Store, *storeFaultSwitch) *getProjectErrStore {
+	return func(inner store.Store, fault *storeFaultSwitch) *getProjectErrStore {
+		return &getProjectErrStore{Store: inner, fault: fault, err: err}
+	}
+}
+
 func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
-	if id == g.projectID {
+	if g.fault.Active() && id == g.projectID {
 		return nil, g.err
 	}
 	return g.Store.GetProject(ctx, id)
@@ -718,7 +727,10 @@ func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.
 // returned (to a caller who can read it) with no name or git remote, since
 // only the enrichment step — not the entry — is skipped.
 func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
-	srv, s := testServer(t)
+	// The wrapper is installed before autoProvideBrokerWithProject, whose
+	// project registration emits a mutation audit that reads srv.store
+	// from a goroutine (ptone/scion#3184).
+	srv, s, failing, fault := testServerWithStoreFault(t, getProjectErrWrap(store.ErrNotFound))
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -735,8 +747,8 @@ func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
 		"notfound-project-broker", "StaleProj", "https://github.com/acme/stale-repo.git")
 
-	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: store.ErrNotFound}
-	defer func() { srv.store = s }()
+	failing.projectID = project.ID
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
@@ -769,7 +781,8 @@ func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 // error rather than silently treated the same as a not-found and dropped
 // from the list.
 func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T) {
-	srv, s := testServer(t)
+	// Installed before the audited registration; see the previous test.
+	srv, s, failing, fault := testServerWithStoreFault(t, getProjectErrWrap(errors.New("connection reset by peer")))
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -786,12 +799,660 @@ func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
 		"getproject-error-broker", "ErrProj", "https://github.com/acme/err-repo.git")
 
-	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: errors.New("connection reset by peer")}
-	defer func() { srv.store = s }()
+	failing.projectID = project.ID
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
 
 	assert.Equal(t, http.StatusInternalServerError, rec.Code,
 		"a genuine store error from GetProject must not be silently swallowed into a 200 with an incomplete list, and must map through writeErrorFromErr's default (unrecognized-error) branch: %s", rec.Body.String())
+}
+
+// TestBrokerHeartbeat_BackfillsRuntimeFromResolvedProfile verifies the
+// narrow heartbeat-time companion to the display-time enrichment fix
+// (ptone/scion#2262): once a heartbeat reports the agent's applied profile,
+// the hub resolves it by name against the broker's advertised profiles and
+// backfills agent.Runtime alongside the existing Profile backfill — without
+// guessing from whichever profile happens to be listed first.
+func TestBrokerHeartbeat_BackfillsRuntimeFromResolvedProfile(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-runtime-broker"),
+		Name:   "HB Runtime Broker",
+		Slug:   "hb-runtime-broker",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-runtime-project"),
+		Slug:    "hb-runtime-project",
+		Name:    "HB Runtime Project",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("hb-runtime-agent"),
+		Slug:            "hb-runtime-agent",
+		Name:            "HB Runtime Agent",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:    agent.Slug,
+		Status:  "WORKING",
+		Phase:   "running",
+		Profile: "k8s-prod",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	updated := getAgentState(t, s, agent.Slug, project.ID)
+	assert.Equal(t, "kubernetes", updated.Runtime,
+		"Runtime should be backfilled from the agent's own resolved profile, not the broker's first profile")
+	require.NotNil(t, updated.AppliedConfig)
+	assert.Equal(t, "k8s-prod", updated.AppliedConfig.Profile)
+}
+
+// TestBrokerHeartbeat_UnresolvedProfileDoesNotBackfillRuntime is the
+// unresolved-profile counterpart: if the heartbeat's reported profile name
+// doesn't match any profile the broker advertises, Runtime must stay empty
+// rather than falling back to the broker's docker profile.
+func TestBrokerHeartbeat_UnresolvedProfileDoesNotBackfillRuntime(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-runtime-broker-unresolved"),
+		Name:   "HB Runtime Broker Unresolved",
+		Slug:   "hb-runtime-broker-unresolved",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-runtime-project-unresolved"),
+		Slug:    "hb-runtime-project-unresolved",
+		Name:    "HB Runtime Project Unresolved",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("hb-runtime-agent-unresolved"),
+		Slug:            "hb-runtime-agent-unresolved",
+		Name:            "HB Runtime Agent Unresolved",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:    agent.Slug,
+		Status:  "WORKING",
+		Phase:   "running",
+		Profile: "some-other-profile",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	updated := getAgentState(t, s, agent.Slug, project.ID)
+	assert.Empty(t, updated.Runtime,
+		"Runtime must stay empty when the reported profile can't be resolved against the broker's profiles, not fall back to docker")
+}
+
+// TestBrokerHeartbeat_NeverOverwritesExplicitRuntime verifies the heartbeat
+// backfill never overwrites an already-set Runtime: an agent that already
+// has a Runtime and an already-known applied profile is never overwritten,
+// even when the broker's profile list would resolve the current profile to
+// a different runtime type. The backfill only ever fills in a value that's
+// missing.
+func TestBrokerHeartbeat_NeverOverwritesExplicitRuntime(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-runtime-broker-no-overwrite"),
+		Name:   "HB Runtime Broker No Overwrite",
+		Slug:   "hb-runtime-broker-no-overwrite",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-runtime-project-no-overwrite"),
+		Slug:    "hb-runtime-project-no-overwrite",
+		Name:    "HB Runtime Project No Overwrite",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("hb-runtime-agent-no-overwrite"),
+		Slug:            "hb-runtime-agent-no-overwrite",
+		Name:            "HB Runtime Agent No Overwrite",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+		Runtime:         "docker",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// The heartbeat reports the same profile the agent already has on
+	// record, so this is not a first-time Profile backfill — Runtime must
+	// stay untouched even though "k8s-prod" resolves to kubernetes.
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:    agent.Slug,
+		Status:  "WORKING",
+		Phase:   "running",
+		Profile: "k8s-prod",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	updated := getAgentState(t, s, agent.Slug, project.ID)
+	assert.Equal(t, "docker", updated.Runtime,
+		"an explicitly-set Runtime must not be silently overwritten by the heartbeat backfill")
+}
+
+// TestBrokerHeartbeat_RuntimeNotOverwrittenWhenProfileFirstBackfilledSamePass
+// proves the backfill is a pure fill-in, not a re-derivation: even when a
+// heartbeat backfills AppliedConfig.Profile for the first time (it was
+// previously unknown) in the same pass, an already-set Runtime is left
+// alone, even though the newly-known profile would resolve to a different
+// runtime type. The only writer of a non-empty Runtime elsewhere in the hub
+// for a broker-hosted agent (the dispatch response path) sets Runtime from
+// the broker's own AgentInfo for the agent it actually started (recording
+// Profile too when AppliedConfig exists), so "Runtime set, Profile still
+// unknown" is exactly the authoritative case this backfill must not touch.
+func TestBrokerHeartbeat_RuntimeNotOverwrittenWhenProfileFirstBackfilledSamePass(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-runtime-broker-refresh"),
+		Name:   "HB Runtime Broker Refresh",
+		Slug:   "hb-runtime-broker-refresh",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "docker-default", Type: "docker", Available: true},
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-runtime-project-refresh"),
+		Slug:    "hb-runtime-project-refresh",
+		Name:    "HB Runtime Project Refresh",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	// Runtime is already authoritatively set to "kubernetes" (e.g. from the
+	// dispatch response path), and AppliedConfig is nil so Profile is still
+	// unknown to the hub.
+	agent := &store.Agent{
+		ID:              tid("hb-runtime-agent-refresh"),
+		Slug:            "hb-runtime-agent-refresh",
+		Name:            "HB Runtime Agent Refresh",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+		Runtime:         "kubernetes",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// The heartbeat backfills Profile for the first time, and it resolves to
+	// a *different* type (docker) than the Runtime already on record.
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:    agent.Slug,
+		Status:  "WORKING",
+		Phase:   "running",
+		Profile: "docker-default",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	updated := getAgentState(t, s, agent.Slug, project.ID)
+	require.NotNil(t, updated.AppliedConfig)
+	assert.Equal(t, "docker-default", updated.AppliedConfig.Profile)
+	assert.Equal(t, "kubernetes", updated.Runtime,
+		"an already-set Runtime must be kept even when this same heartbeat pass first backfills a Profile that would resolve to a different type")
+}
+
+// countingBrokerLoadStore wraps a store.Store and counts calls to
+// GetRuntimeBroker, optionally injecting an error, so a test can prove the
+// heartbeat handler's lazily-loaded, memoised broker read (ptone/scion#2262,
+// loadHeartbeatBroker) behaves as described: at most one read per heartbeat
+// regardless of how many callers need it, no read at all when nothing needs
+// it, and a failed read that the handler recovers from without crashing.
+//
+// getRuntimeBrokerErrBroker, when set alongside getRuntimeBrokerErr, is
+// returned together with the error, simulating a store call that returns a
+// (non-nil but unreliable) value in the same breath as an error. This proves
+// a caller actually gates on the error rather than trusting whatever value
+// came back whenever one happens to be present.
+//
+// updateRuntimeBrokerCalls counts broker row writes, so a test can prove the
+// heartbeat handler writes the row only when the refreshed state changed.
+type countingBrokerLoadStore struct {
+	store.Store
+	getRuntimeBrokerCalls     int
+	getRuntimeBrokerErr       error
+	getRuntimeBrokerErrBroker *store.RuntimeBroker
+	updateRuntimeBrokerCalls  int
+}
+
+func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broker *store.RuntimeBroker) error {
+	s.updateRuntimeBrokerCalls++
+	return s.Store.UpdateRuntimeBroker(ctx, broker)
+}
+
+func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	s.getRuntimeBrokerCalls++
+	if s.getRuntimeBrokerErr != nil {
+		return s.getRuntimeBrokerErrBroker, s.getRuntimeBrokerErr
+	}
+	return s.Store.GetRuntimeBroker(ctx, id)
+}
+
+// TestBrokerHeartbeat_BrokerLoadedOnceForCapabilitiesAndBackfill proves the
+// lazy, memoised broker load shared by the Capabilities refresh and the
+// Runtime backfill (loadHeartbeatBroker) reads the broker row at most once
+// per heartbeat, even when the Capabilities block and two agents needing a
+// Runtime backfill all call it. Without the memoisation
+// (heartbeatBrokerLoaded), this would be three separate reads.
+func TestBrokerHeartbeat_BrokerLoadedOnceForCapabilitiesAndBackfill(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-load-once-broker"),
+		Name:   "HB Load Once Broker",
+		Slug:   "hb-load-once-broker",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Capabilities: &store.BrokerCapabilities{Sync: true},
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-load-once-project"),
+		Slug:    "hb-load-once-project",
+		Name:    "HB Load Once Project",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	agent1 := &store.Agent{
+		ID:              tid("hb-load-once-agent-1"),
+		Slug:            "hb-load-once-agent-1",
+		Name:            "HB Load Once Agent 1",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent1))
+
+	agent2 := &store.Agent{
+		ID:              tid("hb-load-once-agent-2"),
+		Slug:            "hb-load-once-agent-2",
+		Name:            "HB Load Once Agent 2",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent2))
+
+	counting := &countingBrokerLoadStore{Store: s}
+	srv.store = counting
+	defer func() { srv.store = s }()
+
+	hb := brokerHeartbeatRequest{
+		Status:       "online",
+		Capabilities: &store.BrokerCapabilities{Sync: true, Attach: true},
+		Projects: []brokerProjectHeartbeat{
+			{
+				ProjectID: project.ID,
+				Agents: []brokerAgentHeartbeat{
+					{Slug: agent1.Slug, Status: "WORKING", Phase: "running", Profile: "k8s-prod"},
+					{Slug: agent2.Slug, Status: "WORKING", Phase: "running", Profile: "k8s-prod"},
+				},
+			},
+		},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.Equal(t, 1, counting.getRuntimeBrokerCalls,
+		"the broker row backing both the Capabilities refresh and the Runtime backfill for two agents must be read exactly once per heartbeat")
+
+	updated1 := getAgentState(t, s, agent1.Slug, project.ID)
+	updated2 := getAgentState(t, s, agent2.Slug, project.ID)
+	assert.Equal(t, "kubernetes", updated1.Runtime, "agent 1's Runtime should be backfilled")
+	assert.Equal(t, "kubernetes", updated2.Runtime, "agent 2's Runtime should be backfilled")
+
+	updatedBroker, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updatedBroker.Capabilities)
+	assert.True(t, updatedBroker.Capabilities.Attach, "capabilities should be refreshed from the heartbeat")
+}
+
+// TestBrokerHeartbeat_NoBrokerLoadWhenNothingNeedsIt proves the broker row is
+// never read when a heartbeat carries no Capabilities and every agent
+// already has a Runtime: the common-case path the lazy load exists to avoid
+// regressing back into an unconditional read on every heartbeat.
+func TestBrokerHeartbeat_NoBrokerLoadWhenNothingNeedsIt(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-no-load-broker"),
+		Name:   "HB No Load Broker",
+		Slug:   "hb-no-load-broker",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-no-load-project"),
+		Slug:    "hb-no-load-project",
+		Name:    "HB No Load Project",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("hb-no-load-agent"),
+		Slug:            "hb-no-load-agent",
+		Name:            "HB No Load Agent",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+		Runtime:         "kubernetes",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "k8s-prod"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	counting := &countingBrokerLoadStore{Store: s}
+	srv.store = counting
+	defer func() { srv.store = s }()
+
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:    agent.Slug,
+		Status:  "WORKING",
+		Phase:   "running",
+		Profile: "k8s-prod",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	assert.Equal(t, 0, counting.getRuntimeBrokerCalls,
+		"a heartbeat with no Capabilities and no agent needing a Runtime backfill must not read the broker row at all")
+}
+
+// TestBrokerHeartbeat_BrokerLoadErrorDoesNotCrashOrBlockStatusUpdate proves
+// that a GetRuntimeBroker failure does not crash the handler: the
+// Capabilities refresh logs and skips instead of dereferencing a nil broker,
+// the Runtime backfill is skipped (Runtime stays empty), and the agent's
+// status update — which does not depend on the
+// broker row — is still applied.
+func TestBrokerHeartbeat_BrokerLoadErrorDoesNotCrashOrBlockStatusUpdate(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-load-err-broker"),
+		Name:   "HB Load Err Broker",
+		Slug:   "hb-load-err-broker",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-load-err-project"),
+		Slug:    "hb-load-err-project",
+		Name:    "HB Load Err Project",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("hb-load-err-agent"),
+		Slug:            "hb-load-err-agent",
+		Name:            "HB Load Err Agent",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "provisioning",
+		Activity:        "starting",
+		Labels:          map[string]string{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	counting := &countingBrokerLoadStore{Store: s, getRuntimeBrokerErr: errors.New("connection reset by peer")}
+	srv.store = counting
+	defer func() { srv.store = s }()
+
+	hb := brokerHeartbeatRequest{
+		Status:       "online",
+		Capabilities: &store.BrokerCapabilities{Sync: true},
+		Projects: []brokerProjectHeartbeat{
+			{
+				ProjectID: project.ID,
+				Agents: []brokerAgentHeartbeat{
+					{Slug: agent.Slug, Status: "WORKING", Phase: "running", Activity: "working", Profile: "k8s-prod"},
+				},
+			},
+		},
+	}
+
+	var rec *httptest.ResponseRecorder
+	require.NotPanics(t, func() {
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	}, "a GetRuntimeBroker failure must not panic the heartbeat handler")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated := getAgentState(t, s, agent.Slug, project.ID)
+	assert.Empty(t, updated.Runtime, "Runtime must stay empty when the broker load needed to resolve it fails")
+	assert.Equal(t, "running", updated.Phase, "the agent's status update must still apply even though the broker load failed")
+	assert.Equal(t, "working", updated.Activity)
+}
+
+// TestBrokerHeartbeat_BrokerLoadErrorSkipsBackfillEvenWithStaleBrokerValue
+// isolates the Runtime-backfill branch's own error gate from the Capabilities
+// branch: no Capabilities are sent, so this exercises only
+// "if err != nil { skip }" at the backfill call site. The injected error
+// comes back together with a non-nil, resolvable broker value, so a gate
+// that ignored the error (rather than skipping whenever err != nil) would
+// still produce a non-empty, wrong Runtime from that stale value.
+func TestBrokerHeartbeat_BrokerLoadErrorSkipsBackfillEvenWithStaleBrokerValue(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("hb-load-err-stale-broker"),
+		Name:   "HB Load Err Stale Broker",
+		Slug:   "hb-load-err-stale-broker",
+		Status: store.BrokerStatusOnline,
+		Profiles: []store.BrokerProfile{
+			{Name: "k8s-prod", Type: "kubernetes", Available: true},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	project := &store.Project{
+		ID:      tid("hb-load-err-stale-project"),
+		Slug:    "hb-load-err-stale-project",
+		Name:    "HB Load Err Stale Project",
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("hb-load-err-stale-agent"),
+		Slug:            "hb-load-err-stale-agent",
+		Name:            "HB Load Err Stale Agent",
+		Template:        "default",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           "running",
+		Activity:        "working",
+		Labels:          map[string]string{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// A resolvable, single-type broker value is returned alongside the
+	// error: if the backfill used it regardless of the error, Runtime would
+	// come back "kubernetes" instead of staying empty.
+	counting := &countingBrokerLoadStore{
+		Store:               s,
+		getRuntimeBrokerErr: errors.New("connection reset by peer"),
+		getRuntimeBrokerErrBroker: &store.RuntimeBroker{
+			ID: broker.ID,
+			Profiles: []store.BrokerProfile{
+				{Name: "k8s-prod", Type: "kubernetes", Available: true},
+			},
+		},
+	}
+	srv.store = counting
+	defer func() { srv.store = s }()
+
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:    agent.Slug,
+		Status:  "WORKING",
+		Phase:   "running",
+		Profile: "k8s-prod",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	updated := getAgentState(t, s, agent.Slug, project.ID)
+	assert.Empty(t, updated.Runtime,
+		"the backfill must skip on a GetRuntimeBroker error rather than resolving from whatever broker value came back with it")
 }

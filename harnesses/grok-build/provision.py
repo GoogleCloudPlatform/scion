@@ -307,7 +307,34 @@ default = "{_VERTEX_MODEL_CONFIG_NAME}"'''
         content += "\n\n"
     content += vertex_toml + "\n"
 
-    scion_harness.atomic_write_text(config_path, content)
+    # Key-path managed keys (rather than bare "auth_provider"/"model") so
+    # this write can't be fooled into silently accepting damage to some
+    # other tool's [auth_provider.*] or [model.*] sub-table — only the
+    # named vertex-grok ones are actually written here. "models" stays a
+    # bare top-level key: the whole [models] table (just `default = ...`)
+    # is unconditionally replaced by this write, not a shared table this
+    # site owns only part of.
+    if not scion_harness.write_toml_if_preserves(
+        ctx, config_path, existing, content,
+        managed_keys={
+            ("auth_provider", _VERTEX_AUTH_PROVIDER_NAME),
+            ("model", _VERTEX_MODEL_CONFIG_NAME),
+            "models",
+        },
+        what="vertex-ai auth/model config",
+    ):
+        # A vertex-auth agent with no vertex config is guaranteed broken —
+        # grok would fall back to the direct xAI API and fail auth outright
+        # — so this must fail loudly rather than continue as if it
+        # succeeded (ptone/scion#2427 review round 1, R2). The caller
+        # (_configure_vertex_ai) must not reach its GROK_DEFAULT_MODEL env
+        # export or success log after this.
+        raise scion_harness.ProvisionError(
+            f"vertex-ai: failed to write auth_provider/model/models config "
+            f"to {config_path}; grok would start without vertex routing "
+            "configured (see the preceding warning for what blocked the "
+            "write)"
+        )
 
 
 def _write_vertex_model_alias(
@@ -327,17 +354,22 @@ def _write_vertex_model_alias(
         return  # _write_vertex_config should have created it
 
     with open(config_path, "r", encoding="utf-8") as f:
-        content = f.read()
+        original = f.read()
 
     # Strip any existing block with this alias name to avoid duplicates.
+    # Only match the bare-key form ([model.<alias_name>]) when alias_name is
+    # actually a valid TOML bare key: for a dotted name like "grok-4.2" (the
+    # realistic case — model names commonly contain dots), that bare-looking
+    # header is a *different* TOML path ([model.grok-4]["2"], not
+    # [model."grok-4.2"]), so matching it here would strip and discard an
+    # unrelated user table instead of leaving it alone, turning a harmless
+    # hand-written overlay into a hard ProvisionError from the ("model",
+    # alias_name) key-path check below (ptone/scion#2427 review round 3).
     escaped_alias = scion_harness.toml_escape(alias_name)
-    content = scion_harness.strip_toml_sections(
-        content,
-        lambda line: (
-            line == f'[model."{escaped_alias}"]'
-            or line == f"[model.{alias_name}]"
-        ),
-    )
+    headers = {f'[model."{escaped_alias}"]'}
+    if _TOML_BARE_KEY_RE.match(alias_name):
+        headers.add(f"[model.{alias_name}]")
+    content = scion_harness.strip_toml_sections(original, lambda line: line in headers)
 
     # Append the alias block.  Use quoted key so dots in the model name
     # (e.g. "grok-4.6") are treated as a single key, not a TOML path.
@@ -350,7 +382,27 @@ api_backend = "chat_completions"
 supports_backend_search = false'''
 
     content = content.rstrip("\n") + "\n" + alias_toml + "\n"
-    scion_harness.atomic_write_text(config_path, content)
+    # Key-path ("model", alias_name), not bare "model": this write owns
+    # only its own alias sub-table, not the whole shared [model.*] table
+    # (which also holds _write_vertex_config's own vertex-grok block and
+    # possibly a user's [model.custom]).
+    if not scion_harness.write_toml_if_preserves(
+        ctx, config_path, original, content,
+        managed_keys={("model", alias_name)},
+        what=f"vertex-ai model alias '{alias_name}'",
+    ):
+        # Without this alias block, grok falls back to the direct xAI API
+        # for --model <alias_name> and gets a 401 when vertex-ai auth is in
+        # use — the same guaranteed-broken-if-missing outcome
+        # _write_vertex_config's own raise is about, so this must also fail
+        # loudly instead of warning and continuing into a misleading
+        # success log (ptone/scion#2427 review round 2, R2-a).
+        raise scion_harness.ProvisionError(
+            f"vertex-ai: failed to write model alias '{alias_name}' to "
+            f"{config_path}; grok would fall back to the direct xAI API "
+            "for this model and fail auth (see the preceding warning for "
+            "what blocked the write)"
+        )
     ctx.info(f"vertex-ai: created model alias '{alias_name}' -> vertex endpoint")
 
 
@@ -411,7 +463,10 @@ def _write_mcp_toml(ctx: scion_harness.ProvisionContext, servers: dict[str, Any]
     elif new_content:
         new_content += "\n"
 
-    scion_harness.atomic_write_text(config_path, new_content)
+    scion_harness.write_toml_if_preserves(
+        ctx, config_path, existing, new_content,
+        managed_keys={"mcp_servers"}, what="MCP server registration",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +530,11 @@ def _harden_config(ctx: scion_harness.ProvisionContext) -> None:
         content += "\n\n"
     content += _HARDENING_TOML + "\n"
 
-    scion_harness.atomic_write_text(config_path, content)
+    scion_harness.write_toml_if_preserves(
+        ctx, config_path, existing, content,
+        managed_keys={"cli", "features", "memory", "subagents"},
+        what="config hardening",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -661,13 +720,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         extra = _configure_vertex_ai(ctx, env)
 
     # --- Model resolution ---------------------------------------------------
-    # The Go side does not populate ctx.model_resolution for out-of-tree
-    # harnesses. Use the SCION_MODEL env var and resolve via model_aliases.
     # vertex-ai sets GROK_DEFAULT_MODEL in _configure_vertex_ai.
     if resolved.method != "vertex-ai":
-        raw_model = os.environ.get("SCION_MODEL", "").strip()
-        aliases = ctx.harness_config.get("model_aliases") or {}
-        resolved_model = aliases.get(raw_model.lower(), raw_model) if raw_model else ""
+        resolved_model = scion_harness.resolve_model(ctx)
         if resolved_model:
             env["GROK_DEFAULT_MODEL"] = resolved_model
 

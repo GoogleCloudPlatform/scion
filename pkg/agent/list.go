@@ -24,10 +24,39 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
+// List returns the agents the runtime reports, plus "created" agents that
+// exist on disk but have no container yet.
+//
+// The runtime layer applies filter to each container's labels. The on-disk
+// scan applies the same filter through the same matcher
+// (scionruntime.LabelsMatchFilter), evaluated against createdAgentLabels:
+// an approximation, from what was recorded at create time, of the label
+// set the agent's container would carry once started. Per key:
+//
+//   - scion.agent: always "true" for an on-disk agent.
+//   - scion.name: the agent directory name (a slug).
+//   - scion.project, scion.project_path: the scanned project's name and path.
+//   - scion.project_id: the project's Hub-linked project ID, the value the
+//     container label is populated from; empty for an unlinked project, so a
+//     project ID filter never matches its created agents (nor its containers).
+//   - scion.template, scion.harness_config: the values recorded when the
+//     agent was created. Start may resolve them again, so the running
+//     container's labels can differ.
+//   - scion.harness_auth: resolved only at start, so it is empty for a
+//     created agent and a non-empty filter never matches one.
+//   - status: no agent carries a "status" label, so a status filter matches
+//     no created agent, exactly as it matches no container.
+//   - Any other key (for example agent_id, assigned only at start) is unknown
+//     to a created agent and never matches.
+//
+// The scan runs only when filter carries scion.project_path, or when filter
+// is empty or only {scion.agent: true} (the current and global projects).
 func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
 	agents, err := m.Runtime.List(ctx, filter)
 	if err != nil {
@@ -188,6 +217,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			dirsToScan = append(dirsToScan, extDir)
 		}
 		projectName := config.GetProjectName(gp)
+		projectIDLabel := lazyHubProjectID(gp)
 		for _, agentsDir := range dirsToScan {
 			entries, err := os.ReadDir(agentsDir)
 			if err != nil {
@@ -244,6 +274,10 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					}
 				}
 
+				if !scionruntime.LabelsMatchFilter(createdAgentLabels(e.Name(), projectName, gp, info, filter, projectIDLabel), filter) {
+					continue
+				}
+
 				agentEntry := api.AgentInfo{
 					Name:            e.Name(),
 					Template:        info.Template,
@@ -266,7 +300,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				// Warn about stale soft-deleted agents
 				if !info.DeletedAt.IsZero() {
 					agentEntry.Warnings = append(agentEntry.Warnings,
-						fmt.Sprintf("soft-deleted at %s", info.DeletedAt.Format("2006-01-02 15:04")))
+						fmt.Sprintf("soft-deleted at %s", clitime.Format(info.DeletedAt, clitime.Minute)))
 				}
 
 				agents = append(agents, agentEntry)
@@ -275,6 +309,57 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	}
 
 	return agents, nil
+}
+
+// createdAgentLabels approximates the label set a created agent's
+// container would carry once started (see the Labels/Annotations built for
+// runtime.RunConfig in run.go), for matching List's filter against an
+// on-disk agent. Template and harness config are the values recorded at
+// create time (start may resolve them again); harness auth is resolved only
+// at start, so it is normally empty here. projectID is consulted only when filter asks for the
+// project ID, because resolving it loads the project's settings.
+func createdAgentLabels(name, projectName, projectPath string, info *api.AgentInfo, filter map[string]string, projectID func() string) map[string]string {
+	labels := map[string]string{
+		"scion.agent":          "true",
+		"scion.name":           name,
+		"scion.template":       info.Template,
+		"scion.harness_config": info.HarnessConfig,
+		"scion.harness_auth":   info.HarnessAuth,
+	}
+	for k, v := range projectkeys.ProjectNameLabels(projectName) {
+		labels[k] = v
+	}
+	for k, v := range projectkeys.ProjectPathLabels(projectPath) {
+		labels[k] = v
+	}
+	if _, ok := filter[projectkeys.LabelProjectID]; ok {
+		if id := projectID(); id != "" {
+			for k, v := range projectkeys.ProjectIDLabels(id) {
+				labels[k] = v
+			}
+		}
+	}
+	return labels
+}
+
+// lazyHubProjectID returns a memoised lookup of projectDir's Hub-linked
+// project ID (settings.Hub.ProjectID), the value run.go labels a locally
+// started container with. It is not the local project-id marker that
+// agent-info.json records as ProjectID.
+func lazyHubProjectID(projectDir string) func() string {
+	var (
+		loaded bool
+		id     string
+	)
+	return func() string {
+		if !loaded {
+			loaded = true
+			if settings, _, err := config.LoadEffectiveSettings(projectDir); err == nil && settings != nil && settings.Hub != nil {
+				id = settings.Hub.ProjectID
+			}
+		}
+		return id
+	}
 }
 
 func terminalRuntimePhase(agent api.AgentInfo) string {

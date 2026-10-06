@@ -124,6 +124,24 @@ server:
     # soft_delete_retention: "72h"     # Layer 1 (section: lifecycle)
     # soft_delete_retain_files: false  # Layer 1 (section: lifecycle)
     # public_url: ""                   # Layer 1 (section: endpoints)
+    # async_agent_launch: false        # Layer 0 (restart required). Reserved: no
+    #                                   # create path reads this yet, so setting it
+    #                                   # has no effect until the async dispatch path
+    #                                   # lands. Once live: non-blocking agent create
+    #                                   # kill switch, off by default. A launch is
+    #                                   # non-blocking only when this is on AND the
+    #                                   # request also opts in (acceptAsyncLaunch);
+    #                                   # old clients that never opt in stay
+    #                                   # synchronous permanently.
+    # launch_timeout: "5m"             # Layer 0 (restart required). Reserved: not
+    #                                   # yet read by any create path. Once live:
+    #                                   # whole-launch budget from BeginLaunch. The
+    #                                   # API already advertises the remaining
+    #                                   # budget; no client sizes its wait around it
+    #                                   # yet (planned CLI behavior).
+    # launch_keepalive_seconds: 15     # Layer 0 (restart required). Broker keepalive
+    #                                   # interval; the reaper's staleness window is
+    #                                   # 8x this value.
 
   # -------------------------------------------------------------------------
   # Layer 0 — Broker (restart required)

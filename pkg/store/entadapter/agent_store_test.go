@@ -342,6 +342,38 @@ func TestAgentStore_UpdateAgentExposedPorts(t *testing.T) {
 	assert.ErrorIs(t, s.UpdateAgentExposedPorts(ctx, uuid.NewString(), ports), store.ErrNotFound)
 }
 
+// TestAgentStore_ExposedPortsStoredUTC checks that ExposedAt, a time embedded
+// in the agents.exposed_ports JSON column (out of reach of the ent UTC
+// mutation hook), is stored in UTC by both writers, at the same instant, and
+// that the caller's slice is not modified.
+func TestAgentStore_ExposedPortsStoredUTC(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	plus2 := time.Date(2030, 1, 1, 12, 0, 0, 500, time.FixedZone("", 2*3600))
+	a := makeAgent(projectID, "ports-utc")
+	a.ExposedPorts = []store.ExposedPort{{Port: 3000, ExposedAt: plus2, ExposedBy: "agent"}}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	assert.Equal(t, plus2.Location(), a.ExposedPorts[0].ExposedAt.Location(), "CreateAgent must not modify the caller's slice")
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+	assert.Equal(t, time.UTC, got.ExposedPorts[0].ExposedAt.Location(), "CreateAgent: ExposedAt location")
+	assert.True(t, got.ExposedPorts[0].ExposedAt.Equal(plus2), "CreateAgent: ExposedAt instant")
+
+	kathmandu := time.Date(2030, 6, 1, 9, 45, 0, 0, time.FixedZone("+0545", 5*3600+45*60))
+	ports := []store.ExposedPort{{Port: 4000, ExposedAt: kathmandu, ExposedBy: "agent"}}
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, a.ID, ports))
+	assert.Equal(t, kathmandu.Location(), ports[0].ExposedAt.Location(), "UpdateAgentExposedPorts must not modify the caller's slice")
+
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Len(t, got.ExposedPorts, 1)
+	assert.Equal(t, time.UTC, got.ExposedPorts[0].ExposedAt.Location(), "UpdateAgentExposedPorts: ExposedAt location")
+	assert.Equal(t, "2030-06-01T04:00:00Z", got.ExposedPorts[0].ExposedAt.Format(time.RFC3339Nano))
+}
+
 // TestAgentStore_TerminalPhaseClearsStalledActivity verifies that transitioning
 // to a terminal phase (stopped/error) without an explicit activity clears a
 // lingering live activity such as "stalled", while preserving terminal
@@ -793,7 +825,7 @@ func TestAgentStore_AppliedConfigValidatedOnRead(t *testing.T) {
 		require.NoError(t, err, "one bad field must not make the agent unreadable")
 		require.NotNil(t, got.AppliedConfig)
 		assert.Nil(t, got.AppliedConfig.GCPIdentity,
-			"an unusable metadata mode must not reach callers; the agent falls back to the secure default")
+			"an unusable metadata mode must not reach callers; the agent falls back to the runtime default")
 		assert.Equal(t, "img:1", got.AppliedConfig.Image)
 	})
 
@@ -1287,4 +1319,616 @@ func TestListAgentsWithStaleNonTerminalReincarnationState_ExcludesAgentWithNonTe
 	}
 	assert.True(t, ids[orphan.ID], "a stale agent with no matching record must be included")
 	assert.False(t, ids[owned.ID], "a stale agent with a fresh non-terminal record must be excluded")
+}
+
+// TestAgentStore_HarnessConfigFilter verifies filtering agents by the
+// harness_config shadow column (pkg/ent/schema/agent.go), which
+// CreateAgent/UpdateAgent keep in sync with the top-level
+// AppliedConfig.HarnessConfig (ptone/scion#2146). These tests execute the
+// real predicate (agent.HarnessConfigEQ) via ListAgents, not a
+// hand-simulation of it.
+func TestAgentStore_HarnessConfigFilter(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	claude := makeAgent(projectID, "claude-agent")
+	claude.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+	require.NoError(t, s.CreateAgent(ctx, claude))
+
+	gemini := makeAgent(projectID, "gemini-agent")
+	gemini.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "gemini"}
+	require.NoError(t, s.CreateAgent(ctx, gemini))
+
+	none := makeAgent(projectID, "no-config-agent")
+	require.NoError(t, s.CreateAgent(ctx, none))
+
+	byClaude, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, byClaude.TotalCount)
+	require.Len(t, byClaude.Items, 1)
+	assert.Equal(t, claude.ID, byClaude.Items[0].ID)
+
+	byGemini, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "gemini"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, byGemini.TotalCount)
+	require.Len(t, byGemini.Items, 1)
+	assert.Equal(t, gemini.ID, byGemini.Items[0].ID)
+
+	noMatch, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "codex"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, noMatch.TotalCount)
+	assert.Empty(t, noMatch.Items)
+
+	// Unfiltered listing still returns all three, including the agent with no
+	// applied_config at all (must not error on a NULL/empty column).
+	all, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 3, all.TotalCount)
+}
+
+// TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case:
+// with no Env map at all, filtering by HarnessConfig must still match
+// exactly the top-level value and nothing else.
+func TestAgentStore_HarnessConfigFilter_NoEnv(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "no-env-agent")
+	a.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	result, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, a.ID, result.Items[0].ID)
+}
+
+// TestAgentStore_HarnessConfigFilter_CreateInputsDivergence covers an agent
+// whose live, top-level HarnessConfig ("gemini") differs from
+// CreateInputs.HarnessConfig ("claude") — reachable in production because
+// the broker overwrites AppliedConfig.HarnessConfig after create
+// (pkg/hub/httpdispatcher.go) while CreateInputs stays frozen at the
+// create-time value. Filtering by "claude" must NOT match this agent;
+// filtering by "gemini" must.
+func TestAgentStore_HarnessConfigFilter_CreateInputsDivergence(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "diverged-agent")
+	a.AppliedConfig = &store.AgentAppliedConfig{
+		HarnessConfig: "gemini",
+		CreateInputs:  &store.AgentCreateInputs{HarnessConfig: "claude"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	byCreateInputsValue, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, byCreateInputsValue.Items,
+		"CreateInputs.HarnessConfig must never match — only the live, top-level value does")
+
+	byLiveValue, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "gemini"}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, byLiveValue.Items, 1)
+	assert.Equal(t, a.ID, byLiveValue.Items[0].ID)
+}
+
+// TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow covers: a corrupt
+// applied_config row (a plain Ent field.Text column, not schema-validated
+// JSON) must not break a HarnessConfig-filtered query. With the harness_config
+// shadow column, this is now trivially true rather than merely
+// guard-verified: the filter predicate (agent.HarnessConfigEQ) never reads
+// applied_config at all, so a corrupt applied_config value simply can't
+// reach the query — it can only ever affect whether the shadow column was
+// populated in the first place (see BackfillHarnessConfigColumn's own
+// corrupt-row handling for the backfill path).
+func TestAgentStore_HarnessConfigFilter_TolerantOfCorruptRow(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	claude := makeAgent(projectID, "claude-agent-corrupt-test")
+	claude.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+	require.NoError(t, s.CreateAgent(ctx, claude))
+
+	corrupt := makeAgent(projectID, "corrupt-applied-config-agent")
+	corrupt.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "gemini"}
+	require.NoError(t, s.CreateAgent(ctx, corrupt))
+
+	// Corrupt the row's applied_config directly at the column level, leaving
+	// harness_config (already set to "gemini" at create time) untouched —
+	// exactly like production data whose applied_config was hand-edited or
+	// written by a stricter/older writer, but whose harness_config shadow
+	// column was already correctly populated.
+	corruptUID, err := uuid.Parse(corrupt.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(corruptUID).SetAppliedConfig("{not json").Save(ctx)
+	require.NoError(t, err)
+
+	result, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+	require.NoError(t, err, "a corrupt applied_config row on an unrelated agent must not fail the whole query")
+	require.Len(t, result.Items, 1)
+	assert.Equal(t, claude.ID, result.Items[0].ID)
+
+	// The corrupt-applied_config row's harness_config column is untouched by
+	// the corruption (it's a separate column) and still filters correctly.
+	byCorruptRowsHarness, err := s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "gemini"}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, byCorruptRowsHarness.Items, 1)
+	assert.Equal(t, corrupt.ID, byCorruptRowsHarness.Items[0].ID)
+
+	// The unfiltered listing already tolerated a corrupt applied_config
+	// (parseAppliedConfig logs and continues) — confirm that still holds.
+	all, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 2, all.TotalCount)
+}
+
+// TestAgentStore_RequestedOwnerIDFilter verifies that RequestedOwnerID is a
+// plain AND filter, independent of the OwnerID/MemberOrOwnerProjectIDs
+// OR-based Mine/Shared classification (ptone/scion#2146). This is the
+// regression the field exists to prevent: if a caller-supplied owner filter
+// were folded into that OR clause instead, combining it with a "mine"-style
+// classification would silently widen results to every agent in the
+// classification's owned/member projects, not just the ones actually owned
+// by the requested principal.
+func TestAgentStore_RequestedOwnerIDFilter(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	ownerA := uuid.NewString()
+	ownerB := uuid.NewString()
+
+	a1 := makeAgent(projectID, "owner-a-1")
+	a1.OwnerID = ownerA
+	require.NoError(t, s.CreateAgent(ctx, a1))
+
+	a2 := makeAgent(projectID, "owner-a-2")
+	a2.OwnerID = ownerA
+	require.NoError(t, s.CreateAgent(ctx, a2))
+
+	b1 := makeAgent(projectID, "owner-b-1")
+	b1.OwnerID = ownerB
+	require.NoError(t, s.CreateAgent(ctx, b1))
+
+	// Plain RequestedOwnerID: only ownerA's agents.
+	byOwner, err := s.ListAgents(ctx, store.AgentFilter{RequestedOwnerID: ownerA}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{a1.ID, a2.ID}, ids(byOwner.Items))
+
+	// Combined with MemberOrOwnerProjectIDs (the "mine" OR-branch), the
+	// RequestedOwnerID restriction to ownerB must still AND — not fall into
+	// the OR — so agents owned by ownerA in the same project are excluded
+	// even though the project itself is in MemberOrOwnerProjectIDs.
+	combined, err := s.ListAgents(ctx, store.AgentFilter{
+		MemberOrOwnerProjectIDs: []string{projectID},
+		RequestedOwnerID:        ownerB,
+	}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{b1.ID}, ids(combined.Items),
+		"RequestedOwnerID must AND with MemberOrOwnerProjectIDs, not OR into it")
+
+	none, err := s.ListAgents(ctx, store.AgentFilter{RequestedOwnerID: uuid.NewString()}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, none.Items)
+}
+
+// TestAgentStore_IDsFilter verifies the IDs restriction backing relationship
+// queries such as CLI --ancestors (ptone/scion#2146): nil means unrestricted,
+// an empty non-nil slice fails closed to zero rows (mirroring
+// AuthorizedProjectIDs). In production, "skip entries that are users, not
+// agents" falls out for free because a user ID — a perfectly valid UUID —
+// simply matches no row in the agents table; the test below additionally
+// checks a genuinely malformed (non-UUID) entry, which parseUUIDList drops
+// rather than erroring on, as a separate defensive fallback for corrupt data.
+func TestAgentStore_IDsFilter(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a1 := makeAgent(projectID, "ids-1")
+	require.NoError(t, s.CreateAgent(ctx, a1))
+	a2 := makeAgent(projectID, "ids-2")
+	require.NoError(t, s.CreateAgent(ctx, a2))
+
+	t.Run("nil applies no restriction", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: nil}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 2, result.TotalCount)
+	})
+
+	t.Run("empty non-nil returns zero results", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{}}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.TotalCount)
+		assert.Empty(t, result.Items)
+	})
+
+	t.Run("matching ID returns only that agent", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID}}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, a1.ID, result.Items[0].ID)
+	})
+
+	t.Run("mix of agent ID and a real user ID (valid UUID, no agent row) skips the latter", func(t *testing.T) {
+		// This is the actual production path "skip entries that are users,
+		// not agents" takes: a user ID is a perfectly valid UUID, it just
+		// never matches any row in the agents table. The malformed,
+		// non-UUID entry below exercises the separate parseUUIDList drop
+		// path instead.
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, uuid.NewString()}}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, a1.ID, result.Items[0].ID)
+	})
+
+	t.Run("mix of agent ID and a genuinely malformed (non-UUID) entry skips the latter", func(t *testing.T) {
+		// Distinct from the case above: this exercises parseUUIDList's
+		// drop-on-parse-failure fallback for corrupt data, not the normal
+		// user-ID-in-Ancestry path.
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, "not-a-uuid-at-all"}}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, result.Items, 1)
+		assert.Equal(t, a1.ID, result.Items[0].ID)
+	})
+
+	t.Run("all invalid IDs fail closed to zero rows", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{"garbage-1", "garbage-2"}}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, result.TotalCount)
+	})
+
+	t.Run("multiple valid IDs return all matches", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{IDs: []string{a1.ID, a2.ID}}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{a1.ID, a2.ID}, ids(result.Items))
+	})
+}
+
+// TestAgentStore_LineageRootIDFilter verifies LineageRootID returns the root
+// itself plus all of its transitive descendants (ptone/scion#2146), backing
+// CLI --lineage. The root is resolved client-side; this only exercises the
+// store's OR(id==root, ancestry contains root) predicate.
+func TestAgentStore_LineageRootIDFilter(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	root := makeAgent(projectID, "lineage-root")
+	require.NoError(t, s.CreateAgent(ctx, root))
+
+	child := makeAgent(projectID, "lineage-child")
+	child.Ancestry = []string{root.ID}
+	require.NoError(t, s.CreateAgent(ctx, child))
+
+	grandchild := makeAgent(projectID, "lineage-grandchild")
+	grandchild.Ancestry = []string{root.ID, child.ID}
+	require.NoError(t, s.CreateAgent(ctx, grandchild))
+
+	unrelated := makeAgent(projectID, "lineage-unrelated")
+	require.NoError(t, s.CreateAgent(ctx, unrelated))
+
+	result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: root.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{root.ID, child.ID, grandchild.ID}, ids(result.Items),
+		"lineage must include the root itself plus every transitive descendant, and nothing unrelated")
+
+	t.Run("root with no descendants returns just the root", func(t *testing.T) {
+		lonely := makeAgent(projectID, "lineage-lonely")
+		require.NoError(t, s.CreateAgent(ctx, lonely))
+
+		result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: lonely.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{lonely.ID}, ids(result.Items))
+	})
+
+	t.Run("a root ID matching nobody returns zero rows", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: uuid.NewString()}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, result.Items)
+	})
+
+	t.Run("root can be a user ID (never matches IDEQ, only ancestryContains)", func(t *testing.T) {
+		userRoot := uuid.NewString()
+		userChild := makeAgent(projectID, "lineage-user-child")
+		userChild.Ancestry = []string{userRoot}
+		require.NoError(t, s.CreateAgent(ctx, userChild))
+
+		result, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: userRoot}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{userChild.ID}, ids(result.Items),
+			"a user-ID root never matches any agent's ID, but still surfaces its descendants")
+	})
+}
+
+// TestAgentStore_LineageRootIDFilter_AgreesWithCascadeMessageModeQuery pins
+// ptone's explicit requirement that --lineage's predicate cannot drift from
+// cascadeMessageMode's (pkg/hub/handlers_agent_message_mode.go): both must
+// identify the same descendant set for the same root. cascadeMessageMode
+// queries AgentFilter{ProjectID, AncestorID: root.ID} and handles the root
+// itself separately (skipping it in the loop); LineageRootID is exactly
+// {root} UNION that same AncestorID query. This test proves the union holds
+// exactly, so a future change to either query shape that breaks the
+// agreement fails here first.
+func TestAgentStore_LineageRootIDFilter_AgreesWithCascadeMessageModeQuery(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	root := makeAgent(projectID, "cascade-agree-root")
+	require.NoError(t, s.CreateAgent(ctx, root))
+
+	child := makeAgent(projectID, "cascade-agree-child")
+	child.Ancestry = []string{root.ID}
+	require.NoError(t, s.CreateAgent(ctx, child))
+
+	grandchild := makeAgent(projectID, "cascade-agree-grandchild")
+	grandchild.Ancestry = []string{root.ID, child.ID}
+	require.NoError(t, s.CreateAgent(ctx, grandchild))
+
+	unrelated := makeAgent(projectID, "cascade-agree-unrelated")
+	require.NoError(t, s.CreateAgent(ctx, unrelated))
+
+	// The exact query shape cascadeMessageMode uses to find descendants to
+	// cascade a mode change to (root excluded — it is updated separately by
+	// that function's caller).
+	cascadeDescendants, err := s.ListAgents(ctx, store.AgentFilter{
+		ProjectID:  projectID,
+		AncestorID: root.ID,
+	}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+
+	lineage, err := s.ListAgents(ctx, store.AgentFilter{LineageRootID: root.ID}, store.ListOptions{})
+	require.NoError(t, err)
+
+	wantLineageIDs := append([]string{root.ID}, ids(cascadeDescendants.Items)...)
+	assert.ElementsMatch(t, wantLineageIDs, ids(lineage.Items),
+		"--lineage must equal {root} UNION cascadeMessageMode's descendant query — they must not drift apart")
+}
+
+// TestAgentStore_NoWidening_NewFiltersRespectAuthorizedProjectIDs is the
+// regression test ptone/scion#2146 calls for explicitly: the new ownerId,
+// ancestorId, and IDs (relationship) filters must never widen the listable
+// set beyond what AuthorizedProjectIDs already scoped. An agent in an
+// unauthorized project stays hidden even when it also matches AncestorID,
+// RequestedOwnerID, or an explicit IDs restriction — because every predicate
+// in agentFilterPredicates is combined with AND at the query level, never OR.
+func TestAgentStore_NoWidening_NewFiltersRespectAuthorizedProjectIDs(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+
+	authorizedProjectUID := uuid.MustParse("c0000000-0000-0000-0000-000000000001")
+	unauthorizedProjectUID := uuid.MustParse("d0000000-0000-0000-0000-000000000002")
+	_, err := client.Project.Create().
+		SetID(authorizedProjectUID).SetName("authorized").SetSlug("authorized").
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.Project.Create().
+		SetID(unauthorizedProjectUID).SetName("unauthorized").SetSlug("unauthorized").
+		Save(ctx)
+	require.NoError(t, err)
+
+	s := NewAgentStore(client)
+
+	sharedOwner := uuid.NewString()
+	sharedAncestor := "shared-ancestor"
+
+	visible := makeAgent(authorizedProjectUID.String(), "visible")
+	visible.OwnerID = sharedOwner
+	visible.Ancestry = []string{sharedAncestor}
+	require.NoError(t, s.CreateAgent(ctx, visible))
+
+	// hidden matches every new filter's value, but lives in a project outside
+	// AuthorizedProjectIDs. It must never appear in a result that carries
+	// AuthorizedProjectIDs, no matter which new filter is combined with it.
+	hidden := makeAgent(unauthorizedProjectUID.String(), "hidden")
+	hidden.OwnerID = sharedOwner
+	hidden.Ancestry = []string{sharedAncestor}
+	require.NoError(t, s.CreateAgent(ctx, hidden))
+
+	authorizedScope := []string{authorizedProjectUID.String()}
+
+	t.Run("ancestorId does not resurrect an unauthorized-project agent", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: authorizedScope,
+			AncestorID:           sharedAncestor,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{visible.ID}, ids(result.Items))
+	})
+
+	t.Run("ownerId does not resurrect an unauthorized-project agent", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: authorizedScope,
+			RequestedOwnerID:     sharedOwner,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{visible.ID}, ids(result.Items))
+	})
+
+	t.Run("an explicit IDs restriction naming the hidden agent still excludes it", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: authorizedScope,
+			IDs:                  []string{visible.ID, hidden.ID},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{visible.ID}, ids(result.Items),
+			"IDs must intersect with AuthorizedProjectIDs, never bypass it")
+	})
+
+	t.Run("lineageRootId naming the hidden agent as root does not reveal it", func(t *testing.T) {
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: authorizedScope,
+			LineageRootID:        hidden.ID,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, result.Items,
+			"an unauthorized agent used as the lineage root must not be revealed, even as the root itself")
+	})
+
+	t.Run("lineageRootId set to a shared ancestor does not resurrect the hidden descendant", func(t *testing.T) {
+		// Ancestry is fixed at creation (UpdateAgent never touches it), so
+		// this needs its own fixtures rather than mutating visible/hidden.
+		sharedRoot := uuid.NewString()
+		visibleDescendant := makeAgent(authorizedProjectUID.String(), "visible-descendant")
+		visibleDescendant.Ancestry = []string{sharedRoot}
+		require.NoError(t, s.CreateAgent(ctx, visibleDescendant))
+
+		hiddenDescendant := makeAgent(unauthorizedProjectUID.String(), "hidden-descendant")
+		hiddenDescendant.Ancestry = []string{sharedRoot}
+		require.NoError(t, s.CreateAgent(ctx, hiddenDescendant))
+
+		result, err := s.ListAgents(ctx, store.AgentFilter{
+			AuthorizedProjectIDs: authorizedScope,
+			LineageRootID:        sharedRoot,
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{visibleDescendant.ID}, ids(result.Items))
+	})
+}
+
+func TestUpdateAgentStatus_ClearMessageIf(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "clear-message-if")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	const notice = "Stop queued: broker offline."
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: notice}))
+
+	// A different value leaves the message in place.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		ContainerStatus: "stopped",
+		ClearMessageIf:  "some other notice",
+	}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, notice, got.Message)
+	assert.Equal(t, "stopped", got.ContainerStatus)
+
+	// The matching value clears it.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ClearMessageIf: notice}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Message)
+
+	// An explicit message in the same update wins.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: notice}))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: "newer", ClearMessageIf: notice}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "newer", got.Message)
+}
+
+// IfPhase makes UpdateAgentStatus conditional on the stored phase
+// (ptone/scion#2014): a mismatch writes nothing and returns ErrPhaseMismatch,
+// which is a version conflict.
+func TestUpdateAgentStatus_IfPhase(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "if-phase")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+
+	err := s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting", Message: "x", IfPhase: "stopped"})
+	require.ErrorIs(t, err, store.ErrPhaseMismatch)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Empty(t, got.Message, "a mismatched update writes nothing")
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfPhase: "running"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+}
+
+// IfRunID makes UpdateAgentStatus conditional on the stored run_id
+// (ptone/scion#2550): a mismatch writes nothing and returns ErrRunChanged,
+// which is a version conflict; a match applies; an empty IfRunID does not
+// check the run.
+func TestUpdateAgentStatus_IfRunID(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "if-run-id")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-new")
+	require.NoError(t, err)
+
+	err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", ContainerStatus: "stopped", IfRunID: "run-old"})
+	require.ErrorIs(t, err, store.ErrRunChanged)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "a mismatched update writes nothing")
+	assert.NotEqual(t, "stopped", got.ContainerStatus)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped", IfRunID: "run-new"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase, "an empty IfRunID applies unconditionally")
+}
+
+// ClearTerminalRemnants applies the stopped/error -> running clear whatever
+// the stored phase (ptone/scion#2014): message (unless set on the update),
+// stalled marker, exit code and reason.
+func TestUpdateAgentStatus_ClearTerminalRemnants(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "clear-remnants")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	code := 137
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: "starting", Message: "Agent crashed with exit code 137", ExitCode: &code, ExitReason: "crashed",
+	}))
+	row, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	row.StalledFromActivity = "working"
+	require.NoError(t, s.UpdateAgent(ctx, row))
+
+	// Without the flag, starting -> running keeps them.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, got.Message)
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", ClearTerminalRemnants: true}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Message)
+	assert.Empty(t, got.StalledFromActivity)
+	assert.Empty(t, got.ExitReason)
+	assert.Nil(t, got.ExitCode)
+
+	// An explicit message in the same update wins.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: "fresh", ClearTerminalRemnants: true}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh", got.Message)
+}
+
+// SetAgentWorkspacePlacement writes a live row, and leaves a soft-deleted
+// row untouched with ErrNotFound.
+func TestAgentStore_SetAgentWorkspacePlacementSkipsSoftDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "placement-soft-deleted")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.SetAgentWorkspacePlacement(ctx, a.ID, "export"))
+
+	a.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, a))
+
+	err := s.SetAgentWorkspacePlacement(ctx, a.ID, "local")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	row, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "export", row.WorkspacePlacement, "a soft-deleted row is left unchanged")
+	assert.NotNil(t, row.DeletedAt)
+
+	assert.ErrorIs(t, s.SetAgentWorkspacePlacement(ctx, uuid.NewString(), "export"), store.ErrNotFound)
 }

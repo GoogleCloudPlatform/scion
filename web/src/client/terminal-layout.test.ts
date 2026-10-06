@@ -351,6 +351,114 @@ describe('TerminalLayoutManager', () => {
     });
   });
 
+  describe('addOrReplaceFocused: the "Jump to agent" palette never collapses a full grid', () => {
+    it('fills the first empty slot, exactly like open(), when the preset has room', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.setLayout('four');
+
+      m.addOrReplaceFocused('agent-b', 'agent-a');
+
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', null, null]);
+      expect(m.getState().single[0]).toBe('agent-b');
+    });
+
+    it('replaces the focused slot instead of overflowing to single when the grid is full', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.place('agent-c', 'four', 2);
+      m.place('agent-d', 'four', 3);
+      m.setLayout('four');
+
+      m.addOrReplaceFocused('agent-e', 'agent-c');
+
+      // Unlike open()'s overflow, the grid stays up and agent-c's slot (2)
+      // is replaced in place — the other three panes are untouched.
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', 'agent-e', 'agent-d']);
+      expect(m.getState().single[0]).toBe('agent-e');
+    });
+
+    it('falls back to slot 0 when the full grid is at capacity but the focused key is null', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.place('agent-c', 'four', 2);
+      m.place('agent-d', 'four', 3);
+      m.setLayout('four');
+
+      m.addOrReplaceFocused('agent-e', null);
+
+      expect(m.getState().active).toBe('four');
+      expect(m.getState().four).toEqual(['agent-e', 'agent-b', 'agent-c', 'agent-d']);
+    });
+
+    it('falls back to slot 0 when the focused key is full but not present in the active preset', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.place('agent-c', 'four', 2);
+      m.place('agent-d', 'four', 3);
+      m.setLayout('four');
+
+      // 'agent-z' isn't in any slot of the active ('four') preset.
+      m.addOrReplaceFocused('agent-e', 'agent-z');
+
+      expect(m.getState().four).toEqual(['agent-e', 'agent-b', 'agent-c', 'agent-d']);
+    });
+
+    it('replaces in a two-pane preset at capacity too, not just four', () => {
+      const m = manager();
+      m.place('agent-a', 'two-columns', 0);
+      m.place('agent-b', 'two-columns', 1);
+      m.setLayout('two-columns');
+
+      m.addOrReplaceFocused('agent-c', 'agent-b');
+
+      expect(m.getState().active).toBe('two-columns');
+      expect(m.getState().twoColumns).toEqual(['agent-a', 'agent-c']);
+    });
+
+    it('selects without duplicating when the session is already in the active preset', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.setLayout('four');
+
+      m.addOrReplaceFocused('agent-a', 'agent-b');
+
+      expect(m.getState().four).toEqual(['agent-a', 'agent-b', null, null]);
+      expect(m.getState().single[0]).toBe('agent-a');
+    });
+
+    it('in single mode, just selects — there is no grid to preserve', () => {
+      const m = manager();
+      m.open('agent-a');
+
+      m.addOrReplaceFocused('agent-b', 'agent-a');
+
+      expect(m.getState().active).toBe('single');
+      expect(m.getState().single[0]).toBe('agent-b');
+    });
+
+    it('cancels zoom when replacing a focused slot at capacity', () => {
+      const m = manager();
+      m.place('agent-a', 'four', 0);
+      m.place('agent-b', 'four', 1);
+      m.place('agent-c', 'four', 2);
+      m.place('agent-d', 'four', 3);
+      m.setLayout('four');
+      m.zoom('agent-a');
+      expect(m.getZoomed()).toBe('agent-a');
+
+      m.addOrReplaceFocused('agent-e', 'agent-a');
+
+      expect(m.getZoomed()).toBeNull();
+    });
+  });
+
   describe('setLayout', () => {
     it('changes active preset without modifying assignments', () => {
       const m = manager();

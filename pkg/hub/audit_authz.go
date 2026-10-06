@@ -33,38 +33,10 @@ import (
 // Decision Audit Emitter
 // =============================================================================
 
-// auditWriteTimeout is the maximum time an async audit INSERT may take before
-// the goroutine abandons the attempt and releases its store reference.
+// auditWriteTimeout is the maximum time an async mutation audit INSERT may
+// take before the goroutine abandons the attempt and releases its store
+// reference.
 const auditWriteTimeout = 1 * time.Second
-
-// StoreDecisionAuditEmitter implements DecisionAuditEmitter using the store.
-type StoreDecisionAuditEmitter struct {
-	store  store.Store
-	logger *slog.Logger
-}
-
-// NewStoreDecisionAuditEmitter creates a new store-backed decision audit emitter.
-func NewStoreDecisionAuditEmitter(s store.Store, logger *slog.Logger) *StoreDecisionAuditEmitter {
-	return &StoreDecisionAuditEmitter{store: s, logger: logger}
-}
-
-// EmitDecisionAudit stores a decision audit record asynchronously.
-func (e *StoreDecisionAuditEmitter) EmitDecisionAudit(ctx context.Context, record *store.DecisionAuditRecord) {
-	// Fire-and-forget in a goroutine to avoid blocking the authorization hot path.
-	// Uses a short timeout context to prevent goroutine/memory leaks on shutdown.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				e.logger.Warn("recovered panic in decision audit emit", "panic", r)
-			}
-		}()
-		writeCtx, cancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-		defer cancel()
-		if err := e.store.CreateDecisionAudit(writeCtx, record); err != nil {
-			e.logger.Warn("failed to emit decision audit record", "error", err)
-		}
-	}()
-}
 
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
@@ -102,10 +74,20 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		result = "allow"
 	}
 
+	// On a decorated Decision, PrincipalID is the principal ID Decide
+	// evaluated, including an empty ID for an identity that derived none.
+	// request.Principal.ID, the caller-supplied AuthzRequest field, is used
+	// only for an undecorated Decision (e.g. a non-Decide caller of this
+	// function that built a Decision by hand).
+	principalID := decision.PrincipalID
+	if !decision.principalDecorated {
+		principalID = request.Principal.ID
+	}
+
 	record := &store.DecisionAuditRecord{
 		Timestamp:      time.Now(),
 		PrincipalKind:  string(decision.PrincipalKind),
-		PrincipalID:    request.Principal.ID,
+		PrincipalID:    principalID,
 		CredentialID:   decision.CredentialID,
 		CredentialType: decision.CredentialKind,
 		ResourceType:   request.Resource.Type,
@@ -118,6 +100,7 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		MatchedGrant:   decision.MatchedGrant,
 		PolicyID:       decision.BindingID,
 		CorrelationID:  logging.RequestIDFromContext(ctx),
+		DeniedBy:       string(decision.DeniedBy),
 	}
 
 	if route := routeFromContext(ctx); route != "" {
@@ -791,6 +774,13 @@ func (a *explainAgentIdentity) Scopes() []AgentTokenScope     { return nil }
 func (a *explainAgentIdentity) HasScope(AgentTokenScope) bool { return false }
 func (a *explainAgentIdentity) Ancestry() []string            { return a.ancestry }
 func (a *explainAgentIdentity) TokenID() string               { return "" }
+
+// localAncestryProvenance reports that this ancestry chain was read back
+// from a hub-persisted store.Agent record, not from a JWT.
+func (a *explainAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceStoreAgent
+}
+
 func (a *explainAgentIdentity) OriginUserID() string {
 	if len(a.ancestry) > 0 {
 		return a.ancestry[0]

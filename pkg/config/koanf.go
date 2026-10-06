@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -59,6 +60,22 @@ func resetDetectLocalRuntimeCache() {
 // 4. External project config settings (for git projects with split storage)
 // 5. Environment variables (SCION_ prefix, top-level only)
 func LoadSettingsKoanf(projectPath string) (*Settings, error) {
+	return loadSettingsKoanf(projectPath, false)
+}
+
+// LoadSettingsIgnoringEnvProjectID is LoadSettingsKoanf without the
+// SCION_PROJECT_ID / SCION_HUB_PROJECT_ID environment overlay on project_id.
+// All other environment variables still apply.
+//
+// It is for callers that resolve an explicitly named project (the --project
+// or --global flag): the project ID must come from that project's own
+// settings, not from the environment of the agent container the CLI runs
+// in (ptone/scion#3123).
+func LoadSettingsIgnoringEnvProjectID(projectPath string) (*Settings, error) {
+	return loadSettingsKoanf(projectPath, true)
+}
+
+func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults (YAML with fallback to JSON)
@@ -126,9 +143,11 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	// Environment variables like SCION_PROJECT, SCION_CREATOR do not map to
 	// Settings struct fields and would produce false-positive warnings if the
 	// check ran on the merged koanf instance.
-	{
-		var probe Settings
-		_ = unmarshalWithUnusedKeyCheck(k, &probe, "settings")
+	if settingsUnused, err := decodeCollectingUnused(k, settingsProbeStruct(false)); err == nil {
+		warnSettingsUnusedKeys(k, settingsUnused, func() bool {
+			hasVersioned, _ := detectHierarchyFormat(projectPath)
+			return hasVersioned
+		}, "settings", settingsHierarchySources(globalDir, projectPath, effectiveProjectPath))
 	}
 
 	// 5. Load environment variables (SCION_ prefix, top-level only)
@@ -144,7 +163,17 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
 	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
 		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
+			if ignoreEnvProjectID {
+				return ""
+			}
 			return mapped
+		}
+		if isSettingsExcludedEnv(s) {
+			// See settingsExcludedEnvVars for every excluded name and the
+			// reason. Dropping them here too keeps this legacy mapper in
+			// sync with settings_v1.go's versionedEnvKeyMapper (a bare
+			// SCION_HUB, for one, collides with Settings.Hub).
+			return ""
 		}
 		if isRemovedLegacyEnv(s) {
 			// SCION_HUB_GROVE_ID is no longer read. Without this check
@@ -270,10 +299,46 @@ func LoadSettingsFromDir(dir string) (*Settings, error) {
 		Harnesses: make(map[string]HarnessConfig),
 		Profiles:  make(map[string]ProfileConfig),
 	}
-	if err := unmarshalWithUnusedKeyCheck(k, settings, "settings"); err != nil {
+	settingsUnused, err := decodeCollectingUnused(k, settings)
+	if err != nil {
 		return nil, err
 	}
+	warnSettingsUnusedKeys(k, settingsUnused, func() bool {
+		hasVersioned, _ := detectDirSettingsFormat(dir)
+		return hasVersioned
+	}, "settings", settingsHierarchySources(dir))
 	return settings, nil
+}
+
+// settingsHierarchySources resolves each directory to its settings file path
+// (if any) for the unused-keys warning's dedup key and log message. Empty
+// directories and directories with no settings file are omitted; each
+// resolved path is made absolute (like serverConfigSources, and without
+// symlink resolution, for the same reason) before the dedup check so that a
+// relative and absolute spelling of the same directory (e.g. projectPath and
+// effectiveProjectPath) collapse to one entry instead of being warned about
+// twice.
+func settingsHierarchySources(dirs ...string) []string {
+	seen := make(map[string]struct{}, len(dirs))
+	var out []string
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		path := GetSettingsPath(dir)
+		if path == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	return out
 }
 
 // loadVersionedSettingsFileOnly is LoadVersionedSettings restricted to a
@@ -563,8 +628,28 @@ func ScionAgentConfigExists(dir string) bool {
 // unmarshalWithUnusedKeyCheck unmarshals the koanf instance into the target struct
 // and logs a warning for any config keys that do not map to struct fields.
 // It uses mapstructure's Metadata to collect unused keys without causing a hard error.
-// The label parameter identifies the config source in warning messages (e.g. "settings", "server config").
-func unmarshalWithUnusedKeyCheck(k *koanf.Koanf, target interface{}, label string) error {
+// The label parameter identifies the config source in warning messages (e.g.
+// "settings", "server config"); sources are the resolved file path(s) the
+// warning applies to, used to scope the once-per-process dedup and named in
+// the log message.
+//
+// This is for config shapes that have exactly one valid schema (e.g.
+// GlobalConfig/server config). Settings (settings.yaml) has two — legacy
+// Settings and v1 VersionedSettings — and needs warnSettingsUnusedKeys
+// instead; see its doc comment for why.
+func unmarshalWithUnusedKeyCheck(k *koanf.Koanf, target interface{}, label string, sources []string) error {
+	unused, err := decodeCollectingUnused(k, target)
+	if err != nil {
+		return err
+	}
+	warnUnusedKeysOnce(label, sources, unused)
+	return nil
+}
+
+// decodeCollectingUnused decodes the koanf instance into target and returns
+// the set of keys mapstructure could not match to a struct field (via
+// mapstructure.Metadata), without treating that as a decode error.
+func decodeCollectingUnused(k *koanf.Koanf, target interface{}) ([]string, error) {
 	var md mapstructure.Metadata
 	conf := koanf.UnmarshalConf{
 		DecoderConfig: &mapstructure.DecoderConfig{
@@ -578,13 +663,192 @@ func unmarshalWithUnusedKeyCheck(k *koanf.Koanf, target interface{}, label strin
 		},
 	}
 	if err := k.UnmarshalWithConf("", target, conf); err != nil {
-		return err
+		return nil, err
 	}
-	if len(md.Unused) > 0 {
-		slog.Warn(label+" file contains unrecognized keys (these will be ignored)",
-			"keys", md.Unused)
+	return md.Unused, nil
+}
+
+// settingsProbeStruct returns a freshly initialized, empty settings struct of
+// the shape matching hasVersioned. It exists only to be decoded into so that
+// mapstructure.Metadata.Unused reflects which keys that schema recognizes —
+// never to hold a real result.
+func settingsProbeStruct(hasVersioned bool) interface{} {
+	if hasVersioned {
+		return &VersionedSettings{
+			Runtimes:       make(map[string]V1RuntimeConfig),
+			HarnessConfigs: make(map[string]HarnessConfigEntry),
+			Profiles:       make(map[string]V1ProfileConfig),
+		}
 	}
-	return nil
+	return &Settings{
+		Runtimes:  make(map[string]RuntimeConfig),
+		Harnesses: make(map[string]HarnessConfig),
+		Profiles:  make(map[string]ProfileConfig),
+	}
+}
+
+// warnSettingsUnusedKeys warns about unrecognized keys in merged settings.yaml
+// data. settingsUnused is the unused-key list from a decode into the legacy
+// Settings struct that the CALLER already performed for its own purposes
+// (LoadSettingsKoanf's probe decode, or LoadSettingsFromDir's real result
+// decode) — this function never decodes into Settings itself, so callers
+// never pay for that decode twice.
+//
+// Settings-unused is always the base: LoadSettingsKoanf seeds the koanf
+// instance with embedded defaults in the legacy JSON shape (see
+// GetDefaultSettingsData) regardless of the user's own file format, so even a
+// purely v1-format user file is decoded from data that is a mix of both
+// shapes — Settings alone still correctly recognizes every default-seeded
+// legacy key (e.g. "harnesses", converted from the default's v1
+// harness_configs).
+//
+// Settings does not, however, carry the user's own v1-only fields
+// (schema_version, top-level server/image_registry, runtimes[*].type,
+// profiles[*].image_registry, ...), so when hasVersioned() is true (from
+// detectHierarchyFormat or detectDirSettingsFormat — the source is genuinely
+// v1-format) a second decode into VersionedSettings cross-checks Settings'
+// unused list via combineSettingsUnused: a key survives only if the other
+// decode corroborates it, so a real v1 field settings alone can't see is
+// dropped, a genuinely unknown key both decodes agree on is kept, and a
+// default-seeded legacy-only key VersionedSettings alone can't see (e.g.
+// "harnesses") is also dropped. When hasVersioned() is false, the source is
+// legacy-format and is never read by anything but the legacy Settings shape
+// (LoadEffectiveSettings sends it through LoadSettingsKoanf +
+// AdaptLegacySettings, never LoadVersionedSettings), so the cross-check is
+// skipped and Settings-unused is reported as-is: a v1-only key mistakenly
+// placed in a legacy file is genuinely unused by every loader that will ever
+// read it, and must still warn (ptone/scion#2258 round-1 review finding 2).
+//
+// hasVersioned is a func, not a bool, and is called only when settingsUnused
+// is non-empty: detecting the format re-reads the settings file(s) from disk
+// (detectHierarchyFormat) or re-reads and re-parses one (detectDirSettingsFormat),
+// and settings are loaded from many call sites per CLI invocation, so that
+// work — like the VersionedSettings cross-check decode itself — should not
+// run on the (overwhelmingly common) path where there is nothing to warn
+// about.
+func warnSettingsUnusedKeys(k *koanf.Koanf, settingsUnused []string, hasVersioned func() bool, label string, sources []string) {
+	if len(settingsUnused) == 0 {
+		return
+	}
+
+	unused := settingsUnused
+	if hasVersioned() {
+		if versionedUnused, err := decodeCollectingUnused(k, settingsProbeStruct(true)); err == nil {
+			unused = combineSettingsUnused(settingsUnused, versionedUnused)
+		}
+		// A decode error here is not expected (the same koanf data already
+		// decoded cleanly into Settings above), but if it happens, fall back
+		// to reporting settingsUnused as-is rather than losing the warning
+		// entirely — this never touches or re-decodes the caller's real
+		// result.
+	}
+
+	warnUnusedKeysOnce(label, sources, unused)
+}
+
+// combineSettingsUnused reconciles the unused-key lists from decoding the
+// same merged settings data into Settings and into VersionedSettings. A key
+// from either list is kept only if the OTHER list corroborates it: contains
+// that exact key, or a shorter path prefix of it (see isSettingsKeyPrefix).
+//
+// This is prefix-aware, not an exact-string intersection, because
+// mapstructure reports a whole section a struct entirely lacks as a single
+// coarse key: legacy Settings has no top-level `server` field at all, so a
+// v1 file's `server.brokr` typo shows up against Settings as bare "server"
+// covering the whole subtree, never as "server.brokr". An exact intersection
+// of that bare "server" against VersionedSettings' fine-grained
+// "server.brokr" is never equal, so the typo would silently vanish. Prefix
+// matching finds the corroboration instead: "server" is a path-prefix of
+// "server.brokr", so "server.brokr" — the more precise of the two — is kept,
+// and the coarse "server" is not (nothing in the other list is "server" or a
+// prefix of the bare word "server", so it fails its own corroboration check).
+// The result never reports both the coarse parent and the precise child for
+// the same miss.
+func combineSettingsUnused(settingsUnused, versionedUnused []string) []string {
+	corroborated := func(candidates, other []string) []string {
+		var kept []string
+		for _, key := range candidates {
+			for _, o := range other {
+				if key == o || isSettingsKeyPrefix(o, key) {
+					kept = append(kept, key)
+					break
+				}
+			}
+		}
+		return kept
+	}
+
+	combined := corroborated(settingsUnused, versionedUnused)
+	combined = append(combined, corroborated(versionedUnused, settingsUnused)...)
+
+	seen := make(map[string]struct{}, len(combined))
+	var deduped []string
+	for _, key := range combined {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		deduped = append(deduped, key)
+	}
+	return deduped
+}
+
+// isSettingsKeyPrefix reports whether prefix is a path-prefix of key in
+// mapstructure's unused-key naming: equal, or immediately followed by "."
+// (nested struct field) or "[" (map-of-struct entry) — e.g. "server" is a
+// path-prefix of "server.brokr", and "harness_configs" is a path-prefix of
+// "harness_configs[x].imagee".
+func isSettingsKeyPrefix(prefix, key string) bool {
+	if prefix == key {
+		return true
+	}
+	if !strings.HasPrefix(key, prefix) {
+		return false
+	}
+	switch key[len(prefix)] {
+	case '.', '[':
+		return true
+	default:
+		return false
+	}
+}
+
+// warnedUnusedKeys records which (label, sources, unused keys) combinations
+// have already been warned about in this process. Settings are loaded
+// repeatedly within a single CLI invocation (once per call site that needs
+// them), and a broker or hub may load settings for many projects in one
+// process, so warning on every load would repeat the same message for one
+// underlying file, or suppress a genuinely distinct file that happens to
+// share another file's unknown-key set.
+var warnedUnusedKeys sync.Map
+
+// resetWarnedUnusedKeysCache clears the unused-keys warning dedup cache. Tests
+// that assert whether this warning fires must call this first, so that state
+// left behind by an earlier test in the same process cannot suppress it.
+// Clear (not reassignment) keeps this safe against a concurrent LoadOrStore
+// from another test or a leftover background goroutine.
+func resetWarnedUnusedKeysCache() {
+	warnedUnusedKeys.Clear()
+}
+
+// warnUnusedKeysOnce logs the unrecognized-keys warning the first time a
+// given label and source path set reports a given set of unused keys. A
+// later load that turns up a different set of unknown keys (e.g. after an
+// edit), or the same keys from a different source, warns again.
+func warnUnusedKeysOnce(label string, sources []string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	sortedKeys := append([]string(nil), keys...)
+	sort.Strings(sortedKeys)
+	sortedSources := append([]string(nil), sources...)
+	sort.Strings(sortedSources)
+	dedupKey := label + "\x00" + strings.Join(sortedSources, ",") + "\x00" + strings.Join(sortedKeys, ",")
+	if _, seen := warnedUnusedKeys.LoadOrStore(dedupKey, struct{}{}); seen {
+		return
+	}
+	slog.Warn(label+" file contains unrecognized keys (these will be ignored)",
+		"keys", keys, "path", strings.Join(sources, ", "))
 }
 
 // warnIfInRepoHasGlobalKeys emits a warning if an in-repo settings file contains

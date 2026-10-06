@@ -97,7 +97,7 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 		mgr := agent.NewManager(rt)
 
 		statusf("Suspending agent '%s'...\n", agentName)
-		if err := mgr.Stop(context.Background(), agentName, projectPath); err != nil {
+		if err := mgr.Stop(context.Background(), agentName, projectPath, ""); err != nil {
 			return err
 		}
 
@@ -215,7 +215,7 @@ func suspendAllAgents() error {
 			agentRt := runtime.GetRuntime(projectPath, profile)
 			agentMgr := agent.NewManager(agentRt)
 
-			if err := agentMgr.Stop(context.Background(), name, projectPath); err != nil {
+			if err := agentMgr.Stop(context.Background(), name, projectPath, ""); err != nil {
 				res.Status = "error"
 				res.Error = err.Error()
 				mu.Lock()
@@ -337,7 +337,7 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer agentCancel()
 
-			if err := agentSvc.Suspend(agentCtx, ag.Name); err != nil {
+			if _, err := agentSvc.Suspend(agentCtx, ag.Name); err != nil {
 				res.Status = "error"
 				res.Error = wrapHubError(fmt.Errorf("failed to suspend: %w", err)).Error()
 				mu.Lock()
@@ -409,9 +409,11 @@ func suspendAgentViaHub(hubCtx *HubContext, agentName string) error {
 
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	if err := agentSvc.Suspend(ctx, agentName); err != nil {
+	suspendResp, err := agentSvc.Suspend(ctx, agentName)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to suspend agent via Hub: %w", err))
 	}
+	printLifecycleWarnings(suspendResp)
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{

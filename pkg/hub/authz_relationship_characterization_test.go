@@ -25,14 +25,16 @@ package hub
 // relationship can only admit a permission that is listed here.
 //
 // The tests in this file evaluate every same-type registry permission through
-// Decide for a principal that has no role bindings, so the only possible grant
-// source is the relationship under test.
+// Decide for a principal whose only role binding, where a project-scoped
+// target needs one, grants no permissions (grantProjectAccessOnly), so the only
+// possible grant source is the relationship under test.
 
 import (
 	"context"
 	"sort"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -54,13 +56,7 @@ type relationshipAllowKey struct {
 // entry, and that a relationship admits. Each entry names its call sites.
 // These IDs are accepted by the permission resolver and by the relationship
 // policy consistency test only through this list.
-var relationshipUnregisteredPermissions = map[string][]string{
-	// handlers_messages.go (message list and stream) and handlers_logs.go
-	// (agent log read) check (agent, manage) to decide whether the caller
-	// sees every entry or only the entries it participates in.
-	// TODO(ptone/scion#2120): drop this entry once agent.manage is registered.
-	"agent.manage": {"handlers_messages.go", "handlers_logs.go"},
-}
+var relationshipUnregisteredPermissions = map[string][]string{}
 
 // relationshipCrossTypePermissions lists relationship cells whose resource
 // type differs from the registry resource of the permission they admit. The
@@ -83,13 +79,9 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.message", "agent.set_message_mode", "agent.grant_hub_mode",
 		"agent.status_update", "agent.log_append", "agent.notify",
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
-		"agent.manage",
 	},
-	{"owner", "user", "project"}: {
-		"project.create", "project.read", "project.update", "project.delete",
-		"project.manage", "project.register", "project.set_messaging_policy",
-		"project.clone", "project.list", "project.secret_read",
-	},
+	// No {"owner", "user", "project"} cell: Project.OwnerID grants nothing
+	// (ptone/scion#2586); see TestRelationshipCharacterization_OwnerProjectGrantsNothing.
 	{"owner", "user", "template"}: {
 		"template.create", "template.read", "template.update", "template.delete", "template.list",
 	},
@@ -121,7 +113,6 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.message", "agent.set_message_mode", "agent.grant_hub_mode",
 		"agent.status_update", "agent.log_append", "agent.notify",
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
-		"agent.manage",
 	},
 	// Agent ancestors are further limited by their JWT scopes; this cell is
 	// the set reachable when the agent holds every registered agent scope.
@@ -131,8 +122,16 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 
-	// Progeny read of an ancestor's opted-in user-scoped secret.
-	{"progeny", "agent", "secret"}: {"project.secret_read"},
+	// An agent reads the status of an agent it directly launched, in the
+	// same project, on the single-agent GET routes only
+	// (TestLauncherRead_OnlySingleAgentReadWidened).
+	{"launcher", "agent", "agent"}: {"agent.read"},
+
+	// Progeny read of an ancestor's opted-in user-scoped secret, plus the
+	// reviewed exact pairs (reviewedProgenyExactPairs): runtime use and launch
+	// delivery of opted-in user-scope secrets and env vars.
+	{"progeny", "agent", "secret"}:  {"project.secret_read", "secret.use", "secret.deliver"},
+	{"progeny", "agent", "env_var"}: {"env_var.deliver"},
 
 	// Current hub members may assign hub-scoped service accounts.
 	{"hub_member_sa_assign", "user", "gcp_service_account"}: {"gcp_service_account.assign"},
@@ -199,21 +198,47 @@ func createCharacterizationUser(t *testing.T, s store.Store, id string) UserIden
 	return NewAuthenticatedUser(id, id+"@relchar.test", id, "member", "api")
 }
 
+// grantProjectAccessOnly binds userID in projectID to a project-scoped role
+// with no permissions. The binding is project membership (active project
+// access, which owner and ancestor relationships on project targets
+// require; ptone/scion#2141) without granting any permission through the
+// role, so the relationship stays the only grant source under test.
+func grantProjectAccessOnly(t *testing.T, s store.Store, userID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	name := "relchar-access-only"
+	rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+	if err != nil {
+		require.ErrorIs(t, err, store.ErrNotFound)
+		rd, err = s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			ID: api.NewUUID(), Name: name, Description: "project access, no permissions",
+			ScopeType: store.RoleScopeProject, Permissions: []string{},
+		})
+		require.NoError(t, err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+}
+
 // TestRelationshipCharacterization_Owner pins the owner relationship for a
-// user with no role bindings across every resource type whose constructor
+// user whose only role binding is an access-only binding in the project of
+// the project-scoped targets, across every resource type whose constructor
 // sets OwnerID.
 func TestRelationshipCharacterization_Owner(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relchar-owner"))
 	other := createCharacterizationUser(t, s, tid("relchar-other"))
 	projectID := tid("relchar-project")
+	grantProjectAccessOnly(t, s, owner.ID(), projectID)
 
 	resources := []struct {
 		name     string
 		resource Resource
 	}{
 		{"agent", agentResource(&store.Agent{ID: tid("relchar-agent"), ProjectID: projectID, OwnerID: owner.ID()})},
-		{"project", projectResource(&store.Project{ID: projectID, OwnerID: owner.ID()})},
 		{"template", templateResource(&store.Template{ID: tid("relchar-tpl"), OwnerID: owner.ID(), Scope: store.TemplateScopeUser, ScopeID: owner.ID()})},
 		{"harness_config", harnessConfigResource(&store.HarnessConfig{ID: tid("relchar-hc"), OwnerID: owner.ID(), Scope: store.HarnessConfigScopeUser, ScopeID: owner.ID()})},
 		{"group", groupResource(&store.Group{ID: tid("relchar-group"), OwnerID: owner.ID()})},
@@ -254,12 +279,36 @@ func TestRelationshipCharacterization_Owner(t *testing.T) {
 	}
 }
 
+// TestRelationshipCharacterization_OwnerProjectGrantsNothing pins
+// ptone/scion#2586: Project.OwnerID is not an authorization source. A user
+// named as the project's OwnerID but holding no project role binding (for
+// example a creator removed without an ownership transfer) is denied every
+// project permission, and no owner relationship candidate is accepted.
+func TestRelationshipCharacterization_OwnerProjectGrantsNothing(t *testing.T) {
+	authz, s := authzTestSetup(t)
+	owner := createCharacterizationUser(t, s, tid("relchar-proj-owner"))
+	project := projectResource(&store.Project{ID: tid("relchar-proj"), OwnerID: owner.ID()})
+
+	assert.Empty(t, characterizedSet(relationshipAllowKey{"owner", "user", "project"}))
+	perms := sameTypeRegistryPermissions("project")
+	require.NotEmpty(t, perms)
+	for _, p := range perms {
+		t.Run(p.ID, func(t *testing.T) {
+			d := decideExplicit(t, authz, owner, project, p)
+			assert.False(t, d.Allowed, "OwnerID-only %s: reason %q", p.ID, d.Reason)
+			assert.NotEqual(t, "owner", d.MatchedGrant, "no owner relationship grant may match")
+			assert.NotEqual(t, ScopeTypeRelationship, d.Scope, "no relationship rule may decide")
+		})
+	}
+}
+
 // TestRelationshipCharacterization_UserAncestor pins the ancestor
 // relationship for a user in an agent's creation chain.
 func TestRelationshipCharacterization_UserAncestor(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	root := createCharacterizationUser(t, s, tid("relchar-root"))
 	outsider := createCharacterizationUser(t, s, tid("relchar-outsider"))
+	grantProjectAccessOnly(t, s, root.ID(), tid("relchar-desc-project"))
 	descendant := agentResource(&store.Agent{
 		ID:        tid("relchar-desc"),
 		ProjectID: tid("relchar-desc-project"),
@@ -311,16 +360,21 @@ func TestRelationshipCharacterization_AgentAncestor(t *testing.T) {
 	}
 }
 
-// TestRelationshipCharacterization_DerivedAgentManage pins the (agent,
-// manage) check made without an explicit permission by the message and log
-// handlers: admitted for the owner and a user ancestor, not for an agent
-// ancestor or an unrelated user.
-func TestRelationshipCharacterization_DerivedAgentManage(t *testing.T) {
+// TestRelationshipCharacterization_AgentFullHistory pins the full message
+// and log history check made by the message and log handlers: it is the
+// exact registered permission agent.attach, admitted for the owner, a user
+// ancestor and an agent ancestor under the registered ancestor rule, and
+// not for an unrelated user. The
+// (agent, manage) pair resolves to no permission and denies for every
+// caller.
+func TestRelationshipCharacterization_AgentFullHistory(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 	owner := createCharacterizationUser(t, s, tid("relchar-m-owner"))
 	root := createCharacterizationUser(t, s, tid("relchar-m-root"))
 	other := createCharacterizationUser(t, s, tid("relchar-m-other"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relchar-m-project"))
+	grantProjectAccessOnly(t, s, root.ID(), tid("relchar-m-project"))
 	ancestorID := tid("relchar-m-anc-agent")
 	ancestor := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: ancestorID},
@@ -334,10 +388,22 @@ func TestRelationshipCharacterization_DerivedAgentManage(t *testing.T) {
 		Ancestry:  []string{root.ID(), ancestorID},
 	})
 
-	assert.True(t, authz.CheckAccess(ctx, owner, res, ActionManage).Allowed)
-	assert.True(t, authz.CheckAccess(ctx, root, res, ActionManage).Allowed)
-	assert.False(t, authz.CheckAccess(ctx, ancestor, res, ActionManage).Allowed)
-	assert.False(t, authz.CheckAccess(ctx, other, res, ActionManage).Allowed)
+	var attach permissions.Permission
+	for _, p := range permissions.Registry {
+		if p.ID == "agent.attach" {
+			attach = p
+		}
+	}
+	require.Equal(t, "agent.attach", attach.ID, "agent.attach must be registered")
+	assert.True(t, decideExplicit(t, authz, owner, res, attach).Allowed)
+	assert.True(t, decideExplicit(t, authz, root, res, attach).Allowed)
+	assert.True(t, decideExplicit(t, authz, ancestor, res, attach).Allowed)
+	assert.False(t, decideExplicit(t, authz, other, res, attach).Allowed)
+
+	for _, caller := range []Identity{owner, root, ancestor, other} {
+		assert.False(t, authz.CheckAccess(ctx, caller, res, ActionManage).Allowed,
+			"(agent, manage) resolves to no permission for %s", caller.ID())
+	}
 }
 
 // TestRelationshipCharacterization_Progeny pins the progeny read of an
@@ -345,9 +411,11 @@ func TestRelationshipCharacterization_DerivedAgentManage(t *testing.T) {
 // resolution.
 func TestRelationshipCharacterization_Progeny(t *testing.T) {
 	f := newGoldenFixture(t)
+	seedExecutionAgent(t, f.store, tid("relchar-progeny-agent"), f.projectAlpha.ID,
+		[]string{f.projectOwnerID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relchar-progeny-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}
@@ -391,9 +459,11 @@ func TestRelationshipCharacterization_HubMemberSAAssign(t *testing.T) {
 // grant (ptone/scion#2128 retired the dedicated creator-user-skill grant).
 func TestRelationshipCharacterization_ProgenySkillRead(t *testing.T) {
 	f := newGoldenFixture(t)
+	seedExecutionAgent(t, f.store, tid("relchar-skill-agent"), f.projectAlpha.ID,
+		[]string{f.projectOwnerID}, []string{f.projectOwnerID})
 	agent := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: tid("relchar-skill-agent")},
-		ProjectID: f.projectBeta.ID,
+		ProjectID: f.projectAlpha.ID,
 		Ancestry:  []string{f.projectOwnerID},
 		Scopes:    allRegisteredAgentScopes(),
 	}}

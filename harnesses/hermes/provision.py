@@ -268,9 +268,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     }
 
     # Model resolution passthrough.
-    resolved_model = str(ctx.model_resolution.get("resolved_model") or "").strip()
-    if not resolved_model:
-        resolved_model = os.environ.get("SCION_MODEL", "").strip()
+    resolved_model = scion_harness.resolve_model(ctx)
     if resolved_model:
         env_payload["HERMES_INFERENCE_MODEL"] = resolved_model
     elif resolved.method == "vertex-ai":

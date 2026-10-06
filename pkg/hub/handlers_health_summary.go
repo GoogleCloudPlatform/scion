@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -44,6 +45,13 @@ type HealthSummaryHub struct {
 	ConnectedBrokers int    `json:"connected_brokers"`
 	ActiveAgents     int    `json:"active_agents"`
 	Projects         int    `json:"projects"`
+	// Checks is the hub's /healthz check map, so a degraded or unhealthy
+	// hub status carries its cause (e.g. colocated_broker) rather than
+	// only the database check surfacing below.
+	Checks map[string]string `json:"checks,omitempty"`
+	// UnhealthyChecks lists the non-healthy checks as "key: value", sorted,
+	// so a dashboard can show the cause without interpreting the map.
+	UnhealthyChecks []string `json:"unhealthy_checks,omitempty"`
 }
 
 // HealthSummaryDB contains database health information.
@@ -104,7 +112,7 @@ type HealthSummaryStall struct {
 // Authorization: enforced by routeGuard via hub.health.read permission.
 func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -114,16 +122,21 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	healthInfo := s.GetHealthInfo(ctx)
 
 	// Determine overall status early so DB-error branches can degrade it.
-	overallStatus := "healthy"
-	if healthInfo.Status != "" && healthInfo.Status != "healthy" {
-		overallStatus = healthInfo.Status
+	// Later signals only ever raise severity (worseHealthStatus): an
+	// unhealthy hub must not be reported as merely degraded.
+	overallStatus := HealthStatusHealthy
+	if healthInfo.Status != "" {
+		overallStatus = worseHealthStatus(overallStatus, healthInfo.Status)
 	}
+	degrade := func() { overallStatus = worseHealthStatus(overallStatus, HealthStatusDegraded) }
 
 	// Build hub section
 	hubSummary := HealthSummaryHub{
-		Status:  healthInfo.Status,
-		Version: healthInfo.ScionVersion,
-		Uptime:  healthInfo.Uptime,
+		Status:          healthInfo.Status,
+		Version:         healthInfo.ScionVersion,
+		Uptime:          healthInfo.Uptime,
+		Checks:          healthInfo.Checks,
+		UnhealthyChecks: unhealthyChecks(healthInfo.Checks),
 	}
 	if healthInfo.Stats != nil {
 		hubSummary.ConnectedBrokers = healthInfo.Stats.ConnectedBrokers
@@ -164,7 +177,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	agentAgg, err := s.store.AggregateAgentHealth(ctx)
 	if err != nil {
 		slog.Error("health summary: failed to aggregate agent health", "error", err)
-		overallStatus = "degraded"
+		degrade()
 	} else {
 		agentsSummary.Total = agentAgg.Total
 		agentsSummary.ByPhase = agentAgg.ByPhase
@@ -184,7 +197,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
 	if err != nil {
 		slog.Error("health summary: failed to list runtime brokers", "error", err)
-		overallStatus = "degraded"
+		degrade()
 	} else {
 		for _, b := range brokerResult.Items {
 			agentCount := 0
@@ -235,11 +248,11 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 
 	// Propagate unhealthy agent/broker signals into overall status.
 	if len(agentsSummary.Stalled) > 0 || len(agentsSummary.Crashed) > 0 || len(agentsSummary.Errored) > 0 {
-		overallStatus = "degraded"
+		degrade()
 	}
 	for _, b := range brokerSummaries {
 		if b.Status != "online" && b.Status != "" {
-			overallStatus = "degraded"
+			degrade()
 			break
 		}
 	}
@@ -255,4 +268,17 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// unhealthyChecks returns the non-healthy entries of a check map as sorted
+// "key: value" strings, or nil when every check is healthy.
+func unhealthyChecks(checks map[string]string) []string {
+	var out []string
+	for k, v := range checks {
+		if v != HealthStatusHealthy {
+			out = append(out, k+": "+v)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

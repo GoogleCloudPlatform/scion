@@ -38,6 +38,10 @@ const (
 	FieldResources = "resources"
 	// FieldRuntimes holds the string denoting the runtimes field in the database.
 	FieldRuntimes = "runtimes"
+	// FieldDefaultProfile holds the string denoting the default_profile field in the database.
+	FieldDefaultProfile = "default_profile"
+	// FieldWorkspaceStorage holds the string denoting the workspace_storage field in the database.
+	FieldWorkspaceStorage = "workspace_storage"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -81,6 +85,8 @@ var Columns = []string{
 	FieldSupportedHarnesses,
 	FieldResources,
 	FieldRuntimes,
+	FieldDefaultProfile,
+	FieldWorkspaceStorage,
 	FieldLabels,
 	FieldAnnotations,
 	FieldEndpoint,
@@ -196,6 +202,16 @@ func ByResources(opts ...sql.OrderTermOption) OrderOption {
 // ByRuntimes orders the results by the runtimes field.
 func ByRuntimes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimes, opts...).ToFunc()
+}
+
+// ByDefaultProfile orders the results by the default_profile field.
+func ByDefaultProfile(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDefaultProfile, opts...).ToFunc()
+}
+
+// ByWorkspaceStorage orders the results by the workspace_storage field.
+func ByWorkspaceStorage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldWorkspaceStorage, opts...).ToFunc()
 }
 
 // ByEndpoint orders the results by the endpoint field.

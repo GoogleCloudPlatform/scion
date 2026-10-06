@@ -233,7 +233,7 @@ func checkAgentNotifyScope(w http.ResponseWriter, r *http.Request) bool {
 //     the combined shape has nothing to carry.
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -380,7 +380,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	MethodNotAllowed(w)
+	MethodNotAllowed(w, http.MethodPost)
 }
 
 // createSubscriptionRequest is the request body for POST /api/v1/notifications/subscriptions.
@@ -706,7 +706,14 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 
 	default:
-		MethodNotAllowed(w)
+		switch subID {
+		case "":
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		case "bulk", "bulk-delete":
+			MethodNotAllowed(w, http.MethodPost, http.MethodPatch, http.MethodDelete)
+		default:
+			MethodNotAllowed(w, http.MethodPatch, http.MethodDelete)
+		}
 	}
 }
 
@@ -809,6 +816,10 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		if templateID == "" {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		} else {
+			MethodNotAllowed(w, http.MethodDelete)
+		}
 	}
 }

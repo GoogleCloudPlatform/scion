@@ -54,6 +54,14 @@ const (
 	ScopeProjectSecretRead AgentTokenScope = "project:secret:read"
 	// ScopeAgentCreate allows the agent to create sub-agents within the same project.
 	ScopeAgentCreate AgentTokenScope = "project:agent:create"
+	// ScopeAgentSAAssign allows the agent to assign a GCP service account to
+	// an agent within the same project. Split from ScopeAgentCreate
+	// (ptone/scion#2339) so the two permissions are granted and checked
+	// independently. A JWT minted with the combined ScopeAgentCreate before
+	// the split keeps authorizing gcp_service_account.assign until it next
+	// refreshes onto the split scopes — see effectiveAgentScopes (authz.go)
+	// and CurrentAgentScopeSchema.
+	ScopeAgentSAAssign AgentTokenScope = "project:agent:sa_assign"
 	// ScopeAgentLifecycle allows the agent to start/stop/restart agents within the same project.
 	ScopeAgentLifecycle AgentTokenScope = "project:agent:lifecycle"
 	// ScopeAgentNotify allows the agent to create notification subscriptions within the same project.
@@ -76,6 +84,20 @@ const (
 	// do; being able to publish the template it spawns them from is the same
 	// authority expressed once instead of per-agent.
 	ScopeProjectTemplateWrite AgentTokenScope = "project:template:write"
+	// ScopeProjectArtifactRead allows the agent to use the artifact service
+	// to read artifacts (artifact.read). It is a ceiling-optional role scope
+	// (ceilingOptionalRoleScopes): readonly, baseline and full carry it, but
+	// a mint drops it when the source ceiling lacks artifact.read, so tokens
+	// issued under ceilings that predate artifacts do not gain it.
+	// The hub's artifacts.Host does not serve an agent whose token lacks it,
+	// whatever artifact grants exist.
+	ScopeProjectArtifactRead AgentTokenScope = "project:artifact:read"
+	// ScopeProjectArtifactWrite allows the agent to publish artifacts, and
+	// new versions of them, homed in its own project (artifact.create,
+	// artifact.update). Deliberately excludes deletion and grant
+	// management. Minted for the baseline and full agent roles
+	// (ScopesForRole).
+	ScopeProjectArtifactWrite AgentTokenScope = "project:artifact:write"
 	// ScopeAgentSetMessageMode allows the agent to change message mode
 	// for agents within the same project.
 	ScopeAgentSetMessageMode AgentTokenScope = "project:agent:set_message_mode"
@@ -84,12 +106,57 @@ const (
 	ScopeGCPTokenPrefix = "project:gcp:token:"
 )
 
+// CurrentAgentScopeSchema is stamped onto every agent JWT this hub mints or
+// refreshes (AgentTokenClaims.ScopeSchema), so a verified token's wire form
+// records which scope vocabulary it was minted under. It increments only
+// when a permission moves off a shared scope onto its own (ptone/scion#2339
+// is schema 1: gcp_service_account.assign gets project:agent:sa_assign
+// instead of sharing project:agent:create).
+//
+// Authorization code never reads ScopeSchema; ValidateAgentToken alone reads
+// it, once, to set AgentTokenClaims.legacyScopeSchema, the unexported field
+// authz.go's effectiveAgentScopes actually keys on. ValidateAgentToken sets
+// legacyScopeSchema only when a verified token's wire form carries no
+// scope_schema claim (ScopeSchema reads as its Go zero value, 0, because
+// GenerateAgentToken — the only agent-JWT minter — has always stamped a
+// nonzero value since this field existed, so a verified 0 can only mean
+// "minted before the field existed"; any other value, including one from a
+// schema this package does not yet know about, is left as not legacy). Every
+// in-process AgentTokenClaims built directly as a Go literal — every
+// stored-record identity, scheduled-dispatch creator identity, and synthetic
+// secret-resolution identity among them — leaves legacyScopeSchema at its
+// own zero value (false) and so is NEVER read as legacy, regardless of what
+// its Scopes list contains: only a value that came out of ValidateAgentToken
+// can be legacy.
+//
+// legacyScopeSchema's effect may be deleted once no pre-split token can
+// still validate. ValidateAgentToken rejects a token once its exp claim
+// (its mint time plus the AgentTokenConfig.TokenDuration configured at
+// mint) is more than jwt.DefaultLeeway (one minute) in the past, so the
+// window closes one minute plus the TokenDuration in effect when the last
+// pre-split token was minted after the last hub instance running pre-split
+// code stops minting.
+const CurrentAgentScopeSchema = 1
+
 // AgentTokenClaims represents the custom claims in an agent JWT.
 type AgentTokenClaims struct {
 	jwt.Claims
 	ProjectID string            `json:"project_id,omitempty"`
 	Scopes    []AgentTokenScope `json:"scopes,omitempty"`
 	Ancestry  []string          `json:"ancestry,omitempty"` // [root_user, ..., parent_agent]
+	// ScopeSchema records which scope vocabulary Scopes was minted under.
+	// See CurrentAgentScopeSchema. Metadata only; see legacyScopeSchema for
+	// the field that actually gates compatibility behavior.
+	ScopeSchema int `json:"scope_schema,omitempty"`
+	// legacyScopeSchema is set only by ValidateAgentToken, and only when the
+	// verified token's wire form carries no scope_schema claim. It is
+	// deliberately unexported (so it is never part of the wire format and
+	// can never be set by unmarshaling untrusted input) and deliberately
+	// never set by any direct construction of this struct — see
+	// CurrentAgentScopeSchema's doc comment for why that is the safe
+	// default. Read via authz.go's effectiveAgentScopes /
+	// isLegacyPreSplitAgentJWT, never directly.
+	legacyScopeSchema bool
 }
 
 // AgentTokenConfig holds configuration for agent token generation.
@@ -227,9 +294,10 @@ func (s *AgentTokenService) GenerateAgentToken(agentID, projectID string, scopes
 			NotBefore: jwt.NewNumericDate(now),
 			ID:        jti,
 		},
-		ProjectID: projectID,
-		Scopes:    scopes,
-		Ancestry:  ancestry,
+		ProjectID:   projectID,
+		Scopes:      scopes,
+		Ancestry:    ancestry,
+		ScopeSchema: CurrentAgentScopeSchema,
 	}
 
 	token, err := jwt.Signed(s.signer).Claims(claims).Serialize()
@@ -276,6 +344,17 @@ func (s *AgentTokenService) ValidateAgentToken(tokenString string) (*AgentTokenC
 
 	if err := claims.Validate(expected); err != nil {
 		return nil, fmt.Errorf("token validation failed: %w", err)
+	}
+
+	// A verified token whose wire form carried no scope_schema claim (reads
+	// as the Go zero value, 0) predates CurrentAgentScopeSchema entirely:
+	// GenerateAgentToken has always stamped a nonzero schema since the field
+	// existed, and this method only returns claims that passed HS256
+	// verification against this hub's own signing key, so no other signer's
+	// output reaches this line. This is the one place legacyScopeSchema is
+	// ever set — see CurrentAgentScopeSchema's doc comment.
+	if claims.ScopeSchema == 0 {
+		claims.legacyScopeSchema = true
 	}
 
 	return &claims, nil

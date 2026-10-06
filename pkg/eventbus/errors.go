@@ -18,3 +18,27 @@ import "errors"
 
 // ErrEventBusClosed is returned when attempting to publish or subscribe on a closed event bus.
 var ErrEventBusClosed = errors.New("event bus is closed")
+
+// ErrSubscriberBufferFull is returned by InProcessEventBus.Publish when a
+// message addressed to a user-message topic could not be queued because the
+// matching subscriber's buffer was full. Other topics keep the historical
+// fire-and-forget behaviour (the message is dropped and Publish returns nil)
+// because those callers already tolerate silent drops; the user-message path
+// does not, since nothing else re-delivers or surfaces the loss
+// (ptone/scion#2311).
+var ErrSubscriberBufferFull = errors.New("event bus: subscriber buffer full")
+
+// ErrInProcessPublish wraps a failure of the inprocess spoke inside a
+// FanOutEventBus publish. Callers that need to know whether the hub's own
+// subscribers received a message (as opposed to an external plugin spoke
+// failing) test for it with errors.Is; the underlying cause stays reachable
+// too (e.g. ErrEventBusClosed, ErrSubscriberBufferFull).
+var ErrInProcessPublish = errors.New("inprocess bus publish failed")
+
+// ErrNilHandler is returned by Subscribe on buses that deliver messages to
+// local handlers (InProcessEventBus, FanOutEventBus) when called with a nil
+// handler. Accepting one would register a subscription that panics on the
+// first delivery (InProcessEventBus) or silently delivers nothing
+// (FanOutEventBus). External spokes behind a FanOutEventBus still receive a
+// nil handler by design: they only use the pattern for remote-side filtering.
+var ErrNilHandler = errors.New("event bus: nil handler")

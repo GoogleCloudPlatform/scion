@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -167,6 +168,33 @@ func TestConnect_SurfacesBrokerErrorBody(t *testing.T) {
 	assert.Contains(t, err.Error(), "retry")
 	assert.NotContains(t, err.Error(), "bad handshake",
 		"the actionable broker message should replace the opaque gorilla error, not just prefix it")
+}
+
+// TestConnect_AttachUnsupportedPreUpgrade_MapsToExplicitError covers the
+// pre-upgrade half of the 501/runtime_attach_unsupported wire contract
+// (wsprotocol.ErrCodeRuntimeAttachUnsupported): a broker that rejects
+// attach before any WebSocket upgrade happens must surface as the same
+// fixed, actionable error the post-upgrade 4501 close code produces (see
+// TestReadFromWebSocket_AttachUnsupportedCloseCode_MapsToExplicitError) —
+// not the generic "connection failed with status 501: ..." wording every
+// other handshake failure gets.
+func TestConnect_AttachUnsupportedPreUpgrade_MapsToExplicitError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_, _ = w.Write([]byte(`{"error":{"code":"` + wsprotocol.ErrCodeRuntimeAttachUnsupported + `","message":"attach is not supported for agents on this runtime"}}`))
+	}))
+	defer srv.Close()
+
+	client := NewPTYClient(PTYClientConfig{
+		Endpoint: srv.URL,
+		Token:    "scion-user-token",
+		Slug:     "unsupported-agent",
+	})
+
+	err := client.Connect(context.Background())
+	require.Error(t, err, "expected a non-nil error so the CLI exits non-zero")
+	assert.Equal(t, attachUnsupportedMessage, err.Error())
 }
 
 // TestConnect_FallsBackToRawBodyWhenNotJSON covers a handshake rejection

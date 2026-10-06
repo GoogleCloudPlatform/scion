@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -74,12 +75,102 @@ func (p PoolConfig) apply(db *sql.DB) {
 	}
 }
 
+// withUTCTimezone returns dsn with the modernc.org/sqlite "_timezone" DSN
+// option forced to "UTC", preserving any other query options already
+// present. modernc parses every bound and scanned time.Time through the
+// connection's configured location (sqlite.go, applyQueryParams), so this
+// makes every SQLite time.Time bind and read-back canonical UTC regardless
+// of the process's time.Local — including legacy rows written with a
+// non-UTC zone suffix (tz-refactor design §2.1.2).
+//
+// dsn may be a bare path, an in-memory name (":memory:"), a "file:" URI with
+// or without an existing query, or a DSN that already sets "_timezone": the
+// option is force-replaced because modernc honours only the first value for
+// a repeated key, so a naive append would leave the operator's value in
+// effect.
+//
+// If the caller's query string fails to parse, dsn is returned unchanged
+// rather than rewritten with every other option dropped: modernc's own
+// sql.Open/applyQueryParams calls url.ParseQuery on the same string and will
+// surface the same error at open time, which is the caller's error to see,
+// not something this rewrite should mask by silently opening a different
+// database (e.g. dropping "mode=memory" and landing on disk instead).
+func withUTCTimezone(dsn string) string {
+	base, rawQuery, hasQuery := strings.Cut(dsn, "?")
+	if !hasQuery {
+		return dsn + "?_timezone=UTC"
+	}
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return dsn
+	}
+	values.Set("_timezone", "UTC")
+	return base + "?" + values.Encode()
+}
+
+// UTCTimeHook is an Ent mutation hook that converts every time.Time field
+// value set in a mutation (explicit or defaulted — ent fills in defaults
+// before hooks run) to UTC before it is persisted. On SQLite this makes a
+// value canonical even with no "_timezone" DSN option, because modernc only
+// adjusts a bound value's Location when one is configured and otherwise
+// formats it as-is — so a value this hook has already converted still comes
+// out as canonical "... +0000 UTC" text. On Postgres (field.Time maps to
+// timestamptz, which is already instant-correct regardless of Location) the
+// hook's only effect is that a create/update no longer echoes a non-UTC
+// Location back to the caller. See tz-refactor design §2.1.2.
+//
+// Registered by OpenSQLite, OpenSQLiteReadOnly and openPostgres. Exported so
+// a caller that builds an *ent.Client around some other driver — for example
+// a test harness that must keep working under the "no_sqlite" build tag,
+// where modernc (and so OpenSQLite's "_timezone" option) is unavailable —
+// can still register it directly with client.Use(entc.UTCTimeHook).
+//
+// What it does not cover, because a mutation hook never sees these:
+//   - predicate arguments, e.g. a bare time.Now() passed to a generated
+//     XxxLT/XxxGTE predicate. On SQLite this binds as local-zone text under
+//     a non-UTC time.Local (a numeric-abbreviation zone such as Kathmandu's
+//     "+0545 +0545" compares wrong, and may not even Scan back); callers on
+//     modernc should also set the DSN "_timezone=UTC" option (OpenSQLite
+//     does this) or convert the predicate argument themselves. On Postgres,
+//     timestamptz comparisons are correct regardless;
+//   - values set via OnConflict(...).Update(func(u *XUpsert){...}), which
+//     bypasses mutation hooks entirely — same SQLite/Postgres split as above;
+//   - raw SQL;
+//   - time.Time values embedded inside a JSON field (e.g.
+//     PolicyConditions.ValidFrom/ValidUntil, ExposedPort.ExposedAt) — out of
+//     reach of a field-level hook; each writer converts them instead, and
+//     TestJSONEmbeddedTimesAreAllowlisted fails on any new embedded
+//     time.Time that is not on its allowlist of normalised paths.
+func UTCTimeHook(next ent.Mutator) ent.Mutator {
+	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+		for _, name := range m.Fields() {
+			v, ok := m.Field(name)
+			if !ok {
+				continue
+			}
+			t, ok := v.(time.Time)
+			if !ok {
+				continue
+			}
+			// Always convert, even when Location() is already time.UTC: a
+			// time.Time can carry a monotonic clock reading (e.g. a bare
+			// time.Now() under a process pinned to UTC by util.PinProcessUTC)
+			// whose String() form appends " m=...". Only .UTC()/.In() strip
+			// it, and doing so unconditionally is cheap and idempotent.
+			if err := m.SetField(name, t.UTC()); err != nil {
+				return nil, fmt.Errorf("UTCTimeHook: setting field %q to UTC: %w", name, err)
+			}
+		}
+		return next.Mutate(ctx, m)
+	})
+}
+
 // OpenSQLite creates an Ent client backed by SQLite.
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
 // Foreign keys and WAL journal mode are enabled automatically.
 // This uses the modernc.org/sqlite pure-Go driver which registers as "sqlite".
 func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
@@ -95,6 +186,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client.Use(UTCTimeHook)
 	return client, nil
 }
 
@@ -109,7 +201,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 // are connection-scoped; with a larger pool, unprimed connections would not
 // inherit them.
 func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
@@ -127,6 +219,7 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client.Use(UTCTimeHook)
 	return client, nil
 }
 
@@ -134,6 +227,37 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 // The dsn should be a PostgreSQL connection string
 // (e.g. "host=localhost port=5432 user=scion dbname=scion sslmode=disable").
 func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
+	return openPostgres(dsn, pool, false, opts...)
+}
+
+// OpenPostgresReadOnly creates an Ent client backed by PostgreSQL with the
+// session-level default_transaction_read_only GUC set to "on" for every
+// connection in the pool (ptone/scion#2152 round-3 review finding 10): every
+// transaction starts read-only, so a write attempted by a tool that should
+// never perform one (e.g. `hub secret migrate-names --dry-run`) fails
+// loudly at the database itself instead of relying solely on the caller
+// never issuing one. This is defense in depth on top of that caller
+// discipline — an application-level read-only call (e.g. PlanRefRepair)
+// choosing to write due to a bug elsewhere still hits this and fails,
+// rather than silently succeeding.
+//
+// Note (ptone/scion#2152 round-4 review FYI): default_transaction_read_only
+// is sent as a connection startup parameter, which PgBouncer in transaction
+// or statement pooling mode can reject unless explicitly listed in
+// ignore_startup_parameters. Session pooling mode is unaffected. If a
+// deployment fronts Postgres with PgBouncer in transaction-pooling mode,
+// confirm that setting is allow-listed before relying on this for --dry-run.
+func OpenPostgresReadOnly(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
+	return openPostgres(dsn, pool, true, opts...)
+}
+
+// buildPostgresConnConfig parses dsn and applies the keepalive and (when
+// readOnly) default_transaction_read_only RuntimeParams, without opening any
+// connection. Factored out of openPostgres so the resulting config is
+// directly assertable in tests (ptone/scion#2152 round-4 review Consider 4)
+// — in particular, that OpenPostgresReadOnly actually sets
+// default_transaction_read_only=on, without needing a real Postgres server.
+func buildPostgresConnConfig(dsn string, readOnly bool) (*pgx.ConnConfig, error) {
 	// Parse the DSN with pgx (accepts both keyword/value DSNs "host=... port=..."
 	// and URL-style "postgres://..." connection strings) so we can attach TCP
 	// keepalive settings to the connection before handing it to database/sql via
@@ -145,8 +269,21 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 		return nil, fmt.Errorf("parsing postgres dsn: %w", err)
 	}
 	applyKeepalives(connConfig.RuntimeParams)
+	if readOnly {
+		connConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	}
 	if connConfig.ConnectTimeout == 0 {
 		connConfig.ConnectTimeout = connectTimeout
+	}
+	return connConfig, nil
+}
+
+// openPostgres is the shared implementation behind OpenPostgres and
+// OpenPostgresReadOnly.
+func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option) (*ent.Client, error) {
+	connConfig, err := buildPostgresConnConfig(dsn, readOnly)
+	if err != nil {
+		return nil, err
 	}
 
 	// Register google/uuid.UUID with pgx's type system so that UUID values are
@@ -164,6 +301,7 @@ func OpenPostgres(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client,
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
+	client.Use(UTCTimeHook)
 	return client, nil
 }
 

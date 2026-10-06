@@ -4,12 +4,14 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -28,6 +30,8 @@ var (
 	nonInteractive bool   // Full non-interactive mode (implies --yes, errors on ambiguous prompts)
 	autoHelp       = true // Default to true, updated in PersistentPreRunE
 	debugMode      bool   // Enable debug output
+	displayTZ      string // --tz: IANA zone for human-readable time output
+	displayUTC     bool   // --utc: show human-readable times in UTC
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -44,6 +48,19 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Cobra checks flag groups (e.g. --tz/--utc) only after this hook
+		// returns, so check them first: a later hook error, such as running
+		// outside a project, must not hide a flag conflict.
+		if err := cmd.ValidateFlagGroups(); err != nil {
+			return err
+		}
+		// Likewise required flags, which cobra checks only after this hook:
+		// a missing required flag is a usage error and must be reported as
+		// one (with usage), before SilenceUsage is set below.
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return err
+		}
+
 		// Warn (once per process) about legacy environment variables that
 		// scion no longer reads. For real top-level invocations this has
 		// already run in Execute(), before any settings or project
@@ -51,6 +68,41 @@ return an error instead of blocking.`,
 		// path for callers that invoke rootCmd directly (e.g. cmd-level
 		// tests) without going through the package's own Execute().
 		maybeWarnRemovedLegacyEnv(cmd)
+
+		// Display zone for human-readable times: --tz/--utc, else the
+		// process local zone. Set on every invocation so a previous
+		// invocation in the same process (tests) cannot leak its zone.
+		loc, err := clitime.ResolveZone(displayTZ, displayUTC)
+		if err != nil {
+			return err
+		}
+		clitime.SetZone(loc)
+
+		if outputFormat != "" {
+			if outputFormat != "json" && outputFormat != "plain" {
+				return fmt.Errorf("invalid format: %s (allowed: json, plain)", outputFormat)
+			}
+			// Reject --format json for interactive/streaming commands
+			if outputFormat == "json" {
+				if reason, ok := interactiveOnlyCommands[cmd.CommandPath()]; ok {
+					return fmt.Errorf("--format json is not supported for '%s' because %s", cmd.CommandPath(), reason)
+				}
+				// Silently ignore --format json for commands that don't support structured output
+				if jsonNoOpCommands[cmd.CommandPath()] {
+					outputFormat = ""
+				}
+			}
+		}
+
+		// Invocation is now known to be well-formed: cobra has parsed the
+		// flags and validated the positional args (both happen before this
+		// hook runs), and the checks above cover flag groups, required
+		// flags and flag values. Anything that fails from here on — the
+		// rest of this hook, PreRunE, RunE — is a runtime failure, so stop
+		// Execute from printing the usage block after it (see
+		// shouldShowUsageOnError). Doing it here, once, covers every
+		// subcommand without each RunE having to opt in (ptone/scion#2859).
+		cmd.SilenceUsage = true
 
 		// --non-interactive implies --yes
 		if nonInteractive {
@@ -106,6 +158,14 @@ return an error instead of blocking.`,
 			if parentName == "hub" {
 				requiresProject = false
 			}
+		case "migrate-names", "migrate":
+			// hub secret migrate-names (GCP SM name migration) and hub secret
+			// migrate (DB -> GCP SM value migration) operate directly against
+			// the Hub DB and GCP Secret Manager; neither reads or resolves
+			// the current directory's scion project (ptone/scion#2396).
+			if parentName == "secret" && commandInSubtree(cmd, "hub") {
+				requiresProject = false
+			}
 		case "scion":
 			// Root command itself doesn't require project
 			requiresProject = false
@@ -120,6 +180,11 @@ return an error instead of blocking.`,
 		}
 		// Project subcommands operate on all projects, not just the current one
 		if parentName == "project" {
+			requiresProject = false
+		}
+		// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
+		// above — --handoff-template never touches the project or the Hub.
+		if isReincarnateHandoffTemplateInvocation(cmd) {
 			requiresProject = false
 		}
 
@@ -151,22 +216,6 @@ return an error instead of blocking.`,
 			nonInteractive = true
 			autoConfirm = true
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
-		}
-
-		if outputFormat != "" {
-			if outputFormat != "json" && outputFormat != "plain" {
-				return fmt.Errorf("invalid format: %s (allowed: json, plain)", outputFormat)
-			}
-			// Reject --format json for interactive/streaming commands
-			if outputFormat == "json" {
-				if reason, ok := interactiveOnlyCommands[cmd.CommandPath()]; ok {
-					return fmt.Errorf("--format json is not supported for '%s' because %s", cmd.CommandPath(), reason)
-				}
-				// Silently ignore --format json for commands that don't support structured output
-				if jsonNoOpCommands[cmd.CommandPath()] {
-					outputFormat = ""
-				}
-			}
 		}
 
 		// Check image_registry is configured for commands that need it.
@@ -251,33 +300,113 @@ func Execute() {
 
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
-		if shouldShowUsageOnError(cmd, autoHelp) {
-			_ = cmd.Usage()
+		// A failure already reported in the JSON output only sets the exit
+		// status; printing it again would add noise for JSON consumers.
+		if !isReportedInJSON(err) {
+			fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
+			if showUsageForError(cmd, err, autoHelp) {
+				_ = cmd.Usage()
+			}
 		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitCodeFor returns the process exit status for a failed command: the
+// status requested by an error implementing exitCoder (anywhere in the
+// wrap chain), otherwise 1.
+func exitCodeFor(err error) int {
+	var ec exitCoder
+	if errors.As(err, &ec) && ec.ExitCode() > 0 {
+		return ec.ExitCode()
+	}
+	return 1
 }
 
 // shouldShowUsageOnError reports whether Execute should print cmd's usage
 // block after a failed invocation. cobra's own SilenceUsage handling is
 // bypassed here because Execute prints the error and usage itself (for the
 // colored error banner above), so this helper re-implements the same intent:
-// a subcommand sets SilenceUsage on itself once argument parsing has already
-// succeeded, so a later runtime failure isn't mistaken for a usage error.
+// a subcommand's SilenceUsage is set once its invocation is known to be
+// well-formed, so a later runtime failure isn't mistaken for a usage error.
 //
-// rootCmd itself sets SilenceUsage: true, but only so cobra's own internal
-// auto-print never double-prints usage under the banner above — it is not an
-// opt-out signal for this helper. ExecuteC returns rootCmd as cmd for
-// root-level usage errors (an unknown command or an unknown global flag), and
-// those must still show usage, so only a non-root command's SilenceUsage is
-// honored here. This is a no-op for every subcommand that never sets
-// SilenceUsage on itself, which today is every command except attach.
+// rootCmd's PersistentPreRunE sets SilenceUsage on the executing command
+// after flag parsing, positional-arg validation, flag-group/required-flag
+// checks and flag-value checks have passed, so every subcommand gets this
+// behaviour centrally: argument and flag errors (which fail before that
+// point) show usage; errors from the rest of the hook, PreRunE or RunE do
+// not. Commands may still set SilenceUsage themselves (attach does, in RunE).
+//
+// rootCmd itself sets SilenceUsage: true statically, but only so cobra's own
+// internal auto-print never double-prints usage under the banner above — it
+// is not an opt-out signal for this helper. ExecuteC returns rootCmd as cmd
+// for root-level usage errors (an unknown command or an unknown global flag),
+// and those must still show usage, so only a non-root command's SilenceUsage
+// is honored here.
 func shouldShowUsageOnError(cmd *cobra.Command, autoHelp bool) bool {
 	if cmd == nil || !autoHelp {
 		return false
 	}
 	return !cmd.HasParent() || !cmd.SilenceUsage
+}
+
+// showUsageForError decides whether Execute prints the Usage block after a
+// failed invocation. This is the single statement of the usage policy
+// (ptone/scion#2859):
+//
+//   - Argument and flag errors show usage. They are reported by cobra's own
+//     flag parsing and Args validators, by the flag checks at the top of
+//     root's PersistentPreRunE (flag groups, required flags, --tz, --format),
+//     or, for checks that live in RunE, by returning a usageError
+//     (newUsageError / asUsageError).
+//   - Everything else is a runtime failure and shows no usage: root's hook
+//     sets SilenceUsage on the command once the invocation is known to be
+//     well-formed (see shouldShowUsageOnError), and hub failures
+//     (isHubFailure) never show it.
+//
+// A usageError shows usage even after SilenceUsage was set, which is what
+// lets a RunE flag check keep its usage block.
+func showUsageForError(cmd *cobra.Command, err error, autoHelp bool) bool {
+	if cmd == nil || !autoHelp {
+		return false
+	}
+	if isUsageError(err) {
+		return true
+	}
+	if isHubFailure(err) {
+		return false
+	}
+	return shouldShowUsageOnError(cmd, autoHelp)
+}
+
+// usageError marks an argument or flag validation error returned from RunE
+// (or a helper it calls), after root's hook has set SilenceUsage. Error() is
+// the wrapped error's message unchanged, and Unwrap exposes it, so
+// errors.Is/As and the exit code behave as for the unwrapped error.
+type usageError struct{ err error }
+
+func (e *usageError) Error() string { return e.err.Error() }
+func (e *usageError) Unwrap() error { return e.err }
+
+// newUsageError is fmt.Errorf for argument/flag validation errors in RunE:
+// the result shows the Usage block (see showUsageForError).
+func newUsageError(format string, a ...any) error {
+	return &usageError{err: fmt.Errorf(format, a...)}
+}
+
+// asUsageError marks an existing validation error (e.g. from a shared flag
+// parser) as a usage error. It returns nil for a nil err.
+func asUsageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &usageError{err: err}
+}
+
+// isUsageError reports whether err, or anything it wraps, is a usageError.
+func isUsageError(err error) bool {
+	var ue *usageError
+	return errors.As(err, &ue)
 }
 
 func commandInSubtree(cmd *cobra.Command, name string) bool {
@@ -305,8 +434,13 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
 	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
 
+	// Display zone for human-readable times (JSON output is always UTC)
+	rootCmd.PersistentFlags().StringVar(&displayTZ, "tz", "", "Show times in this IANA time zone, e.g. America/New_York (default: local zone; JSON output is unchanged)")
+	rootCmd.PersistentFlags().BoolVar(&displayUTC, "utc", false, "Show times in UTC (JSON output is unchanged)")
+	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
+
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output (equivalent to SCION_DEBUG=1)")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output; agents started by this command also get SCION_DEBUG=1. 'scion server start' has its own --debug (see its help).")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which
@@ -495,6 +629,13 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 		return nil
 	}
 	if cmd.Parent() != nil && cmd.Parent().Name() == "config" {
+		return nil
+	}
+	// design Amendment A26.2 O1: `scion reincarnate --handoff-template` is a
+	// pure local print (no Hub, no env, no target resolution — see its RunE),
+	// so it must work regardless of container/Hub context, exactly like the
+	// informational commands above.
+	if isReincarnateHandoffTemplateInvocation(cmd) {
 		return nil
 	}
 

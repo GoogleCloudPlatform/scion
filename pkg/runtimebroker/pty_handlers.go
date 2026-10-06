@@ -599,6 +599,9 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 
 	// Look up agent using LookupAgent for runtime-aware info
 	projectID := r.URL.Query().Get("projectId")
+	// projectPath is the hub's hint for a linked project's local path, used
+	// to find the agent's saved profile (see ensureAgentOwnRuntime).
+	ctx = withProjectPathHint(ctx, r.URL.Query().Get("projectPath"))
 	result, err := s.LookupAgent(ctx, agentID, projectID)
 	if err != nil {
 		if errors.Is(err, ErrAgentListUnavailable) {
@@ -630,6 +633,22 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	containerID := result.ContainerID
+
+	// Reject before the WebSocket upgrade when the resolved runtime doesn't
+	// support interactive attach at all (runtime.HasAttachSupport, asked of
+	// the live instance LookupAgent actually matched) — otherwise the
+	// caller only learns this after the upgrade, from an abnormal close
+	// instead of a clean HTTP error. This is the direct-connect counterpart
+	// of the control-channel gate's 4501/attach_unsupported (controlchannel.go):
+	// same policy, but since no WebSocket has been upgraded yet here, there is
+	// no close frame to send — the already-distinct 501/runtime_attach_unsupported
+	// HTTP response below already tells the caller this is a definitive
+	// refusal, not a retriable readiness failure, so it stays as it is.
+	if !runtime.HasAttachSupport(result.Runtime) {
+		slog.Info("PTY attach: runtime does not support attach", "agent_id", agentID, "runtime", result.RuntimeName)
+		RuntimeAttachUnsupported(w, "attach is not supported for agents on this runtime")
+		return
+	}
 
 	// Upgrade to WebSocket
 	conn, err := ptyUpgrader.Upgrade(w, r, nil)
@@ -812,6 +831,12 @@ func (s *LocalPTYSession) Run() error {
 	} else if isK8s {
 		return s.runK8sExec()
 	} else {
+		// A runtime with no exec/attach/TTY primitive at all is rejected
+		// before this point, in handleAgentAttach — the only caller that
+		// constructs a LocalPTYSession — via runtime.HasAttachSupport on the
+		// live instance LookupAgent matched. Every session reaching here has
+		// already cleared that gate.
+		//
 		// Activate set-titles for existing sessions that predate the template change.
 		// Best-effort — failure doesn't block attach.
 		if isDockerCompatibleRuntime(s.runtimeCmd) {
@@ -1122,7 +1147,7 @@ func (s *LocalPTYSession) startDockerExec() error {
 		}
 	}
 
-	args := []string{"exec", "-it"}
+	args := append([]string{"exec", "-it"}, runtime.ExecDetachKeysArgs(s.runtimeCmd)...)
 	if s.attachNonce != "" {
 		args = append(args, "-e", "SCION_ATTACH_NONCE="+s.attachNonce)
 	}
@@ -1366,6 +1391,13 @@ func (h *StreamPTYHandler) Run() error {
 	} else if isK8s {
 		return h.runK8sExec()
 	} else {
+		// A runtime with no exec/attach/TTY primitive at all is rejected
+		// before this point, in handlePTYStream (controlchannel.go) — the
+		// only path that constructs a StreamPTYHandler — via
+		// runtime.HasAttachSupport on the live instance LookupAgent
+		// matched. Every stream reaching here has already cleared that
+		// gate.
+		//
 		// Activate set-titles for existing sessions that predate the template change.
 		// Best-effort — failure doesn't block attach.
 		if isDockerCompatibleRuntime(runtimeCmd) {
@@ -1689,7 +1721,7 @@ func (h *StreamPTYHandler) startDockerExec() error {
 		}
 	}
 
-	args := []string{"exec", "-it"}
+	args := append([]string{"exec", "-it"}, runtime.ExecDetachKeysArgs(runtimeCmd)...)
 	if h.attachNonce != "" {
 		args = append(args, "-e", "SCION_ATTACH_NONCE="+h.attachNonce)
 	}

@@ -2,6 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!-- Matches the real app's index.html: without this, Chromium's mobile
+         emulation (isMobile: true) ignores Playwright's requested viewport
+         size and falls back to a ~980px desktop-site layout viewport, which
+         silently breaks any narrow-width assertion made under touch
+         emulation. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Chat quick command palette fixture</title>
     <style>
       html,
@@ -35,6 +41,10 @@
       scion-page-chat {
         width: 100%;
       }
+      scion-chat-shell {
+        width: 100%;
+        min-height: 0;
+      }
       scion-terminal-pane {
         width: 100%;
         height: 100%;
@@ -42,6 +52,12 @@
     </style>
   </head>
   <body>
+    <!-- A real focusable element outside <scion-page-chat> entirely — distinct
+         from both a real composer and the page's own #palette-focus-fallback
+         — so a test can tell "the invoker was actually restored" apart from
+         "focus fell back to the page's own default" when this is the
+         invoker. -->
+    <button id="outside-invoker" type="button">Outside invoker</button>
     <!-- Mirrors main.ts: the route outlet is hidden (not the page itself)
          while the terminal workspace is shown, and the chat page stays
          mounted underneath. -->

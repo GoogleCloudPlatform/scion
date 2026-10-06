@@ -30,6 +30,7 @@ import (
 
 	gouuid "github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -191,7 +192,7 @@ func (s *Server) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 		}
 		s.createRoleDefinition(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -208,7 +209,7 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 	// Sub-resource action: GET /api/v1/admin/roles/:id/export
 	if action == "export" {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodHead)
 			return
 		}
 		s.exportSingleRole(w, r, id)
@@ -218,7 +219,7 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 	// Sub-resource action: POST /api/v1/admin/roles/:id/duplicate
 	if action == "duplicate" {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		user, ok := s.requireWritePermissionForRole(w, r, "role.create", "create")
@@ -250,7 +251,7 @@ func (s *Server) handleAdminRoleByID(w http.ResponseWriter, r *http.Request) {
 		}
 		s.deleteRoleDefinition(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -285,7 +286,7 @@ func (s *Server) handleAdminRoleBindings(w http.ResponseWriter, r *http.Request)
 	case http.MethodPost:
 		s.createRoleBindingScopeAware(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -343,7 +344,7 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 	if peek.ScopeType == store.RoleScopeProject && peek.RoleDefinitionID != "" {
 		// Check if this is a built-in project role.
 		roleDef, err := s.store.GetRoleDefinition(r.Context(), peek.RoleDefinitionID)
-		if err == nil && !validProjectRoles[roleDef.Name] {
+		if err == nil && !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
 			// Custom project role — require hub-level auth.
 			requireHubAuth = true
 		}
@@ -385,7 +386,7 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		// Inline authorization: role_binding.read at hub scope.
@@ -412,7 +413,7 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 		}
 		s.deleteRoleBinding(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
@@ -423,7 +424,7 @@ func (s *Server) handleAdminRoleBindingByID(w http.ResponseWriter, r *http.Reque
 // handleAdminPermissions handles GET on /api/v1/admin/permissions.
 func (s *Server) handleAdminPermissions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.listPermissions(w, r)
@@ -704,7 +705,7 @@ func (s *Server) duplicateRoleDefinition(w http.ResponseWriter, r *http.Request,
 // Authorization: route guard checks role.read.
 func (s *Server) handleAdminRolesExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodHead)
 		return
 	}
 	s.exportRoleDefinitions(w, r)
@@ -714,7 +715,7 @@ func (s *Server) handleAdminRolesExport(w http.ResponseWriter, r *http.Request) 
 // Authorization: route guard checks role.read; inline check requires role.create.
 func (s *Server) handleAdminRolesImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 	user, ok := s.requireWritePermissionForRole(w, r, "role.create", "create")
@@ -1267,6 +1268,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		req.PrincipalID = resolvedUser.ID
 	}
 
+	// principalIsMembersGroup records whether the group principal is a
+	// project members group. The refusal is applied below, after routing:
+	// built-in project roles are refused by the membership service once the
+	// actor is authorized; the remaining routes are already behind hub-level
+	// role_binding.create.
+	principalIsMembersGroup := false
+
 	// Verify group exists for group principals.
 	// Try UUID first, fall back to slug lookup (mirrors email→UUID for users).
 	if req.PrincipalType == store.RoleBindingPrincipalGroup {
@@ -1288,6 +1296,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			}
 		}
 		req.PrincipalID = g.ID
+		principalIsMembersGroup = store.IsProjectMembersGroup(g)
 	}
 
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
@@ -1356,7 +1365,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			BadRequest(w, "role definition not found")
 			return
 		}
-		if validProjectRoles[roleDef.Name] {
+		if store.IsBuiltInProjectMembershipRole(roleDef.Name) {
 			// Built-in project role — route through membership service.
 			if s.membershipService == nil {
 				writeError(w, http.StatusInternalServerError, "internal_error",
@@ -1382,12 +1391,12 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			if denial != nil && !denial.Allowed {
 				// Error contract: membership-service 403s surfaced through the
 				// role-binding endpoint include structured details.
-				var details map[string]interface{}
+				details := legacyMembershipDenialDetails(denial)
 				if denial.HTTPStatus == http.StatusForbidden {
-					details = map[string]interface{}{
+					details = withSessionOnlyDenialDetails(map[string]interface{}{
 						"resource_type": "role_binding",
 						"denied_action": "create",
-					}
+					}, denial.Details)
 				}
 				writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 				return
@@ -1396,6 +1405,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		// Custom project-scoped role — fall through to CanDelegate path.
+	}
+
+	// Project members groups cannot be granted roles, on any scope.
+	if principalIsMembersGroup {
+		writeError(w, http.StatusBadRequest, ErrCodePrincipalIneligible,
+			projectMembersGroupPrincipalMessage, projectMembersGroupPrincipalDetails(req.PrincipalID))
+		return
 	}
 
 	// CanDelegate check: security invariant — the actor must hold all
@@ -1496,10 +1512,10 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			// details carry the resource context the UI needs.
 			var details map[string]interface{}
 			if denial.HTTPStatus == http.StatusForbidden {
-				details = map[string]interface{}{
+				details = withSessionOnlyDenialDetails(map[string]interface{}{
 					"resource_type": "role_binding",
 					"denied_action": "delete",
-				}
+				}, denial.Details)
 			}
 			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 			return
@@ -1561,10 +1577,12 @@ func (s *Server) deleteSystemSuperAdminBinding(
 	// Credential boundary: super-admin binding mutations require interactive
 	// session or dev credentials. Reject broker, agent JWT, UAT, and
 	// federation tokens (R6 credential gate).
-	cred := GetCredentialContextFromContext(ctx)
-	if !allowedMutationCredentials[cred.Kind] {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed", cred.Kind), nil)
+	// Session-only with the GOV_PENDING reason (session_only_gate.go).
+	if !sessionCredentialAllowed(ctx) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed",
+				GetCredentialContextFromContext(ctx).Kind),
+			authzop.ReasonGovernancePending)
 		return
 	}
 

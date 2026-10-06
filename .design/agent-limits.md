@@ -178,13 +178,13 @@ All limit-related events produce structured log entries in `agent.log` using the
 #### When Duration Limit is Hit
 
 ```
-2026-02-22 14:30:00 [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_duration of 2h exceeded (started at 2026-02-22 12:30:00)
+2026-02-22T14:30:00Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_duration of 2h exceeded (started at 2026-02-22 12:30:00)
 ```
 
 #### When Turn Limit is Hit
 
 ```
-2026-02-22 14:30:00 [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_turns of 50 exceeded (completed 50 turns)
+2026-02-22T14:30:00Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: max_turns of 50 exceeded (completed 50 turns)
 ```
 
 #### When Neither Limit is Configured

@@ -44,12 +44,11 @@ async function setupChat(page: Page, opts: ChatSetupOptions = {}): Promise<void>
 
   const agentProjectId = agentHasProject ? projectId : '';
 
-  // Feature flags: both native_chat flags ON (default), terminal workspace
+  // Feature flags: native_chat ON (default), terminal workspace
   await page.addInitScript(
     ({ tw }) => {
       window.__SCION_FEATURES__ = {
         'web.native_chat': true,
-        'web.native_chat_v2': true,
         'web.terminal_workspace': tw,
       };
       // Suppress EventSource (SSE) — no real server

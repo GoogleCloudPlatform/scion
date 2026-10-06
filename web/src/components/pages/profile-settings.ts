@@ -23,6 +23,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import {
@@ -34,18 +35,10 @@ import {
   type PushPermissionState,
 } from '../../client/push-preference.js';
 import { isChimeEnabled, setChimeEnabled } from '../../utils/audio.js';
+import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
 import '../shared/subscription-manager.js';
-
-/**
- * Minimal shape of a runtime profile as returned by
- * GET /api/v1/admin/server-config. Only the fields this page reads or
- * writes are declared; the API returns more (runtime, resources, etc.)
- * which are preserved untouched via the spread in `_saveTimezone`.
- */
-interface AgentProfile {
-  timezone?: string;
-  [key: string]: unknown;
-}
+import '../shared/timezone-picker.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 
 @customElement('scion-page-profile-settings')
 export class ScionPageProfileSettings extends LitElement {
@@ -67,29 +60,41 @@ export class ScionPageProfileSettings extends LitElement {
   @state()
   private _isWorkstation = false;
 
-  // Timezone (agent execution profile) state. The timezone field lives on
-  // the active runtime profile (`V1ProfileConfig.timezone`), read/written
-  // via the admin server-config API. The section is hidden entirely if that
-  // endpoint isn't reachable for the current user (e.g. insufficient
-  // permissions on a shared hub) so we never show a control that can't work.
+  // Display timezone (`preferences.timezone`, design.md §3 A "Fate of the
+  // card"). Visible to every signed-in user: it only affects how this user
+  // *sees* times, never agent containers.
   @state()
-  private _timezoneSectionAvailable = false;
+  private _userId = '';
 
   @state()
-  private _timezoneInput = '';
+  private _displayTimezone = '';
 
   @state()
-  private _timezoneSaving = false;
+  private _displayTimezoneSaving = false;
 
   @state()
-  private _timezoneError: string | null = null;
+  private _displayTimezoneError: string | null = null;
 
   @state()
-  private _timezoneSaved = false;
+  private _displayTimezoneSaved = false;
 
-  private _activeProfileName = '';
-  private _profiles: Record<string, AgentProfile> = {};
-  private _savedTimezone = '';
+  /**
+   * Bumped to force the picker to remount after a failed PATCH or the
+   * no-user-id case (review R2-2, replacing R1-5's `@query`-ref approach).
+   *
+   * Task 12's `<scion-timezone-picker>` never mutates its own `value`
+   * property on selection — only its internal, unexported `searchQuery`
+   * text — so even a direct `picker.value = x` write (bypassing Lit's
+   * property-binding diff) changes a property the picker doesn't read back
+   * into what it displays. There is no supported way to ask the picker to
+   * resync from outside without either modifying it (out of bounds for
+   * this PR — task 12 owns that file) or relying on its private internals.
+   * `keyed()` sidesteps both: bumping the key unmounts the stale instance
+   * and mounts a fresh one, which always initializes its display from
+   * `.value` in `willUpdate`'s `!this.hasUpdated` branch.
+   */
+  @state()
+  private _pickerRevision = 0;
 
   static override styles = css`
     :host {
@@ -209,16 +214,10 @@ export class ScionPageProfileSettings extends LitElement {
       border: 1px solid var(--sl-color-danger-200, #fecaca);
     }
 
-    .timezone-row {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin-top: 0.75rem;
-    }
-
-    .timezone-row sl-input {
-      flex: 1;
-      max-width: 22rem;
+    scion-timezone-picker {
+      display: block;
+      width: 18rem;
+      max-width: 100%;
     }
   `;
 
@@ -231,7 +230,7 @@ export class ScionPageProfileSettings extends LitElement {
     // must show the same answer.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this._onPushPreferenceChanged);
     void this._loadSystemStatus();
-    void this._loadTimezoneSettings();
+    void this._loadDisplayTimezone();
   }
 
   override disconnectedCallback(): void {
@@ -258,98 +257,76 @@ export class ScionPageProfileSettings extends LitElement {
   }
 
   /**
-   * Loads the timezone of the hub's active runtime profile. Uses the admin
-   * server-config endpoint, since profile timezone is a field on the shared
-   * `V1ProfileConfig` catalog rather than a per-user record. On hubs where
-   * the current user lacks permission to read server config (403), the
-   * request fails silently and the timezone section stays hidden.
+   * Loads the signed-in user's id and display-timezone preference from
+   * `/auth/me`, which returns `preferences` live (no session caching) for
+   * the authenticated caller only.
    */
-  private async _loadTimezoneSettings(): Promise<void> {
+  private async _loadDisplayTimezone(): Promise<void> {
     try {
-      const res = await apiFetch('/api/v1/admin/server-config');
-      if (!res.ok) {
-        return;
-      }
+      const res = await apiFetch('/auth/me');
+      if (!res.ok) return;
       const data = (await res.json()) as {
-        active_profile?: string;
-        profiles?: Record<string, AgentProfile>;
+        id?: string;
+        preferences?: { timezone?: string };
       };
-      const activeProfile = data.active_profile;
-      if (!activeProfile) {
-        return;
-      }
-      this._profiles = data.profiles ?? {};
-      this._activeProfileName = activeProfile;
-      const tz = this._profiles[activeProfile]?.timezone ?? '';
-      this._timezoneInput = tz;
-      this._savedTimezone = tz;
-      this._timezoneSectionAvailable = true;
+      this._userId = data.id ?? '';
+      this._displayTimezone = data.preferences?.timezone ?? '';
     } catch {
-      // Non-critical — leave the section hidden.
+      // Non-critical — the card still renders; saving just has nothing to
+      // PATCH against until a reload succeeds.
     }
   }
 
-  /** Returns an error message if `tz` isn't a recognized IANA timezone name. */
-  private _validateTimezone(tz: string): string | null {
-    if (!tz) return null;
-    try {
-      // Throws RangeError for unrecognized IANA zone names.
-      new Intl.DateTimeFormat('en-US', { timeZone: tz });
-      return null;
-    } catch {
-      return `"${tz}" is not a recognized IANA timezone name (e.g. "America/Los_Angeles").`;
-    }
-  }
-
-  private _handleTimezoneInput(e: Event): void {
-    this._timezoneInput = (e.target as HTMLInputElement).value;
-    this._timezoneError = null;
-    this._timezoneSaved = false;
-  }
-
-  private async _saveTimezone(): Promise<void> {
-    const value = this._timezoneInput.trim();
-    const validationError = this._validateTimezone(value);
-    if (validationError) {
-      this._timezoneError = validationError;
+  /**
+   * Saves the display-timezone preference via a per-key `preferences`
+   * merge (backend contract: tz-refactor task 10, ptone/scion#2526) and
+   * applies it to the effective-zone store immediately, with no reload
+   * (AC4/AC5). On failure — including when `_userId` hasn't loaded yet —
+   * resets the picker's displayed value back to the last-saved preference
+   * (review R1-5/R2-2), since the picker already updated its own
+   * typed/selected text before this handler ran.
+   */
+  private async _handleZoneChange(e: CustomEvent<TimezoneChangeDetail>): Promise<void> {
+    const value = e.detail.timezone;
+    if (!this._userId) {
+      this._resetPickerDisplay();
       return;
     }
 
-    this._timezoneSaving = true;
-    this._timezoneError = null;
-    this._timezoneSaved = false;
-
-    // The API replaces the entire `profiles` map on write, so we send back
-    // the full map we loaded with only the active profile's timezone changed.
-    const activeProfile: AgentProfile = { ...this._profiles[this._activeProfileName] };
-    if (value) {
-      activeProfile.timezone = value;
-    } else {
-      delete activeProfile.timezone;
-    }
-    const updatedProfiles: Record<string, AgentProfile> = {
-      ...this._profiles,
-      [this._activeProfileName]: activeProfile,
-    };
+    this._displayTimezoneSaving = true;
+    this._displayTimezoneError = null;
+    this._displayTimezoneSaved = false;
 
     try {
-      const res = await apiFetch('/api/v1/admin/server-config', {
+      const res = await apiFetch(`/api/v1/users/${encodeURIComponent(this._userId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profiles: updatedProfiles }),
+        body: JSON.stringify({ preferences: { timezone: value } }),
       });
       if (!res.ok) {
-        this._timezoneError = await extractApiError(res, 'Failed to update timezone');
+        this._displayTimezoneError = await extractApiError(res, 'Failed to update timezone');
+        this._resetPickerDisplay();
         return;
       }
-      this._profiles = updatedProfiles;
-      this._savedTimezone = value;
-      this._timezoneSaved = true;
+      this._displayTimezone = value;
+      setPreferredTimeZone(value);
+      this._displayTimezoneSaved = true;
     } catch {
-      this._timezoneError = 'Failed to update timezone';
+      this._displayTimezoneError = 'Failed to update timezone';
+      this._resetPickerDisplay();
     } finally {
-      this._timezoneSaving = false;
+      this._displayTimezoneSaving = false;
     }
+  }
+
+  /**
+   * Forces the picker to remount (review R2-2) so it re-displays the
+   * last-saved `_displayTimezone` instead of whatever the user just typed
+   * or selected — see `_pickerRevision`'s doc comment for why a property
+   * write alone can't do this for task 12's picker.
+   */
+  private _resetPickerDisplay(): void {
+    this._pickerRevision++;
   }
 
   private _initNotificationState(): void {
@@ -484,66 +461,58 @@ export class ScionPageProfileSettings extends LitElement {
         </div>
       </div>
 
-      ${this._timezoneSectionAvailable
-        ? html`
-            <div class="settings-card">
-              <h2 class="section-title">
-                <sl-icon name="clock"></sl-icon>
-                Timezone
-              </h2>
+      <div class="settings-card">
+        <h2 class="section-title">
+          <sl-icon name="clock"></sl-icon>
+          Display timezone
+        </h2>
 
-              <div class="setting-row">
-                <div class="setting-info">
-                  <p class="setting-label">Agent timezone</p>
-                  <p class="setting-description">
-                    IANA timezone name (e.g. "America/Los_Angeles") injected as
-                    <code>TZ</code> into agent containers using the "${this._activeProfileName}"
-                    profile. Leave blank to fall back to the hub default.
-                  </p>
-                </div>
-              </div>
-
-              <div class="timezone-row">
-                <sl-input
-                  .value=${this._timezoneInput}
-                  placeholder="America/Los_Angeles"
-                  ?disabled=${this._timezoneSaving}
-                  @sl-input=${(e: Event): void => this._handleTimezoneInput(e)}
-                  @keydown=${(e: KeyboardEvent): void => {
-                    if (e.key === 'Enter') void this._saveTimezone();
+        <div class="setting-row">
+          <div class="setting-info">
+            <p class="setting-label">Times shown in</p>
+            <p class="setting-description">
+              Controls how times are displayed and how date/time inputs are interpreted in
+              native chat and scheduling forms, and the rest of the UI follows over time. Choose
+              "Auto" to follow your browser's zone (currently ${browserTimeZone()}); this never
+              changes how agent containers are configured.
+            </p>
+          </div>
+          <div class="setting-control">
+            ${keyed(
+              this._pickerRevision,
+              html`
+                <scion-timezone-picker
+                  empty-label="Auto"
+                  label="Display timezone"
+                  .value=${this._displayTimezone}
+                  ?disabled=${this._displayTimezoneSaving}
+                  @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>): void => {
+                    void this._handleZoneChange(e);
                   }}
-                ></sl-input>
-                <sl-button
-                  variant="primary"
-                  size="medium"
-                  ?loading=${this._timezoneSaving}
-                  ?disabled=${this._timezoneSaving ||
-                  this._timezoneInput.trim() === this._savedTimezone}
-                  @click=${(): void => void this._saveTimezone()}
-                >
-                  Save
-                </sl-button>
-              </div>
+                ></scion-timezone-picker>
+              `
+            )}
+          </div>
+        </div>
 
-              ${this._timezoneError
-                ? html`
-                    <div class="permission-status status-denied">
-                      <sl-icon name="exclamation-triangle"></sl-icon>
-                      ${this._timezoneError}
-                    </div>
-                  `
-                : nothing}
-              ${this._timezoneSaved
-                ? html`
-                    <div class="permission-status status-granted">
-                      <sl-icon name="check-circle"></sl-icon>
-                      Timezone updated.
-                    </div>
-                  `
-                : nothing}
-            </div>
-          `
-        : nothing}
+        ${this._displayTimezoneError
+          ? html`
+              <div class="permission-status status-denied">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                ${this._displayTimezoneError}
+              </div>
+            `
+          : nothing}
+        ${this._displayTimezoneSaved
+          ? html`
+              <div class="permission-status status-granted">
+                <sl-icon name="check-circle"></sl-icon>
+                Display timezone updated.
+              </div>
+            `
+          : nothing}
+      </div>
+
       ${this._gcloudADCAvailable && this._isWorkstation
         ? html`
             <div class="settings-card">

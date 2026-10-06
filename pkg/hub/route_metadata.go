@@ -154,6 +154,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/experiments": {
+		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/auth/admin-status": {
 		Pattern: "/api/v1/auth/admin-status", RouteID: "auth.admin-status",
 		Classification: RouteAuthenticated,
@@ -188,6 +192,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/users/me/injected-skills/": {
 		Pattern: "/api/v1/users/me/injected-skills/", RouteID: "users.me.injectedSkills.byId",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/terminal-workspace": {
+		Pattern: "/api/v1/users/me/terminal-workspace", RouteID: "users.me.terminalWorkspace",
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/users/me/templates": {
@@ -370,6 +378,48 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "gcp_service_account.read", Resource: "gcp_service_account", Action: "read",
 	},
 
+	// gs:// link fetch: identity-only at the route level (any identity may
+	// reach the handler); the handler itself requires a user identity and
+	// derives every further check from the requested message, never from a
+	// registry permission — see handleGCSObject.
+	"/api/v1/gcs/object": {
+		Pattern: "/api/v1/gcs/object", RouteID: "gcs.object",
+		Classification: RouteAuthenticated,
+	},
+
+	// Conduit grant verification keys (public halves only), behind the
+	// hub.conduit experiment. Any authenticated principal may read them.
+	"/api/v1/conduit/grant-keys": {
+		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
+		Classification: RouteAuthenticated,
+	},
+	// The agent's conduit session (WebSocket), behind hub.conduit. Agent
+	// tokens with agent:port:forward only; the handler reads the agent row.
+	"/api/v1/conduit": {
+		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
+		Classification: RouteAgentToken,
+	},
+
+	// -------------------------------------------------------------------------
+	// Policy: Artifacts (pkg/artifacts, behind the hub.artifacts experiment).
+	// The service performs the fine-grained checks through artifacts.Host;
+	// the share-link route authenticates by link token only.
+	// -------------------------------------------------------------------------
+	"/api/v1/artifacts": {
+		Pattern: "/api/v1/artifacts", RouteID: "artifacts.list",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/": {
+		Pattern: "/api/v1/artifacts/", RouteID: "artifacts.byId",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/shared/": {
+		Pattern: "/api/v1/artifacts/shared/", RouteID: "artifacts.shared",
+		Classification: RoutePublic,
+	},
+
 	// -------------------------------------------------------------------------
 	// Policy: Skills
 	// -------------------------------------------------------------------------
@@ -488,16 +538,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// -------------------------------------------------------------------------
 	"/api/v1/chat/prefs": {
 		Pattern: "/api/v1/chat/prefs", RouteID: "chat.prefs",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/chat/threads": {
-		Pattern: "/api/v1/chat/threads", RouteID: "chat.threads.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/chat/threads/": {
-		Pattern: "/api/v1/chat/threads/", RouteID: "chat.threads.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
@@ -685,6 +725,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.messaging.update", Resource: "hub", Action: "update",
 	},
+	"/api/v1/admin/experiments": {
+		Pattern: "/api/v1/admin/experiments", RouteID: "admin.experiments",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
+	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
@@ -845,6 +890,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/access-constraints/", RouteID: "admin.accessConstraints.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+	},
+	"GET /api/v1/admin/access-constraints/{id}/audit": {
+		Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", RouteID: "admin.accessConstraints.audit",
+		Classification: RoutePolicy,
+		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "manage",
 	},
 	"/api/v1/admin/access-constraint-previews": {
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
@@ -1089,6 +1139,15 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			// The handler performs per-resource authorization with full context.
 			// The declarative guard classifies the route; enforcement stays in
 			// the handler where resource IDs, ownership, and visibility are known.
+			if agentSubRouteGuardedRoutes[meta.RouteID] {
+				// Agent sub-routes resolve once here, for every caller
+				// kind; handlers dispatch on the stored value.
+				resolved, ok := resolveAgentSubRouteForRequest(w, r)
+				if !ok {
+					return
+				}
+				r = resolved
+			}
 			next(w, r)
 		case RouteHubAdmin:
 			if meta.Permission != "" && s.authzService != nil {

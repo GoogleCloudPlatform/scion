@@ -26,8 +26,9 @@ const (
 	// live route/service/scheduled entry point was found.
 	DriftMissingRoute DriftKind = "missing_route"
 	// DriftPatternMismatch: both a catalog entry and a live entry point
-	// exist for the operation and kind, but their patterns disagree (e.g.
-	// catalog "/attach" vs. live "/pty").
+	// exist for the operation and kind, but their pattern or method
+	// disagree (e.g. catalog "/attach" vs. live "/pty"; catalog PUT vs.
+	// live PATCH on the same pattern).
 	DriftPatternMismatch DriftKind = "pattern_mismatch"
 )
 
@@ -166,5 +167,5 @@ func CheckDrift(discovered map[OperationID][]DiscoveredEntryPoint) []DriftFindin
 }
 
 func (d DiscoveredEntryPoint) asEntryPoint() EntryPoint {
-	return EntryPoint(d)
+	return EntryPoint{Kind: d.Kind, Pattern: d.Pattern, Method: d.Method}
 }

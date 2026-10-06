@@ -20,9 +20,27 @@ import (
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 const metadataIP = "169.254.169.254"
+
+// iptablesCmd resolves "iptables" through rootexec.Resolve — never the
+// ambient PATH, which on substrate includes a directory the workload owns
+// outright — and builds its environment from scratch: this runs as root,
+// in-process in PID 1, and needs nothing beyond a fixed PATH to invoke a
+// system binary with fixed arguments. A resolution failure is returned as
+// the exec error every caller here already handles.
+func iptablesCmd(args ...string) (*exec.Cmd, error) {
+	path, err := rootexec.Resolve("iptables")
+	if err != nil {
+		return nil, fmt.Errorf("resolve iptables: %w", err)
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Env = rootexec.Env()
+	return cmd, nil
+}
 
 // setupIPTablesRedirect configures iptables to redirect traffic destined for
 // the GCE metadata server IP (169.254.169.254) to the local metadata sidecar.
@@ -42,8 +60,11 @@ func setupIPTablesRedirect(port int) error {
 		"--to-port", portStr,
 	}
 
-	cmd := exec.Command("iptables", args...)
-	output, err := cmd.CombinedOutput()
+	cmd, err := iptablesCmd(args...)
+	if err != nil {
+		return fmt.Errorf("iptables redirect setup failed: %w", err)
+	}
+	output, err := procreap.CombinedOutputManaged(cmd)
 	if err != nil {
 		return fmt.Errorf("iptables redirect setup failed: %w (output: %s)", err, string(output))
 	}
@@ -65,8 +86,12 @@ func cleanupIPTablesRedirect(port int) {
 		"--to-port", portStr,
 	}
 
-	cmd := exec.Command("iptables", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
+	cmd, err := iptablesCmd(args...)
+	if err != nil {
+		log.Debug("iptables cleanup failed (non-fatal): %v", err)
+		return
+	}
+	if output, err := procreap.CombinedOutputManaged(cmd); err != nil {
 		log.Debug("iptables cleanup failed (non-fatal): %v (output: %s)", err, string(output))
 	}
 }
@@ -96,8 +121,11 @@ func setupMetadataBlock() (blockMethod, error) {
 		"-j", "REJECT",
 		"--reject-with", "icmp-port-unreachable",
 	}
-	cmd := exec.Command("iptables", rejectArgs...)
-	output, err := cmd.CombinedOutput()
+	cmd, err := iptablesCmd(rejectArgs...)
+	if err != nil {
+		return blockNone, fmt.Errorf("metadata blocking failed: %w", err)
+	}
+	output, err := procreap.CombinedOutputManaged(cmd)
 	if err == nil {
 		log.Info("iptables: blocking TCP/80 traffic to %s (REJECT)", metadataIP)
 		return blockIPTables, nil
@@ -119,8 +147,12 @@ func cleanupMetadataBlock(method blockMethod) {
 			"-j", "REJECT",
 			"--reject-with", "icmp-port-unreachable",
 		}
-		cmd := exec.Command("iptables", args...)
-		if output, err := cmd.CombinedOutput(); err != nil {
+		cmd, err := iptablesCmd(args...)
+		if err != nil {
+			log.Debug("iptables block cleanup failed (non-fatal): %v", err)
+			return
+		}
+		if output, err := procreap.CombinedOutputManaged(cmd); err != nil {
 			log.Debug("iptables block cleanup failed (non-fatal): %v (output: %s)", err, string(output))
 		}
 	}

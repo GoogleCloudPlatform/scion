@@ -1,0 +1,74 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Full Test Suite (reporting only), moved out of ci.yml (ptone/scion#2845).
+#
+# It no longer runs on pull_request. It is reporting-only (continue-on-error)
+# and duplicates Build & Test's `make test-fast` plus the pkg/hub SQLite Tests
+# job, yet it accounted for about a third of billed CI minutes when it ran on
+# every PR push. It now runs post-merge on push to main, nightly, and on
+# demand via workflow_dispatch.
+#
+# It lives in its own file, rather than in ci.yml behind
+# `if: github.event_name != 'pull_request'`, so that the nightly schedule
+# does not also start every other ci.yml job. The job ID and name are
+# unchanged.
+name: Full Test Suite
+
+on:
+  push:
+    branches: [ main ]
+  # 07:17 UTC: off-peak. That is late night in US time zones and before the
+  # European working day, when PR traffic and runner contention are lowest.
+  # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+# Deliberately no concurrency group. Runs on main must never be cancelled,
+# and even with cancel-in-progress: false a shared group cancels older
+# *pending* runs.
+
+permissions:
+  contents: read
+
+jobs:
+  test-full-suite:
+    name: Full Test Suite (reporting only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run full test suite (with SQLite)
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 45m ./... 2>&1 | tee test-full-suite-output.txt
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: full-test-suite-results
+          path: test-full-suite-output.txt
+          retention-days: 14

@@ -29,9 +29,23 @@ import {
   attachmentIdentityKey,
   pathIdentityKey,
   isImageFileName,
+  isGcsImageContentType,
+  isGcsImageExtension,
   isMarkdownFileName,
+  isLikelyTextFileName,
+  isLikelyTextMime,
+  isLikelyBinaryFileName,
+  baseMimeType,
   extensionOf,
   resolveMessageProjectId,
+  GCS_URI_PATTERN,
+  resolveGcsMatch,
+  parseGcsUri,
+  escAttr,
+  buildGcsLinkHtml,
+  buildGcsObjectApiUrl,
+  pinGcsObjectUrl,
+  buildCloudConsoleUrl,
 } from './chat-file-links.js';
 
 describe('isRecognizedFilePath', () => {
@@ -147,6 +161,50 @@ describe('extractContainerPaths', () => {
     expect(extractContainerPaths('see /workspace/notes.txt#../../secret for details')).toEqual([
       '/workspace/notes.txt',
     ]);
+  });
+
+  // A gs:// object name may itself contain a '/'-separated run that happens
+  // to look like a local container path — e.g. an object named
+  // `workspace/report.md` sits right after the bucket's own `/` separator,
+  // so the whole URI contains the literal substring `/workspace/report.md`.
+  // That substring is not a local file at all, so the recent-files recorder
+  // must not record it, the same way it already excludes a path embedded in
+  // an http(s) URL.
+  it('excludes a /workspace path embedded inside a gs:// URI', () => {
+    expect(extractContainerPaths('see gs://bkt/workspace/report.md for details')).toEqual([]);
+  });
+
+  it('excludes a /scion-volumes path embedded inside a gs:// URI', () => {
+    expect(extractContainerPaths('see gs://bkt/scion-volumes/shared/notes.md')).toEqual([]);
+  });
+
+  it('still extracts a real path elsewhere in the text while excluding the one embedded in a gs:// URI', () => {
+    expect(extractContainerPaths('gs://bkt/workspace/a.md and also /workspace/b.md')).toEqual([
+      '/workspace/b.md',
+    ]);
+  });
+
+  // Isolates insideGcsUri's lower bound the same way the http(s) case above
+  // does for insideUrl: a real path positioned before a gs:// URI that
+  // appears later in the text must not be wrongly treated as "inside" that
+  // URI merely because its index is less than the URI's end index.
+  it('still extracts a real path that appears before an unrelated gs:// URI later in the text', () => {
+    expect(extractContainerPaths('/workspace/a.md then gs://bkt/workspace/b.md')).toEqual([
+      '/workspace/a.md',
+    ]);
+  });
+
+  it('does not exclude a /workspace path that merely follows a gs:// URI with no embedded collision', () => {
+    // A real product URI (bucket scion-xproject-exchange, object
+    // workspace-volumes/dev-brief.md) contains "/workspace-volumes/", not
+    // "/workspace/" — CONTAINER_PATH_PATTERN never matches inside it at all,
+    // so a real, separate /workspace path later in the same message is
+    // unaffected by the exclusion.
+    expect(
+      extractContainerPaths(
+        'see gs://scion-xproject-exchange/workspace-volumes/dev-brief.md and /workspace/notes.md'
+      )
+    ).toEqual(['/workspace/notes.md']);
   });
 });
 
@@ -777,6 +835,194 @@ describe('extensionOf / isImageFileName / isMarkdownFileName', () => {
   });
 });
 
+describe('isGcsImageExtension', () => {
+  it.each(['pic.png', 'pic.jpg', 'pic.jpeg', 'pic.gif', 'pic.webp'])(
+    'is true for %s (one of the four hub-sniffed raster types)',
+    (name) => {
+      expect(isGcsImageExtension(name)).toBe(true);
+    }
+  );
+
+  it('is false for .svg, even though isImageFileName treats it as an image', () => {
+    expect(isGcsImageExtension('pic.svg')).toBe(false);
+    expect(isImageFileName('pic.svg')).toBe(true);
+  });
+
+  it('is false for .bmp and .ico, even though isImageFileName treats them as images', () => {
+    expect(isGcsImageExtension('pic.bmp')).toBe(false);
+    expect(isGcsImageExtension('pic.ico')).toBe(false);
+  });
+
+  it('is false for a non-image extension', () => {
+    expect(isGcsImageExtension('notes.md')).toBe(false);
+  });
+
+  it('is case-insensitive, matching extensionOf', () => {
+    expect(isGcsImageExtension('PIC.PNG')).toBe(true);
+  });
+});
+
+describe('isGcsImageContentType', () => {
+  it.each(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])(
+    'is true for %s (one of the four hub-sniffed raster types)',
+    (mime) => {
+      expect(isGcsImageContentType(mime)).toBe(true);
+    }
+  );
+
+  it.each(['image/bmp', 'image/x-icon', 'image/svg+xml', 'image/avif', 'image/tiff'])(
+    'is false for %s, another image type',
+    (mime) => {
+      expect(isGcsImageContentType(mime)).toBe(false);
+    }
+  );
+
+  it.each(['text/plain', 'application/octet-stream', ''])('is false for %j', (mime) => {
+    expect(isGcsImageContentType(mime)).toBe(false);
+  });
+});
+
+describe('isLikelyTextFileName / isLikelyTextMime', () => {
+  it('isLikelyTextFileName is true for a known text/code extension', () => {
+    expect(isLikelyTextFileName('main.go')).toBe(true);
+    expect(isLikelyTextFileName('data.json')).toBe(true);
+    expect(isLikelyTextFileName('notes.txt')).toBe(true);
+  });
+
+  it('isLikelyTextFileName is true for Markdown (delegates to isMarkdownFileName)', () => {
+    expect(isLikelyTextFileName('readme.md')).toBe(true);
+  });
+
+  it('isLikelyTextFileName is true for a well-known extensionless name', () => {
+    expect(isLikelyTextFileName('Dockerfile')).toBe(true);
+    expect(isLikelyTextFileName('Makefile')).toBe(true);
+  });
+
+  it('isLikelyTextFileName is false for an unrecognized extension', () => {
+    expect(isLikelyTextFileName('bundle.zip')).toBe(false);
+    expect(isLikelyTextFileName('archive.tar.gz')).toBe(false);
+  });
+
+  it('isLikelyTextFileName is false for an unrecognized extensionless name', () => {
+    expect(isLikelyTextFileName('notes')).toBe(false);
+  });
+
+  it('isLikelyTextFileName is false for a name with an unrecognized extension, even if its basename is a well-known extensionless name', () => {
+    // A name with an extension is never treated as "well-known extensionless"
+    // even if its basename-without-extension happens to collide with one.
+    expect(isLikelyTextFileName('README.bin')).toBe(false);
+    expect(isLikelyTextFileName('a.out')).toBe(false);
+  });
+
+  it('isLikelyTextMime is true for any text/* MIME type', () => {
+    expect(isLikelyTextMime('text/plain')).toBe(true);
+    expect(isLikelyTextMime('text/csv')).toBe(true);
+  });
+
+  it('isLikelyTextMime is true for a known text-like application/* MIME type', () => {
+    expect(isLikelyTextMime('application/json')).toBe(true);
+    expect(isLikelyTextMime('application/xml')).toBe(true);
+  });
+
+  it('isLikelyTextMime is true for a structured-syntax +json or +xml suffix, regardless of top-level type', () => {
+    expect(isLikelyTextMime('application/ld+json')).toBe(true);
+    expect(isLikelyTextMime('image/svg+xml')).toBe(true);
+    expect(isLikelyTextMime('application/atom+xml')).toBe(true);
+  });
+
+  it('isLikelyTextMime is false for a binary MIME type', () => {
+    expect(isLikelyTextMime('application/zip')).toBe(false);
+    expect(isLikelyTextMime('application/octet-stream')).toBe(false);
+    expect(isLikelyTextMime('image/png')).toBe(false);
+  });
+
+  it('isLikelyTextMime is case-insensitive', () => {
+    expect(isLikelyTextMime('APPLICATION/JSON')).toBe(true);
+  });
+
+  it('isLikelyTextMime ignores a trailing charset parameter', () => {
+    expect(isLikelyTextMime('text/plain; charset=utf-8')).toBe(true);
+  });
+});
+
+describe('baseMimeType', () => {
+  it('lowercases the MIME type', () => {
+    expect(baseMimeType('APPLICATION/OCTET-STREAM')).toBe('application/octet-stream');
+  });
+
+  it('strips a trailing parameter', () => {
+    expect(baseMimeType('application/octet-stream; charset=binary')).toBe(
+      'application/octet-stream'
+    );
+  });
+
+  it('trims surrounding whitespace around the base type', () => {
+    expect(baseMimeType('  application/octet-stream  ')).toBe('application/octet-stream');
+  });
+
+  it('is empty for an empty or parameter-only input', () => {
+    expect(baseMimeType('')).toBe('');
+    expect(baseMimeType(';charset=x')).toBe('');
+  });
+});
+
+describe('isLikelyBinaryFileName', () => {
+  it('is true for a known archive extension', () => {
+    expect(isLikelyBinaryFileName('bundle.zip')).toBe(true);
+    expect(isLikelyBinaryFileName('archive.tar.gz')).toBe(true);
+  });
+
+  it('is true for a known executable/compiled extension', () => {
+    expect(isLikelyBinaryFileName('app.exe')).toBe(true);
+    expect(isLikelyBinaryFileName('lib.so')).toBe(true);
+  });
+
+  it.each([
+    '.mp3',
+    '.wav',
+    '.ogg',
+    '.m4a',
+    '.flac',
+    '.aac',
+    '.mp4',
+    '.mkv',
+    '.mov',
+    '.webm',
+    '.avi',
+    '.woff',
+    '.woff2',
+    '.ttf',
+    '.otf',
+    '.eot',
+    '.dmg',
+    '.iso',
+    '.pkg',
+    '.deb',
+    '.rpm',
+  ])('is true for the known audio, video, font or disk-image extension %s', (ext) => {
+    expect(isLikelyBinaryFileName(`file${ext}`)).toBe(true);
+  });
+
+  it('is true for a known audio/video/font/disk-image extension regardless of case', () => {
+    expect(isLikelyBinaryFileName('CLIP.MP3')).toBe(true);
+    expect(isLikelyBinaryFileName('Icon.WOFF2')).toBe(true);
+  });
+
+  it('is false for ordinary text/code files that no allow-list enumerates', () => {
+    expect(isLikelyBinaryFileName('.gitignore')).toBe(false);
+    expect(isLikelyBinaryFileName('go.mod')).toBe(false);
+    expect(isLikelyBinaryFileName('Main.vue')).toBe(false);
+    expect(isLikelyBinaryFileName('main.swift')).toBe(false);
+    expect(isLikelyBinaryFileName('init.lua')).toBe(false);
+    expect(isLikelyBinaryFileName('main.tf')).toBe(false);
+  });
+
+  it('is false for a name with no extension at all', () => {
+    expect(isLikelyBinaryFileName('Makefile')).toBe(false);
+    expect(isLikelyBinaryFileName('README')).toBe(false);
+  });
+});
+
 describe('resolveMessageProjectId', () => {
   it('a non-DM thread prefers the thread project id', () => {
     expect(
@@ -840,5 +1086,896 @@ describe('resolveMessageProjectId', () => {
 
   it('a DM with nothing resolvable returns empty (never guesses the inherited project)', () => {
     expect(resolveMessageProjectId({ isDM: true, threadProjectId: 'proj-inherited' })).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gs:// link detection, parsing and URL construction.
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs GCS_URI_PATTERN once against body and returns the first match's
+ * bucket and its actually-extracted object (via {@link resolveGcsMatch}, not
+ * the pattern's raw group 3), or null if there is no match or this
+ * occurrence extracts no valid object at all.
+ */
+function firstGcsMatch(body: string): { bucket: string; object: string } | null {
+  const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+  const m = re.exec(body);
+  if (!m) return null;
+  const resolved = resolveGcsMatch(m);
+  if (!resolved) return null;
+  return { bucket: m[2], object: resolved.object };
+}
+
+/**
+ * Runs GCS_URI_PATTERN over the whole body and returns every occurrence
+ * that resolves to a valid object, in order — unlike {@link firstGcsMatch},
+ * which only ever looks at the first. Needed to assert "linked" for a body
+ * with more than one independent gs:// occurrence, where checking only the
+ * first match cannot prove anything about the second.
+ */
+function allGcsMatches(body: string): Array<{ bucket: string; object: string }> {
+  const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+  const results: Array<{ bucket: string; object: string }> = [];
+  let m: RegExpExecArray | null;
+  let prevIndex = 0;
+  while ((m = re.exec(body)) !== null) {
+    const resolved = resolveGcsMatch(m);
+    if (resolved) {
+      results.push({ bucket: m[2], object: resolved.object });
+    }
+    if (re.lastIndex === prevIndex) break;
+    prevIndex = re.lastIndex;
+  }
+  return results;
+}
+
+/**
+ * Shared parity vector table: one table of {body, bucket, object, linked,
+ * serverAllowed} cases, present verbatim in this file and in
+ * pkg/hub/gcs_link_test.go. The `name` field cross-references the matching row in
+ * pkg/hub/gcs_link_test.go's gcsParityVectors — the two files list the same
+ * cases under the same names. `serverAllowed` documents the value the Go
+ * test asserts (bodyReferencesGCSURI); only `linked` is exercised here.
+ */
+const GCS_PARITY_VECTORS: Array<{
+  name: string;
+  body: string;
+  bucket: string;
+  object: string;
+  linked: boolean;
+  serverAllowed: boolean;
+}> = [
+  // Required parity vector: a bucket name containing a hyphenated
+  // cross-project-style segment, to prove the bucket pattern accepts it.
+  {
+    name: 'cross-project-exchange-uri',
+    body: 'see gs://scion-xproject-exchange/workspace-volumes/dev-brief.md',
+    bucket: 'scion-xproject-exchange',
+    object: 'workspace-volumes/dev-brief.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'exact-object',
+    body: 'gs://bkt/abc.md',
+    bucket: 'bkt',
+    object: 'abc.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'prefix-single-char',
+    body: 'gs://bkt/abc.md',
+    bucket: 'bkt',
+    object: 'a',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'prefix-stem',
+    body: 'gs://bkt/abc.md',
+    bucket: 'bkt',
+    object: 'abc',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'prefix-partial-extension',
+    body: 'gs://bkt/abc.md',
+    bucket: 'bkt',
+    object: 'abc.m',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'scheme-prefixed-not-a-link',
+    body: 'xgs://bkt/o',
+    bucket: 'bkt',
+    object: 'o',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'leading-slash-not-a-link',
+    body: '/gs://bkt/o',
+    bucket: 'bkt',
+    object: 'o',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'parenthesized-trailing-dot',
+    body: '(gs://bkt/o.md).',
+    bucket: 'bkt',
+    object: 'o.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'nested-workspace-path-no-collision',
+    body: 'gs://bkt/workspace/x.md, ok',
+    bucket: 'bkt',
+    object: 'workspace/x.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'trailing-slash-directory',
+    body: 'gs://bkt/dir/',
+    bucket: 'bkt',
+    object: 'dir',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'backtick-wrapped',
+    body: '`gs://scion-xproject-exchange/workspace-volumes/dev-brief.md`',
+    bucket: 'scion-xproject-exchange',
+    object: 'workspace-volumes/dev-brief.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  // A trailing underscore is a word character, so it blocks the right
+  // boundary exactly like a trailing letter would: the real link in this
+  // body is "abc.md_extra", not "abc.md".
+  {
+    name: 'underscore-blocks-right-boundary',
+    body: 'gs://bkt/abc.md_extra',
+    bucket: 'bkt',
+    object: 'abc.md',
+    linked: false,
+    serverAllowed: false,
+  },
+  // A leading underscore likewise blocks the left boundary.
+  {
+    name: 'underscore-blocks-left-boundary',
+    body: 'x_gs://bkt/o.txt',
+    bucket: 'bkt',
+    object: 'o.txt',
+    linked: false,
+    serverAllowed: false,
+  },
+  // A trailing run of `~+=@%` is part of the object, not a boundary — the
+  // full object links and is allowed; a truncated form of the same posted
+  // text is denied.
+  {
+    name: 'trailing-tilde-full-object',
+    body: 'gs://bkt/secret~',
+    bucket: 'bkt',
+    object: 'secret~',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'trailing-tilde-truncated-object',
+    body: 'gs://bkt/secret~',
+    bucket: 'bkt',
+    object: 'secret',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'trailing-plus-full-object',
+    body: 'gs://bkt/data+',
+    bucket: 'bkt',
+    object: 'data+',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'trailing-plus-truncated-object',
+    body: 'gs://bkt/data+',
+    bucket: 'bkt',
+    object: 'data',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'trailing-double-equals-full-object',
+    body: 'gs://bkt/key==',
+    bucket: 'bkt',
+    object: 'key==',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'trailing-double-equals-truncated-object',
+    body: 'gs://bkt/key==',
+    bucket: 'bkt',
+    object: 'key',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'trailing-percent-full-object',
+    body: 'gs://bkt/report%',
+    bucket: 'bkt',
+    object: 'report%',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'trailing-percent-truncated-object',
+    body: 'gs://bkt/report%',
+    bucket: 'bkt',
+    object: 'report',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'trailing-at-full-object',
+    body: 'gs://bkt/a@',
+    bucket: 'bkt',
+    object: 'a@',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'trailing-at-truncated-object',
+    body: 'gs://bkt/a@',
+    bucket: 'bkt',
+    object: 'a',
+    linked: false,
+    serverAllowed: false,
+  },
+  // A fragment-, query- or param-like continuation immediately after the
+  // object — '#', '?' or '&' followed by a further non-whitespace
+  // character — is a full reject, not a truncation.
+  {
+    name: 'fragment-continuation-hash',
+    body: 'gs://bkt/a#frag',
+    bucket: 'bkt',
+    object: 'a',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'fragment-continuation-query',
+    body: 'gs://bkt/a?x=1',
+    bucket: 'bkt',
+    object: 'a',
+    linked: false,
+    serverAllowed: false,
+  },
+  // The posted text is the same "a&b" as the Go row of this name, but here
+  // it is written pre-escaped, matching what this function actually
+  // consumes: production always HTML-escapes a message body before
+  // GCS_URI_PATTERN ever runs on it, so a raw '&' is never in this table's
+  // input as a bare byte — it is a raw '&' the moment it reaches the Go
+  // side's bodyReferencesGCSURI (see the exact same row in gcs_link_test.go).
+  {
+    name: 'fragment-continuation-amp',
+    body: 'gs://bkt/a&amp;b',
+    bucket: 'bkt',
+    object: 'a',
+    linked: false,
+    serverAllowed: false,
+  },
+  // A trailing '?' at the very end of a sentence (nothing after it, or only
+  // whitespace) is not a continuation — it links normally, truncated at '?'
+  // exactly like a period or comma would be.
+  {
+    name: 'trailing-question-end-of-sentence',
+    body: 'see gs://bkt/o.md?',
+    bucket: 'bkt',
+    object: 'o.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'double-quoted-wrapping',
+    body: '"gs://bkt/o.md"',
+    bucket: 'bkt',
+    object: 'o.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'parenthesized-wrapping',
+    body: '(gs://bkt/o.md)',
+    bucket: 'bkt',
+    object: 'o.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  // A name containing whitespace links, and is served, only up to the
+  // whitespace — an accepted edge, not a truncation bug: the agent posted
+  // this text, and only a viewer of this message can fetch it, so this does
+  // not widen access beyond what renders.
+  {
+    name: 'space-in-name-accepted-edge',
+    body: 'gs://bkt/my file.txt',
+    bucket: 'bkt',
+    object: 'my',
+    linked: true,
+    serverAllowed: true,
+  },
+  // A gs:// URI nested inside another URI's object run belongs entirely to
+  // the outer candidate's raw run — the atomic `(?=(...))\3` group consumes
+  // the whole run in one match, so the inner occurrence, including one
+  // naming a different bucket, is never a candidate on its own.
+  {
+    name: 'nested-tilde-inner-never-a-candidate',
+    body: 'gs://b1b/a~gs://b1b/c',
+    bucket: 'b1b',
+    object: 'c',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'nested-tilde-outer-allowed',
+    body: 'gs://b1b/a~gs://b1b/c',
+    bucket: 'b1b',
+    object: 'a~gs://b1b/c',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'nested-comma-inner-never-a-candidate',
+    body: 'gs://b1b/a,gs://b1b/c',
+    bucket: 'b1b',
+    object: 'c',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'nested-comma-outer-allowed',
+    body: 'gs://b1b/a,gs://b1b/c',
+    bucket: 'b1b',
+    object: 'a,gs://b1b/c',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'nested-cross-bucket-inner-never-a-candidate',
+    body: 'gs://pub/x=gs://sec/key',
+    bucket: 'sec',
+    object: 'key',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'nested-cross-bucket-outer-allowed',
+    body: 'gs://pub/x=gs://sec/key',
+    bucket: 'pub',
+    object: 'x=gs://sec/key',
+    linked: true,
+    serverAllowed: true,
+  },
+  // Two independent, space-separated occurrences: each is its own
+  // candidate, both allowed — this is not the nested case above.
+  {
+    name: 'multiple-independent-occurrences-first',
+    body: 'gs://bkt/a gs://bkt/b',
+    bucket: 'bkt',
+    object: 'a',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'multiple-independent-occurrences-second',
+    body: 'gs://bkt/a gs://bkt/b',
+    bucket: 'bkt',
+    object: 'b',
+    linked: true,
+    serverAllowed: true,
+  },
+  // Applied directly to this raw, unrendered text (no markdown escape
+  // resolution happens here), the client's object-class run simply stops
+  // at the backslash, the same as it would at whitespace, and links
+  // "secret" — a third value, distinct from both the server's unconditional
+  // void (serverAllowed: false for every object) and what the client
+  // actually links once this text has gone through real markdown
+  // rendering ("secret_v2", pinned separately in gcs-link.pw.ts, where the
+  // backslash escape is already resolved before the linkifier ever runs).
+  {
+    name: 'backslash-voids-candidate',
+    body: 'gs://bkt/secret\\_v2',
+    bucket: 'bkt',
+    object: 'secret',
+    linked: true,
+    serverAllowed: false,
+  },
+  // The server's void-on-backslash rule covers the unescaped object too,
+  // not only the truncated one: neither "secret" nor "secret_v2" is ever
+  // authorized from this raw body. The client can never produce
+  // "secret_v2" by applying the regex directly to raw, unrendered text
+  // (only real markdown rendering resolves the escape), so this is false
+  // here on both sides, for different reasons.
+  {
+    name: 'backslash-voids-candidate-unescaped-object',
+    body: 'gs://bkt/secret\\_v2',
+    bucket: 'bkt',
+    object: 'secret_v2',
+    linked: false,
+    serverAllowed: false,
+  },
+  // A bucket not immediately followed by '/' is not a valid occurrence at
+  // all: the whole match fails, not just a shorter bucket. Regression guard
+  // for the scan that replays the client's global match on the server
+  // (dropping this guard would let the server treat "bkt" as a bucket and
+  // extract an object starting right after the ':' or '~').
+  {
+    name: 'bucket-not-followed-by-slash-colon',
+    body: 'gs://bkt:o.txt',
+    bucket: 'bkt',
+    object: 'o.txt',
+    linked: false,
+    serverAllowed: false,
+  },
+  {
+    name: 'bucket-not-followed-by-slash-tilde',
+    body: 'gs://bkt~o.txt',
+    bucket: 'bkt',
+    object: 'o.txt',
+    linked: false,
+    serverAllowed: false,
+  },
+  // A question mark followed by more text, itself followed by whitespace,
+  // is not a continuation.
+  {
+    name: 'trailing-question-then-whitespace',
+    body: 'is it gs://bkt/o.md? next',
+    bucket: 'bkt',
+    object: 'o.md',
+    linked: true,
+    serverAllowed: true,
+  },
+  // Trailing sentence punctuation trimmed from the object is what the
+  // continuation check must see next, not the character after that
+  // punctuation.
+  {
+    name: 'trimmed-punct-then-fragment-hash',
+    body: 'gs://bkt/a.#frag',
+    bucket: 'bkt',
+    object: 'a',
+    linked: true,
+    serverAllowed: true,
+  },
+  {
+    name: 'trimmed-punct-then-fragment-query',
+    body: 'gs://bkt/a,?x',
+    bucket: 'bkt',
+    object: 'a',
+    linked: true,
+    serverAllowed: true,
+  },
+];
+
+describe('GCS_PARITY_VECTORS (cross-referenced with pkg/hub/gcs_link_test.go)', () => {
+  for (const v of GCS_PARITY_VECTORS) {
+    it(`${v.name}: linked=${v.linked}`, () => {
+      // allGcsMatches, not firstGcsMatch: a row like *-inner-never-a-candidate
+      // asserts something about the SECOND occurrence in its body, which
+      // checking only the first match can never disprove.
+      const linked = allGcsMatches(v.body).some(
+        (m) => m.bucket === v.bucket && m.object === v.object
+      );
+      expect(linked).toBe(v.linked);
+    });
+  }
+});
+
+describe('GCS_URI_PATTERN', () => {
+  it('links a gs:// URI at the start of the body', () => {
+    const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+    const m = re.exec('gs://bkt/o.txt rest');
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe('');
+    expect(m![2]).toBe('bkt');
+    expect(resolveGcsMatch(m!)).toEqual({ object: 'o.txt', suffix: '' });
+  });
+
+  it('links a gs:// URI directly after a </code> boundary char', () => {
+    const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+    const m = re.exec('>gs://bkt/o.txt');
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe('>');
+  });
+
+  it('excludes trailing punctuation: comma, period, closing paren', () => {
+    const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+    const m = re.exec('gs://bkt/o.txt, next');
+    expect(m).not.toBeNull();
+    // Group 3 is the raw run (includes the comma); resolveGcsMatch trims it.
+    expect(m![3]).toBe('o.txt,');
+    expect(resolveGcsMatch(m!)).toEqual({ object: 'o.txt', suffix: ',' });
+  });
+
+  it('does not link a bucket shorter than 3 characters', () => {
+    const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+    expect(re.exec('gs://ab/o.txt')).toBeNull();
+  });
+
+  it('never contains a lookbehind assertion', () => {
+    expect(GCS_URI_PATTERN.source).not.toMatch(/\(\?<[=!]/);
+  });
+});
+
+describe('resolveGcsMatch (exact extraction, not a widened reject set)', () => {
+  function resolve(body: string): { object: string; suffix: string } | null {
+    const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+    const m = re.exec(body);
+    return m ? resolveGcsMatch(m) : null;
+  }
+
+  it.each([
+    ['secret~', 'secret~'],
+    ['data+', 'data+'],
+    ['key==', 'key=='],
+    ['report%', 'report%'],
+    ['a@', 'a@'],
+  ])('links the full object %s, trailing final-class run included', (objectPart, expected) => {
+    expect(resolve(`gs://bkt/${objectPart}`)).toEqual({ object: expected, suffix: '' });
+  });
+
+  it.each([
+    ['a#frag', 'a#frag'],
+    ['a?x=1', 'a?x=1'],
+    // A raw '&' is HTML-escaped to the 5-character entity '&amp;' before
+    // this function ever sees it — matching real usage, where the markdown
+    // renderer escapes text before GCS_URI_PATTERN runs on it.
+    ['a&b', 'a&amp;b'],
+  ])('does not link %s: a fragment/query/param continuation immediately follows', (_, escaped) => {
+    expect(resolve(`gs://bkt/${escaped}`)).toBeNull();
+  });
+
+  it('links up to a trailing ? at the end of a sentence', () => {
+    // '?' is not part of the object class at all, so it was never in the
+    // raw run to begin with — it sits entirely outside the match, which is
+    // why the caller does not need a non-empty suffix to re-emit it.
+    expect(resolve('gs://bkt/o.md?')).toEqual({ object: 'o.md', suffix: '' });
+  });
+
+  it('links up to a trailing ? followed by whitespace', () => {
+    expect(resolve('gs://bkt/o.md? next')).toEqual({ object: 'o.md', suffix: '' });
+  });
+
+  it('links the double-quoted form', () => {
+    // The quote, like '?', is outside the object class and outside the
+    // match entirely — no suffix needed.
+    expect(resolve('"gs://bkt/o.md"')).toEqual({ object: 'o.md', suffix: '' });
+  });
+
+  it('links the parenthesized form, re-emitting the trimmed trailing paren as the suffix', () => {
+    // Unlike '?' or a quote, ')' IS in the object class, so it is captured
+    // into the raw run and then trimmed off — the caller must re-emit it
+    // via the non-empty suffix, not drop it.
+    expect(resolve('(gs://bkt/o.md)')).toEqual({ object: 'o.md', suffix: ')' });
+  });
+
+  it('never rejects a directory-like trailing slash by falling back to a shorter object', () => {
+    expect(resolve('gs://bkt/dir/')).toBeNull();
+  });
+
+  it.each([
+    ['U+3000 (ideographic space)', '　'],
+    ['U+00A0 (NBSP)', ' '],
+  ])(
+    "rejects a continuation follower that is Unicode whitespace (%s), matching the server's ASCII-only check",
+    (_label, unicodeSpace) => {
+      expect(resolve(`gs://bkt/o.md?${unicodeSpace}next`)).toBeNull();
+    }
+  );
+
+  // Every ASCII whitespace byte individually, not just the plain space every
+  // other case here happens to use — mirrors
+  // TestGCSLink_EveryWhitespaceByteTerminatesContinuation in
+  // pkg/hub/gcs_link_test.go.
+  it.each([
+    ['space', ' '],
+    ['tab', '\t'],
+    ['newline', '\n'],
+    ['carriage return', '\r'],
+    ['form feed', '\f'],
+    ['vertical tab', '\v'],
+  ])(
+    'a continuation follower that is ASCII whitespace (%s) is not a continuation',
+    (_label, ws) => {
+      expect(resolve(`gs://bkt/o.md?${ws}next`)).toEqual({ object: 'o.md', suffix: '' });
+    }
+  );
+
+  // Every trim byte individually, not just '.' and ',' — mirrors
+  // TestGCSLink_EveryTrimByteIsTrimmed in pkg/hub/gcs_link_test.go.
+  it.each(['.', ',', ':', '!', '$', '*', '(', ')', '-'])(
+    'trims a trailing %s from the object',
+    (trimByte) => {
+      expect(resolve(`gs://bkt/a${trimByte}`)).toEqual({ object: 'a', suffix: trimByte });
+    }
+  );
+
+  // Uppercase word bytes are object-class and final-class too — every
+  // other row here happens to use an all-lowercase object. Mirrors
+  // TestGCSLink_UppercaseObjectBytesAreObjectClass.
+  it('links an object made of uppercase letters', () => {
+    expect(resolve('gs://bkt/ABC')).toEqual({ object: 'ABC', suffix: '' });
+  });
+});
+
+// The two cases below are accepted client-wider mismatches: the client
+// links these, but the hub always refuses to serve them (a bucket
+// containing ".." fails the server's own validation; an object over 1024
+// bytes fails its own length check), so activating either link always ends
+// in the uniform "not available" state. This asserts only the actual
+// current client behaviour — it is not a claim that this is correct UX.
+describe('accepted mismatches: client links what the server always refuses to serve', () => {
+  it('links a bucket containing ".." (the server rejects any such bucket)', () => {
+    expect(firstGcsMatch('gs://a..b/o.txt')).toEqual({ bucket: 'a..b', object: 'o.txt' });
+  });
+
+  it("links an object over the server's 1024-byte cap", () => {
+    const longObject = 'a'.repeat(1025);
+    expect(firstGcsMatch(`gs://bkt/${longObject}`)).toEqual({ bucket: 'bkt', object: longObject });
+  });
+
+  it('buildGcsObjectApiUrl itself refuses the over-cap object the regex just linked', () => {
+    const longObject = 'a'.repeat(1025);
+    expect(() =>
+      buildGcsObjectApiUrl('00000000-0000-4000-8000-000000000000', 'bkt', longObject)
+    ).toThrow();
+  });
+});
+
+describe('parseGcsUri', () => {
+  it('parses a well-formed URI', () => {
+    expect(parseGcsUri('gs://bkt/dir/o.txt')).toEqual({ bucket: 'bkt', object: 'dir/o.txt' });
+  });
+
+  it('rejects a URI with a trailing slash (directory-like)', () => {
+    expect(parseGcsUri('gs://bkt/dir/')).toBeNull();
+  });
+
+  it('rejects a non-gs scheme', () => {
+    expect(parseGcsUri('https://bkt/o.txt')).toBeNull();
+  });
+
+  it('rejects trailing garbage after a valid URI', () => {
+    expect(parseGcsUri('gs://bkt/o.txt)')).toBeNull();
+  });
+});
+
+describe('escAttr', () => {
+  it('escapes all five reserved characters', () => {
+    expect(escAttr(`&<>"'`)).toBe('&amp;&lt;&gt;&quot;&#39;');
+  });
+
+  it('escapes & before other entities so it never double-encodes', () => {
+    expect(escAttr('&amp;')).toBe('&amp;amp;');
+  });
+
+  it('leaves an ordinary gs:// URI unchanged', () => {
+    expect(escAttr('gs://bkt/o.txt')).toBe('gs://bkt/o.txt');
+  });
+});
+
+describe('buildGcsLinkHtml', () => {
+  it('builds an anchor with the expected class, data attribute and text', () => {
+    const html = buildGcsLinkHtml('bkt', 'dir/o.txt');
+    expect(html).toBe(
+      '<a class="entity-link gcs-link" data-gcs-uri="gs://bkt/dir/o.txt" href="javascript:void(0)" title="Open gs://bkt/dir/o.txt">gs://bkt/dir/o.txt</a>'
+    );
+  });
+
+  it('escapes an ampersand that survives into the object text (defense in depth)', () => {
+    // GCS_URI_PATTERN's object class has no '&', so this exercises escAttr's
+    // own behaviour, not a value the regex could actually capture.
+    const html = buildGcsLinkHtml('bkt', 'a&b');
+    expect(html).toContain('data-gcs-uri="gs://bkt/a&amp;b"');
+  });
+});
+
+/**
+ * A hostile object name producing no extra attributes or elements is a
+ * property of GCS_URI_PATTERN's object character class, which excludes
+ * `& < > " '` and whitespace — never of buildGcsLinkHtml, which only ever
+ * receives what the regex already captured. A hostile name is proven safe by
+ * showing the regex stops the object capture before the dangerous
+ * character, not by feeding the dangerous string to the builder directly
+ * (the real-Chromium spec in web/e2e/chat-file-preview/ proves the full
+ * pipeline end to end).
+ */
+describe('GCS_URI_PATTERN excludes dangerous characters from the object capture', () => {
+  it('stops before a double quote', () => {
+    expect(firstGcsMatch('gs://bkt/a"onmouseover=alert(1)')).toEqual({
+      bucket: 'bkt',
+      object: 'a',
+    });
+  });
+
+  it('stops before a <', () => {
+    expect(firstGcsMatch('gs://bkt/a<img src=x>')).toEqual({ bucket: 'bkt', object: 'a' });
+  });
+
+  it('stops the object capture before a literal & at all (the pattern runs on already-HTML-escaped text, so a raw & in the source is "&amp;" by the time this regex sees it), then rejects the whole occurrence under the continuation rule since more text follows', () => {
+    // The '&' that starts "&amp;" is itself the very next character after
+    // "a", followed by non-whitespace ("mp;b...") — the same continuation
+    // rule the server applies to the raw '&' in the unescaped body, so
+    // client and server reject this occurrence identically, not just
+    // truncate it to "a".
+    expect(firstGcsMatch('gs://bkt/a&amp;b')).toBeNull();
+  });
+
+  it('stops the raw run before & directly, independent of the continuation rule', () => {
+    // Isolates "the object class excludes &" itself from the continuation
+    // rule above: inspecting the regex's own raw group 3 directly (bypassing
+    // resolveGcsMatch) shows the character run already stops at 'a', before
+    // the '&' is ever considered — the continuation rule only decides
+    // whether that stop counts as a full reject, never how the run itself
+    // is bounded.
+    const re = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+    const m = re.exec('gs://bkt/a&amp;b');
+    expect(m).not.toBeNull();
+    expect(m![3]).toBe('a');
+  });
+});
+
+describe('buildGcsObjectApiUrl', () => {
+  const messageId = '11111111-2222-4333-8444-555555555555';
+
+  it('builds the expected URL', () => {
+    expect(
+      buildGcsObjectApiUrl(messageId, 'scion-xproject-exchange', 'workspace-volumes/dev-brief.md')
+    ).toBe(
+      `/api/v1/gcs/object?message=${messageId}&bucket=scion-xproject-exchange&object=workspace-volumes%2Fdev-brief.md`
+    );
+  });
+
+  it('throws, and does not normalise, on a malformed message id', () => {
+    expect(() => buildGcsObjectApiUrl('not-a-uuid', 'bkt', 'o.txt')).toThrow();
+  });
+
+  it('throws on a malformed bucket', () => {
+    expect(() => buildGcsObjectApiUrl(messageId, 'AB', 'o.txt')).toThrow();
+    expect(() => buildGcsObjectApiUrl(messageId, 'bk..t', 'o.txt')).toThrow();
+  });
+
+  it('throws on a malformed object', () => {
+    expect(() => buildGcsObjectApiUrl(messageId, 'bkt', '')).toThrow();
+    expect(() => buildGcsObjectApiUrl(messageId, 'bkt', 'o file.txt')).toThrow();
+  });
+
+  it('round-trips &, =, %2F and ~+@ in an object name exactly', () => {
+    const object = 'a~b+c@d';
+    const url = buildGcsObjectApiUrl(messageId, 'bkt', object);
+    const params = new URL(url, 'http://x').searchParams;
+    expect(params.get('object')).toBe(object);
+  });
+
+  it('round-trips a nested path (encoded /) exactly', () => {
+    const object = 'dir/sub/file.name-1.txt';
+    const url = buildGcsObjectApiUrl(messageId, 'bkt', object);
+    expect(url).toContain('object=dir%2Fsub%2Ffile.name-1.txt');
+    const params = new URL(url, 'http://x').searchParams;
+    expect(params.get('object')).toBe(object);
+  });
+});
+
+describe('pinGcsObjectUrl', () => {
+  const messageId = '11111111-2222-4333-8444-555555555555';
+  const validUrl = () => buildGcsObjectApiUrl(messageId, 'bkt', 'o.txt');
+
+  it('accepts a URL built by buildGcsObjectApiUrl', () => {
+    expect(() => pinGcsObjectUrl(validUrl(), messageId, 'bkt', 'o.txt')).not.toThrow();
+  });
+
+  it('rejects a wrong path', () => {
+    expect(() =>
+      pinGcsObjectUrl(
+        '/api/v1/gcs/object-x?message=' + messageId + '&bucket=bkt&object=o.txt',
+        messageId,
+        'bkt',
+        'o.txt'
+      )
+    ).toThrow();
+  });
+
+  it('rejects an extra query key', () => {
+    expect(() => pinGcsObjectUrl(validUrl() + '&agent=x', messageId, 'bkt', 'o.txt')).toThrow();
+  });
+
+  it('rejects a duplicated object key', () => {
+    expect(() =>
+      pinGcsObjectUrl(validUrl() + '&object=other.txt', messageId, 'bkt', 'o.txt')
+    ).toThrow();
+  });
+
+  it('rejects a duplicated bucket key', () => {
+    expect(() =>
+      pinGcsObjectUrl(validUrl() + '&bucket=other-bucket', messageId, 'bkt', 'o.txt')
+    ).toThrow();
+  });
+
+  it('rejects a duplicated message key', () => {
+    const otherMessageId = '99999999-8888-4777-8666-555555555555';
+    expect(() =>
+      pinGcsObjectUrl(validUrl() + `&message=${otherMessageId}`, messageId, 'bkt', 'o.txt')
+    ).toThrow();
+  });
+
+  it('rejects a built value with no query string at all', () => {
+    expect(() => pinGcsObjectUrl('/api/v1/gcs/object', messageId, 'bkt', 'o.txt')).toThrow();
+  });
+
+  it('rejects a hash fragment', () => {
+    expect(() => pinGcsObjectUrl(validUrl() + '#frag', messageId, 'bkt', 'o.txt')).toThrow();
+  });
+
+  it('rejects a bucket value mismatch', () => {
+    expect(() => pinGcsObjectUrl(validUrl(), messageId, 'other-bucket', 'o.txt')).toThrow();
+  });
+
+  it('rejects an object value mismatch', () => {
+    expect(() => pinGcsObjectUrl(validUrl(), messageId, 'bkt', 'other.txt')).toThrow();
+  });
+
+  it('rejects a message-id value mismatch', () => {
+    const otherMessageId = '99999999-8888-4777-8666-555555555555';
+    expect(() => pinGcsObjectUrl(validUrl(), otherMessageId, 'bkt', 'o.txt')).toThrow();
+  });
+
+  it('rejects an absolute URL smuggled in as the built value', () => {
+    expect(() =>
+      pinGcsObjectUrl(
+        `https://evil.example/api/v1/gcs/object?message=${messageId}&bucket=bkt&object=o.txt`,
+        messageId,
+        'bkt',
+        'o.txt'
+      )
+    ).toThrow();
+  });
+});
+
+describe('buildCloudConsoleUrl', () => {
+  it('builds the console link for the cross-project-exchange URI', () => {
+    expect(buildCloudConsoleUrl('scion-xproject-exchange', 'workspace-volumes/dev-brief.md')).toBe(
+      'https://console.cloud.google.com/storage/browser/_details/scion-xproject-exchange/workspace-volumes/dev-brief.md'
+    );
+  });
+
+  it('encodes a space in an object name', () => {
+    expect(buildCloudConsoleUrl('bkt', 'a b.txt')).toBe(
+      'https://console.cloud.google.com/storage/browser/_details/bkt/a%20b.txt'
+    );
+  });
+
+  it('encodes # and ? in an object name', () => {
+    expect(buildCloudConsoleUrl('bkt', 'a#b?c.txt')).toBe(
+      'https://console.cloud.google.com/storage/browser/_details/bkt/a%23b%3Fc.txt'
+    );
+  });
+
+  it('encodes % in an object name', () => {
+    expect(buildCloudConsoleUrl('bkt', 'a%b.txt')).toBe(
+      'https://console.cloud.google.com/storage/browser/_details/bkt/a%25b.txt'
+    );
+  });
+
+  it('preserves nested / as path structure rather than encoding it', () => {
+    expect(buildCloudConsoleUrl('bkt', 'a/b/c.txt')).toBe(
+      'https://console.cloud.google.com/storage/browser/_details/bkt/a/b/c.txt'
+    );
   });
 });

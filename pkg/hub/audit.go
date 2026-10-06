@@ -199,12 +199,56 @@ type AgentSecretReadEvent struct {
 	Timestamp     time.Time `json:"timestamp"`
 }
 
+// GCSLinkFetchReason enumerates why a gs:// link fetch was allowed or denied.
+// Exactly one is recorded per request, alongside Decision.
+type GCSLinkFetchReason string
+
+const (
+	GCSLinkReasonFeatureOff         GCSLinkFetchReason = "feature_off"
+	GCSLinkReasonNotUser            GCSLinkFetchReason = "not_user"
+	GCSLinkReasonBadRequest         GCSLinkFetchReason = "bad_request"
+	GCSLinkReasonRateLimited        GCSLinkFetchReason = "rate_limited"
+	GCSLinkReasonMessageNotFound    GCSLinkFetchReason = "message_not_found"
+	GCSLinkReasonMessageNotReadable GCSLinkFetchReason = "message_not_readable"
+	GCSLinkReasonURINotInBody       GCSLinkFetchReason = "uri_not_in_body"
+	GCSLinkReasonSenderNotAgent     GCSLinkFetchReason = "sender_not_agent"
+	GCSLinkReasonNoSA               GCSLinkFetchReason = "no_sa"
+	GCSLinkReasonMintFailed         GCSLinkFetchReason = "mint_failed"
+	GCSLinkReasonGCSNotFound        GCSLinkFetchReason = "gcs_not_found"
+	GCSLinkReasonGCSDenied          GCSLinkFetchReason = "gcs_denied"
+	GCSLinkReasonTooLarge           GCSLinkFetchReason = "too_large"
+	GCSLinkReasonUpstreamError      GCSLinkFetchReason = "upstream_error"
+	GCSLinkReasonOK                 GCSLinkFetchReason = "ok"
+)
+
+// GCSLinkFetchEvent is the single auditable event emitted for every
+// GET /api/v1/gcs/object request, allow or deny. Fields not resolved by the time the request was
+// denied (e.g. SAEmail before step 9) are left at their zero value.
+type GCSLinkFetchEvent struct {
+	ViewerUserID   string             `json:"viewerUserId"`
+	MessageID      string             `json:"messageId"`
+	ConversationID string             `json:"conversationId,omitempty"`
+	SenderAgentID  string             `json:"senderAgentId,omitempty"`
+	SAEmail        string             `json:"saEmail,omitempty"`
+	Bucket         string             `json:"bucket,omitempty"`
+	Object         string             `json:"object,omitempty"`
+	Decision       string             `json:"decision"` // "allow" or "deny"
+	Reason         GCSLinkFetchReason `json:"reason"`
+	Status         int                `json:"status"`
+	Bytes          int64              `json:"bytes,omitempty"`
+	Generation     int64              `json:"generation,omitempty"`
+	DurationMS     int64              `json:"durationMs"`
+	Timestamp      time.Time          `json:"timestamp"`
+}
+
 // AuditLogger defines the interface for logging audit events.
 type AuditLogger interface {
 	// LogBrokerAuthEvent logs a broker authentication event.
 	LogBrokerAuthEvent(ctx context.Context, event *BrokerAuthEvent) error
 	// LogGCPTokenEvent logs a GCP token generation event.
 	LogGCPTokenEvent(ctx context.Context, event *GCPTokenEvent) error
+	// LogGCSLinkFetchEvent logs a gs:// link fetch decision (allow or deny).
+	LogGCSLinkFetchEvent(ctx context.Context, event *GCSLinkFetchEvent) error
 	// LogInviteAuditEvent logs an invite/allow-list audit event.
 	LogInviteAuditEvent(ctx context.Context, event *InviteAuditEvent) error
 	// LogLifecycleHookEvent logs a lifecycle-hook admin event.
@@ -430,6 +474,36 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 	return nil
 }
 
+// LogGCSLinkFetchEvent logs a gs:// link fetch decision to the standard
+// logger. A deny is logged at INFO (these are expected, routine denials —
+// wrong viewer, expired SA, and so on — not warnings), and an allow at DEBUG.
+func (l *LogAuditLogger) LogGCSLinkFetchEvent(ctx context.Context, event *GCSLinkFetchEvent) error {
+	level := slog.LevelDebug
+	if event.Decision != "allow" {
+		level = slog.LevelInfo
+	}
+
+	attrs := []slog.Attr{
+		slog.String("decision", event.Decision),
+		slog.String("reason", string(event.Reason)),
+		slog.Int("status", event.Status),
+		slog.String("viewer_user_id", event.ViewerUserID),
+		slog.String("message_id", event.MessageID),
+		slog.String("conversation_id", event.ConversationID),
+		slog.String("sender_agent_id", event.SenderAgentID),
+		slog.String("sa_email", event.SAEmail),
+		slog.String("bucket", event.Bucket),
+		slog.String("object", event.Object),
+		slog.Int64("bytes", event.Bytes),
+		slog.Int64("generation", event.Generation),
+		slog.Int64("duration_ms", event.DurationMS),
+	}
+
+	l.logger().LogAttrs(ctx, level, "gcs link fetch audit event", attrs...)
+
+	return nil
+}
+
 // LogLifecycleHookEvent logs a lifecycle-hook admin event to the standard logger.
 func (l *LogAuditLogger) LogLifecycleHookEvent(ctx context.Context, event *LifecycleHookEvent) error {
 	level := slog.LevelInfo
@@ -630,9 +704,12 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				return
 			}
 
-			// Set broker-specific identity context and resolve on-behalf-of
-			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx, userIdent, ok := svc.applyOnBehalfOf(ctx, w, r, identity)
+			// Install the authenticated broker/on-behalf-of context through
+			// the same shared helper BrokerAuthMiddleware uses, so both
+			// variants install an identical broker identity, effective user
+			// (when OBO resolves), OBO marker, and broker credential for the
+			// same request.
+			ctx, userIdent, ok := svc.applyOnBehalfOf(r.Context(), w, r, identity)
 			if !ok {
 				return
 			}
@@ -652,7 +729,7 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				_ = logger.LogBrokerAuthEvent(ctx, event)
 			}
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }

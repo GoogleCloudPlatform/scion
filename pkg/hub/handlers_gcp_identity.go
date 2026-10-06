@@ -39,7 +39,7 @@ func (s *Server) handleProjectGCPServiceAccounts(w http.ResponseWriter, r *http.
 	case http.MethodPost:
 		s.createGCPServiceAccount(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -74,7 +74,7 @@ func (s *Server) handleProjectGCPServiceAccountByID(w http.ResponseWriter, r *ht
 	case http.MethodDelete:
 		s.deleteGCPServiceAccount(w, r, projectID, saID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -262,6 +262,17 @@ type createGCPServiceAccountResponse struct {
 	store.GCPServiceAccount
 	VerificationFailed  bool                       `json:"verificationFailed,omitempty"`
 	VerificationDetails *verificationFailedDetails `json:"verificationDetails,omitempty"`
+	// Warnings are advisory only (see projectSAMappingWarnings); set on the
+	// project-scoped route, never on the hub-scoped one.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// gcpServiceAccountWithWarnings is a service account response plus advisory
+// warnings. Embedding keeps the JSON identical to a bare
+// store.GCPServiceAccount when there are no warnings.
+type gcpServiceAccountWithWarnings struct {
+	store.GCPServiceAccount
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -354,26 +365,21 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	// Auto-verify impersonation after registration
 	resp := createGCPServiceAccountResponse{GCPServiceAccount: *sa}
 	if s.gcpTokenGenerator != nil {
-		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-			sa.Verified = false
-			sa.VerificationStatus = store.GCPVerificationFailed
-			sa.VerificationError = err.Error()
-			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
-			resp.GCPServiceAccount = *sa
+		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
+		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+			writeGCPVerificationPersistError(w, sa.ID)
+			return
+		}
+		resp.GCPServiceAccount = *sa
+		if verifyErr != nil {
 			resp.VerificationFailed = true
 			resp.VerificationDetails = &verificationFailedDetails{
 				HubServiceAccountEmail: s.gcpTokenGenerator.ServiceAccountEmail(),
 				TargetEmail:            sa.Email,
 			}
-		} else {
-			sa.Verified = true
-			sa.VerifiedAt = time.Now()
-			sa.VerificationStatus = store.GCPVerificationVerified
-			sa.VerificationError = ""
-			_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
-			resp.GCPServiceAccount = *sa
 		}
 	}
+	resp.Warnings = s.projectSAMappingWarnings(r.Context(), projectID, sa)
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -399,6 +405,10 @@ type ListGCPServiceAccountsResponse struct {
 	Items        []GCPServiceAccountWithCapabilities `json:"items"`
 	Capabilities *Capabilities                       `json:"_capabilities,omitempty"`
 	MintQuota    *GCPMintQuotaInfo                   `json:"mint_quota,omitempty"`
+	// Warnings are advisory only: one per project-scoped account no
+	// Kubernetes broker profile of the project maps (see
+	// projectSAMappingWarnings). Hub-scoped items never get one.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -478,10 +488,16 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	saPtrs := make([]*store.GCPServiceAccount, len(sas))
+	for i := range sas {
+		saPtrs[i] = &sas[i]
+	}
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
 		MintQuota:    mintQuota,
+		Warnings:     s.projectSAMappingWarnings(ctx, projectID, saPtrs...),
 	})
 }
 
@@ -582,7 +598,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	s.runGCPServiceAccountVerification(w, r, sa)
+	s.runGCPServiceAccountVerification(w, r, sa, projectID)
 }
 
 // runGCPServiceAccountVerification performs the impersonation check and
@@ -596,7 +612,11 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 // this body writes verification state that the assign gate later trusts, so a
 // copy that forgot to persist a FAILURE would leave an account reading as
 // verified after a verification that did not pass.
-func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount) {
+//
+// warnProjectID is the project whose Kubernetes broker profiles a successful
+// response warns about (projectSAMappingWarnings), or "" for no warnings
+// (the parentless route).
+func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, warnProjectID string) {
 	// Fail-closed: if no token generator is configured, we cannot verify.
 	if s.gcpTokenGenerator == nil {
 		writeError(w, http.StatusServiceUnavailable, "gcp_not_configured",
@@ -604,34 +624,72 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Attempt to verify impersonation via the GCP token generator
-	if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-		// Persist the failure status
-		sa.Verified = false
-		sa.VerificationStatus = store.GCPVerificationFailed
-		sa.VerificationError = err.Error()
-		_ = s.store.UpdateGCPServiceAccount(r.Context(), sa)
+	// Attempt to verify impersonation via the GCP token generator, then
+	// persist the outcome. A result that could not be stored is reported as
+	// a server error rather than as the verification outcome: the stored row
+	// is what later checks read, so it must match what the caller is told.
+	verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
+	if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+		writeGCPVerificationPersistError(w, sa.ID)
+		return
+	}
 
+	if verifyErr != nil {
 		details := map[string]interface{}{
 			"hubServiceAccountEmail": s.gcpTokenGenerator.ServiceAccountEmail(),
 			"targetEmail":            sa.Email,
 		}
 		writeError(w, http.StatusBadGateway, "gcp_verification_failed",
-			"Failed to verify impersonation: "+err.Error(), details)
+			"Failed to verify impersonation: "+verifyErr.Error(), details)
 		return
 	}
 
-	sa.Verified = true
-	sa.VerifiedAt = time.Now()
-	sa.VerificationStatus = store.GCPVerificationVerified
-	sa.VerificationError = ""
+	writeJSON(w, http.StatusOK, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.verificationWarnings(r.Context(), warnProjectID, sa),
+	})
+}
 
-	if err := s.store.UpdateGCPServiceAccount(r.Context(), sa); err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+// applyGCPVerificationResult records the outcome of an impersonation check
+// on sa and persists it. verifyErr is the error VerifyImpersonation returned
+// (nil on success). Every verify and auto-verify path goes through here so
+// the fields written for each outcome cannot drift apart between handlers.
+//
+// The returned error is only ever a persistence failure; callers must not
+// report the verification outcome when it is non-nil, because the stored
+// row -- which the assign, start and token-mint checks read -- would not
+// match it.
+func (s *Server) applyGCPVerificationResult(ctx context.Context, sa *store.GCPServiceAccount, verifyErr error) error {
+	if verifyErr != nil {
+		sa.Verified = false
+		sa.VerificationStatus = store.GCPVerificationFailed
+		sa.VerificationError = verifyErr.Error()
+	} else {
+		sa.Verified = true
+		sa.VerifiedAt = time.Now()
+		sa.VerificationStatus = store.GCPVerificationVerified
+		sa.VerificationError = ""
 	}
+	if err := s.store.UpdateGCPServiceAccount(ctx, sa); err != nil {
+		slog.Error("failed to persist GCP service account verification result",
+			"sa_id", sa.ID, "status", sa.VerificationStatus, "error", err)
+		return fmt.Errorf("persist verification result: %w", err)
+	}
+	return nil
+}
 
-	writeJSON(w, http.StatusOK, sa)
+// writeGCPVerificationPersistError answers a request whose verification
+// result could not be stored. Always 500: a missing row or a conflict here
+// is a server-side failure to record the outcome, not a client error.
+//
+// On the create paths the account row already exists at this point, so a
+// retried create would conflict on the email. The message and details
+// therefore point at re-verifying the existing account by ID.
+func writeGCPVerificationPersistError(w http.ResponseWriter, saID string) {
+	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+		fmt.Sprintf("failed to record the verification result for service account %s; "+
+			"re-run verification on the existing account (POST .../gcp-service-accounts/%s/verify)", saID, saID),
+		map[string]interface{}{"serviceAccountId": saID})
 }
 
 // mintGCPServiceAccountRequest is the request body for POST .../gcp-service-accounts/mint.
@@ -939,7 +997,10 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		"account_id", accountID, "project", projectID, "user", user.ID(),
 		"self_act_as", allowSelfActAs)
 
-	writeJSON(w, http.StatusCreated, sa)
+	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.projectSAMappingWarnings(r.Context(), projectID, sa),
+	})
 }
 
 // GCPQuotaProjectInfo holds per-project mint quota info for the admin endpoint.
@@ -963,7 +1024,7 @@ type GCPQuotaResponse struct {
 func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 	// Route guard enforces hub.health.read permission.
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1015,11 +1076,151 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// resolveAgentGCPAssignment rechecks the agent-side half of a token-mint
+// request: the agent record is current (not soft-deleted) and its applied
+// GCP identity is still in assign mode. It intentionally does not touch the
+// service account row -- the caller runs the token-scope compare against the
+// returned config before paying for that lookup, so that a denial from a
+// mismatched scope never depends on, and so never reveals, the assigned
+// account's current row state.
+func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCPIdentityConfig, bool) {
+	if agentRecord == nil || !agentRecord.DeletedAt.IsZero() {
+		return nil, false
+	}
+	if agentRecord.AppliedConfig == nil || agentRecord.AppliedConfig.GCPIdentity == nil ||
+		agentRecord.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
+		return nil, false
+	}
+	return agentRecord.AppliedConfig.GCPIdentity, true
+}
+
+// gcpServiceAccountVerified reports whether sa's stored verification state
+// admits it for use by an agent: the Verified flag and the persisted status
+// must both say verified. This is the single verified predicate; every
+// assign, default, start and token-mint check uses it rather than reading
+// sa.Verified directly.
+func gcpServiceAccountVerified(sa *store.GCPServiceAccount) bool {
+	return sa != nil && sa.Verified && sa.VerificationStatus == store.GCPVerificationVerified
+}
+
+// Reasons checkGCPAssignmentAdmissible refuses an agent's GCP identity
+// assignment. Each is phrased so it can be shown to the user as is.
+var (
+	errGCPSANotAvailable = errors.New("the assigned GCP service account is no longer available in this project")
+	errGCPSANotVerified  = errors.New("the assigned GCP service account is not verified")
+	errGCPSAEmailChanged = errors.New("the assigned GCP service account's email no longer matches the agent's assignment")
+	errGCPSAHubModeOff   = errors.New("hub-scoped GCP service account assignment requires gcpIamCheckMode=enforce")
+)
+
+// isGCPAssignmentInadmissible reports whether err is one of the refusal
+// reasons above, as opposed to a store failure while checking.
+func isGCPAssignmentInadmissible(err error) bool {
+	return errors.Is(err, errGCPSANotAvailable) || errors.Is(err, errGCPSANotVerified) ||
+		errors.Is(err, errGCPSAEmailChanged) || errors.Is(err, errGCPSAHubModeOff)
+}
+
+// checkGCPAssignmentAdmissible is the admissibility rule for an agent's
+// applied GCP identity assignment: the assigned service account still loads
+// by ID, is still verified (gcpServiceAccountVerified) under the same email,
+// is still reachable from the agent's project, and -- for a hub-scoped
+// account -- saAssignCheckMode is still enforce.
+//
+// It returns nil when the assignment is admissible, one of the errGCPSA*
+// reasons when it is not, and a wrapped store error when the check itself
+// could not be completed. The token-mint gate (resolveAgentGCPMintFacts)
+// and the start/restart gate (gcpIdentityStartRefusal) both apply it, so an
+// agent that would be refused a token is refused at start instead.
+func (s *Server) checkGCPAssignmentAdmissible(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) error {
+	if gcpID == nil {
+		return errGCPSANotAvailable
+	}
+	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return errGCPSANotAvailable
+		}
+		return fmt.Errorf("load assigned GCP service account: %w", err)
+	}
+	if sa == nil {
+		return errGCPSANotAvailable
+	}
+	if !gcpServiceAccountVerified(sa) {
+		return errGCPSANotVerified
+	}
+	if sa.Email != gcpID.ServiceAccountEmail {
+		return errGCPSAEmailChanged
+	}
+	if !sa.ReachableFromProject(agentProjectID) {
+		return errGCPSANotAvailable
+	}
+	if sa.Scope == store.ScopeHub {
+		s.mu.RLock()
+		mode := s.saAssignCheckMode
+		s.mu.RUnlock()
+		if mode != SAAssignCheckEnforce {
+			return errGCPSAHubModeOff
+		}
+	}
+	return nil
+}
+
+// resolveAgentGCPMintFacts rechecks, for one token-mint request and after the
+// token-scope compare has already passed, that the agent's assignment is
+// still admissible (checkGCPAssignmentAdmissible). Every fresh mint is a new
+// authorization event, so none of these facts is read once and trusted for
+// the life of the token; each mint re-derives them from the store. Passing
+// the start gate does not exempt an agent from this check.
+//
+// A false return covers every failure in the same path, including any store
+// lookup error, so the caller renders the same "no GCP identity assigned" denial
+// it uses when no GCP identity is assigned -- a refusal here discloses nothing
+// beyond what that denial discloses.
+func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) bool {
+	if gcpID == nil {
+		return false
+	}
+	return s.checkGCPAssignmentAdmissible(ctx, gcpID, agentProjectID) == nil
+}
+
+// gcpIdentityStartRefusal applies the token-mint admissibility rule at
+// start and restart, so an agent whose assigned GCP service account would be
+// refused a token fails fast with an actionable message instead of starting
+// and failing later inside the container. It runs on the lifecycle
+// start/restart route, on each branch of handleExistingAgent that starts
+// or resumes an existing agent (the create-endpoint path the CLI uses), and
+// on reincarnate, including its dry-run and dry-run move variants.
+// Agents without an applied assign-mode GCP identity are unaffected.
+//
+// It writes the response and returns true when the start must not proceed:
+// 400 for an inadmissible assignment, 500 when the check could not be made.
+func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWriter, agent *store.Agent, action string) bool {
+	gcpID, ok := s.resolveAgentGCPAssignment(agent)
+	if !ok {
+		return false
+	}
+	err := s.checkGCPAssignmentAdmissible(ctx, gcpID, agent.ProjectID)
+	if err == nil {
+		return false
+	}
+	if !isGCPAssignmentInadmissible(err) {
+		slog.Error("GCP identity admissibility check failed at agent start",
+			"agent_id", agent.ID, "action", action, "error", err)
+		InternalError(w)
+		return true
+	}
+	slog.Info("agent start refused: GCP identity assignment is not admissible",
+		"agent_id", agent.ID, "action", action, "sa_id", gcpID.ServiceAccountID, "reason", err)
+	writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+		fmt.Sprintf("Cannot %s agent: %s. Verify the service account, or assign the agent a different GCP identity, then retry.",
+			action, err.Error()), nil)
+	return true
+}
+
 // handleAgentGCPToken handles POST /api/v1/agent/gcp-token.
 // Called by the metadata sidecar to obtain a GCP access token for the agent's assigned SA.
 func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1047,18 +1248,27 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if agentRecord.AppliedConfig == nil || agentRecord.AppliedConfig.GCPIdentity == nil ||
-		agentRecord.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
+	// Recheck the agent record and assignment mode from the store, then the
+	// JWT scope, before paying for the service-account row lookup below -- a
+	// wrong-scope denial must never depend on, and so never reveal, that
+	// row's current state.
+	gcpID, ok := s.resolveAgentGCPAssignment(agentRecord)
+	if !ok {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
-
-	gcpID := agentRecord.AppliedConfig.GCPIdentity
 
 	// Verify the agent's JWT has the correct scope
 	requiredScope := GCPTokenScopeForSA(gcpID.ServiceAccountID)
 	if !agent.HasScope(requiredScope) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "missing required GCP token scope", nil)
+		return
+	}
+
+	// Recheck the service account row's verification, reachability and mode
+	// facts from the store on every mint request.
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
 
@@ -1102,7 +1312,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 // Called by the metadata sidecar to obtain a GCP OIDC identity token.
 func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1129,16 +1339,25 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if agentRecord.AppliedConfig == nil || agentRecord.AppliedConfig.GCPIdentity == nil ||
-		agentRecord.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
+	// Recheck the agent record and assignment mode from the store, then the
+	// JWT scope, before paying for the service-account row lookup below -- a
+	// wrong-scope denial must never depend on, and so never reveal, that
+	// row's current state.
+	gcpID, ok := s.resolveAgentGCPAssignment(agentRecord)
+	if !ok {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
-
-	gcpID := agentRecord.AppliedConfig.GCPIdentity
 	requiredScope := GCPTokenScopeForSA(gcpID.ServiceAccountID)
 	if !agent.HasScope(requiredScope) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "missing required GCP token scope", nil)
+		return
+	}
+
+	// Recheck the service account row's verification, reachability and mode
+	// facts from the store on every mint request.
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
 

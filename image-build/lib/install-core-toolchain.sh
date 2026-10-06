@@ -110,11 +110,16 @@ ensure_google_keyring() {
 # it is the one package whose availability differs between the two bases, and
 # it gets its own step so that difference is visible rather than buried in a
 # 30-line install list that fails as a unit.
+#
+# tzdata is listed explicitly even though python3 pulls it in on the current
+# suites (libpython3.x-stdlib depends on it): a configured agent TZ only takes
+# effect if /usr/share/zoneinfo exists, and glibc silently treats an unknown
+# zone as UTC, so losing it to a dependency change would fail without a trace.
 COMMON_PACKAGES="
   tmux ca-certificates libexpat1 zlib1g python3 python3-venv make g++ man-db
   curl wget dnsutils less jq bc unzip rsync ripgrep procps psmisc lsof socat
   sudo fzf zsh gnupg2 iptables ipset iproute2 aggregate nano vim openssh-client
-  lsb-release dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools
+  lsb-release dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools tzdata
 "
 
 step_apt_common() {

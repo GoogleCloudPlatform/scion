@@ -87,7 +87,7 @@ CREATE INDEX idx_maintenance_ops_status ON maintenance_operations(status);
 ```
 
 **Category semantics:**
-- `migration` — One-time tasks that transition the system from state A to state B. Once completed, they are marked done and cannot be re-run from the UI (CLI `--force` flag remains for exceptional cases). These are seeded into the table at startup or via schema migration.
+- `migration` — One-time tasks that transition the system from state A to state B. Once completed, they are marked done, and the run endpoint rejects another run with `409 Conflict`. There is no override flag in the UI or CLI. The exception is a migration listed in `rerunnableMigrations` (`pkg/hub/utc_timestamp_normalize.go`): it is idempotent, so the run endpoint accepts it again after it completes (see §3.5). A re-run replaces the stored result (log, start time and user) of the previous run. A dry run of a completed migration is rejected with `409 Conflict`; run it without `dryRun` instead. The Maintenance page offers **Run** for a pending migration and **Retry** for a failed one, and no button once a migration has completed, so a completed listed migration is re-run through the API (`POST /api/v1/admin/maintenance/migrations/{key}/run`). These are seeded into the table at startup or via schema migration.
 - `operation` — Repeatable infrastructure tasks. Each execution creates a new history entry (see `maintenance_operation_runs` below).
 
 **Status transitions:**
@@ -121,11 +121,14 @@ CREATE INDEX idx_maintenance_runs_started ON maintenance_operation_runs(started_
 
 ### 3.3 Seeded Migrations
 
-The following migrations are seeded into `maintenance_operations` when the table is first created (via the DB schema migration that adds the table). Additional migrations are added via future schema migrations as new one-time tasks are introduced.
+The following migrations are seeded into `maintenance_operations` by `SeedMaintenanceOperations` (`pkg/store/entadapter/maintenance_store.go`, list `defaultSeedOperations`). It runs at hub start and inserts any built-in entry that is missing, so a migration added in a later release appears as pending on existing hubs. Migrations run only when an admin starts them.
 
 | Key | Title | Description |
 |-----|-------|-------------|
 | `secret-hub-id-migration` | Secret Hub ID Namespace Migration | Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend. |
+| `applied-config-env-cleanup` | Applied Config Env Cleanup | Removes env entries that a since-fixed merge-back could have saved into agents' applied config. From `agent.appliedConfig.env`: `GITHUB_TOKEN`, any key named like a secret or secret-flagged env var in the agent's user, project, runtime broker or hub scope, and any other key whose saved value no longer matches a live plain source (template default env, the agent's explicit config, or a plain env var). From the explicit config env (inline config and saved create inputs): only `GITHUB_TOKEN` and secret-named keys. The same rules apply to finished reincarnation snapshots. Supports a dry run. Safe to re-run. Seeding never overwrites an existing row, so a hub created by an older release keeps the description it was seeded with. |
+| `applied-config-tz-cleanup` | Applied Config TZ Cleanup | Optional. Converts the `TZ` that older hubs saved in `agent.appliedConfig.env` into an explicit timezone pin (source `legacy`) in one pass and reports how many agents it converted. The hub already does this lazily on each timezone read. Safe to re-run: it is listed in `rerunnableMigrations` (see §3.5), and a second run converts 0. A re-run replaces the stored result of the previous run, including its `ADOPT agent=...` lines; adopted pins stay identifiable afterwards by timezone source `legacy` (`ExplicitTimezoneLegacy`). Both orders with `applied-config-env-cleanup` are safe: run this first to keep every saved `TZ` as a pin; if the env cleanup runs first, saved `TZ` values that match no live plain source are removed and those agents follow the timezone settings instead. |
+| `utc-timestamp-normalize` | UTC Timestamp Normalize | Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Tables that cannot be read because of rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) are repaired automatically at hub start, after a snapshot of the database. Back up the database first. Safe to re-run: it is listed in `rerunnableMigrations`, so it is exempt from the completed-migration guard (see §3.5). |
 
 ### 3.4 Seeded Operations
 
@@ -223,6 +226,8 @@ Request body (optional, migration-specific parameters):
 }
 ```
 
+`dryRun` reports what the migration would do without changing anything; every built-in migration supports it. The documented form is `params.dryRun` as a boolean. A top-level `"dryRun"` field, the `?dryRun=` query parameter and string values (`"true"`/`"false"`) are accepted too, and any of them set to true makes the run a dry run. A body that is not valid JSON, a `params` that is not an object, or a `dryRun` value that is not a boolean returns `400 Bad Request` and starts nothing. That includes a bare `?dryRun` or `?dryRun=` with no value: write `?dryRun=true`. (Before ptone/scion#1976 these forms were ignored and a real run started.)
+
 Response:
 ```json
 {
@@ -230,7 +235,7 @@ Response:
 }
 ```
 
-Returns `409 Conflict` if the migration is already completed (use CLI `--force` for re-runs).
+Returns `409 Conflict` if the migration is already completed, unless it is listed in `rerunnableMigrations` (currently `utc-timestamp-normalize` and `applied-config-tz-cleanup`). A listed migration must be idempotent: a second run changes nothing the first run already fixed. A successful run replaces the stored result. A dry run of a pending (or failed) migration leaves it `pending` with the dry-run log as its result. A dry run of a completed migration returns `409 Conflict` and leaves the record unchanged. An unlisted migration gets the plain "Migration already completed" from the guard above; a listed one gets "Migration already completed; a re-run is idempotent, so run it without dryRun". The reasons: a dry run would overwrite the completed record (success resets it to `pending`, a failure marks it `failed`), and a real re-run of a listed migration is idempotent and reports its own count.
 
 #### Get Run Status
 

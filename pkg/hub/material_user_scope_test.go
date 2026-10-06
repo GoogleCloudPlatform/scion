@@ -326,11 +326,14 @@ func TestAgentGetSecret_UserMetaErrorIsUnavailable(t *testing.T) {
 }
 
 // TestAgentSecretRead_UserScopeCeilingApplied documents the known gap
-// (partial coverage, closed by a later change): user-scoped reads have no
-// delegation-ceiling step at all yet, because there is no existing
-// permission to route check 8 through Decide.
+// (partial coverage): user-scoped reads have no delegation-ceiling step at
+// all yet. Check 8 still calls the relationship resolver directly rather
+// than routing through a permission decision, so closing this gap needs two
+// further changes neither of which has landed: a shared, exact-permission
+// progeny decision path that accepts a non-read-only action, and a
+// user-material delegation ceiling to evaluate once that path exists.
 func TestAgentSecretRead_UserScopeCeilingApplied(t *testing.T) {
-	t.Skip("requires exact-permission progeny decision")
+	t.Skip("pending the shared exact-permission progeny decision path and the user-material delegation ceiling")
 }
 
 // TestAgentSecretRead_ProgenyEligibleSecretIDsNilRecDenies pins that

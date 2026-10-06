@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -27,12 +28,27 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
+// brokerCodeRuntimeLogsUnsupported mirrors the wire value of
+// pkg/runtimebroker.ErrCodeRuntimeLogsUnsupported, the code a runtime broker
+// sends when its runtime declines a logs request outright (e.g. the
+// substrate runtime's ErrLogsNotSupported). Kept as a literal rather than an
+// import: pkg/hub only ever talks to the broker over HTTP.
+const brokerCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
+
+// runtimeLogsUnsupportedMessage is the hub's own fixed text for a
+// runtime_logs_unsupported response — never the broker-supplied message.
+// Any broker (including one this hub does not otherwise trust — a
+// user-registered or misconfigured one) can put arbitrary text in its own
+// response body; matching the code is not a reason to repeat that text
+// verbatim under the hub's response.
+const runtimeLogsUnsupportedMessage = "agent logs are not available on this agent's runtime"
+
 // handleAgentLogs handles GET /api/v1/agents/{id}/logs
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/logs
 // It proxies the request to the agent's runtime broker to read agent.log.
 func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -77,6 +93,22 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 	logs, err := dispatcher.DispatchAgentLogs(ctx, agent, tail)
 	if err != nil {
 		slog.Error("agent log relay failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
+		// The broker declined outright (e.g. the substrate runtime's
+		// ErrLogsNotSupported) rather than failing to reach the runtime.
+		// Pass its status and code straight through instead of re-wrapping
+		// them in a generic gateway error — matching on both the status and
+		// the code keeps every other broker error, including any other 501,
+		// on the unchanged path below. The message is the hub's own fixed
+		// text, not the broker's: any broker can put arbitrary text in its
+		// response body, and this response must stay clean regardless.
+		var se *brokerStatusError
+		if errors.As(err, &se) && se.StatusCode == http.StatusNotImplemented && se.brokerErrorCode() == brokerCodeRuntimeLogsUnsupported {
+			writeError(w, http.StatusNotImplemented, brokerCodeRuntimeLogsUnsupported, runtimeLogsUnsupportedMessage, nil)
+			return
+		}
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
 			"Failed to retrieve logs from broker: "+err.Error(), nil)
 		return
@@ -89,7 +121,7 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 // and GET /api/v1/projects/{projectId}/agents/{agentId}/cloud-logs
 func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -170,7 +202,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 // It returns an SSE stream of log entries using the Cloud Logging Tail API.
 func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -280,7 +312,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 // entries associated with the given agent.
 func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -304,17 +336,17 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	// DEF-128b: check manage first, then read. Manage implies read and lets
-	// us skip participant scoping for users who have it — mirroring the
-	// hub-store path in handleAgentMessages (handlers_messages.go:231-239).
+	// DEF-128b: full logs require agent.attach on this agent; agent.read
+	// alone gives participant-scoped logs, as on the hub-store message path
+	// (handleAgentMessages).
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
 		return
 	}
 	res := agentResource(agent)
-	canManage := s.authzService.CheckAccess(ctx, identity, res, ActionManage)
-	if !canManage.Allowed {
+	fullHistory := s.agentFullHistoryDecision(ctx, identity, agent)
+	if !fullHistory.Allowed {
 		decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
 		if !decision.Allowed {
 			logAuthzDenial(r, identity, res, ActionRead, decision.Reason)
@@ -337,18 +369,18 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 		LogID:     logging.MessageLogID,
 	}
 
-	// DEF-128b: non-manage callers see only their own messages, matching the
+	// DEF-128b: callers without agent.attach see only their own messages, matching the
 	// hub-store path's filter.ParticipantID = user.ID() constraint.
 	//
-	// Fail closed: if the caller is not-manage and we cannot resolve a user
+	// Fail closed: if the caller lacks agent.attach and we cannot resolve a user
 	// identity, deny rather than return an unscoped query. An absent identity
 	// must produce less access, not more. Any future identity kind that is
 	// not a user must be explicitly handled here — silent pass-through is
 	// an over-grant.
-	if !canManage.Allowed {
+	if !fullHistory.Allowed {
 		user := GetUserIdentityFromContext(ctx)
 		if user == nil {
-			// No user identity and not a manager — deny.
+			// No user identity and no full-history permission — deny.
 			Forbidden(w)
 			return
 		}
@@ -387,7 +419,7 @@ func (s *Server) handleAgentMessageLogs(w http.ResponseWriter, r *http.Request, 
 // It returns an SSE stream of message log entries from the "scion-messages" log.
 func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -485,7 +517,7 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 // within the given project (across all agents).
 func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -557,7 +589,7 @@ func (s *Server) handleProjectMessageLogs(w http.ResponseWriter, r *http.Request
 // It returns an SSE stream of all message log entries within the project.
 func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

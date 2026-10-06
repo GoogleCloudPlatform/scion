@@ -42,9 +42,22 @@ system_prompt_file: .claude/system-prompt.md
 system_prompt_mode: native
 model_aliases:
   small: haiku
-  medium: claude-sonnet-5
+  medium: claude-sonnet-5-5
   large: claude-opus-5-5
   extra-large: claude-fable-5-1
+# SCION_THINKING_LEVEL (0-100) -> CLAUDE_CODE_EFFORT_LEVEL in the harness env.
+# Applied by scion_harness.resolve_thinking in provision.py. Each level maps
+# to the value of the first entry whose max (inclusive) is >= the level.
+# The top tier is xhigh rather than max to avoid max's excessive-token runs;
+# max stays reachable via a preset CLAUDE_CODE_EFFORT_LEVEL or a custom table.
+# No default: when the level is unset, nothing is set and Claude Code keeps
+# its own per-model default effort.
+thinking:
+  levels:
+    - {max: 25,  value: low}
+    - {max: 50,  value: medium}
+    - {max: 75,  value: high}
+    - {max: 100, value: xhigh}
 env:
   # ANTHROPIC_MODEL is intentionally NOT set here. Entries in this block land
   # in the container environment, and the container environment always wins

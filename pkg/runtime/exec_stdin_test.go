@@ -108,6 +108,47 @@ func TestPodmanRuntime_ExecWithStdin_SecretNotInArgv(t *testing.T) {
 	}
 }
 
+// TestAppleContainerRuntime_ExecWithStdin_SecretNotInArgv covers
+// the Apple `container` CLI backend: same shape as the
+// Docker/Podman tests above, via runSimpleCommandWithStdin. ExecWithStdin
+// first calls List to resolve the slug to a container ID; the fake binary
+// below doesn't print valid JSON, so List returns an error that
+// ExecWithStdin already tolerates (falls back to the given id), and List's
+// own (stdin-less) invocation of the recorder harmlessly overwrites
+// stdinFile with an empty read before the real ExecWithStdin call overwrites
+// it again with the secret.
+func TestAppleContainerRuntime_ExecWithStdin_SecretNotInArgv(t *testing.T) {
+	tmpDir := t.TempDir()
+	bin := filepath.Join(tmpDir, "mock-container")
+	argvFile := filepath.Join(tmpDir, "argv")
+	stdinFile := filepath.Join(tmpDir, "stdin")
+	writeArgvStdinRecorder(t, bin, argvFile, stdinFile)
+
+	rt := &AppleContainerRuntime{Command: bin}
+	if _, err := rt.ExecWithStdin(context.Background(), "test-container", []string{"cat"}, strings.NewReader(stdinLeakSecret)); err != nil {
+		t.Fatalf("ExecWithStdin failed: %v", err)
+	}
+
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded argv: %v", err)
+	}
+	if strings.Contains(string(argv), stdinLeakSecret) {
+		t.Errorf("secret leaked into container exec argv: %q", string(argv))
+	}
+	if !strings.Contains(string(argv), "-i") {
+		t.Errorf("expected -i (required for `container exec` to attach stdin) in argv, got %q", string(argv))
+	}
+
+	stdin, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatalf("failed to read recorded stdin: %v", err)
+	}
+	if string(stdin) != stdinLeakSecret {
+		t.Errorf("secret not delivered via stdin verbatim: got %q, want %q", string(stdin), stdinLeakSecret)
+	}
+}
+
 func TestCloudRunSandboxRuntime_ExecWithStdin_SecretNotInArgv(t *testing.T) {
 	tmpDir := t.TempDir()
 	bin := filepath.Join(tmpDir, "mock-sandbox")

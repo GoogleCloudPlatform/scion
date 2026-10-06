@@ -75,7 +75,7 @@ As an alternative to the OTel pipeline, the Hub and Broker can send logs directl
 export SCION_CLOUD_LOGGING=true
 export SCION_GCP_PROJECT_ID="your-project-id"
 
-# Optional: customize the log name (default: "scion")
+# Optional: customize the log name (default: "scion-server")
 export SCION_CLOUD_LOGGING_LOG_ID="scion-hub"
 
 scion server start --enable-hub
@@ -140,7 +140,7 @@ Each harness integrates with `sciontool`'s telemetry pipeline differently depend
 
 - **Claude Code (logs-first route)**: Claude Code emits structured OTLP log records (scope `com.anthropic.claude_code.events`) rather than spans or metrics. The `sciontool` receiver normalizes Claude's event names to the canonical `agent.*` namespace (e.g. `user_prompt` → `agent.user.prompt`) and **unconditionally redacts** all Claude log bodies to protect prompt privacy, regardless of the configured filter policy. When Claude is the active harness and telemetry is enabled, the broker propagates the telemetry backend configuration (`gcp` or `otlp`) via the `SCION_TELEMETRY_CLOUD_PROVIDER` environment variable to `sciontool` to prevent accidental metrics export before credentials are available.
 
-- **Gemini CLI**: Telemetry comes primarily from harness hook events and session-file parsing — see [Session Metrics (Gemini)](/scion/hosted/single-node/metrics/#session-metrics-gemini).
+- **Gemini CLI**: The harness provisioner points Gemini CLI's native OTel (logs and metrics) at the local `sciontool` receiver over gRPC on `4317`, so it passes through redaction and identity stamping. Its usage (`gen_ai.api.calls`, `scion.usage.tokens`) is derived from the native `gemini_cli.api_response` and `gemini_cli.api_error` log events — see the usage source description under [Automated Metrics Collection](/scion/hosted/single-node/metrics/#automated-metrics-collection). Session metrics still come from session-file parsing — see [Session Metrics (Gemini)](/scion/hosted/single-node/metrics/#session-metrics-gemini).
 
 - **Copilot and Grok Build**: The harness provisioner always points the native OTel exporter at the local `sciontool` receiver (Copilot over HTTP on `4318`, Grok Build over gRPC on `4317`), never directly at `SCION_OTEL_ENDPOINT`, so their telemetry passes through redaction and identity stamping. `SCION_COPILOT_OTEL_ENDPOINT` and `SCION_GROK_BUILD_OTEL_ENDPOINT` override the endpoint for local debugging only; they bypass redaction entirely. See [Supported Harnesses](/scion/supported-harnesses/).
 
@@ -148,11 +148,13 @@ Each harness integrates with `sciontool`'s telemetry pipeline differently depend
 When a harness provisioner configures native telemetry, the variables that control it are reserved: `CLAUDE_CODE_ENABLE_TELEMETRY`, `GEMINI_TELEMETRY_*`, `COPILOT_OTEL_*`, `GROK_TELEMETRY_*`, `GROK_EXTERNAL_OTEL`, and `OTEL_*`. If the runtime environment (for example, Project or Broker env on the Hub) sets any of them to a value other than the one the provisioner generated, the agent fails to start with a `native telemetry policy conflict` error naming the key.
 :::
 
-These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion automatically injects `SCION_HARNESS` and `SCION_MODEL` into all agent containers to enable harness-aware telemetry attribution.
+These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion injects `SCION_HARNESS` into every agent container, and `SCION_MODEL` when the agent's configuration names a model, to enable harness-aware telemetry attribution (see [Native Metrics Pipeline](/scion/hosted/single-node/metrics/#native-metrics-pipeline) for how a missing model is labelled).
 
 ## Agent Logs
 
 Agent logs are written to `/home/scion/agent.log` inside the container. The sciontool logging system writes to both stderr and this file.
+
+Each `agent.log` line starts with a UTC RFC 3339 timestamp, followed by `[sciontool] [LEVEL]`, an optional `[TAG]`, and the message, for example `2026-10-02T00:30:15.123456789Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: ...`. Per-service `<name>.lifecycle.log` lines use the same timestamp in brackets: `[2026-10-02T00:30:15.123456789Z] message`. Timestamps are always UTC, whatever `TZ` the agent runs with; the agent process itself keeps its own `TZ`.
 
 ### Cloud Log Viewer & Hub API
 
@@ -166,7 +168,7 @@ The `sciontool` utility ensures that `agent.log` is owned by the `scion` user du
 
 - **INFO**: Normal operational events
 - **ERROR**: Critical failures
-- **DEBUG**: Detailed information (enabled with `SCION_DEBUG=true` or `SCION_LOG_LEVEL=debug`)
+- **DEBUG**: Detailed information. In `agent.log`, `sciontool` enables it when `SCION_DEBUG` is set to any non-empty value in the agent environment. `SCION_LOG_LEVEL` does not affect `agent.log`. The Hub's own log is separate. `SCION_DEBUG` does not change the Hub's log level; it only enables some extra `[DEBUG]` lines on stderr (from `util.Debugf`, when `--debug` was not passed). To get DEBUG-level Hub logs, start the Hub with `--debug` or `SCION_LOG_LEVEL=debug` (the only value it honours).
 
 ## Telemetry Collection
 
@@ -237,7 +239,7 @@ httpRequest.status >= 400
 labels.project_id = "my-project"
 
 -- Correlate a request with its application logs
-logName="projects/YOUR_PROJECT/logs/scion" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"
+logName="projects/YOUR_PROJECT/logs/scion-server" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"
 jsonPayload.request_id = "YOUR_REQUEST_ID"
 ```
 
@@ -273,17 +275,17 @@ In combo server mode (`scion-server`), both `hub.*` and `broker.*` subsystem log
 
 ### Cloud Logging Query Examples
 
-All examples assume your logs are in the `scion` log name. Adjust the `logName` filter to match your configuration.
+All examples assume your logs are in the `scion-server` log name. Adjust the `logName` filter to match your configuration.
 
 #### Filter by Server Component
 
 ```
 -- All hub logs (hub-only or combo mode)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 labels.component="scion-hub"
 
 -- All logs from combo server mode
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 labels.component="scion-server"
 ```
 
@@ -291,15 +293,15 @@ labels.component="scion-server"
 
 ```
 -- All hub subsystem logs
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^hub\."
 
 -- All broker subsystem logs
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^broker\."
 
 -- A specific subsystem
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.notifications"
 ```
 
@@ -307,16 +309,16 @@ jsonPayload.subsystem = "hub.notifications"
 
 ```
 -- All agent lifecycle events across hub and broker
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 
 -- Agent lifecycle for a specific agent
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 jsonPayload.agent_id = "my-agent-id"
 
 -- Only errors in agent lifecycle
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 severity >= ERROR
 ```
@@ -325,30 +327,54 @@ severity >= ERROR
 
 ```
 -- All message-related logs (hub routing + broker injection)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 
 -- Messages from a specific sender
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.sender = "agent-slug"
 
 -- Messages to a specific recipient in a project
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.recipient = "target-agent"
 jsonPayload.project_id = "my-project-id"
+```
+
+#### Agent Telemetry Logs
+
+Logs that agents export through the `sciontool` telemetry pipeline go to the `scion-agents` log name, not `scion-server`. The exporter turns each OpenTelemetry resource attribute into a log label with the same key. Agent identity is carried only in these resource-attribute labels: there are no top-level `agent_id` or `project_id` labels on agent telemetry log entries. The only extra label is `hub`, which is set from `SCION_HUB_NAME` when present.
+
+The identity labels are stamped by the `sciontool` receiver from the agent's authoritative identity (see [Identity Enforcement](/scion/hosted/single-node/metrics/#identity-enforcement)), so filter on these:
+
+- `labels."scion.project.id"` for the agent's project.
+- `labels."scion.agent.id"` for the agent ID.
+- `labels."scion.agent.slug"` for the agent slug.
+
+```
+-- Agent telemetry logs for a project
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.project.id" = "my-project-id"
+
+-- Agent telemetry logs for one agent, by slug
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.slug" = "my-agent-slug"
+
+-- Agent telemetry logs for one agent, by ID
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.id" = "my-agent-id"
 ```
 
 #### Auth and Security Auditing
 
 ```
 -- All authentication and authorization events
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.auth"
 
 -- Auth failures only
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.auth"
 severity >= WARNING
 ```
@@ -357,11 +383,11 @@ severity >= WARNING
 
 ```
 -- All control channel activity (hub + broker sides)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.control-channel$"
 
 -- Control channel errors (connectivity issues)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.control-channel$"
 severity >= ERROR
 ```
@@ -370,12 +396,12 @@ severity >= ERROR
 
 ```
 -- All hub logs EXCEPT heartbeat noise
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^hub\."
 jsonPayload.subsystem != "broker.heartbeat"
 
 -- Only high-priority subsystems (notifications, auth, agent lifecycle)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.notifications" OR
 jsonPayload.subsystem = "hub.auth" OR
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
@@ -385,13 +411,13 @@ jsonPayload.subsystem =~ "\.agent-lifecycle$"
 
 ```
 -- Errors across all subsystems in the last hour
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem != ""
 severity >= ERROR
 timestamp >= "2026-03-03T00:00:00Z"
 
 -- Debug-level broker logs for troubleshooting
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^broker\."
 severity = DEBUG
 ```

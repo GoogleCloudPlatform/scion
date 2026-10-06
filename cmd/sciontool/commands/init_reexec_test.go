@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
@@ -74,19 +75,22 @@ func TestStagedSecretsEnvVarName(t *testing.T) {
 	}
 }
 
-// TestReExecWithCleanEnv_ResolvesExecutable verifies that reExecWithCleanEnv
-// can resolve the current executable path. We cannot test the actual execve
-// in-process (it replaces the process image), so we test the prerequisite
-// that os.Executable succeeds in this environment.
-func TestReExecWithCleanEnv_ResolvesExecutable(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable() failed: %v — reExecWithCleanEnv would also fail", err)
+// TestReExecWithCleanEnv_UsesProcSelfExe verifies reExecWithCleanEnv re-execs
+// via rootexec.SelfExe() ("/proc/self/exe"), never a path resolved from disk
+// (os.Executable()): the latter re-reads this binary's on-disk path, which a
+// workload could have replaced since this process started, and would then
+// have that planted binary re-executed as root. We cannot test the actual
+// execve in-process (it replaces the process image), so this checks the
+// prerequisite that "/proc/self/exe" is present and executable in this
+// environment, and that rootexec.SelfExe() is exactly that magic path (not,
+// e.g., something EvalSymlinks resolved it to).
+func TestReExecWithCleanEnv_UsesProcSelfExe(t *testing.T) {
+	if got := rootexec.SelfExe(); got != "/proc/self/exe" {
+		t.Fatalf("rootexec.SelfExe() = %q, want /proc/self/exe", got)
 	}
-	if exe == "" {
-		t.Fatal("os.Executable() returned empty string")
+	if _, err := os.Stat(rootexec.SelfExe()); err != nil {
+		t.Fatalf("/proc/self/exe not accessible in this environment: %v — reExecWithCleanEnv would also fail", err)
 	}
-	t.Logf("Executable: %s", exe)
 }
 
 // TestReExecIntegration is a subprocess-based test that verifies the full

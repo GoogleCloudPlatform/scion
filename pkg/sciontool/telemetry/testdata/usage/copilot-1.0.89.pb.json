@@ -1,0 +1,1313 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "github-copilot"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "1.0.89"
+            }
+          }
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "scope": {
+            "name": "github.copilot",
+            "version": "1.0.89"
+          },
+          "metrics": [
+            {
+              "name": "gen_ai.client.operation.duration",
+              "description": "GenAI operation duration.",
+              "unit": "s",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907038970",
+                    "timeUnixNano": "1790730396782224219",
+                    "count": "3",
+                    "sum": 6.6714851809999995,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "2",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      }
+                    ],
+                    "min": 1.480910911,
+                    "max": 2.734129478
+                  },
+                  {
+                    "startTimeUnixNano": "1790730388907038970",
+                    "timeUnixNano": "1790730396782224219",
+                    "count": "2",
+                    "sum": 0.042563909,
+                    "bucketCounts": [
+                      "1",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "execute_tool"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      }
+                    ],
+                    "min": 0.003256142,
+                    "max": 0.039307767
+                  },
+                  {
+                    "startTimeUnixNano": "1790730388907038970",
+                    "timeUnixNano": "1790730396782224219",
+                    "count": "1",
+                    "sum": 6.801054063,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      }
+                    ],
+                    "min": 6.801054063,
+                    "max": 6.801054063
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.client.inference.operation.input_tokens",
+              "description": "The number of input tokens used per inference operation.",
+              "unit": "{token}",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907054269",
+                    "timeUnixNano": "1790730396782236009",
+                    "count": "3",
+                    "sum": 62803.0,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "3",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      1.0,
+                      4.0,
+                      16.0,
+                      64.0,
+                      256.0,
+                      1024.0,
+                      4096.0,
+                      16384.0,
+                      65536.0,
+                      262144.0,
+                      1048576.0,
+                      4194304.0,
+                      16777216.0,
+                      67108864.0
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      }
+                    ],
+                    "min": 20818.0,
+                    "max": 21035.0
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.client.inference.operation.output_tokens",
+              "description": "The number of output tokens used per inference operation.",
+              "unit": "{token}",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907069102",
+                    "timeUnixNano": "1790730396782239569",
+                    "count": "3",
+                    "sum": 202.0,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "1",
+                      "2",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      1.0,
+                      4.0,
+                      16.0,
+                      64.0,
+                      256.0,
+                      1024.0,
+                      4096.0,
+                      16384.0,
+                      65536.0,
+                      262144.0,
+                      1048576.0,
+                      4194304.0,
+                      16777216.0,
+                      67108864.0
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      }
+                    ],
+                    "min": 33.0,
+                    "max": 94.0
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.client.inference.usage.input_tokens",
+              "description": "The number of input tokens used, including cached tokens.",
+              "unit": "{token}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907083482",
+                    "timeUnixNano": "1790730396782242752",
+                    "asInt": "62803",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.token.modality",
+                        "value": {
+                          "stringValue": "unknown"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            },
+            {
+              "name": "gen_ai.client.inference.usage.output_tokens",
+              "description": "The number of output tokens used, including reasoning tokens.",
+              "unit": "{token}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907092902",
+                    "timeUnixNano": "1790730396782246644",
+                    "asInt": "202",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.token.modality",
+                        "value": {
+                          "stringValue": "unknown"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            },
+            {
+              "name": "gen_ai.client.inference.usage.cache_read.input_tokens",
+              "description": "The number of input tokens served from a provider-managed cache.",
+              "unit": "{token}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907102281",
+                    "timeUnixNano": "1790730396782250197",
+                    "asInt": "55836",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.token.modality",
+                        "value": {
+                          "stringValue": "unknown"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            },
+            {
+              "name": "gen_ai.client.inference.usage.cache_write.input_tokens",
+              "description": "The number of input tokens written to a provider-managed cache.",
+              "unit": "{token}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907109579",
+                    "timeUnixNano": "1790730396782253167",
+                    "asInt": "6961",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.token.modality",
+                        "value": {
+                          "stringValue": "unknown"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            },
+            {
+              "name": "gen_ai.client.inference.usage.reasoning.output_tokens",
+              "description": "The number of output tokens used for reasoning.",
+              "unit": "{token}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907120385",
+                    "timeUnixNano": "1790730396782256097",
+                    "asInt": "9",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.response.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.token.modality",
+                        "value": {
+                          "stringValue": "unknown"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            },
+            {
+              "name": "gen_ai.client.operation.time_to_first_chunk",
+              "description": "Time to receive the first chunk from a streaming response.",
+              "unit": "s",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907128691",
+                    "timeUnixNano": "1790730396782259084",
+                    "count": "3",
+                    "sum": 5.682142251,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "1",
+                      "2",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      }
+                    ],
+                    "min": 1.277770604,
+                    "max": 2.429652099
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.client.operation.time_per_output_chunk",
+              "description": "Time elapsed between streamed output chunks after the first chunk.",
+              "unit": "s",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907138152",
+                    "timeUnixNano": "1790730396782261045",
+                    "count": "31",
+                    "sum": 0.964148102,
+                    "bucketCounts": [
+                      "25",
+                      "0",
+                      "0",
+                      "4",
+                      "0",
+                      "1",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "chat"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.provider.name",
+                        "value": {
+                          "stringValue": "github"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.request.model",
+                        "value": {
+                          "stringValue": "claude-sonnet-5"
+                        }
+                      }
+                    ],
+                    "min": 0.000132836,
+                    "max": 0.47520279
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.invoke_agent.duration",
+              "description": "The end-to-end duration of a single agent invocation.",
+              "unit": "s",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907150979",
+                    "timeUnixNano": "1790730396782264106",
+                    "count": "1",
+                    "sum": 6.801054063,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.1,
+                      0.2,
+                      0.4,
+                      0.8,
+                      1.6,
+                      3.2,
+                      6.4,
+                      12.8,
+                      25.6,
+                      51.2,
+                      102.4,
+                      204.8,
+                      409.6
+                    ],
+                    "min": 6.801054063,
+                    "max": 6.801054063
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.invoke_agent.inference_calls",
+              "description": "The number of inference (model) calls a GenAI agent makes during a single invocation.",
+              "unit": "{inference_call}",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907169644",
+                    "timeUnixNano": "1790730396782265442",
+                    "count": "1",
+                    "sum": 3.0,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.0,
+                      1.0,
+                      2.0,
+                      4.0,
+                      8.0,
+                      16.0,
+                      32.0,
+                      64.0,
+                      128.0,
+                      256.0
+                    ],
+                    "min": 3.0,
+                    "max": 3.0
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.invoke_agent.tool_calls",
+              "description": "The number of tool calls a GenAI agent makes during a single invocation.",
+              "unit": "{tool_call}",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907178480",
+                    "timeUnixNano": "1790730396782266462",
+                    "count": "1",
+                    "sum": 2.0,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.0,
+                      1.0,
+                      2.0,
+                      4.0,
+                      8.0,
+                      16.0,
+                      32.0,
+                      64.0,
+                      128.0,
+                      256.0
+                    ],
+                    "min": 2.0,
+                    "max": 2.0
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "gen_ai.execute_tool.duration",
+              "description": "The duration of a single tool execution.",
+              "unit": "s",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907186284",
+                    "timeUnixNano": "1790730396782267073",
+                    "count": "1",
+                    "sum": 0.039307767,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "bash"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.type",
+                        "value": {
+                          "stringValue": "function"
+                        }
+                      }
+                    ],
+                    "min": 0.039307767,
+                    "max": 0.039307767
+                  },
+                  {
+                    "startTimeUnixNano": "1790730388907186284",
+                    "timeUnixNano": "1790730396782267073",
+                    "count": "1",
+                    "sum": 0.003256142,
+                    "bucketCounts": [
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "view"
+                        }
+                      },
+                      {
+                        "key": "gen_ai.tool.type",
+                        "value": {
+                          "stringValue": "function"
+                        }
+                      }
+                    ],
+                    "min": 0.003256142,
+                    "max": 0.003256142
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "github.copilot.tool.call.count",
+              "description": "Number of tool invocations by tool name and outcome.",
+              "unit": "{call}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907193689",
+                    "timeUnixNano": "1790730396782270979",
+                    "asInt": "1",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "view"
+                        }
+                      },
+                      {
+                        "key": "success",
+                        "value": {
+                          "boolValue": true
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "startTimeUnixNano": "1790730388907193689",
+                    "timeUnixNano": "1790730396782270979",
+                    "asInt": "1",
+                    "attributes": [
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "bash"
+                        }
+                      },
+                      {
+                        "key": "success",
+                        "value": {
+                          "boolValue": true
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            },
+            {
+              "name": "github.copilot.tool.call.duration",
+              "description": "Tool execution latency.",
+              "unit": "s",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907201918",
+                    "timeUnixNano": "1790730396782274111",
+                    "count": "1",
+                    "sum": 0.003256142,
+                    "bucketCounts": [
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "view"
+                        }
+                      }
+                    ],
+                    "min": 0.003256142,
+                    "max": 0.003256142
+                  },
+                  {
+                    "startTimeUnixNano": "1790730388907201918",
+                    "timeUnixNano": "1790730396782274111",
+                    "count": "1",
+                    "sum": 0.039307767,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.01,
+                      0.02,
+                      0.04,
+                      0.08,
+                      0.16,
+                      0.32,
+                      0.64,
+                      1.28,
+                      2.56,
+                      5.12,
+                      10.24,
+                      20.48,
+                      40.96,
+                      81.92
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.tool.name",
+                        "value": {
+                          "stringValue": "bash"
+                        }
+                      }
+                    ],
+                    "min": 0.039307767,
+                    "max": 0.039307767
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "github.copilot.agent.turn.count",
+              "description": "Number of LLM round-trips per agent invocation.",
+              "unit": "{turn}",
+              "histogram": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907213956",
+                    "timeUnixNano": "1790730396782277781",
+                    "count": "1",
+                    "sum": 3.0,
+                    "bucketCounts": [
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      0.0,
+                      5.0,
+                      10.0,
+                      25.0,
+                      50.0,
+                      75.0,
+                      100.0,
+                      250.0,
+                      500.0,
+                      750.0,
+                      1000.0,
+                      2500.0,
+                      5000.0,
+                      7500.0,
+                      10000.0
+                    ],
+                    "attributes": [
+                      {
+                        "key": "gen_ai.operation.name",
+                        "value": {
+                          "stringValue": "invoke_agent"
+                        }
+                      }
+                    ],
+                    "min": 3.0,
+                    "max": 3.0
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE"
+              }
+            },
+            {
+              "name": "github.copilot.mcp.server.connection.count",
+              "description": "Number of completed MCP server connection attempts by transport and outcome.",
+              "unit": "{attempt}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907222149",
+                    "timeUnixNano": "1790730396782279837",
+                    "asInt": "1",
+                    "attributes": [
+                      {
+                        "key": "outcome",
+                        "value": {
+                          "stringValue": "success"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            },
+            {
+              "name": "github.copilot.sandbox.operation.count",
+              "description": "Number of bounded sandbox governance decisions.",
+              "unit": "{decision}",
+              "sum": {
+                "dataPoints": [
+                  {
+                    "startTimeUnixNano": "1790730388907229994",
+                    "timeUnixNano": "1790730396782282121",
+                    "asInt": "1",
+                    "attributes": [
+                      {
+                        "key": "github.copilot.sandbox.decision_kind",
+                        "value": {
+                          "stringValue": "enforcement_state"
+                        }
+                      },
+                      {
+                        "key": "github.copilot.sandbox.control",
+                        "value": {
+                          "stringValue": "process"
+                        }
+                      },
+                      {
+                        "key": "github.copilot.sandbox.outcome",
+                        "value": {
+                          "stringValue": "inactive"
+                        }
+                      },
+                      {
+                        "key": "github.copilot.sandbox.enforcement_point",
+                        "value": {
+                          "stringValue": "shell"
+                        }
+                      },
+                      {
+                        "key": "github.copilot.sandbox.platform",
+                        "value": {
+                          "stringValue": "linux"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+                "isMonotonic": true
+              }
+            }
+          ]
+        }
+      ],
+      "schemaUrl": "https://opentelemetry.io/schemas/1.44.0"
+    }
+  ]
+}

@@ -18,8 +18,14 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <!-- app-icons:start -- kept identical to pkg/hub/web.go; see TestSPAShellAppIconTags. -->
+  <link rel="icon" href="/favicon.ico" sizes="32x32" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#1e293b" />
+  <!-- app-icons:end -->
   <title>Scion - Agent Orchestration Platform</title>
   <link rel="stylesheet" href="/node_modules/@shoelace-style/shoelace/dist/themes/light.css" />
   <link rel="stylesheet" href="/node_modules/@shoelace-style/shoelace/dist/themes/dark.css" />
@@ -41,6 +47,60 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: var(--scion-font-sans, system-ui, sans-serif); }
     body { background: var(--scion-bg, #f8fafc); color: var(--scion-text, #1e293b); }
+
+    /* mobile-frame:start -- kept identical (modulo comments and
+       indentation) to pkg/hub/web.go; see TestSPAShellIndexHTMLParity. */
+    :root {
+      --scion-app-height: 100vh;
+    }
+    @supports (height: 100dvh) {
+      :root {
+        --scion-app-height: 100dvh;
+      }
+    }
+
+    html,
+    body {
+      overscroll-behavior: none;
+    }
+
+    html {
+      touch-action: manipulation;
+    }
+
+    #app {
+      height: 100%;
+      min-height: 0;
+    }
+
+    /* Frame mode: set by any app shell while mounted (see
+       web/src/components/shared/app-frame.ts). Document-scrolling pages
+       (login, invite, onboarding) never set it. */
+    html.scion-app-frame,
+    html.scion-app-frame body {
+      overflow: hidden;
+      height: 100%;
+    }
+
+    /* Stop iOS/Android focus-zoom: the Shoelace input default is raised
+       to 16px on a coarse (touch) pointer. Components that set their own
+       input font-size (a local ::part override, or their own
+       --sl-input-font-size-* re-declaration) bypass this variable and
+       must floor it at 16px on coarse pointers themselves -- see e.g.
+       chat-space-rail.ts's own @media (pointer: coarse) block. Shoelace's
+       own theme sets these same custom properties on a selector list
+       that includes a bare ":root" (light.css/dark.css), at the exact
+       same specificity as a plain ":root" rule here -- whichever
+       stylesheet loads last would otherwise win. "html:root" raises
+       the specificity (adds the "html" type selector) so this rule
+       always wins, regardless of load order. */
+    @media (pointer: coarse) {
+      html:root {
+        --sl-input-font-size-small: 16px;
+        --sl-input-font-size-medium: 16px;
+      }
+    }
+    /* mobile-frame:end */
   </style>
 </head>
 <body>

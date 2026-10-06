@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -137,6 +138,105 @@ func TestBootstrapHarnessConfigsFromDir_PersistsConfigImage(t *testing.T) {
 	}
 	if hc.Config == nil || hc.Config.Image != "scion-claude:v2" {
 		t.Errorf("expected Config.Image = %q after re-sync, got %+v", "scion-claude:v2", hc.Config)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_PersistsModelAliases is a regression
+// test for ptone/scion#2365: the hub used to never persist a config.yaml's
+// model_aliases (or default model) onto the stored HarnessConfig record, so
+// resolveModelAliasForAgent always fell through to the alias table baked
+// into the hub binary at build time — meaning an alias update in
+// config.yaml had no effect until the hub itself was rebuilt/redeployed.
+// This verifies the extraction happens on both initial import and re-sync.
+func TestBootstrapHarnessConfigsFromDir_PersistsModelAliases(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "codex", map[string]string{
+		"config.yaml": "harness: codex\nmodel: medium\n" +
+			"model_aliases:\n  small: gpt-6-luna\n  medium: gpt-6.1-sol\n  large: gpt-6.1-sol\n",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "codex", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.Config == nil {
+		t.Fatal("expected Config to be populated after bootstrap, got nil")
+	}
+	if hc.Config.Model != "medium" {
+		t.Errorf("expected Config.Model = %q, got %q", "medium", hc.Config.Model)
+	}
+	wantAliases := map[string]string{"small": "gpt-6-luna", "medium": "gpt-6.1-sol", "large": "gpt-6.1-sol"}
+	if !reflect.DeepEqual(hc.Config.ModelAliases, wantAliases) {
+		t.Errorf("expected Config.ModelAliases = %+v, got %+v", wantAliases, hc.Config.ModelAliases)
+	}
+
+	// Re-sync with updated aliases (as if the user edited config.yaml to
+	// point "large" at a new model) and verify the stored record picks up
+	// the change rather than keeping the value from the first sync.
+	if err := os.WriteFile(filepath.Join(dir, "codex", "config.yaml"),
+		[]byte("harness: codex\nmodel: medium\n"+
+			"model_aliases:\n  small: gpt-6-luna\n  medium: gpt-6.1-sol\n  large: gpt-6.1-astra\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	hc, err = s.GetHarnessConfigBySlug(ctx, "codex", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.Config == nil || hc.Config.ModelAliases["large"] != "gpt-6.1-astra" {
+		t.Errorf("expected Config.ModelAliases[large] = %q after re-sync, got %+v", "gpt-6.1-astra", hc.Config)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_PreservesModelAliasesWhenConfigYAMLSilent
+// verifies extractModelConfig's "only overwrite when config.yaml declares
+// it" contract: a hub-side manual edit to Config.ModelAliases (e.g. made
+// through the harness-config API) must survive a re-sync of a config.yaml
+// that has no model_aliases key at all, mirroring the existing
+// TestSyncHarnessConfig_PreservesTypedConfig contract for Config.Model.
+func TestBootstrapHarnessConfigsFromDir_PreservesModelAliasesWhenConfigYAMLSilent(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "custom", map[string]string{
+		"config.yaml": "harness: custom\nimage: scion-custom:v1\n",
+	})
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "custom", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc.Config.ModelAliases = map[string]string{"large": "manually-set-model"}
+	if err := s.UpdateHarnessConfig(ctx, hc); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "custom", "config.yaml"),
+		[]byte("harness: custom\nimage: scion-custom:v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("second bootstrap failed: %v", err)
+	}
+
+	got, err := s.GetHarnessConfigBySlug(ctx, "custom", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Config == nil || got.Config.ModelAliases["large"] != "manually-set-model" {
+		t.Errorf("expected manually-set ModelAliases to survive a config.yaml silent on model_aliases, got %+v", got.Config)
 	}
 }
 
@@ -575,5 +675,38 @@ func TestImportHarnessConfigsFromWorkspace_Reimport(t *testing.T) {
 	}
 	if result.TotalCount != 1 {
 		t.Fatalf("expected 1 harness-config after re-import, got %d", result.TotalCount)
+	}
+}
+
+func TestBootstrapHarnessConfigsFromDir_SkipsBackupAndTempFiles(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	dir := makeHarnessConfigDir(t, "claude", map[string]string{
+		"config.yaml":                       "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+		"dialect.yaml":                      "dialect: claude\n",
+		"config.yaml.bak.20261003T193320Z":  "old\n",
+		"provision.py.bak.20261003T193320Z": "old\n",
+		".provision.py.tmp-123456":          "partial\n",
+	})
+
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+
+	hc, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range hc.Files {
+		got = append(got, f.Path)
+	}
+	want := []string{"config.yaml", "dialect.yaml"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("manifest files = %v, want %v", got, want)
+	}
+	if len(stor.objects) != 2 {
+		t.Errorf("expected 2 objects in storage, got %d", len(stor.objects))
 	}
 }

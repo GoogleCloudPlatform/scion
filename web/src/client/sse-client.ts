@@ -30,6 +30,7 @@
  */
 
 import { dispatchTeardown } from '../utils/auth.js';
+import { setPreferredTimeZone } from '../utils/time.js';
 
 /** Data shape for SSE 'update' events from the server */
 export interface SSEUpdateEvent {
@@ -228,6 +229,19 @@ export class SSEClient extends EventTarget {
         const returnTo = encodeURIComponent(window.location.pathname);
         window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
         return;
+      }
+      // Review R1-6: this reconnect check already fetches /auth/me live, so
+      // it is also the place a preference changed in another tab or on
+      // another device reaches a long-lived tab — refresh the effective-zone
+      // store from the same response instead of leaving it stale until some
+      // unrelated render.
+      if (resp.ok) {
+        try {
+          const data = await resp.json();
+          setPreferredTimeZone(data.preferences?.timezone);
+        } catch {
+          // Malformed/non-JSON body — not this check's concern.
+        }
       }
     } catch {
       // Network error — fall through to normal reconnect.

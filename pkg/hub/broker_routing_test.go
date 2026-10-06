@@ -55,18 +55,18 @@ func (f *fakeHTTPClient) StartAgent(_ context.Context, _, _, _, _, _, _, _, _, _
 	f.lastStartExtras = extras
 	return nil, nil
 }
-func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, string) error {
+func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, string, string) error {
 	f.stopAgentCalled = true
 	return nil
 }
-func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ map[string]string, extras StartExtras) error {
+func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	f.lastRestartExtras = extras
+	return nil, nil
+}
+func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string, string) error {
 	return nil
 }
-func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string) error {
-	return nil
-}
-func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, bool, bool, bool, time.Time) error {
+func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, DeleteAgentOptions) error {
 	f.deleteAgentCalled = true
 	return nil
 }
@@ -164,11 +164,11 @@ func TestHybridBrokerClient_StatelessBrokerLifecycleUsesHTTP(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, httpClient.startAgentCalled)
 
-	err = c.StopAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1")
+	err = c.StopAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", "")
 	assert.NoError(t, err)
 	assert.True(t, httpClient.stopAgentCalled)
 
-	err = c.DeleteAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", false, false, false, time.Time{})
+	err = c.DeleteAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", DeleteAgentOptions{})
 	assert.NoError(t, err)
 	assert.True(t, httpClient.deleteAgentCalled)
 }

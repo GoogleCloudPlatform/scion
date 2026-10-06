@@ -179,8 +179,8 @@ func (d *wakeTrackingDispatcher) getMessageCalls() []wakeDispatchMsg {
 }
 
 // Implement remaining AgentDispatcher methods as no-ops.
-func (d *wakeTrackingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
+func (d *wakeTrackingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *wakeTrackingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
@@ -204,7 +204,7 @@ func (d *wakeTrackingDispatcher) DispatchAgentDelete(_ context.Context, _ *store
 func (d *wakeTrackingDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *wakeTrackingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *wakeTrackingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
 func (d *wakeTrackingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
@@ -213,8 +213,8 @@ func (d *wakeTrackingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.A
 func (d *wakeTrackingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *wakeTrackingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *wakeTrackingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +462,13 @@ func (i *wakeDMTestIdentity) OriginUserID() string {
 	}
 	return ""
 }
+
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (i *wakeDMTestIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
 func (i *wakeDMTestIdentity) TokenID() string { return "test-token-id" }
 
 func TestExecuteAgentDM_Wake_Suspended_Delivers(t *testing.T) {
@@ -481,7 +488,7 @@ func TestExecuteAgentDM_Wake_Suspended_Delivers(t *testing.T) {
 
 	result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 		SenderAgent:    sender,
-		SenderIdentity: &wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
+		SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
 		TargetAgent:    target,
 		Msg:            "hello after wake",
 		Type:           "instruction",
@@ -651,7 +658,7 @@ func TestExecuteAgentDM_Wake_ManagedRuntime_Unsupported(t *testing.T) {
 
 	result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 		SenderAgent:    sender,
-		SenderIdentity: &wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
+		SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
 		TargetAgent:    target,
 		Msg:            "wake managed",
 		Type:           "instruction",
@@ -883,11 +890,17 @@ func TestBrokerQuota_WakeReadinessTimeoutLiveCtxNoTransientRelease(t *testing.T)
 	u := newWakeQuotaFixture(t, "wq-livectx", 1)
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		_ = u.s.UpdateAgentStatus(context.Background(), u.target.ID, store.AgentStatusUpdate{Phase: "resumed"})
+		// "stopping" is rejected by waitForAgentReady's phase check (unlike
+		// the tolerated legacy "resumed" value, ptone/scion#1956) but is
+		// still broker-quota counted (isBrokerQuotaCountedPhase), so this
+		// still exercises the fast-fail path on a live caller context
+		// without changing the slot assertion below.
+		_ = u.s.UpdateAgentStatus(context.Background(), u.target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStopping)})
 	}()
 	dmErr := wakeWithReadinessBudget(t, u.srv, u.target, 10*time.Second)
 	require.NotNil(t, dmErr)
 	require.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus, dmErr.Message)
+	assert.Contains(t, dmErr.Message, "unexpected phase", "must fail fast via the phase check, not the 10s budget")
 	assert.EqualValues(t, 1, u.count(t), "slot held immediately after live-ctx wake failure")
 
 	disp := &quotaLifecycleDispatcher{}

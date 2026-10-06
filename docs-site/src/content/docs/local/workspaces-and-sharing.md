@@ -1,23 +1,23 @@
 ---
 title: Workspaces & Sharing Modes
-description: The three workspace sharing modes — Shared-plain, Worktree-per-agent, and Clone-per-agent — that decide how a project's agents share (or isolate) their working directory.
+description: The workspace sharing modes — Shared-plain, Worktree-per-agent, Clone-per-agent and Empty-per-agent — that decide how a project's agents share (or isolate) their working directory.
 ---
 
 Every Scion **agent** runs against a **workspace** — the working directory mounted into its container at `/workspace`, where it reads code, makes changes, and runs commands. When a project runs several agents at once, a key question follows: do they share one directory, or does each get its own?
 
-Scion answers this with a project-level setting called the **workspace sharing mode**. There is **one universal set of three modes**, intended for both local and Hub-managed projects. This page explains each mode and when to use it. The definitions follow the canonical [`GLOSSARY.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/GLOSSARY.md).
+Scion answers this with a project-level setting called the **workspace sharing mode**. There are three modes for git and shared workspaces, used by both local and Hub-managed projects, plus **Empty-per-agent** for Hub-managed projects without git. This page explains each mode and when to use it. The definitions follow the canonical [`GLOSSARY.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/GLOSSARY.md).
 
-:::note[Three modes, not two]
-Earlier documentation framed workspaces as "two strategies" (worktrees vs. a git-init clone). That framing is superseded. The current model is **three sharing modes** — **Shared-plain**, **Worktree-per-agent**, and **Clone-per-agent** — described below.
+:::note[Not "two strategies"]
+Earlier documentation framed workspaces as "two strategies" (worktrees vs. a git-init clone). That framing is superseded. The current model is the sharing modes described below: **Shared-plain**, **Worktree-per-agent**, **Clone-per-agent** and **Empty-per-agent**.
 :::
 
-## The three sharing modes
+## The sharing modes
 
 ### Shared-plain
 
 One workspace directory is mounted into **every agent, with no per-agent isolation**. All agents in the project see and modify the same files at the same time.
 
-This is the model used for **plain (non-git) projects**, where there is no git history to branch from. It suits data directories, document sets, and other non-source content that a group of agents collaborate on directly.
+This is the default for **plain (non-git) projects**, where there is no git history to branch from. It suits data directories, document sets, and other non-source content that a group of agents collaborate on directly.
 
 - **Isolation:** none — agents share one directory.
 - **Requires git:** no.
@@ -31,7 +31,7 @@ Every agent operates on the same repository history but has an independent worki
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** supported in **local mode** today; not yet available on Hub-managed projects.
+- **Availability:** supported in **local mode** and on **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker). On Kubernetes it requires NFS workspace storage.
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent
@@ -44,42 +44,85 @@ When a Hub manages a git-based project, agents are provisioned with an independe
 - **Requires git:** yes (and a `GITHUB_TOKEN`; host SSH credentials are not used).
 - **Best for:** Hub-managed git projects, and any case where agents need completely independent checkouts across machines.
 
+### Empty-per-agent
+
+Each agent in a **Hub-managed project without git** gets its **own private directory** that starts empty.
+
+The directory is not a git repository, and no other agent can see it. It lives under the agent's directory on the Runtime Broker (`<project>/agents/<agent>/workspace`). On Kubernetes with NFS workspace storage it lives on the NFS export instead, at `<subpath_root>/<project-id>/agents/<agent>/workspace`.
+
+- It is kept across suspend/resume where storage allows, including on Kubernetes with NFS workspace storage. On Kubernetes without NFS workspace storage (including `gke-shared-volume`), the contents are lost when the agent stops (see [Kubernetes](/scion/hosted/ha/kubernetes/)).
+- It is deleted together with the agent. Use [shared directories](#2-the-shared-directories-invariant) for files that agents should share or that must outlive an agent.
+- Files from your local project directory are **not** uploaded into it. When you start an agent from a local non-git directory, the CLI shows the Hub's warning that the files were ignored.
+- `scion reincarnate` on the agent's current Runtime Broker is supported on Docker, Podman, and Apple `container`: the new generation reuses this directory in place, with its content, and reincarnation never creates or recreates it. On every other runtime, such as Kubernetes or `cloudrun-sandbox`, it is refused (see [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate)).
+- Reincarnate (moving the agent to another Runtime Broker) is not supported for this mode.
+- Runtime Brokers whose default runtime is Cloud Run or Substrate do not support this mode (the `cloudrun-sandbox` runtime does). Once such a broker has sent its first heartbeat it reports that it lacks the `emptyPerAgentWorkspace` capability, and creating such an agent there fails with `412 Precondition Failed`. Before that first heartbeat, the Hub may still dispatch the agent, and the Cloud Run or Substrate runtime then rejects it with an error. The capability reflects only the broker's default runtime: an agent that uses a Cloud Run or Substrate runtime profile on a broker whose default runtime is neither gets no `412`, and fails with an error when it starts.
+
+Summary:
+
+- **Isolation:** full — each agent has its own directory.
+- **Requires git:** no (Hub-managed projects without a git remote only).
+- **Best for:** independent tasks that each produce their own files, such as research or scratch work, where agents must not see each other's output.
+
 ## Choosing a sharing mode
 
-| | Shared-plain | Worktree-per-agent | Clone-per-agent |
-|---|---|---|---|
-| **Isolation** | None (shared dir) | Per-agent working tree | Full per-agent clone |
-| **Git required** | No | Yes | Yes |
-| **Shares history** | n/a | Yes (one clone) | No (independent clones) |
-| **Typical setting** | Plain projects | Local git projects | Hub-managed git projects |
+| | Shared-plain | Worktree-per-agent | Clone-per-agent | Empty-per-agent |
+|---|---|---|---|---|
+| **Isolation** | None (shared dir) | Per-agent working tree | Full per-agent clone | Full per-agent directory |
+| **Git required** | No | Yes | Yes | No (no git only) |
+| **Starts with** | The shared files | A checkout of the branch | A checkout of the branch | An empty directory |
+| **Shares history** | n/a | Yes (one clone) | No (independent clones) | n/a |
+| **Typical setting** | Plain projects | Local git projects | Hub-managed git projects | Hub-managed projects without git |
 
 A useful rule of thumb:
 
 - **No git, collaborate on shared files** → **Shared-plain**.
+- **No git, each agent works on its own** → **Empty-per-agent**.
 - **Local git repo, parallel agents, one shared history** → **Worktree-per-agent**.
 - **Hub-managed git project, or agents that need fully independent checkouts** → **Clone-per-agent**.
 
-Note that the same git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, because Worktree-per-agent is not yet supported for Hub-managed projects.
+Note that the same git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`.
+
+## Setting the mode on a Hub project
+
+For Hub projects, the mode is set **when the project is created** and cannot be changed afterwards. The API and CLI use three values; what `per-agent` means depends on whether the project has a git remote:
+
+| Workspace mode value | Project with git remote | Project without git remote |
+|---|---|---|
+| *(not set)* | Clone-based provisioning (the existing default) | Shared-plain |
+| `shared` | Shared-plain | Shared-plain |
+| `per-agent` | Clone-per-agent | Empty-per-agent |
+| `worktree-per-agent` | Worktree-per-agent | Rejected (`400`): requires a git remote |
+
+```bash
+# Hub-managed project where each agent starts in an empty private directory
+scion hub projects create --name scratch --workspace-mode per-agent
+
+# Git project with one worktree per agent
+scion hub projects create https://github.com/acme/widgets.git --workspace-mode worktree-per-agent
+```
+
+The Hub rejects unknown values with `400`. The mode is stored in the server-owned `scion.dev/workspace-mode` label: you cannot set or change that label directly, on create or later with an update. Creating or starting an Empty-per-agent agent on a Runtime Broker that does not support this mode fails with `412 Precondition Failed` (`unsupported_capability`). The error names the Runtime Broker and says which ones work: Docker, Podman, Apple, and Kubernetes Runtime Brokers. Upgrade an older Runtime Broker, or pick one of those; upgrading does not help a Cloud Run or Substrate Runtime Broker. See [`scion hub projects create`](/scion/reference/cli/#scion-hub) and the [Projects API](/scion/reference/api/#projects-apiv1projects).
 
 ## Runtime environment variables
 
-Agents can discover their workspace provisioning at startup through two environment variables emitted by the broker into every container.
+Agents can discover their workspace provisioning at startup through two environment variables. The Runtime Broker sets them when it starts an agent (Hub-dispatched agents, including Workstation mode). Agents started in local mode without a Runtime Broker do not get them.
 
 ### `SCION_WORKSPACE_MODE`
 
-The canonical workspace sharing mode for the project. Always present; defaults to `shared-plain` when no mode label is set.
+The canonical workspace sharing mode for the project. The Runtime Broker sets it on every agent it starts. When the project has no workspace mode, its value is `shared-plain`. That includes Hub git projects created without `--workspace-mode`, even though each of their agents gets its own clone; for those, `SCION_WORKSPACE_GIT=true` tells the agent the workspace is a git checkout.
 
 | Value | Description |
 |---|---|
 | `shared-plain` | One workspace directory shared by all agents (no per-agent isolation). |
 | `clone-per-agent` | Each agent has its own full git clone. |
 | `worktree-per-agent` | Each agent has its own git worktree over a shared checkout. |
+| `empty-per-agent` | Each agent has its own private directory that started empty (no git). |
 
-**Example:** An agent in a Hub-managed git project reads `SCION_WORKSPACE_MODE=clone-per-agent` to know it has a private checkout and can safely commit without affecting other agents.
+**Example:** An agent in a Hub-managed git project created with workspace mode `per-agent` reads `SCION_WORKSPACE_MODE=clone-per-agent` to know it has a private checkout and can safely commit without affecting other agents.
 
 ### `SCION_WORKSPACE_GIT`
 
-Present (value `"true"`) when the workspace is a git repository. Absent when the workspace is not git-backed.
+Present (value `"true"`) when the workspace is a git repository. Absent when the workspace is not git-backed, which is always the case for `empty-per-agent`.
 
 `SCION_WORKSPACE_GIT` is separate from `SCION_WORKSPACE_MODE` because `shared-plain` can be either git-backed or a plain directory — the mode alone cannot disambiguate. Absent means false; there is no `"false"` string value.
 
@@ -104,13 +147,16 @@ Depending on the effective workspace sharing mode, agents must adhere to the fol
   * **Shared Git Repo**: The underlying git repository history, local branches, and refs are shared. Treat local branch names as a shared namespace to avoid collisions.
 * **When `SCION_WORKSPACE_MODE` is `clone-per-agent`**:
   * **Full Isolation**: Your clone is entirely your own. Nothing you do to the working tree, local refs, or local branches will affect any other agent's workspace.
+* **When `SCION_WORKSPACE_MODE` is `empty-per-agent`**:
+  * **Private, Initially Empty**: `/workspace` is your own directory. It started empty and is not a git repository.
+  * **Lifetime**: It is kept across suspend/resume where storage allows, and deleted with the agent. Put anything that other agents need, or that must outlive you, in a shared directory.
 
 ### 2. The Shared-Directories Invariant
 
 Scion allows mounting persistent **Shared Directories** (such as a shared cache or scratchpad) into agent containers.
 
 :::danger[Shared Directories are Always Shared]
-**Shared directories are shared across all agents in every workspace mode — including the highly isolated `worktree-per-agent` and `clone-per-agent` modes.** They bypass working tree isolation. Treat shared directory paths as concurrent-access, zero-isolation storage.
+**Shared directories are shared across all agents in every workspace mode — including the highly isolated `worktree-per-agent`, `clone-per-agent` and `empty-per-agent` modes.** They bypass working tree isolation. Treat shared directory paths as concurrent-access, zero-isolation storage.
 :::
 
 ---

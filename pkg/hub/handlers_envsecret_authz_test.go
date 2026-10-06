@@ -248,6 +248,11 @@ func TestEnvVar_ProjectScope_OwnerAccess(t *testing.T) {
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
 	}
+	// Project authority comes from the project-owner binding, not OwnerID
+	// (ptone/scion#2586).
+	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID); err != nil {
+		t.Fatalf("failed to create owner binding: %v", err)
+	}
 
 	// Owner should be able to list project env vars
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil)
@@ -607,6 +612,11 @@ func TestSecret_ProjectScope_OwnerAccess(t *testing.T) {
 	}
 	if err := s.CreateProject(ctx, project); err != nil {
 		t.Fatalf("failed to create project: %v", err)
+	}
+	// Project authority comes from the project-owner binding, not OwnerID
+	// (ptone/scion#2586).
+	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID); err != nil {
+		t.Fatalf("failed to create owner binding: %v", err)
 	}
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/projects/"+project.ID+"/secrets", nil)

@@ -184,6 +184,10 @@ func TestGCPSA_Get_ProjectScoped_CrossProjectNotFound(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, other))
+	// The caller owns the other project too, through the project-owner
+	// binding (Project.OwnerID grants nothing, ptone/scion#2586), so the
+	// guard is exercised against a caller with rights on both projects.
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, other.ID, owner.ID))
 
 	sa := &store.GCPServiceAccount{
 		ID:        tid("sa-other-project"),
@@ -229,6 +233,15 @@ func seedListMix(t *testing.T, ctx context.Context, s store.Store, owner *store.
 		OwnerID: owner.ID, CreatedBy: owner.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, other))
+	// The caller owns the other project too, through the project-owner
+	// binding (Project.OwnerID grants nothing, ptone/scion#2586).
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: owner.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: other.ID, CreatedBy: owner.ID,
+	})
+	require.NoError(t, err)
 
 	mk := func(idName, email, scope, scopeID, createdBy string) {
 		require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{

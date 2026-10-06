@@ -33,7 +33,7 @@ type systemIdentityResponse struct {
 
 func (s *Server) handleSystemIdentity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPut)
 		return
 	}
 

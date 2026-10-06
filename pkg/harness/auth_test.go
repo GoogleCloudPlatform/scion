@@ -1144,3 +1144,19 @@ func TestGatherAuthWithEnv_BrokerModeConfigDriven(t *testing.T) {
 		t.Errorf("COPILOT_GITHUB_TOKEN = %q, want overlay value %q", auth.EnvVars["COPILOT_GITHUB_TOKEN"], "broker-token")
 	}
 }
+
+// TestOverlaySettings_IgnoresNoAuthSentinel: agents created in no-auth mode
+// persist auth_selectedType "none" (ptone/scion#2561). It is not an auth
+// type and must not be overlaid as the selected type.
+func TestOverlaySettings_IgnoresNoAuthSentinel(t *testing.T) {
+	tmpDir := t.TempDir()
+	scionAgentPath := filepath.Join(tmpDir, "scion-agent.json")
+	_ = os.WriteFile(scionAgentPath, []byte(`{"auth_selectedType": "none"}`), 0644)
+
+	auth := api.AuthConfig{}
+	OverlaySettings(&auth, New("gemini"), tmpDir)
+
+	if auth.SelectedType != "" {
+		t.Errorf("SelectedType = %q, want empty (\"none\" is not an auth type)", auth.SelectedType)
+	}
+}

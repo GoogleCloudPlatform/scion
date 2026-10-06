@@ -58,7 +58,7 @@ const (
 // project authorization (check 7) and the record-race rule (check 9).
 func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

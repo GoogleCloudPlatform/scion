@@ -81,7 +81,7 @@ _Avoid_: agent tunnel, port proxy, hub reverse tunnel, web access
 _See also_: sciontool
 
 **Runtime**:
-The container technology that executes an agent's container: Docker, Podman, Apple Container, or Kubernetes.
+The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, Cloud Run Instances, or Substrate (Agent Substrate actors on GKE).
 _Avoid_: backend, engine, executor, environment
 _See also_: Runtime Broker, Profile
 
@@ -90,7 +90,7 @@ The working directory mounted into a single agent's container at `/workspace`. H
 _Avoid_: project, repo, mount
 
 **Workspace sharing mode**:
-How a project's workspace is provisioned across its agents — one universal set of modes intended for both local and Hub-managed projects: **Shared-plain**, **Worktree-per-agent**, and **Clone-per-agent**.
+How a project's workspace is provisioned across its agents. There are four canonical modes: **Shared-plain**, **Worktree-per-agent** and **Clone-per-agent**, plus **Empty-per-agent** for Hub-managed projects without git. The mode is chosen when the project is created (API/CLI value `shared`, `per-agent` or `worktree-per-agent`; `per-agent` resolves to Clone-per-agent for git projects and to Empty-per-agent otherwise) and cannot be changed afterwards. "Workspace mode" is used only as the name of the API field (`workspaceMode`) and CLI flag (`--workspace-mode`) whose values select the sharing mode; in prose, say "workspace sharing mode".
 _Avoid_: workspace mode, isolation mode
 
 **Shared-plain**:
@@ -98,12 +98,17 @@ A workspace sharing mode where one workspace directory is mounted into every age
 _Avoid_: shared mount, plain workspace
 
 **Worktree-per-agent**:
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode today; not yet on Hub-managed projects.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; on Kubernetes it requires NFS workspace storage.
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:
 A workspace sharing mode where each agent gets its own full git clone of the repository.
 _Avoid_: clone mode, per-agent clone
+
+**Empty-per-agent**:
+A workspace sharing mode for Hub-managed projects without git, where each agent gets its own private directory that starts empty and is not a git repository. It is kept across suspend/resume where storage allows and deleted with the agent. Selected with workspace mode `per-agent` on a project without a git remote.
+_Avoid_: plain-per-agent, private workspace
+_See also_: Shared directory
 
 **Shared directory**:
 A persistent, mutable volume shared by the agents within one project.
@@ -243,7 +248,7 @@ _Avoid_: team, org, role
 _See also_: Message Group (different concept — message recipients, not users)
 
 **User Access Token (UAT)**:
-A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes).
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**.
 _Avoid_: personal access token (PAT), API key, secret token
 _See also_: Hub
 
@@ -254,6 +259,10 @@ _Avoid_: rate limits, usage caps
 
 **LimitDefinition**:
 A seeded system or custom limit configuration that defines a quota boundary within the Quota System.
+
+**Runtime Broker Settings**:
+A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/{id}/settings`). Its first key, `maxAgents`, overrides the `max_agents_per_broker` limit for that Runtime Broker. The effective cap resolves from the Runtime Broker's setting, then an entitlement binding, then the hub default.
+_Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
 
 ## Messaging
 

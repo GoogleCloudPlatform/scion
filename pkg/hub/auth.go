@@ -138,6 +138,75 @@ func brokerAuthActive(svc *BrokerAuthService) bool {
 	return svc != nil && svc.config.Enabled
 }
 
+const constraintAuditPathPrefix = "/api/v1/admin/access-constraints/"
+
+// isConstraintAuditAuthFailureRoute matches only the canonical live-constraint
+// audit subresource. Query parameters are intentionally irrelevant, while an
+// encoded path is rejected even when net/url decodes it to the same URL.Path.
+func isConstraintAuditAuthFailureRoute(r *http.Request) bool {
+	if r.Method != http.MethodGet || r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, constraintAuditPathPrefix) || !strings.HasSuffix(r.URL.Path, "/audit") {
+		return false
+	}
+
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, constraintAuditPathPrefix), "/audit")
+	return id != "" && id != "." && id != ".." && !strings.Contains(id, "/")
+}
+
+// constraintAuditAuthFailureWriter preserves authentication's fail-closed
+// control flow while making credential rejection responses indistinguishable
+// from the endpoint's absent-resource response. It never forwards the rejected
+// body. Infrastructure failures remain unchanged.
+type constraintAuditAuthFailureWriter struct {
+	http.ResponseWriter
+	normalized bool
+}
+
+func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
+	if w.normalized {
+		return
+	}
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+		w.normalized = true
+		NotFound(w.ResponseWriter, "Access Constraint")
+		return
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *constraintAuditAuthFailureWriter) Write(body []byte) (int, error) {
+	if w.normalized {
+		return len(body), nil
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
+	if isConstraintAuditAuthFailureRoute(r) {
+		return &constraintAuditAuthFailureWriter{ResponseWriter: w}
+	}
+	return w
+}
+
+// serveAfterAuth unwraps the response normalizer before entering downstream
+// middleware or a handler, so only authentication failures are rewritten.
+func serveAfterAuth(w http.ResponseWriter, next http.Handler, r *http.Request) {
+	if normalizer, ok := w.(*constraintAuditAuthFailureWriter); ok {
+		next.ServeHTTP(normalizer.ResponseWriter, r)
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+func handlerAfterAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveAfterAuth(w, next, r)
+	})
+}
+
 // UnifiedAuthMiddleware creates middleware that handles all authentication types.
 // It processes tokens in priority order:
 // 1. Agent tokens (X-Scion-Agent-Token or agent JWT in Bearer)
@@ -158,6 +227,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w = normalizeConstraintAuditAuthFailures(w, r)
 			ctx := r.Context()
 
 			if cfg.Debug {
@@ -182,7 +252,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.Debug {
 					log.Debug("Skipping auth for unauthenticated endpoint", "path", r.URL.Path)
 				}
-				next.ServeHTTP(w, r)
+				serveAfterAuth(w, next, r)
 				return
 			}
 
@@ -237,7 +307,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Agent authenticated", "subject", claims.Subject)
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					} else if r.Header.Get("X-Scion-Agent-Token") != "" {
 						// Agent token header was present but invalid
@@ -279,7 +349,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"type", identity.Type(),
 						"id", identity.ID())
 				}
-				next.ServeHTTP(w, r.WithContext(ctx))
+				serveAfterAuth(w, next, r.WithContext(ctx))
 				return
 			}
 
@@ -306,6 +376,9 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					log.Debug("Broker auth headers present, deferring to BrokerAuthMiddleware", "brokerID", brokerID)
 				}
 				ctx = contextWithAuthType(ctx, AuthTypeBroker)
+				// Broker HMAC and on-behalf-of authentication run downstream.
+				// Keep the exact-route normalizer attached until that delegated
+				// authentication succeeds inside the broker middleware.
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -351,7 +424,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated", "provider", cfg.ProxyAuthenticator.Name(), "email", proxyUser.Email)
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					}
 					// (nil, nil) = no assertion present, fall through
@@ -367,7 +440,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated (legacy)", "email", user.Email())
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					}
 				}
@@ -381,7 +454,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// anonymous request exactly as it would for a public route.
 				if isSignedSkillFileRequest(r) {
 					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
-					next.ServeHTTP(w, r.WithContext(ctx))
+					serveAfterAuth(w, next, r.WithContext(ctx))
 					return
 				}
 
@@ -443,7 +516,8 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
 				ctx = contextWithAuthType(ctx, AuthTypeUAT)
 				if cfg.Debug {
-					log.Debug("UAT authenticated", "email", scopedUser.Email(), "project_id", scopedUser.ScopedProjectID())
+					boundary := scopedUser.Boundary()
+					log.Debug("UAT authenticated", "email", scopedUser.Email(), "boundary_kind", string(boundary.Kind), "project_id", boundary.ProjectID)
 				}
 
 			case tokenTypeUser:
@@ -457,7 +531,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Dev user authenticated (fallback)")
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
@@ -468,7 +542,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if err != nil {
 					// Not a Hub-issued user JWT. It may be a Google ID token
 					// forwarded verbatim by a trusted external caller.
-					if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+					if serveExternalBearer(w, r, handlerAfterAuth(next), ctx, token, cfg, log) {
 						return
 					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
@@ -511,9 +585,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"access denied: user account is suspended", nil)
 						return
 					}
-					// ErrNotFound (deleted user) falls through — downstream
-					// handlers will fail closed when the identity has no
-					// matching store record.
+					// A token whose subject has no user record (for example
+					// the account was deleted after the token was issued) is
+					// rejected here, like a suspended user. The token is
+					// self-contained, so authentication must not succeed for
+					// an identity that has no store record.
+					if errors.Is(uErr, store.ErrNotFound) {
+						log.Warn("JWT auth rejected: no user record for this token",
+							"user_id", claims.UserID)
+						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+							"invalid access token: no user record for this token", nil)
+						return
+					}
 				}
 				user := NewAuthenticatedUser(
 					claims.UserID,
@@ -543,7 +626,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// this path at all (e.g. no Google trust configured), in
 				// which case that rejection runs as usual. The ID-token hook
 				// site is reached only from the tokenTypeUser case above.
-				if serveExternalBearer(w, r, next, ctx, token, cfg, log) {
+				if serveExternalBearer(w, r, handlerAfterAuth(next), ctx, token, cfg, log) {
 					return
 				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
@@ -551,7 +634,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }

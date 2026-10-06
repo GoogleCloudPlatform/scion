@@ -87,6 +87,15 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		"endpoint", "broker.inbound.routed",
 	)
 
+	// Raw keystroke delivery through messages has been removed. A body
+	// whose message (or top level) still carries the retired raw field is
+	// rejected before decoding, so no sender identity is synthesized and no
+	// routing, conversation, mention or dispatch work runs. Trusted
+	// Hub-to-runtime-broker keys dispatch is a separate operation.
+	if s.rejectRetiredRawMessageBody(w, r, rawIngressBrokerInboundRouted, agentKeysAuditTarget{}, "", rawTombstonePreAuthMaxBodyBytes, "message") {
+		return
+	}
+
 	// Parse request body.
 	var req routedInboundRequest
 	if err := readJSON(r, &req); err != nil {
@@ -322,6 +331,10 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// routedRefusalError is the constant per-recipient error for a refused
+// routed delivery, whatever the internal reason.
+const routedRefusalError = "message delivery refused"
+
 // dispatchRoutedParams holds parameters for a single recipient dispatch.
 type dispatchRoutedParams struct {
 	agent            *store.Agent
@@ -358,7 +371,9 @@ func (s *Server) dispatchRoutedRecipient(
 		s.messageLog.Warn("routed inbound authorization denied",
 			"agent_slug", agent.Slug, "reason", reason)
 		result.Status = "unauthorized"
-		result.Error = reason
+		// The response carries one constant public refusal; the internal
+		// reason stays in the log above.
+		result.Error = routedRefusalError
 		return result
 	}
 
@@ -384,7 +399,7 @@ func (s *Server) dispatchRoutedRecipient(
 	if params.isPrimary {
 		msg = &messages.StructuredMessage{
 			Version:     messages.Version,
-			Timestamp:   params.now.Format(time.RFC3339),
+			Timestamp:   params.now.UTC().Format(time.RFC3339),
 			Sender:      params.req.Message.Sender,
 			SenderID:    params.req.Message.SenderID,
 			Recipient:   "agent:" + agent.Slug,
@@ -404,7 +419,7 @@ func (s *Server) dispatchRoutedRecipient(
 		)
 		// Override NewMention's time.Now() with the shared arrival timestamp
 		// so all recipients see one consistent arrival time (design step 6).
-		msg.Timestamp = params.now.Format(time.RFC3339)
+		msg.Timestamp = params.now.UTC().Format(time.RFC3339)
 		msg.SenderID = params.req.Message.SenderID
 		msg.RecipientID = agent.ID
 		msg.Urgent = params.req.Message.Urgent
@@ -431,6 +446,10 @@ func (s *Server) dispatchRoutedRecipient(
 			msg.Metadata[k] = v
 		}
 	}
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys — the switch above doesn't exclude them, so a
+	// plugin could otherwise spoof body_offloaded/body_chars/body_sha256.
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 
 	// --- Validate through envelope choke point ---
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {

@@ -341,6 +341,16 @@ export class ScionFileEditor extends LitElement {
       --sl-input-font-size-small: 0.875rem;
     }
 
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      .new-file-input sl-input {
+        --sl-input-font-size-small: max(16px, 0.875rem);
+      }
+    }
+
     .new-file-error {
       font-size: 0.75rem;
       color: var(--sl-color-danger-600, #dc2626);

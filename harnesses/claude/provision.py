@@ -39,10 +39,13 @@ This script's job:
      format in .claude.json.
   5. Publish the resolved model (the SCION_MODEL env var, already resolved
      by the Go side) as ANTHROPIC_MODEL in the env overlay.
-  6. Write outputs/resolved-auth.json describing the chosen method.
-  7. Write outputs/env.json with env vars to project into the harness process
-     (e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_MODEL, or
-     Vertex AI vars).
+  6. Map SCION_THINKING_LEVEL through config.yaml's `thinking:` block and
+     publish the result as CLAUDE_CODE_EFFORT_LEVEL in the env overlay. With
+     no level set nothing is published, so Claude keeps its per-model default.
+  7. Write outputs/resolved-auth.json describing the chosen method.
+  8. Write outputs/env.json with env vars to project into the harness process
+     (e.g. ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_MODEL,
+     CLAUDE_CODE_EFFORT_LEVEL, or Vertex AI vars).
 
 The script is intentionally stdlib-only so it works on any container image
 that ships python3 (declared in config.yaml's required_image_tools).
@@ -63,9 +66,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import scion_harness
 
-assert scion_harness.INTERFACE_VERSION >= 2, (
+assert scion_harness.INTERFACE_VERSION >= 3, (  # 3: resolve_thinking
     "scion_harness.py INTERFACE_VERSION is too old "
-    f"(got {scion_harness.INTERFACE_VERSION}, need >= 2); "
+    f"(got {scion_harness.INTERFACE_VERSION}, need >= 3); "
     "this is a staging bug — the host should have staged a compatible library"
 )
 
@@ -88,15 +91,16 @@ DEFAULT_MODEL = "opus"
 OPUS_5_5_MIN_CLAUDE_VERSION = (2, 1, 280)
 OPUS_5_5_FALLBACK_MODEL = "claude-opus-4-8"
 
-# Shorthand spellings for model size aliases. Must stay in lockstep with
-# config.NormalizeModelAlias (pkg/config/templates.go): the Go side resolves
-# --model against the same shorthand set, so accepting a spelling here that
-# Go does not recognize would make ANTHROPIC_MODEL disagree with --model.
-MODEL_ALIAS_SHORTHAND = {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"}
-
-# The canonical set of recognized model size aliases. Mirrors
-# config.KnownModelAliases (pkg/config/templates.go).
-KNOWN_MODEL_ALIASES = frozenset({"small", "medium", "large", "extra-large"})
+# Claude Code reads the session effort from this env var. It outranks the
+# --effort flag, /effort, and the effortLevel / modelSettings keys in
+# settings.json (https://code.claude.com/docs/en/model-config, "Precedence
+# Order"). Accepted values per https://code.claude.com/docs/en/env-vars; a
+# level the active model does not support falls back to the highest supported
+# level below it. The bundled table tops out at xhigh rather than max to avoid
+# max's excessive-token runs; max stays reachable via a preset env var or a
+# custom thinking table.
+EFFORT_ENV = "CLAUDE_CODE_EFFORT_LEVEL"
+EFFORT_ENV_VALUES = frozenset({"low", "medium", "high", "xhigh", "max", "auto"})
 
 AUTH = scion_harness.AuthSpec(
     harness="claude",
@@ -268,45 +272,6 @@ def _update_project_paths(
     return version
 
 
-def _normalize_model_alias(raw: str) -> str:
-    """Python mirror of config.NormalizeModelAlias (pkg/config/templates.go).
-
-    Lower-cases the input and expands the s/m/l/xl shorthand to their full
-    alias names. Must stay in lockstep with the Go implementation — see the
-    MODEL_ALIAS_SHORTHAND comment above.
-    """
-    lowered = raw.strip().lower()
-    return MODEL_ALIAS_SHORTHAND.get(lowered, lowered)
-
-
-def _resolve_model_alias(ctx: scion_harness.ProvisionContext, raw: str) -> str:
-    """Python mirror of config.ResolveModelAlias (pkg/config/templates.go).
-
-    Resolves a model size alias (e.g. "large") to a concrete model name using
-    this harness's own model_aliases from config.yaml (ctx.harness_config).
-    Unknown aliases and already-concrete model names pass through unchanged,
-    normalized to lowercase/canonical shorthand.
-
-    This is the defense-in-depth layer for resume/restart paths where the Go
-    side (hub or broker) had no alias table to resolve SCION_MODEL against
-    and passed a bare alias straight through — this harness always has its
-    own config.yaml on disk, so it can resolve the alias itself rather than
-    exporting it verbatim, which Claude Code rejects outright.
-    """
-    if not raw:
-        return raw
-    normalized = _normalize_model_alias(raw)
-    if normalized not in KNOWN_MODEL_ALIASES:
-        return normalized
-    # ctx.harness_config is normally always a dict (the property defaults to
-    # {} when the manifest carries none), but guard defensively in case that
-    # ever changes or a future caller passes a stripped-down context.
-    aliases = ctx.harness_config.get("model_aliases") if ctx.harness_config else None
-    if not isinstance(aliases, dict):
-        aliases = {}
-    return aliases.get(normalized, normalized)
-
-
 def _apply_model(
     ctx: scion_harness.ProvisionContext,
     env: dict[str, str],
@@ -322,8 +287,8 @@ def _apply_model(
 
     Defense in depth: if SCION_MODEL still carries a bare size alias (e.g.
     "large") — which has happened on resume/restart paths where the Go side
-    had no alias table to resolve against — _resolve_model_alias maps it
-    using this harness's own config.yaml rather than exporting the alias
+    had no alias table to resolve against — scion_harness.resolve_model maps
+    it using this harness's own config.yaml rather than exporting the alias
     verbatim.
 
     When *claude_version* is older than 2.1.280 and the resolved model is
@@ -334,7 +299,7 @@ def _apply_model(
     Returns the concrete model name that was applied.
     """
     raw = os.environ.get("SCION_MODEL", "").strip()
-    model = _resolve_model_alias(ctx, raw) if raw else DEFAULT_MODEL
+    model = scion_harness.resolve_model(ctx) or DEFAULT_MODEL
 
     parsed_version = _parse_semver(claude_version)
     if parsed_version is not None and parsed_version < OPUS_5_5_MIN_CLAUDE_VERSION:
@@ -360,6 +325,55 @@ def _apply_model(
 
     env["ANTHROPIC_MODEL"] = model
     return model
+
+
+def _apply_effort(ctx: scion_harness.ProvisionContext, env: dict[str, str]) -> str | None:
+    """Resolve the thinking level and publish it as CLAUDE_CODE_EFFORT_LEVEL.
+
+    The level -> effort table lives in config.yaml's `thinking:` block, which
+    has no `default` on purpose: with no level set, nothing is published and
+    Claude Code keeps its own per-model default effort.
+
+    A CLAUDE_CODE_EFFORT_LEVEL already in the container environment (from a
+    template or harness-config `env:` entry) is an explicit pin. The
+    supervisor's MergeEnvOverlay drops any overlay key that is present in the
+    runtime env, even with an empty value, so presence (not truthiness) is
+    what counts: the pin is left alone and nothing is written.
+
+    Returns the effort value written to *env*, or None when none was written.
+    """
+    requested = bool(os.environ.get(scion_harness.THINKING_LEVEL_ENV, "").strip())
+    harness_cfg = ctx.harness_config if isinstance(ctx.harness_config, dict) else {}
+    if requested and not harness_cfg.get("thinking"):
+        # Only when a level was asked for: a customized config.yaml without
+        # the block silently drops the request.
+        ctx.warn(
+            f"config.yaml has no thinking block; {EFFORT_ENV} not set "
+            "(copy the block from the bundled config.yaml or run "
+            "`scion harness-config upgrade claude`)"
+        )
+
+    if EFFORT_ENV in os.environ:
+        preset = os.environ[EFFORT_ENV]
+        if requested:
+            ctx.warn(
+                f"{EFFORT_ENV}={preset!r} is set in the container environment and "
+                "takes precedence over the requested thinking level. This usually "
+                "comes from an `env:` entry in your template or harness-config; "
+                "remove it there to let the agent's thinking level apply."
+            )
+        return None
+
+    effort = scion_harness.resolve_thinking(ctx)
+    if not effort:
+        return None
+    if effort not in EFFORT_ENV_VALUES:
+        ctx.warn(
+            f"thinking map value {effort!r} is not a documented {EFFORT_ENV} "
+            f"value ({', '.join(sorted(EFFORT_ENV_VALUES))}); Claude Code may ignore it"
+        )
+    env[EFFORT_ENV] = effort
+    return effort
 
 
 def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.ResolvedAuth) -> dict[str, str]:
@@ -444,11 +458,12 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         # unset here means no usage is published at all (D10).
         env["SCION_USAGE_SOURCE"] = "native"
     model = _apply_model(ctx, env, claude_version=claude_version)
+    effort = _apply_effort(ctx, env)
     extra: dict[str, Any] | None = None
     if auth.method == "vertex-ai":
         extra = {"vertex_ai": True}
     ctx.write_outputs(auth, env=env, extra=extra)
-    ctx.info(f"method={auth.method} model={model}")
+    ctx.info(f"method={auth.method} model={model} effort={effort or '<claude default>'}")
 
     mcp_mapping = dict(CLAUDE_MCP_MAPPING)
     mcp_mapping["project_config_path"] = f"projects.{ctx.workspace}.mcpServers"

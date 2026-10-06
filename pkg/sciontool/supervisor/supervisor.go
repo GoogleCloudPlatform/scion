@@ -12,17 +12,39 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
 // ErrNoCommand is returned when no command is specified for the supervisor to run.
 var ErrNoCommand = errors.New("no command specified")
+
+// ErrAlreadyStarted is returned by Run when the Supervisor has already
+// started a child process, or another Run call on it is in progress. A
+// Supervisor runs at most one child; a Run that failed before starting the
+// child may be retried.
+var ErrAlreadyStarted = errors.New("supervisor already started")
+
+// ErrPrivilegeDropRequired is returned by Run when Config.RequirePrivilegeDrop
+// is set but Config.UID/GID do not both pass the same UID>0 && GID>0
+// predicate the credential drop itself uses (see Run's Credential-setting
+// block): a "no drop" decision reaching this point in enforced mode must be
+// a hard, fail-closed error rather than a silent run-as-root — the same
+// fail-closed principle commands.requirePrivilegeDropOrFail already applies
+// one layer up, at RunInit's own call site. In practice, the equivalent
+// clamp on requirePrivilegeDropOrFail already makes this unreachable in
+// enforced mode (it refuses to reach Supervisor.Run at all unless UID>0 &&
+// GID>0), so this is belt-and-suspenders against a future caller that
+// constructs a Config directly, bypassing RunInit's own check.
+var ErrPrivilegeDropRequired = errors.New("privilege drop required but UID/GID were not both set; refusing to run the child as root")
 
 // Config holds configuration for the Supervisor.
 type Config struct {
@@ -58,6 +80,26 @@ type Config struct {
 	// change mergeEnvOverlay's precedence rule — it is correct for its own
 	// case. See the override reasoning in the P2d PR description.
 	SecretOverrides map[string]string
+	// WorkingDir sets the child process's working directory (exec.Cmd.Dir).
+	// Empty (the zero value) leaves cmd.Dir unset, so the child inherits
+	// this process's own current working directory — exactly today's
+	// behaviour for every caller that does not set this field. Supervisor
+	// never inspects the environment or filesystem to decide this itself;
+	// the caller resolves it (see commands.InitRunOptions.WorkingDir, set
+	// only by substrate-serve's InitRunner wiring).
+	WorkingDir string
+	// RequirePrivilegeDrop is the caller's own
+	// commands.InitRunOptions.RequirePrivilegeDrop (true only for
+	// substrate). It gates chownRecursive's hard-link guard: a regular file
+	// with more than one hard link is skipped rather than chowned only when
+	// this is true, since the guard is new, security-motivated behaviour —
+	// a legitimately hard-linked file under a non-substrate container's home
+	// directory would otherwise be silently left unowned by the target user
+	// and break writes, with no privilege boundary at stake to justify that
+	// on runtimes other than substrate. The fd-relative, no-follow walk
+	// itself (see chownRecursive's doc comment) is unconditional — it is
+	// behaviour-preserving and has no legitimate dependent case.
+	RequirePrivilegeDrop bool
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -73,12 +115,27 @@ type Supervisor struct {
 	config Config
 	cmd    *exec.Cmd
 
+	// execToken is the reaper registration handle for cmd's PID, set once in
+	// Run (before waitForChild is spawned, so no synchronization is needed
+	// to read it there) and consumed exactly once in waitForChild's
+	// UnregisterManagedPID call. See procreap.Token for why the token
+	// (rather than just the PID) must be passed back.
+	execToken *procreap.Token
+
 	// mu protects the process state
-	mu        sync.Mutex
+	mu sync.Mutex
+	// running is set, under mu, by the Run call that owns this Supervisor,
+	// and cleared again if that Run fails before starting the child, so
+	// concurrent or repeated Run calls cannot both start a child.
+	running   bool
 	started   bool
 	exited    bool
 	exitCode  int
 	exitError error
+
+	// startedCh is closed once the child process has been started (and
+	// Signal can reach it). It is never closed if Run fails before Start.
+	startedCh chan struct{}
 
 	// done is closed when the child process exits
 	done chan struct{}
@@ -87,14 +144,36 @@ type Supervisor struct {
 // New creates a new Supervisor with the given configuration.
 func New(config Config) *Supervisor {
 	return &Supervisor{
-		config: config,
-		done:   make(chan struct{}),
+		config:    config,
+		startedCh: make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
 // Run starts and supervises the given command until it exits or the context
-// is cancelled. It returns the exit code of the child process.
+// is cancelled. It returns the exit code of the child process. A Supervisor
+// runs at most one child: once a Run has started its child, or while another
+// Run is in progress, Run returns ErrAlreadyStarted. A Run that fails before
+// starting the child may be retried.
 func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
+	s.mu.Lock()
+	// running stays set after a successful start, so it alone covers both cases.
+	if s.running {
+		s.mu.Unlock()
+		return 1, ErrAlreadyStarted
+	}
+	s.running = true
+	s.mu.Unlock()
+	// Release the claim if this Run returns before the child started, so a
+	// failed start can be retried. Once started is set it stays claimed.
+	defer func() {
+		s.mu.Lock()
+		if !s.started {
+			s.running = false
+		}
+		s.mu.Unlock()
+	}()
+
 	if len(args) == 0 {
 		return 1, ErrNoCommand
 	}
@@ -105,6 +184,14 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
 
+	// Leave cmd.Dir unset (today's behaviour: the child inherits this
+	// process's own cwd) unless the caller explicitly resolved one. See
+	// Config.WorkingDir's doc comment.
+	if s.config.WorkingDir != "" {
+		s.cmd.Dir = s.config.WorkingDir
+		log.Debug("Child working directory: %s", s.config.WorkingDir)
+	}
+
 	// Start in a new process group so we can signal the whole group
 	s.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -113,11 +200,11 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// Drop privileges if UID/GID specified (skip in rootless mode where
 	// UID 0 inside the container is already the unprivileged host user).
 	if s.config.UID > 0 && s.config.GID > 0 {
-		s.cmd.SysProcAttr.Credential = &syscall.Credential{
-			Uid: uint32(s.config.UID),
-			Gid: uint32(s.config.GID),
-		}
+		// Keeps the runtime-granted nfs shared-dir groups (ptone/scion#3155).
+		s.cmd.SysProcAttr.Credential = suppgroups.Credential(uint32(s.config.UID), uint32(s.config.GID))
 		log.Debug("Child will run as UID=%d, GID=%d", s.config.UID, s.config.GID)
+	} else if s.config.RequirePrivilegeDrop {
+		return 1, ErrPrivilegeDropRequired
 	}
 
 	// Set the child's user environment when dropping privileges OR in
@@ -141,7 +228,7 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// UID/GID from the credential drop) gets permission denied on its own home.
 	if s.config.UID > 0 && s.config.GID > 0 && s.config.Username != "" {
 		home := "/home/" + s.config.Username
-		err := chownRecursive(home, s.config.UID, s.config.GID)
+		err := chownRecursive(home, s.config.UID, s.config.GID, s.config.RequirePrivilegeDrop)
 		if err != nil {
 			log.Error("Failed to chown home directory %s: %v", home, err)
 		} else {
@@ -201,7 +288,30 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 		s.cmd.Env = removeEnvVar(s.cmd.Env, hooks.NativeTelemetryPolicyKey)
 	}
 
-	if err := s.cmd.Start(); err != nil {
+	// Tell the child its logical cwd explicitly. exec.Cmd setting Dir does
+	// not itself add PWD to the environment, so without this the child
+	// would inherit this process's own PWD. sh, tmux and Node's
+	// process.cwd() all prefer PWD over getcwd() when the two agree, so
+	// this keeps a symlinked WorkingDir's logical path visible instead of
+	// its resolved physical one — the same PWD behaviour Docker/Podman/
+	// Kubernetes already get from the shell that applies the image's
+	// WORKDIR. Scoped to WorkingDir != "" so every other caller, which
+	// never sets it, is unaffected.
+	if s.config.WorkingDir != "" {
+		s.cmd.Env = setEnvVar(s.cmd.Env, "PWD", s.config.WorkingDir)
+	}
+
+	// Start and register the child's PID as a single gated step so
+	// sciontool init's SIGCHLD reaper cannot observe it as
+	// exited-and-unmanaged in the gap between Start() returning and
+	// registration (see pkg/sciontool/procreap for why).
+	if err := procreap.Gated(func() error {
+		if err := s.cmd.Start(); err != nil {
+			return err
+		}
+		s.execToken = procreap.RegisterManagedPID(s.cmd.Process.Pid)
+		return nil
+	}); err != nil {
 		return 1, fmt.Errorf("failed to start command: %w", err)
 	}
 	log.Debug("Started child process %d: %v", s.cmd.Process.Pid, args)
@@ -209,6 +319,7 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
+	close(s.startedCh)
 
 	// Wait for the child in a goroutine
 	go s.waitForChild()
@@ -241,6 +352,7 @@ func (s *Supervisor) Signal(sig os.Signal) error {
 // waitForChild waits for the child process to exit and records its exit status.
 func (s *Supervisor) waitForChild() {
 	err := s.cmd.Wait()
+	procreap.UnregisterManagedPID(s.cmd.Process.Pid, s.execToken)
 
 	s.mu.Lock()
 	s.exited = true
@@ -315,6 +427,16 @@ func (s *Supervisor) shutdown() (int, error) {
 		defer s.mu.Unlock()
 		return s.exitCode, s.exitError
 	}
+}
+
+// Started returns a channel that is closed once the child process has been
+// started, i.e. from the point at which Signal reaches it rather than being
+// a no-op. It is never closed if Run fails before starting the child, so
+// callers waiting on it should also select on Done or a deadline. It is
+// closed at most once: only the Run that starts the child closes it, and any
+// later Run returns ErrAlreadyStarted.
+func (s *Supervisor) Started() <-chan struct{} {
+	return s.startedCh
 }
 
 // Done returns a channel that is closed when the child process exits.
@@ -409,12 +531,59 @@ func indexByte(s string, c byte) int {
 	return -1
 }
 
-// chownRecursive changes ownership of a directory and all its contents.
-func chownRecursive(root string, uid, gid int) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+// chownRecursive changes ownership of a directory and all its contents to
+// uid:gid, unconditionally (every entry, not just root-owned ones — the
+// home directory this is called on belongs entirely to the workload user
+// both before and after the drop, so there is no "leave root-owned entries
+// alone" distinction to make here, unlike chownTreeRootOwned).
+//
+// fsutil.CheckRoot refuses root outright on its own path/name alone when it
+// is a known critical system path or looks like a filesystem root by
+// content; fsutil.CheckMountSource additionally refuses root when it is
+// itself a mount point whose bind source names a critical system directory
+// — see that function's doc comment for exactly what it does and does not
+// detect. Checking CheckRoot first means an already-invalid root is never
+// checked against the mount table at all.
+//
+// It walks via dirfd.ChownTreeNoFollow: every entry is resolved to a file
+// descriptor exactly once (openat(O_DIRECTORY|O_NOFOLLOW) for a directory,
+// openat(O_PATH|O_NOFOLLOW) otherwise), and every chown is
+// fchownat(fd, "", uid, gid, AT_EMPTY_PATH) issued against that same fd —
+// never a full-path os.Lchown, which re-resolves every intermediate path
+// component on every call and can be redirected by a symlink a scion-uid
+// process (a sidecar service, or a process a pre-start hook spawned) swaps
+// into one of them between this walk visiting that component and the
+// Lchown call for something beneath it. sup.Run calls this while such
+// processes may already be alive, so that window is real. This part is
+// unconditional on every runtime: it is behaviour-preserving (every entry
+// still ends up chowned exactly as before) and has no legitimate case that
+// depends on the old, re-resolving behaviour.
+//
+// requirePrivilegeDrop gates the walk's hard-link guard only — see
+// Config.RequirePrivilegeDrop's doc comment for why that one part of this
+// is new behaviour that must not change non-substrate runtimes.
+//
+// Per-entry chown failures and hard-link-guard skips are logged (entry name
+// only) rather than silently discarded.
+func chownRecursive(root string, uid, gid int, requirePrivilegeDrop bool) error {
+	if err := fsutil.CheckRoot(root); err != nil {
+		return err
+	}
+	if err := checkMountSource(root); err != nil {
+		return err
+	}
+	_, _, err := dirfd.ChownTreeNoFollow(root, uid, gid, func(uint32) bool { return true }, requirePrivilegeDrop, func(name string, cerr error) {
+		if errors.Is(cerr, dirfd.ErrHardlinkedRegularFile) {
+			log.Warn("chownRecursive: skipping %s: %v", name, cerr)
+			return
 		}
-		return os.Lchown(path, uid, gid)
+		log.Error("chownRecursive: failed to chown %s: %v", name, cerr)
 	})
+	return err
 }
+
+// checkMountSource is fsutil.CheckMountSource, held behind a package
+// variable so a test can stub it (to prove chownRecursive actually calls
+// it) without needing a real mount to exercise. The production value is
+// fixed; only tests reassign it, and always restore it afterward.
+var checkMountSource = fsutil.CheckMountSource

@@ -27,12 +27,12 @@ export interface TerminalScope {
 }
 
 export type TerminalConnectionState =
-  | 'loading'
-  | 'connecting'
-  | 'connected'
-  | 'disconnected'
-  | 'unavailable'
-  | 'closed';
+  // Restored (from the persisted terminal list), not yet connected. No
+  // socket or renderer has ever been allocated for
+  // this entry. Connects when it becomes frontmost (Session.setFrontmost)
+  // or on an explicit connect() call, exactly like a fresh open() — from
+  // that point on 'idle' never recurs for this session.
+  'idle' | 'loading' | 'connecting' | 'connected' | 'disconnected' | 'unavailable' | 'closed';
 
 /**
  * Classifies the cause of a disconnection or unavailability so the UI
@@ -236,14 +236,25 @@ export class TerminalSessionRegistry {
     this.metadata = new TerminalMetadata(this.hubUrl);
   }
 
-  /** Registers synchronously before any asynchronous work. Existing entries never rebind/reconnect. */
-  open(agentId: string, initialize: TerminalResourceInitializer): TerminalSession {
+  /**
+   * Registers synchronously before any asynchronous work. Existing entries
+   * never rebind/reconnect (options is ignored when returning an existing
+   * session). options.deferConnect creates the entry in the 'idle' state
+   * without calling connect() — no socket or renderer is allocated until the
+   * session becomes frontmost or connect() is called explicitly.
+   */
+  open(
+    agentId: string,
+    initialize: TerminalResourceInitializer,
+    options?: { deferConnect?: boolean }
+  ): TerminalSession {
     if (this.disposed) throw new Error('Terminal registry is disposed.');
     if (!uuid.test(agentId)) throw new Error('Terminal requires an agent UUID.');
     const id = agentId.toLowerCase();
     const existing = this.sessions.get(id);
     if (existing) return existing;
     const key = JSON.stringify([this.hubUrl, this.accountId, id]);
+    const deferConnect = options?.deferConnect ?? false;
     const session = new Session(
       key,
       id,
@@ -256,12 +267,13 @@ export class TerminalSessionRegistry {
           this.notify();
         }
       },
-      (agent) => this.metadata.seed(id, agent)
+      (agent) => this.metadata.seed(id, agent),
+      deferConnect
     );
     this.sessions.set(id, session);
     this.metadata.retain(id);
     this.notify();
-    void session.connect();
+    if (!deferConnect) void session.connect();
     return session;
   }
 
@@ -360,13 +372,14 @@ class Session implements TerminalSession {
     private readonly hubUrl: string,
     private readonly initialize: TerminalResourceInitializer,
     private readonly remove: () => void,
-    private readonly seedMetadata: (agent: Agent) => void
+    private readonly seedMetadata: (agent: Agent) => void,
+    deferConnect = false
   ) {
     this.snapshot = {
       key,
       agentId,
       generation: 0,
-      connection: 'loading',
+      connection: deferConnect ? 'idle' : 'loading',
       agent: null,
       error: null,
       disconnectReason: null,
@@ -501,6 +514,15 @@ class Session implements TerminalSession {
     this.frontmost = frontmost;
     if (frontmost) {
       this.clearBackgroundResetTimer();
+      // An idle (restored, never-connected) entry connects the first time it
+      // becomes frontmost — via selection, placing it in a visible slot, or
+      // the tab foregrounding while it is visible. maybeAutoAttempt() would
+      // no-op here regardless (everConnected is false for an idle session),
+      // so this is a distinct path, not a special case of it.
+      if (this.state.connection === 'idle') {
+        void this.connect();
+        return;
+      }
       this.maybeAutoAttempt();
     } else if (this.state.reconnectFailed) {
       this.armBackgroundResetTimer();

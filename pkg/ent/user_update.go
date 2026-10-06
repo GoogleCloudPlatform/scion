@@ -18,6 +18,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
 
@@ -283,6 +284,25 @@ func (_u *UserUpdate) AddExternalIdentities(v ...*ExternalIdentity) *UserUpdate 
 	return _u.AddExternalIdentityIDs(ids...)
 }
 
+// SetTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID.
+func (_u *UserUpdate) SetTerminalWorkspaceID(id uuid.UUID) *UserUpdate {
+	_u.mutation.SetTerminalWorkspaceID(id)
+	return _u
+}
+
+// SetNillableTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID if the given value is not nil.
+func (_u *UserUpdate) SetNillableTerminalWorkspaceID(id *uuid.UUID) *UserUpdate {
+	if id != nil {
+		_u = _u.SetTerminalWorkspaceID(*id)
+	}
+	return _u
+}
+
+// SetTerminalWorkspace sets the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpdate {
+	return _u.SetTerminalWorkspaceID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_u *UserUpdate) Mutation() *UserMutation {
 	return _u.mutation
@@ -370,6 +390,12 @@ func (_u *UserUpdate) RemoveExternalIdentities(v ...*ExternalIdentity) *UserUpda
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveExternalIdentityIDs(ids...)
+}
+
+// ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdate) ClearTerminalWorkspace() *UserUpdate {
+	_u.mutation.ClearTerminalWorkspace()
+	return _u
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -665,6 +691,35 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.TerminalWorkspaceCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TerminalWorkspaceIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{user.Label}
@@ -934,6 +989,25 @@ func (_u *UserUpdateOne) AddExternalIdentities(v ...*ExternalIdentity) *UserUpda
 	return _u.AddExternalIdentityIDs(ids...)
 }
 
+// SetTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID.
+func (_u *UserUpdateOne) SetTerminalWorkspaceID(id uuid.UUID) *UserUpdateOne {
+	_u.mutation.SetTerminalWorkspaceID(id)
+	return _u
+}
+
+// SetNillableTerminalWorkspaceID sets the "terminal_workspace" edge to the UserTerminalWorkspace entity by ID if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableTerminalWorkspaceID(id *uuid.UUID) *UserUpdateOne {
+	if id != nil {
+		_u = _u.SetTerminalWorkspaceID(*id)
+	}
+	return _u
+}
+
+// SetTerminalWorkspace sets the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdateOne) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpdateOne {
+	return _u.SetTerminalWorkspaceID(v.ID)
+}
+
 // Mutation returns the UserMutation object of the builder.
 func (_u *UserUpdateOne) Mutation() *UserMutation {
 	return _u.mutation
@@ -1021,6 +1095,12 @@ func (_u *UserUpdateOne) RemoveExternalIdentities(v ...*ExternalIdentity) *UserU
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveExternalIdentityIDs(ids...)
+}
+
+// ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
+func (_u *UserUpdateOne) ClearTerminalWorkspace() *UserUpdateOne {
+	_u.mutation.ClearTerminalWorkspace()
+	return _u
 }
 
 // Where appends a list predicates to the UserUpdate builder.
@@ -1339,6 +1419,35 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(externalidentity.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.TerminalWorkspaceCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.TerminalWorkspaceIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.TerminalWorkspaceTable,
+			Columns: []string{user.TerminalWorkspaceColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

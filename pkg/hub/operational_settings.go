@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"sync"
 	"time"
@@ -50,6 +51,18 @@ type sectionState struct {
 	// distinguish "validated document" from "unreadable document" without
 	// re-parsing and without swallowing errors silently.
 	Malformed bool
+
+	// ExperimentsOverrides is the parsed overrides for the "experiments"
+	// section only; nil for every other section, and nil for "experiments"
+	// itself when absent, malformed, or a valid document with no overrides
+	// field. Populated at the same ingest points as Malformed (Refresh,
+	// Update), so it is always part of the same sectionState value and is
+	// replaced or removed together with it — a delete, a replace, or an
+	// eviction can never leave it stale. ExperimentsSnapshot is on a hot
+	// path (GET /api/v1/experiments runs on every page load, and
+	// requireExperiment runs per request), so parsing once here rather than
+	// per read matters.
+	ExperimentsOverrides map[string]bool
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -58,14 +71,16 @@ type sectionState struct {
 // external source.
 //
 // Field population depends on the source:
-//   - Postgres mode (OperationalSettings.Snapshot): ALL fields are populated via
+//   - DB-backed, any driver (OperationalSettings.Snapshot): ALL fields are populated via
 //     the koanf merge (DB > bootstrap merge). This includes
 //     SoftDeleteRetention, SoftDeleteRetainFiles, PublicURL, ImageRegistry,
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
-//   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
-//     reloadSettings() consumed are populated, plus DefaultHarnessConfig which
-//     is read from the top-level default_harness_config key in settings.yaml.
+//   - No OperationalSettings (BuildLayer1SnapshotFromFile): only the fields that the old
+//     reloadSettings() consumed are populated, plus DefaultHarnessConfig and
+//     DefaultTimezone, which are read from the top-level
+//     default_harness_config and default_timezone keys in settings.yaml,
+//     and HubName (see the HubName field: every constructor must set it).
 //     Fields like SoftDeleteRetention, DefaultTemplate, etc. remain at zero
 //     values because the old reloadSettings never applied them on reload — they
 //     are consumed only at startup. This maintains file-mode parity (the
@@ -79,9 +94,15 @@ type Layer1Snapshot struct {
 
 	// Lifecycle
 	AutoSuspendStalled    bool
-	StalledThreshold      string // postgres-mode only (see type comment)
-	SoftDeleteRetention   string // postgres-mode only (see type comment)
-	SoftDeleteRetainFiles bool   // postgres-mode only (see type comment)
+	StalledThreshold      string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
+
+	// Start claim timing (durations as strings; empty keeps the startup value)
+	StartClaimLeaseTTL         string
+	StartMaxDuration           string
+	StartUnconfirmedHold       string
+	StartCreateUnconfirmedHold string
 
 	// Maintenance
 	AdminMode          bool
@@ -89,8 +110,9 @@ type Layer1Snapshot struct {
 	// HasMaintenanceRow indicates whether a maintenance section row exists in
 	// the DB. When false (row absent), ApplyMaintenanceFromSnapshot leaves
 	// MaintenanceState as initialized at startup rather than resetting to
-	// defaults. This field is only meaningful in postgres mode — file-mode
-	// snapshots should never apply maintenance state.
+	// defaults. This field is only meaningful for DB-backed snapshots (any
+	// driver) — snapshots built from the file should never apply maintenance
+	// state.
 	HasMaintenanceRow bool
 
 	// Telemetry
@@ -99,6 +121,12 @@ type Layer1Snapshot struct {
 
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
+
+	// Quotas
+	EnforceBrokerQuotas *bool
+
+	// Agent secrets
+	AgentSecretsUserScopeOnly *bool
 
 	// Project defaults
 	DefaultScratchpad *bool
@@ -115,12 +143,16 @@ type Layer1Snapshot struct {
 	DefaultRuntimeBroker string
 	DefaultTimezone      string
 	// DefaultGCPIdentityMode/DefaultGCPIdentityServiceAccountID are the
-	// hub-wide GCP identity default, postgres-mode only (see type comment).
+	// hub-wide GCP identity default, DB-backed snapshots only (see type
+	// comment).
 	DefaultGCPIdentityMode             string
 	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
-	PublicURL     string
+	PublicURL string
+	// HubName is the configured hub_name. "" does NOT mean "leave alone":
+	// ApplySnapshot resets the running name (and the GCP secret label) to
+	// this replica's startup name. Every snapshot constructor must set it.
 	HubName       string
 	ImageRegistry string
 
@@ -175,7 +207,8 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
-	// Event publisher for cross-replica propagation (nil in SQLite/file mode).
+	// Event publisher for cross-replica propagation: LISTEN/NOTIFY on
+	// postgres, in-process channel on SQLite; nil until SetEventPublisher.
 	events EventPublisher
 
 	// server is set by StartPropagation — used for self-apply in Update
@@ -260,13 +293,15 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 				)
 			}
 		}
+		experimentsOverrides, malformed := experimentsOverridesFor(row.Section, row.Value, malformed)
 		o.cache[row.Section] = sectionState{
-			Value:     row.Value,
-			Revision:  row.Revision,
-			UpdatedAt: row.UpdatedAt,
-			UpdatedBy: row.UpdatedBy,
-			Origin:    row.Origin,
-			Malformed: malformed,
+			Value:                row.Value,
+			Revision:             row.Revision,
+			UpdatedAt:            row.UpdatedAt,
+			UpdatedBy:            row.UpdatedBy,
+			Origin:               row.Origin,
+			Malformed:            malformed,
+			ExperimentsOverrides: experimentsOverrides,
 		}
 	}
 
@@ -279,6 +314,33 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 	}
 
 	return changed, nil
+}
+
+// experimentsOverridesFor returns the parsed "experiments" section overrides
+// and the (possibly updated) malformed flag, for storage in sectionState
+// alongside the generic ingest check that produced malformed. It is a no-op
+// for any section other than "experiments": callers pass malformed straight
+// through unchanged and get a nil map back.
+//
+// Folding this into sectionState (rather than a second, separately-tracked
+// field on OperationalSettings) means every write, delete, or replace of the
+// cache entry carries the parsed overrides automatically — there is no
+// second place that can go out of step with the cache.
+func experimentsOverridesFor(section string, raw json.RawMessage, malformed bool) (map[string]bool, bool) {
+	if section != "experiments" || malformed {
+		return nil, malformed
+	}
+	doc, docMalformed := opsettings.ParseExperimentsDoc(raw)
+	if docMalformed {
+		// The caller's ingest check (Refresh/Update's sec.New() unmarshal)
+		// already applies the same predicate (the "experiments" section's
+		// New() unmarshals into the same ExperimentsSettings shape
+		// ParseExperimentsDoc uses), so this cannot happen in practice. Fail
+		// closed rather than trust an inconsistent parse, and let it show up
+		// in Malformed too.
+		return nil, true
+	}
+	return doc.Overrides, malformed
 }
 
 // Snapshot returns an immutable merged Layer-1 view.
@@ -329,6 +391,17 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+
+	// hub_name is the one endpoints key that keeps its bootstrap value when
+	// a DB row omits it: a managed endpoints row carries hub_name only after
+	// an admin sets it, and clearing it returns to the bootstrap name. The
+	// snapshot holds the configured value only; "" means unset, and
+	// ApplySnapshot then uses the name this replica resolved at startup
+	// (startupHubNameOrDefault). A replica's hostname must not appear
+	// here: GET returns this value and clients echo it back to any replica.
+	if snap.HubName == "" && o.bootstrapKoanf != nil {
+		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
+	}
 
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
 	// directly from DB docs or bootstrap koanf rather than going through the
@@ -523,20 +596,23 @@ func (o *OperationalSettings) Update(
 			)
 		}
 	}
+	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
 	o.cache[section] = sectionState{
-		Value:     result.Value,
-		Revision:  result.Revision,
-		UpdatedAt: result.UpdatedAt,
-		UpdatedBy: result.UpdatedBy,
-		Origin:    result.Origin,
-		Malformed: malformed,
+		Value:                result.Value,
+		Revision:             result.Revision,
+		UpdatedAt:            result.UpdatedAt,
+		UpdatedBy:            result.UpdatedBy,
+		Origin:               result.Origin,
+		Malformed:            malformed,
+		ExperimentsOverrides: experimentsOverrides,
 	}
 	o.mu.Unlock()
 
 	// Publish admin.settings.updated event to propagate the change to other
-	// replicas via PostgresEventPublisher (design §3.6). The event publisher
-	// is nil in file/SQLite mode — no-op there.
+	// replicas via PostgresEventPublisher (design §3.6). On SQLite the
+	// publisher is an in-process ChannelEventPublisher (single replica); it
+	// is nil only before StartPropagation is wired, e.g. in tests.
 	if o.events != nil {
 		o.events.PublishRaw(settingsUpdatedSubject, SettingsUpdatedEvent{
 			Section:  section,
@@ -597,7 +673,8 @@ func (o *OperationalSettings) EnvOverriddenKeys() []string {
 
 // SetEventPublisher wires the event publisher for cross-replica propagation.
 // Must be called before StartPropagation. Nil is safe (disables publishing
-// in Update). In file/SQLite mode this is never called.
+// in Update). Called on every DB driver: postgres wires the LISTEN/NOTIFY
+// publisher, SQLite an in-process ChannelEventPublisher.
 func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 	o.events = ep
 }
@@ -606,8 +683,9 @@ func (o *OperationalSettings) SetEventPublisher(ep EventPublisher) {
 // §3.6). It subscribes to admin.settings.updated events, starts a 60s jittered
 // poll backstop, and wires the reconnect callback for unconditional refresh.
 //
-// Must be called after SetEventPublisher. Postgres mode only; in file/SQLite
-// mode this is never called (the writing handler applies synchronously).
+// Must be called after SetEventPublisher. Runs on every DB driver; on SQLite
+// (single replica, in-process publisher) the writing node's synchronous
+// self-apply is what matters and the poll backstop is a harmless re-read.
 //
 // The ctx should be the server's lifetime context; cancellation stops the
 // propagation goroutines.
@@ -691,7 +769,8 @@ func (o *OperationalSettings) runSubscriptionLoop(ctx context.Context, ch <-chan
 
 // runPollBackstop runs a ticker at the configured PollInterval (default 60s,
 // with ±10s jitter) that calls Refresh and applies any changes. This is the
-// backstop for missed NOTIFY events (design §3.6). Postgres mode only.
+// backstop for missed NOTIFY events (design §3.6). It also runs on SQLite,
+// where it is a cheap re-read of the local DB.
 func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Server) {
 	interval := o.PollInterval
 	if interval == 0 {
@@ -764,6 +843,10 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
 	snap.SoftDeleteRetainFiles = k.Bool("server.hub.soft_delete_retain_files")
+	snap.StartClaimLeaseTTL = k.String("server.hub.start_claim_lease_ttl")
+	snap.StartMaxDuration = k.String("server.hub.start_max_duration")
+	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
+	snap.StartCreateUnconfirmedHold = k.String("server.hub.start_create_unconfirmed_hold")
 
 	// Telemetry — extract via the section struct for full fidelity.
 	if k.Exists("telemetry.enabled") {
@@ -775,6 +858,18 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists("auto_expose_ports.enabled") {
 		v := k.Bool("auto_expose_ports.enabled")
 		snap.AutoExposePortsEnabled = &v
+	}
+
+	// Quotas
+	if k.Exists("quotas.enforce_broker_quotas") {
+		v := k.Bool("quotas.enforce_broker_quotas")
+		snap.EnforceBrokerQuotas = &v
+	}
+
+	// Agent secrets
+	if k.Exists("agent_secrets.user_scope_only") {
+		v := k.Bool("agent_secrets.user_scope_only")
+		snap.AgentSecretsUserScopeOnly = &v
 	}
 
 	// Project defaults
@@ -882,20 +977,24 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 }
 
 // BuildLayer1SnapshotFromFile constructs a Layer1Snapshot from the current
-// GlobalConfig, i.e. from settings.yaml + env. This is used in file/SQLite
-// mode where there is no DB tier for operational settings.
+// GlobalConfig, i.e. from settings.yaml + env. This is used only by a hub
+// with no OperationalSettings (no DB tier for operational settings).
 //
 // NOTE: Only fields that the old reloadSettings() consumed are populated here.
 // Fields like SoftDeleteRetention, DefaultTemplate, DefaultMaxTurns, PublicURL,
 // ImageRegistry, DefaultResources, and NotificationChannels remain at zero
 // values — the old reloadSettings never applied those on config reload (they
-// are consumed at startup, not on reload). In postgres mode, the full koanf-based
-// Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
+// are consumed at startup, not on reload). With OperationalSettings (any DB
+// driver), the full koanf-based Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
 //
-// Exception: DefaultHarnessConfig, DefaultGCPIdentityMode and
+// Exception: DefaultHarnessConfig, DefaultTimezone, DefaultGCPIdentityMode and
 // DefaultGCPIdentityServiceAccountID are populated from GlobalConfig so that
 // hubAgentDefaults() reflects them in file mode, including immediately after a
 // file-mode admin PUT (reloadSettings).
+//
+// HubName is populated too: "" in a snapshot makes ApplySnapshot reset the
+// running name to the startup name, so leaving it out would rename a
+// configured hub on every file-mode reload.
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
@@ -906,11 +1005,26 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		TelemetryEnabled:   gc.TelemetryEnabled,
 		AdminMode:          gc.AdminMode,
 		MaintenanceMessage: gc.MaintenanceMessage,
+		// The configured hub_name ("" when unset); ApplySnapshot resolves
+		// "" to the startup default, as at startup.
+		HubName: gc.Hub.HubName,
 	}
 
 	if gc.TelemetryConfig != nil {
 		snap.TelemetryConfig = gc.TelemetryConfig
 	}
+
+	// Start claim timing: applied on reload in file mode too.
+	durStr := func(d time.Duration) string {
+		if d > 0 {
+			return d.String()
+		}
+		return ""
+	}
+	snap.StartClaimLeaseTTL = durStr(gc.Hub.StartClaimLeaseTTL)
+	snap.StartMaxDuration = durStr(gc.Hub.StartMaxDuration)
+	snap.StartUnconfirmedHold = durStr(gc.Hub.StartUnconfirmedHold)
+	snap.StartCreateUnconfirmedHold = durStr(gc.Hub.StartCreateUnconfirmedHold)
 
 	// GitHub App (non-secret)
 	snap.GitHubAppID = gc.GitHubApp.AppID
@@ -922,8 +1036,18 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
 
+	// Quotas — read from settings.yaml top-level quotas section, so a
+	// file-mode admin save takes effect without a restart (unlike
+	// AutoExposePortsEnabled, which is intentionally not populated here).
+	snap.EnforceBrokerQuotas = gc.EnforceBrokerQuotas
+
+	// Agent secrets — read from settings.yaml top-level agent_secrets
+	// section, so a file-mode admin save takes effect without a restart.
+	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
+	snap.DefaultTimezone = gc.DefaultTimezone
 	snap.DefaultGCPIdentityMode = gc.DefaultGCPIdentityMode
 	snap.DefaultGCPIdentityServiceAccountID = gc.DefaultGCPIdentityServiceAccountID
 
@@ -933,6 +1057,24 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	}
 
 	return snap
+}
+
+// boolPtrEqual reports whether two *bool values are equal, treating nil as a
+// distinct value from both true and false (unlike dereferencing, which would
+// panic on nil, or treating nil as false, which would conflate "unset" with
+// "explicitly false").
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// startupHubNameOrDefault returns the hub name resolved at startup, or the
+// startup default (config.ResolveHubNameOrDefault) for a Server not built
+// by New.
+func (s *Server) startupHubNameOrDefault() string {
+	return config.ResolveHubNameOrDefault(s.startupHubName)
 }
 
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
@@ -978,6 +1120,31 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		}
 	}
 
+	// Quotas. Unlike the other *bool settings above, nil here is a real,
+	// meaningful value — the fail-safe default (enforced) — not "unset,
+	// leave the current value alone". So this assigns unconditionally: a
+	// snapshot with EnforceBrokerQuotas==nil (switch cleared, section
+	// deleted, or a PUT of {}) must flip the live hub back to enforced, not
+	// silently keep an old in-memory `false` in place while GET/the UI both
+	// report "enforced" (findings F3).
+	oldEnforceBrokerQuotas := s.config.EnforceBrokerQuotas
+	s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
+	if !boolPtrEqual(oldEnforceBrokerQuotas, snap.EnforceBrokerQuotas) {
+		applied = append(applied, "enforce_broker_quotas")
+	}
+
+	// Agent secrets. Like quotas above, nil is a real, meaningful value —
+	// the permissive default (agents may write project scope) — not
+	// "unset, leave the current value alone". So this assigns
+	// unconditionally: a snapshot with AgentSecretsUserScopeOnly==nil
+	// (switch cleared, section deleted, or a PUT of {}) must flip live
+	// enforcement off immediately.
+	oldAgentSecretsUserScopeOnly := s.config.AgentSecretsUserScopeOnly
+	s.config.AgentSecretsUserScopeOnly = snap.AgentSecretsUserScopeOnly
+	if !boolPtrEqual(oldAgentSecretsUserScopeOnly, snap.AgentSecretsUserScopeOnly) {
+		applied = append(applied, "agent_secrets_user_scope_only")
+	}
+
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match
 	// the normalization the user store applies (D11-fix).
 	if len(snap.AdminEmails) > 0 {
@@ -1008,6 +1175,16 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		} else {
 			slog.Warn("invalid stalled_threshold duration, keeping current value", "value", snap.StalledThreshold, "error", err)
 		}
+	}
+
+	// Start claim timing. The base is the startup value, so removing a
+	// setting reverts to it.
+	sc, scWarns := parseStartClaimSettings(s.config.StartClaim, snap.StartClaimLeaseTTL, snap.StartMaxDuration, snap.StartUnconfirmedHold, snap.StartCreateUnconfirmedHold)
+	for _, w := range scWarns {
+		slog.Warn("start claim setting: " + w)
+	}
+	if s.setStartClaimSettings(sc) {
+		applied = append(applied, "start_claim")
 	}
 
 	// User access mode
@@ -1054,9 +1231,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "github_app")
 	}
 
-	// Hub name
-	if snap.HubName != "" {
-		s.config.HubName = snap.HubName
+	// Hub name: the configured value, or when unset the name this replica
+	// resolved at startup, so a cleared hub_name does not leave a stale
+	// managed name in use and a name set only through --config survives.
+	// Reported as applied only when it changes. (Other Layer-1 keys set
+	// only in a --config file are still overridden; tracked in ptone/scion#3070.)
+	hubName := snap.HubName
+	if hubName == "" {
+		hubName = s.startupHubNameOrDefault()
+	}
+	if s.config.HubName != hubName {
+		s.config.HubName = hubName
 		applied = append(applied, "hub_name")
 	}
 
@@ -1074,10 +1259,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	//
 	// Written unconditionally from the snapshot rather than only-if-non-empty,
 	// so that clearing a value in the DB clears it here too. In file mode,
-	// BuildLayer1SnapshotFromFile populates DefaultHarnessConfig and the two
-	// GCP identity defaults; other agent-defaults fields remain at zero values
-	// in file mode, so this assignment is a no-op for those fields and
-	// file-mode dispatch is unchanged.
+	// BuildLayer1SnapshotFromFile populates DefaultHarnessConfig,
+	// DefaultTimezone and the two GCP identity defaults; other agent-defaults
+	// fields remain at zero values in file mode, so this assignment is a
+	// no-op for those fields and file-mode dispatch is unchanged.
 	newDefaults := opsettings.AgentDefaultsSettings{
 		DefaultTemplate:                    snap.DefaultTemplate,
 		DefaultHarnessConfig:               snap.DefaultHarnessConfig,
@@ -1114,10 +1299,8 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
-	if snap.HubName != "" {
-		if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
-			gcpBackend.SetHubName(snap.HubName)
-		}
+	if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
+		gcpBackend.SetHubName(hubName)
 	}
 
 	// Runtimes, profiles, and harness configs: update the global settings
@@ -1147,10 +1330,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	// NOTE: Maintenance state is deliberately NOT applied here.
-	// Maintenance is runtime/API-owned state. In file mode, reloadSettings
-	// must never touch MaintenanceState (restoring pre-refactor behavior).
-	// In postgres mode, the caller uses ApplyMaintenanceFromSnapshot
-	// separately, which respects env > DB precedence (§3.4/§3.8).
+	// Maintenance is runtime/API-owned state. On a hub without
+	// OperationalSettings, reloadSettings must never touch MaintenanceState
+	// (restoring pre-refactor behavior). With OperationalSettings (any DB
+	// driver), the caller uses ApplyMaintenanceFromSnapshot separately.
 
 	// Federation (outside mutex — atomic.Pointer swap is lock-free,
 	// and NewFederationAuthenticator may do network I/O)
@@ -1219,27 +1402,46 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 }
 
-// ApplyMaintenanceFromSnapshot applies maintenance state from a postgres-mode
-// snapshot, respecting the env > DB precedence rule (design §3.4/§3.8).
+// ApplyMaintenanceFromSnapshot applies maintenance state from a DB-backed
+// (any driver) snapshot.
 //
-// This function must be called ONLY in postgres-mode paths — file-mode
-// reloadSettings must never touch MaintenanceState (it is runtime/API-owned).
+// This function must be called ONLY on DB-backed paths (any driver) — the
+// file-mode reloadSettings must never touch MaintenanceState (it is
+// runtime/API-owned).
 //
 // Behavior:
 //   - If snap.HasMaintenanceRow is false (no DB row): no-op — MaintenanceState
-//     keeps its current value (which honors the env var set at startup).
-//   - If snap.HasMaintenanceRow is true: apply DB values, UNLESS the
-//     SCION_SERVER_ADMIN_MODE env var is set (per-node break-glass override).
-//
-// ApplyMaintenanceFromSnapshot applies the maintenance settings from the
-// snapshot to the server's maintenance state. In HA mode, maintenance must
-// be cluster-consistent — per-node env force-win is removed.
+//     keeps its current value (which honors the startup admin mode).
+//   - If snap.HasMaintenanceRow is true on a hosted hub: apply the DB values.
+//     Maintenance must be cluster-consistent, so there is no per-node
+//     override.
+//   - If snap.HasMaintenanceRow is true on a workstation hub whose startup
+//     admin mode is on (SCION_SERVER_ADMIN_MODE=true or settings.yaml
+//     admin_mode: true): the hub stays in maintenance — the break-glass wins
+//     over the row for the life of the process (ptone/scion#1091 option C).
+//     The row's message is still used when it has one.
 func ApplyMaintenanceFromSnapshot(s *Server, snap Layer1Snapshot) {
 	if !snap.HasMaintenanceRow {
 		return
 	}
 
+	if s.maintenanceBreakGlass() {
+		_, msg := s.maintenance.State()
+		if snap.MaintenanceMessage != "" {
+			msg = snap.MaintenanceMessage
+		}
+		s.maintenance.Set(true, msg)
+		return
+	}
 	s.maintenance.Set(snap.AdminMode, snap.MaintenanceMessage)
+}
+
+// maintenanceBreakGlass reports whether a workstation hub was started in
+// admin mode (SCION_SERVER_ADMIN_MODE=true or settings.yaml admin_mode: true).
+// That startup state wins over a DB maintenance row; on hosted hubs the row
+// wins.
+func (s *Server) maintenanceBreakGlass() bool {
+	return s.workstation && s.config.AdminMode
 }
 
 // ProjectDefaultScratchpad returns whether the default scratchpad shared
@@ -1298,6 +1500,40 @@ func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 	return true // field omitted in doc → compiled default → ON
 }
 
+// OffloadThresholdRunes returns the rune-count threshold above which an
+// agent-recipient DM body is offloaded to a fetch stub at dispatch
+// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Returns 0
+// (disabled) when the section is absent, the document is malformed, the
+// field is omitted, or the stored value is negative — matching
+// messaging.OffloadPolicy's "<= 0 disables" contract.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) OffloadThresholdRunes() int {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return 0 // section absent → compiled default → disabled
+	}
+	if state.Malformed {
+		return 0 // unreadable → fail closed → disabled
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return 0 // parse error → fail closed → disabled
+	}
+
+	if ms.OffloadThresholdRunes == nil {
+		return 0 // field omitted → compiled default → disabled
+	}
+	if *ms.OffloadThresholdRunes < 0 {
+		return 0
+	}
+	return *ms.OffloadThresholdRunes
+}
+
 // SectionRevision returns the current revision of the named settings section.
 // Returns 0 if the section does not exist or operational settings are unavailable.
 func (o *OperationalSettings) SectionRevision(section string) int64 {
@@ -1338,6 +1574,31 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 		return *ms.CrossProjectMessagingEnabled
 	}
 	return false // field omitted → compiled default → OFF
+}
+
+// Artifacts returns the resolved artifact service settings (the
+// "artifacts" section). It returns opsettings.DefaultArtifactsConfig when
+// the section is absent, and fails closed (opsettings.MalformedArtifactsConfig:
+// service disabled, compiled-default limits) when the stored document is
+// unreadable or holds an invalid value.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["artifacts"]
+	if !ok {
+		return opsettings.DefaultArtifactsConfig() // section absent → compiled defaults
+	}
+	if state.Malformed {
+		return opsettings.MalformedArtifactsConfig() // unreadable → fail closed
+	}
+	cfg, err := opsettings.ParseArtifactsDoc(state.Value)
+	if err != nil {
+		return opsettings.MalformedArtifactsConfig() // invalid value → fail closed
+	}
+	return cfg
 }
 
 // CrossProjectSettingResult holds the authoritative cross-project messaging
@@ -1395,6 +1656,89 @@ func (o *OperationalSettings) ReadAuthoritativeCrossProjectEnabled(ctx context.C
 	}
 	// Field omitted → compiled default → OFF.
 	return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
+}
+
+// ExperimentsSnapshot is one consistent view of the cached "experiments"
+// section, taken under a single RLock, so revision, overrides, malformed
+// flag and metadata always belong to the same refresh.
+type ExperimentsSnapshot struct {
+	// Overrides is a copy of the stored admin overrides; empty when
+	// malformed or absent. May contain names this binary does not know
+	// (ptone/scion#2217).
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	UpdatedAt time.Time
+	UpdatedBy string
+	// Present is false when no row exists.
+	Present bool
+}
+
+// ExperimentsSnapshot returns one consistent view of the cached "experiments"
+// section. Read path: it never parses JSON. state.ExperimentsOverrides is
+// parsed once, when the cache entry is written (Refresh, Update); this only
+// clones that already-parsed map, so a caller mutating the returned map can
+// never affect another caller or a later snapshot. No logging here (Refresh
+// logs once per ingest).
+func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["experiments"]
+	if !ok {
+		return ExperimentsSnapshot{Overrides: map[string]bool{}}
+	}
+
+	snap := ExperimentsSnapshot{
+		Revision:  state.Revision,
+		Malformed: state.Malformed,
+		UpdatedAt: state.UpdatedAt,
+		UpdatedBy: state.UpdatedBy,
+		Present:   true,
+	}
+	snap.Overrides = maps.Clone(state.ExperimentsOverrides)
+	if snap.Overrides == nil {
+		snap.Overrides = map[string]bool{}
+	}
+	return snap
+}
+
+// ExperimentsReadResult holds the authoritative experiments overrides and
+// revision, read directly from the store (not the cache).
+type ExperimentsReadResult struct {
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	Err       error
+}
+
+// ReadAuthoritativeExperiments reads the "experiments" section straight from
+// the store, bypassing the replica-local cache. Write path only; the
+// precedent is ReadAuthoritativeCrossProjectEnabled.
+//
+//	row absent (store.ErrNotFound)             → {Overrides: {}, Revision: 0}
+//	row present, ParseExperimentsDoc ok        → {Overrides, Revision}
+//	row present, ParseExperimentsDoc malformed → {Overrides: {}, Revision, Malformed: true}
+//	store error                                → {Err}
+func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) ExperimentsReadResult {
+	setting, err := o.store.GetHubSetting(ctx, "experiments")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: 0}
+		}
+		slog.Warn("ReadAuthoritativeExperiments: store read failed", "error", err)
+		return ExperimentsReadResult{Err: fmt.Errorf("authoritative experiments read: %w", err)}
+	}
+
+	doc, malformed := opsettings.ParseExperimentsDoc(setting.Value)
+	if malformed {
+		return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: setting.Revision, Malformed: true}
+	}
+	overrides := doc.Overrides
+	if overrides == nil {
+		overrides = map[string]bool{}
+	}
+	return ExperimentsReadResult{Overrides: overrides, Revision: setting.Revision}
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.

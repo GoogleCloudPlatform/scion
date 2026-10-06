@@ -14,7 +14,26 @@
 
 package permissions
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
+)
+
+var (
+	_ credentialmeta.BoundaryKind = BoundaryKindProject
+	_ BoundaryKind                = credentialmeta.BoundaryProject
+)
+
+func TestBoundaryKindsAliasCanonicalContract(t *testing.T) {
+	t.Parallel()
+
+	serverKinds := []credentialmeta.BoundaryKind{BoundaryKindProject, BoundaryKindHub}
+	if want := credentialmeta.BoundaryKinds(); !reflect.DeepEqual(serverKinds, want) {
+		t.Fatalf("server boundary kinds = %v, canonical kinds = %v", serverKinds, want)
+	}
+}
 
 // expectedSelectorRegistry pins today's full derived selector set. A human
 // must update this table — an explicit review act — whenever a Registry
@@ -29,6 +48,12 @@ var expectedSelectorRegistry = map[string][]string{
 	"agent:message":              {"agent.message"},
 	"agent:port_access":          {"agent.port_access"},
 	"agent:read":                 {"agent.read"},
+	"artifact:create":            {"artifact.create"},
+	"artifact:delete":            {"artifact.delete"},
+	"artifact:manage":            {"artifact.manage"},
+	"artifact:read":              {"artifact.read"},
+	"artifact:update":            {"artifact.update"},
+	"broker:create":              {"broker.create"},
 	"broker:list":                {"broker.list"},
 	"broker:read":                {"broker.read"},
 	"gcp_service_account:assign": {"gcp_service_account.assign"},
@@ -86,7 +111,6 @@ func TestResolveSelector_UnknownSelectorsFailClosed(t *testing.T) {
 		"nonsense",
 		"agent:frobnicate",
 		"hub:read",          // exactly the resource:action reconstruction a fallback would accept
-		"broker:create",     // no UATScope on broker.create today; not yet a selector (D.0a/D.1 add it)
 		"hub.settings:read", // no such literal UATScope exists
 	} {
 		if _, ok := ResolveSelector(selector); ok {
@@ -100,10 +124,10 @@ func TestResolveSelector_UnknownSelectorsFailClosed(t *testing.T) {
 // resource/action cannot collapse into one selector." hub.settings.read and
 // hub.config.read are real Registry entries that already share
 // {Resource: hub, Action: read} today. A resource:action reconstruction
-// (like useraccesstoken.go's scopeToPermissionIDs) would map the single
-// selector string "hub:read" to BOTH permission IDs at once. ResolveSelector
-// must not do that: it has no resource:action path at all, so "hub:read"
-// resolves to nothing rather than to an ambiguous pair.
+// would map the single selector string "hub:read" to BOTH permission IDs
+// at once. ResolveSelector must not do that: it has no resource:action
+// path at all, so "hub:read" resolves to nothing rather than to an
+// ambiguous pair.
 func TestResolveSelector_SharedResourceActionCannotCollapse(t *testing.T) {
 	var settingsRead, configRead *Permission
 	for i := range Registry {
@@ -122,9 +146,9 @@ func TestResolveSelector_SharedResourceActionCannotCollapse(t *testing.T) {
 			settingsRead.Resource, settingsRead.Action, configRead.Resource, configRead.Action)
 	}
 
-	// The naive resource:action reconstruction (what scopeToPermissionIDs
-	// does today) WOULD match both permissions for a single scope key.
-	// Demonstrate that fact so the contrast with ResolveSelector is legible.
+	// A naive resource:action reconstruction WOULD match both permissions
+	// for a single scope key. Demonstrate that fact so the contrast with
+	// ResolveSelector is legible.
 	scopeKey := settingsRead.Resource + ":" + settingsRead.Action
 	var naiveMatches []string
 	for _, p := range Registry {
@@ -203,13 +227,11 @@ func TestPermissionAllowedBoundaries_CoversEveryUATScope(t *testing.T) {
 
 // permissionAllowedBoundariesPreReviewedWithoutUATScope is the explicit
 // allowlist for a PermissionAllowedBoundaries key that has no
-// Permission.UATScope yet: broker.create is pre-reviewed as Hub-only ahead
-// of its UATScope landing, so ResolveSelector resolves it correctly the
-// moment that field is added, with no second boundary-table change needed.
-// A key on neither this list nor a Registry row with a non-empty UATScope
-// is stale and must be removed.
+// Permission.UATScope: a boundary entry that precedes its selector. A key
+// on neither this list nor a Registry row with a non-empty UATScope is
+// stale and must be removed.
 var permissionAllowedBoundariesPreReviewedWithoutUATScope = map[string]bool{
-	"broker.create": true,
+	// No entries.
 }
 
 // TestPermissionAllowedBoundaries_NoStaleKeys is the reverse of the coverage

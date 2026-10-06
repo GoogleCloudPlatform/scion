@@ -59,7 +59,7 @@ func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, user, project
 }
@@ -414,7 +414,7 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	}
 
 	// Call populateAgentConfig to simulate the real code path
-	srv.populateAgentConfig(ctx, agent, project, tmpl)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, project, tmpl))
 
 	// Verify the template scopes are stored on AppliedConfig for visibility
 	require.NotNil(t, agent.AppliedConfig, "AppliedConfig should be set")
@@ -491,7 +491,7 @@ func TestTemplateHubAccessScopes_EmptyDoesNotWarn(t *testing.T) {
 	}
 
 	srv, _ := testServer(t)
-	srv.populateAgentConfig(context.Background(), agent, nil, tmpl)
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, nil, tmpl))
 
 	assert.Empty(t, agent.AppliedConfig.HubAccessScopes,
 		"empty scopes array should not populate HubAccessScopes")
@@ -513,7 +513,7 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, st.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-cap"),
@@ -583,7 +583,7 @@ func setupFullMaxProject(t *testing.T) (*Server, store.Store, *store.Project) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, project
 }
@@ -864,7 +864,7 @@ func TestCreateAgent_ProjectMaxBaseline_CapsFullToBaseline(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-base-cap"),
@@ -904,7 +904,7 @@ func TestCreateAgent_ProjectMaxReadonly_MemberGetsReadonly(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Member user requesting no specific role — should default to project max (readonly)
 	_ = doAgentRoleRequest(t, srv, user, CreateAgentRequest{
@@ -967,7 +967,7 @@ func setupReadScopeTest(t *testing.T) (*Server, store.Store, *store.Agent, *stor
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID:        tid("agent-read-scope"),
@@ -1186,7 +1186,7 @@ func TestCreateAgent_ProjectDefaultFull_NotOverriddenByHubBaseline(t *testing.T)
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Set the hub-level default to baseline — this should NOT override the
 	// project-level explicit "full".

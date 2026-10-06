@@ -20,7 +20,7 @@
  * Displays project-scoped templates, environment variables, secrets, and danger-zone actions (delete).
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
@@ -38,6 +38,7 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -60,6 +61,9 @@ import '../shared/injected-skills-panel.js';
 import '../shared/pre-start-hook-list.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -113,6 +117,9 @@ interface RuntimeBrokerWithProvider extends RuntimeBroker {
 
 @customElement('scion-page-project-settings')
 export class ScionPageProjectSettings extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -1364,6 +1371,42 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   /**
+   * Whether every runtime broker linked to this project (the same list shown
+   * on the Brokers tab) is reliably known to be Kubernetes: at least one
+   * linked broker, and every one of them registers only "kubernetes"
+   * profiles. This deliberately does not guess — a project with no linked
+   * broker, a broker with no profile info, or a mix of runtime types across
+   * its brokers, all read as false here.
+   */
+  private get projectIsKubernetesOnly(): boolean {
+    if (this.brokers.length === 0) return false;
+    return this.brokers.every((b) => isBrokerKubernetesOnly(b));
+  }
+
+  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
+  private static readonly gcpIdentityK8sHintText =
+    'Block is not supported on the Kubernetes runtime: this project’s runtime brokers are ' +
+    'Kubernetes. Choose Passthrough or Assign Service Account instead.';
+
+  /**
+   * Short explanation rendered into the GCP identity select's `help-text`
+   * slot when this project's linked brokers are reliably Kubernetes-only:
+   * block is disabled in that case (existing stored "block" values still
+   * display; the server rejects saving a new one).
+   *
+   * Rendered as a slotted child of the `<sl-select>` (not a sibling
+   * `aria-describedby` reference) because the element that receives focus is
+   * the `role="combobox"` input inside Shoelace's shadow root, which an
+   * attribute on the host cannot reach across the shadow boundary. Shoelace
+   * wires its own `help-text` slot to that combobox's `aria-describedby`
+   * internally.
+   */
+  private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
+    if (!this.projectIsKubernetesOnly) return nothing;
+    return html`<div slot="help-text">${ScionPageProjectSettings.gcpIdentityK8sHintText}</div>`;
+  }
+
+  /**
    * Describes the hub default GCP identity this project inherits while its
    * own setting is "inherit". For "assign" it names the service account (the
    * mode alone doesn't say which identity agents get); for "passthrough" it
@@ -1383,6 +1426,16 @@ export class ScionPageProjectSettings extends LitElement {
         saEntry?.hubDefault === 'present' && saEntry.hubValue != null
           ? String(saEntry.hubValue)
           : '';
+      // No service account configured: the consumption-side ladder falls
+      // through to "Block" the same way an unverified one does, which this
+      // project's Kubernetes runtime rejects at dispatch.
+      if (!saID && this.projectIsKubernetesOnly) {
+        return html`<span class="field-help"
+          >Inherited from hub: the hub default is "Assign", but no service account is configured, so
+          it falls back to "Block" — rejected at dispatch for this project's Kubernetes runtime. Set
+          a project-level default of Passthrough or Assign Service Account.</span
+        >`;
+      }
       const sa = this.gcpServiceAccounts.find((s) => s.id === saID);
       const saLabel = sa ? sa.email : saID;
       return html`<span class="field-help"
@@ -1391,9 +1444,34 @@ export class ScionPageProjectSettings extends LitElement {
       >`;
     }
     if (mode.hubValue === 'passthrough') {
+      if (this.projectIsKubernetesOnly) {
+        // This rung only ever reaches passthrough for a local container
+        // runtime (docker/podman) on the hub's own embedded broker
+        // (hubDefaultPassthroughAllowed + hubDefaultRuntimeAllowed,
+        // pkg/hub/default_gcp_identity.go, ptone/scion#2186) — Kubernetes is
+        // never in that allowed set, embedded broker or not. When denied,
+        // Phase 1 (ptone/scion#2338) leaves the identity unset rather than
+        // writing an explicit "block", so the broker applies its own
+        // Kubernetes default (passthrough). For a confirmed Kubernetes-bound
+        // project that denial is unconditional, so this is informational,
+        // not a rejection warning.
+        return html`<span class="field-help"
+          >Inherited from hub: passthrough only reaches a local container runtime (docker/podman) on
+          the hub's own embedded broker — Kubernetes is never eligible, so here no identity is
+          explicitly set, and this project's Kubernetes runtime applies its own default
+          automatically.</span
+        >`;
+      }
       return html`<span class="field-help"
         >Inherited from hub: passthrough applies only to agents on the hub's embedded broker; agents
         on other brokers get "Block".</span
+      >`;
+    }
+    if (mode.hubValue === 'block' && this.projectIsKubernetesOnly) {
+      return html`<span class="field-help"
+        >Inherited from hub: the hub default is "Block", but this project's runtime brokers are
+        Kubernetes, which rejects it at dispatch. Set a project-level default of Passthrough or
+        Assign Service Account.</span
       >`;
     }
     return nothing;
@@ -1564,8 +1642,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
 
       // Navigate back to projects list
-      window.history.pushState({}, '', '/projects');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/projects');
     } catch (err) {
       console.error('Failed to delete project:', err);
       showToast(err instanceof Error ? err.message : 'Failed to delete project');
@@ -1600,7 +1677,7 @@ export class ScionPageProjectSettings extends LitElement {
         ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
         compact
         sectionTitle="Members"
-        sectionDescription="Users and groups with access to this project. Adding a member creates a project-scoped role binding."
+        sectionDescription="Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles."
       ></scion-project-members-editor>
       ${this.renderResourcesSection()}
       ${this.renderMessagingPolicySection()}
@@ -1786,7 +1863,7 @@ export class ScionPageProjectSettings extends LitElement {
                   ? html`
                       <div class="github-status-item">
                         <span class="field-help">Last Token Mint</span>
-                        <span>${new Date(status.last_token_mint).toLocaleString()}</span>
+                        <span>${formatInstantWithZone(status.last_token_mint)}</span>
                       </div>
                     `
                   : ''}
@@ -2391,12 +2468,22 @@ export class ScionPageProjectSettings extends LitElement {
                   <sl-option value="inherit"
                     >${this.hubSelectLabel(
                       'scion.io/default-gcp-identity-mode',
-                      'None (default to block)'
+                      this.projectIsKubernetesOnly
+                        ? 'None (default to passthrough)'
+                        : 'None (default to block)'
                     )}</sl-option
                   >
-                  <sl-option value="block">Block</sl-option>
+                  <sl-option
+                    value="block"
+                    ?disabled=${this.projectIsKubernetesOnly}
+                    title=${this.projectIsKubernetesOnly
+                      ? ScionPageProjectSettings.gcpIdentityK8sHintText
+                      : nothing}
+                    >Block</sl-option
+                  >
                   <sl-option value="passthrough">Passthrough</sl-option>
                   <sl-option value="assign">Assign Service Account</sl-option>
+                  ${this.renderKubernetesBlockHint()}
                 </sl-select>
                 <span class="field-help"
                   >Controls GCP metadata server access for new agents. "Block" prevents access,
@@ -2974,29 +3061,8 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '\u2014';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (Number.isNaN(new Date(dateString).getTime())) return '\u2014';
+    return formatRelative(dateString);
   }
 
   private renderBrokersContent() {

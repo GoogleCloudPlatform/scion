@@ -99,7 +99,7 @@ func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 		OwnerID: f.member.ID, CreatedBy: f.member.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.createProjectMembersGroup(ctx, f.project)
+	srv.seedProjectCreatorMembership(ctx, f.project)
 	msgAuthzAddProjectMember(t, s, f.plainMember.ID, f.project.ID, f.project.Slug, store.GroupMemberRoleMember)
 
 	f.other = &store.Project{
@@ -107,7 +107,7 @@ func projectAgentAuthzSetup(t *testing.T) *projectAgentAuthzFixture {
 		OwnerID: f.member.ID, CreatedBy: f.member.ID, Created: time.Now(), Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, f.other))
-	srv.createProjectMembersGroup(ctx, f.other)
+	srv.seedProjectCreatorMembership(ctx, f.other)
 
 	mk := func(name, projectID string) *store.Agent {
 		a := &store.Agent{

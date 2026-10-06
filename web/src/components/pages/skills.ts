@@ -25,11 +25,16 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Skill, SkillScope, Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { paginateAll, PaginationError, PaginationStoppedError } from '../../client/paginate-all.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
+
+/** Skills requested per page; the server's maximum list limit. */
+const SKILLS_PAGE_SIZE = 200;
 
 type SkillSortField = 'name' | 'updated' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -40,9 +45,19 @@ export class ScionPageSkills extends LitElement {
   pageData: PageData | null = null;
 
   @state() private loading = true;
+  /**
+   * True once any load has settled (or the server prefetch was used). After
+   * that, reloads keep the current UI rendered with an inline spinner rather
+   * than swapping it for the full-page one, so the focused control (search
+   * input, Retry button) is not removed (ptone/scion#2948).
+   */
+  @state() private hasLoaded = false;
   @state() private error: string | null = null;
   @state() private skills: Skill[] = [];
   @state() private scopeCapabilities: Capabilities | undefined;
+  /** Set when a page after the first failed; the loaded pages are still shown. */
+  @state() private partialLoadError: string | null = null;
+  private loadGeneration = 0;
   @state() private viewMode: ViewMode = 'grid';
   @state() private searchQuery = '';
   @state() private scopeFilter: SkillScope | '' = '';
@@ -77,6 +92,14 @@ export class ScionPageSkills extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.5rem;
+      }
+
+      /* The header's only child holds the name and scope. As a flex item it
+         defaults to min-width:auto and grows to fit a long unbroken name,
+         pushing it past the card edge; min-width:0 lets it shrink so the
+         shared wrapping rules can break the name instead. */
+      .skill-header > div {
+        min-width: 0;
       }
 
       .skill-meta {
@@ -146,6 +169,10 @@ export class ScionPageSkills extends LitElement {
         min-width: 200px;
       }
 
+      .filter-bar .inline-loading {
+        font-size: 1rem;
+      }
+
       th.sortable {
         cursor: pointer;
         user-select: none;
@@ -206,20 +233,32 @@ export class ScionPageSkills extends LitElement {
     }
 
     const ssrData = this.pageData?.data as
-      | { skills?: Skill[]; _capabilities?: Capabilities }
+      | { skills?: Skill[]; nextCursor?: string; _capabilities?: Capabilities }
       | undefined;
-    if (ssrData?.skills && this.scopeFilter === '' && !this.searchQuery) {
+    // The server prefetch is a single page; when it has more, walk every
+    // page on the client instead (ptone/scion#1949).
+    if (ssrData?.skills && !ssrData.nextCursor && this.scopeFilter === '' && !this.searchQuery) {
       this.skills = ssrData.skills;
       this.scopeCapabilities = ssrData._capabilities;
       this.loading = false;
+      this.hasLoaded = true;
     } else {
       void this.loadSkills();
     }
   }
 
   private async loadSkills(): Promise<void> {
+    const generation = ++this.loadGeneration;
     this.loading = true;
-    this.error = null;
+    // The current error or partial-load notice stays up (with its Retry
+    // button) until this load settles, so focus on Retry is not lost.
+    const focusWasInside = this.shadowRoot?.activeElement != null;
+
+    // Pages are collected here as they arrive, so a failure after the first
+    // page can still show what was loaded (ptone/scion#1949).
+    const loaded: Skill[] = [];
+    let capabilities: Capabilities | undefined;
+    let firstPage = true;
 
     try {
       const params = new URLSearchParams();
@@ -227,29 +266,83 @@ export class ScionPageSkills extends LitElement {
       if (this.scopeFilter) params.set('scope', this.scopeFilter);
       if (this.searchQuery) params.set('search', this.searchQuery);
 
-      const response = await apiFetch(`/api/v1/skills?${params.toString()}`);
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
-      }
-
-      const data = (await response.json()) as
-        | { skills?: Skill[]; items?: Skill[]; _capabilities?: Capabilities }
-        | Skill[];
-      if (Array.isArray(data)) {
-        this.skills = data;
-        this.scopeCapabilities = undefined;
-      } else {
-        this.skills = data.skills || data.items || [];
-        this.scopeCapabilities = data._capabilities;
-      }
+      await paginateAll<Skill>({
+        path: `/api/v1/skills?${params.toString()}`,
+        pageSize: SKILLS_PAGE_SIZE,
+        label: 'Skills',
+        // A newer load (search or scope change) supersedes this one, and a
+        // detached page needs no more pages.
+        shouldContinue: () => generation === this.loadGeneration && this.isConnected,
+        parsePage: (body) => {
+          const data = body as {
+            skills?: Skill[];
+            items?: Skill[];
+            nextCursor?: string;
+            _capabilities?: Capabilities;
+          };
+          // Scope capabilities (e.g. create) come with the first page.
+          if (firstPage) capabilities = data._capabilities;
+          firstPage = false;
+          const items = data.skills || data.items || [];
+          loaded.push(...items);
+          return { items, ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
+        },
+      });
+      if (generation !== this.loadGeneration) return;
+      this.skills = loaded;
+      this.scopeCapabilities = capabilities;
+      this.error = null;
+      this.partialLoadError = null;
     } catch (err) {
+      if (generation !== this.loadGeneration || err instanceof PaginationStoppedError) return;
       console.error('Failed to load skills:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load skills';
+      const message = err instanceof Error ? err.message : 'Failed to load skills';
+      // Lead with the hub's explanation when it sent one (ptone/scion#2949).
+      const hubMessage = err instanceof PaginationError ? err.hubMessage : undefined;
+      if (firstPage) {
+        // paginateAll's errors are terse ("Skills request failed: 403"), so
+        // say what failed; other errors (e.g. network) read as they are.
+        this.error =
+          err instanceof PaginationError
+            ? hubMessage
+              ? `Failed to load skills: ${hubMessage} (${message})`
+              : `Failed to load skills (${message})`
+            : message;
+        this.partialLoadError = null;
+      } else {
+        // A later page failed: keep the pages that loaded and say so.
+        this.skills = loaded;
+        this.scopeCapabilities = capabilities;
+        this.error = null;
+        this.partialLoadError = hubMessage ? `${hubMessage}; ${message}` : message;
+      }
     } finally {
-      this.loading = false;
+      if (generation === this.loadGeneration) {
+        this.loading = false;
+        this.hasLoaded = true;
+        if (focusWasInside) void this.restoreFocus();
+      }
     }
+  }
+
+  /**
+   * After a load that started with focus inside the page: if the re-render
+   * removed the focused control (e.g. Retry, once the error or notice
+   * clears) so that focus fell to the document body, move it to the search
+   * input (ptone/scion#2948). Focus the user moved elsewhere during the
+   * load is left alone. The filter bar is always rendered after the first
+   * load, so the Retry selectors are only a defensive fallback in case
+   * that ever changes.
+   */
+  private async restoreFocus(): Promise<void> {
+    await this.updateComplete;
+    if (!this.isConnected || this.shadowRoot?.activeElement) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    const target = ['.search-input', '.error-retry', '.partial-load-retry']
+      .map((selector) => this.shadowRoot?.querySelector<HTMLElement>(selector))
+      .find((el) => el != null);
+    target?.focus();
   }
 
   private get displaySkills(): Skill[] {
@@ -273,19 +366,11 @@ export class ScionPageSkills extends LitElement {
   }
 
   private formatRelativeTime(isoString: string): string {
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return '—';
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    if (diffMs < 0) return 'just now';
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(isoString).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(isoString, { style: 'narrow' });
   }
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
@@ -347,11 +432,14 @@ export class ScionPageSkills extends LitElement {
         </div>
       </div>
 
-      ${this.loading
+      ${this.loading && !this.hasLoaded
         ? this.renderLoading()
-        : this.error
-          ? this.renderError()
-          : html` ${this.renderFilterBar()} ${this.renderSkills()} `}
+        : html`
+            ${this.renderFilterBar()}
+            ${this.error
+              ? this.renderError()
+              : html`${this.renderPartialLoadNotice()} ${this.renderSkills()}`}
+          `}
     `;
   }
 
@@ -408,7 +496,29 @@ export class ScionPageSkills extends LitElement {
               </sl-dropdown>
             `
           : nothing}
+        ${this.loading
+          ? html`<sl-spinner class="inline-loading" aria-label="Loading skills"></sl-spinner>`
+          : nothing}
       </div>
+    `;
+  }
+
+  private renderPartialLoadNotice() {
+    if (!this.partialLoadError) return nothing;
+    return html`
+      <sl-alert class="partial-load-notice" variant="warning" open>
+        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+        Showing ${this.skills.length} skill${this.skills.length === 1 ? '' : 's'}; the rest could
+        not be loaded (${this.partialLoadError}).
+        <sl-button
+          size="small"
+          variant="text"
+          class="partial-load-retry"
+          ?loading=${this.loading}
+          @click=${() => this.loadSkills()}
+          >Retry</sl-button
+        >
+      </sl-alert>
     `;
   }
 
@@ -428,7 +538,12 @@ export class ScionPageSkills extends LitElement {
         <h2>Failed to Load Skills</h2>
         <p>There was a problem connecting to the API.</p>
         <div class="error-details">${this.error}</div>
-        <sl-button variant="primary" @click=${() => this.loadSkills()}>
+        <sl-button
+          variant="primary"
+          class="error-retry"
+          ?loading=${this.loading}
+          @click=${() => this.loadSkills()}
+        >
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
         </sl-button>
@@ -495,7 +610,7 @@ export class ScionPageSkills extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="lightning-charge"></sl-icon>
-              ${skill.name}
+              <span>${skill.name}</span>
             </h3>
             <div class="skill-meta">
               <span class="scope-badge">${skill.scope}</span>
@@ -554,8 +669,7 @@ export class ScionPageSkills extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/skills/${skill.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/skills/${skill.id}`);
         }}
       >
         <td>

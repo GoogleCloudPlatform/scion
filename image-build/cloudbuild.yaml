@@ -101,6 +101,13 @@ steps:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-muse-code'
+    dir: 'harnesses/muse-code'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-muse-code:$_SHORT_SHA', '-t', '$_REGISTRY/scion-muse-code:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-opencode'
     dir: 'harnesses/opencode'
     args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']

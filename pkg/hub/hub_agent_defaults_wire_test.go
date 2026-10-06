@@ -257,9 +257,18 @@ func TestDispatch_HubAgentDefaults_ProviderInstalledByServer(t *testing.T) {
 // requestId is dropped before comparison: it is a fresh uuid.NewString() per
 // call and is the only non-deterministic member. Everything else, including the
 // two derived UUIDs, is stable across runs.
+//
+// Golden updated: buildCreateRequest always writes the
+// SCION_METADATA_MODE_SOURCE=hub marker into resolvedEnv/envClassifications.
+// This fixed input has no GCP identity configured, so SCION_METADATA_MODE
+// itself is absent and the broker applies its runtime default ("block" on
+// every runtime except Kubernetes, "passthrough" on Kubernetes). This is an
+// intended change to the payload, not an incidental one.
 func TestDispatch_FileMode_RequestJSONUnchanged(t *testing.T) {
-	const preChangeGolden = `{"config":{},"id":"8de2cea5-95b0-5ee2-a75a-c4d168aff6a7",` +
-		`"name":"test-agent","projectId":"","slug":"test-agent",` +
+	const preChangeGolden = `{"config":{},"envClassifications":{` +
+		`"SCION_METADATA_MODE_SOURCE":"plain"},"id":"8de2cea5-95b0-5ee2-a75a-c4d168aff6a7",` +
+		`"name":"test-agent","projectId":"","resolvedEnv":{` +
+		`"SCION_METADATA_MODE_SOURCE":"hub"},"slug":"test-agent",` +
 		`"userId":"b88f5d8f-14e6-5a0a-8f6c-6b720a0f672c"}`
 
 	ctx := context.Background()
@@ -309,6 +318,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 			Limits:   api.ResourceList{CPU: "2", Memory: "4Gi"},
 			Disk:     "10Gi",
 		},
+		AutoExposePorts: func() *bool { b := true; return &b }(),
 	}
 
 	blob, err := json.Marshal(&RemoteAgentConfig{HubAgentDefaults: sent})
@@ -333,7 +343,9 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 		got.HubAgentDefaults.MaxModelCalls != want.MaxModelCalls ||
 		got.HubAgentDefaults.MaxDuration != want.MaxDuration ||
 		got.HubAgentDefaults.Resources == nil ||
-		*got.HubAgentDefaults.Resources != *want.Resources {
+		*got.HubAgentDefaults.Resources != *want.Resources ||
+		got.HubAgentDefaults.AutoExposePorts == nil ||
+		!*got.HubAgentDefaults.AutoExposePorts {
 		t.Errorf("wire round-trip mismatch:\n sent %+v\n got  %+v (resources %+v)",
 			want, got.HubAgentDefaults, got.HubAgentDefaults.Resources)
 	}
@@ -344,7 +356,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 // still marshal the key and would make the broker-side rung "fire" with zero
 // values, which is how file-mode parity would silently break.
 func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
-	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}); got != nil {
+	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil); got != nil {
 		t.Errorf("want nil for empty section, got %+v", got)
 	}
 	// The two hub-resolved fields alone must not put the field on the wire:
@@ -352,13 +364,23 @@ func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
 	d := opsettings.AgentDefaultsSettings{}
 	d.DefaultTemplate = "team-default"
 	d.DefaultHarnessConfig = "claude-vertex"
-	if got := remoteHubAgentDefaults(d); got != nil {
+	if got := remoteHubAgentDefaults(d, nil, nil); got != nil {
 		t.Errorf("template/harness-config defaults must not travel here, got %+v", got)
 	}
 	// A single limit is enough to send.
 	d = opsettings.AgentDefaultsSettings{}
 	d.DefaultMaxTurns = 50
-	if got := remoteHubAgentDefaults(d); got == nil || got.MaxTurns != 50 {
+	if got := remoteHubAgentDefaults(d, nil, nil); got == nil || got.MaxTurns != 50 {
 		t.Errorf("want MaxTurns 50 on the wire, got %+v", got)
+	}
+	// The hub auto-expose default alone is enough to send, false included.
+	off := false
+	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off, nil)
+	if got == nil || got.AutoExposePorts == nil || *got.AutoExposePorts {
+		t.Errorf("want autoExposePorts=false on the wire, got %+v", got)
+	}
+	off = true
+	if *got.AutoExposePorts {
+		t.Error("the wire value must be a copy, not the provider's pointer")
 	}
 }

@@ -41,7 +41,7 @@ type oidcDiscoveryDocument struct {
 // GET /.well-known/openid-configuration.
 func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -70,7 +70,7 @@ func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 // handleJWKS serves the JSON Web Key Set at GET /.well-known/jwks.json.
 func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -202,7 +202,7 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 		"project_id", agent.ProjectID,
 		"audience", req.Audience,
 		"agent_name", agentName,
-		"expires_at", expiresAt.Format(time.RFC3339),
+		"expires_at", expiresAt.UTC().Format(time.RFC3339),
 	)
 
 	// 9. Return 200 with token and expiry.

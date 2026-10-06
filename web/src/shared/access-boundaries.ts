@@ -628,47 +628,24 @@ export interface AccessBoundaryCommitResponse {
 /* 10. AccessBoundaryAuditEvent (design §9.3, §11)                            */
 /* -------------------------------------------------------------------------- */
 
-/** One entry in a boundary's audit trail. */
+/** One retained, typed entry in a live boundary's audit trail. */
 export interface AccessBoundaryAuditEvent {
   id: string;
-  occurredAt: Iso8601;
-  eventType:
-    | 'boundary.created'
-    | 'boundary.updated'
-    | 'boundary.deleted'
-    | 'boundary.commit_rejected'
-    | 'boundary.recovery_disabled';
-  classification: MutationClassification | null;
-  actor: {
-    principal: PrincipalRef | null;
-    credentialType: string | null;
-    credentialId: string | null;
-  };
-  target: { type: 'access_constraint'; id: string; name: string | null };
-  revisionBefore: BoundaryRevision | null;
-  revisionAfter: BoundaryRevision | null;
-  previewId: string | null;
-  correlationId: string;
-  changeSummary: AuditChangeSummary | null;
-  beforeSummary: string | null;
-  afterSummary: string | null;
-  outcome: 'committed' | 'rejected';
-  /** Present when `outcome === 'rejected'`. */
-  rejectionCode?: AccessBoundaryErrorCode;
-  rejectionDetails?: Record<string, unknown>;
-  reason?: string;
-  redacted?: RedactionNotice;
-  _capabilities: AccessBoundaryCapabilities;
-}
-
-export interface AuditChangeSummary {
-  /** `['*']` for creation. */
-  fieldsChanged: string[];
-  permissionsAdded: PermissionId[];
-  permissionsRemoved: PermissionId[];
-  affectedPrincipalCount: number;
-  losingPrincipalCount: number;
-  regainingPrincipalCount: number;
+  constraintId: string;
+  operation: string;
+  actorKind?: string;
+  actorId?: string;
+  correlationId?: string;
+  batchOperationId?: string;
+  beforeRevision: BoundaryRevision | null;
+  afterRevision: BoundaryRevision | null;
+  classification?: MutationClassification;
+  previewId?: string;
+  /** Retained for integrity/correlation but deliberately not displayed. */
+  draftHash?: string;
+  impactCounts?: { agents: number; users: number; projects: number };
+  changedFields?: string[];
+  timestamp: Iso8601;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -763,13 +740,11 @@ export interface AffectedPrincipalsPage {
 }
 
 export interface AccessBoundaryAuditPage {
-  constraintId: string;
   items: AccessBoundaryAuditEvent[];
   nextPageToken?: PageToken;
   totalCount: number;
   totalCountExact: boolean;
-  retention: { windowDays: number | null; note?: string };
-  _capabilities: AccessBoundaryCapabilities;
+  retention: { maxRows: number; note: string };
 }
 
 /* -------------------------------------------------------------------------- */

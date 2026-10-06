@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -28,8 +29,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -175,6 +178,23 @@ type constraintScopeRequest struct {
 type constraintConditionReq struct {
 	NotBefore *time.Time `json:"notBefore,omitempty"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+}
+
+// utcWindow returns the request's time window converted to UTC. Clients may
+// send any RFC 3339 offset; the window is stored and returned in UTC so every
+// consumer sees the same canonical "Z" form. Nil bounds stay nil.
+func (c *constraintConditionReq) utcWindow() (notBefore, expiresAt *time.Time) {
+	return utcTimePtr(c.NotBefore), utcTimePtr(c.ExpiresAt)
+}
+
+// utcTimePtr returns a pointer to a UTC copy of *t, or nil when t is nil.
+// It never modifies *t.
+func utcTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }
 
 // ---------------------------------------------------------------------------
@@ -324,24 +344,41 @@ type accessBoundaryListResponse struct {
 
 // auditEventResponse wraps a single audit entry for the API.
 type auditEventResponse struct {
-	ID             string       `json:"id"`
-	ConstraintID   string       `json:"constraintId"`
-	Operation      string       `json:"operation"`
-	ActorID        string       `json:"actorId"`
-	BeforeRevision string       `json:"beforeRevision"`
-	AfterRevision  string       `json:"afterRevision"`
-	Classification string       `json:"classification"`
-	PreviewID      string       `json:"previewId,omitempty"`
-	DraftHash      string       `json:"draftHash,omitempty"`
-	ImpactCounts   ImpactCounts `json:"impactCounts"`
-	Timestamp      time.Time    `json:"timestamp"`
+	ID               string                     `json:"id"`
+	ConstraintID     string                     `json:"constraintId"`
+	Operation        string                     `json:"operation"`
+	ActorKind        string                     `json:"actorKind,omitempty"`
+	ActorID          string                     `json:"actorId,omitempty"`
+	CorrelationID    string                     `json:"correlationId,omitempty"`
+	BatchOperationID string                     `json:"batchOperationId,omitempty"`
+	BeforeRevision   *string                    `json:"beforeRevision"`
+	AfterRevision    *string                    `json:"afterRevision"`
+	Classification   string                     `json:"classification,omitempty"`
+	PreviewID        string                     `json:"previewId,omitempty"`
+	DraftHash        string                     `json:"draftHash,omitempty"`
+	ImpactCounts     *auditImpactCountsResponse `json:"impactCounts,omitempty"`
+	ChangedFields    []string                   `json:"changedFields,omitempty"`
+	Timestamp        time.Time                  `json:"timestamp"`
+}
+
+type auditImpactCountsResponse struct {
+	Agents   uint32 `json:"agents"`
+	Users    uint32 `json:"users"`
+	Projects uint32 `json:"projects"`
+}
+
+type auditRetentionResponse struct {
+	MaxRows int    `json:"maxRows"`
+	Note    string `json:"note"`
 }
 
 // auditListResponse is the audit subresource envelope.
 type auditListResponse struct {
-	Items         []auditEventResponse `json:"items"`
-	NextPageToken string               `json:"nextPageToken,omitempty"`
-	TotalCount    int                  `json:"totalCount"`
+	Items           []auditEventResponse   `json:"items"`
+	NextPageToken   string                 `json:"nextPageToken,omitempty"`
+	TotalCount      int                    `json:"totalCount"`
+	TotalCountExact bool                   `json:"totalCountExact"`
+	Retention       auditRetentionResponse `json:"retention"`
 }
 
 // affectedPrincipalsResponse wraps the affected-principals subresource.
@@ -657,14 +694,32 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 // Audit subresource
 // ---------------------------------------------------------------------------
 
+const (
+	constraintAuditCursorVersion = 1
+	constraintAuditMaxPageSize   = 200
+	constraintAuditRetentionRows = 1000
+)
+
+type constraintAuditCursor struct {
+	Version      int    `json:"version"`
+	ConstraintID string `json:"constraintId"`
+	OccurredAt   string `json:"occurredAt"`
+	EventID      string `json:"eventId"`
+}
+
+func (s *Server) handleAdminAccessConstraintAudit(w http.ResponseWriter, r *http.Request) {
+	s.getConstraintAudit(w, r, r.PathValue("id"))
+}
+
 func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, "GET")
 		return
 	}
 
-	// Verify the constraint exists.
-	_, err := s.store.GetAccessConstraint(r.Context(), id)
+	// Resolve the live constraint before authorization. Every absent/denied
+	// outcome below deliberately uses the same response to prevent enumeration.
+	constraint, err := s.store.GetAccessConstraint(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Access Constraint")
@@ -674,48 +729,36 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Get audit entries from the governance service's audit writer.
-	var entries []BoundaryAuditEntry
-	if s.governanceService != nil && s.governanceService.auditWriter != nil {
-		entries = s.governanceService.auditWriter.GetEntriesForConstraint(id)
+	if !s.canReadConstraintAudit(r, constraint) {
+		NotFound(w, "Access Constraint")
+		return
 	}
 
-	// Keyset pagination based on audit entry ID (R5).
-	// Audit entries are append-only, so ID-based keyset is stable.
+	cursor, err := decodeConstraintAuditCursor(r.URL.Query().Get("pageToken"), id)
+	if err != nil {
+		BadRequest(w, "invalid pageToken")
+		return
+	}
+
 	pageSize := parseIntOr(r.URL.Query().Get("pageSize"), 50)
-	if pageSize > 200 {
-		pageSize = 200
+	if pageSize <= 0 {
+		pageSize = 50
+	}
+	if pageSize > constraintAuditMaxPageSize {
+		pageSize = constraintAuditMaxPageSize
 	}
 
-	// Sort entries by ID for deterministic ordering.
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].ID < entries[j].ID
-	})
-
+	entries, err := s.store.ListConstraintHistory(r.Context(), id)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
 	total := len(entries)
 
-	// Decode cursor: base64-encoded last-seen audit entry ID.
-	var cursorID string
-	if rawToken := r.URL.Query().Get("pageToken"); rawToken != "" {
-		decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
-		if err != nil {
-			BadRequest(w, "invalid pageToken")
-			return
-		}
-		cursorID = string(decoded)
-	}
-
-	// Filter: skip all entries with ID <= cursorID.
 	startIdx := 0
-	if cursorID != "" {
-		for i, e := range entries {
-			if e.ID > cursorID {
-				startIdx = i
-				break
-			}
-			if i == len(entries)-1 {
-				startIdx = len(entries) // all items consumed
-			}
+	if cursor != nil {
+		for startIdx < len(entries) && !constraintHistoryOlderThan(entries[startIdx], cursor) {
+			startIdx++
 		}
 	}
 
@@ -727,19 +770,12 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 	var items []auditEventResponse
 	if startIdx < total {
 		for _, e := range entries[startIdx:end] {
-			items = append(items, auditEventResponse{
-				ID:             e.ID,
-				ConstraintID:   e.ConstraintID,
-				Operation:      e.Operation,
-				ActorID:        e.ActorID,
-				BeforeRevision: strconv.FormatInt(e.BeforeRevision, 10),
-				AfterRevision:  strconv.FormatInt(e.AfterRevision, 10),
-				Classification: e.Classification,
-				PreviewID:      e.PreviewID,
-				DraftHash:      e.DraftHash,
-				ImpactCounts:   e.ImpactCounts,
-				Timestamp:      e.Timestamp,
-			})
+			item, mapErr := constraintHistoryResponse(e)
+			if mapErr != nil {
+				writeErrorFromErr(w, mapErr, "")
+				return
+			}
+			items = append(items, item)
 		}
 	}
 	if items == nil {
@@ -747,16 +783,138 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	var nextToken string
-	if end < total && len(items) > 0 {
-		lastID := items[len(items)-1].ID
-		nextToken = base64.RawURLEncoding.EncodeToString([]byte(lastID))
+	if end < total && len(entries[startIdx:end]) > 0 {
+		last := entries[end-1]
+		nextToken, err = encodeConstraintAuditCursor(id, last)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, auditListResponse{
-		Items:         items,
-		NextPageToken: nextToken,
-		TotalCount:    total,
+		Items:           items,
+		NextPageToken:   nextToken,
+		TotalCount:      total,
+		TotalCountExact: true,
+		Retention: auditRetentionResponse{
+			MaxRows: constraintAuditRetentionRows,
+			Note:    "Current retained rows for this live access constraint; not a lifetime or pagination-snapshot total.",
+		},
 	})
+}
+
+func (s *Server) canReadConstraintAudit(r *http.Request, constraint *store.AccessConstraint) bool {
+	identity := GetIdentityFromContext(r.Context())
+	user, ok := identity.(UserIdentity)
+	if !ok || user == nil || s.authzService == nil {
+		return false
+	}
+
+	resource := Resource{Type: "access_constraint", ID: constraint.ID}
+	if constraint.ScopeType == store.RoleScopeProject && constraint.ScopeID != "" {
+		resource.ParentType = "project"
+		resource.ParentID = constraint.ScopeID
+	}
+	decision := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   resource,
+		Action:     ActionManage,
+		Permission: "hub.audit.read",
+	})
+	return decision.Allowed
+}
+
+func decodeConstraintAuditCursor(rawToken, constraintID string) (*constraintAuditCursor, error) {
+	if rawToken == "" {
+		return nil, nil
+	}
+	if len(rawToken) > 2048 {
+		return nil, errors.New("audit cursor is too large")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(strings.NewReader(string(decoded)))
+	dec.DisallowUnknownFields()
+	var cursor constraintAuditCursor
+	if err := dec.Decode(&cursor); err != nil {
+		return nil, err
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return nil, errors.New("audit cursor must contain one object")
+	}
+	if cursor.Version != constraintAuditCursorVersion || cursor.ConstraintID != constraintID ||
+		cursor.EventID == "" || cursor.OccurredAt == "" {
+		return nil, errors.New("invalid audit cursor")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, cursor.OccurredAt); err != nil {
+		return nil, err
+	}
+	return &cursor, nil
+}
+
+func encodeConstraintAuditCursor(constraintID string, entry *store.AccessConstraintHistory) (string, error) {
+	encoded, err := json.Marshal(constraintAuditCursor{
+		Version:      constraintAuditCursorVersion,
+		ConstraintID: constraintID,
+		OccurredAt:   entry.OccurredAt.UTC().Format(time.RFC3339Nano),
+		EventID:      entry.EventID,
+	})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func constraintHistoryOlderThan(entry *store.AccessConstraintHistory, cursor *constraintAuditCursor) bool {
+	cursorTime, err := time.Parse(time.RFC3339Nano, cursor.OccurredAt)
+	if err != nil {
+		return false
+	}
+	return entry.OccurredAt.Before(cursorTime) ||
+		(entry.OccurredAt.Equal(cursorTime) && entry.EventID < cursor.EventID)
+}
+
+func constraintHistoryResponse(entry *store.AccessConstraintHistory) (auditEventResponse, error) {
+	response := auditEventResponse{
+		ID:               entry.EventID,
+		ConstraintID:     entry.ConstraintID,
+		Operation:        entry.Operation,
+		ActorKind:        entry.ActorKind,
+		ActorID:          entry.ActorID,
+		CorrelationID:    entry.CorrelationID,
+		BatchOperationID: entry.BatchOperationID,
+		BeforeRevision:   formatOptionalRevision(entry.BeforeRevision),
+		AfterRevision:    formatOptionalRevision(entry.AfterRevision),
+		Classification:   entry.Classification,
+		PreviewID:        entry.PreviewID,
+		DraftHash:        entry.DraftHash,
+		Timestamp:        entry.OccurredAt,
+	}
+	if entry.ImpactCountsJSON != "" {
+		var counts auditImpactCountsResponse
+		if err := json.Unmarshal([]byte(entry.ImpactCountsJSON), &counts); err != nil {
+			return auditEventResponse{}, fmt.Errorf("decode access constraint history impact counts: %w", err)
+		}
+		response.ImpactCounts = &counts
+	}
+	if entry.ChangedFieldsJSON != "" {
+		if err := json.Unmarshal([]byte(entry.ChangedFieldsJSON), &response.ChangedFields); err != nil {
+			return auditEventResponse{}, fmt.Errorf("decode access constraint history changed fields: %w", err)
+		}
+	}
+	return response, nil
+}
+
+func formatOptionalRevision(revision *int64) *string {
+	if revision == nil {
+		return nil
+	}
+	formatted := strconv.FormatInt(*revision, 10)
+	return &formatted
 }
 
 // ---------------------------------------------------------------------------
@@ -952,8 +1110,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 
 	// Set time window (appliesWhen).
 	if req.AppliesWhen != nil {
-		draft.NotBefore = req.AppliesWhen.NotBefore
-		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
+		draft.NotBefore, draft.ExpiresAt = req.AppliesWhen.utcWindow()
 	}
 
 	// Commit through governance service.
@@ -962,12 +1119,21 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		ID:   user.ID(),
 	}
 
-	result, err := s.governanceService.CommitBoundaryChange(r.Context(), CommitRequest{
+	commitRequest := CommitRequest{
 		Operation:    "create",
 		Draft:        draft,
 		PreviewToken: req.PreviewToken,
 		Actor:        actor,
-	})
+	}
+	if requestID := logging.RequestIDFromContext(r.Context()); requestID != "" {
+		commitRequest.AuditRequest = &auditevent.RequestRef{
+			ID:      requestID,
+			Method:  r.Method,
+			Route:   "/api/v1/admin/access-constraints",
+			Surface: "api",
+		}
+	}
+	result, err := s.governanceService.CommitBoundaryChange(r.Context(), commitRequest)
 	if err != nil {
 		s.handleGovernanceError(w, err)
 		return
@@ -1105,8 +1271,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 	}
 
 	if req.AppliesWhen != nil {
-		draft.NotBefore = req.AppliesWhen.NotBefore
-		draft.ExpiresAt = req.AppliesWhen.ExpiresAt
+		draft.NotBefore, draft.ExpiresAt = req.AppliesWhen.utcWindow()
 	}
 
 	actor := PrincipalContext{
@@ -1815,8 +1980,7 @@ func (s *Server) draftToStoreConstraint(draft *previewDraftRequest, user UserIde
 	}
 
 	if draft.AppliesWhen != nil {
-		sc.NotBefore = draft.AppliesWhen.NotBefore
-		sc.ExpiresAt = draft.AppliesWhen.ExpiresAt
+		sc.NotBefore, sc.ExpiresAt = draft.AppliesWhen.utcWindow()
 	}
 
 	return sc, nil

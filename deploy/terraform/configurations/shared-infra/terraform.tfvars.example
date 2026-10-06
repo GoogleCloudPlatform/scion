@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (or pass -var-file) and fill in. See
+# deploy/terraform/README.md for the full prerequisite list.
+
+project_id  = "my-project"
+region      = "us-central1"
+zone        = "us-central1-a"
+name_prefix = "tfha"
+
+# REGIONAL is the module default (HA). Use ZONAL only for the smallest
+# viable dev/test footprint; converting an existing ZONAL instance to
+# REGIONAL later is an in-place update with an outage of about 7 minutes
+# (see the README).
+sql_availability_type = "ZONAL"
+
+# Leave true always outside a deliberate, documented teardown — see the
+# README's destroy runbook.
+deletion_protection = true

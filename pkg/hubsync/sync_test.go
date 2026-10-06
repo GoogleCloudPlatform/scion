@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -1340,9 +1341,12 @@ func TestCreateHubClient_UsesAgentTokenFromEnv(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindAgentToken {
+		t.Errorf("expected CredentialKindAgentToken, got %q", kind)
 	}
 
 	// Make a request to verify the agent token is used
@@ -1377,9 +1381,12 @@ func TestCreateHubClient_PrefersTokenFileOverEnv(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindAgentToken {
+		t.Errorf("expected CredentialKindAgentToken, got %q", kind)
 	}
 
 	_, err = client.Health(context.Background())
@@ -1423,9 +1430,12 @@ func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_abc123")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindAgentToken {
+		t.Errorf("expected CredentialKindAgentToken (the real per-agent token must win over the dev token present here), got %q", kind)
 	}
 
 	_, err = client.Health(context.Background())
@@ -1434,27 +1444,48 @@ func TestCreateHubClient_HubManagedAgentUsesRealTokenOnLocalhost(t *testing.T) {
 	}
 }
 
+// TestCreateHubClient_PrefersOAuthOverAgentToken sets BOTH an OAuth
+// credential and an agent token and proves OAuth wins.
+// credentials.GetAccessToken reads its store from a file under HOME, so a
+// clean, test-local HOME plus credentials.Store makes OAuth directly
+// testable here.
 func TestCreateHubClient_PrefersOAuthOverAgentToken(t *testing.T) {
-	// When OAuth credentials exist, they should take precedence over SCION_AUTH_TOKEN.
-	// We can't easily test this because credentials.GetAccessToken uses a global store,
-	// but we can verify that without OAuth, SCION_AUTH_TOKEN is picked up.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Just verify the request arrives
+		if auth := r.Header.Get("Authorization"); auth != "Bearer oauth-access-token" {
+			t.Errorf("expected Authorization 'Bearer oauth-access-token', got %q", auth)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}))
 	defer server.Close()
 
-	// Use a clean HOME so no token file interferes
+	// Clean HOME so no token file interferes, then store OAuth credentials
+	// for this exact server URL (GetAccessToken is keyed by hub URL).
 	t.Setenv("HOME", t.TempDir())
-	// With SCION_AUTH_TOKEN set but no OAuth, agent token should be used
-	t.Setenv("SCION_AUTH_TOKEN", "agent-jwt")
+	if err := credentials.Store(server.URL, &credentials.TokenResponse{
+		AccessToken: "oauth-access-token",
+		ExpiresIn:   time.Hour,
+	}); err != nil {
+		t.Fatalf("credentials.Store failed: %v", err)
+	}
+	// Also set an agent token, to prove OAuth is preferred over it.
+	t.Setenv("SCION_AUTH_TOKEN", "should-not-be-used")
 	t.Setenv("SCION_DEV_TOKEN", "")
 
 	settings := &config.Settings{}
-	_, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindOAuth {
+		t.Errorf("expected CredentialKindOAuth, got %q", kind)
+	}
+
+	_, err = client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health check failed: %v", err)
 	}
 }
 
@@ -1473,14 +1504,53 @@ func TestCreateHubClient_FallsBackToDevAuth(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "dev-token-123")
 
 	settings := &config.Settings{}
-	client, err := createHubClient(settings, server.URL)
+	client, kind, err := createHubClient(settings, server.URL)
 	if err != nil {
 		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindDevAuto {
+		t.Errorf("expected CredentialKindDevAuto, got %q", kind)
 	}
 
 	// Verify client was created (dev auth resolves the token)
 	if client == nil {
 		t.Fatal("expected non-nil client")
+	}
+}
+
+// TestCreateHubClient_UsesHubTokenFromEnv covers the SCION_HUB_TOKEN legacy
+// bearer-token branch — no prior test in this file exercised it at all.
+func TestCreateHubClient_UsesHubTokenFromEnv(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer legacy-hub-token" {
+			t.Errorf("expected Authorization 'Bearer legacy-hub-token', got %q", auth)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+
+	// Clean HOME so no token file or OAuth store interferes; no agent token
+	// either, so only the SCION_HUB_TOKEN branch can fire.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_AUTH_TOKEN", "")
+	t.Setenv("SCION_DEV_TOKEN", "")
+	t.Setenv("SCION_HUB_TOKEN", "legacy-hub-token")
+
+	settings := &config.Settings{}
+	client, kind, err := createHubClient(settings, server.URL)
+	if err != nil {
+		t.Fatalf("createHubClient failed: %v", err)
+	}
+	if kind != CredentialKindHubToken {
+		t.Errorf("expected CredentialKindHubToken, got %q", kind)
+	}
+
+	_, err = client.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health check failed: %v", err)
 	}
 }
 

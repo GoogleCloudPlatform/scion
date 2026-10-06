@@ -138,7 +138,45 @@ type HubContext struct {
 	BrokerID    string
 	ProjectPath string
 	IsGlobal    bool
+	// CredentialKind records which authentication mechanism createHubClient
+	// selected for Client, so a caller that needs to know "is this actually
+	// an agent token" — not just "is the CLI running in agent mode" — can
+	// check it directly instead of inferring it from CLI mode
+	// (ptone/scion#2146). It is purely observational: it
+	// must never be used to change auth priority or behavior, only to let a
+	// caller-side guard key on the credential that's actually in use.
+	CredentialKind CredentialKind
 }
+
+// CredentialKind identifies which authentication mechanism createHubClient
+// selected. See HubContext.CredentialKind.
+type CredentialKind string
+
+const (
+	// CredentialKindUnknown is the zero value: no HubContext was built via a
+	// path that records this (e.g. a test double), or the field predates
+	// this HubContext.
+	CredentialKindUnknown CredentialKind = ""
+	// CredentialKindOAuth is a human/assistant OAuth login
+	// (`scion hub auth login`), via credentials.GetAccessToken.
+	CredentialKindOAuth CredentialKind = "oauth"
+	// CredentialKindAgentToken is an actual agent identity token — the
+	// canonical token file, or the SCION_AUTH_TOKEN bootstrap env var.
+	CredentialKindAgentToken CredentialKind = "agent_token"
+	// CredentialKindHubToken is a bearer token from the SCION_HUB_TOKEN env
+	// var — normally a user personal access token (`scion_pat_...`), or a
+	// bootstrap bearer token; never an agent identity token (this matters
+	// because the agent-mode --all guard's correctness rests on hub_token
+	// being treated as a non-agent-token credential).
+	CredentialKindHubToken CredentialKind = "hub_token"
+	// CredentialKindDevAuto covers both dev-auth paths: the automatic
+	// localhost dev-token override that takes priority over a non-dev agent
+	// token for a non-hub-managed agent, and the final SCION_DEV_TOKEN/
+	// ~/.scion/dev-token fallback when no other credential is configured.
+	// Either way the effective caller is a dev-auth identity, not an agent
+	// token.
+	CredentialKindDevAuto CredentialKind = "dev_auto"
+)
 
 // EnsureHubReadyOptions configures the behavior of EnsureHubReady.
 type EnsureHubReadyOptions struct {
@@ -159,6 +197,11 @@ type EnsureHubReadyOptions struct {
 	// ExcludedAgents extends TargetAgent to support multi-agent operations.
 	// Any excluded agent is filtered from sync gating checks.
 	ExcludedAgents []string
+	// ExplicitProject reports that projectPath came from the --project / -g
+	// or --global flag. Only flag handling sets it: a caller passing a
+	// directory it resolved itself is not an explicit target and keeps
+	// SCION_PROJECT_ID in a hub-connected container (ptone/scion#3123).
+	ExplicitProject bool
 }
 
 // EnsureHubReady performs all Hub pre-flight checks before agent operations.
@@ -203,7 +246,19 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		cleanupProjectBrokerCredentials(resolvedPath)
 	}
 
-	settings, err := config.LoadSettings(resolvedPath)
+	// An explicit --project / -g / --global target names the project to use,
+	// so its ID must come from that project's own settings rather than from
+	// SCION_PROJECT_ID in the environment of the agent container the CLI may
+	// be running in (ptone/scion#3123). Precedence: flag, then the
+	// environment (hub-connected containers only), then the project .scion,
+	// then the global directory.
+	explicitTarget := opts.ExplicitProject
+	loadSettings := config.LoadSettings
+	if explicitTarget {
+		loadSettings = config.LoadSettingsIgnoringEnvProjectID
+	}
+
+	settings, err := loadSettings(resolvedPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load settings: %w", err)
 	}
@@ -254,9 +309,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// settings.ProjectID because the dispatcher sets it to the authoritative
 	// project for this agent. The workspace may contain a cloned repo whose
 	// .scion/settings has a different project_id (e.g. template-sync from an
-	// external repo).
+	// external repo). An explicit target skips this (see explicitTarget).
 	var projectID string
-	if hubContext {
+	if hubContext && !explicitTarget {
 		projectID = projectkeys.ProjectIDFromEnv(os.Getenv)
 	}
 	if projectID == "" {
@@ -275,7 +330,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				return nil, fmt.Errorf("failed to save project_id: %w", err)
 			}
 			// Reload settings to get the updated project_id
-			settings, err = config.LoadSettings(resolvedPath)
+			settings, err = loadSettings(resolvedPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to reload settings: %w", err)
 			}
@@ -283,7 +338,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	// Create Hub client
-	client, err := createHubClient(settings, endpoint)
+	client, credentialKind, err := createHubClient(settings, endpoint)
 	if err != nil {
 		return nil, wrapHubError(fmt.Errorf("failed to create Hub client: %w", err))
 	}
@@ -294,6 +349,18 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 	if _, err := client.Health(ctx); err != nil {
 		return nil, wrapHubError(fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+	}
+
+	// An explicit global target (-g global, -g home, --global) inside a
+	// hub-connected context has no local project ID to use: the global
+	// directory there is not linked to a hub project. Resolve the hub's
+	// Global project instead (ptone/scion#3124).
+	if explicitTarget && isGlobal && hubContext && projectID == "" && settings.GetHubProjectID() == "" {
+		globalID, err := resolveHubGlobalProjectID(ctx, client, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		projectID = globalID
 	}
 
 	// Get broker ID
@@ -311,13 +378,14 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	hubCtx := &HubContext{
-		Client:      client,
-		Endpoint:    endpoint,
-		Settings:    settings,
-		ProjectID:   effectiveProjectID,
-		BrokerID:    brokerID,
-		ProjectPath: resolvedPath,
-		IsGlobal:    isGlobal,
+		Client:         client,
+		Endpoint:       endpoint,
+		Settings:       settings,
+		ProjectID:      effectiveProjectID,
+		BrokerID:       brokerID,
+		ProjectPath:    resolvedPath,
+		IsGlobal:       isGlobal,
+		CredentialKind: credentialKind,
 	}
 
 	debugf("HubContext created: endpoint=%s, projectID=%s (local=%s), brokerID=%s, projectPath=%s, isGlobal=%v",
@@ -559,7 +627,7 @@ func UpdateLastSyncedAt(projectPath string, hubTime time.Time) {
 		}
 	}
 
-	currentState.LastSyncedAt = ts.Format(time.RFC3339Nano)
+	currentState.LastSyncedAt = ts.UTC().Format(time.RFC3339Nano)
 
 	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
 		debugf("Warning: failed to save lastSyncedAt to state.yaml: %v", err)
@@ -762,7 +830,7 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 
 		result.StaleLocal = append(result.StaleLocal, name)
 		debugf("Agent %s local-only but stale (local=%s, watermark=%s), marking StaleLocal",
-			name, localTS.Format(time.RFC3339Nano), lastSyncedAt.Format(time.RFC3339Nano))
+			name, localTS.UTC().Format(time.RFC3339Nano), lastSyncedAt.Format(time.RFC3339Nano))
 	}
 
 	// Find agents on Hub but not locally present.
@@ -1330,7 +1398,12 @@ func readAgentTokenFile() string {
 	return strings.TrimSpace(string(data))
 }
 
-// createHubClient creates a new Hub client with proper authentication.
+// createHubClient creates a new Hub client with proper authentication, and
+// reports which credential it selected (ptone/scion#2146) so a caller like
+// the CLI's --all guard can key on the credential actually in
+// use rather than inferring it from CLI mode. Recording the kind is purely
+// observational — it never changes auth priority or behavior.
+//
 // Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 // Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > auto dev auth.
 // Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
@@ -1341,16 +1414,27 @@ func readAgentTokenFile() string {
 // message to a user) require the real per-agent identity that only that token carries —
 // dev auth resolves to a superuser/dev identity, not any specific agent, so it 401s on
 // self-only endpoints.
-func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, error) {
+//
+// This is the Hub client builder used by EnsureHubReady and
+// resolveHubProjectRef — i.e. everything that goes through
+// CheckHubAvailability* (cmd/common.go), including `scion list`. It
+// duplicates cmd/hub.go's getHubClient, which implements the identical
+// priority order independently for commands that call it directly instead
+// (`broker`, `clean`, `notifications`, `project`, `doctor`, template sync,
+// etc.) and does not report CredentialKind. That duplication is out of scope
+// for this change — tracked as https://github.com/ptone/scion/issues/2213.
+func createHubClient(settings *config.Settings, endpoint string) (hubclient.Client, CredentialKind, error) {
 	var opts []hubclient.Option
 
 	// Add authentication - check in priority order
 	authConfigured := false
+	kind := CredentialKindUnknown
 
 	// 1. Check for OAuth credentials from scion hub auth login
 	if accessToken := credentials.GetAccessToken(endpoint); accessToken != "" {
 		opts = append(opts, hubclient.WithBearerToken(accessToken))
 		authConfigured = true
+		kind = CredentialKindOAuth
 	}
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
@@ -1360,15 +1444,18 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
+					kind = CredentialKindDevAuto
 				}
 			}
 			if !authConfigured {
 				opts = append(opts, hubclient.WithAgentToken(token))
 				authConfigured = true
+				kind = CredentialKindAgentToken
 			}
 		} else if token := os.Getenv("SCION_AUTH_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithAgentToken(token))
 			authConfigured = true
+			kind = CredentialKindAgentToken
 		}
 	}
 
@@ -1377,17 +1464,20 @@ func createHubClient(settings *config.Settings, endpoint string) (hubclient.Clie
 		if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
 			opts = append(opts, hubclient.WithBearerToken(token))
 			authConfigured = true
+			kind = CredentialKindHubToken
 		}
 	}
 
 	// 4. Fallback to auto dev auth
 	if !authConfigured {
 		opts = append(opts, hubclient.WithAutoDevAuth())
+		kind = CredentialKindDevAuto
 	}
 
 	opts = append(opts, hubclient.WithTimeout(30*time.Second))
 
-	return hubclient.New(endpoint, opts...)
+	client, err := hubclient.New(endpoint, opts...)
+	return client, kind, err
 }
 
 func isLocalhostEndpoint(endpoint string) bool {
@@ -1445,34 +1535,29 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 			return
 		}
 
-		vs, err := config.LoadSingleFileVersioned(projectPath)
+		// Load, modify and save under the settings-file lock.
+		err := config.LoadModifySaveVersionedSettings(projectPath, func(vs *config.VersionedSettings) error {
+			if vs.Server == nil || vs.Server.Broker == nil {
+				return config.ErrSkipSave
+			}
+			modified := false
+			if vs.Server.Broker.BrokerID != "" {
+				vs.Server.Broker.BrokerID = ""
+				modified = true
+				debugf("Removed stale server.broker.broker_id from project settings")
+			}
+			if vs.Server.Broker.BrokerToken != "" {
+				vs.Server.Broker.BrokerToken = ""
+				modified = true
+				debugf("Removed stale server.broker.broker_token from project settings")
+			}
+			if !modified {
+				return config.ErrSkipSave
+			}
+			return nil
+		})
 		if err != nil {
-			debugf("Warning: failed to load v1 project settings: %v", err)
-			return
-		}
-
-		if vs.Server == nil || vs.Server.Broker == nil {
-			return
-		}
-
-		modified := false
-		if vs.Server.Broker.BrokerID != "" {
-			vs.Server.Broker.BrokerID = ""
-			modified = true
-			debugf("Removed stale server.broker.broker_id from project settings")
-		}
-		if vs.Server.Broker.BrokerToken != "" {
-			vs.Server.Broker.BrokerToken = ""
-			modified = true
-			debugf("Removed stale server.broker.broker_token from project settings")
-		}
-
-		if !modified {
-			return
-		}
-
-		if err := config.SaveVersionedSettings(projectPath, vs); err != nil {
-			debugf("Warning: failed to write cleaned v1 settings: %v", err)
+			debugf("Warning: failed to clean v1 project settings: %v", err)
 		}
 		return
 	}
@@ -1540,4 +1625,24 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		debugf("Warning: failed to write cleaned settings: %v", err)
 	}
+}
+
+// hubGlobalProjectSlug is the reserved slug of the hub's Global project
+// (see pkg/hub/provider_localpath.go globalProjectSlug).
+const hubGlobalProjectSlug = "global"
+
+// resolveHubGlobalProjectID returns the ID of the hub project with the
+// reserved slug "global". Only the slug identifies the Global project;
+// project names are client-settable, so there is no name fallback.
+func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
+	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
+	if err != nil {
+		return "", wrapHubError(fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+	}
+	if resp == nil || len(resp.Projects) == 0 {
+		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
+			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
+			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
+	}
+	return resp.Projects[0].ID, nil
 }

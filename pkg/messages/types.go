@@ -59,11 +59,15 @@ func IsValidChannel(ch string) bool {
 }
 
 // Message type constants (closed enum).
+//
+// TypeAssistantReply is retired: it was the harness's automatic end-of-turn
+// transcript mirror. It stays valid so historical rows keep validating and
+// rendering; the hub drops new outbound sends of it.
 const (
 	TypeInstruction    = "instruction"
 	TypeInputNeeded    = "input-needed"
 	TypeStateChange    = "state-change"
-	TypeAssistantReply = "assistant-reply"
+	TypeAssistantReply = "assistant-reply" // retired; see above
 	TypeGroupSet       = "group-set"
 	TypeMention        = "mention"
 	TypeSystem         = "system"
@@ -130,7 +134,6 @@ type StructuredMessage struct {
 	Msg            string            `json:"msg"`
 	Type           string            `json:"type"`
 	Plain          bool              `json:"plain,omitempty"`
-	Raw            bool              `json:"raw,omitempty"`
 	Urgent         bool              `json:"urgent,omitempty"`
 	Broadcasted    bool              `json:"broadcasted,omitempty"`
 	ObserverOnly   bool              `json:"observer_only,omitempty"`
@@ -302,7 +305,6 @@ func (m *StructuredMessage) LogAttrs() []any {
 		"urgent", m.Urgent,
 		"broadcasted", m.Broadcasted,
 		"plain", m.Plain,
-		"raw", m.Raw,
 	}
 	if m.SenderID != "" {
 		attrs = append(attrs, "sender_id", m.SenderID)

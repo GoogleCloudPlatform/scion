@@ -34,13 +34,15 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import { setDocumentTitle } from '../../client/page-title.js';
-import { getPrincipalIcon, formatDateTime } from '../shared/role-binding-utils.js';
+import { getPrincipalIcon } from '../shared/role-binding-utils.js';
 import '../shared/principal-picker.js';
 import '../shared/project-picker.js';
 import type { AssignmentFormValues } from '../shared/role-binding-assignment-form.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import '../shared/role-binding-assignment-form.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -86,6 +88,9 @@ interface RoleBinding {
 
 @customElement('scion-page-admin-role-detail')
 export class ScionPageAdminRoleDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   // Core state
   @state() private roleId = '';
   @state() private roleData: RoleDefinition | null = null;
@@ -156,13 +161,16 @@ export class ScionPageAdminRoleDetail extends LitElement {
 
     .header-info {
       flex: 1;
+      min-width: 0;
     }
 
+    /* A long role name breaks inside its line beside the actions. */
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0 0 0.25rem 0;
+      overflow-wrap: anywhere;
     }
 
     .header-description {
@@ -590,27 +598,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
       .join(' ');
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) return rtf.format(-diffSeconds, 'second');
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
-  }
-
   // ---------------------------------------------------------------------------
   // Dialog management
   // ---------------------------------------------------------------------------
@@ -932,8 +919,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
             ? html`<p class="header-description">${role.description}</p>`
             : nothing}
           <div class="metadata-row">
-            Updated ${this.formatRelativeTime(role.updatedAt)} · Created
-            ${this.formatRelativeTime(role.createdAt)}
+            Updated ${formatRelative(role.updatedAt)} · Created ${formatRelative(role.createdAt)}
           </div>
         </div>
         <div class="header-actions">
@@ -1144,7 +1130,9 @@ export class ScionPageAdminRoleDetail extends LitElement {
         </td>
         <td><span class="scope-badge">${scopeLabel}</span></td>
         <td class="hide-mobile">${createdByLabel}</td>
-        <td class="hide-mobile">${formatDateTime(binding.createdAt)}</td>
+        <td class="hide-mobile">
+          ${formatInstantWithZone(binding.createdAt) || binding.createdAt}
+        </td>
         <td>
           <sl-icon-button
             name="trash"

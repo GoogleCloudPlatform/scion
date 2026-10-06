@@ -159,7 +159,30 @@ var configSetCmd = &cobra.Command{
 var configGetCmd = &cobra.Command{
 	Use:   "get <key>",
 	Short: "Get a specific configuration value",
-	Args:  cobra.ExactArgs(1),
+	Long: `Get a specific configuration value.
+
+Supported keys include the top-level settings (active_profile, default_template,
+default_harness_config, workspace_path, image_registry, project_id, cli.autohelp,
+hub.enabled, hub.linked, hub.endpoint, hub.local_only, hub.brokerId, hub.brokerToken,
+hub.brokerNickname — note that hub.brokerToken prints its value, as it always has),
+plus dotted paths into a named entry of the profiles or runtimes maps:
+profiles.<name>.<field> and runtimes.<name>.<field>, where <field> is one of that
+entry's scalar (string, bool, or integer) settings, named by its settings.yaml key
+(e.g. profiles.local.runtime, runtimes.kubernetes.namespace). Within a
+profiles/runtimes entry, structured fields (maps, lists, nested objects — e.g. env,
+volumes, secrets, harness_overrides) and credential-like field names are not
+supported and return an error rather than a partial, reformatted, or unmasked value.
+
+harness_configs.<name>.<field> is not supported: harness configs are normally
+resolved from on-disk harness-config directories, not from settings.yaml alone.
+Use "scion harness-config" to inspect them.
+
+Examples:
+  scion config get active_profile
+  scion config get image_registry
+  scion config get profiles.local.runtime
+  scion config get runtimes.kubernetes.namespace`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		key := args[0]
 
@@ -265,6 +288,7 @@ against the schema — they use the pre-versioned format.`,
 				r.Version = version
 
 				validationErrors, err := config.ValidateSettings(data, version)
+				r.Warnings = append(r.Warnings, config.SettingsWarnings(data, version)...)
 				if err != nil {
 					r.Valid = false
 					r.Errors = []string{err.Error()}

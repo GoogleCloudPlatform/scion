@@ -16,13 +16,17 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/knadh/koanf/providers/confmap"
@@ -284,15 +288,17 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// populate ProjectID and would make this test fail for a reason
+	// unrelated to the variable under test.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -310,9 +316,7 @@ func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
 func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -320,8 +324,12 @@ func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
 	v1Settings := "schema_version: \"1\"\nhub:\n  grove_id: \"file-grove\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Settings), 0644))
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// populate ProjectID and would make this test fail for a reason
+	// unrelated to the variable under test.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -885,6 +893,186 @@ func TestLoadEffectiveSettings_WarnOnIgnoredSettingsFile(t *testing.T) {
 	})
 }
 
+// TestLoadVersionedSettings_AutoExposePortsEnvDoesNotBreakDecode is the
+// regression test for https://github.com/ptone/scion/issues/2447
+// ("runtimebroker: project runtime settings silently ignored when a
+// colliding SCION_* env var is set"). SCION_AUTO_EXPOSE_PORTS and
+// SCION_AUTO_EXPOSE_PORTS_LIST are variables the hub sets inside agent
+// containers (consumed only by
+// sciontool's auto-expose scanner); they are never settings overrides. Left
+// mapped, they land on the bare key "auto_expose_ports", which collides
+// with the struct-typed AutoExposePorts field and used to make koanf's
+// Unmarshal fail outright for every LoadVersionedSettings/LoadEffectiveSettings
+// caller whose own process happened to have one of them set — not just
+// resolveManagerForOpts. Before the fix, LoadVersionedSettings below returns
+// an error; after it, decoding succeeds and file + real env overrides both
+// still apply.
+func TestLoadVersionedSettings_AutoExposePortsEnvDoesNotBreakDecode(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	settingsYAML := `schema_version: "1"
+active_profile: file-profile
+`
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+	t.Run("colliding vars set, no real override: file value wins", func(t *testing.T) {
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadVersionedSettings decoding")
+		assert.Equal(t, "file-profile", vs.ActiveProfile)
+	})
+
+	t.Run("colliding vars set alongside a real override: override still applies", func(t *testing.T) {
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+		t.Setenv("SCION_ACTIVE_PROFILE", "env-profile")
+
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		assert.Equal(t, "env-profile", vs.ActiveProfile, "SCION_ACTIVE_PROFILE must still override the file value")
+	})
+}
+
+// TestLoadEffectiveSettings_AutoExposePortsEnvDoesNotBreakDecode exercises
+// the same regression through LoadEffectiveSettings (the caller
+// resolveManagerForOpts actually uses), covering both the versioned and
+// legacy settings-file branches.
+func TestLoadEffectiveSettings_AutoExposePortsEnvDoesNotBreakDecode(t *testing.T) {
+	t.Run("versioned settings file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+
+		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+		settingsYAML := `schema_version: "1"
+active_profile: file-profile
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+		vs, _, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break LoadEffectiveSettings decoding")
+		assert.Equal(t, "file-profile", vs.ActiveProfile)
+	})
+
+	// "legacy settings file" is a guard, not a regression test: the legacy
+	// Settings struct has no auto_expose_ports field, so this branch never
+	// failed to decode even before the env key mapper excluded these two
+	// variables. It still passes with that exclusion reverted.
+	t.Run("legacy settings file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS", "true")
+		t.Setenv("SCION_AUTO_EXPOSE_PORTS_LIST", "8000,8080,3000")
+
+		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+		settingsYAML := `active_profile: legacy-file-profile
+harnesses:
+  gemini:
+    image: example.com/gemini:latest
+    user: scion
+`
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+		vs, _, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err, "SCION_AUTO_EXPOSE_PORTS/_LIST must never break the legacy LoadEffectiveSettings branch")
+		assert.Equal(t, "legacy-file-profile", vs.ActiveProfile)
+	})
+}
+
+// TestLoadSettings_BareScionHubEnvDoesNotBreakDecode is the regression
+// test for https://github.com/ptone/scion/issues/2724. A bare SCION_HUB
+// variable used to map to the top-level key "hub" as a string, which
+// collides with the struct-typed hub settings and made koanf's Unmarshal
+// fail with "'hub' expected a map or struct, got string" for any project
+// whose settings.yaml has a hub: map. Nothing in scion reads a bare
+// SCION_HUB, so the env key mappers drop it.
+func TestLoadSettings_BareScionHubEnvDoesNotBreakDecode(t *testing.T) {
+	unsetTestEnv(t, "SCION_HUB_ENDPOINT", "SCION_AUTO_EXPOSE_PORTS", "SCION_HUB")
+
+	writeProject := func(t *testing.T, settingsYAML string) string {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		projectDir := filepath.Join(tmpDir, "my-project", ".scion")
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
+		return projectDir
+	}
+	newProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `schema_version: "1"
+hub:
+  endpoint: https://file.example.com
+`)
+	}
+	// newLegacyProject writes an unversioned settings.yaml (no
+	// schema_version), which LoadEffectiveSettings routes through
+	// LoadSettingsKoanf and its legacy env key mapper. The legacy
+	// Settings.Hub field is struct-typed too, so it collides the same way.
+	newLegacyProject := func(t *testing.T) string {
+		t.Helper()
+		return writeProject(t, `hub:
+  endpoint: https://file.example.com
+`)
+	}
+
+	t.Run("SCION_HUB unset: file hub map loads", func(t *testing.T) {
+		projectDir := newProject(t)
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: versioned load ignores it", func(t *testing.T) {
+		projectDir := newProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadVersionedSettings decoding")
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: effective load of legacy file ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		vs, _, err := LoadEffectiveSettings(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadEffectiveSettings decoding")
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://file.example.com", vs.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: legacy koanf load ignores it", func(t *testing.T) {
+		projectDir := newLegacyProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		s, err := LoadSettingsKoanf(projectDir)
+		require.NoError(t, err, "a bare SCION_HUB must never break LoadSettingsKoanf decoding")
+		require.NotNil(t, s.Hub)
+		assert.Equal(t, "https://file.example.com", s.Hub.Endpoint)
+	})
+
+	t.Run("SCION_HUB set: SCION_HUB_ENDPOINT still applies", func(t *testing.T) {
+		projectDir := newProject(t)
+		t.Setenv("SCION_HUB", "https://env.example.com")
+		t.Setenv("SCION_HUB_ENDPOINT", "https://endpoint.example.com")
+		vs, err := LoadVersionedSettings(projectDir)
+		require.NoError(t, err)
+		require.NotNil(t, vs.Hub)
+		assert.Equal(t, "https://endpoint.example.com", vs.Hub.Endpoint)
+	})
+}
+
 // --- Default settings compatibility tests ---
 
 func TestGetDefaultSettingsData_ProducesSameEffectiveDefaults(t *testing.T) {
@@ -1039,6 +1227,9 @@ func TestVersionedEnvKeyMapper(t *testing.T) {
 		{"SCION_CLI_INTERACTIVE_DISABLED", "cli.interactive_disabled"},
 		{"SCION_SERVER_ENV", "server.env"},
 		{"SCION_SERVER_LOG_LEVEL", "server.log_level"},
+		{"SCION_AUTO_EXPOSE_PORTS", ""},
+		{"SCION_AUTO_EXPOSE_PORTS_LIST", ""},
+		{"SCION_HUB", ""},
 	}
 
 	for _, tt := range tests {
@@ -4129,6 +4320,525 @@ func TestGetVersionedSettingValue(t *testing.T) {
 	}
 }
 
+func TestGetVersionedSettingValueNestedMaps(t *testing.T) {
+	vs := &VersionedSettings{
+		SchemaVersion: "1",
+		Profiles: map[string]V1ProfileConfig{
+			"staging": {
+				Runtime:       "docker",
+				ImageRegistry: "ghcr.io/myorg",
+				HarnessOverrides: map[string]V1HarnessOverride{
+					"claude": {Image: "override-image"},
+				},
+			},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"local": {
+				Type:              "docker",
+				Namespace:         "ns1",
+				GKE:               true,
+				ListAllNamespaces: false,
+				Env:               map[string]string{"FOO": "bar"},
+				CloudRun:          &CloudRunConfig{Location: "us-central1"},
+			},
+			// "bare" deliberately leaves CloudRun (and the other pointer-to-struct
+			// fields) unset, to test that an unset structured field is refused the
+			// same way as a set one — see the nil-pointer-to-struct cases below.
+			"bare": {
+				Type: "kubernetes",
+			},
+		},
+		HarnessConfigs: map[string]HarnessConfigEntry{
+			"claude": {
+				Harness: "claude",
+				Image:   "myimage",
+				Secrets: []api.RequiredSecret{{Key: "TOKEN"}},
+			},
+		},
+	}
+
+	scalarTests := []struct {
+		key  string
+		want string
+	}{
+		{"profiles.staging.runtime", "docker"},
+		{"profiles.staging.image_registry", "ghcr.io/myorg"},
+		{"profiles.staging.default_template", ""},
+		{"runtimes.local.type", "docker"},
+		{"runtimes.local.namespace", "ns1"},
+		{"runtimes.local.gke", "true"},
+		{"runtimes.local.list_all_namespaces", "false"},
+	}
+	for _, tt := range scalarTests {
+		t.Run(tt.key, func(t *testing.T) {
+			got, err := GetVersionedSettingValue(vs, tt.key)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	errTests := []struct {
+		name    string
+		key     string
+		wantErr string
+	}{
+		{"unknown profile name", "profiles.missing.runtime", `no profile named "missing"`},
+		{"unknown runtime name", "runtimes.missing.type", `no runtime named "missing"`},
+		{"unknown field on profile", "profiles.staging.nope", `has no field "nope"`},
+		{"unknown field on runtime", "runtimes.local.nope", `has no field "nope"`},
+		{"non-scalar profile field", "profiles.staging.harness_overrides", "is not a scalar value"},
+		{"non-scalar runtime field", "runtimes.local.env", "is not a scalar value"},
+		// A pointer-to-struct field that is nil (unset) must be refused exactly
+		// like one that is set — scalar-ness is decided by the pointee's static
+		// type, not by whether the value happens to be nil. Treating every nil
+		// pointer as scalar would return an empty string with a nil error, so
+		// the CLI would print an empty line and exit 0 for a structured field.
+		{"nil pointer-to-struct profile field", "profiles.staging.resources", "is not a scalar value"},
+		{"nil pointer-to-struct runtime field", "runtimes.bare.cloudrun", "is not a scalar value"},
+		{"nested path under a nil pointer-to-struct field", "runtimes.bare.cloudrun.location", `field "cloudrun" of runtime "bare" is not a scalar value; nested paths are not supported`},
+		{"unsupported category falls back to generic error", "widgets.a.b", "unknown or complex setting key: widgets.a.b"},
+		{"too few parts falls back to generic error", "profiles.staging", "unknown or complex setting key: profiles.staging"},
+		// harness_configs is deliberately unsupported (see getNestedMapSettingValue's
+		// doc comment): it falls through to the same flat "unknown key" error as any
+		// other unrecognized key, rather than a nested-map lookup error, since
+		// GetVersionedSettingValue never dispatches to lookupMapEntryField for it.
+		{"harness_configs category is not supported", "harness_configs.claude.image", "unknown or complex setting key: harness_configs.claude.image"},
+		// Nested paths below a resolved field report a "not supported" error naming
+		// the resolved field, not a misleading "no such field" against the full
+		// dotted remainder — whether that field is itself structured (cloudrun, a
+		// nested struct) or scalar (namespace, a plain string with no sub-fields).
+		{"nested path into a structured field", "runtimes.local.cloudrun.location", `field "cloudrun" of runtime "local" is not a scalar value; nested paths are not supported`},
+		{"nested path into a scalar field", "runtimes.local.namespace.sub", `field "namespace" of runtime "local" is a scalar value and has no sub-fields; nested paths are not supported`},
+		// An unresolved first segment of a nested path names only that segment
+		// ("nope", not the full "nope.sub" remainder) — the field that is
+		// actually missing — and notes that nested paths are not supported,
+		// rather than implying "nope" exists and only "sub" is the problem.
+		{"nested path with unknown first segment", "profiles.staging.nope.sub", `has no field "nope"; nested paths are not supported`},
+		// findFieldByConfigTag matches the configTagName exactly: a field name
+		// that merely extends, or differs only in case from, a real tag does
+		// not match it.
+		{"field name extending a real tag", "runtimes.local.namespacex", `has no field "namespacex"`},
+		{"field name in a different case", "runtimes.local.NAMESPACE", `has no field "NAMESPACE"`},
+		// A trailing dot leaves the field segment empty; findFieldByConfigTag's
+		// tag != "" guard (see TestLookupScalarFieldEmptyNameMatchesNoField)
+		// keeps that empty name from matching any field.
+		{"empty field segment", "profiles.staging.", `has no field ""`},
+	}
+	for _, tt := range errTests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := GetVersionedSettingValue(vs, tt.key)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.key)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestCredentialLikeFieldPatternAlternatives pins credentialLikeFieldPattern
+// itself, one matching name per alternative (plus a mixed-case one, to pin
+// the (?i) flag) and a set of names that must not match. Without this, a
+// mutation that drops most of the pattern's alternatives — leaving only
+// enough to satisfy the other tests, which each reference only one or two
+// specific names — passes undetected; see TestLookupScalarFieldRefusesCredentialLikeNames
+// and TestScalarFieldsExcludeCredentialLikeNames, neither of which touches
+// most of these alternatives.
+func TestCredentialLikeFieldPatternAlternatives(t *testing.T) {
+	matches := []string{
+		"token",
+		"client_secret",
+		"password",
+		"passwd",
+		"api_key",
+		"apikey",
+		"credential",
+		"gh_pat",
+		"pat", // bare "pat", pinning ^pat$
+		"private_key",
+		"privatekey",
+		"ssh_key",
+		"sshkey",
+		"bearer",
+		"auth_header",
+		"authheader",
+		"API_KEY", // mixed case, pins the (?i) flag
+	}
+	for _, name := range matches {
+		t.Run("matches/"+name, func(t *testing.T) {
+			assert.True(t, credentialLikeFieldPattern.MatchString(name))
+		})
+	}
+
+	nonMatches := []string{
+		// The real scalar tags on V1ProfileConfig and V1RuntimeConfig — must
+		// never be refused, or config get would break for every user.
+		"runtime",
+		"namespace",
+		"default_template",
+		"image_registry",
+		"list_all_namespaces",
+		// A documented gap (see credentialLikeFieldPattern's comment): a
+		// credential-holding field under this name would still render in
+		// plaintext, since name-based coverage cannot catch it.
+		"passphrase",
+		// A word that merely ends in "pat" is not a credential-like name.
+		// The pattern anchors on "_pat$" or "^pat$" rather than a bare
+		// "pat$", specifically to exclude names like this.
+		"compat",
+	}
+	for _, name := range nonMatches {
+		t.Run("does_not_match/"+name, func(t *testing.T) {
+			assert.False(t, credentialLikeFieldPattern.MatchString(name))
+		})
+	}
+}
+
+// TestLookupScalarFieldRefusesCredentialLikeNames directly exercises the
+// credential-name refusal branch of lookupScalarField, using a local
+// struct with a plain string field whose tag matches
+// credentialLikeFieldPattern. This proves the refusal actually fires (not
+// just that no current production field happens to match) — see
+// TestScalarFieldsExcludeCredentialLikeNames for the production-struct
+// guard.
+func TestLookupScalarFieldRefusesCredentialLikeNames(t *testing.T) {
+	type fakeEntry struct {
+		APIKey string `koanf:"api_key"`
+		SSHKey string `koanf:"ssh_key"`
+		Name   string `koanf:"name"`
+	}
+	entry := fakeEntry{APIKey: "super-secret-value", SSHKey: "another-secret", Name: "ok"}
+
+	for _, field := range []string{"api_key", "ssh_key"} {
+		_, err := lookupScalarField(entry, field, "widgets.x."+field, "widget", "x")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "looks like a credential")
+		assert.NotContains(t, err.Error(), "secret-value")
+		assert.NotContains(t, err.Error(), "another-secret")
+	}
+
+	val, err := lookupScalarField(entry, "name", "widgets.x.name", "widget", "x")
+	require.NoError(t, err)
+	assert.Equal(t, "ok", val)
+}
+
+// TestLookupScalarFieldNilPointerClassification pins scalarValueString's
+// nil-pointer handling using a local struct with fields V1ProfileConfig and
+// V1RuntimeConfig don't happen to exercise today: a nil pointer to a scalar
+// type (e.g. *bool) must still render as an empty string, while a nil
+// pointer to a struct (e.g. an unset CloudRun-shaped field) must be refused
+// as non-scalar — scalar-ness is decided by the pointee's static type, not
+// by whether the field happens to be nil.
+func TestLookupScalarFieldNilPointerClassification(t *testing.T) {
+	type fakeStruct struct {
+		Sub string `koanf:"sub"`
+	}
+	type fakeEntry struct {
+		NilString *string     `koanf:"nil_string"`
+		NilBool   *bool       `koanf:"nil_bool"`
+		NilStruct *fakeStruct `koanf:"nil_struct"`
+	}
+	entry := fakeEntry{}
+
+	val, err := lookupScalarField(entry, "nil_string", "widgets.x.nil_string", "widget", "x")
+	require.NoError(t, err)
+	assert.Empty(t, val)
+
+	val, err = lookupScalarField(entry, "nil_bool", "widgets.x.nil_bool", "widget", "x")
+	require.NoError(t, err)
+	assert.Empty(t, val)
+
+	_, err = lookupScalarField(entry, "nil_struct", "widgets.x.nil_struct", "widget", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a scalar value")
+
+	_, err = lookupScalarField(entry, "nil_struct.sub", "widgets.x.nil_struct.sub", "widget", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `field "nil_struct" of widget "x" is not a scalar value; nested paths are not supported`)
+}
+
+// TestScalarKindAgreesWithScalarValueString checks, for a representative
+// type of every reflect.Kind that can appear as a struct field (i.e. every
+// kind except Invalid and Pointer itself — pointer indirection is exercised
+// via the PointerTo(t) case below, not as its own "kind" of leaf value),
+// that isScalarKind(k) agrees with what scalarValueString actually does:
+// once for a non-nil zero value of that kind, and once for a nil pointer to
+// that kind (the path scalarValueString takes for an unset pointer field).
+//
+// The expected scalar-ness of each kind is pinned explicitly in the table
+// (the "scalar" column below), not derived from isScalarKind itself: a
+// table that instead computed want := isScalarKind(tt.typ.Kind()) could
+// only ever catch disagreement between isScalarKind and scalarValueString,
+// never a change to isScalarKind's own kind list (e.g. dropping the Uint
+// kinds), since both sides of the comparison would move together. The
+// completeness check at the end of the test asserts that every kind from
+// reflect.Bool through reflect.UnsafePointer (except Pointer) has a row in
+// the table, so a kind added to Go later, or a row removed here, cannot be
+// skipped silently. isScalarKind is the single source of truth
+// scalarValueString gates on for both paths, so this test is what makes
+// "the two cannot drift" true rather than aspirational — see isScalarKind's
+// doc comment.
+func TestScalarKindAgreesWithScalarValueString(t *testing.T) {
+	types := []struct {
+		name   string
+		typ    reflect.Type
+		scalar bool
+	}{
+		{"string", reflect.TypeOf(""), true},
+		{"bool", reflect.TypeOf(false), true},
+		{"int", reflect.TypeOf(int(0)), true},
+		{"int8", reflect.TypeOf(int8(0)), true},
+		{"int16", reflect.TypeOf(int16(0)), true},
+		{"int32", reflect.TypeOf(int32(0)), true},
+		{"int64", reflect.TypeOf(int64(0)), true},
+		{"uint", reflect.TypeOf(uint(0)), true},
+		{"uint8", reflect.TypeOf(uint8(0)), true},
+		{"uint16", reflect.TypeOf(uint16(0)), true},
+		{"uint32", reflect.TypeOf(uint32(0)), true},
+		{"uint64", reflect.TypeOf(uint64(0)), true},
+		{"uintptr", reflect.TypeOf(uintptr(0)), false},
+		{"float32", reflect.TypeOf(float32(0)), false},
+		{"float64", reflect.TypeOf(float64(0)), false},
+		{"complex64", reflect.TypeOf(complex64(0)), false},
+		{"complex128", reflect.TypeOf(complex128(0)), false},
+		{"struct", reflect.TypeOf(struct{}{}), false},
+		{"map", reflect.TypeOf(map[string]int{}), false},
+		{"slice", reflect.TypeOf([]int{}), false},
+		{"array", reflect.TypeOf([1]int{}), false},
+		{"interface", reflect.TypeOf((*any)(nil)).Elem(), false},
+		{"chan", reflect.TypeOf(make(chan int)), false},
+		{"func", reflect.TypeOf(func() {}), false},
+		{"unsafe_pointer", reflect.TypeOf(unsafe.Pointer(nil)), false},
+	}
+
+	seen := make(map[reflect.Kind]bool, len(types))
+	for _, tt := range types {
+		seen[tt.typ.Kind()] = true
+	}
+	for k := reflect.Bool; k <= reflect.UnsafePointer; k++ {
+		if k == reflect.Pointer {
+			continue
+		}
+		assert.True(t, seen[k], "reflect.Kind %s has no row in the agreement table", k)
+	}
+
+	for _, tt := range types {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.scalar, isScalarKind(tt.typ.Kind()), "isScalarKind(%s)", tt.name)
+
+			_, directOK := scalarValueString(reflect.Zero(tt.typ))
+			assert.Equal(t, tt.scalar, directOK, "direct (non-pointer) %s value", tt.name)
+
+			nilPtr := reflect.Zero(reflect.PointerTo(tt.typ))
+			_, nilPtrOK := scalarValueString(nilPtr)
+			assert.Equal(t, tt.scalar, nilPtrOK, "nil pointer to %s", tt.name)
+		})
+	}
+}
+
+// TestScalarValueStringRendersIntegers proves scalarValueString actually
+// formats non-zero integer values correctly, not just that it accepts them
+// (TestScalarKindAgreesWithScalarValueString only ever checks the zero
+// value). It covers a negative int, the largest uint64, and a non-nil
+// pointer to an int, through lookupScalarField so the credential-name and
+// nested-path logic sits in the path too.
+func TestScalarValueStringRendersIntegers(t *testing.T) {
+	n := -7
+	type fakeEntry struct {
+		Neg    int    `koanf:"neg"`
+		Big    uint64 `koanf:"big"`
+		PtrInt *int   `koanf:"ptr_int"`
+	}
+	entry := fakeEntry{
+		Neg:    -7,
+		Big:    math.MaxUint64,
+		PtrInt: &n,
+	}
+
+	tests := []struct {
+		field string
+		want  string
+	}{
+		{"neg", "-7"},
+		{"big", "18446744073709551615"},
+		{"ptr_int", "-7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			got, err := lookupScalarField(entry, tt.field, "widgets.x."+tt.field, "widget", "x")
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestConfigTagName exercises configTagName's yaml fallback and its "-"
+// skip against a local struct, since no field on V1ProfileConfig or
+// V1RuntimeConfig takes either path today — see configTagName's doc
+// comment, which names this test.
+func TestConfigTagName(t *testing.T) {
+	type fakeStruct struct {
+		KoanfOnly string `koanf:"koanf_only"`
+		YamlOnly  string `yaml:"yaml_only,omitempty"`
+		KoanfWins string `koanf:"koanf_wins" yaml:"yaml_loses"`
+		Skipped   string `koanf:"-"`
+		Untagged  string
+	}
+
+	tests := []struct {
+		field string
+		want  string
+	}{
+		{"KoanfOnly", "koanf_only"},
+		{"YamlOnly", "yaml_only"},
+		{"KoanfWins", "koanf_wins"},
+		{"Skipped", ""},
+		{"Untagged", ""},
+	}
+
+	typ := reflect.TypeOf(fakeStruct{})
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			f, ok := typ.FieldByName(tt.field)
+			require.True(t, ok, "field %s not found on fakeStruct", tt.field)
+			assert.Equal(t, tt.want, configTagName(f))
+		})
+	}
+}
+
+// TestLookupScalarFieldEmptyNameMatchesNoField proves that an empty field
+// name — as reached via a trailing dot in a dotted key, e.g.
+// "profiles.ci." — never resolves, even against a struct with an untagged
+// field and a koanf:"-" field, both of which configTagName reports as ""
+// the same way an empty query name is. findFieldByConfigTag's tag != ""
+// guard is what keeps those two empty strings from being treated as a
+// match; without it, the first untagged or "-" field would be returned for
+// any empty name. No field on V1ProfileConfig or V1RuntimeConfig is
+// untagged today, so this case is only reachable through a local struct.
+func TestLookupScalarFieldEmptyNameMatchesNoField(t *testing.T) {
+	type fakeStruct struct {
+		Skipped  string `koanf:"-"`
+		Untagged string
+	}
+	_, err := lookupScalarField(fakeStruct{}, "", "widgets.x.", "widget", "x")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `has no field ""`)
+}
+
+// TestFindFieldByConfigTagHandlesNonStructValues proves findFieldByConfigTag
+// returns false instead of panicking when v is not a struct — a nil
+// pointer, a non-nil pointer to a non-struct, or a plain non-struct value —
+// since reflect.Type.NumField panics for non-struct kinds. Neither
+// V1ProfileConfig nor V1RuntimeConfig is ever passed in as a pointer today
+// (lookupMapEntryField's map values are plain structs), so this guards
+// against a future caller or refactor passing one of these shapes rather
+// than a currently reachable production path. A pointer to a struct is also
+// checked, to prove the function still resolves through one level (or more)
+// of indirection rather than refusing every pointer.
+func TestFindFieldByConfigTagHandlesNonStructValues(t *testing.T) {
+	type fakeStruct struct {
+		Name string `koanf:"name"`
+	}
+
+	t.Run("nil pointer to struct", func(t *testing.T) {
+		var p *fakeStruct
+		_, ok := findFieldByConfigTag(reflect.ValueOf(p), "name")
+		assert.False(t, ok)
+	})
+	t.Run("non-struct value", func(t *testing.T) {
+		_, ok := findFieldByConfigTag(reflect.ValueOf("not a struct"), "name")
+		assert.False(t, ok)
+	})
+	t.Run("nil pointer to non-struct", func(t *testing.T) {
+		var p *string
+		_, ok := findFieldByConfigTag(reflect.ValueOf(p), "name")
+		assert.False(t, ok)
+	})
+	t.Run("pointer to struct resolves like the struct itself", func(t *testing.T) {
+		entry := &fakeStruct{Name: "ok"}
+		fv, ok := findFieldByConfigTag(reflect.ValueOf(entry), "name")
+		require.True(t, ok)
+		assert.Equal(t, "ok", fv.String())
+	})
+	t.Run("pointer to pointer to struct resolves through both", func(t *testing.T) {
+		entry := &fakeStruct{Name: "ok"}
+		pp := &entry
+		fv, ok := findFieldByConfigTag(reflect.ValueOf(pp), "name")
+		require.True(t, ok)
+		assert.Equal(t, "ok", fv.String())
+	})
+}
+
+// TestGetNestedMapSettingValueNilSettings proves getNestedMapSettingValue
+// returns handled=false for a nil *VersionedSettings on a key shaped like
+// "profiles.x.y", rather than panicking on vs.Profiles — and that
+// GetVersionedSettingValue, which calls it, surfaces the ordinary "unknown
+// or complex setting key" error for that case instead of panicking.
+func TestGetNestedMapSettingValueNilSettings(t *testing.T) {
+	_, err, handled := getNestedMapSettingValue(nil, "profiles.local.runtime")
+	assert.False(t, handled)
+	assert.NoError(t, err)
+
+	_, err = GetVersionedSettingValue(nil, "profiles.local.runtime")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown or complex setting key: profiles.local.runtime")
+}
+
+// isScalarFieldType reports whether a struct field's static type is one
+// lookupScalarField could actually render (string, bool, integer, or a
+// pointer to one) — as opposed to a map, slice, or (pointer-to-)struct,
+// which lookupScalarField already refuses via scalarValueString regardless
+// of its name. Used by TestScalarFieldsExcludeCredentialLikeNames to scope
+// the credential-name guard to fields that config get could actually print.
+//
+// This delegates to the production isScalarKind/underlyingKind helpers
+// (also used by scalarValueString to classify a nil pointer-to-struct field,
+// e.g. an unset CloudRun, as non-scalar) rather than re-deriving its own
+// kind list, so this test-only classification cannot silently drift out of
+// sync with what config get actually renders.
+func isScalarFieldType(t reflect.Type) bool {
+	return isScalarKind(underlyingKind(t))
+}
+
+// TestScalarFieldsExcludeCredentialLikeNames is a tripwire, not a coverage
+// guarantee: it reflects over every scalar-typed field (see
+// isScalarFieldType) of V1ProfileConfig and V1RuntimeConfig — the structs
+// lookupScalarField is used against via config get's profiles/runtimes
+// dotted-key support — and fails if any koanf/yaml tag matches
+// credentialLikeFieldPattern. Non-scalar fields (Secrets, Env, and similar)
+// are skipped: lookupScalarField already refuses them regardless of name,
+// via scalarValueString, so a name match there carries no risk.
+//
+// No scalar field matches today. If this test starts failing, it means a
+// new scalar field was added whose name matches the pattern; lookupScalarField
+// already refuses it by name (see TestLookupScalarFieldRefusesCredentialLikeNames),
+// so the field will not render in plaintext as-is. Treat the failure as a
+// prompt to consciously decide whether refusal is the right behavior for
+// that field, or to rename it — not as a sign that credential material was printed.
+// This test cannot catch a credential-holding field whose name does not
+// match credentialLikeFieldPattern (e.g. "passphrase"); it only checks
+// names against the pattern.
+func TestScalarFieldsExcludeCredentialLikeNames(t *testing.T) {
+	structs := []interface{}{V1ProfileConfig{}, V1RuntimeConfig{}}
+	for _, s := range structs {
+		typ := reflect.TypeOf(s)
+		t.Run(typ.Name(), func(t *testing.T) {
+			for i := 0; i < typ.NumField(); i++ {
+				f := typ.Field(i)
+				if !isScalarFieldType(f.Type) {
+					continue
+				}
+				tag := configTagName(f)
+				if tag == "" {
+					continue
+				}
+				assert.False(t, credentialLikeFieldPattern.MatchString(tag),
+					"field %s.%s has scalar type and koanf/yaml tag %q, which matches the credential-like "+
+						"pattern; lookupScalarField will refuse it by name via config get, so confirm that is "+
+						"the intended handling for this field (or rename it) before landing", typ.Name(), f.Name, tag)
+			}
+		})
+	}
+}
+
 func TestIsImageRegistryConfigured(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -4352,6 +5062,13 @@ func TestWorkspaceStorageConfig_NFSDefaults(t *testing.T) {
 		assert.Nil(t, ws.NFS)
 	})
 
+	t.Run("backend name is case-sensitive", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "NFS"}
+		ws.ApplyNFSDefaults()
+		assert.Nil(t, ws.NFS, "only the exact name \"nfs\" selects the NFS backend")
+		assert.NoError(t, ws.ValidateNFS(), "ValidateNFS ignores non-nfs backends; ValidateWorkspaceStorage rejects the name")
+	})
+
 	t.Run("nil receiver is safe", func(t *testing.T) {
 		var ws *V1WorkspaceStorageConfig
 		ws.ApplyNFSDefaults() // should not panic
@@ -4390,6 +5107,163 @@ func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
 		err := ws.ValidateNFS()
 		require.NoError(t, err)
 	})
+}
+
+func TestWorkspaceStorageConfig_ApplyWorkspaceStorageDefaults(t *testing.T) {
+	t.Run("nfs delegates to ApplyNFSDefaults", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "nfs"}
+		ws.ApplyWorkspaceStorageDefaults()
+		require.NotNil(t, ws.NFS)
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.NFS.SubPathRoot)
+		assert.Equal(t, 1000, ws.NFS.UID)
+	})
+
+	t.Run("cloudrun-volume defaults subpath_root", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.CloudRunVolume.SubPathRoot)
+	})
+
+	t.Run("gke-shared-volume defaults subpath_root", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.GKESharedVolume.SubPathRoot)
+	})
+
+	t.Run("explicit subpath_root is preserved", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: "trees"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, "trees", ws.GKESharedVolume.SubPathRoot)
+	})
+
+	t.Run("missing volume block stays nil", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Nil(t, ws.CloudRunVolume)
+	})
+
+	t.Run("local, unknown and nil are left alone", func(t *testing.T) {
+		for _, backend := range []string{"", "local", "s3", "NFS"} {
+			ws := &V1WorkspaceStorageConfig{Backend: backend}
+			ws.ApplyWorkspaceStorageDefaults()
+			assert.Equal(t, &V1WorkspaceStorageConfig{Backend: backend}, ws)
+		}
+		var ws *V1WorkspaceStorageConfig
+		ws.ApplyWorkspaceStorageDefaults() // must not panic
+	})
+}
+
+func TestWorkspaceStorageConfig_ValidateWorkspaceStorage(t *testing.T) {
+	nfsShares := []V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/data"}}
+	tests := []struct {
+		name    string
+		ws      *V1WorkspaceStorageConfig
+		wantErr string // empty means valid
+	}{
+		{name: "nil", ws: nil},
+		{name: "empty backend", ws: &V1WorkspaceStorageConfig{}},
+		{name: "local", ws: &V1WorkspaceStorageConfig{Backend: "local"}},
+		{name: "unknown backend", ws: &V1WorkspaceStorageConfig{Backend: "s3"}, wantErr: `workspace_storage.backend "s3" is not supported`},
+		{name: "backend names are case-sensitive", ws: &V1WorkspaceStorageConfig{Backend: "NFS"}, wantErr: "is not supported"},
+		{name: "nfs without shares", ws: &V1WorkspaceStorageConfig{Backend: "nfs"}, wantErr: "no NFS shares are defined"},
+		{name: "nfs with shares", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: &V1NFSConfig{Shares: nfsShares}}},
+		{
+			name:    "nfs with absolute subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "nfs", NFS: &V1NFSConfig{Shares: nfsShares, SubPathRoot: "/projects"}},
+			wantErr: "workspace_storage.nfs.subpath_root must be relative",
+		},
+		{name: "cloudrun-volume", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol"}}},
+		{name: "cloudrun-volume without block", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}, wantErr: "cloudrun_volume.volume_name is not set"},
+		{
+			name:    "cloudrun-volume with empty volume_name",
+			ws:      &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{SubPathRoot: "projects"}},
+			wantErr: "cloudrun_volume.volume_name is not set",
+		},
+		{
+			name:    "cloudrun-volume with traversing subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol", SubPathRoot: "../x"}},
+			wantErr: "workspace_storage.cloudrun_volume.subpath_root",
+		},
+		{name: "gke-shared-volume", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", PVClaimName: "pvc"}}},
+		{name: "gke-shared-volume without block", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume"}, wantErr: "gke_shared_volume.volume_name is not set"},
+		{
+			name:    "gke-shared-volume with empty volume_name",
+			ws:      &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{PVClaimName: "pvc"}},
+			wantErr: "gke_shared_volume.volume_name is not set",
+		},
+		{
+			name:    "gke-shared-volume with unclean subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: "projects/"}},
+			wantErr: "workspace_storage.gke_shared_volume.subpath_root",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.ws.ApplyWorkspaceStorageDefaults()
+			err := tt.ws.ValidateWorkspaceStorage()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateSubPathRoot_SuggestsCleanValue pins the clean-path check: it
+// runs before the component checks so an unclean value names the value to
+// use instead, and gives no suggestion for ".." or for a value that cleans
+// to ".".
+func TestValidateSubPathRoot_SuggestsCleanValue(t *testing.T) {
+	suggest := map[string]string{
+		"projects/":        "projects",
+		"./projects":       "projects",
+		"projects/.":       "projects",
+		"a//b":             "a/b",
+		"team/./projects/": "team/projects",
+	}
+	for in, want := range suggest {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.Contains(t, err.Error(), fmt.Sprintf("must be a clean path (got %q, use %q)", in, want))
+	}
+
+	noSuggestion := map[string]string{
+		"projects/../escape": `".." path component`,
+		"../projects":        `".." path component`,
+		"a/..":               `".." path component`,
+		"./a/../b":           `".." path component`,
+		".":                  `"." path component`,
+	}
+	for in, want := range noSuggestion {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.NotContains(t, err.Error(), "use ", in)
+		assert.Contains(t, err.Error(), want, in)
+	}
+
+	for _, valid := range []string{"projects", "team/projects", "a.b/c-d"} {
+		assert.NoError(t, ValidateSubPathRoot(valid), valid)
+	}
+}
+
+func TestResolveSubPathRoot(t *testing.T) {
+	got, err := ResolveSubPathRoot("")
+	require.NoError(t, err)
+	assert.Equal(t, DefaultWorkspaceSubPathRoot, got)
+
+	for _, valid := range []string{"projects", "trees", "team/trees"} {
+		got, err := ResolveSubPathRoot(valid)
+		require.NoError(t, err, valid)
+		assert.Equal(t, valid, got)
+	}
+
+	for _, invalid := range []string{"/projects", "../projects", "a/../b", "a/./b", "./a", "a/", "a//b", "..", "."} {
+		_, err := ResolveSubPathRoot(invalid)
+		assert.Error(t, err, invalid)
+	}
 }
 
 func TestWorkspaceStorageConfig_BackendUnset_IsLocal(t *testing.T) {
@@ -4491,9 +5365,9 @@ func TestSharedDirStorageConfig_Validate(t *testing.T) {
 		want  string
 	}{
 		{"absolute", "/projects", "must be relative"},
-		{"empty component", "projects//nested", "empty path component"},
+		{"empty component", "projects//nested", `must be a clean path (got "projects//nested", use "projects/nested")`},
 		{"leading slash empty component", "/", "must be relative"},
-		{"dot component", "projects/./nested", "\".\" path component"},
+		{"dot component", "projects/./nested", `use "projects/nested"`},
 		{"dotdot component", "projects/../escape", "\"..\" path component"},
 		{"bare dotdot", "..", "\"..\" path component"},
 	}
@@ -4562,7 +5436,7 @@ func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
 		assert.Nil(t, s.IgnoredNFSFields())
 	})
 
-	t.Run("nfs backend with all four ignored fields set", func(t *testing.T) {
+	t.Run("nfs backend with all ignored fields set", func(t *testing.T) {
 		s := &V1SharedDirStorageConfig{
 			Backend: "nfs",
 			NFS: &V1NFSConfig{
@@ -4572,9 +5446,11 @@ func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
 				GID:          1000,
 				MountOptions: "vers=3",
 				StorageClass: "standard",
+				AutoMount:    true,
 			},
 		}
-		assert.ElementsMatch(t, []string{"uid", "gid", "mount_options", "storage_class"}, s.IgnoredNFSFields())
+		// gid is not ignored: it is the leaf-group allowlist (ptone/scion#3155).
+		assert.ElementsMatch(t, []string{"uid", "mount_options", "storage_class", "auto_mount"}, s.IgnoredNFSFields())
 	})
 
 	t.Run("nfs backend with only one ignored field set", func(t *testing.T) {
@@ -4583,10 +5459,22 @@ func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
 			NFS: &V1NFSConfig{
 				MountRoot: "/srv",
 				Shares:    []V1NFSShare{{ID: "scion-shared"}},
+				UID:       1003,
+			},
+		}
+		assert.Equal(t, []string{"uid"}, s.IgnoredNFSFields())
+	})
+
+	t.Run("nfs backend with gid set is not warned about", func(t *testing.T) {
+		s := &V1SharedDirStorageConfig{
+			Backend: "nfs",
+			NFS: &V1NFSConfig{
+				MountRoot: "/srv",
+				Shares:    []V1NFSShare{{ID: "scion-shared"}},
 				GID:       1003,
 			},
 		}
-		assert.Equal(t, []string{"gid"}, s.IgnoredNFSFields())
+		assert.Nil(t, s.IgnoredNFSFields())
 	})
 }
 
@@ -5486,4 +6374,488 @@ func TestRewriteImageRegistry_Idempotent(t *testing.T) {
 			assert.Equal(t, once, RewriteImageRegistry(once, registry), "registry %q image %q", registry, image)
 		}
 	}
+}
+
+// TestResolveKubernetesServiceAccountMapping covers the precedence for GCP
+// identity mode "assign" on Kubernetes (ptone/scion#2328): a
+// profile-level entry for a given GSA wins over the runtime-level entry for
+// the same GSA, mirroring ResolveImageRegistry's profile-overrides-runtime
+// precedent but evaluated per map key.
+func TestResolveKubernetesServiceAccountMapping(t *testing.T) {
+	tests := []struct {
+		name        string
+		settings    *VersionedSettings
+		profileName string
+		gsaEmail    string
+		wantKSA     string
+		wantOK      bool
+	}{
+		{
+			name: "runtime-level mapping",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {Runtime: "gke"},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa",
+						},
+					},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "agent-worker-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "profile-level entry overrides runtime-level entry for the same GSA",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {
+						Runtime: "gke",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "profile-ksa",
+						},
+					},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "runtime-ksa",
+						},
+					},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "profile-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "profile mapping for a different GSA does not shadow the runtime mapping",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {
+						Runtime: "gke",
+						KubernetesServiceAccountMappings: map[string]string{
+							"other@my-project.iam.gserviceaccount.com": "other-ksa",
+						},
+					},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "runtime-ksa",
+						},
+					},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "runtime-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "empty profile name uses active profile",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {Runtime: "gke"},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {
+						Type: "kubernetes",
+						KubernetesServiceAccountMappings: map[string]string{
+							"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa",
+						},
+					},
+				},
+			},
+			profileName: "",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "agent-worker-ksa",
+			wantOK:      true,
+		},
+		{
+			name: "no mapping for the requested GSA",
+			settings: &VersionedSettings{
+				ActiveProfile: "prod",
+				Profiles: map[string]V1ProfileConfig{
+					"prod": {Runtime: "gke"},
+				},
+				Runtimes: map[string]V1RuntimeConfig{
+					"gke": {Type: "kubernetes"},
+				},
+			},
+			profileName: "prod",
+			gsaEmail:    "unmapped@my-project.iam.gserviceaccount.com",
+			wantKSA:     "",
+			wantOK:      false,
+		},
+		{
+			name:        "unknown profile",
+			settings:    &VersionedSettings{ActiveProfile: "prod"},
+			profileName: "does-not-exist",
+			gsaEmail:    "agent-worker@my-project.iam.gserviceaccount.com",
+			wantKSA:     "",
+			wantOK:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotKSA, gotOK := tt.settings.ResolveKubernetesServiceAccountMapping(tt.profileName, tt.gsaEmail)
+			assert.Equal(t, tt.wantKSA, gotKSA)
+			assert.Equal(t, tt.wantOK, gotOK)
+		})
+	}
+}
+
+// TestValidateKubernetesServiceAccountMappings covers the three GSA email
+// shapes GCP actually issues (user-managed, App Engine default, Compute
+// Engine default) plus rejection of malformed emails and KSA names.
+func TestValidateKubernetesServiceAccountMappings(t *testing.T) {
+	tests := []struct {
+		name     string
+		mappings map[string]string
+		wantErr  bool
+	}{
+		{
+			name:     "user-managed GSA (iam.gserviceaccount.com)",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  false,
+		},
+		{
+			name:     "App Engine default GSA (appspot.gserviceaccount.com)",
+			mappings: map[string]string{"my-project@appspot.gserviceaccount.com": "appengine-ksa"},
+			wantErr:  false,
+		},
+		{
+			name:     "Compute Engine default GSA (developer.gserviceaccount.com)",
+			mappings: map[string]string{"123456789012-compute@developer.gserviceaccount.com": "compute-default-ksa"},
+			wantErr:  false,
+		},
+		{
+			name:     "malformed GSA email",
+			mappings: map[string]string{"not-an-email": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email not ending in gserviceaccount.com",
+			mappings: map[string]string{"agent-worker@my-project.iam.example.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "KSA name with uppercase characters",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "Agent-Worker-KSA"},
+			wantErr:  true,
+		},
+		{
+			name:     "KSA name with underscore",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "agent_worker_ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "empty KSA name",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": ""},
+			wantErr:  true,
+		},
+		{
+			name:     "empty mapping set",
+			mappings: map[string]string{},
+			wantErr:  false,
+		},
+		{
+			name:     "KSA name with a dot (DNS-1123 subdomain, not just a label)",
+			mappings: map[string]string{"agent-worker@my-project.iam.gserviceaccount.com": "team.agent-worker"},
+			wantErr:  false,
+		},
+		{
+			name:     "uppercase GSA email is rejected, not silently lowercased",
+			mappings: map[string]string{"Agent-Worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email with an empty domain label",
+			mappings: map[string]string{"agent-worker@.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email with a domain label starting with a hyphen",
+			mappings: map[string]string{"agent-worker@-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "GSA email with a disallowed local-part character",
+			mappings: map[string]string{"agent!worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+		{
+			name:     "empty GSA email",
+			mappings: map[string]string{"": "agent-worker-ksa"},
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateKubernetesServiceAccountMappings(tt.mappings)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestResolveKubernetesServiceAccountMapping_CaseInsensitiveLookup proves the
+// lookup lower-cases the requested GSA email before matching, so a caller
+// that received the email in mixed case (e.g. from an upstream API) still
+// resolves the mapping against a validated, lowercase settings key.
+func TestResolveKubernetesServiceAccountMapping_CaseInsensitiveLookup(t *testing.T) {
+	vs := &VersionedSettings{
+		ActiveProfile: "prod",
+		Profiles: map[string]V1ProfileConfig{
+			"prod": {Runtime: "gke"},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke": {
+				Type: "kubernetes",
+				KubernetesServiceAccountMappings: map[string]string{
+					"agent-worker@my-project.iam.gserviceaccount.com": "agent-worker-ksa",
+				},
+			},
+		},
+	}
+	ksa, ok := vs.ResolveKubernetesServiceAccountMapping("prod", "Agent-Worker@My-Project.IAM.GServiceAccount.com")
+	assert.True(t, ok)
+	assert.Equal(t, "agent-worker-ksa", ksa)
+}
+
+// TestResolveKubernetesServiceAccountMapping_ProfileEmptyValueFallsThrough
+// proves that an explicit but empty-string profile-level entry for a GSA
+// does not shadow the runtime-level entry for the same GSA — it is treated
+// as unset, per the resolver's documented fall-through behavior.
+func TestResolveKubernetesServiceAccountMapping_ProfileEmptyValueFallsThrough(t *testing.T) {
+	vs := &VersionedSettings{
+		ActiveProfile: "prod",
+		Profiles: map[string]V1ProfileConfig{
+			"prod": {
+				Runtime: "gke",
+				KubernetesServiceAccountMappings: map[string]string{
+					"agent-worker@my-project.iam.gserviceaccount.com": "",
+				},
+			},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke": {
+				Type: "kubernetes",
+				KubernetesServiceAccountMappings: map[string]string{
+					"agent-worker@my-project.iam.gserviceaccount.com": "runtime-ksa",
+				},
+			},
+		},
+	}
+	ksa, ok := vs.ResolveKubernetesServiceAccountMapping("prod", "agent-worker@my-project.iam.gserviceaccount.com")
+	assert.True(t, ok)
+	assert.Equal(t, "runtime-ksa", ksa)
+}
+
+// TestResolveKubernetesNamespace covers the namespace lookup used by GCP
+// identity mode "assign": only the selected runtime entry's namespace is
+// consulted, and an entry without one (or no entry) reports false so the
+// caller falls back to the runtime's default.
+func TestResolveKubernetesNamespace(t *testing.T) {
+	vs := &VersionedSettings{
+		Profiles: map[string]V1ProfileConfig{
+			"prod": {Runtime: "gke"},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke":      {Namespace: "scion-agents"},
+			"gke-team": {Namespace: "team-agents"},
+			"gke-bare": {},
+		},
+	}
+	tests := []struct {
+		name          string
+		runtimeEntry  string
+		wantNamespace string
+		wantOK        bool
+	}{
+		{name: "runtime entry namespace", runtimeEntry: "gke", wantNamespace: "scion-agents", wantOK: true},
+		{name: "second runtime entry namespace", runtimeEntry: "gke-team", wantNamespace: "team-agents", wantOK: true},
+		{name: "runtime entry without namespace", runtimeEntry: "gke-bare"},
+		{name: "unknown runtime entry", runtimeEntry: "missing"},
+		{name: "no runtime entry", runtimeEntry: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotNamespace, gotOK := vs.ResolveKubernetesNamespace(tt.runtimeEntry)
+			assert.Equal(t, tt.wantNamespace, gotNamespace)
+			assert.Equal(t, tt.wantOK, gotOK)
+		})
+	}
+}
+
+// TestProjectSettingsHasKubernetesServiceAccountMappings covers the
+// project-root-vs-.scion-dir resolution this function must get right (via
+// GetResolvedProjectDir) and confirms it reads the project's settings.yaml
+// directly rather than through LoadEffectiveSettings/LoadVersionedSettings —
+// which merge the global settings in underneath the project's own, making a
+// key the project never set indistinguishable from one it did (see the
+// function's own doc comment). Each subtest uses a fresh HOME and project
+// dir so a mapping written to one is never visible by accident from the
+// other.
+func TestProjectSettingsHasKubernetesServiceAccountMappings(t *testing.T) {
+	writeProjectSettings := func(t *testing.T, yaml string) string {
+		t.Helper()
+		projectDir := t.TempDir()
+		dotScion := filepath.Join(projectDir, ".scion")
+		if err := os.MkdirAll(dotScion, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(yaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return projectDir
+	}
+	writeGlobalSettingsWithMapping := func(t *testing.T) {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		globalDir := filepath.Join(home, ".scion")
+		if err := os.MkdirAll(globalDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		yaml := `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: global-ksa
+`
+		if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(yaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("project runtime entry sets the mapping", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: project-ksa
+`)
+		if !ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "kubernetes", "") {
+			t.Error("expected true: the project's own settings.yaml sets this runtime entry's mapping")
+		}
+	})
+
+	t.Run("project profile sets the mapping", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+profiles:
+    prod:
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: project-ksa
+`)
+		if !ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "", "prod") {
+			t.Error("expected true: the project's own settings.yaml sets this profile's mapping")
+		}
+	})
+
+	// The regression case this function exists for: a project settings.yaml
+	// that never mentions kubernetes_service_account_mappings at all must
+	// read as false here, even though the broker's global settings (merged
+	// in underneath by LoadEffectiveSettings/LoadVersionedSettings for every
+	// other caller) do have one for the same runtime entry name. A naive
+	// LoadEffectiveSettings(projectDir)-based check cannot tell these two
+	// cases apart.
+	t.Run("project settings silent, global has the mapping", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+`)
+		if ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "kubernetes", "") {
+			t.Error("expected false: the project's own settings.yaml never mentions this mapping, even though the merged/global view would show one")
+		}
+	})
+
+	t.Run("no project settings file at all", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		emptyDir := t.TempDir()
+		if ProjectSettingsHasKubernetesServiceAccountMappings(emptyDir, "kubernetes", "") {
+			t.Error("expected false when there is no project settings file")
+		}
+	})
+
+	t.Run("project root path (not yet resolved to its .scion dir)", func(t *testing.T) {
+		writeGlobalSettingsWithMapping(t)
+		projectDir := writeProjectSettings(t, `schema_version: "1"
+runtimes:
+    kubernetes:
+        type: kubernetes
+        kubernetes_service_account_mappings:
+            agent-worker@my-project.iam.gserviceaccount.com: project-ksa
+`)
+		// projectDir itself is the project root, not projectDir/.scion —
+		// GetResolvedProjectDir must resolve it before the file is read.
+		if !ProjectSettingsHasKubernetesServiceAccountMappings(projectDir, "kubernetes", "") {
+			t.Error("expected true: a project-root path must resolve to its .scion settings file")
+		}
+	})
+}
+
+// TestLoadGlobalSettingsWithOverlay_IgnoresProjectConfigsSettings checks
+// that only the global settings file is read, even when the global directory
+// carries a project-id file whose project-configs settings.yaml sets runtime
+// values. The overlay itself is covered by TestLoadGlobalSettingsWithOverlay.
+func TestLoadGlobalSettingsWithOverlay_IgnoresProjectConfigsSettings(t *testing.T) {
+	prev := GetGlobalSettingsOverlay()
+	t.Cleanup(func() { SetGlobalSettingsOverlay(prev) })
+	SetGlobalSettingsOverlay(nil)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	globalScionDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    namespace: ns-global
+`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "project-id"),
+		[]byte("11111111-2222-3333-4444-555555555555\n"), 0644))
+	externalDir, err := GetGitProjectExternalConfigDir(globalScionDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, externalDir)
+	require.NoError(t, os.MkdirAll(externalDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(externalDir, "settings.yaml"), []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    namespace: ns-project-config
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: project-config-ksa
+`), 0644))
+
+	vs, _, err := LoadGlobalSettingsWithOverlay()
+	require.NoError(t, err)
+	assert.Equal(t, "ns-global", vs.Runtimes["k8s"].Namespace)
+	_, mapped := vs.ResolveKubernetesServiceAccountMappingForSelection("", "k8s", "agent-worker@my-project.iam.gserviceaccount.com")
+	assert.False(t, mapped, "the project-configs mapping must not be used")
 }

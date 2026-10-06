@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 )
 
@@ -292,9 +293,45 @@ func (_u *AccessConstraintUpdate) SetUpdated(v time.Time) *AccessConstraintUpdat
 	return _u
 }
 
+// AddHistoryIDs adds the "history" edge to the AccessConstraintHistory entity by IDs.
+func (_u *AccessConstraintUpdate) AddHistoryIDs(ids ...string) *AccessConstraintUpdate {
+	_u.mutation.AddHistoryIDs(ids...)
+	return _u
+}
+
+// AddHistory adds the "history" edges to the AccessConstraintHistory entity.
+func (_u *AccessConstraintUpdate) AddHistory(v ...*AccessConstraintHistory) *AccessConstraintUpdate {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddHistoryIDs(ids...)
+}
+
 // Mutation returns the AccessConstraintMutation object of the builder.
 func (_u *AccessConstraintUpdate) Mutation() *AccessConstraintMutation {
 	return _u.mutation
+}
+
+// ClearHistory clears all "history" edges to the AccessConstraintHistory entity.
+func (_u *AccessConstraintUpdate) ClearHistory() *AccessConstraintUpdate {
+	_u.mutation.ClearHistory()
+	return _u
+}
+
+// RemoveHistoryIDs removes the "history" edge to AccessConstraintHistory entities by IDs.
+func (_u *AccessConstraintUpdate) RemoveHistoryIDs(ids ...string) *AccessConstraintUpdate {
+	_u.mutation.RemoveHistoryIDs(ids...)
+	return _u
+}
+
+// RemoveHistory removes "history" edges to AccessConstraintHistory entities.
+func (_u *AccessConstraintUpdate) RemoveHistory(v ...*AccessConstraintHistory) *AccessConstraintUpdate {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveHistoryIDs(ids...)
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -446,6 +483,51 @@ func (_u *AccessConstraintUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(accessconstraint.FieldUpdated, field.TypeTime, value)
+	}
+	if _u.mutation.HistoryCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   accessconstraint.HistoryTable,
+			Columns: []string{accessconstraint.HistoryColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedHistoryIDs(); len(nodes) > 0 && !_u.mutation.HistoryCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   accessconstraint.HistoryTable,
+			Columns: []string{accessconstraint.HistoryColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.HistoryIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   accessconstraint.HistoryTable,
+			Columns: []string{accessconstraint.HistoryColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -730,9 +812,45 @@ func (_u *AccessConstraintUpdateOne) SetUpdated(v time.Time) *AccessConstraintUp
 	return _u
 }
 
+// AddHistoryIDs adds the "history" edge to the AccessConstraintHistory entity by IDs.
+func (_u *AccessConstraintUpdateOne) AddHistoryIDs(ids ...string) *AccessConstraintUpdateOne {
+	_u.mutation.AddHistoryIDs(ids...)
+	return _u
+}
+
+// AddHistory adds the "history" edges to the AccessConstraintHistory entity.
+func (_u *AccessConstraintUpdateOne) AddHistory(v ...*AccessConstraintHistory) *AccessConstraintUpdateOne {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.AddHistoryIDs(ids...)
+}
+
 // Mutation returns the AccessConstraintMutation object of the builder.
 func (_u *AccessConstraintUpdateOne) Mutation() *AccessConstraintMutation {
 	return _u.mutation
+}
+
+// ClearHistory clears all "history" edges to the AccessConstraintHistory entity.
+func (_u *AccessConstraintUpdateOne) ClearHistory() *AccessConstraintUpdateOne {
+	_u.mutation.ClearHistory()
+	return _u
+}
+
+// RemoveHistoryIDs removes the "history" edge to AccessConstraintHistory entities by IDs.
+func (_u *AccessConstraintUpdateOne) RemoveHistoryIDs(ids ...string) *AccessConstraintUpdateOne {
+	_u.mutation.RemoveHistoryIDs(ids...)
+	return _u
+}
+
+// RemoveHistory removes "history" edges to AccessConstraintHistory entities.
+func (_u *AccessConstraintUpdateOne) RemoveHistory(v ...*AccessConstraintHistory) *AccessConstraintUpdateOne {
+	ids := make([]string, len(v))
+	for i := range v {
+		ids[i] = v[i].ID
+	}
+	return _u.RemoveHistoryIDs(ids...)
 }
 
 // Where appends a list predicates to the AccessConstraintUpdate builder.
@@ -914,6 +1032,51 @@ func (_u *AccessConstraintUpdateOne) sqlSave(ctx context.Context) (_node *Access
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(accessconstraint.FieldUpdated, field.TypeTime, value)
+	}
+	if _u.mutation.HistoryCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   accessconstraint.HistoryTable,
+			Columns: []string{accessconstraint.HistoryColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.RemovedHistoryIDs(); len(nodes) > 0 && !_u.mutation.HistoryCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   accessconstraint.HistoryTable,
+			Columns: []string{accessconstraint.HistoryColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.HistoryIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2M,
+			Inverse: false,
+			Table:   accessconstraint.HistoryTable,
+			Columns: []string{accessconstraint.HistoryColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(accessconstrainthistory.FieldID, field.TypeString),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
 	_node = &AccessConstraint{config: _u.config}
 	_spec.Assign = _node.assignValues

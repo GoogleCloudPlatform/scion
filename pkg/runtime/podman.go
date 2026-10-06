@@ -188,10 +188,18 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 
+	newArgs = appendSharedDirGroupArgs(newArgs, config, podmanRuntimeName(r.Rootless), !r.Rootless)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -204,11 +212,17 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
-	return strings.TrimSpace(out), nil
+	// Run returns the whole trimmed output, as before; only the launch
+	// handle is restricted to a well-formed container ID line.
+	id := strings.TrimSpace(out)
+	reportContainerCreated(hooks, config.Name, out)
+	return id, nil
 }
 
-func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// Stop stops the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Stop(ctx context.Context, ref RunRef) error {
+	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	if err != nil && out != "" {
 		// Include podman's stderr output in the error so callers can match
 		// on messages like "not running" (which runSimpleCommand's error
@@ -218,8 +232,10 @@ func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *PodmanRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -264,24 +280,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 		}
 
 		// Filter by labels if requested
-		match := true
-		for k, v := range labelFilter {
-			actual := labels[k]
-			if actual == "" {
-				switch k {
-				case projectkeys.LabelProject:
-					actual = projectkeys.ProjectNameFromLabels(labels)
-				case projectkeys.LabelProjectID:
-					actual = projectkeys.ProjectIDFromLabels(labels)
-				case projectkeys.LabelProjectPath:
-					actual = projectkeys.ProjectPathFromLabels(labels)
-				}
-			}
-			if !projectkeys.LabelValuesMatch(k, actual, v) {
-				match = false
-				break
-			}
-		}
+		match := LabelsMatchFilter(labels, labelFilter)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Podman container name,
@@ -294,6 +293,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 			info := api.AgentInfo{
 				ContainerID:     c.Id,
+				RunID:           labels[api.LabelRunID],
 				Name:            name,
 				ContainerStatus: c.Status,
 				Phase:           phaseFromContainerStatus(c.Status),
@@ -349,7 +349,8 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", r.ExecUser(),
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")...)
 }
 
 func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -462,4 +463,12 @@ func (r *PodmanRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
+}
+
+// podmanRuntimeName names the Podman mode in shared-dir group warnings.
+func podmanRuntimeName(rootless bool) string {
+	if rootless {
+		return "podman (rootless)"
+	}
+	return "podman"
 }

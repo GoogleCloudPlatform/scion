@@ -292,7 +292,7 @@ func (s *GEExchangeService) Exchange(ctx context.Context, req *ExchangeRequest) 
 //     semantics via geExchangeClientIP.
 func (s *Server) handleGEGoogleExchange(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

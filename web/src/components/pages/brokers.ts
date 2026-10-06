@@ -20,7 +20,7 @@
  * Displays all runtime brokers with their status, version, and capabilities
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, RuntimeBroker } from '../../shared/types.js';
@@ -30,6 +30,8 @@ import { listPageStyles, brokerTypeBadgeStyles } from '../shared/resource-styles
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -77,6 +79,14 @@ export class ScionPageBrokers extends LitElement {
         margin-bottom: 1rem;
       }
 
+      /* The header's first child holds the name and version. As a flex item
+         it defaults to min-width:auto and grows to fit a long unbroken name,
+         pushing it past the card edge; min-width:0 lets it shrink so the
+         shared wrapping rules can break the name instead. */
+      .broker-header > div {
+        min-width: 0;
+      }
+
       .broker-version {
         font-size: 0.875rem;
         color: var(--scion-text-muted, #64748b);
@@ -108,6 +118,22 @@ export class ScionPageBrokers extends LitElement {
       .capability-tag.enabled {
         background: var(--sl-color-success-100, #dcfce7);
         color: var(--sl-color-success-700, #15803d);
+      }
+
+      /* Visible marker for a broker cap whose source is "not_enforced"
+       * (design.md Amendment A1): the value shown is a real, resolved cap
+       * that is not currently enforced. Must not be tooltip-only. */
+      .not-enforced-marker {
+        display: inline-flex;
+        align-items: center;
+        align-self: flex-start;
+        margin-left: 0.375rem;
+        padding: 0.0625rem 0.375rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        background: var(--sl-color-warning-100, #fef3c7);
+        color: var(--sl-color-warning-700, #a16207);
       }
 
       .broker-meta {
@@ -210,33 +236,40 @@ export class ScionPageBrokers extends LitElement {
     }
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
+  }
+
+  /**
+   * Renders the broker's effective agent capacity as "7 / 30" or
+   * "7 / unlimited", with the precedence source in a tooltip
+   * (ptone/scion#2061 P2.2, design.md §5.6). Renders an em dash "—" when the
+   * fields are absent — e.g. the caller lacks visibility, or capacity
+   * resolution didn't run. When agentLimitSource is "not_enforced" (design.md
+   * Amendment A1), the shown value is a real, resolved cap that is not
+   * currently enforced — a visible "not enforced" marker is appended next to
+   * it; the source tooltip alone is not enough (a caller must not have to
+   * hover to learn the cap doesn't apply).
+   */
+  private renderAgentCapacity(broker: RuntimeBroker): TemplateResult {
+    // == null: these fields are omitempty on the wire (Go omits, never sends
+    // null), but the loose check tolerates an explicit null too.
+    if (broker.agentCount == null) {
+      return html`<span class="meta-text">—</span>`;
+    }
+    const capLabel = broker.agentLimit != null ? String(broker.agentLimit) : 'unlimited';
+    // mono-cell only applies inside .resource-table-container (the table
+    // view); stat-value is unscoped, so it styles the grid card's value too.
+    // Shared between the table cell and the grid stat (review round 2, F2)
+    // so the two can't drift out of sync.
+    return html`
+      <span class="mono-cell stat-value" title="Source: ${broker.agentLimitSource || 'unknown'}"
+        >${broker.agentCount} / ${capLabel}</span
+      >
+      ${broker.agentLimitSource === 'not_enforced'
+        ? html`<span class="not-enforced-marker">not enforced</span>`
+        : nothing}
+    `;
   }
 
   override render() {
@@ -328,7 +361,7 @@ export class ScionPageBrokers extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="hdd-rack"></sl-icon>
-              ${broker.name} ${this.renderBrokerTypeBadge(broker)}
+              <span>${broker.name} ${this.renderBrokerTypeBadge(broker)}</span>
             </h3>
             ${broker.version ? html`<div class="broker-version">v${broker.version}</div>` : ''}
           </div>
@@ -343,13 +376,21 @@ export class ScionPageBrokers extends LitElement {
         <div class="broker-meta">
           <div class="stat">
             <span class="stat-label">Last Heartbeat</span>
-            <span class="stat-value">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
+            <span class="stat-value">${formatRelative(broker.lastHeartbeat)}</span>
           </div>
           ${broker.profiles
             ? html`
                 <div class="stat">
                   <span class="stat-label">Profiles</span>
                   <span class="stat-value">${broker.profiles.length}</span>
+                </div>
+              `
+            : ''}
+          ${broker.agentCount != null
+            ? html`
+                <div class="stat">
+                  <span class="stat-label">Agents / Cap</span>
+                  ${this.renderAgentCapacity(broker)}
                 </div>
               `
             : ''}
@@ -388,6 +429,7 @@ export class ScionPageBrokers extends LitElement {
               <th class="hide-mobile">Capabilities</th>
               <th>Last Heartbeat</th>
               <th class="hide-mobile">Profiles</th>
+              <th class="hide-mobile">Agents / Cap</th>
             </tr>
           </thead>
           <tbody>
@@ -403,8 +445,7 @@ export class ScionPageBrokers extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/brokers/${broker.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/brokers/${broker.id}`);
         }}
       >
         <td>
@@ -441,9 +482,10 @@ export class ScionPageBrokers extends LitElement {
             : '\u2014'}
         </td>
         <td>
-          <span class="meta-text">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
+          <span class="meta-text">${formatRelative(broker.lastHeartbeat)}</span>
         </td>
         <td class="hide-mobile">${broker.profiles ? broker.profiles.length : '\u2014'}</td>
+        <td class="hide-mobile">${this.renderAgentCapacity(broker)}</td>
       </tr>
     `;
   }

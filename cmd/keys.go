@@ -16,13 +16,19 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
@@ -37,15 +43,22 @@ with no trailing Enter. Supports control keys like arrows, Escape, etc.
 This is useful for interacting with interactive TUI applications running
 inside an agent's terminal session.
 
-In Hub mode, keys are delivered to the agent's terminal the same way a
-local agent's are — through the hub. When run by an agent, this only
-works within the agent's own project; cross-project targets are refused.
-A human operator using --project can still target other projects.
+In Hub mode, keys are delivered through the Hub's dedicated keys operation.
+This replaces the removed 'scion message --raw' flag. When run by an agent,
+this only works within the agent's own project; cross-project targets are
+refused. A human operator using --project can still target other projects.
+
+Each invocation delivers exactly one argument to tmux: each example below is
+a separate call, not a sequence. A whole argument that matches a recognized
+tmux key name (like "Enter" or "Escape") is sent as that key; any other text
+is typed literally, character by character, including spaces — and nothing
+ever adds a trailing Enter for you.
 
 Examples:
   scion keys my-agent "Escape"
   scion keys my-agent "C-c"
-  scion keys my-agent "Up Up Enter"`,
+  scion keys my-agent Up
+  scion keys my-agent Enter`,
 	Args: cobra.ExactArgs(2),
 	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) == 0 {
@@ -60,7 +73,7 @@ Examples:
 		keystrokes := strings.Join(args[1:], " ")
 
 		// keys must not work as a cross-project command. This CLI check is
-		// UX only; the authoritative refusal is hub-side (ExecuteAgentDM).
+		// UX only; the authoritative refusal is hub-side (ExecuteAgentKeys).
 		if crossProjectTarget := detectCrossProjectTarget(cmd); crossProjectTarget != "" {
 			return fmt.Errorf("scion keys does not support cross-project targets; message the agent from within its own project")
 		}
@@ -74,57 +87,514 @@ Examples:
 			return sendKeysViaHub(hubCtx, agentName, keystrokes)
 		}
 
-		// Local mode now resolves the agent name the same way `scion
-		// message` does; otherwise unchanged.
-		ctx := context.Background()
-
-		rt := runtime.GetRuntime(projectPath, profile)
-		mgr := agent.NewManager(rt)
-		defer mgr.Close()
-
-		fmt.Printf("Sending raw keys to agent '%s'...\n", agentName)
-		return mgr.MessageRaw(ctx, agentName, "", keystrokes)
+		return sendKeysLocal(agentName, keystrokes)
 	},
 }
 
-// sendKeysViaHub delivers keystrokes to a hub-managed agent by reusing the
-// same StructuredMessage-with-Raw=true path `scion message --raw` uses: it
-// resolves the sender identity and project the way `scion message` does,
-// builds the structured message via the shared helper, and sends it through
-// the normal messaging-authorization gate. The broker honours Raw the same
-// way regardless of which command set it.
-func sendKeysViaHub(hubCtx *HubContext, agentName, keystrokes string) error {
+// ---------------------------------------------------------------------------
+// Outcome classification shared by the Hub and local paths, and by JSON and
+// human-readable output. #2184 requires that an unknown outcome never says
+// "delivered" and never invites a blind retry, and that it stay visibly
+// distinct from a definite rejection; #2198 requires JSON mode to produce a
+// useful, machine-readable result on failure too, not just on success.
+// ---------------------------------------------------------------------------
+
+// keysOutcomeStatus is the three-way classification every keys attempt
+// resolves to.
+type keysOutcomeStatus string
+
+const (
+	// keysOutcomeDispatched means the broker acknowledged terminal
+	// injection — not that the harness consumed it (contract §2.4).
+	keysOutcomeDispatched keysOutcomeStatus = "dispatched"
+	// keysOutcomeRejected means the attempt definitely did not inject
+	// anything, for the stated reason (not found, not running, denied,
+	// invalid, unsupported, ...). Safe to correct and retry.
+	keysOutcomeRejected keysOutcomeStatus = "rejected"
+	// keysOutcomeUnknown means the attempt may or may not have reached the
+	// terminal. Never safe to blindly retry, for the opposite reason from
+	// "rejected": a retry here could be a second, unwanted injection.
+	keysOutcomeUnknown keysOutcomeStatus = "unknown"
+)
+
+// keysResult is what every keys attempt — Hub or local, success or failure —
+// reports, in both JSON and human-readable form.
+type keysResult struct {
+	Outcome     keysOutcomeStatus
+	Code        string // machine outcome code, when known (e.g. "agent_not_running")
+	OperationID string // present only when the Hub minted and returned one
+	AgentID     string
+	Message     string // human-readable detail; never normative (contract §2.4a)
+	// RetryAfterSeconds is the Hub's Retry-After value (seconds), when the
+	// response carried one (429 keys_rate_limited; also present on some 503
+	// keys_unavailable responses). 0 means none was present — this is
+	// informational only: the CLI never auto-retries regardless (contract
+	// C§2.4a: "describes admission, not permission to replay").
+	RetryAfterSeconds int
+}
+
+// reportKeysResult is the single exit point for sendKeysViaHub and
+// sendKeysLocalWithManager: exactly one JSON result on success or failure
+// (contract: "JSON mode emits exactly one parseable result"), or a
+// human-readable success line only — a failure's text comes solely from the
+// returned error, which cmd/root.go already prints to stderr, so this never
+// prints a failure line itself (would otherwise duplicate that banner).
+//
+// cause, when non-nil, is wrapped (%w) so errors.As can still recover it
+// (e.g. the original *apiclient.APIError, with Code/Details intact).
+func reportKeysResult(agentName string, res keysResult, cause error) error {
+	if isJSONOutput() {
+		details := map[string]interface{}{"outcome": string(res.Outcome)}
+		if res.Code != "" {
+			details["code"] = res.Code
+		}
+		if res.OperationID != "" {
+			details["operation_id"] = res.OperationID
+		}
+		if res.AgentID != "" {
+			details["agent_id"] = res.AgentID
+		}
+		if res.RetryAfterSeconds > 0 {
+			details["retry_after_seconds"] = res.RetryAfterSeconds
+		}
+		status := "success"
+		if res.Outcome != keysOutcomeDispatched {
+			status = "error"
+		}
+		if jsonErr := outputJSON(ActionResult{
+			Status:  status,
+			Command: "keys",
+			Agent:   agentName,
+			Message: res.Message,
+			Details: details,
+		}); jsonErr != nil {
+			return jsonErr
+		}
+	} else if res.Outcome == keysOutcomeDispatched {
+		// Failure text is deliberately not printed here: the error this
+		// function returns below carries it, and cmd/root.go's Execute
+		// already prints every returned error to stderr — printing it again
+		// here would duplicate that line.
+		fmt.Printf("Keys dispatched to agent '%s' (terminal injection acknowledged; this does not confirm the agent processed it).\n", agentName)
+	}
+
+	if res.Outcome == keysOutcomeDispatched {
+		return nil
+	}
+
+	// An unknown outcome carries its own hint in the returned error (the
+	// only place failure text appears, in both JSON and text mode): never
+	// suggest delivery, and never invite a blind resend, since a retry here
+	// could be a second, unwanted injection.
+	suffix := ""
+	if res.Outcome == keysOutcomeUnknown {
+		suffix = " — the terminal may or may not have received them; check before resending"
+	}
+	if res.RetryAfterSeconds > 0 {
+		// Informational only: this never triggers an automatic retry here
+		// or anywhere upstream (contract C§2.4a: Retry-After "describes
+		// admission, not permission to replay"). Phrased with "do not
+		// retry", the one allowed form, never a bare "retry" that could
+		// read as an invitation.
+		suffix += fmt.Sprintf(" (Retry-After: %ds — do not retry automatically)", res.RetryAfterSeconds)
+	}
+	if cause != nil {
+		if res.Message == "" || res.Message == cause.Error() {
+			return fmt.Errorf("keys %s for agent '%s'%s: %w", res.Outcome, agentName, suffix, cause)
+		}
+		return fmt.Errorf("keys %s for agent '%s': %s%s: %w", res.Outcome, agentName, res.Message, suffix, cause)
+	}
+	return fmt.Errorf("keys %s for agent '%s': %s%s", res.Outcome, agentName, res.Message, suffix)
+}
+
+// classifyHubKeysError turns a hubclient.AgentService.SendKeys error into a
+// keysResult. err is always non-nil here (the caller only invokes this on
+// SendKeys's error path).
+func classifyHubKeysError(err error) keysResult {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		// No structured response was ever received (connection
+		// refused/reset, DNS failure, context deadline, ...): the caller
+		// cannot know whether the broker executed the keys. Genuinely
+		// unknown, never reclassified as a rejection.
+		return keysResult{
+			Outcome: keysOutcomeUnknown,
+			Message: "no response was received: " + err.Error(),
+		}
+	}
+
+	opID, _ := apiErr.Details["operation_id"].(string)
+
+	// A 404/405 carrying no operation_id cannot be keys' own not_found: the
+	// contract mints one for every outcome from validation onward (§2.5's
+	// OperationID policy). This shape also covers AK-21e's project-not-found
+	// 404 on a current Hub (also no operation_id), so the wording below
+	// names both rather than asserting the Hub is necessarily old.
+	if (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusMethodNotAllowed) && opID == "" {
+		return keysResult{
+			Outcome: keysOutcomeRejected,
+			Code:    "hub_unsupported",
+			Message: "this Hub does not support the keys operation, or the project was not found",
+		}
+	}
+
+	// Contract §2.5: a 4xx, or a 503 whose Code is keys_unavailable, is the
+	// only shape that proves no delivery was attempted. Everything else —
+	// including a bare 5xx with no parseable body at all (a load balancer's
+	// HTML 502/504, a proxy timeout, a 500 that never reached the keys
+	// handler) — leaves open that the Hub already dispatched, so it must
+	// classify as unknown, never a "safe to retry" rejection.
+	isDefiniteRejection := apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
+	if apiErr.StatusCode == http.StatusServiceUnavailable && apiErr.Code == string(agentkeys.OutcomeKeysUnavailable) {
+		isDefiniteRejection = true
+	}
+	// The Hub's dispatch-error classifier never returns an empty code, but a
+	// proxy or load balancer between the CLI and the Hub can answer on its
+	// behalf (e.g. a bodyless 502). apiclient.ParseErrorResponse then fills
+	// in a generic status-derived code such as internal_error. Never surface
+	// an empty or generic code for an ambiguous outcome: a non-definite
+	// status whose code is not a keys outcome and that carries no
+	// operation_id (so it never came from the keys handler) is reported as
+	// keys_outcome_unknown.
+	code := apiErr.Code
+	message := apiErr.Message
+	if message == "" {
+		message = fmt.Sprintf("HTTP %d %s with no error body", apiErr.StatusCode, http.StatusText(apiErr.StatusCode))
+	}
+	if !isDefiniteRejection {
+		_, isKeysOutcome := agentkeys.HTTPStatus(agentkeys.Outcome(code))
+		if code == "" || (!isKeysOutcome && opID == "") {
+			message = notFromKeysHandlerMessage(apiErr)
+			code = string(agentkeys.OutcomeKeysOutcomeUnknown)
+		}
+		return keysResult{Outcome: keysOutcomeUnknown, Code: code, OperationID: opID, Message: message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
+	}
+	if code == "" {
+		code = fmt.Sprintf("http_%d", apiErr.StatusCode)
+	}
+	return keysResult{Outcome: keysOutcomeRejected, Code: code, OperationID: opID, Message: message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
+}
+
+// notFromKeysHandlerMessage describes an ambiguous error response that did
+// not come from the Hub's keys handler (no keys outcome code, no
+// operation_id): typically a proxy or gateway answering for the Hub. The
+// response's own message is kept only when it says more than the status
+// text.
+func notFromKeysHandlerMessage(apiErr *apiclient.APIError) string {
+	statusText := http.StatusText(apiErr.StatusCode)
+	msg := fmt.Sprintf("HTTP %d %s with no keys outcome from the Hub (possibly a proxy or gateway response)", apiErr.StatusCode, statusText)
+	if detail := strings.TrimSpace(apiErr.Message); detail != "" && detail != statusText {
+		msg += ": " + detail
+	}
+	return msg
+}
+
+// classifyLocalKeysError turns an agent.Manager.SendKeys/SendKeysLocal error
+// into a keysResult, matching the return-class table both methods document
+// (.design/agent-keys-contract.md §4.3's manager-level taxonomy).
+func classifyLocalKeysError(err error) keysResult {
+	switch {
+	case errors.Is(err, agentkeys.ErrTargetNotFound):
+		return keysResult{Outcome: keysOutcomeRejected, Code: string(agentkeys.OutcomeNotFound), Message: "agent not found"}
+	case errors.Is(err, agentkeys.ErrAgentNotRunning):
+		return keysResult{Outcome: keysOutcomeRejected, Code: string(agentkeys.OutcomeAgentNotRunning), Message: "agent is not running"}
+	case errors.Is(err, agentkeys.ErrTerminalNotReady):
+		return keysResult{Outcome: keysOutcomeRejected, Code: string(agentkeys.OutcomeTerminalNotReady), Message: "agent's terminal session is not ready"}
+	case errors.Is(err, agent.ErrKeysUnsupported):
+		return keysResult{Outcome: keysOutcomeRejected, Code: string(agentkeys.OutcomeKeysUnsupported), Message: "this runtime backend does not support keys delivery"}
+	case errors.Is(err, agent.ErrKeysNotStarted):
+		return keysResult{Outcome: keysOutcomeRejected, Code: string(agentkeys.OutcomeKeysUnavailable), Message: "keys dispatch did not start: " + err.Error()}
+	}
+	if ve, ok := agentkeys.AsValidationError(err); ok {
+		return keysResult{Outcome: keysOutcomeRejected, Code: string(ve.Outcome), Message: ve.Error()}
+	}
+	// Any other failure — including one that itself wraps a context error —
+	// cannot be proven to have happened before delivery began (see
+	// agent.Manager.SendKeys's doc comment on ErrKeysNotStarted). Ambiguous,
+	// never reported as a plain rejection.
+	//
+	// This fixed message, not err.Error(), is
+	// what JSON mode prints (reportKeysResult's ActionResult.Message is
+	// exactly this field) and is the real, independent protection for that
+	// output path. It is NOT what protects the human-readable error path:
+	// reportKeysResult still wraps the caller's original err via %w into
+	// the returned error, and cmd/root.go's Execute prints that. The actual
+	// protection there is upstream, in SendKeys/SendKeysLocal's own
+	// sanitization (sendKeysDeliveryErrorClass, pkg/agent/manager.go) --
+	// err itself never carries backend text by the time it reaches this
+	// function. This fixed Message does not depend on that holding; it is
+	// a second, independent guarantee for the field it actually controls.
+	return keysResult{Outcome: keysOutcomeUnknown, Message: "keys dispatch outcome is unknown; do not retry automatically"}
+}
+
+// rejectInvalidKeys validates keys via agentkeys.ValidateKeys and, if
+// invalid, reports the rejection through reportKeysResult before any
+// network/List call. ok is false when keys was invalid, in which case the
+// caller must return err immediately.
+func rejectInvalidKeys(agentName, keys string) (err error, ok bool) {
+	verr := agentkeys.ValidateKeys(keys)
+	if verr == nil {
+		return nil, true
+	}
+	code := string(agentkeys.OutcomeInvalidRequest)
+	if ve, isVE := agentkeys.AsValidationError(verr); isVE {
+		code = string(ve.Outcome)
+	}
+	reportErr := reportKeysResult(agentName, keysResult{Outcome: keysOutcomeRejected, Code: code, Message: verr.Error()}, verr)
+	return reportErr, false
+}
+
+// sendKeysViaHub delivers keystrokes to a hub-managed agent through the
+// dedicated agent-keys operation (.design/agent-keys-contract.md): it POSTs
+// {"keys": ...} to the project-scoped /keys route via
+// AgentService.SendKeys and never goes through /message.
+func sendKeysViaHub(hubCtx *HubContext, agentName, keys string) error {
+	if err, ok := rejectInvalidKeys(agentName, keys); !ok {
+		return err
+	}
+
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
 
-	sender := resolveSenderIdentity(hubCtx)
-
-	projectID, err := GetProjectID(hubCtx)
+	// Contract C§3 "ambiguous resolution fails rather
+	// than guessing" (ptone/scion#2200): unlike GetProjectID's default behavior (shared by
+	// every other command, left unchanged), the keys path fails closed
+	// when several projects match the git remote, instead of silently
+	// picking the first one.
+	projectID, err := getProjectIDForKeys(hubCtx)
 	if err != nil {
 		return wrapHubError(err)
 	}
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	if !isJSONOutput() {
-		fmt.Printf("Sending raw keys to agent '%s'...\n", agentName)
-	}
+	statusf("Sending keys to agent '%s'...\n", agentName)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, keystrokes, nil, true, false, false)
-	if err := messaging.ValidateLegacyMessage(msg); err != nil {
-		return fmt.Errorf("message validation failed: %w", err)
-	}
-	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, false, false, false); err != nil {
-		return wrapHubError(fmt.Errorf("failed to send keys to agent '%s' via Hub: %w", agentName, err))
+	resp, err := agentSvc.SendKeys(ctx, agentName, keys)
+	if err != nil {
+		// Never fall back to the legacy raw-message path on any failure,
+		// including "this Hub predates /keys" — a new client talking to an
+		// old Hub must fail clearly, not silently retry through /message
+		// (.design/agent-keys-contract.md, "Raw compatibility and removal").
+		return reportKeysResult(agentName, classifyHubKeysError(err), err)
 	}
 
-	if !isJSONOutput() {
-		fmt.Printf("Keys delivered to agent '%s'.\n", agentName)
+	return reportKeysResult(agentName, keysResult{
+		Outcome:     keysOutcomeDispatched,
+		OperationID: resp.OperationID,
+		AgentID:     resp.AgentID,
+	}, nil)
+}
+
+// localKeysScope records which identity dimension resolveLocalKeysTarget
+// resolved against — exactly one of HubProjectID/ProjectPath is set,
+// mirroring pkg/agent's own keysScope — so sendKeysLocalWithManager calls
+// the matching manager entry point (SendKeys vs. SendKeysLocal) without
+// re-deriving which one applies.
+type localKeysScope struct {
+	hubProjectID string
+	projectPath  string
+}
+
+// sendKeysLocal delivers keystrokes to a local (non-Hub-transport) agent,
+// resolving a fresh agent.Manager from the ambient runtime/profile and
+// delegating to sendKeysLocalWithManager.
+func sendKeysLocal(agentName, keystrokes string) error {
+	rt := runtime.GetRuntime(projectPath, profile)
+	mgr := agent.NewManager(rt)
+	defer mgr.Close()
+
+	return sendKeysLocalWithManager(context.Background(), mgr, agentName, keystrokes)
+}
+
+// sendKeysLocalWithManager is sendKeysLocal's testable core: it accepts an
+// already-constructed agent.Manager so tests can inject a mock runtime and
+// observe the exact delivery call (projectID/path, slug, agent_id, and the
+// runtime payload), which sendKeysLocal's own runtime.GetRuntime construction
+// does not allow.
+//
+// It calls agent.Manager.SendKeys when the selected project has a
+// Hub-linked project ID, or the additive agent.Manager.SendKeysLocal
+// (.design/agent-keys-contract.md's local-scope correction, ptone/scion#2468
+// finding 3) when it does not — never falling back to an unscoped lookup
+// either way, and never retrying one entry point's failure through the
+// other.
+func sendKeysLocalWithManager(ctx context.Context, mgr agent.Manager, agentName, keystrokes string) error {
+	if err, ok := rejectInvalidKeys(agentName, keystrokes); !ok {
+		return err
 	}
-	return nil
+
+	target, scope, err := resolveLocalKeysTarget(ctx, mgr, agentName)
+	if err != nil {
+		code := agentkeys.OutcomeNotFound
+		if errors.Is(err, agentkeys.ErrAgentNotRunning) {
+			code = agentkeys.OutcomeAgentNotRunning
+		}
+		return reportKeysResult(agentName, keysResult{Outcome: keysOutcomeRejected, Code: string(code), Message: err.Error()}, err)
+	}
+
+	statusf("Sending keys to agent '%s'...\n", agentName)
+
+	expectedAgentID := target.Labels["agent_id"]
+	slug := target.Labels["scion.name"]
+	if slug == "" {
+		slug = api.Slugify(agentName)
+	}
+
+	var sendErr error
+	if scope.hubProjectID != "" {
+		sendErr = mgr.SendKeys(ctx, scope.hubProjectID, slug, expectedAgentID, keystrokes)
+	} else {
+		sendErr = mgr.SendKeysLocal(ctx, scope.projectPath, slug, expectedAgentID, keystrokes)
+	}
+	if sendErr != nil {
+		return reportKeysResult(agentName, classifyLocalKeysError(sendErr), sendErr)
+	}
+
+	return reportKeysResult(agentName, keysResult{Outcome: keysOutcomeDispatched, AgentID: expectedAgentID}, nil)
+}
+
+// resolveLocalKeysTarget finds the single agent `agentName` (by slug) refers
+// to, scoped to the local project selected by projectPath (the --project
+// flag, or the current working directory) — ambiguity-safe, mirroring
+// `scion stop`/`scion delete`'s selectAgentTarget, but additionally
+// returning which identity dimension (Hub-linked project ID, or local
+// resolved project-config directory path) the call was scoped by, since
+// agent.Manager's two keys entry points require exactly one.
+//
+// When this project has a Hub-linked project ID (VersionedSettings.Hub.
+// ProjectID — independent of the Hub endpoint being reachable right now;
+// see pkg/agent/run.go's own label population, which this mirrors),
+// resolution is scoped by that ID, matching every container's
+// "scion.project_id" label. Otherwise — a purely local project, never
+// linked to a Hub project, whose containers carry no such label at all — it
+// is scoped by the resolved project-config directory path instead
+// (config.GetResolvedProjectDir, the same identity recorded on
+// "scion.project_path"), per .design/agent-keys-contract.md's Authorization
+// section ("Projects without a Hub ID use the existing local project
+// identity/filter; ambiguous resolution fails"). Either way, an empty scope
+// is never passed through to a project-blind lookup.
+func resolveLocalKeysTarget(ctx context.Context, mgr agent.Manager, agentName string) (api.AgentInfo, localKeysScope, error) {
+	slug := api.Slugify(agentName)
+
+	resolvedProjectDir, _ := config.GetResolvedProjectDir(projectPath)
+	var hubProjectID, projectName string
+	if resolvedProjectDir != "" {
+		projectName = config.GetProjectName(resolvedProjectDir)
+		if settings, _, err := config.LoadEffectiveSettings(resolvedProjectDir); err == nil && settings != nil && settings.Hub != nil {
+			hubProjectID = settings.Hub.ProjectID
+		}
+	}
+
+	var filter map[string]string
+	var scope localKeysScope
+	switch {
+	case hubProjectID != "":
+		filter = map[string]string{"scion.name": slug, projectkeys.LabelProjectID: hubProjectID}
+		scope = localKeysScope{hubProjectID: hubProjectID}
+	case resolvedProjectDir != "":
+		filter = map[string]string{"scion.name": slug, projectkeys.LabelProjectPath: resolvedProjectDir}
+		scope = localKeysScope{projectPath: resolvedProjectDir}
+	default:
+		// No Hub link AND no resolvable project directory at all (e.g. run
+		// outside any scion project with no --project given): there is no
+		// stable identity to scope this call to, so this is a hard refusal
+		// rather than an unscoped lookup.
+		return api.AgentInfo{}, localKeysScope{}, fmt.Errorf(
+			"could not resolve a project for agent '%s'; run inside a scion project or pass --project", agentName)
+	}
+
+	agents, err := mgr.List(ctx, filter)
+	if err != nil {
+		return api.AgentInfo{}, localKeysScope{}, err
+	}
+
+	// Only an agent with a container can receive keystrokes. List also
+	// reports "created" agents that exist on disk with no container yet;
+	// they are kept aside so a name that matches only such an agent gets a
+	// clear "not running" error instead of "not found", and so they can
+	// never be selected as the delivery target.
+	var candidates []api.AgentInfo
+	createdOnly := false
+	for _, a := range agent.DedupeByContainerID(agents) {
+		if a.ContainerID == "" {
+			createdOnly = true
+			continue
+		}
+		candidates = append(candidates, a)
+	}
+	if len(candidates) == 0 && !createdOnly && hubProjectID != "" && resolvedProjectDir != "" {
+		// List scans on-disk created agents only for a path-scoped filter,
+		// so a project-ID-scoped lookup never sees them. Probe the project
+		// directory for one, solely to choose the error message below; the
+		// probe's results are never used as a delivery target.
+		createdOnly = hasCreatedOnlyAgent(ctx, mgr, slug, resolvedProjectDir)
+	}
+	switch len(candidates) {
+	case 0:
+		if createdOnly {
+			return api.AgentInfo{}, localKeysScope{}, newLocalKeysNotRunningError(agentName, projectName, projectPath)
+		}
+		if projectName != "" {
+			return api.AgentInfo{}, localKeysScope{}, fmt.Errorf("agent '%s' not found in project %q", agentName, projectName)
+		}
+		return api.AgentInfo{}, localKeysScope{}, fmt.Errorf("agent '%s' not found", agentName)
+	case 1:
+		return candidates[0], scope, nil
+	default:
+		return api.AgentInfo{}, localKeysScope{}, fmt.Errorf(
+			"agent '%s' is ambiguous: %d containers match in project %q", agentName, len(candidates), projectName)
+	}
+}
+
+// hasCreatedOnlyAgent reports whether projectDir holds an on-disk agent
+// named slug that has no container. A List failure reports false, so the
+// caller falls back to its plain "not found" error.
+func hasCreatedOnlyAgent(ctx context.Context, mgr agent.Manager, slug, projectDir string) bool {
+	agents, err := mgr.List(ctx, map[string]string{"scion.name": slug, projectkeys.LabelProjectPath: projectDir})
+	if err != nil {
+		return false
+	}
+	for _, a := range agents {
+		if a.ContainerID == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// localKeysNotRunningError is resolveLocalKeysTarget's error for a name
+// that matches only an agent with no container (created on disk, never
+// started). It unwraps to agentkeys.ErrAgentNotRunning so callers classify
+// it as agent_not_running, while its message stays user-facing.
+type localKeysNotRunningError struct{ msg string }
+
+func (e *localKeysNotRunningError) Error() string { return e.msg }
+func (e *localKeysNotRunningError) Unwrap() error { return agentkeys.ErrAgentNotRunning }
+
+// projectFlag is the --project value the user passed, if any; it is
+// repeated in the start hint so the hint targets the same project.
+func newLocalKeysNotRunningError(agentName, projectName, projectFlag string) error {
+	hint := "scion start " + agentName
+	if projectFlag != "" {
+		hint = "scion start --project " + shellQuoteIfNeeded(projectFlag) + " " + agentName
+	}
+	if projectName != "" {
+		return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists in project %q but is not running; start it with '%s'", agentName, projectName, hint)}
+	}
+	return &localKeysNotRunningError{msg: fmt.Sprintf("agent '%s' exists but is not running; start it with '%s'", agentName, hint)}
+}
+
+// shellQuoteIfNeeded double-quotes s when it contains characters a shell
+// would split on or interpret, so a copied hint stays one argument.
+func shellQuoteIfNeeded(s string) string {
+	if strings.ContainsAny(s, " \t\n'\"$`\\&;|<>()*?[]{}~#!") {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 func init() {

@@ -98,6 +98,12 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 - **Refactoring**: Since the project is in alpha, refactoring that modifies or removes behavior does not require graceful deprecation.
 - **Project terminology guardrail**: Use `project` vocabulary in new code. The legacy `grove` name is retired but may still appear in explicit compatibility adapters, compatibility tests/fixtures, migrations, or examples that intentionally demonstrate historical behavior. Route any remaining legacy literals through `pkg/projectkeys` instead of open-coding aliases, and run `make compat-literals` when touching project/grove compatibility surfaces.
 
+## Experimental features
+
+- New experimental user-facing features must be launched behind a registered experiment (`pkg/experiments/registry.go`); see `docs-site/src/content/docs/reference/experiments.md`.
+- Browser-side flag values are user-editable and only affect presentation; if an experiment changes hub behaviour, register it with the server layer and check it in the hub (`requireExperiment` / `experimentEnabled`).
+- Do not add ad-hoc `scion:feature:` string literals or new booleans to `/api/v1/settings/public`.
+
 ## Glossary and project development terminology
 
 > **Canonical engineering glossary:** See [`GLOSSARY.md`](./GLOSSARY.md) at the repo root for the canonical, opinionated terminology used throughout the codebase — the preferred term for each concept and the synonyms to avoid. Prefer these terms in new code, comments, and docs.

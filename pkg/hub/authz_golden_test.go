@@ -445,17 +445,19 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 			"project admin should have %s access on project agents", action)
 	}
 
-	// miller79/scion#88: admin must NOT attach to or reach ports of another
-	// member's agent — the agent runs with its owner's user-scoped secrets.
-	for _, action := range []Action{ActionAttach, ActionPortAccess} {
-		decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, action)
-		assert.False(t, decision.Allowed,
-			"project admin should NOT have %s access on another member's agent", action)
-	}
+	// admin must NOT attach to another member's agent —
+	// the agent runs with its owner's user-scoped secrets.
+	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionAttach)
+	assert.False(t, decision.Allowed,
+		"project admin should NOT have attach access on another member's agent")
+	// admin may open another member's forwarded ports.
+	decision = f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionPortAccess)
+	assert.True(t, decision.Allowed,
+		"project admin should have port_access on project agents: %s", decision.Reason)
 
 	// CO1 CUTOVER: Admin cannot delete agents — project-admin role excludes
 	// delete action. This is an INTENTIONAL restriction.
-	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionDelete)
+	decision = f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionDelete)
 	assert.False(t, decision.Allowed,
 		"project admin should NOT have delete access (project-admin role excludes delete)")
 }
@@ -826,7 +828,10 @@ func TestGolden_AgentRelationshipGrantDelegationCeiling(t *testing.T) {
 	resource := Resource{
 		Type: "agent", ID: tid("relceil-child"),
 		ParentType: "project", ParentID: f.projectBeta.ID,
-		Ancestry: []string{ceilingUserID, ceilingAgentID},
+		// The chain root is a different user, so the delegator's own
+		// authority on the resource comes only from its Beta role (an
+		// ancestor relationship of the delegator would also supply it).
+		Ancestry: []string{tid("relceil-other-root"), ceilingAgentID},
 	}
 
 	// ALLOWED: relationship grant fires (kernel denied), ceiling passes.
@@ -887,6 +892,8 @@ func TestGolden_AgentProgenySecretAccess(t *testing.T) {
 		CreatedBy: f.projectOwnerID,
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, progenyAgent))
+	createDCEdge(t, f.store, store.DelegationPrincipalUser, f.projectOwnerID,
+		store.DelegationPrincipalAgent, progenyAgent.ID, store.RoleScopeProject, f.projectAlpha.ID, string(AgentRoleFull))
 
 	// Use an ancestry-bearing agent identity (nil scopes → fail-closed restriction)
 	agentIdentity := &testProgenyAgentIdentity{
@@ -1175,6 +1182,22 @@ func (a *testProgenyAgentIdentity) OriginUserID() string {
 	return ""
 }
 func (a *testProgenyAgentIdentity) TokenID() string { return "" }
+
+// localAncestryProvenance opts this fake into AncestryIsHubAttested: the
+// marker is not inherited from Type() == "agent", so test fakes must opt in
+// explicitly.
+func (a *testProgenyAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
+// authzClassification opts this fake into principalContextForIdentity /
+// credentialContextForIdentity classification: those functions switch on
+// concrete type, not Type(), so a package-hub test fake that is passed
+// through CheckAccess/Decide (as this one is, below) must opt in explicitly
+// rather than being classified from its Type() == "agent" string.
+func (a *testProgenyAgentIdentity) authzClassification() (PrincipalKind, CredentialKind) {
+	return PrincipalKindAgent, CredentialKindAgentJWT
+}
 
 // =============================================================================
 // C1 Regression: Members-group owner cannot escalate to project-owner

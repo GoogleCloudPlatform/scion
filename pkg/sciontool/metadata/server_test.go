@@ -23,9 +23,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -981,6 +983,96 @@ func TestMetadataServer_ShutdownEndpoint(t *testing.T) {
 	// Server should no longer be reachable
 	if srv.probeHealth() {
 		t.Fatal("expected server to be unreachable after shutdown")
+	}
+}
+
+func TestReadShutdownToken_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shutdown.token")
+	if err := writeShutdownToken(path, "a-token"); err != nil {
+		t.Fatalf("writeShutdownToken: %v", err)
+	}
+
+	got, err := readShutdownToken(path)
+	if err != nil {
+		t.Fatalf("readShutdownToken: %v", err)
+	}
+	if string(got) != "a-token\n" {
+		t.Errorf("got %q, want %q", got, "a-token\n")
+	}
+}
+
+// TestReadShutdownToken_SymlinkRefused proves that another user who can
+// plant a symlink at the (predictable, shared os.TempDir()) shutdown-token
+// path can't make shutdownExisting read and forward an unrelated file's
+// contents as the shutdown token: readShutdownToken must refuse without
+// following the symlink.
+func TestReadShutdownToken_SymlinkRefused(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "secret")
+	if err := os.WriteFile(target, []byte("do-not-touch"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	path := filepath.Join(dir, "shutdown.token")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if _, err := readShutdownToken(path); err == nil {
+		t.Fatal("expected an error reading a symlinked shutdown-token path, got nil")
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(data) != "do-not-touch" {
+		t.Errorf("symlink target was modified: %q", data)
+	}
+}
+
+// TestReadShutdownToken_FIFODoesNotBlock proves that a FIFO planted at the
+// (predictable, shared os.TempDir()) shutdown-token path can't hang
+// shutdownExisting forever: readShutdownToken must return an error
+// promptly instead of blocking in open(2) waiting for a writer.
+func TestReadShutdownToken_FIFODoesNotBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shutdown.token")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := readShutdownToken(path)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("expected an error reading a FIFO shutdown-token path, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readShutdownToken blocked on a FIFO with no writer")
+	}
+}
+
+// TestReadShutdownToken_BoundedRead proves an oversized file at the
+// shutdown-token path is bounded by shutdownTokenMaxBytes rather than read
+// in full: writeShutdownToken never produces a file this large, so
+// anything longer already isn't a token this process wrote.
+func TestReadShutdownToken_BoundedRead(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shutdown.token")
+	oversized := strings.Repeat("a", shutdownTokenMaxBytes*4)
+	if err := os.WriteFile(path, []byte(oversized), 0o600); err != nil {
+		t.Fatalf("write oversized file: %v", err)
+	}
+
+	got, err := readShutdownToken(path)
+	if err != nil {
+		t.Fatalf("readShutdownToken: %v", err)
+	}
+	if len(got) != shutdownTokenMaxBytes {
+		t.Errorf("read %d bytes, want bounded to %d", len(got), shutdownTokenMaxBytes)
 	}
 }
 

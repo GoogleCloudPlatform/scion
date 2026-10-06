@@ -20,15 +20,16 @@ const (
 // assistantDenied lists commands removed in assistant mode (relative to human).
 // Uses dot-separated command paths: "hub.auth", "config.migrate", etc.
 var assistantDenied = map[string]bool{
-	"hub.auth":             true,
-	"hub.token":            true,
-	"project.reconnect":    true,
-	"config.migrate":       true,
-	"config.cd-config":     true,
-	"config.cd-project":    true,
-	"cdw":                  true,
-	"clean":                true,
-	"server.recover-authz": true,
+	"hub.auth":                 true,
+	"hub.token":                true,
+	"hub.secret.migrate-names": true,
+	"project.reconnect":        true,
+	"config.migrate":           true,
+	"config.cd-config":         true,
+	"config.cd-project":        true,
+	"cdw":                      true,
+	"clean":                    true,
+	"server.recover-authz":     true,
 }
 
 // agentAllowed lists commands available in agent mode.
@@ -128,6 +129,9 @@ var agentAllowed = map[string]bool{
 	"conversation.join":           true,
 	"conversation.leave":          true,
 	"conversation.catch-up":       true,
+	"artifact":                    true,
+	"artifact.publish":            true,
+	"artifact.get":                true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

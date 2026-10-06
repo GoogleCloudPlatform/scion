@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // mockRuntimeBrokerService implements hubclient.RuntimeBrokerService for testing.
@@ -34,6 +35,26 @@ type mockRuntimeBrokerService struct {
 	heartbeatErr   error
 
 	messageFailureReports []*hubclient.MessageFailuresReport
+
+	// launchReports records every ReportAgentLaunch call, in order.
+	launchReports []*mockLaunchReportCall
+	// launchReportFunc, when set, computes ReportAgentLaunch's answer for
+	// each report; it lets a test script a sequence of Hub answers (claim
+	// applied, a checkpoint 409, a terminal "completed", ...). When nil,
+	// ReportAgentLaunch answers "applied" to everything.
+	launchReportFunc func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error)
+	// ctxHook, when set, is called with the ctx ReportAgentLaunch actually
+	// received for every call, so a test can inspect the attempt ctx a
+	// launchSender call site built (e.g. its deadline) without needing the
+	// call to fail or time out.
+	ctxHook func(ctx context.Context)
+}
+
+// mockLaunchReportCall records one ReportAgentLaunch invocation.
+type mockLaunchReportCall struct {
+	BrokerID string
+	AgentID  string
+	Report   *hubclient.AgentLaunchReport
 }
 
 type mockHeartbeatCall struct {
@@ -94,6 +115,46 @@ func (m *mockRuntimeBrokerService) getHeartbeatCalls() []mockHeartbeatCall {
 	return append([]mockHeartbeatCall{}, m.heartbeatCalls...)
 }
 
+func (m *mockRuntimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+	m.mu.Lock()
+	m.launchReports = append(m.launchReports, &mockLaunchReportCall{BrokerID: brokerID, AgentID: agentID, Report: req})
+	fn := m.launchReportFunc
+	hook := m.ctxHook
+	m.mu.Unlock()
+	if hook != nil {
+		hook(ctx)
+	}
+	if fn == nil {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+	// Run fn in its own goroutine and select on it against ctx, so a test's
+	// fn that deliberately never returns (simulating an unresponsive Hub) is
+	// still bounded by the real attemptCtx launchSender builds -- this mock
+	// has no HTTP transport of its own to enforce that, unlike the real
+	// hubclient.RuntimeBrokerService implementation.
+	type fnResult struct {
+		result *hubclient.AgentLaunchReportResult
+		err    error
+	}
+	done := make(chan fnResult, 1)
+	go func() {
+		result, err := fn(req)
+		done <- fnResult{result, err}
+	}()
+	select {
+	case r := <-done:
+		return r.result, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *mockRuntimeBrokerService) getLaunchReports() []*mockLaunchReportCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*mockLaunchReportCall{}, m.launchReports...)
+}
+
 // heartbeatMockManager implements agent.Manager for testing.
 type heartbeatMockManager struct {
 	agents []api.AgentInfo
@@ -104,6 +165,14 @@ func (m *heartbeatMockManager) Provision(ctx context.Context, opts api.StartOpti
 	return nil, nil
 }
 
+func (m *heartbeatMockManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
+}
+
 func (m *heartbeatMockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return nil, nil
 }
@@ -112,7 +181,11 @@ func (m *heartbeatMockManager) Start(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
-func (m *heartbeatMockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+func (m *heartbeatMockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
 	return nil
 }
 
@@ -120,7 +193,7 @@ func (m *heartbeatMockManager) Delete(ctx context.Context, agentID string, delet
 	return false, nil
 }
 
-func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *heartbeatMockManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return false, nil
 }
 
@@ -132,7 +205,11 @@ func (m *heartbeatMockManager) Message(ctx context.Context, agentID, projectID s
 	return nil
 }
 
-func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
+func (m *heartbeatMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }
 
@@ -252,6 +329,55 @@ func TestHeartbeatService_ReportsReprovisionCapability(t *testing.T) {
 	}
 	if !hb.Capabilities.Sync || !hb.Capabilities.Attach {
 		t.Error("expected Sync and Attach capabilities to still be reported")
+	}
+}
+
+// TestHeartbeatService_ReportsEmptyPerAgentWorkspaceCapability pins that
+// every heartbeat advertises empty-per-agent support (design #2703 P2), so
+// the hub's dispatch gate admits this broker for such projects and an
+// upgraded, already-joined broker self-heals its stored capabilities.
+func TestHeartbeatService_ReportsEmptyPerAgentWorkspaceCapability(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 || calls[0].Heartbeat.Capabilities == nil {
+		t.Fatalf("expected 1 heartbeat with capabilities, got %d calls", len(calls))
+	}
+	if !calls[0].Heartbeat.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected Capabilities.EmptyPerAgentWorkspace to be true on every heartbeat")
+	}
+}
+
+// noEmptyPerAgentTestRuntime is a MockRuntime that opts out of the optional
+// runtime.EmptyPerAgentCapableRuntime capability, as Cloud Run does.
+type noEmptyPerAgentTestRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (r *noEmptyPerAgentTestRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
+var _ runtime.EmptyPerAgentCapableRuntime = (*noEmptyPerAgentTestRuntime)(nil)
+
+// TestHeartbeatService_EmptyPerAgentFollowsDefaultRuntime pins that the
+// heartbeat's EmptyPerAgentWorkspace reflects the default runtime, like
+// Attach: false when it opts out (Cloud Run), so the hub never routes an
+// empty-per-agent project to a broker that would reject it at Run.
+func TestHeartbeatService_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+	svc.SetDefaultRuntime(&noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{}})
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 || calls[0].Heartbeat.Capabilities == nil {
+		t.Fatalf("expected 1 heartbeat with capabilities, got %d calls", len(calls))
+	}
+	if calls[0].Heartbeat.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("Capabilities.EmptyPerAgentWorkspace = true, want false for a default runtime that opts out")
 	}
 }
 

@@ -18,7 +18,11 @@ approval_policy = "never"
 
 notify = ["sh", "/home/scion/.codex/scion_notify.sh"]
 
-model = "gpt-5.5"
+# model is intentionally not set here. provision.py's _reconcile_codex_toml
+# writes the resolved model (from SCION_MODEL, itself resolved from this
+# harness's model_aliases/default model in config.yaml) at agent start, so a
+# static value here would silently win whenever it drifted from the current
+# aliases (ptone/scion#2365).
 
 [features]
 hooks = true

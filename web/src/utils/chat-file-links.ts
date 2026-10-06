@@ -78,6 +78,16 @@ export function isRecognizedFilePath(path: string): boolean {
  * excluded even when its suffix matches a supported path shape, so a message
  * containing `https://example.com/workspace/a.md` never creates a local file
  * entry for `/workspace/a.md`.
+ *
+ * A path substring inside a `gs://bucket/object` reference is excluded the
+ * same way: an object name like `workspace/report.md` sits right after the
+ * bucket's own `/` separator, so the whole URI already contains the literal
+ * substring `/workspace/report.md` — a real, independently-matching
+ * container path that is not a local file at all. Linkify's own
+ * leftmost-wins HTML-entity pass already keeps that case from also becoming
+ * a clickable path link in rendered chat; this recorder runs as a separate
+ * scan over the raw text with no such dedup of its own, so it needs the same
+ * exclusion directly.
  */
 export function extractContainerPaths(text: string): string[] {
   if (!text) return [];
@@ -93,8 +103,21 @@ export function extractContainerPaths(text: string): string[] {
     urlRanges.push([um.index, um.index + um[0].length]);
   }
 
+  const gcsRanges: Array<[number, number]> = [];
+  const gcsRe = new RegExp(GCS_URI_PATTERN.source, GCS_URI_PATTERN.flags);
+  let gm: RegExpExecArray | null;
+  while ((gm = gcsRe.exec(text)) !== null) {
+    if (gm[0].length === 0) {
+      gcsRe.lastIndex++;
+      continue;
+    }
+    gcsRanges.push([gm.index, gm.index + gm[0].length]);
+  }
+
   const insideUrl = (index: number): boolean =>
     urlRanges.some(([start, end]) => index >= start && index < end);
+  const insideGcsUri = (index: number): boolean =>
+    gcsRanges.some(([start, end]) => index >= start && index < end);
 
   const pathRe = new RegExp(CONTAINER_PATH_PATTERN.source, CONTAINER_PATH_PATTERN.flags);
   const seen = new Set<string>();
@@ -106,7 +129,12 @@ export function extractContainerPaths(text: string): string[] {
       continue;
     }
     const path = pm[0];
-    if (!insideUrl(pm.index) && isRecognizedFilePath(path) && !seen.has(path)) {
+    if (
+      !insideUrl(pm.index) &&
+      !insideGcsUri(pm.index) &&
+      isRecognizedFilePath(path) &&
+      !seen.has(path)
+    ) {
       seen.add(path);
       out.push(path);
     }
@@ -550,6 +578,13 @@ export function pathIdentityKey(projectId: string, target: PathLinkTarget): stri
 /** Largest file fetched for an inline text preview, in bytes (512 KiB). */
 export const TEXT_PREVIEW_MAX_BYTES = 512 * 1024;
 
+/** Human-readable file size, shared by the message attachment chip and the Documents palette row. */
+export function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 const IMAGE_EXTENSIONS = new Set([
   '.png',
   '.jpg',
@@ -573,9 +608,497 @@ export function isImageFileName(name: string): boolean {
   return IMAGE_EXTENSIONS.has(extensionOf(name));
 }
 
+/**
+ * Extensions a `gcs` preview target renders as `<img>` — narrower than
+ * {@link IMAGE_EXTENSIONS}: no `.svg` (always shown as source text, since an
+ * SVG document can embed script) and no `.bmp`/`.ico` (the hub serves only
+ * PNG, JPEG, GIF and WebP as image types, so the response `Content-Type`
+ * could never agree with those extensions anyway). Matched against the file
+ * name's extension only; the caller must also require the response
+ * `Content-Type` to pass {@link isGcsImageContentType}, so a gcs target
+ * renders as an image only when the hub itself sniffed its bytes as one of
+ * the supported raster types.
+ */
+const GCS_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+
+/** True when a `gcs` preview target's extension is one of the four hub-sniffed raster image types. */
+export function isGcsImageExtension(name: string): boolean {
+  return GCS_IMAGE_EXTENSIONS.has(extensionOf(name));
+}
+
+/**
+ * The exact image Content-Types the hub's sniffer serves for a gcs object.
+ * Any other `image/*` value is never rendered as `<img>` for a gcs target.
+ */
+const GCS_IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** True when a base MIME type (no parameters, lowercase) is one of the four gcs raster image types. */
+export function isGcsImageContentType(mime: string): boolean {
+  return GCS_IMAGE_CONTENT_TYPES.has(mime);
+}
+
 /** True when a file name's extension marks it as Markdown. */
 export function isMarkdownFileName(name: string): boolean {
   return MARKDOWN_EXTENSIONS.has(extensionOf(name));
+}
+
+/**
+ * Extensions (beyond Markdown, checked separately) known to be safe to fetch
+ * and render as plain text/code, not binary data.
+ */
+const KNOWN_TEXT_EXTENSIONS = new Set([
+  '.txt',
+  '.json',
+  '.jsonc',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.conf',
+  '.cfg',
+  '.env',
+  '.csv',
+  '.tsv',
+  '.log',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.tsx',
+  '.jsx',
+  '.py',
+  '.go',
+  '.java',
+  '.kt',
+  '.c',
+  '.h',
+  '.cpp',
+  '.hpp',
+  '.rs',
+  '.rb',
+  '.php',
+  '.sh',
+  '.bash',
+  '.zsh',
+  '.sql',
+  '.css',
+  '.scss',
+  '.html',
+  '.htm',
+  '.proto',
+]);
+
+/** `application/*` MIME types (beyond `text/*`, checked separately) known to be plain-text bodies, not binary data. */
+const KNOWN_TEXT_APPLICATION_MIMES = new Set([
+  'application/json',
+  'application/xml',
+  'application/x-yaml',
+  'application/yaml',
+  'application/javascript',
+  'application/typescript',
+  'application/x-sh',
+  'application/toml',
+  'application/x-ndjson',
+]);
+
+/**
+ * True for a file name whose extension (or well-known extensionless name —
+ * Makefile, Dockerfile, README, ...) is known to be safe to fetch and render
+ * as plain text/code — the classification a container-path target uses,
+ * since it never carries a MIME type of its own.
+ */
+export function isLikelyTextFileName(name: string): boolean {
+  if (isMarkdownFileName(name)) return true;
+  if (KNOWN_TEXT_EXTENSIONS.has(extensionOf(name))) return true;
+  const lastSegment = name.split('/').pop() || name;
+  return !lastSegment.includes('.') && EXTENSIONLESS_FILES.has(lastSegment.toLowerCase());
+}
+
+/**
+ * Lowercased MIME type with any `;`-delimited parameters (e.g.
+ * `; charset=utf-8`) stripped, or '' for an empty input. Use this before
+ * comparing a raw MIME string against a specific type, so a parameter or
+ * unexpected case never defeats the comparison.
+ */
+export function baseMimeType(mime: string): string {
+  return mime.toLowerCase().split(';')[0]?.trim() ?? '';
+}
+
+/**
+ * True for a MIME type known to be safe to fetch and render as plain
+ * text/code — the classification an attachment target uses, since it always
+ * carries a MIME type (unlike a container path, which never does). A
+ * structured-syntax suffix (`+json`, `+xml` — e.g. `application/ld+json`,
+ * `image/svg+xml`) is text regardless of its top-level type, per RFC 6839.
+ */
+export function isLikelyTextMime(mime: string): boolean {
+  const lower = baseMimeType(mime);
+  if (lower.startsWith('text/')) return true;
+  if (lower.endsWith('+json') || lower.endsWith('+xml')) return true;
+  return KNOWN_TEXT_APPLICATION_MIMES.has(lower);
+}
+
+/**
+ * Extensions of compressed archives, compiled/executable binaries and office
+ * documents. A container-path target with one of these extensions is shown
+ * as download-only without fetching its body. Any other path is fetched: the
+ * server rejects non-UTF-8 workspace content, which the preview shows as its
+ * error state.
+ */
+const KNOWN_BINARY_EXTENSIONS = new Set([
+  '.zip',
+  '.tar',
+  '.gz',
+  '.tgz',
+  '.bz2',
+  '.xz',
+  '.7z',
+  '.rar',
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.bin',
+  '.o',
+  '.a',
+  '.class',
+  '.jar',
+  '.war',
+  '.wasm',
+  '.pyc',
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.db',
+  '.sqlite',
+  '.mp3',
+  '.wav',
+  '.ogg',
+  '.m4a',
+  '.flac',
+  '.aac',
+  '.mp4',
+  '.mkv',
+  '.mov',
+  '.webm',
+  '.avi',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.otf',
+  '.eot',
+  '.dmg',
+  '.iso',
+  '.pkg',
+  '.deb',
+  '.rpm',
+]);
+
+/**
+ * True for a file name whose extension is in KNOWN_BINARY_EXTENSIONS. Used
+ * only for container-path targets, which carry no MIME type.
+ */
+export function isLikelyBinaryFileName(name: string): boolean {
+  return KNOWN_BINARY_EXTENSIONS.has(extensionOf(name));
+}
+
+// ---------------------------------------------------------------------------
+// gs:// link detection, parsing and API/console URL construction.
+// ---------------------------------------------------------------------------
+
+/**
+ * Matches a `gs://bucket/object` reference in HTML-escaped text. The
+ * character class deliberately excludes `& < > " '` and whitespace, `#` and
+ * `?`, so a hostile object name can never inject an attribute or break out
+ * of the link text; the builder ({@link buildGcsLinkHtml}) escapes anyway as
+ * defense in depth.
+ *
+ * NO LOOKBEHIND (hard rule): the left boundary is captured as group 1
+ * (`^` or a char that is not a word char or `/`) and the caller re-emits it
+ * unchanged in front of the built `<a>`, exactly as the file-path pattern's
+ * boundary works. Safari before 16.4 throws a SyntaxError at parse time on a
+ * lookbehind, which would kill this whole module.
+ *
+ * Group 2 = bucket. Group 3 = the RAW object run — every contiguous
+ * object-class character after the bucket, captured whole via the
+ * `(?=(...))\3` atomic-group idiom so the regex itself can never backtrack
+ * it to a shorter length (an ordinary greedy group without this idiom would
+ * happily give up trailing `~+=@%` characters to satisfy a later
+ * constraint, which would let a viewer request a shorter object than what
+ * was actually posted). Group 3 is not yet the object a caller should link
+ * or request: pass the whole match to {@link resolveGcsMatch}, which trims
+ * trailing punctuation and applies the fragment/query/param continuation
+ * rule to produce the real extracted object, mirroring `extractGCSObjectAt`
+ * in pkg/hub/gcs_link.go exactly. Buckets shorter than 3 characters never
+ * match, per GCS naming rules.
+ */
+export const GCS_URI_PATTERN =
+  /(^|[^\w/])gs:\/\/([a-z0-9][a-z0-9._-]{1,220}[a-z0-9])\/(?=([A-Za-z0-9._~+=,@%:!$*()/-]+))\3/g;
+
+/** Anchored, whole-string form of {@link GCS_URI_PATTERN}'s bucket group. */
+const GCS_BUCKET_ONLY_PATTERN = /^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$/;
+
+/** Anchored, whole-string form of the object GCS_URI_PATTERN extracts. */
+const GCS_OBJECT_ONLY_PATTERN = /^[A-Za-z0-9._~+=,@%:!$*()/-]*[A-Za-z0-9_~+=@%]$/;
+
+/**
+ * Sentence-like punctuation trimmed from the trailing end of a raw gs://
+ * object run, mirroring the Go server's `isGCSObjectTrimByte` exactly: the
+ * object class allows these in the middle of a name, but a valid extraction
+ * never ends on one. `/` is deliberately not a member — a trailing `/`
+ * means "directory-like" and is rejected outright by
+ * {@link trimGcsObjectRun}, never trimmed down to a shorter object.
+ */
+const GCS_OBJECT_TRIM_CHARS = new Set(['.', ',', ':', '!', '$', '*', '(', ')', '-']);
+
+/**
+ * Trim a raw gs:// object run (GCS_URI_PATTERN's group 3) down to the object
+ * it actually extracts, mirroring the Go server's `extractGCSObjectAt`
+ * exactly: trim trailing characters in
+ * {@link GCS_OBJECT_TRIM_CHARS} one at a time, then reject (return `null`)
+ * if nothing is left or if what remains still ends in `/` — a directory
+ * reference, never an object, even though trimming just one more character
+ * might reach a valid final character further back.
+ */
+function trimGcsObjectRun(rawRun: string): string | null {
+  let end = rawRun.length;
+  while (end > 0 && GCS_OBJECT_TRIM_CHARS.has(rawRun[end - 1])) {
+    end--;
+  }
+  if (end === 0) return null;
+  if (rawRun[end - 1] === '/') return null;
+  return rawRun.slice(0, end);
+}
+
+/**
+ * ASCII whitespace, identical to the server's isGCSWhitespaceByte — not
+ * JS's `\s`, which also matches non-ASCII whitespace (U+00A0, U+3000 and
+ * the other Zs space separators, U+2028/U+2029 and U+FEFF) the server's
+ * byte-oriented check does not. Using `\s` here would let the client link
+ * an object the server always rejects: `gs://b/o.md?` followed by U+3000
+ * or U+2028 reads as "continuation, but the next char is whitespace" on
+ * the client and "continuation, next byte is not ASCII whitespace" on the
+ * server.
+ */
+const GCS_ASCII_WHITESPACE = /[ \t\n\r\f\v]/;
+
+/**
+ * The continuation rule, identical on client and server: an
+ * extracted object immediately followed by `#`, `?` or `&` is rejected (no
+ * link, no server allow) when a further character exists there and it is
+ * not ASCII whitespace — a fragment-, query- or param-like continuation,
+ * never a legitimate end of a posted name. `following` is everything in the
+ * original text right after the extracted object, which is not always the
+ * same as right after the raw run: trimmed trailing punctuation sits
+ * between the two, and must be checked here first, not skipped over.
+ *
+ * `following` is HTML-escaped, so a raw `&` is the 5-character literal
+ * `&amp;`, not a bare `&` — checked as that exact prefix, not just "starts
+ * with `&`", so this does not misfire on `&lt;`, `&gt;`, `&quot;` or
+ * `&#39;`, which start with `&` too but represent `< > " '`, none of which
+ * this rule cares about. The server has no such concern: it reads the raw,
+ * unescaped body, where `#`, `?` and `&` are always exactly one byte. There
+ * is no client-side equivalent of the server's `\` (markdown-escape) void
+ * rule: by the time raw text reaches the client it has already been
+ * rendered, so a markdown escape sequence like `\_` is already resolved
+ * into its literal character and never appears here as a backslash.
+ */
+function gcsObjectHasFragmentContinuation(following: string): boolean {
+  let markerLength: number;
+  if (following.startsWith('&amp;')) {
+    markerLength = '&amp;'.length;
+  } else if (following[0] === '#' || following[0] === '?') {
+    markerLength = 1;
+  } else {
+    return false;
+  }
+  const afterMarker = following[markerLength];
+  return afterMarker !== undefined && !GCS_ASCII_WHITESPACE.test(afterMarker);
+}
+
+/**
+ * Resolve a {@link GCS_URI_PATTERN} match to the object it actually
+ * extracts, or `null` if this occurrence extracts no valid object at all
+ * (a directory-like trailing `/`, or the continuation rule above).
+ * `suffix` is the trimmed trailing punctuation, if any, that a caller
+ * linkifying this match must still re-emit as literal text right after the
+ * built link — it was part of the raw match but not part of the object.
+ */
+export function resolveGcsMatch(match: RegExpExecArray): { object: string; suffix: string } | null {
+  const rawRun = match[3];
+  const object = trimGcsObjectRun(rawRun);
+  if (object === null) return null;
+  const suffix = rawRun.slice(object.length);
+  const afterRawRun = (match.input ?? '').slice(match.index + match[0].length);
+  if (gcsObjectHasFragmentContinuation(suffix + afterRawRun)) return null;
+  return { object, suffix };
+}
+
+/** A UUID in canonical (lowercase, hyphenated) form, matching a message id. */
+const MESSAGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A parsed `gs://bucket/object` reference. */
+export interface GcsUriParts {
+  bucket: string;
+  object: string;
+}
+
+/**
+ * Parse a whole `gs://bucket/object` string (not a substring search — see
+ * {@link GCS_URI_PATTERN} for that) into its bucket and object parts.
+ * Returns null for anything that doesn't match exactly, including a
+ * directory-like trailing `/` or an out-of-charset object name. Used to
+ * parse a `data-gcs-uri` attribute value back into its parts at click time.
+ */
+export function parseGcsUri(uri: string): GcsUriParts | null {
+  const match =
+    /^gs:\/\/([a-z0-9][a-z0-9._-]{1,220}[a-z0-9])\/([A-Za-z0-9._~+=,@%:!$*()/-]*[A-Za-z0-9_~+=@%])$/.exec(
+      uri
+    );
+  if (!match) return null;
+  return { bucket: match[1], object: match[2] };
+}
+
+/** Escapes `& < > " '` for safe interpolation into an HTML attribute value. */
+export function escAttr(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Build the `<a class="entity-link gcs-link">` markup for a matched gs://
+ * URI. Names are literal, with no percent-decoding — what's in the message
+ * is exactly what `data-gcs-uri` carries.
+ */
+export function buildGcsLinkHtml(bucket: string, object: string): string {
+  const uri = `gs://${bucket}/${object}`;
+  const escaped = escAttr(uri);
+  return `<a class="entity-link gcs-link" data-gcs-uri="${escaped}" href="javascript:void(0)" title="Open ${escaped}">${uri}</a>`;
+}
+
+/**
+ * Build the hub API URL for a gs:// object fetch, addressed by the message
+ * id whose body the URI must appear in. Rejects (throws on) a malformed
+ * messageId/bucket/object rather than normalising it — the same regexes the
+ * server's own step-3 validation uses — and pins the built URL before
+ * returning it (see {@link pinGcsObjectUrl}), the same reject-then-pin
+ * treatment as {@link buildFileApiUrl}.
+ */
+export function buildGcsObjectApiUrl(messageId: string, bucket: string, object: string): string {
+  if (!MESSAGE_ID_PATTERN.test(messageId)) {
+    throw new Error('buildGcsObjectApiUrl: unsafe message id');
+  }
+  if (!GCS_BUCKET_ONLY_PATTERN.test(bucket) || bucket.includes('..')) {
+    throw new Error('buildGcsObjectApiUrl: unsafe bucket');
+  }
+  if (object.length > 1024 || !GCS_OBJECT_ONLY_PATTERN.test(object)) {
+    throw new Error('buildGcsObjectApiUrl: unsafe object');
+  }
+  const params = new URLSearchParams({ message: messageId, bucket, object });
+  const url = `/api/v1/gcs/object?${params.toString()}`;
+  pinGcsObjectUrl(url, messageId, bucket, object);
+  return url;
+}
+
+/**
+ * Sink-side pin for {@link buildGcsObjectApiUrl}, in the same spirit as
+ * {@link pinBuiltUrl}: re-checks the URL a builder is about to return,
+ * independent of the source-side validation above. Throws unless:
+ *
+ * - the raw path (everything before `?`/`#`) is exactly `/api/v1/gcs/object`
+ *   — checked as a raw string, not via `new URL()`, so a value that could
+ *   only ever equal that literal by starting with `/` can never be an
+ *   absolute `scheme://host/...` or protocol-relative `//host/...` URL to a
+ *   different origin: this is what stands in for an explicit origin check
+ *   without this module taking on a `location` dependency;
+ * - there is no fragment;
+ * - the query string contains exactly the keys `message`, `bucket` and
+ *   `object`, each exactly once;
+ * - each decoded value `===` the corresponding input.
+ *
+ * A final `new URL()` re-parse against a fixed placeholder origin (mirroring
+ * `pinBuiltUrl`'s own backstop) additionally guards against the raw checks
+ * above missing a normalization edge case.
+ *
+ * For every input `buildGcsObjectApiUrl` can actually construct, several of
+ * these checks overlap: appending `#frag` after a valid query string is
+ * absorbed into the last parameter's value by `URLSearchParams` itself
+ * (it has no `#` delimiter of its own), so the value-mismatch check below
+ * catches it independently of the explicit fragment check; a wrong raw path
+ * likewise still shows up as a `pathname` mismatch in the final `new URL()`
+ * re-parse. Each check is kept anyway — same rationale as `pinBuiltUrl`'s
+ * own overlapping checks — as an independent backstop for a future caller
+ * that builds a string some other way and skips the checks above it.
+ */
+export function pinGcsObjectUrl(
+  built: string,
+  messageId: string,
+  bucket: string,
+  object: string
+): void {
+  const hashIndex = built.indexOf('#');
+  if (hashIndex !== -1) {
+    throw new Error('pinGcsObjectUrl: unexpected fragment');
+  }
+  const queryIndex = built.indexOf('?');
+  if (queryIndex === -1) {
+    throw new Error('pinGcsObjectUrl: missing query string');
+  }
+  const rawPath = built.slice(0, queryIndex);
+  if (rawPath !== '/api/v1/gcs/object') {
+    throw new Error('pinGcsObjectUrl: unexpected path');
+  }
+
+  const params = new URLSearchParams(built.slice(queryIndex + 1));
+  const keys = [...params.keys()];
+  const countOf = (k: string) => keys.filter((x) => x === k).length;
+  if (
+    keys.length !== 3 ||
+    countOf('message') !== 1 ||
+    countOf('bucket') !== 1 ||
+    countOf('object') !== 1
+  ) {
+    throw new Error('pinGcsObjectUrl: unexpected query parameters');
+  }
+  if (
+    params.get('message') !== messageId ||
+    params.get('bucket') !== bucket ||
+    params.get('object') !== object
+  ) {
+    throw new Error('pinGcsObjectUrl: query parameter value mismatch');
+  }
+
+  const parsed = new URL(built, 'http://pin.invalid');
+  if (parsed.origin !== 'http://pin.invalid' || parsed.pathname !== '/api/v1/gcs/object') {
+    throw new Error('pinGcsObjectUrl: the built URL was normalized or left the expected origin');
+  }
+}
+
+const CLOUD_CONSOLE_STORAGE_BASE = 'https://console.cloud.google.com/storage/browser/_details/';
+
+/**
+ * Build the Cloud Console deep-link for a gs:// object (the client cannot
+ * know ahead of render whether the sender still has a usable SA, so every
+ * non-400 error/"not available" state for a gcs target offers this as a
+ * fallback). Built entirely client-side from the already-parsed
+ * URI: no hub call, and it leaks nothing beyond what the message already
+ * showed the viewer. The bucket and each object path segment are
+ * `encodeURIComponent`-escaped individually, keeping `/` as path structure
+ * rather than encoding it into `%2F`.
+ */
+export function buildCloudConsoleUrl(bucket: string, object: string): string {
+  const encodedBucket = encodeURIComponent(bucket);
+  const encodedObject = object.split('/').map(encodeURIComponent).join('/');
+  return `${CLOUD_CONSOLE_STORAGE_BASE}${encodedBucket}/${encodedObject}`;
 }
 
 // ---------------------------------------------------------------------------

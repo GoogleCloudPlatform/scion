@@ -2,7 +2,10 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'entrypoints.pw.ts',
+  // Besides the terminal entry points, this suite covers the graph views'
+  // "Jump to agent" palette and the quick message dialog's "Open agent DM"
+  // button, which share their fixtures.
+  testMatch: ['entrypoints.pw.ts', 'graph-palette.pw.ts', 'quick-message-dm.pw.ts'],
   workers: 1,
   timeout: 30000,
   use: {

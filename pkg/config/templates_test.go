@@ -1112,6 +1112,7 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 				Namespace:          "base-ns",
 				RuntimeClassName:   "base-runtime",
 				ServiceAccountName: "base-sa",
+				PriorityClassName:  "base-priority",
 				Resources: &api.K8sResources{
 					Requests: map[string]string{"cpu": "250m"},
 					Limits:   map[string]string{"memory": "512Mi"},
@@ -1129,6 +1130,7 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 				Namespace:          "override-ns",
 				RuntimeClassName:   "override-runtime",
 				ServiceAccountName: "override-sa",
+				PriorityClassName:  "override-priority",
 				Resources: &api.K8sResources{
 					Requests: map[string]string{"memory": "1Gi"},
 					Limits:   map[string]string{"cpu": "500m"},
@@ -1156,6 +1158,9 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 		}
 		if got.Kubernetes.ServiceAccountName != "override-sa" {
 			t.Errorf("expected ServiceAccountName override, got %q", got.Kubernetes.ServiceAccountName)
+		}
+		if got.Kubernetes.PriorityClassName != "override-priority" {
+			t.Errorf("expected PriorityClassName override, got %q", got.Kubernetes.PriorityClassName)
 		}
 		if got.Kubernetes.ImagePullPolicy != "Never" {
 			t.Errorf("expected ImagePullPolicy override, got %q", got.Kubernetes.ImagePullPolicy)
@@ -1848,6 +1853,9 @@ func TestFriendlyTemplateName(t *testing.T) {
 		{"http URI", "https://example.com/my-template.tar.gz", "my-template"},
 		{"github URI", "https://github.com/user/repo/tree/main/templates/claude", "claude"},
 		{"rclone path", ":gcs:bucket/path/to/template", "template"},
+		{"content-hash cache dir", "/var/scion/template-cache/sha256:" + strings.Repeat("0f", 32), ""},
+		{"bare content hash", "sha256:" + strings.Repeat("0f", 32), ""},
+		{"short sha256-prefixed name kept", "/t/sha256:abc", "sha256:abc"},
 	}
 
 	for _, tt := range tests {
@@ -2235,5 +2243,45 @@ func TestMergeScionConfig_ThinkingLevel_NoAliasing(t *testing.T) {
 	if *got.ThinkingLevel != 7 {
 		t.Errorf("ThinkingLevel = %d after mutating the override, want 7: "+
 			"the merged result aliases the caller-owned override pointer", *got.ThinkingLevel)
+	}
+}
+
+// TestFindTemplateContentHashDirHasNoName checks that a template found at a
+// content-hash cache directory is not named after the hash, while an
+// ordinary absolute template directory keeps its base name.
+func TestFindTemplateContentHashDirHasNoName(t *testing.T) {
+	root := t.TempDir()
+	hashDir := filepath.Join(root, "sha256:"+strings.Repeat("ab", 32))
+	plainDir := filepath.Join(root, "web-dev")
+	for _, d := range []string{hashDir, plainDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projectPath := filepath.Join(root, "project", ".scion")
+
+	finders := map[string]func(string) (*Template, error){
+		"FindTemplate": FindTemplate,
+		"FindTemplateInProjectPath": func(name string) (*Template, error) {
+			return FindTemplateInProjectPath(name, projectPath)
+		},
+	}
+	for fname, find := range finders {
+		t.Run(fname, func(t *testing.T) {
+			tpl, err := find(hashDir)
+			if err != nil {
+				t.Fatalf("hash dir: %v", err)
+			}
+			if tpl.Name != "" || tpl.Path != hashDir {
+				t.Errorf("hash dir: got Name=%q Path=%q, want empty name and Path=%q", tpl.Name, tpl.Path, hashDir)
+			}
+			tpl, err = find(plainDir)
+			if err != nil {
+				t.Fatalf("plain dir: %v", err)
+			}
+			if tpl.Name != "web-dev" {
+				t.Errorf("plain dir: Name = %q, want %q", tpl.Name, "web-dev")
+			}
+		})
 	}
 }

@@ -385,7 +385,7 @@ func TestCloudRunTeardown_SendsQualifiedName(t *testing.T) {
 	}{
 		{
 			name: "Stop",
-			call: func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), id) },
+			call: func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), RunRef{ID: id}) },
 			reqName: func(f *fakeInstancesClient) (string, int) {
 				if len(f.stopReqs) == 0 {
 					return "", 0
@@ -395,7 +395,7 @@ func TestCloudRunTeardown_SendsQualifiedName(t *testing.T) {
 		},
 		{
 			name: "Delete",
-			call: func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), id) },
+			call: func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), RunRef{ID: id}) },
 			reqName: func(f *fakeInstancesClient) (string, int) {
 				if len(f.deleteReqs) == 0 {
 					return "", 0
@@ -431,8 +431,8 @@ func TestCloudRunTeardown_SendsQualifiedName(t *testing.T) {
 // TestCloudRunTeardown_ErrorPaths covers Stop and Delete failing at both the
 // call layer and the long-running-operation wait layer.
 func TestCloudRunTeardown_ErrorPaths(t *testing.T) {
-	stop := func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), "agent-x") }
-	del := func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), "agent-x") }
+	stop := func(rt *CloudRunRuntime) error { return rt.Stop(context.Background(), RunRef{ID: "agent-x"}) }
+	del := func(rt *CloudRunRuntime) error { return rt.Delete(context.Background(), RunRef{ID: "agent-x"}) }
 
 	tests := []struct {
 		name    string
@@ -597,7 +597,7 @@ func TestCloudRunLifecycle_RunListStopDelete(t *testing.T) {
 	// Stop and Delete accept that ContainerID and address the same instance.
 	stopFake := &fakeInstancesClient{}
 	rt.newClient = func(ctx context.Context) (cloudrun.InstancesAPI, error) { return stopFake, nil }
-	if err := rt.Stop(ctx, containerID); err != nil {
+	if err := rt.Stop(ctx, RunRef{ID: containerID}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if got := stopFake.stopReqs[0].Name; got != instanceName {
@@ -606,7 +606,7 @@ func TestCloudRunLifecycle_RunListStopDelete(t *testing.T) {
 
 	deleteFake := &fakeInstancesClient{}
 	rt.newClient = func(ctx context.Context) (cloudrun.InstancesAPI, error) { return deleteFake, nil }
-	if err := rt.Delete(ctx, containerID); err != nil {
+	if err := rt.Delete(ctx, RunRef{ID: containerID}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if got := deleteFake.deleteReqs[0].Name; got != instanceName {
@@ -625,10 +625,10 @@ func TestCloudRunRuntime_ClientFactoryError(t *testing.T) {
 	if _, err := rt.Run(context.Background(), runConfigForTest()); err == nil || !strings.Contains(err.Error(), "failed to create client") {
 		t.Errorf("Run error = %v, want 'failed to create client'", err)
 	}
-	if err := rt.Stop(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "failed to create client") {
+	if err := rt.Stop(context.Background(), RunRef{ID: "x"}); err == nil || !strings.Contains(err.Error(), "failed to create client") {
 		t.Errorf("Stop error = %v, want 'failed to create client'", err)
 	}
-	if err := rt.Delete(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "failed to create client") {
+	if err := rt.Delete(context.Background(), RunRef{ID: "x"}); err == nil || !strings.Contains(err.Error(), "failed to create client") {
 		t.Errorf("Delete error = %v, want 'failed to create client'", err)
 	}
 	if _, err := rt.List(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "failed to create client") {

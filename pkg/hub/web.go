@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -65,6 +66,9 @@ type WebHealthInfo struct {
 // web server's /healthz endpoint. It includes backward-compatible top-level
 // fields (status, version, scionVersion, uptime) plus per-component sub-objects.
 type CompositeHealthResponse struct {
+	// Status must stay the first field: shell health checks
+	// (scripts/starter-hub/gce-start-hub.sh, scripts/single-node-vm/deploy.sh)
+	// read the top-level status by matching the body prefix {"status":"...".
 	Status       string      `json:"status"`
 	Version      string      `json:"version"`
 	ScionVersion string      `json:"scionVersion"`
@@ -111,6 +115,11 @@ type webSessionUser struct {
 	Name      string `json:"displayName"`
 	AvatarURL string `json:"avatarUrl,omitempty"`
 	Role      string `json:"role,omitempty"`
+
+	// Preferences is populated only by handleAuthMe, from a live store read,
+	// never cached on the session. It is nil wherever webSessionUser is
+	// built or read for purposes other than that response.
+	Preferences *store.UserPreferences `json:"preferences,omitempty"`
 }
 
 // getWebSessionUser retrieves the web session user from the request context.
@@ -231,8 +240,16 @@ var spaShellTemplate = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
     <title>Scion</title>
+
+    <!-- app-icons:start -- kept identical to web/index.html; see TestSPAShellAppIconTags. -->
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#1e293b" />
+    <!-- app-icons:end -->
 
     <!-- Preconnect to CDNs for faster loading -->
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
@@ -331,9 +348,58 @@ var spaShellTemplate = `<!DOCTYPE html>
             -moz-osx-font-smoothing: grayscale;
         }
 
-        #app {
-            min-height: 100%;
+        /* mobile-frame:start -- kept identical (modulo comments and
+           indentation) to web/index.html; see TestSPAShellIndexHTMLParity. */
+        :root {
+            --scion-app-height: 100vh;
         }
+        @supports (height: 100dvh) {
+            :root {
+                --scion-app-height: 100dvh;
+            }
+        }
+
+        html, body {
+            overscroll-behavior: none;
+        }
+
+        html {
+            touch-action: manipulation;
+        }
+
+        #app {
+            height: 100%;
+            min-height: 0;
+        }
+
+        /* Frame mode: set by any app shell while mounted (see
+           web/src/components/shared/app-frame.ts). Document-scrolling pages
+           (login, invite, onboarding) never set it. */
+        html.scion-app-frame,
+        html.scion-app-frame body {
+            overflow: hidden;
+            height: 100%;
+        }
+
+        /* Stop iOS/Android focus-zoom: the Shoelace input default is raised
+           to 16px on a coarse (touch) pointer. Components that set their own
+           input font-size (a local ::part override, or their own
+           --sl-input-font-size-* re-declaration) bypass this variable and
+           must floor it at 16px on coarse pointers themselves -- see e.g.
+           chat-space-rail.ts's own @media (pointer: coarse) block. Shoelace's
+           own theme sets these same custom properties on a selector list
+           that includes a bare ":root" (light.css/dark.css), at the exact
+           same specificity as a plain ":root" rule here -- whichever
+           stylesheet loads last would otherwise win. "html:root" raises
+           the specificity (adds the "html" type selector) so this rule
+           always wins, regardless of load order. */
+        @media (pointer: coarse) {
+            html:root {
+                --sl-input-font-size-small: 16px;
+                --sl-input-font-size-medium: 16px;
+            }
+        }
+        /* mobile-frame:end */
 
         /* Prevent FOUC for custom elements */
         scion-app:not(:defined),
@@ -917,10 +983,11 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Hub = hubHealth
 
 		// Inherit top-level version/uptime from hub health if available.
+		// Same severity semantics as GetHealthInfo: the composite is the
+		// worst of its components, so an unhealthy hub (critical check
+		// failed) makes the composite unhealthy, not merely degraded.
 		if h, ok := hubHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 		// Use hub's uptime as the authoritative uptime.
 		if h, ok := hubHealth.(*HealthResponse); ok {
@@ -939,9 +1006,7 @@ func (ws *WebServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		resp.Broker = brokerHealth
 
 		if h, ok := brokerHealth.(interface{ HealthStatus() string }); ok {
-			if h.HealthStatus() != "healthy" {
-				resp.Status = "degraded"
-			}
+			resp.Status = worseHealthStatus(resp.Status, h.HealthStatus())
 		}
 	}
 
@@ -975,6 +1040,13 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		fileServer = http.FileServer(http.FS(ws.assets))
 	}
 
+	// Go's built-in MIME table has no entry for these, and the system
+	// table (if any) varies by host, so set them explicitly. URL paths
+	// always use "/", so use path.Ext rather than filepath.Ext.
+	if ct, ok := staticContentTypes[strings.ToLower(path.Ext(r.URL.Path))]; ok {
+		w.Header().Set("Content-Type", ct)
+	}
+
 	// Set cache headers based on whether the filename contains a hash.
 	// Vite hashed assets (e.g., chunk-abc123.js) get long-lived caching.
 	// Non-hashed entry points (e.g., main.js) get revalidation.
@@ -984,6 +1056,13 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 	fileServer.ServeHTTP(w, r)
+}
+
+// staticContentTypes maps file extensions missing from Go's built-in MIME
+// table to the Content-Type served for them.
+var staticContentTypes = map[string]string{
+	".ico":         "image/x-icon",
+	".webmanifest": "application/manifest+json",
 }
 
 // isHashedAsset checks if a path looks like it contains a content hash.
@@ -2693,9 +2772,11 @@ func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 // Route: GET /auth/me
 func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// Check context first (set by devAuthMiddleware or sessionAuthMiddleware)
-	if user := getWebSessionUser(r.Context()); user != nil {
+	if sessUser := getWebSessionUser(r.Context()); sessUser != nil {
+		resp := *sessUser
+		resp.Preferences = loadUserPreferences(r.Context(), ws.store, sessUser.UserID)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(user)
+		_ = json.NewEncoder(w).Encode(resp)
 		return
 	}
 
@@ -2723,6 +2804,7 @@ func (ws *WebServer) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		AvatarURL: sessionString(session, sessKeyUserAvatar),
 		Role:      sessionString(session, sessKeyUserRole),
 	}
+	user.Preferences = loadUserPreferences(r.Context(), ws.store, uid)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(user)

@@ -478,6 +478,17 @@ type governanceErrorStore struct {
 	deleteConstraintErr error
 }
 
+func (s *governanceErrorStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&governanceErrorStore{
+			Store:               tx,
+			createConstraintErr: s.createConstraintErr,
+			updateConstraintErr: s.updateConstraintErr,
+			deleteConstraintErr: s.deleteConstraintErr,
+		})
+	})
+}
+
 func (s *governanceErrorStore) CreateAccessConstraint(ctx context.Context, c *store.AccessConstraint) (*store.AccessConstraint, error) {
 	if s.createConstraintErr != nil {
 		return nil, s.createConstraintErr

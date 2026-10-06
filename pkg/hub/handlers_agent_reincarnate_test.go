@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,47 @@ type reincarnateTestDispatcher struct {
 	// imageRegistry is the registry the fake reports through ImageRegistry(),
 	// as the HTTP dispatcher reports the registry it rewrites images to.
 	imageRegistry string
+
+	// reprovisionEcho and startEcho, when set, run on a successful dispatch
+	// against the dispatched agent's AppliedConfig, simulating the broker
+	// echo applyBrokerAgentConfig writes in place (HarnessConfig,
+	// HarnessAuth, Image, Profile).
+	reprovisionEcho func(cfg *store.AgentAppliedConfig)
+	startEcho       func(cfg *store.AgentAppliedConfig)
+
+	// rerenderErr is returned by every reprovision call after the first:
+	// the worker's best-effort re-render of the previous config
+	// (ptone/scion#1935). reprovisionErr applies to the first call only.
+	// Move dispatch (agentMoveDispatcher): calls record the broker each
+	// went to; errors make that call fail.
+	moveProvisionCalls   []string // "<brokerID>|<expected workspace>"
+	moveProvisionErr     error
+	localOnlyDeleteCalls []string // "<brokerID>|<runID>"
+	localOnlyDeleteErr   map[string]error
+	startBrokers         []string
+	// runStore, when set, makes DispatchAgentStart mint and record a run
+	// on the row first, like the real dispatcher's beginRun, and record
+	// startPlacement (when set), like a target's start report.
+	runStore       store.Store
+	startPlacement string
+	// stopHook, when set, runs inside DispatchAgentStop.
+	stopHook func()
+
+	rerenderErr error
+	// rerenderEcho, when set, runs on a successful re-render against the
+	// dispatched AppliedConfig, simulating the broker's echo.
+	rerenderEcho func(cfg *store.AgentAppliedConfig)
+	// reprovisionConfigs snapshots the AppliedConfig of every reprovision
+	// dispatch, in call order, as the worker sent it.
+	reprovisionConfigs []store.AgentAppliedConfig
+}
+
+// reprovisionSnapshot returns the reprovision call count and a copy of the
+// dispatched configs.
+func (d *reincarnateTestDispatcher) reprovisionSnapshot() (int, []store.AgentAppliedConfig) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.reprovisionCalls, append([]store.AgentAppliedConfig(nil), d.reprovisionConfigs...)
 }
 
 func (d *reincarnateTestDispatcher) ImageRegistry() string {
@@ -83,8 +125,8 @@ func newReincarnateTestDispatcher() *reincarnateTestDispatcher {
 	return &reincarnateTestDispatcher{}
 }
 
-func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error {
-	return nil
+func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
@@ -92,24 +134,65 @@ func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *sto
 func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
 	d.mu.Lock()
 	d.reprovisionCalls++
+	if agent.AppliedConfig != nil {
+		d.reprovisionConfigs = append(d.reprovisionConfigs, *agent.AppliedConfig)
+	}
 	err := d.reprovisionErr
 	image := d.reprovisionImage
+	echo := d.reprovisionEcho
+	if d.reprovisionCalls > 1 {
+		err, image, echo = d.rerenderErr, "", d.rerenderEcho
+	}
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
 	}
+	if err == nil && echo != nil && agent.AppliedConfig != nil {
+		echo(agent.AppliedConfig)
+	}
 	return err
 }
-func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, task string, resume bool) error {
+func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect string) error {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
+	return d.moveProvisionErr
+}
+func (d *reincarnateTestDispatcher) DispatchAgentDeleteLocalOnly(_ context.Context, agent *store.Agent) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.localOnlyDeleteCalls = append(d.localOnlyDeleteCalls, agent.RuntimeBrokerID+"|"+agent.RunID)
+	return d.localOnlyDeleteErr[agent.RuntimeBrokerID]
+}
+func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, startBrokers []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.moveProvisionCalls...), append([]string(nil), d.localOnlyDeleteCalls...), append([]string(nil), d.startBrokers...)
+}
+func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	d.mu.Lock()
+	if d.runStore != nil {
+		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
+		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID); err == nil {
+			agent.RunID = runID
+		}
+		if d.startPlacement != "" {
+			_ = d.runStore.SetAgentWorkspacePlacement(ctx, agent.ID, d.startPlacement)
+		}
+	}
+	d.startBrokers = append(d.startBrokers, agent.RuntimeBrokerID)
 	d.startCalls++
 	d.lastStartTask = task
 	d.lastStartResume = &resume
 	err := d.startErr
 	image := d.startImage
+	echo := d.startEcho
 	d.mu.Unlock()
 	if err == nil && image != "" && agent.AppliedConfig != nil {
 		agent.AppliedConfig.Image = image
+	}
+	if err == nil && echo != nil && agent.AppliedConfig != nil {
+		echo(agent.AppliedConfig)
 	}
 	return err
 }
@@ -117,7 +200,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentStop(_ context.Context, _ *stor
 	d.mu.Lock()
 	d.stopCalls++
 	err := d.stopErr
+	hook := d.stopHook
 	d.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return err
 }
 func (d *reincarnateTestDispatcher) DispatchAgentRestart(context.Context, *store.Agent) error {
@@ -141,11 +228,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentExec(context.Context, *store.Ag
 func (d *reincarnateTestDispatcher) DispatchCheckAgentPrompt(context.Context, *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *reincarnateTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *reincarnateTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *reincarnateTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) error {
-	return nil
+func (d *reincarnateTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // waitForReincarnationSettled polls the store until the agent's most recent
@@ -299,6 +386,14 @@ func agentIdentityFor(agentID, projectID string, scopes ...AgentTokenScope) Agen
 	}}
 }
 
+// delegatingRequesterFor returns an agent identity for requesterID that may
+// reincarnate a baseline agent in projectID: the lifecycle scope plus every
+// scope of the baseline role, which re-recording the target's authority
+// under the requester requires (CanDelegate).
+func delegatingRequesterFor(requesterID, projectID string) AgentIdentity {
+	return agentIdentityFor(requesterID, projectID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
+}
+
 func reincarnateRequest(t *testing.T, agentID string, identity Identity, body interface{}) *http.Request {
 	t.Helper()
 	var bodyBytes []byte
@@ -368,8 +463,13 @@ func TestReincarnateAgent_Authz_OtherAgentRequiresLifecycleScope(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
-	t.Run("same project with the scope is allowed", func(t *testing.T) {
-		other := agentIdentityFor(tid("coordinator"), project.ID, ScopeAgentLifecycle)
+	t.Run("same project with the scope and delegation authority is allowed", func(t *testing.T) {
+		coordinator := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.ID = tid("coordinator")
+			a.Slug = "coordinator-" + tidSlugSafe(t.Name())
+			a.Name = "Coordinator"
+		})
+		other := delegatingRequesterFor(coordinator.ID, project.ID)
 		req := reincarnateRequest(t, agent.ID, other, ReincarnateAgentRequest{DryRun: true})
 		rec := httptest.NewRecorder()
 		srv.handleReincarnateAgent(rec, req, agent.ID)
@@ -400,10 +500,12 @@ func TestReincarnateAgent_RejectsUnsupportedOverrides(t *testing.T) {
 	self := agentIdentityFor(agent.ID, project.ID)
 
 	cases := []ReincarnateAgentRequest{
-		{Image: "new:v2"},
 		{HarnessConfig: "gemini"},
+		// Patch fields with invalid values (ptone/scion#3302).
 		{HarnessAuth: "oauth"},
-		{Model: "opus"},
+		{Role: "superuser"},
+		{ThinkingLevel: intPtr(101)},
+		{ThinkingLevel: intPtr(-1)},
 		{Env: map[string]string{"K": "V"}},
 		{TemplateHash: "abc123"},
 		{ResetOverrides: true},
@@ -588,6 +690,7 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 		name           string
 		workspaceMode  string // "" = clone-per-agent (the default for a git-remote project)
 		clearWorkspace bool   // force the "neither GitClone nor Workspace" edge case
+		nonGit         bool   // project has no git remote
 		wantRejected   bool
 		wantBodyText   string // O1 (review p1b-r1): pin the exact 400 message
 	}{
@@ -609,6 +712,20 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			workspaceMode: "",
 			wantRejected:  false,
 		},
+		{
+			// miller79/scion#167: same-broker empty-per-agent is
+			// eligible only on a local-disk runtime. This fixture agent
+			// has no recorded runtime and its broker reports no
+			// profiles, so resolveAgentRuntime yields "" and the
+			// allow-list refuses it (fail closed). The positive cases
+			// are TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible
+			// and ..._UnrecordedRuntime.
+			name:          "empty-per-agent (non-git per-agent), no recorded or resolvable runtime: refused",
+			workspaceMode: store.WorkspaceModePerAgent,
+			nonGit:        true,
+			wantRejected:  true,
+			wantBodyText:  "empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)",
+		},
 	}
 
 	for _, tc := range cases {
@@ -617,7 +734,9 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			srv, s, project, broker := setupReincarnateTestServer(t, disp)
 			ctx := context.Background()
 
-			project.GitRemote = "https://example.com/repo.git"
+			if !tc.nonGit {
+				project.GitRemote = "https://example.com/repo.git"
+			}
 			if tc.workspaceMode != "" {
 				project.Labels = map[string]string{store.LabelWorkspaceMode: tc.workspaceMode}
 			}
@@ -628,7 +747,7 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			// populateAgentConfig's GitClone/Workspace conditions ever
 			// change shape again without a matching gate update.
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 
 			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 				a.AppliedConfig.GitClone = probe.AppliedConfig.GitClone
@@ -721,7 +840,7 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 			require.NoError(t, s.UpdateProject(ctx, project))
 
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: an explicit-mount agent must have no GitClone")
 			require.NotEmpty(t, probe.AppliedConfig.Workspace, "fixture check: populateAgentConfig must set an explicit Workspace")
 
@@ -751,6 +870,243 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 	}
 }
 
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible pins
+// miller79/scion#167: an empty-per-agent agent on a local-disk runtime,
+// whose broker advertises ReprovisionEmptyPerAgent, is eligible for a
+// same-broker reincarnation. The dry run reports it eligible (200, no move
+// verdict) and a real request is accepted and reprovisions on the agent's
+// own broker with no workspace source in the dispatched config (the broker
+// reuses the private workspace in place).
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", "container"} {
+		t.Run(rt, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+			require.True(t, project.IsEmptyPerAgent(), "fixture check: project must be empty-per-agent")
+
+			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
+			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: empty-per-agent has no GitClone")
+			require.Empty(t, probe.AppliedConfig.Workspace, "fixture check: empty-per-agent has no Workspace")
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = rt
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, req := range []ReincarnateAgentRequest{
+				{Handoff: "h", DryRun: true},
+				{Handoff: "h", DryRun: true, TargetBroker: broker.ID}, // --broker <current>
+			} {
+				dryRec := httptest.NewRecorder()
+				srv.handleReincarnateAgent(dryRec, reincarnateRequest(t, agent.ID, self, req), agent.ID)
+				require.Equal(t, http.StatusOK, dryRec.Code, "dry run (target %q): body: %s", req.TargetBroker, dryRec.Body.String())
+				var dryResp ReincarnateAgentResponse
+				require.NoError(t, json.Unmarshal(dryRec.Body.Bytes(), &dryResp))
+				assert.Equal(t, agent.ID, dryResp.AgentID)
+				assert.Equal(t, 2, dryResp.Generation)
+				assert.Nil(t, dryResp.MoveVerdict, "a same-broker reincarnation is not a move")
+			}
+			n, _ := disp.reprovisionSnapshot()
+			require.Equal(t, 0, n, "a dry run must not dispatch anything")
+
+			realRec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(realRec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+			require.Equal(t, http.StatusAccepted, realRec.Code, "real request: body: %s", realRec.Body.String())
+
+			r := waitForReincarnationSettled(t, s, agent.ID)
+			require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+			n, cfgs := disp.reprovisionSnapshot()
+			require.Equal(t, 1, n, "exactly one reprovision dispatch")
+			assert.Nil(t, cfgs[0].GitClone, "empty-per-agent reprovision carries no git clone")
+			assert.Empty(t, cfgs[0].Workspace, "empty-per-agent reprovision carries no workspace path")
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, broker.ID, after.RuntimeBrokerID, "the agent stays on its broker")
+		})
+	}
+}
+
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_UnrecordedRuntime pins the
+// runtime fallback of the miller79/scion#167 gate: an agent with no recorded
+// Runtime is judged by resolveAgentRuntime over its broker's profiles. A
+// single docker profile resolves to docker and is accepted; mixed profile
+// types resolve to "" and are refused with 400 before anything is touched,
+// on the dry run and the real request alike.
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_UnrecordedRuntime(t *testing.T) {
+	cases := []struct {
+		name     string
+		profiles []store.BrokerProfile
+		wantOK   bool
+	}{
+		{
+			name:     "single docker profile: accepted",
+			profiles: []store.BrokerProfile{{Name: "default", Type: "docker", Available: true}},
+			wantOK:   true,
+		},
+		{
+			name: "mixed profile types: refused",
+			profiles: []store.BrokerProfile{
+				{Name: "default", Type: "docker", Available: true},
+				{Name: "k8s", Type: "kubernetes", Available: true},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+			broker.Profiles = tc.profiles
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = ""
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				a.AppliedConfig.Profile = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			require.Equal(t, "", agent.Runtime, "fixture check: no recorded runtime")
+			beforeVersion := agent.StateVersion
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, dryRun := range []bool{true, false} {
+				wantCode := http.StatusBadRequest
+				if tc.wantOK {
+					wantCode = http.StatusOK
+					if !dryRun {
+						wantCode = http.StatusAccepted
+					}
+				}
+				rec := httptest.NewRecorder()
+				srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun}), agent.ID)
+				require.Equal(t, wantCode, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+				if !tc.wantOK {
+					assert.Contains(t, rec.Body.String(), "supported only on local-disk runtimes", "dryRun=%v", dryRun)
+				}
+			}
+
+			if tc.wantOK {
+				r := waitForReincarnationSettled(t, s, agent.ID)
+				require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+				return
+			}
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched on a 400")
+			assert.Equal(t, "", after.ReincarnationState)
+			list, err := s.ListAgentReincarnations(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "no reincarnation record on a 400")
+			n, _ := disp.reprovisionSnapshot()
+			assert.Equal(t, 0, n, "nothing dispatched on a 400")
+		})
+	}
+}
+
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_Refused pins the refusals of
+// the miller79/scion#167 gate. A runtime outside the local-disk allow-list
+// gets 400; a broker without ReprovisionEmptyPerAgent gets 412 (an older
+// broker would refuse the reprovision only after the worker had stopped the
+// agent). Each holds on the dry run and the real request, with and without
+// `--broker <current>`, and the agent is never stopped: no stop dispatch,
+// no reincarnation record, no state change.
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_Refused(t *testing.T) {
+	const runtimeMsg = "empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)"
+	const capMsg = "runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker"
+	fullCaps := &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+	cases := []struct {
+		name     string
+		runtime  string
+		caps     *store.BrokerCapabilities
+		wantCode int
+		wantMsg  string
+	}{
+		{name: "kubernetes runtime", runtime: "kubernetes", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{name: "cloudrun runtime", runtime: "cloudrun", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{name: "unknown runtime", runtime: "some-future-runtime", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{
+			name:     "broker without ReprovisionEmptyPerAgent",
+			runtime:  "docker",
+			caps:     &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, AgentMove: true},
+			wantCode: http.StatusPreconditionFailed,
+			wantMsg:  capMsg,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = tc.caps
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = tc.runtime
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			beforeVersion := agent.StateVersion
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, target := range []string{"", broker.ID} {
+				for _, dryRun := range []bool{true, false} {
+					rec := httptest.NewRecorder()
+					req := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun, TargetBroker: target}
+					srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, req), agent.ID)
+					assert.Equal(t, tc.wantCode, rec.Code, "target=%q dryRun=%v: body: %s", target, dryRun, rec.Body.String())
+					assert.Contains(t, rec.Body.String(), tc.wantMsg, "target=%q dryRun=%v", target, dryRun)
+					if tc.wantCode == http.StatusPreconditionFailed {
+						assert.Contains(t, rec.Body.String(), ErrCodeUnsupportedCapability, "target=%q dryRun=%v", target, dryRun)
+					}
+				}
+			}
+
+			disp.mu.Lock()
+			stops := disp.stopCalls
+			disp.mu.Unlock()
+			assert.Zero(t, stops, "the agent must never be stopped for a request the gate refuses up front")
+			n, _ := disp.reprovisionSnapshot()
+			assert.Zero(t, n, "nothing may be dispatched")
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
+			assert.Equal(t, 1, after.Generation)
+			assert.Equal(t, "", after.ReincarnationState)
+			list, err := s.ListAgentReincarnations(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "no reincarnation record may be created")
+		})
+	}
+}
+
 // TestReincarnateAgent_ModeSwitchedToShared_Returns400 is the design §3.4
 // Amendment A23.1 (review p1b-r1) R3 regression test: A23 contract (a) keeps
 // "not shared" as a condition for the clone-per-agent case, unchanged from
@@ -771,7 +1127,7 @@ func TestReincarnateAgent_ModeSwitchedToShared_Returns400(t *testing.T) {
 	// Build the agent's config the way create actually would, while the
 	// project was still clone-per-agent.
 	probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-	srv.populateAgentConfig(ctx, probe, project, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 	require.NotNil(t, probe.AppliedConfig.GitClone, "fixture check: a clone-per-agent project must produce a GitClone")
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
@@ -857,7 +1213,7 @@ func TestReincarnateAgent_ModeSwitchedToCloneOnly_Returns400(t *testing.T) {
 			// Build the agent's config the way create actually would, under
 			// the ORIGINAL mode.
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: this project must produce no GitClone before any switch")
 			require.NotEmpty(t, probe.AppliedConfig.Workspace, "fixture check: populateAgentConfig must set an explicit Workspace")
 
@@ -936,7 +1292,7 @@ func TestReincarnateAgent_LinkedSharedProject_ClearedWorkspace_Returns400(t *tes
 	}))
 
 	probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-	srv.populateAgentConfig(ctx, probe, project, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 	require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: a shared-workspace project must produce no GitClone")
 	require.True(t, filepath.IsAbs(probe.AppliedConfig.Workspace), "fixture check: populateAgentConfig's Workspace for a shared project must be absolute")
 
@@ -1229,16 +1585,17 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 }
 
 // TestReincarnateAgent_WorkerPersistsBrokerEchoedImage is the worker-side
-// half of design §3.4 Amendment A11 item 1: when the broker's reprovision
-// response echoes back a resolved image different from what the hub planned
-// (e.g. the broker's own search path resolved something the hub could not
-// predict), the worker must persist that image on the agent's live
-// AppliedConfig rather than losing it once the "starting" step re-derives the
-// agent's phase. This is a regression test for the pointer-aliasing bug where
-// a step write omitting appliedConfig silently discarded the broker's echo.
+// half of design §3.4 Amendment A11 item 1: when the broker echoes back a
+// resolved image different from what the hub planned (e.g. the broker's own
+// search path resolved something the hub could not predict), the worker must
+// persist that image on the agent's live AppliedConfig. Since
+// ptone/scion#1907 the persisted image is the START echo (the runtime-
+// resolved image); the reprovision echo's image is the rendered,
+// not-yet-qualified value and is not taken.
 func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.reprovisionImage = "broker-resolved-image:v9"
+	disp.reprovisionImage = "broker-reprovision-echo:v9"
+	disp.startImage = "broker-resolved-image:v9"
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
@@ -1257,7 +1614,7 @@ func TestReincarnateAgent_WorkerPersistsBrokerEchoedImage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, final.AppliedConfig)
 	assert.Equal(t, "broker-resolved-image:v9", final.AppliedConfig.Image,
-		"the broker-echoed image must survive the starting step's write, not be lost to a stale re-read")
+		"the start-echoed image must be persisted at completion")
 }
 
 // createImageHarnessConfig stores a global harness config whose only
@@ -1335,10 +1692,12 @@ func TestReincarnateAgent_InlineImageBeatsHarnessConfig(t *testing.T) {
 
 // TestReincarnateAgent_RecordCarriesBrokerEchoedImage proves the reincarnation
 // record's NewAppliedConfig carries the image the broker echoed back from
-// reprovision, the same image the agent row ends up with.
+// start (ptone/scion#1907: not the reprovision echo's unqualified image), the
+// same image the agent row ends up with.
 func TestReincarnateAgent_RecordCarriesBrokerEchoedImage(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
-	disp.reprovisionImage = "broker-resolved-image:v9"
+	disp.reprovisionImage = "broker-reprovision-echo:v9"
+	disp.startImage = "broker-resolved-image:v9"
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -1566,6 +1925,178 @@ func TestReincarnateAgent_RowImageMatchesRecordAfterStartEcho(t *testing.T) {
 	require.NotNil(t, final.AppliedConfig)
 	assert.Equal(t, "ghcr.io/test-org/start-echo:v2", r.NewAppliedConfig.Image)
 	assert.Equal(t, r.NewAppliedConfig.Image, final.AppliedConfig.Image, "the row must end with the image the record holds")
+}
+
+// TestUpdateReincarnationStep_StoresCopyOfAppliedConfig covers
+// ptone/scion#1907: the step write stores a copy of the caller's applied
+// config, so neither side can change the other through a shared pointer:
+// not the caller mutating its struct after the write, and not the
+// dispatcher writing the broker echo onto the returned agent.
+func TestUpdateReincarnationStep_StoresCopyOfAppliedConfig(t *testing.T) {
+	ctx := context.Background()
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+	cfg := &store.AgentAppliedConfig{Image: "ghcr.io/test-org/fresh:v2", HarnessAuth: "api-key", Profile: "fresh-profile"}
+	written, err := srv.updateReincarnationStep(ctx, agent.ID, reincarnationStepUpdate{
+		reincarnationState: store.ReincarnationStateProvisioning,
+		appliedConfig:      cfg,
+	}, reincarnationStepMaxAttempts)
+	require.NoError(t, err)
+	require.NotNil(t, written.AppliedConfig)
+	assert.NotSame(t, cfg, written.AppliedConfig, "the step must not store the caller's pointer")
+
+	cfg.Image = "mutated-by-caller:v1"
+	cfg.Profile = "mutated-by-caller"
+	assert.Equal(t, "ghcr.io/test-org/fresh:v2", written.AppliedConfig.Image, "the in-memory agent must not see the caller's later mutation")
+	assert.Equal(t, "fresh-profile", written.AppliedConfig.Profile)
+	stored, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "ghcr.io/test-org/fresh:v2", stored.AppliedConfig.Image, "the stored row must not see the caller's later mutation")
+
+	written.AppliedConfig.HarnessAuth = "echoed-by-broker"
+	assert.Equal(t, "api-key", cfg.HarnessAuth, "an echo written onto the returned agent must not leak into the caller's struct")
+}
+
+// TestCopyBrokerEcho covers the helper the worker takes broker echoes with:
+// non-empty fields win, empty fields leave dst alone, and the image is only
+// taken when asked.
+func TestCopyBrokerEcho(t *testing.T) {
+	dst := &store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "auth", Profile: "p", Model: "m"}
+	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "bare:v1", HarnessAuth: "echoed-auth", Model: "ignored"}, false)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "echoed-auth", Profile: "p", Model: "m"}, *dst)
+
+	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", Profile: "echoed-p"}, true)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", HarnessAuth: "echoed-auth", Profile: "echoed-p", Model: "m"}, *dst)
+
+	snapshot := *dst
+	copyBrokerEcho(nil, dst, true) // must not panic
+	copyBrokerEcho(dst, nil, true)
+	assert.Equal(t, snapshot, *dst, "a nil src must leave dst unchanged")
+}
+
+// TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig is the drift guard for
+// copyBrokerEcho: applyBrokerAgentConfig (the source of truth) is run with a
+// RemoteAgentInfo whose every string field is set, onto a copy of a config;
+// copyBrokerEcho must then bring dst to exactly that copy. An AppliedConfig
+// field applyBrokerAgentConfig starts writing that copyBrokerEcho does not
+// copy fails here instead of being silently dropped on reincarnate.
+func TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig(t *testing.T) {
+	info := &RemoteAgentInfo{}
+	v := reflect.ValueOf(info).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		if f := v.Field(i); f.Kind() == reflect.String {
+			f.SetString("echo-" + v.Type().Field(i).Name)
+		}
+	}
+	base := store.AgentAppliedConfig{
+		Image: "ghcr.io/test-org/base:v1", HarnessConfig: "base-hc", HarnessAuth: "base-auth",
+		Profile: "base-profile", Model: "base-model", Task: "base-task",
+	}
+	echoed := base
+	applyBrokerAgentConfig(&store.Agent{AppliedConfig: &echoed}, info)
+	require.NotEqual(t, base, echoed, "the populated broker answer must change the config")
+
+	dst := base
+	copyBrokerEcho(&dst, &echoed, true)
+	assert.Equal(t, echoed, dst, "copyBrokerEcho must copy every AppliedConfig field applyBrokerAgentConfig writes")
+}
+
+// TestReincarnateAgent_StartWithoutImageEchoKeepsQualifiedImage covers
+// ptone/scion#1907's fallback: the reprovision echoes an unqualified image
+// and the start succeeds without echoing any image. The row and the record
+// keep the registry-qualified image buildFreshAppliedConfig resolved.
+func TestReincarnateAgent_StartWithoutImageEchoKeepsQualifiedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "ghcr.io/test-org"
+	disp.reprovisionImage = "explicit-image:v1"
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "explicit-image:v1"}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	require.NotNil(t, r.NewAppliedConfig)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", r.NewAppliedConfig.Image, "the record must keep the qualified image")
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", final.AppliedConfig.Image, "the row must keep the qualified image")
+}
+
+// TestReincarnateAgent_StartFailureKeepsQualifiedImage covers
+// ptone/scion#1907: the reprovision echo carries the rendered config's
+// unqualified image. When the start then fails, the row keeps the
+// registry-qualified image buildFreshAppliedConfig resolved, while the
+// reprovision's other echoed fields are still persisted.
+func TestReincarnateAgent_StartFailureKeepsQualifiedImage(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.imageRegistry = "ghcr.io/test-org"
+	disp.reprovisionImage = "explicit-image:v1"
+	disp.reprovisionEcho = func(cfg *store.AgentAppliedConfig) { cfg.HarnessAuth = "reprovision-echoed-auth" }
+	disp.startErr = fmt.Errorf("broker refused start")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "ghcr.io/test-org/explicit-image:v1"
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "explicit-image:v1"}
+	})
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final.AppliedConfig)
+	assert.Equal(t, "ghcr.io/test-org/explicit-image:v1", final.AppliedConfig.Image,
+		"a failed start must leave the qualified image, not the reprovision echo's unqualified one")
+	assert.Equal(t, "reprovision-echoed-auth", final.AppliedConfig.HarnessAuth,
+		"the reprovision echo's other fields are persisted by the starting step")
+}
+
+// TestReincarnateAgent_StartEchoPersistedAtCompletion covers
+// ptone/scion#1907: every field the start response echoes is persisted on
+// the row and the record at completion. The worker takes the echo
+// explicitly, so this fails if that copy is removed (there is no pointer
+// aliasing left to carry it).
+func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startEcho = func(cfg *store.AgentAppliedConfig) {
+		cfg.Image = "ghcr.io/test-org/start-echo:v3"
+		cfg.HarnessConfig = "start-echo-hc"
+		cfg.HarnessAuth = "start-echo-auth"
+		cfg.Profile = "start-echo-profile"
+	}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	for name, cfg := range map[string]*store.AgentAppliedConfig{"row": final.AppliedConfig, "record": r.NewAppliedConfig} {
+		require.NotNil(t, cfg, name)
+		assert.Equal(t, "ghcr.io/test-org/start-echo:v3", cfg.Image, name)
+		assert.Equal(t, "start-echo-hc", cfg.HarnessConfig, name)
+		assert.Equal(t, "start-echo-auth", cfg.HarnessAuth, name)
+		assert.Equal(t, "start-echo-profile", cfg.Profile, name)
+	}
 }
 
 // TestDispatchImageRegistry_ReadsTheHTTPDispatcher proves the reincarnate
@@ -1827,7 +2358,7 @@ func TestReincarnateAgent_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
 
 // TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict is the design §3.4
 // Amendment A3 regression test: a version conflict on the claim write (the guarded
-// UpdateAgent that sets reincarnation_state=pending) must leave nothing
+// ClaimAgentReincarnation that sets reincarnation_state=pending) must leave nothing
 // behind — no orphaned agent_reincarnations row, and no stuck claim — so a
 // retry succeeds. Before the fix, the record was created FIRST, so any
 // failure on the following UpdateAgent left a permanent pending row with no
@@ -1838,15 +2369,40 @@ type failOnceUpdateStore struct {
 	failed bool
 }
 
-func (f *failOnceUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+func (f *failOnceUpdateStore) takeFailure() bool {
 	f.mu.Lock()
-	if !f.failed {
-		f.failed = true
-		f.mu.Unlock()
-		return store.ErrVersionConflict
+	defer f.mu.Unlock()
+	if f.failed {
+		return false
 	}
-	f.mu.Unlock()
-	return f.Store.UpdateAgent(ctx, a)
+	f.failed = true
+	return true
+}
+
+func (f *failOnceUpdateStore) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
+	if f.takeFailure() {
+		return 0, store.ErrVersionConflict
+	}
+	return f.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
+}
+
+// WithTx injects the same one-shot conflict into the claim transaction.
+func (f *failOnceUpdateStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&failOnceUpdateTx{Store: tx, parent: f})
+	})
+}
+
+type failOnceUpdateTx struct {
+	store.Store
+	parent *failOnceUpdateStore
+}
+
+func (t *failOnceUpdateTx) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
+	if t.parent.takeFailure() {
+		return 0, store.ErrVersionConflict
+	}
+	return t.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
 }
 
 func TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict(t *testing.T) {
@@ -1911,13 +2467,16 @@ func TestReincarnateAgent_FailReincarnationConflictDoesNotWedgeAgent(t *testing.
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
-	orig := srv.store
-	srv.store = &conflictOnFailedWriteStore{Store: orig}
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *conflictOnFailedWriteStore {
+		return &conflictOnFailedWriteStore{Store: inner}
+	})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = orig
 
 	after, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
@@ -2117,7 +2676,8 @@ func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	agent := &store.Agent{ID: "agent-1", Slug: "arqa-a"}
 
 	start := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
-	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start)
+	requester := reincarnationRequesterContext{Handle: "user:requester@example.com", Resolved: true}
+	preamble := srv.buildReincarnationPreamble(agent, 2, "do the thing next", start, requester, nil)
 
 	assert.Contains(t, preamble,
 		"2. Run `scion conversation list --json` and, for each conversation, "+
@@ -2136,11 +2696,552 @@ func TestBuildReincarnationPreamble_CatchUpWindow(t *testing.T) {
 	assert.Contains(t, preamble, "do the thing next", "the handoff must still be appended verbatim")
 }
 
+// TestBuildReincarnationPreamble_A26StepsAndNoHandoff is the design
+// Amendment A26 golden test for Phase 2b: steps 1-2 keep their 2a wording
+// (pinned separately by TestBuildReincarnationPreamble_CatchUpWindow above),
+// and "everything else in §3.9" — steps 3-4 and the no-handoff fallback text
+// — comes in here. It also pins Amendment A23's invariant that the preamble
+// carries no workspace-mode-specific text: a clone-per-agent agent and a
+// shared/mounted-workspace agent must produce byte-identical step text, both
+// with a handoff and without one. This test only exercises the *resolved,
+// non-self* case; TestBuildReincarnationPreamble_A262_SelfRequest and
+// TestBuildReincarnationPreamble_A262_UnresolvedRequester below cover the
+// other two reincarnationRequesterContext shapes.
+func TestBuildReincarnationPreamble_A26StepsAndNoHandoff(t *testing.T) {
+	srv, _ := testServer(t)
+	start := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	const requesterHandle = "user:requester@example.com"
+	requester := reincarnationRequesterContext{Handle: requesterHandle, Resolved: true}
+
+	cloneAgent := &store.Agent{
+		ID:   "agent-clone",
+		Slug: "clone-agt",
+		AppliedConfig: &store.AgentAppliedConfig{
+			GitClone: &api.GitCloneConfig{URL: "https://example.invalid/repo.git"},
+		},
+	}
+	sharedAgent := &store.Agent{
+		ID:   "agent-shared",
+		Slug: "shared-agt",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Workspace: "/mnt/shared/project",
+		},
+	}
+
+	assertA26Steps := func(t *testing.T, preamble string, agent *store.Agent, toGeneration int) {
+		t.Helper()
+		assert.Contains(t, preamble,
+			fmt.Sprintf("You are generation %d of agent %q (id %s), reincarnated on request of %s.", toGeneration, agent.Slug, agent.ID, requesterHandle),
+			"the header line (A26.1) must name the resolved requester")
+		assert.Contains(t, preamble,
+			" 1. Verify your environment: `git status` shows the branch and state your handoff describes, and any files your handoff names as canonical are readable.\n",
+			"step 1 must keep A23's neutral wording regardless of workspace mode")
+		assert.Contains(t, preamble,
+			fmt.Sprintf(" 3. Message %s that generation %d is up, and state your next action.\n", requesterHandle, toGeneration),
+			"step 3 (§3.9, A26.1) must name both the resolved requester and the target generation")
+		assert.Contains(t, preamble,
+			" 4. Continue from the handoff's \"Immediate active work\" section below (its next action). Do not redo anything listed under \"Do not redo\".\n",
+			"step 4 (§3.9, come in per A26) must point at the handoff template's real section headings")
+	}
+
+	for _, tc := range []struct {
+		name  string
+		agent *store.Agent
+	}{
+		{"clone-per-agent", cloneAgent},
+		{"shared/non-clone", sharedAgent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("with handoff", func(t *testing.T) {
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "next: ship it", start, requester, nil)
+				assertA26Steps(t, preamble, tc.agent, 4)
+				assert.Contains(t, preamble, "next: ship it")
+				assert.NotContains(t, preamble, "No handoff was provided")
+			})
+			t.Run("no handoff", func(t *testing.T) {
+				preamble := srv.buildReincarnationPreamble(tc.agent, 4, "", start, requester, nil)
+				assertA26Steps(t, preamble, tc.agent, 4)
+				assert.Contains(t, preamble,
+					"No handoff was provided. Reconstruct context from your branch, your conversations "+
+						"(`scion conversation list`), and any project scratchpad before acting.",
+					"the no-handoff fallback text (§3.9, come in per A26) must name `scion conversation list`")
+			})
+		})
+	}
+}
+
+// TestBuildReincarnationPreamble_A262_SelfRequest is the design Amendment
+// A26.2 R1 golden test: a self-migration must never tell the new generation
+// to message the agent's own handle. It covers both sub-cases of the fix —
+// a resolved creator hint appended to step 3, and no hint at all when the
+// creator didn't resolve.
+func TestBuildReincarnationPreamble_A262_SelfRequest(t *testing.T) {
+	srv, _ := testServer(t)
+	start := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	agent := &store.Agent{ID: "agent-self", Slug: "self-agt"}
+
+	t.Run("with a resolved creator hint", func(t *testing.T) {
+		requester := reincarnationRequesterContext{IsSelf: true, CreatorHandle: "user:owner@example.com", CreatorResolved: true}
+		preamble := srv.buildReincarnationPreamble(agent, 3, "h", start, requester, nil)
+
+		assert.Contains(t, preamble,
+			`You are generation 3 of agent "self-agt" (id agent-self), reincarnated at its own request.`,
+			"the header must say the migration was self-requested, never name a requester handle")
+		assert.Contains(t, preamble,
+			` 3. Message the owner named in your handoff's "Authority and ownership" section that generation 3 is up, and state your next action. If the handoff names none, message user:owner@example.com.`,
+			"step 3 must point at the handoff, then give the resolved creator hint as its own sentence (A26.3 N2)")
+		assert.NotContains(t, preamble, "agent:"+agent.Slug,
+			"the preamble must never emit the agent's own handle (A26.2 R1)")
+	})
+
+	t.Run("with no resolved creator", func(t *testing.T) {
+		requester := reincarnationRequesterContext{IsSelf: true}
+		preamble := srv.buildReincarnationPreamble(agent, 3, "h", start, requester, nil)
+
+		assert.Contains(t, preamble,
+			`You are generation 3 of agent "self-agt" (id agent-self), reincarnated at its own request.`)
+		assert.Contains(t, preamble,
+			` 3. Message the owner named in your handoff's "Authority and ownership" section that generation 3 is up, and state your next action.`+"\n",
+			"with no creator hint, step 3 must end right after the handoff-driven instruction, no parenthetical")
+		assert.NotContains(t, preamble, "If the handoff names none",
+			"no creator hint means no fallback clause at all")
+		assert.NotContains(t, preamble, "agent:"+agent.Slug)
+	})
+}
+
+// TestBuildReincarnationPreamble_A262_UnresolvedRequester is the design
+// Amendment A26.2 O2 golden test: when the requester cannot be resolved (and
+// it is not a self-request), the header's "on request of" clause is omitted
+// entirely rather than rendering the generic fallback phrase there too, but
+// step 3 still keeps the fallback phrase so there is at least an
+// instruction.
+func TestBuildReincarnationPreamble_A262_UnresolvedRequester(t *testing.T) {
+	srv, _ := testServer(t)
+	start := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	agent := &store.Agent{ID: "agent-u", Slug: "unresolved-agt"}
+	requester := reincarnationRequesterContext{} // Resolved: false, IsSelf: false
+
+	preamble := srv.buildReincarnationPreamble(agent, 5, "h", start, requester, nil)
+
+	assert.Contains(t, preamble, `You are generation 5 of agent "unresolved-agt" (id agent-u).`+"\n",
+		"an unresolved, non-self requester must omit the 'on request of' clause entirely (Amendment A26.2 O2)")
+	assert.NotContains(t, preamble, "on request of",
+		"no tautological fallback clause in the header")
+	assert.Contains(t, preamble,
+		" 3. Message whoever requested this migration that generation 5 is up, and state your next action.\n",
+		"step 3 still keeps the generic fallback phrase so there is some instruction")
+}
+
+// TestReincarnationChangesLine is the design Amendment A26.3 FYI-1 test for
+// the "Changes:" preamble line: computeReincarnationPlan's diff is rendered
+// only for the fields that actually changed, an empty side renders as
+// "(none)", and the whole line is omitted when nothing changed.
+func TestReincarnationChangesLine(t *testing.T) {
+	cases := []struct {
+		name string
+		plan ReincarnationPlan
+		want string
+	}{
+		{
+			name: "nothing changed: no line at all",
+			plan: ReincarnationPlan{
+				Template:   FieldChange{Old: "h1", New: "h1"},
+				Image:      FieldChange{Old: "img:v1", New: "img:v1"},
+				HarnessCfg: FieldChange{Old: "hc1", New: "hc1"},
+			},
+			want: "",
+		},
+		{
+			name: "all three changed",
+			plan: ReincarnationPlan{
+				Template:   FieldChange{Old: "h1", New: "h2"},
+				Image:      FieldChange{Old: "img:v1", New: "img:v2"},
+				HarnessCfg: FieldChange{Old: "hc1", New: "hc2"},
+			},
+			want: "Changes: template h1->h2, image img:v1->img:v2, harness-config hc1->hc2\n",
+		},
+		{
+			name: "only image changed",
+			plan: ReincarnationPlan{
+				Template:   FieldChange{Old: "h1", New: "h1"},
+				Image:      FieldChange{Old: "img:v1", New: "img:v2"},
+				HarnessCfg: FieldChange{Old: "hc1", New: "hc1"},
+			},
+			want: "Changes: image img:v1->img:v2\n",
+		},
+		{
+			name: "empty old side renders as (none)",
+			plan: ReincarnationPlan{
+				Template: FieldChange{Old: "", New: "h1"},
+			},
+			want: "Changes: template (none)->h1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, reincarnationChangesLine(tc.plan))
+		})
+	}
+}
+
+// TestBuildReincarnationPreamble_A263_ChangesLine is the design Amendment
+// A26.3 FYI-1 golden test for where the "Changes:" line sits in the full
+// preamble: right after the header line, before "Before resuming:", and
+// omitted entirely when nothing changed.
+func TestBuildReincarnationPreamble_A263_ChangesLine(t *testing.T) {
+	srv, _ := testServer(t)
+	start := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	agent := &store.Agent{ID: "agent-c", Slug: "changes-agt"}
+	requester := reincarnationRequesterContext{Handle: "user:req@example.com", Resolved: true}
+
+	t.Run("changed: the line appears between the header and Before resuming", func(t *testing.T) {
+		plan := &ReincarnationPlan{
+			Template: FieldChange{Old: "h1", New: "h2"},
+			Image:    FieldChange{Old: "img:v1", New: "img:v2"},
+		}
+		preamble := srv.buildReincarnationPreamble(agent, 2, "h", start, requester, plan)
+
+		want := `You are generation 2 of agent "changes-agt" (id agent-c), reincarnated on request of user:req@example.com.` + "\n" +
+			"Changes: template h1->h2, image img:v1->img:v2\n" +
+			"Before resuming:\n"
+		assert.Contains(t, preamble, want)
+	})
+
+	t.Run("unchanged: no Changes line at all", func(t *testing.T) {
+		plan := &ReincarnationPlan{
+			Template: FieldChange{Old: "h1", New: "h1"},
+		}
+		preamble := srv.buildReincarnationPreamble(agent, 2, "h", start, requester, plan)
+
+		assert.NotContains(t, preamble, "Changes:")
+		want := `You are generation 2 of agent "changes-agt" (id agent-c), reincarnated on request of user:req@example.com.` + "\n" +
+			"Before resuming:\n"
+		assert.Contains(t, preamble, want)
+	})
+
+	t.Run("nil plan: no Changes line, no panic (Amendment A26.4 O1)", func(t *testing.T) {
+		preamble := srv.buildReincarnationPreamble(agent, 2, "h", start, requester, nil)
+
+		assert.NotContains(t, preamble, "Changes:")
+		want := `You are generation 2 of agent "changes-agt" (id agent-c), reincarnated on request of user:req@example.com.` + "\n" +
+			"Before resuming:\n"
+		assert.Contains(t, preamble, want)
+	})
+
+	t.Run("content hashes are abbreviated in the preamble line (Amendment A26.4 O2)", func(t *testing.T) {
+		oldHash := "sha256:" + strings.Repeat("a", 64)
+		newHash := "sha256:" + strings.Repeat("b", 64)
+		plan := &ReincarnationPlan{
+			Template:   FieldChange{Old: oldHash, New: newHash},
+			HarnessCfg: FieldChange{Old: oldHash, New: newHash},
+		}
+		preamble := srv.buildReincarnationPreamble(agent, 2, "h", start, requester, plan)
+
+		wantAbbrev := "sha256:" + strings.Repeat("a", 12) + "->" + "sha256:" + strings.Repeat("b", 12)
+		assert.Contains(t, preamble, "Changes: template "+wantAbbrev+", harness-config "+wantAbbrev+"\n")
+		assert.NotContains(t, preamble, oldHash, "the full 64-hex hash must not appear in the preamble")
+		assert.NotContains(t, preamble, newHash, "the full 64-hex hash must not appear in the preamble")
+	})
+}
+
+// TestReincarnateAbbreviateHash is the design Amendment A26.4 O2 unit test
+// for the preamble-only hash abbreviation: a `sha256:<64 hex>` value
+// (pkg/transfer/hash.go's shape) is shortened to `sha256:` plus 12 hex; an
+// empty value renders as "(none)"; any other shape (not a content hash, or
+// a `sha256:` prefix with the wrong length) is returned unabbreviated.
+func TestReincarnateAbbreviateHash(t *testing.T) {
+	fullHash := "sha256:" + strings.Repeat("f", 64)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty renders as (none)", "", "(none)"},
+		{"a full sha256 hash is abbreviated to 12 hex", fullHash, "sha256:" + strings.Repeat("f", 12)},
+		{"a non-hash value is unchanged", "template-image:v2", "template-image:v2"},
+		{"a sha256: prefix with the wrong length is unchanged", "sha256:short", "sha256:short"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, reincarnateAbbreviateHash(tc.in))
+		})
+	}
+}
+
+// TestResolveReincarnationRequesterName_A26_1 is the design Amendment A26.1
+// (Amendment A26.2) test matrix for resolving a bare principal ID to a
+// display string: a resolvable user, a resolvable agent, a principal ID
+// that resolves to neither (unresolvable), a GetUser store error that still
+// falls through to a successful GetAgent lookup (fall-through), and a
+// genuine store error that ends in the fallback (fallback) — these are
+// distinct outcomes, so this file has one test for each. All cases must be
+// safe — the function never panics or errors, only ever returns
+// (string, bool) — matching the requirement that a lookup failure must
+// never fail the reincarnation itself.
+func TestResolveReincarnationRequesterName_A26_1(t *testing.T) {
+	t.Run("empty id falls back immediately", func(t *testing.T) {
+		srv, _ := testServer(t)
+		handle, resolved := srv.resolveReincarnationRequesterName(context.Background(), "")
+		assert.Equal(t, reincarnationRequesterFallback, handle)
+		assert.False(t, resolved)
+	})
+
+	t.Run("resolves a user", func(t *testing.T) {
+		srv, s := testServer(t)
+		user := &store.User{
+			ID:      tid("a261-req-user"),
+			Email:   "req-user@example.com",
+			Role:    store.UserRoleMember,
+			Status:  store.UserStatusActive,
+			Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(context.Background(), user))
+
+		handle, resolved := srv.resolveReincarnationRequesterName(context.Background(), user.ID)
+		assert.Equal(t, "user:req-user@example.com", handle)
+		assert.True(t, resolved)
+	})
+
+	t.Run("resolves an agent when the ID is not a user", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+		handle, resolved := srv.resolveReincarnationRequesterName(context.Background(), agent.ID)
+		assert.Equal(t, "agent:"+agent.Slug, handle)
+		assert.True(t, resolved)
+	})
+
+	t.Run("unresolvable ID falls back with a WARN, does not panic or error", func(t *testing.T) {
+		srv, _ := testServer(t)
+		handle, resolved := srv.resolveReincarnationRequesterName(context.Background(), "no-such-principal-id")
+		assert.Equal(t, reincarnationRequesterFallback, handle)
+		assert.False(t, resolved)
+	})
+
+	t.Run("a GetUser store error still falls through to GetAgent", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+		// Swap in a store whose GetUser always errors (not ErrNotFound), to
+		// prove the fall-through path is taken on a genuine store error and
+		// not just on a clean miss. GetAgent still succeeds via the real
+		// store, so this proves the function falls through to the agent
+		// lookup after a non-NotFound GetUser error, rather than a store
+		// error short-circuiting resolution the way a NotFound is expected
+		// to. This is fall-through, not fallback — see the next case for an
+		// actual fallback via a store error.
+		srv.store = &reincarnateGetUserErrorStore{Store: s, err: fmt.Errorf("injected store failure")}
+
+		handle, resolved := srv.resolveReincarnationRequesterName(context.Background(), agent.ID)
+		assert.Equal(t, "agent:"+agent.Slug, handle,
+			"a GetUser store error must fall through to GetAgent, not abandon resolution")
+		assert.True(t, resolved)
+	})
+
+	t.Run("a GetUser store error on a real user ID ends in the fallback", func(t *testing.T) {
+		srv, s := testServer(t)
+		user := &store.User{
+			ID:      tid("a261-storeerr-user"),
+			Email:   "storeerr@example.com",
+			Role:    store.UserRoleMember,
+			Status:  store.UserStatusActive,
+			Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(context.Background(), user))
+
+		// This ID genuinely resolves via GetUser under an unwrapped store —
+		// the previous case proves fall-through works when GetAgent would
+		// have hit. Here GetUser errors (masking the real user) and GetAgent
+		// then genuinely misses (this ID was never an agent ID), so
+		// resolution must land on the fallback, not silently succeed via
+		// some other path.
+		srv.store = &reincarnateGetUserErrorStore{Store: s, err: fmt.Errorf("injected store failure")}
+
+		handle, resolved := srv.resolveReincarnationRequesterName(context.Background(), user.ID)
+		assert.Equal(t, reincarnationRequesterFallback, handle,
+			"a GetUser store error masking a real user, with GetAgent also missing, must end in the fallback")
+		assert.False(t, resolved)
+	})
+}
+
+// reincarnateGetUserErrorStore wraps a real store.Store and forces GetUser to
+// return a non-ErrNotFound error for every call, so
+// TestResolveReincarnationRequesterName_A26_1's store-error cases exercise a
+// genuine store failure rather than a clean "not found" miss.
+type reincarnateGetUserErrorStore struct {
+	store.Store
+	err error
+}
+
+func (e *reincarnateGetUserErrorStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	return nil, e.err
+}
+
+// TestBuildReincarnationRequesterContext_A262_R1 is the design Amendment
+// A26.2 R1 unit test for the self-request detection and creator-hint
+// resolution that buildReincarnationRequesterContext performs before the
+// preamble is built — decoupled from the full worker so the decision logic
+// itself (not just the end-to-end wiring, covered separately by
+// TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure and
+// TestReincarnateAgent_SelfRequest_PreambleNeverEmitsOwnHandle) has a direct
+// test.
+func TestBuildReincarnationRequesterContext_A262_R1(t *testing.T) {
+	t.Run("non-self: passes through to the requester resolver", func(t *testing.T) {
+		srv, s := testServer(t)
+		user := &store.User{
+			ID: tid("a262-nonself-user"), Email: "nonself@example.com",
+			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(context.Background(), user))
+		agent := &store.Agent{ID: "agent-nonself", Slug: "nonself-agt"}
+
+		got := srv.buildReincarnationRequesterContext(context.Background(), agent, user.ID)
+		assert.False(t, got.IsSelf)
+		assert.Equal(t, "user:nonself@example.com", got.Handle)
+		assert.True(t, got.Resolved)
+	})
+
+	t.Run("self: never resolves or emits the agent's own handle, no CreatedBy", func(t *testing.T) {
+		srv, _ := testServer(t)
+		agent := &store.Agent{ID: "agent-self-1", Slug: "self-agt-1"}
+
+		got := srv.buildReincarnationRequesterContext(context.Background(), agent, agent.ID)
+		assert.True(t, got.IsSelf)
+		assert.Empty(t, got.Handle)
+		assert.False(t, got.Resolved)
+		assert.False(t, got.CreatorResolved)
+	})
+
+	t.Run("self: resolves a distinct creator as a hint", func(t *testing.T) {
+		srv, s := testServer(t)
+		creator := &store.User{
+			ID: tid("a262-creator-user"), Email: "creator@example.com",
+			Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(context.Background(), creator))
+		agent := &store.Agent{ID: "agent-self-2", Slug: "self-agt-2", CreatedBy: creator.ID}
+
+		got := srv.buildReincarnationRequesterContext(context.Background(), agent, agent.ID)
+		assert.True(t, got.IsSelf)
+		assert.False(t, got.Resolved, "self-request must never populate Handle/Resolved")
+		assert.True(t, got.CreatorResolved)
+		assert.Equal(t, "user:creator@example.com", got.CreatorHandle)
+	})
+
+	t.Run("self: an unresolvable CreatedBy yields no creator hint", func(t *testing.T) {
+		srv, _ := testServer(t)
+		agent := &store.Agent{ID: "agent-self-3", Slug: "self-agt-3", CreatedBy: "no-such-principal"}
+
+		got := srv.buildReincarnationRequesterContext(context.Background(), agent, agent.ID)
+		assert.True(t, got.IsSelf)
+		assert.False(t, got.CreatorResolved)
+		assert.Empty(t, got.CreatorHandle)
+	})
+
+	t.Run("self: the defensive guard drops a creator that resolves back to the agent itself", func(t *testing.T) {
+		// A contrived but directly-testable shape for the "never emit the
+		// agent's own handle" rule (A26.2 R1): CreatedBy set to the agent's
+		// own ID, so GetAgent(CreatedBy) resolves to the agent itself. Uses
+		// the full project/broker fixtures since GetAgent needs a real,
+		// persisted row to resolve against.
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.CreatedBy = a.ID
+		})
+
+		got := srv.buildReincarnationRequesterContext(context.Background(), agent, agent.ID)
+		assert.True(t, got.IsSelf)
+		assert.False(t, got.CreatorResolved, "a creator that resolves to the agent's own handle must never surface as a hint")
+		assert.Empty(t, got.CreatorHandle)
+	})
+}
+
+// blockingUntilDoneStore wraps a real store.Store and makes GetUser/GetAgent
+// block until the ctx passed to them is done, then return its error. Used by
+// TestBuildReincarnationRequesterContext_A2614_TimeoutBound to simulate a
+// stuck backend: the real resolution path is otherwise exercised, only the
+// store round trip is replaced.
+type blockingUntilDoneStore struct {
+	store.Store
+}
+
+func (b *blockingUntilDoneStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingUntilDoneStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestBuildReincarnationRequesterContext_A2614_TimeoutBound is the design
+// Amendment A26.14/A26.18 test: an unbounded store call during requester
+// resolution must not stall the worker, on either resolution path — non-self
+// (the requester handle) or self (the creator hint). With this Server's
+// reincarnationRequesterResolveTimeout field shortened and a store whose
+// GetUser/GetAgent block until their ctx is done, each subtest's build must
+// still return, with the unresolved fallback, within its own bounded wait
+// (a select with a generous time.After), independent of the production
+// timeout: if the production timeout were removed, the blocking store's
+// calls would hang on context.Background() forever, and the subtest must
+// fail promptly rather than hang the suite. The field is set on this test's
+// own Server instance only, so no t.Cleanup restore is needed and no other
+// test's workers can observe it.
+func TestBuildReincarnationRequesterContext_A2614_TimeoutBound(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+
+	srv.reincarnationRequesterResolveTimeout = 50 * time.Millisecond
+
+	srv.store = &blockingUntilDoneStore{Store: s}
+
+	t.Run("non-self", func(t *testing.T) {
+		done := make(chan reincarnationRequesterContext, 1)
+		go func() {
+			done <- srv.buildReincarnationRequesterContext(context.Background(), agent, "some-other-requester-id")
+		}()
+
+		select {
+		case got := <-done:
+			assert.False(t, got.IsSelf)
+			assert.False(t, got.Resolved)
+			assert.Equal(t, reincarnationRequesterFallback, got.Handle)
+		case <-time.After(2 * time.Second):
+			t.Fatal("buildReincarnationRequesterContext did not return within the test's own bounded wait — the production timeout did not fire (or was removed)")
+		}
+	})
+
+	t.Run("self", func(t *testing.T) {
+		done := make(chan reincarnationRequesterContext, 1)
+		go func() {
+			done <- srv.buildReincarnationRequesterContext(context.Background(), agent, agent.ID)
+		}()
+
+		select {
+		case got := <-done:
+			assert.True(t, got.IsSelf)
+			assert.False(t, got.CreatorResolved)
+			assert.Empty(t, got.CreatorHandle)
+		case <-time.After(2 * time.Second):
+			t.Fatal("buildReincarnationRequesterContext did not return within the test's own bounded wait — the production timeout did not fire (or was removed)")
+		}
+	})
+}
+
 // AC-6: a start failure leaves state=failed with an error and phase=error,
 // and the previous config snapshot remains retrievable.
 func TestReincarnateAgent_AC6_StartFailureMarksFailed(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	// This start error is ambiguous (not a confirmed broker refusal), so no
+	// re-render of `previous` runs (ptone/scion#1935) and the row keeps the
+	// fresh config. TestReincarnateAgent_StartFailure_RerendersPreviousConfig
+	// covers a definitive start failure.
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -2210,7 +3311,7 @@ func TestReincarnateAgent_ReprovisionDispatchFailure_RestoresAppliedConfig(t *te
 	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]",
 		"a pre-reprovision-success failure must restore `previous`, not keep the fresh, never-rendered config")
 
-	assert.Equal(t, 1, disp.reprovisionCalls)
+	assert.Equal(t, 2, disp.reprovisionCalls, "the failed reprovision plus the best-effort re-render of `previous` (ptone/scion#1935)")
 	assert.Zero(t, disp.startCalls, "start must not run when reprovision dispatch fails")
 
 	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
@@ -2218,6 +3319,395 @@ func TestReincarnateAgent_ReprovisionDispatchFailure_RestoresAppliedConfig(t *te
 	require.Len(t, list, 1)
 	assert.Equal(t, store.AgentReincarnationStateFailed, list[0].State)
 	assert.Contains(t, list[0].Error, "reprovision refused")
+}
+
+// TestReincarnateAgent_ReprovisionFailure_RerendersPreviousConfig covers
+// ptone/scion#1935 option (c): a failed reprovision dispatch is followed by
+// one best-effort reprovision with the previous applied config, and the row
+// is rolled back to previous.
+func TestReincarnateAgent_ReprovisionFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("request timeout after 2m0s")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "reprovision failed: request timeout")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "one reprovision with the fresh config, one re-render with the previous config")
+	require.Len(t, cfgs, 2)
+	assert.Contains(t, cfgs[0].Task, "[SCION REINCARNATION]", "the first dispatch carries the fresh config")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+	assert.Zero(t, disp.startCalls)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "the row is rolled back to previous")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_StartFailure_RerendersPreviousConfig covers
+// ptone/scion#1935 option (c) after a successful reprovision: the start
+// fails, the previous config is re-rendered, and since the re-render
+// succeeded (the disk is back at gen N) the row is restored to previous too.
+func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls)
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1], "the re-render dispatches exactly the previous config")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, final.Generation)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_RerenderFailure_KeepsOriginalError covers
+// ptone/scion#1935 option (c) when the re-render itself fails: no panic, one
+// re-render attempt only (no retry loop), the reincarnation still fails with
+// the ORIGINAL error, and the row keeps the gen N+1 config the disk holds.
+func TestReincarnateAgent_RerenderFailure_KeepsOriginalError(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	disp.rerenderErr = fmt.Errorf("reprovision refused: container is still running")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+	assert.NotContains(t, r.Error, "container is still running", "the re-render failure must not mask the original error")
+	assert.NotContains(t, r.Error, "worker panic")
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Equal(t, 2, calls, "exactly one re-render attempt")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Contains(t, final.Message, "runtime broker returned error 409")
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "a failed re-render leaves the row at gen N+1, matching the disk")
+}
+
+// definitiveStartErr is a start failure the broker itself answered with its
+// error envelope and no start-attempted marker: the start was refused before
+// any container was created (reincarnationStartLeftNoContainer).
+func definitiveStartErr() error {
+	return &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"start_refused","message":"start refused"}}`}
+}
+
+// TestReincarnationStartLeftNoContainer pins the classification the
+// start-failure re-render uses (ptone/scion#1935).
+func TestReincarnationStartLeftNoContainer(t *testing.T) {
+	assert.True(t, reincarnationStartLeftNoContainer(definitiveStartErr()), "a broker refusal is definitive")
+	assert.True(t, reincarnationStartLeftNoContainer(fmt.Errorf("wrap: %w", errStartBrokerNotConnected)), "a request that never reached the broker is definitive")
+	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("request timeout after 2m0s")), "a timeout is ambiguous")
+	assert.False(t, reincarnationStartLeftNoContainer(&brokerStatusError{StatusCode: http.StatusGatewayTimeout, Body: "gateway timeout"}), "a proxy error is ambiguous")
+	assert.False(t, reincarnationStartLeftNoContainer(brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("run-1"))),
+		"a failure from inside Manager.Start may have created a container")
+	assert.False(t, reincarnationStartLeftNoContainer(nil))
+}
+
+// TestReincarnateAgent_AmbiguousStartFailure_NoRerender covers
+// ptone/scion#1935: a start failure whose outcome is ambiguous
+// (here a transport timeout: a gen N+1 container may be running) makes no
+// re-render dispatch, so the credential that container would use is not
+// revoked, and the row stays at gen N+1. The re-render would have been
+// refused (and revoked) had it run.
+func TestReincarnateAgent_AmbiguousStartFailure_NoRerender(t *testing.T) {
+	srv, s, agent, mock, gen, calls := setupReincarnateCredentialTest(t, fmt.Errorf("request timeout after 2m0s"))
+	self := agentIdentityFor(agent.ID, agent.ProjectID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: request timeout")
+
+	assert.Equal(t, int32(1), calls.Load(), "no re-render dispatch after an ambiguous start failure")
+	require.True(t, mock.lastCreateReq.Reprovision)
+	require.Len(t, gen.jtis, 1, "only the reprovision minted a credential")
+	assert.Nil(t, getTestAgentCredential(t, s, gen.jtis[0]).RevokedAt, "a credential a possibly running container uses must not be revoked")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "the row stays at gen N+1, matching the disk and any container")
+}
+
+// TestReincarnateAgent_DefinitiveStartFailure_RerenderRefusedRevokes covers
+// ptone/scion#1935: after a definitive start failure (the broker
+// refused it; no container exists) the re-render is dispatched. When that
+// re-render fails, dispatchProvision's create-failed revoke revokes the
+// agent's credentials by agent: every credential, including the one the
+// successful reprovision minted. That is the accepted outcome: no container
+// is using them, and the agent is failed and must be started again (which
+// mints afresh). The row stays at gen N+1.
+func TestReincarnateAgent_DefinitiveStartFailure_RerenderRefusedRevokes(t *testing.T) {
+	srv, s, agent, _, gen, calls := setupReincarnateCredentialTest(t, definitiveStartErr())
+	self := agentIdentityFor(agent.ID, agent.ProjectID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: runtime broker returned error 409")
+	assert.NotContains(t, r.Error, "reprovision_refused", "the re-render failure must not mask the original error")
+
+	assert.Equal(t, int32(2), calls.Load(), "the re-render is dispatched after a definitive start failure")
+	require.Len(t, gen.jtis, 2, "the reprovision and the re-render each minted a credential")
+	for _, jti := range gen.jtis {
+		cred := getTestAgentCredential(t, s, jti)
+		require.NotNil(t, cred.RevokedAt, "a refused re-render revokes the agent's credentials by agent")
+		require.NotNil(t, cred.RevokeReason)
+		assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
+	}
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Contains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]", "a failed re-render leaves the row at gen N+1")
+}
+
+// setupReincarnateCredentialTest wires reprovision through the real
+// HTTPAgentDispatcher with a minting token generator, against a mock broker
+// whose first reprovision succeeds and every later one (the re-render) is
+// refused. The start is the fake's and fails with startErr. calls counts
+// reprovision round trips.
+func setupReincarnateCredentialTest(t *testing.T, startErr error) (*Server, store.Store, *store.Agent, *mockRuntimeBrokerClient, *fakeMintingTokenGenerator, *atomic.Int32) {
+	t.Helper()
+	ctx := context.Background()
+	fake := newReincarnateTestDispatcher()
+	fake.startErr = startErr
+	disp := &httpReprovisionDispatcher{reincarnateTestDispatcher: fake}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	broker.Endpoint = "http://localhost:9800"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	calls := &atomic.Int32{}
+	mock := &mockRuntimeBrokerClient{}
+	mock.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		if calls.Add(1) > 1 {
+			return nil, nil, &brokerStatusError{StatusCode: http.StatusConflict, Body: `{"error":{"code":"reprovision_refused","message":"container is still running"}}`}
+		}
+		return &RemoteAgentResponse{
+			Agent:         &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Phase: "created"},
+			Created:       true,
+			Reprovisioned: req.Reprovision,
+		}, nil, nil
+	}
+	disp.http = NewHTTPAgentDispatcherWithClient(s, mock, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: s}
+	disp.http.SetTokenGenerator(gen)
+
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	return srv, s, agent, mock, gen, calls
+}
+
+// TestReincarnateAgent_RerenderEchoDoesNotLeak covers ptone/scion#1935: the
+// re-render dispatches a copy of previous, so the broker's echo on that
+// dispatch reaches neither the record's PreviousAppliedConfig nor the
+// restored row.
+func TestReincarnateAgent_RerenderEchoDoesNotLeak(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = definitiveStartErr()
+	disp.rerenderEcho = func(cfg *store.AgentAppliedConfig) {
+		cfg.Image = "rerender-echo:v9"
+		cfg.HarnessConfig = "rerender-echo-hc"
+		cfg.Profile = "rerender-echo-profile"
+	}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	calls, _ := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, r.PreviousAppliedConfig)
+	for name, cfg := range map[string]*store.AgentAppliedConfig{"record previous": r.PreviousAppliedConfig, "restored row": final.AppliedConfig} {
+		assert.Equal(t, "old-image:v1", cfg.Image, name)
+		assert.Empty(t, cfg.HarnessConfig, name)
+		assert.Empty(t, cfg.Profile, name)
+	}
+}
+
+// failAdvanceToStartingStore fails every provisioning -> starting record
+// CAS with an error.
+type failAdvanceToStartingStore struct {
+	store.Store
+}
+
+func (f *failAdvanceToStartingStore) TryAdvanceAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation, fromState string, cutoff time.Time) (bool, error) {
+	if fromState == store.AgentReincarnationStateProvisioning && rec.State == store.AgentReincarnationStateStarting {
+		return false, fmt.Errorf("injected advance failure")
+	}
+	return f.Store.TryAdvanceAgentReincarnation(ctx, rec, fromState, cutoff)
+}
+
+// TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig
+// covers ptone/scion#1935: a record CAS error after a
+// successful reprovision (no start dispatched, so no container) re-renders
+// previous and, since that succeeded, restores the row.
+func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *failAdvanceToStartingStore {
+		return &failAdvanceToStartingStore{Store: inner}
+	})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "failed to advance record to starting")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the reprovision plus one re-render")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Zero(t, disp.startCalls)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// failStartingWriteStore fails every agent row write that records the
+// reincarnation's starting step.
+type failStartingWriteStore struct {
+	store.Store
+}
+
+func (f *failStartingWriteStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if a.ReincarnationState == store.ReincarnationStateStarting {
+		return fmt.Errorf("injected starting-step write failure")
+	}
+	return f.Store.UpdateAgent(ctx, a)
+}
+
+// TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig covers
+// ptone/scion#1935: the starting-step row write fails after
+// a successful reprovision (no start dispatched, so no container), so
+// previous is re-rendered and, since that succeeded, the row is restored.
+func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *failStartingWriteStore {
+		return &failStartingWriteStore{Store: inner}
+	})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "failed to record starting state")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "the reprovision plus one re-render")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+	assert.Zero(t, disp.startCalls, "no start is dispatched when the starting step cannot be recorded")
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateFailed, final.ReincarnationState)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow covers
+// ptone/scion#1935: after a failed reprovision the row is
+// restored to previous whatever the re-render's outcome, including when the
+// re-render fails too.
+func TestReincarnateAgent_ReprovisionAndRerenderFailure_StillRestoresRow(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("request timeout after 2m0s")
+	disp.rerenderErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "reprovision failed: request timeout")
+	assert.NotContains(t, r.Error, "broker unreachable")
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Equal(t, 2, calls)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "the row is restored to previous even when the re-render fails")
+	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
+}
+
+// TestReincarnateAgent_FailureBeforeReprovision_NoRerender covers
+// ptone/scion#1935 option (c)'s precondition: a failure before any
+// reprovision dispatch (here, the stop) makes no re-render dispatch.
+func TestReincarnateAgent_FailureBeforeReprovision_NoRerender(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.stopErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	calls, _ := disp.reprovisionSnapshot()
+	assert.Zero(t, calls, "no reprovision, and so no re-render, before the reprovision step")
 }
 
 // TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure is the
@@ -2252,7 +3742,7 @@ func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testin
 		a.Slug = "coordinator-" + tidSlugSafe(t.Name())
 		a.Name = "Coordinator"
 	})
-	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 
 	req := reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"})
 	rec := httptest.NewRecorder()
@@ -2275,11 +3765,286 @@ func TestReincarnateAgent_AC6_NonCreatorRequesterGetsNotifiedOnFailure(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, "error", final.Phase)
 
+	// The worker→preamble wiring needs its own end-to-end assertion: the
+	// resolved handle must actually reach the dispatched preamble, not just
+	// be provable at the resolver/builder unit level. The failure here
+	// happens at the start step, after reprovision already succeeded, so
+	// AppliedConfig.Task still holds the fresh preamble (design §3.4
+	// Amendment A4.3).
+	assert.Contains(t, final.AppliedConfig.Task,
+		fmt.Sprintf("Message agent:%s that generation", coordinator.Slug),
+		"the resolved requester handle must reach the dispatched preamble text")
+
 	require.Eventually(t, func() bool {
 		notifs, err := s.GetNotifications(context.Background(), store.SubscriberTypeAgent, coordinator.Slug, false)
 		return err == nil && len(notifs) > 0
 	}, 2*time.Second, 50*time.Millisecond,
 		"the non-creator requester must actually receive a failure notification")
+}
+
+// TestReincarnateAgent_SelfRequest_PreambleNeverEmitsOwnHandle is the design
+// Amendment A26.2 R1 end-to-end regression test: self-migration is the
+// AC-10/2c dogfood path, and the preamble must never resolve the agent's own
+// ID back to its own handle, which would tell the new generation to message
+// itself. Drives the full worker (via a start failure, so
+// AppliedConfig.Task still holds the fresh preamble per Amendment A4.3) and
+// asserts the dispatched preamble never contains the agent's own handle.
+func TestReincarnateAgent_SelfRequest_PreambleNeverEmitsOwnHandle(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase)
+
+	task := final.AppliedConfig.Task
+	assert.Contains(t, task, "reincarnated at its own request",
+		"a self-migration's header must say so, not name a requester")
+	assert.Contains(t, task, `Message the owner named in your handoff's "Authority and ownership" section`,
+		"step 3 must point at the handoff, not the agent's own identity")
+	assert.NotContains(t, task, "agent:"+agent.Slug,
+		"the preamble must never tell the new generation to message its own handle (A26.2 R1)")
+}
+
+// TestReincarnateAgent_ChangesLineWiring is the design Amendment A26.4 R1
+// worker end-to-end test for the preamble's "Changes:" line: it must reflect
+// the actual old->new diff between the outgoing and incoming generation —
+// not a self-diff, not the arguments swapped, and not an empty plan — and it
+// must be absent entirely when nothing changed. Reuses the
+// template/image-bump fixture from TestReincarnateAgent_DryRun_ShowsDiffAndWritesNothing.
+func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
+	t.Run("changed: the exact line reaches AppliedConfig.Task", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+		template := &store.Template{
+			ID:          tid("tmpl-" + t.Name()),
+			Name:        "t",
+			Slug:        "reincarnate-template-" + tidSlugSafe(t.Name()),
+			Harness:     "claude",
+			Scope:       store.TemplateScopeGlobal,
+			Status:      store.TemplateStatusActive,
+			ContentHash: "new-template-hash",
+			Config:      &store.TemplateConfig{Image: "template-image:v2"},
+		}
+		require.NoError(t, s.CreateTemplate(context.Background(), template))
+
+		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.Template = template.Slug
+			a.AppliedConfig.TemplateHash = "old-template-hash"
+			// No explicit image in CreateInputs -> template image applies fresh.
+		})
+		self := agentIdentityFor(agent.ID, project.ID)
+
+		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		waitForReincarnationSettled(t, s, agent.ID)
+
+		final, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "error", final.Phase)
+
+		assert.Contains(t, final.AppliedConfig.Task,
+			"Changes: template old-template-hash->new-template-hash, image old-image:v1->template-image:v2\n",
+			"the Changes: line must reflect the actual old->new diff, not a self-diff or swapped arguments")
+
+		// Amendment A26.5 O1: pin the by-construction property Amendment
+		// A26.4 O1 relies on directly, rather than only via a hard-coded
+		// expected string that a future reintroduced worker-side recompute
+		// could coincidentally still satisfy — decode the 202 body's own
+		// plan and assert the preamble's line is derived from that exact
+		// value.
+		var resp ReincarnateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		want := reincarnationChangesLine(resp.Plan)
+		// Amendment A26.6 R1: reincarnationChangesLine returns "" for a plan
+		// with no diffs, and assert.Contains(x, "") is always true — so
+		// without this, the assertion below would pass vacuously if the 202
+		// body ever lost or zeroed its plan (a response-side regression),
+		// even though the by-construction property this test exists to pin
+		// would then be false.
+		require.NotEmpty(t, want, "the 202 body must carry the non-empty plan the worker rendered")
+		assert.Contains(t, final.AppliedConfig.Task, want,
+			"the preamble's Changes: line must be exactly reincarnationChangesLine(<the 202 body's plan>)")
+	})
+
+	t.Run("unchanged: no Changes: line at all", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+		template := &store.Template{
+			ID:          tid("tmpl-unchanged-" + t.Name()),
+			Name:        "t",
+			Slug:        "reincarnate-template-unchanged-" + tidSlugSafe(t.Name()),
+			Harness:     "claude",
+			Scope:       store.TemplateScopeGlobal,
+			Status:      store.TemplateStatusActive,
+			ContentHash: "same-template-hash",
+			Config:      &store.TemplateConfig{Image: "old-image:v1"},
+		}
+		require.NoError(t, s.CreateTemplate(context.Background(), template))
+
+		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.Template = template.Slug
+			a.AppliedConfig.TemplateHash = "same-template-hash"
+			a.AppliedConfig.Image = "old-image:v1"
+		})
+		self := agentIdentityFor(agent.ID, project.ID)
+
+		req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+		waitForReincarnationSettled(t, s, agent.ID)
+
+		final, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "error", final.Phase)
+
+		assert.NotContains(t, final.AppliedConfig.Task, "Changes:")
+	})
+}
+
+// TestReincarnateAgent_MigratingMessageOwnership is the design Amendment
+// A26.8 worker end-to-end test: since a `sciontool status blocked` POST
+// from the CLI is unconditionally discarded by Guard 0b
+// (handlers_agent_lifecycle.go, reincarnationInFlight) for the whole
+// in-flight window, the reincarnation worker itself is the only thing that
+// can make "migrating to generation N" observable on the agent row. It must
+// be set at the very first step write (stopping) and cleared again once the
+// migration completes.
+func TestReincarnateAgent_MigratingMessageOwnership(t *testing.T) {
+	base := newReincarnateTestDispatcher()
+	disp := &blockingStopDispatcher{reincarnateTestDispatcher: base, entered: make(chan struct{}), release: make(chan struct{})}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	<-disp.entered // worker is inside Stop; the stopping step's write has already landed
+
+	midFlight, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "migrating to generation 2", midFlight.Message,
+		"the worker, not the CLI, must own the in-flight status message (A26.8)")
+
+	close(disp.release)
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateNone, final.ReincarnationState)
+	assert.Equal(t, "", final.Message, "completion must clear the migrating message")
+}
+
+// TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne is the
+// design Amendment A26.8 test for the conditional clear: the completion
+// write must clear Message only if it still holds the exact migrating text
+// it set at the stopping step — never a message something else wrote in the
+// meantime.
+//
+// It also pins the status endpoint's side (ptone/scion#2267): a
+// message-only status POST while the migration is in flight is a guarded
+// no-op (200 {"applied":false,"reason":"reincarnation_in_flight"}) and
+// leaves the worker's migrating message in place. Before #2267 that POST
+// bypassed Guard 0b and was the path this test used to set a foreign
+// message; with it closed, the foreign writer is simulated by a direct
+// store write (UpdateAgentStatus, which does not apply Guard 0b) while the
+// worker is paused just before DispatchAgentStart.
+func TestReincarnateAgent_MigratingMessagePreservedIfNewGenAlreadySetOne(t *testing.T) {
+	disp := newGatedDispatcher("start", nil)
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+	ctx := context.Background()
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	<-disp.entered // worker is about to call DispatchAgentStart; reincarnation_state is "starting"
+
+	inFlight, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.ReincarnationStateStarting, inFlight.ReincarnationState,
+		"this test is only meaningful while a migration is genuinely in flight")
+	require.Equal(t, "migrating to generation 2", inFlight.Message)
+
+	// The status endpoint: a message-only POST is dropped by Guard 0b.
+	statusBody, err := json.Marshal(store.AgentStatusUpdate{Message: "gen 2 says hi"})
+	require.NoError(t, err)
+	statusReq := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader(statusBody))
+	statusReq = statusReq.WithContext(contextWithIdentity(statusReq.Context(), agentIdentityFor(agent.ID, project.ID, ScopeAgentStatusUpdate)))
+	statusRec := httptest.NewRecorder()
+	srv.updateAgentStatus(statusRec, statusReq, agent.ID)
+	require.Equal(t, http.StatusOK, statusRec.Code, statusRec.Body.String())
+	var statusResp map[string]any
+	require.NoError(t, json.Unmarshal(statusRec.Body.Bytes(), &statusResp), statusRec.Body.String())
+	assert.Equal(t, false, statusResp["applied"])
+	assert.Equal(t, "reincarnation_in_flight", statusResp["reason"])
+
+	afterPost, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "migrating to generation 2", afterPost.Message,
+		"a message-only status POST must not replace the worker's migrating message while the migration is in flight")
+
+	// A foreign writer sets Message directly in the store mid-flight.
+	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Message: "gen 2 says hi"}))
+	midFlight, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "gen 2 says hi", midFlight.Message)
+
+	close(disp.release)
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ReincarnationStateNone, final.ReincarnationState)
+	assert.Equal(t, "gen 2 says hi", final.Message,
+		"the completion write must not clobber a message that is no longer the migrating text")
+}
+
+// TestReincarnateAgent_FailureNeverLeavesMigratingMessageStale is the design
+// Amendment A26.8 test for the failure path: writeFailedAgent's message
+// write is unconditional (design §3.7), so a failure can never leave
+// "migrating to generation N" stale on the agent row — it is always replaced
+// by a failure message.
+func TestReincarnateAgent_FailureNeverLeavesMigratingMessageStale(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = fmt.Errorf("no such image: nonexistent:latest")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.NotEqual(t, "migrating to generation 2", final.Message,
+		"a failure must never leave the in-flight migrating message stale")
+	assert.Contains(t, final.Message, "reincarnation failed: start failed: no such image")
 }
 
 // TestReincarnateAgent_AC6_NotifiesWithRealisticActivity is the design §3.4
@@ -2312,7 +4077,7 @@ func TestReincarnateAgent_AC6_NotifiesWithRealisticActivity(t *testing.T) {
 		a.ID = tid("coord-" + t.Name())
 		a.Slug = "coord-" + tidSlugSafe(t.Name())
 	})
-	requester := agentIdentityFor(coordinator.ID, project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
@@ -2654,21 +4419,30 @@ func TestReincarnateAgent_WorkerStepsBumpRecordUpdatedAt(t *testing.T) {
 	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
-	initial := list[0]
-	<-disp.entered // worker has written the stopping and provisioning steps
+	recID := list[0].ID
 	defer close(disp.release)
+	select {
+	case <-disp.entered: // worker has written the stopping and provisioning steps
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for worker to reach DispatchAgentReprovision; it may have failed before reprovision")
+	}
 
-	time.Sleep(20 * time.Millisecond)
-	cur, err := s.GetAgentReincarnation(context.Background(), initial.ID)
+	// Both provisioning writes (the record via tryAdvanceReincarnation, the
+	// agent row via updateReincarnationStep) finish before
+	// DispatchAgentReprovision and share one timestamp, which stays stable
+	// while the worker is held there.
+	cur, err := s.GetAgentReincarnation(context.Background(), recID)
 	require.NoError(t, err)
+	require.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
+		"the record's own state must track the worker's progress, not stay pending")
+
 	a, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
-	t.Logf("agent reincarnation_state=%q; record state=%q updated_at initial=%v now=%v",
-		a.ReincarnationState, cur.State, initial.UpdatedAt, cur.UpdatedAt)
-	assert.True(t, cur.UpdatedAt.After(initial.UpdatedAt),
-		"worker has passed the stopping and provisioning steps but the record's updated_at was never bumped")
-	assert.Equal(t, store.AgentReincarnationStateProvisioning, cur.State,
-		"the record's own state must track the worker's progress, not stay pending")
+	require.NotNil(t, a.ReincarnationUpdatedAt, "the provisioning step must have set ReincarnationUpdatedAt")
+	t.Logf("agent reincarnation_state=%q; record state=%q reincarnation_updated_at=%v record_updated_at=%v",
+		a.ReincarnationState, cur.State, *a.ReincarnationUpdatedAt, cur.UpdatedAt)
+	assert.False(t, cur.UpdatedAt.Before(*a.ReincarnationUpdatedAt),
+		"the worker's provisioning step must have bumped the record's updated_at, so it cannot predate that step")
 }
 
 // TestReincarnateAgent_RecordUpdatedAtBumpedAtStartingStep exercises the same
@@ -2742,7 +4516,7 @@ func newNotificationRace(t *testing.T, disp AgentDispatcher) *notificationRace {
 
 func (r *notificationRace) reincarnate(t *testing.T) {
 	t.Helper()
-	requester := agentIdentityFor(r.coordinator.ID, r.project.ID, ScopeAgentLifecycle)
+	requester := delegatingRequesterFor(r.coordinator.ID, r.project.ID)
 	rec := httptest.NewRecorder()
 	r.srv.handleReincarnateAgent(rec, reincarnateRequest(t, r.agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), r.agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
@@ -2994,6 +4768,12 @@ func TestReincarnateAgent_SweptWorkerFailureCASErrorDoesNotClobberNewClaim(t *te
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
+	// Installed (disarmed) before the worker starts and armed below, instead
+	// of swapping srv.store under the running worker and restoring it while
+	// the worker may still read it (ptone/scion#3184).
+	fs, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, fault: f, failCASTo: store.AgentReincarnationStateFailed}
+	})
 
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
@@ -3020,8 +4800,7 @@ func TestReincarnateAgent_SweptWorkerFailureCASErrorDoesNotClobberNewClaim(t *te
 	require.NoError(t, s.UpdateAgent(ctx, a))
 
 	// One transient, NOT-landed error on the worker's own failure CAS.
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateFailed}
-	srv.store = fs
+	fault.Arm()
 
 	// The first worker's dispatch now returns (error), driving it into
 	// failReincarnation.
@@ -3043,7 +4822,6 @@ func TestReincarnateAgent_SweptWorkerFailureCASErrorDoesNotClobberNewClaim(t *te
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	srv.store = s
 
 	after, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
@@ -3384,6 +5162,7 @@ func TestReincarnateAgent_SweepDecidesFromRecordNotLaggingAgentRow(t *testing.T)
 //     never delegating — a DB that never recovers within the retry budget.
 type casFaultStore struct {
 	store.Store
+	fault      *storeFaultSwitch // nil: always active
 	failCASTo  string
 	landReal   bool
 	persistent bool
@@ -3396,7 +5175,7 @@ type casFaultStore struct {
 }
 
 func (f *casFaultStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation, expectState string, olderThan time.Time) (bool, error) {
-	targeted := f.failCASTo != "" && r.State == f.failCASTo
+	targeted := f.fault.Active() && f.failCASTo != "" && r.State == f.failCASTo
 	if targeted && (f.persistent || f.failedOnce.CompareAndSwap(false, true)) {
 		if f.landReal {
 			_, _ = f.Store.TryAdvanceAgentReincarnation(ctx, r, expectState, olderThan)
@@ -3426,8 +5205,12 @@ func (f *casFaultStore) TryAdvanceAgentReincarnation(ctx context.Context, r *sto
 func TestReincarnateAgent_CompletionCASTransientErrorDoesNotLoseMigration(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateCompleted}
-	srv.store = fs
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, failCASTo: store.AgentReincarnationStateCompleted}
+	})
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
@@ -3435,7 +5218,6 @@ func TestReincarnateAgent_CompletionCASTransientErrorDoesNotLoseMigration(t *tes
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	settled := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = s
 
 	assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State)
 	after, err := s.GetAgent(context.Background(), agent.ID)
@@ -3461,8 +5243,12 @@ func TestReincarnateAgent_CompletionCASTransientErrorDoesNotLoseMigration(t *tes
 func TestReincarnateAgent_CompletionCASErrorAfterLandedWriteIsTreatedAsOwned(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateCompleted, landReal: true}
-	srv.store = fs
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, failCASTo: store.AgentReincarnationStateCompleted, landReal: true}
+	})
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
@@ -3470,7 +5256,6 @@ func TestReincarnateAgent_CompletionCASErrorAfterLandedWriteIsTreatedAsOwned(t *
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	settled := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = s
 
 	assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State)
 	after, err := s.GetAgent(context.Background(), agent.ID)
@@ -3489,8 +5274,12 @@ func TestReincarnateAgent_CompletionCASErrorAfterLandedWriteIsTreatedAsOwned(t *
 func TestReincarnateAgent_StepCASPersistentErrorEndsFailed(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateProvisioning, persistent: true}
-	srv.store = fs
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, failCASTo: store.AgentReincarnationStateProvisioning, persistent: true}
+	})
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
@@ -3498,7 +5287,6 @@ func TestReincarnateAgent_StepCASPersistentErrorEndsFailed(t *testing.T) {
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	settled := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = s
 
 	assert.Equal(t, store.AgentReincarnationStateFailed, settled.State)
 	assert.Contains(t, settled.Error, "failed to advance record to provisioning")
@@ -3636,6 +5424,7 @@ func TestReincarnateAgent_BackstopResetsOrphanAgentState(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	agent.ReincarnationState = store.ReincarnationStateStarting
+	agent.Message = "migrating to generation 2" // what a real in-flight worker would have set
 	claimedAt := time.Now()
 	agent.ReincarnationUpdatedAt = &claimedAt // a real claim always sets this
 	require.NoError(t, s.UpdateAgent(context.Background(), agent))
@@ -3651,6 +5440,11 @@ func TestReincarnateAgent_BackstopResetsOrphanAgentState(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.ReincarnationStateFailed, after.ReincarnationState)
 	assert.Equal(t, "error", after.Phase)
+	// Amendment A26.8: the orphan-sweep path (reincarnate_worker.go's
+	// sweepStaleReincarnationsOlderThan) sets Message unconditionally too, so
+	// a stale "migrating to generation N" can never survive this path either.
+	assert.NotEqual(t, "migrating to generation 2", after.Message)
+	assert.Contains(t, after.Message, "reincarnation failed: hub restarted during reincarnation")
 }
 
 // =============================================================================
@@ -4117,6 +5911,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			keptWorkspaceStoragePath := "gs://evolved-bucket/evolved-path"
 			keptAgentRoleGrandfathered := !want.AgentRoleGrandfathered
 			created.AppliedConfig.WorkspaceStoragePath = keptWorkspaceStoragePath
+			created.AppliedConfig.WorkspaceStorageBucket = "evolved-bucket"
 			created.AppliedConfig.AgentRoleGrandfathered = keptAgentRoleGrandfathered
 			require.NoError(t, s.UpdateAgent(ctx, created))
 
@@ -4139,6 +5934,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			assert.Equal(t, want.TemplateHash, fresh.TemplateHash, "TemplateHash must match what create produced")
 			assert.Equal(t, wantHubAccessScopes, fresh.HubAccessScopes, "HubAccessScopes must match what create produced")
 			assert.Equal(t, keptWorkspaceStoragePath, fresh.WorkspaceStoragePath, "WorkspaceStoragePath must be kept from the live row, not reset")
+			assert.Equal(t, "evolved-bucket", fresh.WorkspaceStorageBucket, "WorkspaceStorageBucket must be kept with WorkspaceStoragePath")
 			assert.Equal(t, keptAgentRoleGrandfathered, fresh.AgentRoleGrandfathered, "AgentRoleGrandfathered must be kept from the live row, not reset")
 			var freshSkills []api.SkillReference
 			if fresh.InlineConfig != nil {
@@ -4154,6 +5950,58 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 				require.False(t, want.NoAuth,
 					"precondition: the assigned GCPIdentity must satisfy the harness config's auth type, so create must NOT have taken the auto-no-auth fallback")
 			}
+		})
+	}
+}
+
+// claimRefusedTxStore refuses the reincarnation claim inside the claim
+// transaction with err.
+type claimRefusedTxStore struct {
+	store.Store
+	err error
+}
+
+func (s *claimRefusedTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&claimRefusedTx{Store: tx, err: s.err})
+	})
+}
+
+type claimRefusedTx struct {
+	store.Store
+	err error
+}
+
+func (t *claimRefusedTx) ClaimAgentReincarnation(context.Context, string, int64, time.Time) (int64, error) {
+	return 0, t.err
+}
+
+// A reincarnation claim refused inside the claim transaction answers 409
+// with the refusal's message and leaves no reincarnation record.
+func TestReincarnateAgent_ClaimRefusedInTransaction(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		msg  string
+	}{
+		{"already pending", store.ErrClaimPredicate, "a reincarnation is already pending for this agent"},
+		{"start in progress", &store.ClaimHeldError{ClaimID: "c", Kind: store.StartClaimUser, State: store.StartClaimLive, Since: time.Now()}, "a start is in progress for this agent; retry once it completes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newReincarnateTestAgent(t, s, project, broker, nil)
+			self := agentIdentityFor(agent.ID, project.ID)
+			srv.store = &claimRefusedTxStore{Store: srv.store, err: tc.err}
+
+			rec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.msg)
+			list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "a refused claim leaves no record")
 		})
 	}
 }

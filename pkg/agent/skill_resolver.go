@@ -61,10 +61,61 @@ type ResolveResult struct {
 }
 
 // ResolveError represents a single skill that failed resolution.
+// RetryAfter is a delay in whole seconds, as text, when one is known: for
+// SkillErrCodeRateLimited, the time left on the credential's cooldown; for
+// other causes, the upstream Retry-After header, if any. ProvisionAgent
+// copies it to SkillResolutionError.RetryAfter.
 type ResolveError struct {
-	URI     string
-	Code    string
-	Message string
+	URI        string
+	Code       string
+	Message    string
+	RetryAfter string
+}
+
+// Stable cause codes for ResolveError.Code and SkillResolutionError.Code.
+// Resolvers that can distinguish these failure modes (currently
+// GitHubSkillResolver) should set them so the create path can map a failure
+// to the right HTTP status without string-matching Message. An empty or
+// unrecognized code — including the Hub's own per-URI codes (storage_error,
+// internal_error, federation_error) for PreResolvedSkills — is treated as an
+// uncategorized resolution failure and kept on the existing 5xx path rather
+// than guessed at (#2546 R3).
+const (
+	SkillErrCodeNotFound            = "not_found"
+	SkillErrCodeRateLimited         = "rate_limited"
+	SkillErrCodeTimeout             = "timeout"
+	SkillErrCodeUpstreamUnavailable = "upstream_unavailable"
+	SkillErrCodeUnreachable         = "unreachable"
+	// SkillErrCodeForbidden is the per-URI code the Hub's batch skill
+	// resolve returns for a gh:// ref when the caller may not resolve GitHub
+	// skills for the project. It reaches the broker as a
+	// SkillResolutionError.Code through PreResolvedSkills.
+	SkillErrCodeForbidden = "forbidden"
+	// SkillErrCodeResolveFailed is the uncategorized per-ref resolution
+	// failure: the ref could not be resolved for a reason none of the codes
+	// above describes. The create path keeps it on the 5xx path.
+	SkillErrCodeResolveFailed = "resolve_failed"
+)
+
+// SkillResolutionError is returned by ProvisionAgent when a required skill
+// reference could not be resolved. It carries the ref URI and a stable Code
+// (see the SkillErrCode* constants) alongside the human-readable Message, so
+// the HTTP boundary (runtimebroker) can map it to the right status — naming
+// the ref and the cause — instead of folding it into a generic 500/502.
+// RetryAfter is a delay in whole seconds, as text, when one is known: for
+// SkillErrCodeRateLimited, the time left on the credential's cooldown (see
+// GitHubCooldown); for other causes, the upstream Retry-After header, if
+// any. It is empty otherwise. The broker sends it as a Retry-After header
+// only for SkillErrCodeRateLimited.
+type SkillResolutionError struct {
+	URI        string
+	Code       string
+	Message    string
+	RetryAfter string
+}
+
+func (e *SkillResolutionError) Error() string {
+	return fmt.Sprintf("required skill %q could not be resolved: %s", e.URI, e.Message)
 }
 
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.
@@ -80,6 +131,16 @@ type ResolvedSkill struct {
 	DeprecationMessage string `json:"-"`
 	ReplacementURI     string `json:"-"`
 	Optional           bool   `json:"-"` // Propagated from SkillReference for collision log level
+
+	// githubCredentialRef is set by GitHubSkillResolver when it returns a
+	// skill with at least one file whose Content is missing (an entry loaded
+	// from the on-disk resolution cache). It holds the gh:// URI of the
+	// request, which names at most the secret to use, never its value. The
+	// install step passes it to the GitHub credential lookup in the context
+	// (see ContextWithGitHubCredentialLookup) to find the same credential
+	// the resolver used, so a private repo read with a named credential is
+	// downloaded with that credential rather than the default one.
+	githubCredentialRef string
 }
 
 // DestName returns the directory name to use when installing this skill.
@@ -108,12 +169,10 @@ type ResolvedFile struct {
 	//
 	// The json:"-" tag intentionally excludes Content from the on-disk
 	// GitHubResolutionCache. Entries loaded from disk (e.g. after a broker
-	// restart within the TTL window) will have Content == nil and fall back
-	// to downloadSkillFile, which makes an unauthenticated request. For private
-	// repos this means the restart-within-TTL path has the same limitation as
-	// before this fix. A follow-up is needed to address that narrower window
-	// (e.g. by not caching private-repo entries to disk, or by re-fetching
-	// content when the disk-cache entry is used for install).
+	// restart within the TTL window) have Content == nil and fall back to
+	// downloadSkillFile. For those, installOneSkill looks up the credential
+	// the GitHub resolver would use for the skill's ref (see
+	// ResolvedSkill.githubCredentialRef) so private repos still download.
 	Content []byte `json:"-"`
 }
 
@@ -186,6 +245,45 @@ type gitHubTokenKey struct{}
 // the repo in question.
 func ContextWithGitHubToken(ctx context.Context, token string) context.Context {
 	return context.WithValue(ctx, gitHubTokenKey{}, token)
+}
+
+type gitHubCredentialLookupKey struct{}
+
+// GitHubCredentialLookup returns the GitHub credential to use for the given
+// gh:// URI, or "" if none applies. It is used at install time for skills
+// whose file content was not kept (see ResolvedSkill.githubCredentialRef).
+type GitHubCredentialLookup func(uri string) string
+
+// ContextWithGitHubCredentialLookup returns a context carrying lookup for the
+// install phase. The broker sets it to GitHubSkillResolver.CredentialForURI
+// of the resolver it uses for the same request, so install finds the same
+// credential the resolver used without that value travelling on the
+// resolved skill.
+func ContextWithGitHubCredentialLookup(ctx context.Context, lookup GitHubCredentialLookup) context.Context {
+	return context.WithValue(ctx, gitHubCredentialLookupKey{}, lookup)
+}
+
+// gitHubDownloadToken returns the credential installOneSkill presents for
+// skill's raw downloads: the credential the GitHub resolver uses for the
+// skill's ref, when the skill came from that resolver without content and a
+// lookup is available, and otherwise the context's default GitHub token.
+// downloadSkillFile only ever sends either to GitHub hosts.
+func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) string {
+	if skill.githubCredentialRef != "" {
+		if tok := credentialLookupFromContext(ctx)(skill.githubCredentialRef); tok != "" {
+			return tok
+		}
+	}
+	return GitHubTokenFromContext(ctx)
+}
+
+// credentialLookupFromContext returns the GitHub credential lookup carried
+// by ctx, or a lookup that always returns "" if there is none.
+func credentialLookupFromContext(ctx context.Context) GitHubCredentialLookup {
+	if lookup, ok := ctx.Value(gitHubCredentialLookupKey{}).(GitHubCredentialLookup); ok && lookup != nil {
+		return lookup
+	}
+	return func(string) string { return "" }
 }
 
 // GitHubTokenFromContext retrieves the GitHub token for the install phase,
@@ -452,10 +550,11 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		return nil, fmt.Errorf("failed to create skill staging dir: %w", err)
 	}
 
-	// Credential for raw.githubusercontent.com downloads of gh:// skills that
-	// the Hub resolved on our behalf. Empty for public repos and for skills
-	// that carry pre-fetched content.
-	ghToken := GitHubTokenFromContext(ctx)
+	// Credential for raw.githubusercontent.com downloads: for a skill the
+	// broker's GitHub resolver served without content, the credential it
+	// uses for that ref; otherwise the default token, used for gh:// skills
+	// the Hub resolved on our behalf. Empty for public repos.
+	ghToken := gitHubDownloadToken(ctx, skill)
 
 	var fileEntries []FileEntry
 
@@ -482,9 +581,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		//
 		// Note: entries loaded from the on-disk resolution cache have
 		// Content == nil (json:"-" strips it), so they fall through to
-		// downloadSkillFile. This means the post-restart, within-TTL path
-		// retains the pre-fix limitation for private repos. See the Content
-		// field doc on ResolvedFile for details.
+		// downloadSkillFile with the credential chosen above.
 		if f.Content != nil {
 			if err := writeSkillFileContent(f.Content, destPath); err != nil {
 				return nil, fmt.Errorf("failed to write %s: %w", f.Path, err)

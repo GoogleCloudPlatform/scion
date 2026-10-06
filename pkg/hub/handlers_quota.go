@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -90,9 +92,51 @@ type usageSummaryResponse struct {
 
 // usageByLimitResponse wraps the admin usage-by-limit result.
 type usageByLimitResponse struct {
-	LimitDefinition *store.LimitDefinition    `json:"limitDefinition"`
-	Reservations    []*store.UsageReservation `json:"reservations"`
-	TotalActive     int                       `json:"totalActive"`
+	LimitDefinition *store.LimitDefinition `json:"limitDefinition"`
+	Reservations    []usageReservationView `json:"reservations"`
+	TotalActive     int                    `json:"totalActive"`
+}
+
+// usageReservationView extends store.UsageReservation with the effective
+// per-broker agent limit and its precedence source (ptone/scion#2061 P2.2,
+// design.md §5.9, AC-P2-10). Both are populated only for
+// max_agents_per_broker reservations at broker scope — every other
+// reservation (a different limit, or a system/project-scoped one) leaves
+// them unset. They come from the shared brokerCapacity read model, the same
+// one Reserve enforces and the providers listing / broker settings GET
+// report, so the usage page never shows the raw entitlement-binding value
+// or the hub-wide default in place of what create actually enforces.
+type usageReservationView struct {
+	*store.UsageReservation
+	// BrokerAgentLimit is nil when the broker is unlimited, when limit
+	// resolution failed, or when this row isn't a max_agents_per_broker
+	// broker-scoped reservation.
+	BrokerAgentLimit *int64 `json:"brokerAgentLimit,omitempty"`
+	// BrokerAgentLimitSource is one of the BrokerLimitSource* constants
+	// (broker_capacity.go): "broker" | "entitlement" | "hub_default" |
+	// "unlimited" | "not_enforced". Empty only when this row isn't a
+	// max_agents_per_broker broker-scoped reservation, or brokerCapacity's
+	// own resolution failed outright (BrokerCapacity{}, both fields zero).
+	// It is the precedence step that produced the result, not a statement
+	// about whether the result is a cap: when the effective limit is <= 0
+	// (unlimited), BrokerAgentLimit is absent but BrokerAgentLimitSource is
+	// still whichever step produced it ("broker" for a settings.maxAgents=0
+	// override, "entitlement"/"hub_default" for a 0 binding or default).
+	// "unlimited" itself needs a nil limitDef or a nil quotaService in
+	// effectiveBrokerLimit; neither can occur here: def is this request's
+	// limit definition (never nil — see getUsageByLimit, the only builder of
+	// usageReservationView), and s.quotaService is always constructed in
+	// NewServer (server.go).
+	//
+	// "not_enforced" (design.md Amendment A1, ptone/scion#2270/P1b, not yet
+	// wired as of this field) means the P1b enforcement switch is off.
+	// BrokerAgentLimit keeps whatever the precedence steps resolved — a cap,
+	// or absent when that resolves to unlimited, exactly as in every other
+	// source above — but the value is informational only and is not
+	// currently enforced by Reserve. The usage page must render this
+	// visibly (not tooltip-only) next to the cap, since a limit shown
+	// without that context would look enforced when it is not.
+	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
 }
 
 // myUsageEntry represents one limit's current/max for the current user.
@@ -126,7 +170,7 @@ func (s *Server) handleAdminLimits(w http.ResponseWriter, r *http.Request) {
 		}
 		s.createLimitDefinition(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -163,7 +207,7 @@ func (s *Server) handleAdminLimitByID(w http.ResponseWriter, r *http.Request) {
 		}
 		s.deleteLimitDefinition(w, r, limitID, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -184,7 +228,7 @@ func (s *Server) handleLimitEntitlements(w http.ResponseWriter, r *http.Request,
 		}
 		s.createEntitlement(w, r, limitID, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -213,7 +257,7 @@ func (s *Server) handleAdminEntitlementByID(w http.ResponseWriter, r *http.Reque
 		}
 		s.deleteEntitlement(w, r, id, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -224,7 +268,7 @@ func (s *Server) handleAdminEntitlementByID(w http.ResponseWriter, r *http.Reque
 // handleAdminUsage handles GET on /api/v1/admin/usage.
 func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.getUsageSummary(w, r)
@@ -233,7 +277,7 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 // handleAdminUsageByLimit handles GET on /api/v1/admin/usage/:limitID.
 func (s *Server) handleAdminUsageByLimit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	limitID := extractID(r, "/api/v1/admin/usage")
@@ -247,7 +291,7 @@ func (s *Server) handleAdminUsageByLimit(w http.ResponseWriter, r *http.Request)
 // handleUsageMe handles GET on /api/v1/usage/me.
 func (s *Server) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.getMyUsage(w, r)
@@ -269,6 +313,17 @@ func (s *Server) createLimitDefinition(w http.ResponseWriter, r *http.Request, u
 		BadRequest(w, "name is required")
 		return
 	}
+
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	if req.ResourceType == "" {
+		BadRequest(w, "resource type is required")
+		return
+	}
+
+	// unit is trimmed but not required: it is optional (the admin UI treats
+	// it as optional, rendering "—"), and unit is not read by quota
+	// resolution. Matches the update path's trimming (updateLimitDefinition).
+	req.Unit = strings.TrimSpace(req.Unit)
 
 	if req.DefaultValue < 0 {
 		BadRequest(w, "default_value must be non-negative (0 means unlimited)")
@@ -360,15 +415,33 @@ func (s *Server) updateLimitDefinition(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// System-seeded limit definitions cannot be modified.
-	if existing.System {
-		writeForbidden(w, "system-seeded limit definitions cannot be modified")
-		return
-	}
+	// Trim before comparing/validating so a PUT that merely pads a field
+	// with whitespace is normalised rather than treated as a change.
+	req.ResourceType = strings.TrimSpace(req.ResourceType)
+	// unit is trimmed but not required: createLimitDefinition accepts an
+	// empty unit (the admin UI treats it as optional, rendering "—"),
+	// and unit is not read by quota resolution, so requiring it here
+	// would make existing empty-unit rows permanently uneditable.
+	req.Unit = strings.TrimSpace(req.Unit)
 
-	existing.Name = req.Name
-	existing.ResourceType = req.ResourceType
-	existing.Unit = req.Unit
+	// System-seeded limit definitions: only default_value and description
+	// may be changed (ptone/scion#2061 P1a, ptone/scion#2063). This is the
+	// supported admin path for the hub-wide max_agents_per_broker value
+	// (and any other system limit) — see pkg/hub/seed.go.
+	if existing.System {
+		if req.Name != existing.Name || req.ResourceType != existing.ResourceType || req.Unit != existing.Unit {
+			writeForbidden(w, "system limit definitions: only default_value and description can be changed")
+			return
+		}
+	} else {
+		if req.ResourceType == "" {
+			BadRequest(w, "resource type is required")
+			return
+		}
+		existing.Name = req.Name
+		existing.ResourceType = req.ResourceType
+		existing.Unit = req.Unit
+	}
 	existing.Description = req.Description
 	existing.DefaultValue = req.DefaultValue
 	existing.UpdatedAt = time.Now()
@@ -448,12 +521,22 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 	}
 
 	// Validate the referenced limit definition exists.
-	if _, err := s.store.GetLimitDefinition(r.Context(), limitID); err != nil {
+	limitDef, err := s.store.GetLimitDefinition(r.Context(), limitID)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Limit Definition")
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// ptone/scion#2061 P2-D4 / ptone/scion#2063 item 2: per-broker
+	// max_agents_per_broker caps are set via the broker settings API, not
+	// via a broker-scoped entitlement binding. System-scoped bindings for
+	// this limit are unaffected — they remain the hub-wide override.
+	if limitDef.Name == store.LimitMaxAgentsPerBroker && req.ScopeType == store.QuotaScopeBroker {
+		BadRequest(w, "per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings")
 		return
 	}
 
@@ -546,6 +629,24 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	// ptone/scion#2061 P2-D4 / ptone/scion#2063 item 2: an update can
+	// reshape an existing binding into the same broker-scoped
+	// max_agents_per_broker shape that createEntitlement rejects. Block it
+	// here too, so PUT cannot be used to bypass the POST check.
+	limitDef, err := s.store.GetLimitDefinition(r.Context(), existing.LimitDefinitionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Limit Definition")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if limitDef.Name == store.LimitMaxAgentsPerBroker && req.ScopeType == store.QuotaScopeBroker {
+		BadRequest(w, "per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings")
+		return
+	}
+
 	existing.SubjectType = req.SubjectType
 	existing.SubjectID = req.SubjectID
 	existing.ScopeType = req.ScopeType
@@ -590,7 +691,9 @@ func (s *Server) deleteEntitlement(w http.ResponseWriter, r *http.Request, id st
 // ---------------------------------------------------------------------------
 
 func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
-	defs, err := s.store.ListLimitDefinitions(r.Context())
+	ctx := r.Context()
+
+	defs, err := s.store.ListLimitDefinitions(ctx)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -598,11 +701,24 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]usageSummaryEntry, 0, len(defs))
 	for _, def := range defs {
-		reservations, err := s.store.ListActiveReservations(r.Context(), def.ID, store.QuotaScopeSystem, "")
+		// max_agents_per_broker reservations are stored at
+		// store.QuotaScopeBroker scoped to each individual broker
+		// (broker_quota.go), never at store.QuotaScopeSystem, so the
+		// system-scope query below always returns none for it — the summary
+		// row showed 0 active agents regardless of real usage. Sum across
+		// every broker instead, the same way getUsageByLimit and
+		// ReconcileStaleBrokerQuotaReservations do (ptone/scion#2061 P2.2).
+		var reservations []*store.UsageReservation
+		var listErr error
+		if def.Name == store.LimitMaxAgentsPerBroker {
+			reservations, listErr = s.listBrokerScopedActiveReservations(ctx, def.ID)
+		} else {
+			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, "")
+		}
 		activeCount := 0
-		if err != nil {
+		if listErr != nil {
 			slog.Error("failed to list active reservations for usage summary",
-				"limit_id", def.ID, "error", err)
+				"limit_id", def.ID, "error", listErr)
 		} else {
 			activeCount = len(reservations)
 		}
@@ -616,7 +732,9 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID string) {
-	def, err := s.store.GetLimitDefinition(r.Context(), limitID)
+	ctx := r.Context()
+
+	def, err := s.store.GetLimitDefinition(ctx, limitID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Limit Definition")
@@ -626,20 +744,77 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 		return
 	}
 
-	reservations, err := s.store.ListActiveReservations(r.Context(), limitID, store.QuotaScopeSystem, "")
+	// max_agents_per_broker reservations are stored at store.QuotaScopeBroker
+	// scoped to each individual broker (broker_quota.go), never at
+	// store.QuotaScopeSystem — so the generic system-scope query below would
+	// always return none for it. List across every broker instead, the same
+	// way ReconcileStaleBrokerQuotaReservations does.
+	var reservations []*store.UsageReservation
+	if def.Name == store.LimitMaxAgentsPerBroker {
+		reservations, err = s.listBrokerScopedActiveReservations(ctx, def.ID)
+	} else {
+		reservations, err = s.store.ListActiveReservations(ctx, limitID, store.QuotaScopeSystem, "")
+	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if reservations == nil {
-		reservations = []*store.UsageReservation{}
+
+	// limitDef is looked up once and reused for every broker-scoped
+	// reservation below (design.md §5.9, AC-P2-10): def is already that one
+	// lookup, so no second query is needed.
+	brokerCapacityCache := make(map[string]BrokerCapacity)
+	views := make([]usageReservationView, len(reservations))
+	for i, res := range reservations {
+		views[i] = usageReservationView{UsageReservation: res}
+		if def.Name != store.LimitMaxAgentsPerBroker || res.ScopeType != store.QuotaScopeBroker {
+			continue
+		}
+		bc, ok := brokerCapacityCache[res.ScopeID]
+		if !ok {
+			bc = s.brokerCapacity(ctx, res.ScopeID, def)
+			brokerCapacityCache[res.ScopeID] = bc
+		}
+		views[i].BrokerAgentLimit = bc.Limit
+		views[i].BrokerAgentLimitSource = bc.Source
 	}
 
 	writeJSON(w, http.StatusOK, usageByLimitResponse{
 		LimitDefinition: def,
-		Reservations:    reservations,
+		Reservations:    views,
 		TotalActive:     len(reservations),
 	})
+}
+
+// listBrokerScopedActiveReservations aggregates active reservations for
+// limitDefinitionID across every runtime broker (ptone/scion#2061 P2.2).
+// max_agents_per_broker reservations are always scoped to a specific broker
+// (store.QuotaScopeBroker, scope_id=broker ID), so listing them requires
+// enumerating brokers first — store.Store.ListActiveReservations takes one
+// exact scope, not a wildcard. This mirrors
+// ReconcileStaleBrokerQuotaReservations's own broker loop (broker_quota.go),
+// including its bounds: 1+B queries (one ListRuntimeBrokers, one
+// ListActiveReservations per broker) and the same 10,000-broker cap, below
+// which a hub with more brokers than that would silently undercount here
+// exactly as reconcile already does. Reviewed and accepted for this PR
+// (round 1, F3); a single-query store method (e.g.
+// ListActiveReservationsByScopeType) usable by both call sites is a
+// follow-up, not required here.
+func (s *Server) listBrokerScopedActiveReservations(ctx context.Context, limitDefinitionID string) ([]*store.UsageReservation, error) {
+	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return nil, fmt.Errorf("list runtime brokers: %w", err)
+	}
+
+	var reservations []*store.UsageReservation
+	for _, broker := range brokers.Items {
+		brokerReservations, err := s.store.ListActiveReservations(ctx, limitDefinitionID, store.QuotaScopeBroker, broker.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list active reservations for broker %q: %w", broker.ID, err)
+		}
+		reservations = append(reservations, brokerReservations...)
+	}
+	return reservations, nil
 }
 
 func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
@@ -665,6 +840,20 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]myUsageEntry, 0, len(defs))
 	for _, def := range defs {
+		// max_agents_per_broker reservations are held at store.QuotaScopeBroker
+		// (subject = broker ID, not the user) rather than store.QuotaScopeSystem
+		// (ptone/scion#2061 P2.2, broker_quota.go), so the per-user query below
+		// always finds none for it: the row showed "0 used" regardless of real
+		// broker usage. It also isn't a per-user quota at all — it's an
+		// infrastructure ceiling on a broker — so unlike getUsageSummary and
+		// getUsageByLimit (which sum broker reservations for their hub-wide
+		// admin view), the correct fix here is to omit the row from a user's
+		// own usage entirely rather than reporting a broker-wide count under
+		// "my usage". ptone/scion#2313.
+		if def.Name == store.LimitMaxAgentsPerBroker {
+			continue
+		}
+
 		// Resolve effective limit for this user at system scope.
 		effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(
 			r.Context(), def.ID, userID, store.QuotaScopeSystem, "")

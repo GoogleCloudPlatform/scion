@@ -61,6 +61,10 @@ func RunStoreSuite(t *testing.T, factory Factory) {
 	// Agent optimistic locking is not expressible through the generic CRUD
 	// categories, so it gets a dedicated backend-agnostic check.
 	t.Run("agent/OptimisticLock", func(t *testing.T) { runAgentOptimisticLock(t, factory) })
+
+	// Group-membership cleanup (ptone/scion#2769) is likewise not a CRUD
+	// category; see GroupMembershipCleanupConformance.
+	t.Run("group/MembershipCleanup", func(t *testing.T) { GroupMembershipCleanupConformance(t, factory) })
 }
 
 func listFrom[T any](items []T, err error) (*store.ListResult[T], error) {
@@ -441,6 +445,11 @@ func seedAgentProject(t *testing.T, ctx context.Context, s store.Store) {
 	}))
 }
 
+// requestedOwnerFilterTestOwnerID is a fixed UUID shared between the
+// ByRequestedOwnerID filter case's Seed and List closures below — owner_id is
+// a UUID column, so it must be a real UUID rather than an arbitrary label.
+const requestedOwnerFilterTestOwnerID = "e0000000-0000-0000-0000-0000000000e1"
+
 // newOracleAgent builds a minimal valid agent referencing the seeded project.
 func newOracleAgent(slug string) *store.Agent {
 	id := uuid.NewString()
@@ -564,6 +573,104 @@ func AgentDomain() Domain[store.Agent] {
 					return s.ListAgents(ctx, store.AgentFilter{IncludeDeleted: true}, store.ListOptions{})
 				},
 				WantCount: 2,
+			},
+			{
+				// HarnessConfig: matches the dedicated harness_config shadow
+				// column, kept in sync with AppliedConfig.HarnessConfig at
+				// write time (ptone/scion#2146). See
+				// pkg/store/entadapter/agent_store_test.go for the
+				// predicate-level tests (no-env, CreateInputs divergence,
+				// corrupt-row tolerance) that exercise the column directly.
+				Name: "ByHarnessConfig",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					claude := newOracleAgent("harness-claude")
+					claude.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "claude"}
+					require.NoError(t, s.CreateAgent(ctx, claude))
+
+					gemini := newOracleAgent("harness-gemini")
+					gemini.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "gemini"}
+					require.NoError(t, s.CreateAgent(ctx, gemini))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					return s.ListAgents(ctx, store.AgentFilter{HarnessConfig: "claude"}, store.ListOptions{})
+				},
+				WantCount: 1,
+			},
+			{
+				// RequestedOwnerID: a plain AND filter, independent of the
+				// OwnerID/MemberOrOwnerProjectIDs Mine/Shared OR-classification
+				// (ptone/scion#2146). owner_id is a UUID column, so the seeded
+				// values must themselves be valid UUIDs.
+				Name: "ByRequestedOwnerID",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					mine := newOracleAgent("owned-by-me")
+					mine.OwnerID = requestedOwnerFilterTestOwnerID
+					require.NoError(t, s.CreateAgent(ctx, mine))
+
+					someoneElses := newOracleAgent("owned-by-someone-else")
+					someoneElses.OwnerID = uuid.NewString()
+					require.NoError(t, s.CreateAgent(ctx, someoneElses))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					return s.ListAgents(ctx, store.AgentFilter{RequestedOwnerID: requestedOwnerFilterTestOwnerID}, store.ListOptions{})
+				},
+				WantCount: 1,
+			},
+			{
+				// IDs / user-ID path: a user ID mixed into the candidate set
+				// (Ancestry mixes user and agent principal IDs) is a
+				// perfectly valid UUID — it simply matches no row in the
+				// agents table, which is how "skip entries that are users"
+				// falls out without extra bookkeeping for relationship
+				// queries like CLI --ancestors (ptone/scion#2146). Split from
+				// the malformed-entry case below so a regression in either
+				// path is diagnosed by name, not just an opaque count
+				// mismatch in one shared case.
+				Name: "ByIDs_UserIDStandIn",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-keep")))
+					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-drop")))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					// Re-resolve the "keep" agent's ID from a fresh list since
+					// it's randomly generated in newOracleAgent.
+					all, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{})
+					if err != nil {
+						return nil, err
+					}
+					var keepID string
+					for _, a := range all.Items {
+						if a.Name == "ids-keep" {
+							keepID = a.ID
+						}
+					}
+					userIDStandIn := uuid.NewString() // a valid UUID naming no agent
+					return s.ListAgents(ctx, store.AgentFilter{IDs: []string{keepID, userIDStandIn}}, store.ListOptions{})
+				},
+				WantCount: 1,
+			},
+			{
+				// a genuinely non-UUID entry is a distinct code path
+				// (parseUUIDList's parse-failure drop) from the user-ID case
+				// above.
+				Name: "ByIDs_MalformedEntryDropped",
+				Seed: func(t *testing.T, ctx context.Context, s store.Store) {
+					require.NoError(t, s.CreateAgent(ctx, newOracleAgent("ids-malformed-keep")))
+				},
+				List: func(ctx context.Context, s store.Store) (*store.ListResult[store.Agent], error) {
+					all, err := s.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{})
+					if err != nil {
+						return nil, err
+					}
+					var keepID string
+					for _, a := range all.Items {
+						if a.Name == "ids-malformed-keep" {
+							keepID = a.ID
+						}
+					}
+					return s.ListAgents(ctx, store.AgentFilter{IDs: []string{keepID, "not-a-uuid-at-all"}}, store.ListOptions{})
+				},
+				WantCount: 1,
 			},
 		},
 	}

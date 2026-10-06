@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,8 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import scion_harness
 
-assert scion_harness.INTERFACE_VERSION >= 2, (
-    f"scion_harness INTERFACE_VERSION {scion_harness.INTERFACE_VERSION} < 2"
+assert scion_harness.INTERFACE_VERSION >= 3, (
+    f"scion_harness INTERFACE_VERSION {scion_harness.INTERFACE_VERSION} < 3"
 )
 
 PROVISION_VERSION = "2026-07-09T01:00:00Z"
@@ -34,15 +35,6 @@ PROVISION_VERSION = "2026-07-09T01:00:00Z"
 FLASH_MODEL = "Gemini 3.8 Flash (Medium)"
 PRO_MODEL = "Gemini 3.1 Pro (Low)"
 
-
-def _resolve_thinking_tier(level: int) -> str:
-    """Map a thinking level (0-100) to one of AGY's 3 CLI tiers."""
-    level = max(0, min(100, level))
-    if level >= 75:
-        return "high"
-    if level >= 50:
-        return "medium"
-    return "low"
 
 AGY_MCP_MAPPING: dict[str, Any] = {
     "global_config_file": ".gemini/config/mcp_config.json",
@@ -65,6 +57,33 @@ def _get_agy_version() -> tuple[int, ...] | None:
         return tuple(int(p) for p in parts)
     except (subprocess.SubprocessError, ValueError, OSError):
         return None
+
+
+def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
+    """Resolve the effective AGY model name.
+
+    Precedence:
+      1. SCION_MODEL (the broker-resolved value), via
+         scion_harness.resolve_model(ctx) — normalized here, at provision
+         time, through this harness's config.yaml model_aliases.
+      2. harness_config.model, normalized through the same alias table via
+         scion_harness.normalize_model_alias(), rather than passed raw. A
+         tier such as "medium" set directly on harness_config (e.g. by an
+         older template or an explicit override) is resolved the same way
+         SCION_MODEL would be, instead of leaking into settings.json
+         unresolved.
+      3. AGY_MODEL (operator-set env var fallback).
+      4. FLASH_MODEL (the hard-coded pin).
+    """
+    resolved = scion_harness.resolve_model(ctx)
+    if resolved:
+        return resolved
+    configured = scion_harness.normalize_model_alias(
+        str(ctx.harness_config.get("model") or ""), ctx.harness_config
+    )
+    if configured:
+        return configured
+    return os.environ.get("AGY_MODEL", "") or FLASH_MODEL
 
 
 ANTIGRAVITY_AUTH = scion_harness.AuthSpec(
@@ -238,21 +257,26 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
             env_overlay["GOOGLE_CLOUD_LOCATION"] = location
 
     instructions_file = ctx.harness_config.get("instructions_file") or "GEMINI.md"
-    model = (
-        ctx.harness_config.get("model")
-        or os.environ.get("AGY_MODEL", "")
-        or FLASH_MODEL
-    )
-    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
-    thinking_tier: str | None = None
-    if thinking_raw.isdigit():
-        thinking_level = int(thinking_raw)
-        thinking_tier = _resolve_thinking_tier(thinking_level)
-        ctx.info(f"model={model} thinking_level={thinking_level} tier={thinking_tier}")
-    else:
-        ctx.info(f"model={model} thinking_level=unset (using AGY default)")
+    model = _resolve_model(ctx)
+    # The level -> --effort tier table lives in config.yaml's `thinking:`
+    # block; resolve_thinking owns the parse, clamp and logging. None means
+    # no --effort flag, so AGY's own default applies.
+    harness_cfg = ctx.harness_config if isinstance(ctx.harness_config, dict) else {}
+    thinking_requested = bool(os.environ.get(scion_harness.THINKING_LEVEL_ENV, "").strip())
+    if thinking_requested and not harness_cfg.get("thinking"):
+        # Only when a level was asked for: with no level, no --effort is the
+        # intended outcome, so a missing block changes nothing worth a warning.
+        ctx.warn(
+            "config.yaml has no thinking block; --effort not passed "
+            "(update the harness-config)"
+        )
+    thinking_tier = scion_harness.resolve_thinking(ctx)
+    ctx.info(f"model={model} tier={thinking_tier or '<agy default>'}")
 
-    _generate_wrapper_script(ctx.home, has_token, is_enterprise, is_adc=is_adc, thinking_tier=thinking_tier)
+    _generate_wrapper_script(
+        ctx.home, has_token, is_enterprise, is_adc=is_adc, thinking_tier=thinking_tier,
+        secrets_dir=scion_harness.harness_dir_override(scion_harness.HARNESS_SECRETS_DIR_ENV),
+    )
     ctx.write_outputs(resolved, env=env_overlay)
     _copy_instructions(ctx.bundle_dir, ctx.home, instructions_file)
     _generate_hooks_json(ctx.home)
@@ -353,6 +377,7 @@ def _generate_wrapper_script(
     home: str, has_token: bool, is_enterprise: bool,
     is_adc: bool = False,
     thinking_tier: str | None = None,
+    secrets_dir: str | None = None,
 ) -> None:
     """Generate agy-wrapper.sh that inits keyring and execs AGY.
 
@@ -372,9 +397,10 @@ def _generate_wrapper_script(
     are skipped because ADC auth uses GOOGLE_APPLICATION_CREDENTIALS instead
     of the keyring-based OAuth flow. GCP settings patching still runs.
     """
-    secret_path = os.path.join(
-        home, ".scion", "harness", "secrets", "AGY_TOKEN"
-    )
+    # secrets_dir is SCION_HARNESS_SECRETS_DIR when set.
+    if secrets_dir is None:
+        secrets_dir = os.path.join(home, ".scion", "harness", "secrets")
+    secret_path = os.path.join(secrets_dir, "AGY_TOKEN")
     oauth_token_path = os.path.join(
         home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
     )
@@ -430,11 +456,11 @@ echo "agy-wrapper: keyring initialized (DBUS=$DBUS_SESSION_BUS_ADDRESS)" >&2
 echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" > ~/.scion/harness/.dbus-env
 
 # Inject OAuth token into keyring (staging file, target path, env var fallback)
-if [ -f "{secret_path}" ]; then
+if [ -f {shlex.quote(secret_path)} ]; then
     secret-tool store \\
         --label="Password for antigravity on gemini" \\
         service gemini username antigravity \\
-        < "{secret_path}" 2>/dev/null \\
+        < {shlex.quote(secret_path)} 2>/dev/null \\
         && echo "agy-wrapper: token injected into keyring (from staging file)" >&2 \\
         || echo "agy-wrapper: WARNING: failed to inject token" >&2
 elif [ -f "{oauth_token_path}" ]; then
@@ -500,7 +526,7 @@ print('agy-wrapper: marked enterprise onboarding complete', file=sys.stderr)
 fi
 
 # Exec AGY with all arguments passed through
-exec agy --dangerously-skip-permissions{f' --effort {thinking_tier}' if thinking_tier else ''} "$@"
+exec agy --dangerously-skip-permissions{f' --effort {shlex.quote(thinking_tier)}' if thinking_tier else ''} "$@"
 """
 
     wrapper_path = os.path.join(home, ".scion", "harness", "agy-wrapper.sh")
@@ -576,28 +602,60 @@ def _prestage_onboarding(
     # onboardingComplete lives here (not in cache/onboarding.json) per
     # observed post-login AGY config state.
     settings_path = os.path.join(cli_dir, "settings.json")
-    if not os.path.isfile(settings_path):
-        settings: dict[str, Any] = {
-            "colorScheme": "dark",
-            "onboardingComplete": True,
-            "trustedWorkspaces": [workspace],
-        }
-        if model:
-            settings["model"] = model
-        if auth_method == "api-key":
-            settings["modelProvider"] = "gemini"
-        scion_harness.atomic_write_json(settings_path, settings)
-    elif auth_method == "api-key":
-        # settings.json already exists — ensure modelProvider is set.
+    settings: dict[str, Any] = {
+        "colorScheme": "dark",
+        "onboardingComplete": True,
+        "trustedWorkspaces": [workspace],
+    }
+    # changed starts True for a brand-new file so it's always written, even
+    # when model is empty and auth_method isn't api-key.
+    changed = True
+    if os.path.isfile(settings_path):
         try:
-            existing = scion_harness.load_json(settings_path) or {}
-        except (OSError, json.JSONDecodeError):
-            existing = {}
-        if not isinstance(existing, dict):
-            existing = {}
-        if existing.get("modelProvider") != "gemini":
-            existing["modelProvider"] = "gemini"
-            scion_harness.atomic_write_json(settings_path, existing)
+            loaded = scion_harness.load_json(settings_path)
+        except (OSError, ValueError):
+            # ValueError covers both json.JSONDecodeError and the
+            # UnicodeDecodeError a non-UTF-8 file raises when load_json's
+            # open() tries to decode it — this path now runs in every auth
+            # mode (not just api-key, as before this PR), so a malformed or
+            # non-UTF-8 file must fall back to the fresh defaults above
+            # rather than crash provisioning.
+            loaded = None
+        if isinstance(loaded, dict):
+            # Use the existing file as the base so every other key (and any
+            # key this function doesn't know about) is preserved. A
+            # malformed or unexpected (non-dict) file falls back to the
+            # fresh defaults above instead of {} — losing
+            # onboardingComplete/trustedWorkspaces here would mean a
+            # headless agent stalls on AGY's interactive onboarding/trust
+            # prompts, which is exactly what those keys exist to skip.
+            settings = loaded
+            changed = False
+            # Back-fill any onboarding default missing from a valid but
+            # incomplete existing file (e.g. hand-edited, or written by an
+            # older provisioner version), without overriding a value already
+            # present.
+            if "colorScheme" not in settings:
+                settings["colorScheme"] = "dark"
+                changed = True
+            if "onboardingComplete" not in settings:
+                settings["onboardingComplete"] = True
+                changed = True
+            trusted_workspaces = settings.get("trustedWorkspaces")
+            if not isinstance(trusted_workspaces, list):
+                settings["trustedWorkspaces"] = [workspace]
+                changed = True
+            elif workspace not in trusted_workspaces:
+                trusted_workspaces.append(workspace)
+                changed = True
+    if model and settings.get("model") != model:
+        settings["model"] = model
+        changed = True
+    if auth_method == "api-key" and settings.get("modelProvider") != "gemini":
+        settings["modelProvider"] = "gemini"
+        changed = True
+    if changed:
+        scion_harness.atomic_write_json(settings_path, settings)
 
     # cache/onboarding.json — marks onboarding complete.
     # Always set enterpriseOnboardingComplete=true regardless of auth mode:

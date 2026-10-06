@@ -26,10 +26,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type { Project } from '../../shared/types.js';
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface AccessToken {
   id: string;
@@ -53,6 +55,56 @@ interface ScopeOption {
   isAlias: boolean;
   /** For aliases, the list of scopes this alias expands to. */
   expandsTo?: string[];
+  /**
+   * "flat_role" or "relationship" (ptone/scion#2122). Relationship-eligible
+   * scopes (agent:attach, agent:port_access) are checked against the
+   * specific target on every later request -- own agents and their
+   * descendants, plus (for agent:port_access) agents in projects where the
+   * holder's role grants it -- never against a target enumerated at
+   * selection time.
+   */
+  eligibilityKind?: string | undefined;
+  /**
+   * Present only once eligibility was requested for a selected project.
+   * Answers only "may you select this restriction"; never a target list
+   * and never widened by anything the browser already holds.
+   */
+  eligible?: boolean | undefined;
+  /** Stable machine reason code, present only when eligible is false. */
+  eligibilityReason?: string | undefined;
+  /** For an alias, which expanded member scopes are not eligible. */
+  ineligibleMembers?: string[] | undefined;
+}
+
+/** Human-readable text for a MintDenialReason code from the eligibility API. */
+const ELIGIBILITY_REASON_LABELS: Record<string, string> = {
+  flat_role_insufficient: 'your project role does not include this permission',
+  no_relationship_candidacy: 'not eligible under your current project access',
+  boundary_not_allowed: 'not selectable for a project-scoped token',
+  unknown_selector: 'unknown scope',
+  // Appears per-scope only when at least one other scope in the response
+  // was eligible (ptone/scion#2122); a project with zero eligible scopes
+  // fails the whole request instead, so this label is never the only
+  // signal that the project itself is inaccessible.
+  project_access_required:
+    'you do not currently have authority for this permission in this project',
+};
+
+export function formatEligibilityReason(reason?: string): string {
+  if (!reason) return 'not currently selectable';
+  return ELIGIBILITY_REASON_LABELS[reason] || reason;
+}
+
+/**
+ * Badge text for a relationship-eligible scope. agent:port_access also
+ * reaches agents in projects where the holder's role grants port access
+ * (the built-in project owner and admin roles do).
+ */
+export function relationshipBadgeText(scope: string): string {
+  if (scope === 'agent:port_access') {
+    return 'Own agents & descendants, or any agent in the project if your role grants port access — checked per agent';
+  }
+  return 'Own agents & descendants — checked per agent';
 }
 
 /**
@@ -60,6 +112,7 @@ interface ScopeOption {
  */
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
   agent: 'Agent',
+  artifact: 'Artifact',
   broker: 'Broker',
   gcp_service_account: 'GCP Service Account',
   group: 'Group',
@@ -71,7 +124,15 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
 };
 
 /**
- * Fallback scope list used when the dynamic fetch from /api/v1/auth/scopes fails.
+ * Fallback scope list used when the dynamic fetch from /api/v1/auth/scopes
+ * fails. This is a static, best-effort snapshot for that offline case only:
+ * it never carries eligibility (every entry is selectable), so it must not
+ * be used to answer "may I select this restriction" -- only the live
+ * /api/v1/auth/scopes response does that. The list mirrors every registry
+ * selector, including boundary-restricted ones such as broker:create
+ * (hub-boundary tokens only): the live response marks those
+ * boundary_not_allowed for a project-scoped token, and the server rejects
+ * them on submit.
  */
 const FALLBACK_SCOPES: ScopeOption[] = [
   {
@@ -134,7 +195,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'agent:port_access',
     label: 'agent:port_access',
-    description: 'Access forwarded ports',
+    description: 'Access agent forwarded ports',
     resource: 'agent',
     isAlias: false,
   },
@@ -143,6 +204,48 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'agent:read',
     description: 'Read agent status/metadata',
     resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:create',
+    label: 'artifact:create',
+    description: 'Publish artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:delete',
+    label: 'artifact:delete',
+    description: 'Delete artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:manage',
+    label: 'artifact:manage',
+    description: 'Manage artifact grants and share links',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:read',
+    label: 'artifact:read',
+    description: 'Read artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:update',
+    label: 'artifact:update',
+    description: 'Publish new versions of artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'broker:create',
+    label: 'broker:create',
+    description: 'Create brokers',
+    resource: 'broker',
     isAlias: false,
   },
   {
@@ -473,12 +576,32 @@ function groupScopesByResource(scopes: ScopeOption[]): [string, ScopeOption[]][]
 
 @customElement('scion-token-list')
 export class ScionTokenList extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private tokens: AccessToken[] = [];
   @state() private projects: Project[] = [];
   @state() private error: string | null = null;
   @state() private availableScopes: ScopeOption[] = [...FALLBACK_SCOPES];
-  private scopesCached = false;
+  /** Cached scope responses, keyed by projectId ('' for the plain catalog). */
+  private scopesCache: Map<string, ScopeOption[]> = new Map();
+  /**
+   * Monotonic counter guarding against out-of-order responses: each
+   * loadScopes() call captures the value at its start and checks it again
+   * after every await, so a slower, older request cannot overwrite the
+   * state a newer one already applied.
+   */
+  private scopesRequestSeq = 0;
+  /**
+   * Set to the projectId whose eligibility fetch failed (403, or any other
+   * non-OK/network failure), so the picker can say so instead of silently
+   * showing a different project's eligibility. Cleared on any successful
+   * fetch for that project. Compared against createProjectId at render
+   * time, so switching away from the failed project hides the message
+   * without an explicit reset.
+   */
+  @state() private scopesErrorProjectId: string | null = null;
 
   // Create dialog
   @state() private createDialogOpen = false;
@@ -708,6 +831,25 @@ export class ScionTokenList extends LitElement {
         margin-top: 0.125rem;
       }
 
+      .scope-relationship-badge {
+        display: inline-block;
+        margin-left: 0.375rem;
+        font-size: 0.625rem;
+        font-weight: 500;
+        color: var(--scion-text-muted, #64748b);
+        font-family: inherit;
+      }
+
+      .scope-ineligible-reason {
+        font-size: 0.6875rem;
+        color: var(--sl-color-danger-600, #dc2626);
+        font-family: inherit;
+      }
+
+      sl-checkbox[disabled] .scope-checkbox-label {
+        color: var(--scion-text-muted, #94a3b8);
+      }
+
       .scope-selected-count {
         font-size: 0.75rem;
         color: var(--scion-text-muted, #64748b);
@@ -741,26 +883,69 @@ export class ScionTokenList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.loadScopes();
+    void this.loadScopes('');
     void this.loadData();
   }
 
   /**
-   * Fetch available scopes from /api/v1/auth/scopes and cache the result.
-   * Falls back to the hardcoded FALLBACK_SCOPES list on failure.
+   * Fetch scopes from /api/v1/auth/scopes and cache the result per project.
+   * With projectId set, each entry additionally carries mint eligibility
+   * for that project -- computed fresh by the server for the current user,
+   * never inferred or cached across projects. Falls back to the hardcoded
+   * FALLBACK_SCOPES list (with no eligibility at all) on failure.
+   *
+   * Guards against two races when the user switches projects quickly:
+   * responses are matched against a monotonic sequence number so a slower,
+   * older request cannot overwrite state a newer one already applied, and
+   * a non-OK response never leaves a DIFFERENT project's eligibility on
+   * screen -- it falls back to the plain catalog (no eligibility) and
+   * records which project failed, for an inline message.
    *
    * Scopes are enriched with `resource` (for grouping) and `isAlias` fields.
    * Aliases are listed first within their resource group for visual separation.
    */
-  private async loadScopes(): Promise<void> {
-    if (this.scopesCached) return;
+  private async loadScopes(projectId: string): Promise<void> {
+    const seq = ++this.scopesRequestSeq;
+    const cacheKey = projectId || '';
+    const cached = this.scopesCache.get(cacheKey);
+    if (cached) {
+      this.availableScopes = cached;
+      this.scopesErrorProjectId = null;
+      return;
+    }
     try {
-      const res = await apiFetch('/api/v1/auth/scopes');
-      if (!res.ok) return; // keep fallback
+      const url = projectId
+        ? `/api/v1/auth/scopes?projectId=${encodeURIComponent(projectId)}`
+        : '/api/v1/auth/scopes';
+      const res = await apiFetch(url);
+      if (seq !== this.scopesRequestSeq) return; // superseded by a newer request
+      if (!res.ok) {
+        // Never keep a different project's eligibility on screen: fall
+        // back to the plain catalog (server enforcement still applies
+        // regardless of what this picker shows) and surface the failure --
+        // only when a specific project was requested; the parameterless
+        // catalog call has no project to blame.
+        this.availableScopes = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];
+        if (projectId) this.scopesErrorProjectId = projectId;
+        return;
+      }
       const data = (await res.json()) as {
-        scopes?: Array<{ id: string; resource: string; action: string; description: string }>;
-        aliases?: Array<{ id: string; description: string; expands_to: string[] }>;
+        scopes?: Array<{
+          id: string;
+          resource: string;
+          action: string;
+          description: string;
+          eligibilityKind?: string;
+          eligibility?: { eligible: boolean; reason?: string };
+        }>;
+        aliases?: Array<{
+          id: string;
+          description: string;
+          expands_to: string[];
+          eligibility?: { eligible: boolean; ineligibleMembers?: string[] };
+        }>;
       };
+      if (seq !== this.scopesRequestSeq) return; // superseded while parsing
       const scopes: ScopeOption[] = [];
       for (const s of data.scopes || []) {
         scopes.push({
@@ -769,6 +954,9 @@ export class ScionTokenList extends LitElement {
           description: s.description,
           resource: s.resource,
           isAlias: false,
+          eligibilityKind: s.eligibilityKind,
+          eligible: s.eligibility?.eligible,
+          eligibilityReason: s.eligibility?.reason,
         });
       }
       for (const a of data.aliases || []) {
@@ -781,6 +969,8 @@ export class ScionTokenList extends LitElement {
           resource,
           isAlias: true,
           expandsTo: a.expands_to,
+          eligible: a.eligibility?.eligible,
+          ineligibleMembers: a.eligibility?.ineligibleMembers,
         });
       }
       // Sort: aliases first within each resource, then alphabetically
@@ -790,13 +980,17 @@ export class ScionTokenList extends LitElement {
         if (a.isAlias !== b.isAlias) return a.isAlias ? -1 : 1;
         return a.value.localeCompare(b.value);
       });
-      if (scopes.length > 0) {
-        this.availableScopes = scopes;
-        this.scopesCached = true;
-      }
+      // Apply the result even when it is empty, so a project with no
+      // eligible scopes replaces the previous project's list instead of
+      // leaving it on screen.
+      this.scopesCache.set(cacheKey, scopes);
+      this.availableScopes = scopes;
+      this.scopesErrorProjectId = null;
     } catch {
-      // Keep fallback list — log for debugging
-      console.warn('Failed to fetch dynamic scopes, using fallback list');
+      if (seq !== this.scopesRequestSeq) return; // superseded before the catch
+      this.availableScopes = this.scopesCache.get('') ?? [...FALLBACK_SCOPES];
+      if (projectId) this.scopesErrorProjectId = projectId;
+      console.warn('Failed to fetch scopes from /api/v1/auth/scopes');
     }
   }
 
@@ -852,6 +1046,15 @@ export class ScionTokenList extends LitElement {
     this.scopeFilter = '';
     this.collapsedGroups = new Set();
     this.createDialogOpen = true;
+    void this.loadScopes(this.createProjectId);
+  }
+
+  private handleProjectChange(projectId: string): void {
+    this.createProjectId = projectId;
+    // Selected scopes may no longer be eligible under the new project;
+    // clear them rather than silently submitting a stale selection.
+    this.createScopes = new Set();
+    void this.loadScopes(projectId);
   }
 
   private closeCreateDialog(): void {
@@ -869,6 +1072,8 @@ export class ScionTokenList extends LitElement {
   }
 
   private toggleScope(scope: string): void {
+    const option = this.availableScopes.find((s) => s.value === scope);
+    if (option?.eligible === false) return; // defense in depth; checkbox is also disabled
     const next = new Set(this.createScopes);
     if (next.has(scope)) {
       next.delete(scope);
@@ -916,7 +1121,15 @@ export class ScionTokenList extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, 'Failed to create token'));
+        const info = await parseApiError(response, 'Failed to create token');
+        let message = info.message;
+        // scope_violation carries {selector, reason} (ptone/scion#2122); name
+        // the denied selector so the user knows which checkbox to remove,
+        // without duplicating the server's reason vocabulary here.
+        if (info.code === 'scope_violation' && typeof info.details?.selector === 'string') {
+          message = `${message} (scope: ${info.details.selector})`;
+        }
+        throw new Error(message);
       }
 
       const data = (await response.json()) as { token: string };
@@ -1012,44 +1225,6 @@ export class ScionTokenList extends LitElement {
   }
 
   // ── Formatting ─────────────────────────────────────────────────────
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
-  private formatDate(dateString: string): string {
-    try {
-      return new Date(dateString).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    } catch {
-      return dateString;
-    }
-  }
 
   // ── Rendering ──────────────────────────────────────────────────────
 
@@ -1167,16 +1342,18 @@ export class ScionTokenList extends LitElement {
           </div>
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(token.created)}</span>
+          <span class="meta-text">${formatRelative(token.created)}</span>
         </td>
         <td class="hide-mobile">
           <span class="meta-text">
-            ${token.lastUsed ? this.formatRelativeTime(token.lastUsed) : '\u2014'}
+            ${token.lastUsed ? formatRelative(token.lastUsed) : '\u2014'}
           </span>
         </td>
         <td>
           <span class="meta-text">
-            ${token.expiresAt ? this.formatDate(token.expiresAt) : '\u2014'}
+            ${token.expiresAt
+              ? formatInstantWithZone(token.expiresAt) || token.expiresAt
+              : '\u2014'}
           </span>
         </td>
         <td class="actions-cell">
@@ -1242,7 +1419,7 @@ export class ScionTokenList extends LitElement {
             placeholder="Select a project"
             value=${this.createProjectId}
             @sl-change=${(e: Event) => {
-              this.createProjectId = (e.target as HTMLSelectElement).value;
+              this.handleProjectChange((e.target as HTMLSelectElement).value);
             }}
             required
           >
@@ -1263,6 +1440,12 @@ export class ScionTokenList extends LitElement {
                   >`
                 : nothing}
             </div>
+            ${this.scopesErrorProjectId && this.scopesErrorProjectId === this.createProjectId
+              ? html`<div class="dialog-error">
+                  Could not check which scopes you can select for this project. Showing the full
+                  catalog with no eligibility -- the server still enforces access when you submit.
+                </div>`
+              : nothing}
             <div class="scope-selector">
               <div class="scope-search">
                 <sl-input
@@ -1365,10 +1548,12 @@ export class ScionTokenList extends LitElement {
   }
 
   private renderAliasScope(scope: ScopeOption) {
+    const ineligible = scope.eligible === false;
     return html`
       <div class="scope-alias-item">
         <sl-checkbox
           ?checked=${this.createScopes.has(scope.value)}
+          ?disabled=${ineligible}
           @sl-change=${() => this.toggleScope(scope.value)}
         >
           <span class="scope-checkbox-label">${scope.label}</span>
@@ -1379,21 +1564,41 @@ export class ScionTokenList extends LitElement {
             <sl-icon name="collection"></sl-icon>
             Alias${scope.expandsTo ? ` — expands to ${scope.expandsTo.length} scopes` : ''}
           </span>
+          ${ineligible
+            ? html`<br /><span class="scope-ineligible-reason"
+                  >Not
+                  selectable${scope.ineligibleMembers?.length
+                    ? `: missing ${scope.ineligibleMembers.join(', ')}`
+                    : ''}</span
+                >`
+            : nothing}
         </sl-checkbox>
       </div>
     `;
   }
 
   private renderScopeCheckbox(scope: ScopeOption) {
+    const ineligible = scope.eligible === false;
     return html`
       <div class="scope-checkbox-item">
         <sl-checkbox
           ?checked=${this.createScopes.has(scope.value)}
+          ?disabled=${ineligible}
           @sl-change=${() => this.toggleScope(scope.value)}
         >
           <span class="scope-checkbox-label">${scope.label}</span>
+          ${scope.eligibilityKind === 'relationship'
+            ? html`<span class="scope-relationship-badge"
+                >${relationshipBadgeText(scope.value)}</span
+              >`
+            : nothing}
           <br />
           <span class="scope-checkbox-desc">${scope.description}</span>
+          ${ineligible
+            ? html`<br /><span class="scope-ineligible-reason"
+                  >Not selectable: ${formatEligibilityReason(scope.eligibilityReason)}</span
+                >`
+            : nothing}
         </sl-checkbox>
       </div>
     `;

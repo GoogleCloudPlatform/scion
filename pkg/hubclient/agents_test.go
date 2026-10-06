@@ -100,6 +100,96 @@ func TestListAgentsPageLimitZeroOmitted(t *testing.T) {
 	}
 }
 
+// TestAgentService_List_NewFilterQueryEncoding verifies the ownerId,
+// ancestorId, harnessConfig, and id[] query params introduced for
+// ptone/scion#2146 are encoded on the wire exactly as the Hub's listAgents
+// handler expects (pkg/hub/handlers_agents_core.go's
+// applyAgentAttributeAndRelationshipFilters).
+func TestAgentService_List_NewFilterQueryEncoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		assert.Equal(t, "owner-1", query.Get("ownerId"))
+		assert.Equal(t, "ancestor-1", query.Get("ancestorId"))
+		assert.Equal(t, "claude", query.Get("harnessConfig"))
+		assert.ElementsMatch(t, []string{"id-1", "id-2"}, query["id"])
+		assert.Equal(t, "root-1", query.Get("lineageRootId"))
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents": []}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	_, err = client.Agents().List(context.Background(), &ListAgentsOptions{
+		OwnerID:       "owner-1",
+		AncestorID:    "ancestor-1",
+		HarnessConfig: "claude",
+		IDs:           []string{"id-1", "id-2"},
+		LineageRootID: "root-1",
+	})
+	require.NoError(t, err)
+}
+
+// TestAgentService_List_NewFiltersOmittedWhenUnset verifies the new query
+// params are absent from the request entirely when unset, matching every
+// other optional filter's omitempty-style behavior. This matters because an
+// empty (but present) "id" param set is meaningfully different server-side
+// from an absent one (store.AgentFilter.IDs: nil vs. empty-non-nil).
+func TestAgentService_List_NewFiltersOmittedWhenUnset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		assert.Empty(t, query.Get("ownerId"))
+		assert.Empty(t, query.Get("ancestorId"))
+		assert.Empty(t, query.Get("harnessConfig"))
+		assert.Empty(t, query.Get("lineageRootId"))
+		_, hasID := query["id"]
+		assert.False(t, hasID, "id param must be entirely absent, not present-but-empty")
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents": []}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	_, err = client.Agents().List(context.Background(), &ListAgentsOptions{})
+	require.NoError(t, err)
+}
+
+// TestProjectAgentService_List_NewFilterQueryEncoding is the project-scoped
+// counterpart: cmd/list.go's default (non-`--all`) path calls
+// ProjectAgents(projectID), so its query encoding must not drift from the
+// global Agents() path above.
+func TestProjectAgentService_List_NewFilterQueryEncoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		assert.Equal(t, "owner-1", query.Get("ownerId"))
+		assert.Equal(t, "ancestor-1", query.Get("ancestorId"))
+		assert.Equal(t, "claude", query.Get("harnessConfig"))
+		assert.ElementsMatch(t, []string{"id-1", "id-2"}, query["id"])
+		assert.Equal(t, "root-1", query.Get("lineageRootId"))
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents": []}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	_, err = client.ProjectAgents("project-123").List(context.Background(), &ListAgentsOptions{
+		OwnerID:       "owner-1",
+		AncestorID:    "ancestor-1",
+		HarnessConfig: "claude",
+		IDs:           []string{"id-1", "id-2"},
+		LineageRootID: "root-1",
+	})
+	require.NoError(t, err)
+}
+
 func TestSubscriptionService_List_QueryParameters(t *testing.T) {
 	projectID := "project-123"
 
@@ -295,6 +385,8 @@ func TestSendOutboundMessage_Success(t *testing.T) {
 			"status":       "sent",
 			"recipient":    "user:alice",
 			"recipient_id": "uid-alice",
+			// ptone/scion#2026: the hub reports the resolved conversation.
+			"conversation_id": "conv-uuid-9",
 		})
 	}))
 	defer server.Close()
@@ -316,6 +408,7 @@ func TestSendOutboundMessage_Success(t *testing.T) {
 	assert.Equal(t, "sent", result.Status)
 	assert.Equal(t, "user:alice", result.Recipient)
 	assert.Equal(t, "uid-alice", result.RecipientID)
+	assert.Equal(t, "conv-uuid-9", result.ConversationID)
 }
 
 func TestSendOutboundMessage_ProjectScoped(t *testing.T) {
@@ -414,6 +507,42 @@ func TestSendOutboundMessage_NonOKError(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAgentService_GetLogs_RuntimeLogsUnsupported verifies that the hub's
+// 501/runtime_logs_unsupported response (pkg/hub/handlers_logs.go, the
+// passthrough for a runtime returning pkg/runtime.ErrLogsNotSupported)
+// reaches the CLI's error value intact: same status, same code, same fixed
+// message, no re-wrapping. This is what cmd/logs.go's getHubLogs returns
+// verbatim to the caller in hub mode, so this is also what "scion logs"
+// prints.
+func TestAgentService_GetLogs_RuntimeLogsUnsupported(t *testing.T) {
+	const fixedMessage = "agent logs are not available on this runtime"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotImplemented)
+		_, _ = w.Write([]byte(`{"error":{"code":"runtime_logs_unsupported","message":"` + fixedMessage + `"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	logs, err := client.Agents().GetLogs(context.Background(), "agent-1", nil)
+	assert.Empty(t, logs)
+	require.Error(t, err)
+
+	var apiErr *apiError
+	if assert.ErrorAs(t, err, &apiErr) {
+		assert.Equal(t, http.StatusNotImplemented, apiErr.StatusCode)
+		assert.Equal(t, "runtime_logs_unsupported", apiErr.Code)
+		assert.Equal(t, fixedMessage, apiErr.Message)
+		// No runtime-specific scope or workload identifiers leak through
+		// the passthrough.
+		assert.NotContains(t, apiErr.Error(), "namespace")
+		assert.NotContains(t, apiErr.Error(), "pod")
 	}
 }
 

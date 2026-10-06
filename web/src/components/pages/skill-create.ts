@@ -29,6 +29,7 @@ import yaml from 'js-yaml';
 import type { Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -101,6 +102,10 @@ export class ScionPageSkillCreate extends LitElement {
   @state() private name = '';
   @state() private description = '';
   @state() private scope: 'global' | 'project' | 'user' = 'global';
+  /** Whether the caller may create global skills (from the global list capabilities). */
+  @state() private canCreateGlobal = false;
+  /** Set once the user picks a scope, so the capability check never overrides it. */
+  private scopeChosen = false;
   @state() private scopeId = '';
   @state() private tagsInput = '';
 
@@ -225,6 +230,16 @@ export class ScionPageSkillCreate extends LitElement {
     .skillmd-textarea {
       --sl-input-font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
       --sl-input-font-size-medium: 0.8125rem;
+    }
+
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      .skillmd-textarea {
+        --sl-input-font-size-medium: max(16px, 0.8125rem);
+      }
     }
 
     .upload-row {
@@ -456,14 +471,30 @@ export class ScionPageSkillCreate extends LitElement {
 
   private async checkCapabilities(): Promise<void> {
     this.loading = true;
-    try {
-      const res = await apiFetch('/api/v1/skills');
-      if (res.ok) {
+    // The unscoped list reports create when the caller can create in any
+    // scope; the global list reports whether global creation is allowed.
+    const listCreate = async (query: string): Promise<boolean> => {
+      try {
+        const res = await apiFetch(`/api/v1/skills?${query}`);
+        if (!res.ok) return false;
         const data = (await res.json()) as { _capabilities?: Capabilities };
-        this.canCreate = can(data._capabilities, 'create');
+        return can(data._capabilities, 'create');
+      } catch {
+        return false; // fail-closed
       }
-    } catch {
-      // fail-closed
+    };
+    try {
+      const [anyScope, globalScope] = await Promise.all([
+        listCreate('limit=1'),
+        listCreate('scope=global&limit=1'),
+      ]);
+      this.canCreate = anyScope;
+      this.canCreateGlobal = globalScope;
+      // Default to a scope the caller can create in: every signed-in user
+      // can create in their own user scope.
+      if (!globalScope && !this.scopeChosen && this.scope === 'global') {
+        this.scope = 'user';
+      }
     } finally {
       this.loading = false;
     }
@@ -741,8 +772,7 @@ export class ScionPageSkillCreate extends LitElement {
     try {
       const skillId = await this.createSkill();
       this.createdSkillId = skillId;
-      window.history.pushState({}, '', `/skills/${skillId}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/skills/${skillId}`);
     } catch (err) {
       this.flowState = 'form';
       this.error = err instanceof Error ? err.message : 'Failed to create skill';
@@ -776,8 +806,7 @@ export class ScionPageSkillCreate extends LitElement {
       // Step 3: Done — redirect
       this.flowState = 'done';
       this.redirectTimer = setTimeout(() => {
-        window.history.pushState({}, '', `/skills/${skillId}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
+        navigateTo(`/skills/${skillId}`);
       }, 1500);
     } catch (err) {
       console.error('Create & publish failed:', err);
@@ -849,8 +878,7 @@ export class ScionPageSkillCreate extends LitElement {
 
       this.flowState = 'done';
       this.redirectTimer = setTimeout(() => {
-        window.history.pushState({}, '', `/skills/${this.createdSkillId}`);
-        window.dispatchEvent(new PopStateEvent('popstate'));
+        navigateTo(`/skills/${this.createdSkillId}`);
       }, 1500);
     } catch (err) {
       this.flowState = 'error';
@@ -1053,10 +1081,11 @@ export class ScionPageSkillCreate extends LitElement {
                 | 'global'
                 | 'project'
                 | 'user';
+              this.scopeChosen = true;
             }}
             ?disabled=${isSubmitting}
           >
-            <sl-option value="global">Global</sl-option>
+            <sl-option value="global" ?disabled=${!this.canCreateGlobal}>Global</sl-option>
             <sl-option value="project">Project</sl-option>
             <sl-option value="user">User</sl-option>
           </sl-select>

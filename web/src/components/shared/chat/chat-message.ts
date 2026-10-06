@@ -30,8 +30,11 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { styleMap } from 'lit/directives/style-map.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
 import {
@@ -39,7 +42,13 @@ import {
   extensionOf,
   isRecognizedFilePath,
   isMarkdownFileName,
+  formatFileSize,
+  GCS_URI_PATTERN,
+  buildGcsLinkHtml,
+  parseGcsUri,
+  resolveGcsMatch,
 } from '../../../utils/chat-file-links.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
@@ -51,16 +60,59 @@ export interface AttachmentRefInfo {
   name: string;
   mime: string;
   size: number;
+  /** Pixel width of an image attachment, when the server knows it. */
+  width?: number;
+  /** Pixel height of an image attachment, when the server knows it. */
+  height?: number;
+}
+
+/** The largest box an inline image thumbnail is drawn in, in CSS px. */
+export const IMAGE_THUMB_MAX_WIDTH_PX = 320;
+export const IMAGE_THUMB_MAX_HEIGHT_PX = 240;
+
+/** Intrinsic pixel size of an image. */
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
+/** The intrinsic size of an image attachment, when its reference carries one. */
+export function knownImageSize(ref: AttachmentRefInfo): ImageSize | null {
+  if (ref.width && ref.height && ref.width > 0 && ref.height > 0) {
+    return { width: ref.width, height: ref.height };
+  }
+  return null;
+}
+
+/**
+ * The inline style that reserves an image thumbnail's box before it loads.
+ * A known size scales down to fit the thumbnail box, keeping its aspect
+ * ratio, and still narrows with the bubble (max-width: 100% in the
+ * stylesheet). An unknown size reserves the whole 4:3 thumbnail box and
+ * keeps it once the image loads, showing the image inside it at its own
+ * shape (object-fit: contain in the stylesheet), so a load never moves the
+ * thread. The box has a definite width: a percentage would resolve against
+ * the shrink-to-fit button around the image and collapse the box to
+ * nothing until the image arrives.
+ */
+export function imageThumbStyle(size: ImageSize | null): Record<string, string> {
+  if (!size) {
+    return {
+      width: `${IMAGE_THUMB_MAX_WIDTH_PX}px`,
+      aspectRatio: `${IMAGE_THUMB_MAX_WIDTH_PX} / ${IMAGE_THUMB_MAX_HEIGHT_PX}`,
+    };
+  }
+  const scale = Math.min(
+    1,
+    IMAGE_THUMB_MAX_WIDTH_PX / size.width,
+    IMAGE_THUMB_MAX_HEIGHT_PX / size.height
+  );
+  const width = Math.max(1, Math.round(size.width * scale));
+  return { width: `${width}px`, aspectRatio: `${size.width} / ${size.height}` };
 }
 
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat('en', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
 
 /** Non-`text/*` MIME types whose bytes are still text. */
 const TEXT_MIMES = new Set([
@@ -200,17 +252,47 @@ const ENTITY_PATTERNS: EntityPattern[] = [
 ];
 
 /**
+ * gs:// object link pattern, appended only for a message that is eligible
+ * per the gate below (the `web.gcs_links` experiment and agent-sent) —
+ * never for a user-sent message. Leftmost-wins in `styleEntityLinksInText`
+ * means this still beats a `path-link` match starting later in the same
+ * match (e.g. `gs://bkt/workspace/x.md`, where the file-path pattern would
+ * otherwise match the `/workspace/x.md` tail): both patterns are tried and
+ * the one that starts earliest wins, and the gs:// match always starts at
+ * or before the `/workspace/...` substring it contains.
+ */
+const GCS_ENTITY_PATTERN: EntityPattern = {
+  regex: GCS_URI_PATTERN,
+  linkBuilder: (m) => {
+    const boundary = m[1];
+    const bucket = m[2];
+    const resolved = resolveGcsMatch(m);
+    // No valid object at this occurrence (a directory-like trailing '/', or
+    // the fragment/query/param continuation rule) — leave the raw matched
+    // text unchanged rather than linking a truncated name.
+    if (!resolved) return m[0];
+    return boundary + buildGcsLinkHtml(bucket, resolved.object) + resolved.suffix;
+  },
+};
+
+/**
  * Apply entity link patterns to a text segment (outside code/HTML regions).
  * Each match is replaced by the pattern's linkBuilder output. Patterns are
  * tried left-to-right through the string; the first match at each position
  * wins. This is intentionally simple: it scans linearly and does not try to
  * handle overlapping matches from different patterns.
+ *
+ * `includeGcs` appends {@link GCS_ENTITY_PATTERN} for this call only — the
+ * gate (the web.gcs_links experiment && the real sender is an agent) is
+ * evaluated once per render by the caller, not baked into a shared, mutable
+ * pattern list.
  */
-function styleEntityLinksInText(text: string): string {
+function styleEntityLinksInText(text: string, includeGcs: boolean): string {
   // Collect all matches from all patterns, then sort by position.
   const replacements: { start: number; end: number; replacement: string }[] = [];
 
-  for (const pattern of ENTITY_PATTERNS) {
+  const patterns = includeGcs ? [...ENTITY_PATTERNS, GCS_ENTITY_PATTERN] : ENTITY_PATTERNS;
+  for (const pattern of patterns) {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
     // and cannot loop infinitely on a zero-width or non-advancing match.
@@ -254,16 +336,16 @@ function styleEntityLinksInText(text: string): string {
  *
  * Follows the exact same skip-region approach as `styleMentions()`.
  */
-function styleEntityLinks(htmlStr: string): string {
+function styleEntityLinks(htmlStr: string, includeGcs: boolean): string {
   const skip = new RegExp(ENTITY_SKIP_REGION, 'gi');
   let out = '';
   let cursor = 0;
   let match: RegExpExecArray | null;
   while ((match = skip.exec(htmlStr)) !== null) {
-    out += styleEntityLinksInText(htmlStr.slice(cursor, match.index)) + match[0];
+    out += styleEntityLinksInText(htmlStr.slice(cursor, match.index), includeGcs) + match[0];
     cursor = match.index + match[0].length;
   }
-  return out + styleEntityLinksInText(htmlStr.slice(cursor));
+  return out + styleEntityLinksInText(htmlStr.slice(cursor), includeGcs);
 }
 
 // ---------------------------------------------------------------------------
@@ -432,13 +514,6 @@ function attachmentURL(id: string): string {
   return `/api/v1/chat/attachments/${encodeURIComponent(id)}`;
 }
 
-/** Format file size for display. */
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 /**
  * Spans of rendered markdown that @mention styling must step over: code
  * regions, whose text is literal, and HTML tags, whose attributes must not be
@@ -494,6 +569,13 @@ function styleMentions(htmlStr: string): string {
 
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
+  /**
+   * Re-renders this message when the effective display zone changes
+   * (review R2-1), so a thread already on screen when the preference
+   * loads or changes doesn't stay stuck in the browser zone.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The message body text. */
   @property()
   body = '';
@@ -506,6 +588,16 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Boolean })
   fromAgent = false;
 
+  /**
+   * Whether the message's actual sender is an agent, independent of
+   * `fromAgent`. v2 chat-thread computes `fromAgent` as "not me" (any
+   * sender other than the current viewer, including another *user*) for
+   * layout purposes; gs:// linkification needs the real sender kind, since
+   * "user-sent messages never link" means any user, not just the viewer.
+   */
+  @property({ type: Boolean })
+  senderIsAgent = false;
+
   /** Whether the message is plain text (no markdown rendering). */
   @property({ type: Boolean })
   plain = false;
@@ -517,6 +609,15 @@ export class ScionChatMessage extends LitElement {
   /** Sender unique ID for avatar colour hashing (avoids collisions from similar names). */
   @property()
   senderId = '';
+
+  /**
+   * The store message id, set by chat-thread from the rendered message's
+   * `id`. Carried on a `gcs-link-click` event so the hub can derive the
+   * sender's SA from a message the viewer is authorized to read, without a
+   * client-supplied agent or SA identifier.
+   */
+  @property()
+  messageId = '';
 
   /** Sender display name for v2 multi-sender rendering. */
   @property()
@@ -897,11 +998,28 @@ export class ScionChatMessage extends LitElement {
       text-decoration: underline;
     }
 
+    /* A wide table scrolls sideways inside its own box rather than
+       squashing its columns or widening the message. The wrapper is added
+       after render (wrapTables) so the table keeps its table semantics. */
+    .md-table-scroll {
+      max-width: 100%;
+      overflow-x: auto;
+      margin: 0.5em 0;
+    }
+
     .md-content table {
       border-collapse: collapse;
-      width: 100%;
-      margin: 0.5em 0;
+      min-width: 100%;
       font-size: var(--chat-fs-md);
+    }
+
+    .md-table-scroll:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 2px;
+    }
+
+    .md-table-scroll > table {
+      margin: 0;
     }
 
     .md-content th,
@@ -909,6 +1027,15 @@ export class ScionChatMessage extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       padding: 0.375em 0.5em;
       text-align: left;
+    }
+
+    /* On a phone, columns keep a readable width and the wrapper scrolls
+       past that; on wider screens tables size to their content as before. */
+    @media (max-width: 768px) {
+      .md-content th,
+      .md-content td {
+        min-width: 6em;
+      }
     }
 
     .md-content th {
@@ -986,6 +1113,8 @@ export class ScionChatMessage extends LitElement {
     .image-preview-wrapper {
       position: relative;
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
     }
 
     .image-actions {
@@ -1027,6 +1156,8 @@ export class ScionChatMessage extends LitElement {
     /* The image is the button: no chrome of its own, just a focus ring. */
     .image-expand {
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
       padding: 0;
       border: none;
       background: none;
@@ -1039,9 +1170,15 @@ export class ScionChatMessage extends LitElement {
       outline-offset: 2px;
     }
 
+    /* The thumbnail box comes from imageThumbStyle(): its width and aspect
+       ratio are set before the image loads and kept after, so a late load
+       doesn't shift the thread; an image of another shape is letterboxed
+       inside it. The box never runs past the bubble on a narrow screen. */
     .attachment-image {
-      max-width: 320px;
-      max-height: 240px;
+      display: block;
+      max-width: 100%;
+      height: auto;
+      box-sizing: border-box;
       border-radius: 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       cursor: pointer;
@@ -1304,56 +1441,12 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-warning-600, #d97706);
     }
 
-    /* ---- Phase-3: Message action bar ---- */
-    .message-actions {
-      position: absolute;
-      top: -12px;
-      right: 8px;
-      display: flex;
-      gap: 0.0625rem;
-      padding: 0.125rem;
-      border-radius: 0.375rem;
-      background: var(--scion-surface-100, #f1f5f9);
-      border: 1px solid var(--scion-neutral-200, #e2e8f0);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
-      transition:
-        opacity 0.15s ease,
-        visibility 0.15s ease;
-      z-index: 10;
+    .delivery-state.no-recipient {
+      color: var(--scion-warning-600, #d97706);
     }
 
-    .message-wrapper:hover .message-actions,
-    .message-wrapper:focus-within .message-actions,
-    .message-actions.pinned {
-      opacity: 1;
-      visibility: visible;
-      pointer-events: auto;
-    }
-
-    @media (hover: none) {
-      .message-actions {
-        opacity: 0;
-        visibility: hidden;
-        pointer-events: none;
-      }
-      .message-actions.pinned {
-        opacity: 1;
-        visibility: visible;
-        pointer-events: auto;
-      }
-    }
-
-    .message-actions sl-icon-button::part(base) {
-      padding: 0.25rem;
-      font-size: var(--chat-fs-lg);
-      color: var(--scion-neutral-600, #475569);
-    }
-
-    .message-actions sl-icon-button::part(base):hover {
-      color: var(--scion-primary-600, #2563eb);
+    .delivery-state.no-recipient sl-icon {
+      color: var(--scion-warning-600, #d97706);
     }
 
     /* ---- Phase-3: Reply preview quote block ---- */
@@ -1534,6 +1627,27 @@ export class ScionChatMessage extends LitElement {
       padding-top: 0.25em;
       border-top: 1px solid var(--scion-border, #e2e8f0);
     }
+
+    /* The 70%-of-row cap reads as wasted space on a phone. Removing it
+       (rather than raising it) lets the bubble grow to whatever the flex
+       layout actually has left beside the avatar: .bubble is a flex child
+       of .message-wrapper alongside the fixed-width avatar and its gap, so
+       it is already bounded by the space those leave, with no separate
+       max-width needed to keep it off the avatar's column. */
+    @media (max-width: 768px) {
+      .bubble {
+        max-width: none;
+      }
+
+      .message-wrapper {
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+      }
+
+      .bubble-content {
+        padding: 0.625rem 0.75rem;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -1553,6 +1667,7 @@ export class ScionChatMessage extends LitElement {
       void this.renderContent();
     }
     if (changed.has('renderedHtml')) {
+      this.wrapTables();
       this.injectCopyButtons();
       this.injectSyntaxHighlighting();
       this.injectDiffBlocks();
@@ -1620,6 +1735,24 @@ export class ScionChatMessage extends LitElement {
     const next = new Map(this.previews);
     next.set(id, state);
     this.previews = next;
+  }
+
+  /** Give each rendered markdown table its own sideways scroller. */
+  private wrapTables(): void {
+    this.shadowRoot?.querySelectorAll('.md-content table').forEach((table) => {
+      if (table.parentElement?.classList.contains('md-table-scroll')) return;
+      const wrapper = document.createElement('div');
+      wrapper.className = 'md-table-scroll';
+      // A keyboard user must be able to reach and scroll a wide table, and
+      // the scrolling region needs a name. Always focusable: whether it
+      // overflows changes with the viewport (rotation, resizing).
+      wrapper.tabIndex = 0;
+      wrapper.setAttribute('role', 'region');
+      const caption = table.querySelector('caption')?.textContent?.trim();
+      wrapper.setAttribute('aria-label', caption || 'Table');
+      table.replaceWith(wrapper);
+      wrapper.appendChild(table);
+    });
   }
 
   /** Inject copy buttons on all code blocks inside rendered markdown. */
@@ -1838,7 +1971,13 @@ export class ScionChatMessage extends LitElement {
       if (taskId !== this.renderTaskId) return;
       let rendered = renderer.render(this.body);
       rendered = styleMentions(rendered);
-      rendered = styleEntityLinks(rendered);
+      // gs:// links are gated on the server-reported feature flag AND the
+      // message being agent-sent — a user-sent message never links, however
+      // the body happens to be spelled.
+      rendered = styleEntityLinks(
+        rendered,
+        this.senderIsAgent && isFeatureEnabled('web.gcs_links')
+      );
       rendered = styleGithubRefs(rendered);
       this.renderedHtml = rendered;
     } catch {
@@ -1876,7 +2015,12 @@ export class ScionChatMessage extends LitElement {
    * handlers based on the click target.
    */
   private handleContentClick(e: MouseEvent): void {
-    // Check for path-link click first (more specific selector).
+    // Check for the more specific selectors first.
+    const gcsTarget = (e.target as HTMLElement | null)?.closest('.gcs-link[data-gcs-uri]');
+    if (gcsTarget) {
+      this.handleGcsLinkClick(e, gcsTarget as HTMLElement);
+      return;
+    }
     const pathTarget = (e.target as HTMLElement | null)?.closest('.path-link[data-file-path]');
     if (pathTarget) {
       this.handlePathLinkClick(e, pathTarget as HTMLElement);
@@ -1903,6 +2047,32 @@ export class ScionChatMessage extends LitElement {
         bubbles: true,
         composed: true,
         detail: { path: filePath },
+      })
+    );
+  }
+
+  /**
+   * Clicking a gs:// link parses `data-gcs-uri` and dispatches a composed
+   * `gcs-link-click` event carrying the bucket, object and this message's
+   * id. Unlike a path-link click, there is no project resolution and no
+   * chat-thread round-trip: chat-thread only ever assigns the event detail
+   * straight onto the preview target.
+   */
+  private handleGcsLinkClick(e: MouseEvent, target: HTMLElement): void {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const uri = target.dataset.gcsUri;
+    if (!uri) return;
+    const parsed = parseGcsUri(uri);
+    if (!parsed) return;
+    const name = parsed.object.split('/').pop() || parsed.object;
+
+    this.dispatchEvent(
+      new CustomEvent('gcs-link-click', {
+        bubbles: true,
+        composed: true,
+        detail: { bucket: parsed.bucket, object: parsed.object, name, messageId: this.messageId },
       })
     );
   }
@@ -1954,7 +2124,7 @@ export class ScionChatMessage extends LitElement {
                   ${this.routedTo
                     ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
                     : nothing}
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -1967,7 +2137,7 @@ export class ScionChatMessage extends LitElement {
                     ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
                     : nothing}
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -2000,6 +2170,15 @@ export class ScionChatMessage extends LitElement {
             Sending
           </div>
         `;
+      case 'waking':
+        // Client-only state (chat-wake.ts): the user chose "Wake and send"
+        // and the hub is resuming the suspended agent before delivery.
+        return html`
+          <div class="delivery-state pending waking">
+            <sl-icon name="hourglass-split"></sl-icon>
+            Waking agent…
+          </div>
+        `;
       case 'dispatched':
         return this.seen
           ? html`
@@ -2029,6 +2208,17 @@ export class ScionChatMessage extends LitElement {
             <div class="delivery-state deferred">
               <sl-icon name="pause-circle"></sl-icon>
               Deferred: agent is reincarnating (saved)
+            </div>
+          </sl-tooltip>
+        `;
+      case 'no_recipient':
+        // A thread message that resolved no agent recipient: it was saved
+        // to the thread, but no agent was given it.
+        return html`
+          <sl-tooltip content="Mention an agent to send it to that agent" hoist>
+            <div class="delivery-state no-recipient">
+              <sl-icon name="info-circle"></sl-icon>
+              Not delivered to any agent, mention an agent to send it
             </div>
           </sl-tooltip>
         `;
@@ -2134,6 +2324,7 @@ export class ScionChatMessage extends LitElement {
                         src=${attachmentURL(img.id)}
                         alt=${img.name}
                         loading="lazy"
+                        style=${styleMap(imageThumbStyle(knownImageSize(img)))}
                       />
                     </button>
                     <div class="image-actions">
@@ -2354,12 +2545,19 @@ export class ScionChatMessage extends LitElement {
 
   private formatTime(): string {
     if (!this.timestamp) return '';
-    try {
-      const d = new Date(this.timestamp);
-      return Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_TIME_FORMAT.format(d);
-    } catch {
-      return '';
-    }
+    const formatted = formatInstant(this.timestamp, 'time');
+    return formatted || 'Invalid Date';
+  }
+
+  /**
+   * Full instant plus zone label for the `.msg-time` tooltip (review R1-3,
+   * AC4: "sees native chat timestamps in Tokyo time, with a zone label").
+   * Low-noise: surfaced as a `title`, not inline text, since every message
+   * in a thread shares the same effective zone.
+   */
+  private formatTimeTitle(): string {
+    if (!this.timestamp) return '';
+    return formatInstantWithZone(this.timestamp);
   }
 
   /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */

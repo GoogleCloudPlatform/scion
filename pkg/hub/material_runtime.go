@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -97,9 +98,13 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 		return nil, ReasonCapabilityRequired, http.StatusForbidden
 	}
 
-	// Check 5: root human live authority. Interim: current membership only
-	// (system authority for the exact permission is evaluated in a later
-	// change).
+	// Check 5: root human live authority. Admission is project membership
+	// (CheckEffectiveMembership: any active project-scoped binding, built-in
+	// or custom, direct or group-derived) OR target-applicable system
+	// authority for the exact secret.use permission (SystemAuthorityProof).
+	// Membership is admission only: the check-7 project.secret_read
+	// permission still gates every read, so a custom-only member without
+	// that permission is refused there.
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -120,7 +125,26 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 	if m.Err != nil {
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
-	if !m.IsMember {
+	admitted := m.IsMember
+	if !admitted {
+		if s.authzService == nil {
+			return nil, ReasonBackendError, http.StatusInternalServerError
+		}
+		// The class is fixed at the project scope kind because this
+		// precheck runs before any per-item scope is known (a later
+		// user-scope item does not change which class this call reviews).
+		ok, err := s.authzService.SystemAuthorityProof(ctx,
+			PrincipalContext{Kind: PrincipalKindUser, ID: root.ID},
+			rec.ProjectID,
+			"secret.use",
+			ProjectTargetClass{ResourceType: permissions.ResourceSecret, ScopeKind: store.ScopeProject},
+		)
+		if err != nil {
+			return nil, ReasonBackendError, http.StatusInternalServerError
+		}
+		admitted = ok
+	}
+	if !admitted {
 		return nil, ReasonMembershipRequired, http.StatusForbidden
 	}
 

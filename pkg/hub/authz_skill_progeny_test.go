@@ -83,7 +83,9 @@ func TestSkillProgenyAdapter_FactResourceID(t *testing.T) {
 // note in the loop below). The personal-skill progeny read matches only a
 // read of a user-scoped skill owned by a hub-attested agent's origin user. A
 // child agent (ancestry [U, parent]) gets U's bucket, never its parent's or
-// anyone else's.
+// anyone else's. The agents are stored with delegation edges in a project
+// where U is a member, because the execution-project stage resolves the
+// stored agent's source user and requires U's admission to that project.
 //
 // Decide-level (end-to-end) coverage for this grant, beyond the isolated
 // candidate shapes tested here, lives in:
@@ -100,16 +102,33 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 	u := createCharacterizationUser(t, s, tid("sp-user-u"))
 	v := createCharacterizationUser(t, s, tid("sp-user-v"))
 	parent := tid("sp-parent")
+	ctx := context.Background()
+	project := tid("sp-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: project, Name: "sp-proj", Slug: "sp-proj", CreatedBy: u.ID()}))
+	createTestUserWithProjectRole(t, s, u.ID(), u.ID()+"@relchar.test", project, store.ProjectRoleMember)
+	agentID, childID := tid("sp-agent"), tid("sp-child")
+	seedExecutionAgent(t, s, agentID, project, []string{u.ID()}, []string{u.ID()})
+	seedExecutionAgent(t, s, childID, project, []string{u.ID(), parent}, []string{u.ID(), parent})
 
 	newAgent := func(ancestry ...string) Identity {
+		id := agentID
+		if len(ancestry) > 1 {
+			id = childID
+		}
 		return &agentIdentityWrapper{&AgentTokenClaims{
-			Claims: jwt.Claims{Subject: tid("sp-agent")}, ProjectID: tid("sp-proj"),
+			Claims: jwt.Claims{Subject: id}, ProjectID: project,
 			Scopes: allRegisteredAgentScopes(), Ancestry: ancestry,
 		}}
 	}
 	su := skillScopeResource(store.SkillScopeUser, u.ID())
 	sv := skillScopeResource(store.SkillScopeUser, v.ID())
 	fed := NewFederatedAgentIdentity("https://other.example", tid("sp-fed"), tid("sp-proj"), "fed", u.ID(), []string{u.ID()}, allRegisteredAgentScopes())
+
+	// noProgenyCandidate marks a negative case where the shape never produces
+	// a RelationshipRuleProgeny candidate at all (so there is no rejection
+	// stage to name), as distinct from a candidate that is produced and then
+	// rejected at a named stage.
+	const noProgenyCandidate = "no_candidate"
 
 	cases := []struct {
 		name     string
@@ -118,21 +137,26 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 		action   Action
 		perm     string
 		want     bool
+		// rejectedBy is checked only when want is false. It names the stage
+		// (RelationshipCandidateResult.RejectedBy) that rejected the
+		// RelationshipRuleProgeny candidate, or noProgenyCandidate when the
+		// shape produces no such candidate.
+		rejectedBy string
 	}{
-		{"creator skill", newAgent(u.ID()), su, ActionRead, "skill.read", true},
-		{"child agent gets origin user's skill", newAgent(u.ID(), parent), su, ActionRead, "skill.read", true},
-		{"other user's skill", newAgent(u.ID()), sv, ActionRead, "skill.read", false},
-		{"parent agent id is not a user bucket", newAgent(u.ID(), parent), skillScopeResource(store.SkillScopeUser, parent), ActionRead, "skill.read", false},
-		{"no ancestry", newAgent(), su, ActionRead, "skill.read", false},
-		{"update", newAgent(u.ID()), su, ActionUpdate, "skill.update", false},
-		{"delete", newAgent(u.ID()), su, ActionDelete, "skill.delete", false},
-		{"global skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeGlobal, ""), ActionRead, "skill.read", false},
-		{"project skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeProject, u.ID()), ActionRead, "skill.read", false},
-		{"user scope without owner", newAgent(u.ID()), skillScopeResource(store.SkillScopeUser, ""), ActionRead, "skill.read", false},
-		{"no scope kind", newAgent(u.ID()), Resource{Type: "skill", ScopeUserID: u.ID()}, ActionRead, "skill.read", false},
-		{"not a skill", newAgent(u.ID()), Resource{Type: "secret", ScopeKind: store.SkillScopeUser, ScopeUserID: u.ID()}, ActionRead, permissionProjectSecretRead, false},
-		{"federated agent", fed, su, ActionRead, "skill.read", false},
-		{"user principal", u, su, ActionRead, "skill.read", false},
+		{"creator skill", newAgent(u.ID()), su, ActionRead, "skill.read", true, ""},
+		{"child agent gets origin user's skill", newAgent(u.ID(), parent), su, ActionRead, "skill.read", true, ""},
+		{"other user's skill", newAgent(u.ID()), sv, ActionRead, "skill.read", false, RelationshipRejectFact},
+		{"parent agent id is not a user bucket", newAgent(u.ID(), parent), skillScopeResource(store.SkillScopeUser, parent), ActionRead, "skill.read", false, RelationshipRejectFact},
+		{"no ancestry", newAgent(), su, ActionRead, "skill.read", false, RelationshipRejectFact},
+		{"update", newAgent(u.ID()), su, ActionUpdate, "skill.update", false, noProgenyCandidate},
+		{"delete", newAgent(u.ID()), su, ActionDelete, "skill.delete", false, noProgenyCandidate},
+		{"global skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeGlobal, ""), ActionRead, "skill.read", false, noProgenyCandidate},
+		{"project skill", newAgent(u.ID()), skillScopeResource(store.SkillScopeProject, u.ID()), ActionRead, "skill.read", false, noProgenyCandidate},
+		{"user scope without owner", newAgent(u.ID()), skillScopeResource(store.SkillScopeUser, ""), ActionRead, "skill.read", false, noProgenyCandidate},
+		{"no scope kind", newAgent(u.ID()), Resource{Type: "skill", ScopeUserID: u.ID()}, ActionRead, "skill.read", false, noProgenyCandidate},
+		{"not a skill", newAgent(u.ID()), Resource{Type: "secret", ScopeKind: store.SkillScopeUser, ScopeUserID: u.ID()}, ActionRead, permissionProjectSecretRead, false, RelationshipRejectFact},
+		{"federated agent", fed, su, ActionRead, "skill.read", false, RelationshipRejectUntrustedAncestry},
+		{"user principal", u, su, ActionRead, "skill.read", false, noProgenyCandidate},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -142,10 +166,32 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 			// allowed for any agent through the unrelated synthetic
 			// agent-skill-catalog kernel binding (ptone/scion#1968), which
 			// would otherwise mask what this grant does or does not admit.
-			out := authz.evaluateRelationshipCandidates(context.Background(),
-				principalContextForIdentity(tc.identity), tc.resource, tc.action, tc.perm, nil, false)
+			out := authz.evaluateRelationshipCandidates(ctx,
+				principalContextForIdentity(tc.identity), tc.resource, tc.action, tc.perm, nil, false, nil)
 			got := out.accepted != nil && out.accepted.Allowed
 			assert.Equal(t, tc.want, got, "candidates: %+v", out.results)
+
+			if tc.want {
+				return
+			}
+			// A rejected candidate must be rejected at its intended stage,
+			// not at RelationshipRejectExecutionProject: a stage-order
+			// regression that made execution-project run first would still
+			// leave got == false (vacuously) without this check.
+			var progeny *RelationshipCandidateResult
+			for i := range out.results {
+				if out.results[i].Rule == RelationshipRuleProgeny {
+					progeny = &out.results[i]
+					break
+				}
+			}
+			if tc.rejectedBy == noProgenyCandidate {
+				assert.Nil(t, progeny, "expected no progeny candidate: %+v", out.results)
+				return
+			}
+			if assert.NotNil(t, progeny, "expected a progeny candidate: %+v", out.results) {
+				assert.Equal(t, tc.rejectedBy, progeny.RejectedBy)
+			}
 		})
 	}
 }
@@ -153,7 +199,9 @@ func TestSkillProgenyRead_Conditions(t *testing.T) {
 // TestSkillProgenyRead_ScopeOwnerDiffersFromCreator pins that the grant
 // keys only on Resource.ScopeUserID: a skill's OwnerID/CreatedBy (which
 // Resource does not even carry) never widens or narrows it. An agent of the
-// scope owner is allowed; an agent of the creator/owner is not.
+// scope owner is allowed; an agent of the creator/owner is not. Both agents
+// are stored in a project their source user is a member of, so only the
+// bucket key separates them.
 func TestSkillProgenyRead_ScopeOwnerDiffersFromCreator(t *testing.T) {
 	f := newGoldenFixture(t)
 	creator := createCharacterizationUser(t, f.store, tid("sp-creator"))
@@ -166,14 +214,12 @@ func TestSkillProgenyRead_ScopeOwnerDiffersFromCreator(t *testing.T) {
 	sk.CreatedBy = creator.ID()
 	require.NoError(t, f.store.UpdateSkill(context.Background(), sk))
 
-	agentOfScopeOwner := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims: jwt.Claims{Subject: tid("sp-agent-scope-owner")}, ProjectID: f.projectBeta.ID,
-		Ancestry: []string{f.projectOwnerID}, Scopes: allRegisteredAgentScopes(),
-	}}
-	agentOfCreator := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims: jwt.Claims{Subject: tid("sp-agent-creator")}, ProjectID: f.projectBeta.ID,
-		Ancestry: []string{creator.ID()}, Scopes: allRegisteredAgentScopes(),
-	}}
+	createTestUserWithProjectRole(t, f.store, creator.ID(), creator.ID()+"@relchar.test", f.projectAlpha.ID, store.ProjectRoleMember)
+	scopeOwnerAgentID, creatorAgentID := tid("sp-agent-scope-owner"), tid("sp-agent-creator")
+	seedExecutionAgent(t, f.store, scopeOwnerAgentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
+	seedExecutionAgent(t, f.store, creatorAgentID, f.projectAlpha.ID, []string{creator.ID()}, []string{creator.ID()})
+	agentOfScopeOwner := execAgent(scopeOwnerAgentID, f.projectAlpha.ID, []string{f.projectOwnerID})
+	agentOfCreator := execAgent(creatorAgentID, f.projectAlpha.ID, []string{creator.ID()})
 
 	d := decidePerm(f.authz, agentOfScopeOwner, skillResource(sk), ActionRead, "skill.read", false)
 	assert.True(t, d.Allowed, "agent of the scope owner: reason %q", d.Reason)
@@ -188,10 +234,9 @@ func TestSkillProgenyRead_ScopeOwnerDiffersFromCreator(t *testing.T) {
 // for the analogous secret-kind test).
 func TestSkillProgenyRead_ListAndPointReadAgree(t *testing.T) {
 	f := newGoldenFixture(t)
-	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims: jwt.Claims{Subject: tid("sp-list-point-agent")}, ProjectID: f.projectBeta.ID,
-		Ancestry: []string{f.projectOwnerID}, Scopes: allRegisteredAgentScopes(),
-	}}
+	agentID := tid("sp-list-point-agent")
+	seedExecutionAgent(t, f.store, agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
+	agent := execAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID})
 	ctx := context.Background()
 	principal := principalContextForIdentity(agent)
 
@@ -228,10 +273,9 @@ func TestSkillProgenyRead_ListAndPointReadAgree(t *testing.T) {
 // skill record).
 func TestSkillProgenyRead_ProvenanceNamesGrantAndSource(t *testing.T) {
 	f := newGoldenFixture(t)
-	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims: jwt.Claims{Subject: tid("sp-provenance-agent")}, ProjectID: f.projectBeta.ID,
-		Ancestry: []string{f.projectOwnerID}, Scopes: allRegisteredAgentScopes(),
-	}}
+	agentID := tid("sp-provenance-agent")
+	seedExecutionAgent(t, f.store, agentID, f.projectAlpha.ID, []string{f.projectOwnerID}, []string{f.projectOwnerID})
+	agent := execAgent(agentID, f.projectAlpha.ID, []string{f.projectOwnerID})
 
 	d := decidePerm(f.authz, agent, skillScopeResource(store.SkillScopeUser, f.projectOwnerID), ActionRead, "skill.read", true)
 	require.True(t, d.Allowed, "bucket probe: reason %q", d.Reason)
@@ -256,18 +300,12 @@ func TestSkillProgenyRead_ProvenanceNamesGrantAndSource(t *testing.T) {
 	assert.NotEqual(t, sk.ID, r.Source.ID, "the source ID is the owning user, not the skill record ID")
 }
 
-// TestSkillProgenyRead_ProjectAccessRemovedFollowsSourceGrant is a
-// characterization test, kept separate from the acceptance tests above: it
-// pins the CURRENT allow, not a target behaviour. This consolidation of the
-// pre-existing personal-skill grant does not add a skill-only
-// execution-project admission check. Today, when the agent's origin user
-// loses admission to the agent's project (here: U's project role binding is
-// removed while U stays active), the agent still reads U's personal skills,
-// because this grant is keyed only on the source user's live status and the
-// ancestry chain and does not check the source user's admission to the
-// agent's project. ptone/scion#2120 is the tracked closure that adds that
-// execution-project admission step and flips this case to deny.
-func TestSkillProgenyRead_ProjectAccessRemovedFollowsSourceGrant(t *testing.T) {
+// TestSkillProgenyRead_ProjectAccessRemovedDenies pins the execution-project
+// stage for a personal skill: an agent reads its origin user U's personal
+// skills only while U holds admission to the agent's project. When U's
+// project role binding is removed while U stays active, the bucket probe and
+// the point read both deny at the execution_project stage.
+func TestSkillProgenyRead_ProjectAccessRemovedDenies(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	ctx := context.Background()
 	u := createCharacterizationUser(t, s, tid("sp-projgone-u"))
@@ -277,43 +315,33 @@ func TestSkillProgenyRead_ProjectAccessRemovedFollowsSourceGrant(t *testing.T) {
 	createTestUserWithProjectRole(t, s, u.ID(), u.ID()+"@relchar.test", project, store.ProjectRoleMember)
 
 	agentID := tid("sp-projgone-agent")
-	// A stored agent row with the same project and ancestry a real agent
-	// would carry, so the fixture matches what a future execution-project
-	// admission check would actually resolve, rather than an ID-only JWT
-	// wrapper.
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: agentID, Slug: "sp-projgone-agent", Name: "sp-projgone-agent",
-		ProjectID: project, OwnerID: u.ID(), Ancestry: []string{u.ID()},
-	}))
+	seedExecutionAgent(t, s, agentID, project, []string{u.ID()}, []string{u.ID()})
+	agent := execAgent(agentID, project, []string{u.ID()})
+	sk := createTestSkill(t, s, "sp-projgone-skill", store.SkillScopeUser, u.ID(), u.ID())
 
-	// U's project access is present before removal.
-	before := authz.CheckAccess(ctx, u, projectResource(proj), ActionRead)
-	assert.True(t, before.Allowed, "U should have project read access before removal: reason %q", before.Reason)
+	// With U admitted to the project, both reads are allowed.
+	d := authz.CheckAccess(ctx, agent, skillScopeResource(store.SkillScopeUser, u.ID()), ActionRead)
+	assert.True(t, d.Allowed, "bucket probe before removal: reason %q", d.Reason)
+	assert.Equal(t, "relationship grant: progeny_skill_read", d.Reason)
+	d = authz.CheckAccess(ctx, agent, skillResource(sk), ActionRead)
+	assert.True(t, d.Allowed, "point read before removal: reason %q", d.Reason)
 
 	// Remove U's project membership while U itself stays active.
 	n, err := s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, u.ID())
 	require.NoError(t, err)
 	require.Positive(t, n, "the user's project membership must actually be removed")
-
-	// U's project access is gone after removal.
 	after := authz.CheckAccess(ctx, u, projectResource(proj), ActionRead)
 	assert.False(t, after.Allowed, "U should have lost project read access after removal: reason %q", after.Reason)
 
-	agent := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims: jwt.Claims{Subject: agentID}, ProjectID: project,
-		Scopes: allRegisteredAgentScopes(), Ancestry: []string{u.ID()},
-	}}
-	sk := createTestSkill(t, s, "sp-projgone-skill", store.SkillScopeUser, u.ID(), u.ID())
-
-	// The personal-skill read is still allowed today (this is the PARTIAL
-	// behaviour this test characterizes, not endorses).
-	d := authz.CheckAccess(ctx, agent, skillScopeResource(store.SkillScopeUser, u.ID()), ActionRead)
-	assert.True(t, d.Allowed, "bucket probe: reason %q", d.Reason)
-	assert.Equal(t, "relationship grant: progeny_skill_read", d.Reason)
-
-	d = authz.CheckAccess(ctx, agent, skillResource(sk), ActionRead)
-	assert.True(t, d.Allowed, "point read: reason %q", d.Reason)
-	assert.Equal(t, "relationship grant: progeny_skill_read", d.Reason)
+	for name, res := range map[string]Resource{
+		"bucket probe": skillScopeResource(store.SkillScopeUser, u.ID()),
+		"point read":   skillResource(sk),
+	} {
+		d := decidePerm(authz, agent, res, ActionRead, "skill.read", true)
+		assert.False(t, d.Allowed, "%s after removal: reason %q", name, d.Reason)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, RelationshipRejectExecutionProject, r.RejectedBy, "%s: detail %q", name, r.Detail)
+	}
 }
 
 // TestSkillProgenyRead_ListScopeAgreesForChildAndSuspendedSource extends the
@@ -328,13 +356,15 @@ func TestSkillProgenyRead_ListScopeAgreesForChildAndSuspendedSource(t *testing.T
 	ctx := context.Background()
 	u := createCharacterizationUser(t, s, tid("sp-scope-u"))
 	sk := createTestSkill(t, s, "sp-scope-skill", store.SkillScopeUser, u.ID(), u.ID())
+	project := tid("sp-scope-proj")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: project, Name: "sp-scope", Slug: "sp-scope", CreatedBy: u.ID()}))
+	createTestUserWithProjectRole(t, s, u.ID(), u.ID()+"@relchar.test", project, store.ProjectRoleMember)
 
 	// A grandchild agent (ancestry [U, parent]) gets U's bucket, exactly as
 	// a direct child would.
-	child := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims: jwt.Claims{Subject: tid("sp-scope-child")}, ProjectID: tid("sp-scope-proj"),
-		Scopes: allRegisteredAgentScopes(), Ancestry: []string{u.ID(), tid("sp-scope-parent")},
-	}}
+	childID, parentID := tid("sp-scope-child"), tid("sp-scope-parent")
+	seedExecutionAgent(t, s, childID, project, []string{u.ID(), parentID}, []string{u.ID(), parentID})
+	child := execAgent(childID, project, []string{u.ID(), parentID})
 	scope := srv.agentSkillAccessScope(ctx, child)
 	pointAllowed := srv.authzService.CheckAccess(ctx, child, skillResource(sk), ActionRead).Allowed
 	assert.True(t, pointAllowed, "grandchild reads origin user's skill")

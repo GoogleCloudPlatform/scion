@@ -30,6 +30,7 @@ import { stateManager } from '../../client/state.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
+import { navigateTo } from '../../client/navigation.js';
 import '../shared/view-toggle.js';
 
 @customElement('scion-page-projects')
@@ -84,6 +85,14 @@ export class ScionPageProjects extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 1rem;
+      }
+
+      /* The header's only child holds the name and the git remote. As a flex
+         item it defaults to min-width:auto and grows to fit a long unbroken
+         name or URL, pushing both past the card edge; min-width:0 lets it
+         shrink so the shared wrapping rules can break them instead. */
+      .project-header > div {
+        min-width: 0;
       }
 
       .project-path {
@@ -455,7 +464,8 @@ export class ScionPageProjects extends LitElement {
         <div class="project-header">
           <div>
             <h3 class="resource-name">
-              ${this.renderProjectIcon()} ${project.name}${this.renderLinkedBadge(project)}
+              ${this.renderProjectIcon()}
+              <span>${project.name}${this.renderLinkedBadge(project)}</span>
             </h3>
             <div class="project-path">
               <scion-git-remote-display
@@ -506,8 +516,7 @@ export class ScionPageProjects extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/projects/${project.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/projects/${project.id}`);
         }}
       >
         <td>

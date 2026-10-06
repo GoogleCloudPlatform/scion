@@ -15,6 +15,8 @@
 package agent
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +29,33 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
+
+// corruptSharerMarkerWorktreePath writes a sharer marker's WorktreePath field
+// directly to the file, outside RegisterSharer, so the read-side validation
+// can be exercised against values the normal write path would never record.
+// branch must need no sanitization (see sanitizeBranchName in
+// pkg/provision/provision.go) for the marker filename to match what the
+// registry itself would use.
+func corruptSharerMarkerWorktreePath(t *testing.T, base, branch string, sharers []string, worktreePath string) {
+	t.Helper()
+	type sharerMarker struct {
+		Branch       string   `json:"branch"`
+		WorktreePath string   `json:"worktreePath"`
+		Sharers      []string `json:"sharers"`
+	}
+	m := sharerMarker{Branch: branch, WorktreePath: worktreePath, Sharers: sharers}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(base, ".git", "scion-sharers", branch+".json")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func setupGitRepo(t *testing.T, dir string) {
 	t.Helper()
@@ -463,7 +492,7 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains(t *test
 	}
 
 	// Sanity: both are registered.
-	sharers, _, err := provision.ListSharers(base, "shared-branch")
+	sharers, _, err := provision.ListSharers(base, "", "shared-branch")
 	if err != nil || len(sharers) != 2 {
 		t.Fatalf("setup: expected 2 sharers, got %v (err=%v)", sharers, err)
 	}
@@ -499,7 +528,7 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains(t *test
 	}
 
 	// 3. agent-b is still registered as a sharer.
-	sharers, _, err = provision.ListSharers(base, "shared-branch")
+	sharers, _, err = provision.ListSharers(base, "", "shared-branch")
 	if err != nil {
 		t.Fatalf("ListSharers after delete: %v", err)
 	}
@@ -508,7 +537,7 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteCreatorWhileJoinerRemains(t *test
 	}
 
 	// 4. agent-a is no longer registered.
-	_, _, found, _ := provision.FindBranchForAgent(base, "agent-a")
+	_, _, found, _ := provision.FindBranchForAgent(base, "", "agent-a")
 	if found {
 		t.Error("agent-a should no longer be in the sharer registry")
 	}
@@ -590,7 +619,7 @@ func TestDeleteAgentFiles_SharedWorktree_DeleteLastSharer_RemovesWorktree(t *tes
 	}
 
 	// 3. Sharer registry is empty.
-	sharers, _, err := provision.ListSharers(base, "shared-branch")
+	sharers, _, err := provision.ListSharers(base, "", "shared-branch")
 	if err != nil {
 		t.Fatalf("ListSharers: %v", err)
 	}
@@ -662,7 +691,7 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 	}
 
 	// No sharers remain.
-	sharers, _, err := provision.ListSharers(base, "solo-agent")
+	sharers, _, err := provision.ListSharers(base, "", "solo-agent")
 	if err != nil {
 		t.Fatalf("ListSharers: %v", err)
 	}
@@ -676,4 +705,456 @@ func TestDeleteAgentFiles_SharedWorktree_SoleSharer_DeleteRemoves(t *testing.T) 
 	}
 }
 
+// TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_RetainsRatherThanDeletes
+// covers acceptance criterion 3 for the sole-sharer case: if the recorded
+// WorktreePath points outside every scion-created shape, DeleteAgentFiles
+// must never touch the out-of-tree path. The read
+// boundary (pkg/provision.readMarker) degrades the marker — keeps the
+// Sharers refcount, blanks only WorktreePath — so the sole sharer
+// is still found and still unregistered; the teardown caller guard then
+// skips removal on the blanked path. The real worktree (still at its
+// original, valid location) is therefore LEFT IN PLACE, not removed: a deliberate,
+// accepted trade-off (see readMarker's doc comment) — never act on an
+// untrusted path, even at the cost of a cleanup that would otherwise have
+// happened safely via other means.
+func TestDeleteAgentFiles_OutOfTreeMarker_SoleSharer_RetainsRatherThanDeletes(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
+
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{HostPath: base, Backend: "local"}
+
+	if err := provision.ProvisionShared(provision.ProvisionInput{
+		Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+		ProjectID: "p1", AgentID: "solo-agent", AgentName: "solo-agent",
+		GitClone: gc,
+	}); err != nil {
+		t.Fatalf("provision solo-agent: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents", "solo-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wtPath := provision.WorktreePath(base, "solo-agent")
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("setup: worktree should exist at %s: %v", wtPath, err)
+	}
+
+	// Write a marker whose WorktreePath points at an out-of-tree location —
+	// an external directory with real content that must never be touched.
+	outside := t.TempDir()
+	marker := filepath.Join(outside, "keep-me.txt")
+	if err := os.WriteFile(marker, []byte("do not touch"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	corruptSharerMarkerWorktreePath(t, base, "solo-agent", []string{"solo-agent"}, outside)
+
+	if _, err := DeleteAgentFiles("solo-agent", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles: %v", err)
+	}
+
+	// The external path must survive no matter what else happens.
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("external content must survive an out-of-tree marker delete: %v", err)
+	}
+
+	// The real worktree is left in place, not removed: the marker degrades (refcount
+	// kept, path blanked) rather than being discarded, so the refcount path
+	// handles teardown and correctly refuses to act on the blanked path. This
+	// is the accepted trade-off — a retained worktree, never a wrongful delete.
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Errorf("real in-tree worktree should be left in place, not removed: stat err=%v", err)
+	}
+}
+
+// TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed covers
+// acceptance criterion 3 for a joined (non-creator) sharer: when that agent
+// is the last sharer and the recorded WorktreePath is out-of-tree, there is
+// no independent trusted path to fall back to (a joiner never had its own worktree
+// directory), so DeleteAgentFiles must do nothing rather than guess — the
+// external path is untouched AND the real shared worktree the joiner was
+// sharing is left alone too.
+func TestDeleteAgentFiles_OutOfTreeMarker_JoinedAgent_FailsClosed(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	bare := initBareRepo(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main", Depth: intPtr(0)}
+
+	projectPath := filepath.Join(tmpDir, "proj")
+	scionDir := filepath.Join(projectPath, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(scionDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	base := filepath.Join(projectPath, "workspace")
+	resolved := provision.ResolvedWorkspace{HostPath: base, Backend: "local"}
+
+	// Agent A creates, Agent B joins the same branch.
+	for _, id := range []string{"agent-a", "agent-b"} {
+		if err := provision.ProvisionShared(provision.ProvisionInput{
+			Resolved: resolved, Mode: store.SharingModeWorktreePerAgent,
+			ProjectID: "p1", AgentID: id, AgentName: "shared-branch",
+			GitClone: gc,
+		}); err != nil {
+			t.Fatalf("provision %s: %v", id, err)
+		}
+		if err := os.MkdirAll(filepath.Join(scionDir, "agents", id), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wtA := provision.WorktreePath(base, "agent-a")
+
+	// Delete agent-a (creator) first — agent-b remains as sole sharer,
+	// sharing agent-a's original worktree directory.
+	if _, err := DeleteAgentFiles("agent-a", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-a): %v", err)
+	}
+	if _, err := os.Stat(wtA); err != nil {
+		t.Fatalf("setup: shared worktree should persist while agent-b remains: %v", err)
+	}
+
+	// Write a marker whose WorktreePath points at an out-of-tree location for
+	// agent-b (now sole sharer) — an external directory with real content.
+	outside := t.TempDir()
+	marker := filepath.Join(outside, "keep-me.txt")
+	if err := os.WriteFile(marker, []byte("do not touch"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	corruptSharerMarkerWorktreePath(t, base, "shared-branch", []string{"agent-b"}, outside)
+
+	if _, err := DeleteAgentFiles("agent-b", projectPath, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-b): %v", err)
+	}
+
+	// The external path must survive.
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("external content must survive an out-of-tree marker delete: %v", err)
+	}
+
+	// agent-b never had its own worktree directory (it joined agent-a's), so
+	// there is no independent trusted path to fall back to — the shared
+	// worktree the joiner was using must be left alone too (left in place, not
+	// deleted; a lost refcount is the acceptable cost of failing closed).
+	if _, err := os.Stat(wtA); err != nil {
+		t.Errorf("shared worktree must survive when the last-sharer marker is out-of-tree: %v", err)
+	}
+}
+
+// TestDeleteAgentFiles_ProvisionAgentLayout_FirstDeleteKeepsWorktree_LastDeleteRemoves
+// is a required regression test: two agents attached to
+// the same branch via the local ProvisionAgent path (pkg/agent/provision.go's
+// worktree-mode create + attach, NOT ProvisionShared) — worktree at
+// <projectDir>/agents/<name>/workspace, outside repoRoot/worktrees/. Before
+// this fix, readMarker validated WorktreePath only against
+// WorktreeIsLexicallyUnderBase(repoRoot, ...), which this shape never
+// matches — every legitimate marker here was discarded, the refcount was
+// lost, and deleting the FIRST agent removed a worktree the second was still
+// using (data loss). Both clauses matter: the worktree must survive the
+// first (non-last) delete AND actually be removed on the last one — a fix
+// that only avoids over-deletion by retaining forever (never removing) would
+// pass the first clause and fail the second.
+func TestDeleteAgentFiles_ProvisionAgentLayout_FirstDeleteKeepsWorktree_LastDeleteRemoves(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	runProvisionAgentLayoutFirstLastDelete(t, scionDir)
+}
+
+// TestDeleteAgentFiles_ProvisionAgentLayout_SymlinkedProjectAncestor is the
+// REQUIRED symlinked-ancestor regression: the same first-delete/last-delete
+// scenario, but the project directory itself is reached only through a
+// symlink. The write side (ProvisionAgent, via config.GetResolvedProjectDir/
+// util.RepoRootDir) and the read side (DeleteAgentFiles's resolvedProjectDir,
+// threaded into WorktreePathIsScionCreated) must derive the SAME lexical
+// projectDir form from the same symlinked path for the ProvisionAgent-layout
+// shape check to accept a legitimate marker — proving the classification
+// check really is symlink-form-agnostic (no EvalSymlinks anywhere in it), not
+// simply untested for this case.
+func TestDeleteAgentFiles_ProvisionAgentLayout_SymlinkedProjectAncestor(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	projectDir := filepath.Dir(scionDir)
+	tmpDir := filepath.Dir(projectDir)
+
+	realProjectDir := filepath.Join(tmpDir, "real-project")
+	if err := os.Rename(projectDir, realProjectDir); err != nil {
+		t.Fatal(err)
+	}
+	symlinkedProjectDir := projectDir // reuse the original path as the symlink
+	if err := os.Symlink(realProjectDir, symlinkedProjectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	runProvisionAgentLayoutFirstLastDelete(t, filepath.Join(symlinkedProjectDir, config.DotScion))
+}
+
+// TestDeleteAgentFiles_ProvisionAgentLayout_ScionInSubdirectory locks the
+// non-top-level layout the earlier <base>/.scion reconstruction attempt
+// would have false-rejected: .scion lives in a subdirectory of a LARGER
+// enclosing git repository, so repoRoot (util.RepoRootDir(projectDir), the
+// outer repo's top level) is NOT projectDir's parent. The classification
+// check must use the real, resolved projectDir passed through explicitly —
+// not derive it from repoRoot — or a legitimate marker here false-rejects
+// and the worktree is left behind at the last sharer instead of being removed.
+func TestDeleteAgentFiles_ProvisionAgentLayout_ScionInSubdirectory(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	outerRepoDir := filepath.Dir(scionDir) // reprovisionSetup already git-init'd this
+	nestedProjectDir := filepath.Join(outerRepoDir, "nested", "project")
+	if err := os.MkdirAll(nestedProjectDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	nestedScionDir := filepath.Join(nestedProjectDir, config.DotScion)
+	if err := os.MkdirAll(filepath.Join(nestedScionDir, "templates"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// reprovisionSetup's .gitignore (".scion/agents/") is rooted at the outer
+	// repo's top level (git treats a pattern containing a "/" other than a
+	// trailing one as anchored to the .gitignore's own directory), so it does
+	// not cover the nested project's agents dir. Add one scoped to here,
+	// matching how a real nested project would be set up.
+	if err := os.WriteFile(filepath.Join(nestedProjectDir, ".gitignore"), []byte(".scion/agents/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: the outer repo root is NOT the nested project directory —
+	// confirming this test actually exercises the non-top-level layout.
+	if outer, err := util.RepoRootDir(nestedProjectDir); err != nil {
+		t.Fatalf("RepoRootDir: %v", err)
+	} else if outer == nestedProjectDir {
+		t.Fatalf("setup: expected the outer repo root %q to differ from the nested project dir", outer)
+	}
+
+	runProvisionAgentLayoutFirstLastDelete(t, nestedScionDir)
+}
+
+// runProvisionAgentLayoutFirstLastDelete implements a required regression
+// test: two agents attached to the same branch
+// via the local ProvisionAgent path (pkg/agent/provision.go's worktree-mode
+// create + attach, NOT ProvisionShared) — worktree at
+// <projectDir>/agents/<name>/workspace, outside repoRoot/worktrees/. Before
+// this fix, readMarker validated WorktreePath only against
+// WorktreeIsLexicallyUnderBase(repoRoot, ...), which this shape never
+// matches — every legitimate marker here was discarded, the refcount was
+// lost, and deleting the FIRST agent removed a worktree the second was still
+// using (data loss). Both clauses matter: the worktree must survive the
+// first (non-last) delete AND actually be removed on the last one — a fix
+// that only avoids over-deletion by retaining forever (never removing) would
+// pass the first clause and fail the second.
+func runProvisionAgentLayoutFirstLastDelete(t *testing.T, scionDir string) {
+	t.Helper()
+	projectDir := filepath.Dir(scionDir)
+	// reprovisionSetup leaves CWD outside the repo (broker-like), which is
+	// deliberate for the CWD-dependent bug it exists to catch elsewhere. This
+	// test instead needs util.BranchExists/FindWorktreeByBranch (which run
+	// git from the process CWD) to actually see the branch/worktree agent-b
+	// attaches to — a local/CLI-like CWD, inside the repo.
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Production code (both ProvisionAgent and DeleteAgentFiles) resolves the
+	// caller-supplied scionDir through config.GetResolvedProjectDir, which
+	// evaluates symlinks — so the registry's recorded WorktreePath is always
+	// in resolved form, regardless of whether the caller's own path was
+	// symlinked. Do the same resolution here before building the expected
+	// path strings and making direct registry calls, so this test's
+	// expectations match what production actually records rather than
+	// asserting against a form nothing ever writes.
+	resolvedScionDir, err := config.GetResolvedProjectDir(scionDir)
+	if err != nil {
+		t.Fatalf("GetResolvedProjectDir: %v", err)
+	}
+
+	branch := "shared-branch"
+	if _, _, _, err := ProvisionAgent(context.Background(), "agent-a", "default", "", "", scionDir, "", "created", branch, ""); err != nil {
+		t.Fatalf("provision agent-a: %v", err)
+	}
+	wtA := filepath.Join(resolvedScionDir, "agents", "agent-a", "workspace")
+	if _, err := os.Stat(filepath.Join(wtA, ".git")); err != nil {
+		t.Fatalf("setup: expected a worktree at %s: %v", wtA, err)
+	}
+
+	if _, _, _, err := ProvisionAgent(context.Background(), "agent-b", "default", "", "", scionDir, "", "created", branch, ""); err != nil {
+		t.Fatalf("provision agent-b (attach): %v", err)
+	}
+	// agent-b must attach to agent-a's worktree, not create its own.
+	wtB := filepath.Join(resolvedScionDir, "agents", "agent-b", "workspace")
+	if _, err := os.Stat(filepath.Join(wtB, ".git")); err == nil {
+		t.Fatalf("agent-b should have attached to agent-a's worktree, not created its own at %s", wtB)
+	}
+
+	root, err := util.RepoRootDir(projectDir)
+	if err != nil {
+		t.Fatalf("RepoRootDir: %v", err)
+	}
+	sharers, wtPath, err := provision.ListSharers(root, resolvedScionDir, branch)
+	if err != nil {
+		t.Fatalf("ListSharers: %v", err)
+	}
+	if len(sharers) != 2 {
+		t.Fatalf("setup: expected 2 sharers, got %v", sharers)
+	}
+	if wtPath != wtA {
+		t.Fatalf("setup: worktreePath = %q, want %q (this must be recognized as scion-created)", wtPath, wtA)
+	}
+
+	// Delete agent-a FIRST (not the last sharer). The worktree must remain,
+	// and agent-b's refcount registration must survive.
+	if _, err := DeleteAgentFiles("agent-a", scionDir, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-a): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(wtA, ".git")); err != nil {
+		t.Fatalf("worktree must persist after deleting the first (non-last) sharer: %v", err)
+	}
+	sharers, wtPath, err = provision.ListSharers(root, resolvedScionDir, branch)
+	if err != nil {
+		t.Fatalf("ListSharers after first delete: %v", err)
+	}
+	if len(sharers) != 1 || sharers[0] != "agent-b" {
+		t.Fatalf("expected sharers=[agent-b] after deleting agent-a, got %v", sharers)
+	}
+	if wtPath != wtA {
+		t.Fatalf("worktreePath should still be %q after deleting the non-last sharer, got %q", wtA, wtPath)
+	}
+
+	// Delete agent-b LAST. The worktree must actually be removed now — this
+	// is the clause a never-remove fix would fail.
+	if _, err := DeleteAgentFiles("agent-b", scionDir, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-b): %v", err)
+	}
+	if _, err := os.Stat(wtA); !os.IsNotExist(err) {
+		t.Errorf("worktree must be removed after the LAST sharer's teardown, stat err=%v", err)
+	}
+}
+
+// TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved covers
+// the second required regression case: ProvisionAgent's attach-to-an-
+// existing-worktree path (pkg/agent/provision.go, via util.FindWorktreeByBranch)
+// can register a sharer for a worktree at a location scion did not create —
+// most commonly a worktree a user set up by hand before running scion against
+// that branch. Such a WorktreePath matches neither scion-created shape, so it
+// is refcounted (the agent is a real, tracked sharer) but must NEVER be
+// removed by scion teardown, at any point — scion didn't create it and has no
+// business deleting it, independent of any modification question.
+func TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	projectDir := filepath.Dir(scionDir)
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	branch := "user-created-branch"
+	// A worktree a user created by hand, entirely outside any scion-managed
+	// directory: not under <projectDir>/agents/ (ProvisionAgent's own shape)
+	// and not under repoRoot/worktrees/ (ProvisionShared's shape).
+	userWorktree := filepath.Join(filepath.Dir(projectDir), "user-created-worktree")
+	cmd := exec.Command("git", "worktree", "add", "--relative-paths", "-b", branch, userWorktree)
+	cmd.Dir = projectDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add (simulating a user-created worktree): %v\n%s", err, out)
+	}
+
+	if _, _, _, err := ProvisionAgent(context.Background(), "agent-x", "default", "", "", scionDir, "", "created", branch, ""); err != nil {
+		t.Fatalf("provision agent-x (attach to user-created worktree): %v", err)
+	}
+
+	root, err := util.RepoRootDir(projectDir)
+	if err != nil {
+		t.Fatalf("RepoRootDir: %v", err)
+	}
+	sharers, wtPath, err := provision.ListSharers(root, scionDir, branch)
+	if err != nil {
+		t.Fatalf("ListSharers: %v", err)
+	}
+	if len(sharers) != 1 || sharers[0] != "agent-x" {
+		t.Fatalf("expected sharers=[agent-x], got %v", sharers)
+	}
+	if wtPath != "" {
+		t.Fatalf("worktreePath should be blanked for a non-scion-created worktree, got %q", wtPath)
+	}
+
+	// agent-x is the sole/last sharer; teardown must never remove the
+	// user-created worktree, even with removeBranch=true.
+	if _, err := DeleteAgentFiles("agent-x", scionDir, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-x): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(userWorktree, ".git")); err != nil {
+		t.Errorf("user-created worktree must survive teardown of its last scion-tracked sharer: %v", err)
+	}
+}
+
 func intPtr(i int) *int { return &i }
+
+// TestDeleteAgentFiles_GlobalProject_DeletesOnlyTargetWorkspace is the
+// global-project counterpart to
+// TestDeleteAgentFiles_WorktreePerAgent_DeletesOnlyTargetWorktree: each
+// global-project agent gets its own workspace subdirectory under
+// ~/.scion/workspace/<agentName> (ProvisionAgent's Case 3), which
+// DeleteAgentFiles must remove on that agent's own deletion without
+// touching a sibling global agent's own subdirectory.
+func TestDeleteAgentFiles_GlobalProject_DeletesOnlyTargetWorkspace(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	mockRuntimeForTest(t)
+
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	_ = os.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	if err := config.InitGlobal(getTestHarnesses()); err != nil {
+		t.Fatalf("InitGlobal: %v", err)
+	}
+	globalScionDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("GetGlobalDir: %v", err)
+	}
+
+	for _, name := range []string{"global-agent-a", "global-agent-b"} {
+		if _, _, _, err := ProvisionAgent(context.Background(), name, "default", "", "", globalScionDir, "", "", "", ""); err != nil {
+			t.Fatalf("ProvisionAgent(%s): %v", name, err)
+		}
+	}
+
+	workspaceRoot := filepath.Join(globalScionDir, "workspace")
+	wsA := filepath.Join(workspaceRoot, "global-agent-a")
+	wsB := filepath.Join(workspaceRoot, "global-agent-b")
+
+	for _, p := range []string{wsA, wsB} {
+		if info, err := os.Stat(p); err != nil || !info.IsDir() {
+			t.Fatalf("setup: expected %s to exist as a directory: %v", p, err)
+		}
+	}
+
+	if _, err := DeleteAgentFiles("global-agent-b", globalScionDir, false); err != nil {
+		t.Fatalf("DeleteAgentFiles(global-agent-b): %v", err)
+	}
+
+	if _, err := os.Stat(wsB); !os.IsNotExist(err) {
+		t.Errorf("global-agent-b's own workspace directory should be removed, stat err=%v", err)
+	}
+	if info, err := os.Stat(wsA); err != nil || !info.IsDir() {
+		t.Errorf("sibling global-agent-a's workspace directory should survive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(globalScionDir, "agents", "global-agent-b")); !os.IsNotExist(err) {
+		t.Errorf("global-agent-b config dir should be removed, stat err=%v", err)
+	}
+}

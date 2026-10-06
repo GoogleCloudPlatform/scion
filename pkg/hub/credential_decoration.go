@@ -17,12 +17,15 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 )
 
 // ---------------------------------------------------------------------------
@@ -191,11 +194,11 @@ func CredentialDecorationFromContext(ctx context.Context) (CredentialDecoration,
 // ---------------------------------------------------------------------------
 
 const (
-	uatMaxNameBytes       = 128
-	uatMaxPurposeBytes    = 128
-	uatMaxLabelCount      = 8
-	uatMaxLabelKeyBytes   = 32
-	uatMaxLabelValueBytes = 64
+	uatMaxNameBytes       = credentialmeta.MaxNameBytes
+	uatMaxPurposeBytes    = credentialmeta.MaxPurposeBytes
+	uatMaxLabelCount      = credentialmeta.MaxLabelCount
+	uatMaxLabelKeyBytes   = credentialmeta.MaxLabelKeyBytes
+	uatMaxLabelValueBytes = credentialmeta.MaxLabelValueBytes
 	// There is no separate serialized-labels size cap: uatMaxLabelCount *
 	// (uatMaxLabelKeyBytes + uatMaxLabelValueBytes) is already well under
 	// 1KiB (≤8 * (32+64) = 768 bytes of raw content, plus JSON punctuation),
@@ -208,52 +211,7 @@ const (
 // ^[a-z][a-z0-9_.-]{0,31}$ without pulling in a regexp for something this
 // simple.
 func isValidLabelKeyShape(s string) bool {
-	if len(s) == 0 || len(s) > uatMaxLabelKeyBytes {
-		return false
-	}
-	for i, r := range s {
-		switch {
-		case i == 0 && (r < 'a' || r > 'z'):
-			return false
-		case i > 0 && !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-'):
-			return false
-		}
-	}
-	return true
-}
-
-// labelValueCharsetOK reports whether every rune in s is in the allowed
-// label-value charset: [A-Za-z0-9 _.:/@+=,-].
-func labelValueCharsetOK(s string) bool {
-	for _, r := range s {
-		switch {
-		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-		case strings.ContainsRune(" _.:/@+=,-", r):
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-// reservedLabelKeys are exact (case-insensitive) matches that would let an
-// issuer-supplied label impersonate an attribution, ancestry, or
-// authorization field. Rejected both as an exact key and as a dotted prefix
-// (e.g. "user" rejects "user.name" too). gVerifiedActorFieldNames' entries
-// are added at init time, below.
-var reservedLabelKeys = map[string]bool{
-	"agent": true, "agent_id": true, "actor": true, "principal": true,
-	"principal_id": true, "principal_kind": true, "user": true, "user_id": true,
-	"email": true, "on_behalf_of": true, "delegate": true, "delegator": true,
-	"delegation": true, "ancestry": true, "creator": true, "created_by": true,
-	"owner": true, "project_id": true, "broker_id": true, "credential": true,
-	"credential_id": true, "token": true, "token_id": true, "role": true,
-	"scope": true, "scopes": true, "permission": true, "permissions": true,
-	"verified": true, "system": true, "executor": true, "initiator": true,
-	// actor_binding is reserved for G's later verified agent binding.
-	// "actor"'s dotted-prefix rule does not catch it (no "." between the
-	// words), so it is listed explicitly.
-	"actor_binding": true,
+	return credentialmeta.ValidLabelKey(s)
 }
 
 // gVerifiedActorFieldNames are G's verified-agent-actor structured audit
@@ -264,76 +222,7 @@ var reservedLabelKeys = map[string]bool{
 // No wildcard on "actor_"/"source_" — only these exact names are reserved.
 // If G renames a column before merging, this list and the pinning test are
 // updated in the same change.
-var gVerifiedActorFieldNames = []string{
-	"actor_agent_id",
-	"authorizing_user_id",
-	"source_grant_id",
-	"delegation_edge_id",
-	"parent_grant_id",
-	"exchange_agent_credential_id",
-	"actor_kind",
-}
-
-func init() {
-	for _, name := range gVerifiedActorFieldNames {
-		reservedLabelKeys[name] = true
-	}
-}
-
-// reservedLabelKeyPrefixes are case-insensitive prefixes rejected outright,
-// in addition to the dotted-prefix rule for reservedLabelKeys.
-var reservedLabelKeyPrefixes = []string{"scion.", "hub.", "x-"}
-
-// isReservedLabelKey reports whether key collides with a reserved
-// attribution/authorization field name, exactly or as a dotted prefix.
-// "-" is normalized to "_" before the exact/dotted-prefix comparisons
-// (review finding F7): the label key shape allows both separators, so
-// "actor-binding", "agent-id" and "on-behalf-of" must be caught the same as
-// their "_" forms, or reserving the "_" form alone would be trivially
-// sidestepped. The scion./hub./x- prefix check runs against the
-// un-normalized lowercase key, since those prefixes are themselves
-// dot/hyphen-based and normalizing first would change what they match.
-func isReservedLabelKey(key string) bool {
-	lower := strings.ToLower(key)
-	for _, prefix := range reservedLabelKeyPrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	normalized := strings.ReplaceAll(lower, "-", "_")
-	if reservedLabelKeys[normalized] {
-		return true
-	}
-	for reserved := range reservedLabelKeys {
-		if strings.HasPrefix(normalized, reserved+".") {
-			return true
-		}
-	}
-	return false
-}
-
-// looksSecretBearing reports whether s appears to contain a pasted token or
-// bearer header value. This is cheap defence-in-depth, not a secret scanner.
-// The comparison is case-insensitive (review finding F8): "SCION_PAT_..." and
-// "bearer abc" are just as much a pasted secret as the canonical casing.
-func looksSecretBearing(s string) bool {
-	lower := strings.ToLower(s)
-	return strings.Contains(lower, "scion_pat_") || strings.Contains(lower, "bearer ")
-}
-
-// hasControlOrFormatRune reports whether s contains a Unicode Cc (control),
-// Cf (format, including bidi and zero-width), Zl (line separator, U+2028) or
-// Zp (paragraph separator, U+2029) rune. Zl/Zp are included so "single line"
-// actually means single line: they are not Cc/Cf but render as line breaks
-// in most consumers (review finding F6).
-func hasControlOrFormatRune(s string) bool {
-	for _, r := range s {
-		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
-			return true
-		}
-	}
-	return false
-}
+var gVerifiedActorFieldNames = credentialmeta.ReservedActorLabelKeys()
 
 // ErrInvalidUATMetadata reports a credential-metadata field that failed
 // bounded validation. The message names the field and the violated rule but
@@ -356,62 +245,15 @@ func (e *ErrInvalidUATMetadata) Error() string {
 // added. Existing (pre-E.1) rows are never re-validated: they render through
 // the sanitizing LogValue path instead.
 func ValidateCredentialMetadata(name, purpose string, labels map[string]string) error {
-	if !utf8.ValidString(name) {
-		return &ErrInvalidUATMetadata{Field: "name", Rule: "must be valid UTF-8"}
+	err := credentialmeta.ValidateIssuance(name, purpose, labels)
+	if err == nil {
+		return nil
 	}
-	if len(name) > uatMaxNameBytes {
-		return &ErrInvalidUATMetadata{Field: "name", Rule: fmt.Sprintf("must be at most %d bytes", uatMaxNameBytes)}
+	var validationErr *credentialmeta.ValidationError
+	if errors.As(err, &validationErr) {
+		return &ErrInvalidUATMetadata{Field: validationErr.Field, Rule: validationErr.Rule}
 	}
-	if hasControlOrFormatRune(name) {
-		return &ErrInvalidUATMetadata{Field: "name", Rule: "must not contain control or formatting characters"}
-	}
-	if looksSecretBearing(name) {
-		return &ErrInvalidUATMetadata{Field: "name", Rule: "must not resemble a bearer token or credential value"}
-	}
-
-	trimmedPurpose := strings.TrimSpace(purpose)
-	if trimmedPurpose != "" {
-		if !utf8.ValidString(trimmedPurpose) {
-			return &ErrInvalidUATMetadata{Field: "purpose", Rule: "must be valid UTF-8"}
-		}
-		if len(trimmedPurpose) > uatMaxPurposeBytes {
-			return &ErrInvalidUATMetadata{Field: "purpose", Rule: fmt.Sprintf("must be at most %d bytes", uatMaxPurposeBytes)}
-		}
-		if hasControlOrFormatRune(trimmedPurpose) {
-			return &ErrInvalidUATMetadata{Field: "purpose", Rule: "must not contain control or formatting characters, and must be a single line"}
-		}
-		if looksSecretBearing(trimmedPurpose) {
-			return &ErrInvalidUATMetadata{Field: "purpose", Rule: "must not resemble a bearer token or credential value"}
-		}
-	}
-
-	if len(labels) > uatMaxLabelCount {
-		return &ErrInvalidUATMetadata{Field: "labels", Rule: fmt.Sprintf("at most %d labels are allowed", uatMaxLabelCount)}
-	}
-	for key, value := range labels {
-		if !utf8.ValidString(key) || !utf8.ValidString(value) {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: "label key and value must be valid UTF-8"}
-		}
-		if !isValidLabelKeyShape(key) {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: fmt.Sprintf("label key must match ^[a-z][a-z0-9_.-]{0,%d}$", uatMaxLabelKeyBytes-1)}
-		}
-		if isReservedLabelKey(key) {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: "label key is reserved"}
-		}
-		if len(value) > uatMaxLabelValueBytes {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: fmt.Sprintf("label value must be at most %d bytes", uatMaxLabelValueBytes)}
-		}
-		if value != strings.TrimSpace(value) {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: "label value must not have leading or trailing whitespace"}
-		}
-		if !labelValueCharsetOK(value) {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: "label value contains a disallowed character"}
-		}
-		if looksSecretBearing(key) || looksSecretBearing(value) {
-			return &ErrInvalidUATMetadata{Field: "labels", Rule: "must not resemble a bearer token or credential value"}
-		}
-	}
-	return nil
+	return err
 }
 
 // appendCredentialMetadataAuditFields adds E.1's audit-safe metadata
@@ -443,6 +285,15 @@ func appendCredentialMetadataAuditFields(summaryJSON string, hasPurpose bool, la
 	return string(out)
 }
 
+// isDisplayUnsafeRune reports whether r can alter how surrounding text is
+// displayed rather than being displayed itself: control characters (Cc),
+// format characters (Cf: bidi overrides and isolates, zero-width
+// characters, BOM, ...) and line/paragraph separators (Zl, Zp). Shared by
+// sanitizeForLog and sanitizeFailureReason so the two stay on one set.
+func isDisplayUnsafeRune(r rune) bool {
+	return unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+}
+
 // sanitizeForLog is the render-time defence for legacy rows (created before
 // validation existed) and general defence in depth: it never trusts stored
 // text to already satisfy the bounded schema. Cc/Cf/Zl/Zp runes are replaced
@@ -450,7 +301,7 @@ func appendCredentialMetadataAuditFields(summaryJSON string, hasPurpose bool, la
 func sanitizeForLog(s string, maxBytes int) string {
 	var b strings.Builder
 	for _, r := range s {
-		if unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+		if isDisplayUnsafeRune(r) {
 			b.WriteRune(utf8.RuneError)
 		} else {
 			b.WriteRune(r)

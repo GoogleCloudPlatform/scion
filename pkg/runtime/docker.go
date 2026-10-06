@@ -21,6 +21,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,6 +61,7 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}
+	config.RuntimeName = r.Name()
 
 	args, err := buildCommonRunArgs(config)
 	if err != nil {
@@ -92,10 +94,18 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 
+	newArgs = appendSharedDirGroupArgs(newArgs, config, "docker", true)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -108,11 +118,18 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
-	return strings.TrimSpace(out), nil
+	// Run returns the whole trimmed output, as before; only the launch
+	// handle is restricted to a well-formed container ID line.
+	id := strings.TrimSpace(out)
+	reportContainerCreated(hooks, config.Name, out)
+	return id, nil
 }
 
-func (r *DockerRuntime) Stop(ctx context.Context, id string) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// Stop stops the container ref.ID. As with Delete, the engine container ID
+// is already unique per run, so ref.RunID needs no further check here; run
+// targeting is enforced by the caller resolving the ID from List.
+func (r *DockerRuntime) Stop(ctx context.Context, ref RunRef) error {
+	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	if err != nil && out != "" {
 		// Include runtime's stderr output in the error so callers can match
 		// on messages like "not running" or "No such container".
@@ -121,8 +138,11 @@ func (r *DockerRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *DockerRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here; run targeting is
+// enforced by the caller resolving the ID from List.
+func (r *DockerRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -210,26 +230,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 		}
 
 		// Filter by labels if requested
-		match := true
-		for k, v := range labelFilter {
-			actual := labels[k]
-			// Fallback for project labels
-			if actual == "" {
-				switch k {
-				case projectkeys.LabelProject:
-					actual = projectkeys.ProjectNameFromLabels(labels)
-				case projectkeys.LabelProjectID:
-					actual = projectkeys.ProjectIDFromLabels(labels)
-				case projectkeys.LabelProjectPath:
-					actual = projectkeys.ProjectPathFromLabels(labels)
-				}
-			}
-
-			if !projectkeys.LabelValuesMatch(k, actual, v) {
-				match = false
-				break
-			}
-		}
+		match := LabelsMatchFilter(labels, labelFilter)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Docker container name
@@ -239,6 +240,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 			}
 			info := api.AgentInfo{
 				ContainerID:     d.ID,
+				RunID:           labels[api.LabelRunID],
 				Name:            agentName,
 				ContainerStatus: d.Status,
 				Phase:           phaseFromContainerStatus(d.Status),
@@ -333,7 +335,35 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", "scion",
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", "scion", agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", "scion", agent.ContainerID, "tmux", "attach", "-t", "scion")...)
+}
+
+// dockerExecDetachKeys is the --detach-keys value used for docker exec of a
+// tmux attach. docker cannot turn detach keys off (an empty value means "use
+// the default"), so this moves them to a rarely typed sequence. docker holds
+// back a lone Ctrl-\ until the next key arrives, and the full sequence ends
+// the exec (the tmux session keeps running).
+const dockerExecDetachKeys = "ctrl-\\,ctrl-^"
+
+// ExecDetachKeysArgs returns the --detach-keys flag for an interactive
+// "<runtime> exec -it ... tmux attach", or nil for runtimes that don't take
+// one. By default docker and podman reserve Ctrl-p Ctrl-q for detaching. They
+// hold back every Ctrl-p until the next key arrives, and Ctrl-p is a common
+// history key in agent CLIs. Detaching from an attach session is tmux's job
+// (Ctrl-b d), so podman gets an empty sequence, which disables its detach
+// keys, and docker gets dockerExecDetachKeys, a rarely typed sequence (docker
+// cannot disable them). Matching is on the binary's
+// base name, so other runtimes (and test adapters) get no extra flag.
+func ExecDetachKeysArgs(runtimeCmd string) []string {
+	switch filepath.Base(runtimeCmd) {
+	case "docker":
+		return []string{"--detach-keys=" + dockerExecDetachKeys}
+	case "podman":
+		return []string{"--detach-keys="}
+	default:
+		return nil
+	}
 }
 
 func (r *DockerRuntime) ImageExists(ctx context.Context, image string) (bool, error) {

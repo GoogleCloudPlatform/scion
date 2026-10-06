@@ -27,7 +27,9 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import type { User, Message } from '../../shared/types.js';
+import { formatRelative } from '../../utils/time.js';
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
 
@@ -40,8 +42,13 @@ export class ScionInboxTray extends LitElement {
   @state() private open = false;
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** The user id loading was started for; null when nothing is running. */
+  private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnUserMessage = this.onUserMessageEvent.bind(this);
+
+  /** The user id that the message list belongs to. */
+  private stateUserId: string | null = null;
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -49,32 +56,87 @@ export class ScionInboxTray extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (this.user) {
-      void this.fetchMessages();
-      this.startPolling();
-      this.listenForMessages();
-    }
+    this.syncUser();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForMessages();
+    // A reconnect starts afresh, as a first mount does.
+    this.activeUserId = null;
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    // Clear the previous user's state before this render, so no render pairs
+    // the new user with the previous user's list.
+    if (changed.has('user')) this.resetOnUserChange();
+    if (changed.has('messages')) this.announceCount();
+  }
+
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('user')) {
-      if (this.user) {
-        void this.fetchMessages();
-        this.startPolling();
-        this.listenForMessages();
-      } else {
-        this.stopPolling();
-        this.stopListeningForMessages();
-        this.messages = [];
-      }
+    if (changed.has('user')) this.syncUser();
+  }
+
+  /**
+   * Starts or stops loading for the signed-in user.
+   *
+   * Keyed on the user id, not the object: connectedCallback and the first
+   * updated() both see the same user on mount, and the header can hand over a
+   * new object for the same user (an auth refresh). Neither is a reason to
+   * fetch again or to restart polling.
+   */
+  private syncUser(): void {
+    const id = this.user?.id ?? null;
+    if (id) {
+      if (id === this.activeUserId) return;
+      // Loading stops on disconnect and restarts in connectedCallback.
+      if (!this.isConnected) return;
+      this.activeUserId = id;
+      void this.fetchMessages();
+      this.startPolling();
+      this.listenForMessages();
+    } else {
+      this.activeUserId = null;
+      this.stopPolling();
+      this.stopListeningForMessages();
+      this.messages = [];
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-user state
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Clears the message list when the signed-in user id changes, so the next
+   * user only ever sees their own messages.
+   */
+  private resetOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.stateUserId) return;
+    this.stateUserId = id;
+    this.messages = [];
+  }
+
+  /**
+   * Tells the header how many items the list now holds. Called for every
+   * change to the list, including a clear on a user change or sign-out; a
+   * dropped response for a previous user changes nothing, so it announces
+   * nothing.
+   */
+  private announceCount(): void {
+    dispatchTrayCount(this, 'inbox', this.messages.length);
+  }
+
+  /**
+   * Whether a response to a request started while requestUserId was signed in
+   * may be applied. A response for a previous user, or one that arrives after
+   * sign-out, is dropped.
+   */
+  private isForCurrentUser(requestUserId: string | null): boolean {
+    return requestUserId !== null && requestUserId === (this.user?.id ?? null);
   }
 
   // ---------------------------------------------------------------------------
@@ -114,10 +176,12 @@ export class ScionInboxTray extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async fetchMessages(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       const res = await apiFetch('/api/v1/messages?unread=true');
       if (!res.ok) return;
       const data = (await res.json()) as { items?: Message[] } | null;
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = data?.items ?? [];
     } catch {
       // Silently ignore network errors during polling
@@ -125,8 +189,10 @@ export class ScionInboxTray extends LitElement {
   }
 
   private async markOne(id: string): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch(`/api/v1/messages/${id}/read`, { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = this.messages.filter((m) => m.id !== id);
     } catch {
       // Ignore
@@ -134,8 +200,10 @@ export class ScionInboxTray extends LitElement {
   }
 
   private async markAll(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch('/api/v1/messages/read-all', { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.messages = [];
     } catch {
       // Ignore
@@ -193,15 +261,11 @@ export class ScionInboxTray extends LitElement {
   }
 
   private relativeTime(iso: string): string {
-    const diff = Date.now() - new Date(iso).getTime();
-    const seconds = Math.floor(diff / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(iso).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(iso, { style: 'narrow' });
   }
 
   private agentLabel(msg: Message): string {

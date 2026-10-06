@@ -39,6 +39,9 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatInstantWithZone } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 /** Maximum script size accepted by the hub API (64 KB). */
 const SCRIPT_MAX_BYTES = 64 * 1024;
@@ -63,6 +66,9 @@ function byteLength(text: string): number {
 
 @customElement('scion-pre-start-hook-list')
 export class ScionPreStartHookList extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /**
    * API base path — `/api/v1/projects/{id}` for project scope,
    * `/api/v1` for hub scope.
@@ -218,6 +224,16 @@ export class ScionPreStartHookList extends LitElement {
         font-family: var(--scion-font-mono, monospace);
         font-size: 0.8125rem;
         line-height: 1.5;
+      }
+
+      /* This local override replaces the app-wide --sl-input-font-size-*
+         variable with a fixed value, which would otherwise defeat the
+         pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+         touch — re-floor it here too, desktop unchanged. */
+      @media (pointer: coarse) {
+        .script-field sl-textarea::part(textarea) {
+          font-size: max(16px, 0.8125rem);
+        }
       }
 
       .script-meta {
@@ -474,9 +490,7 @@ export class ScionPreStartHookList extends LitElement {
 
   private formatDate(value: string | undefined): string {
     if (!value) return '—';
-    const date = new Date(value);
-    if (isNaN(date.getTime())) return value;
-    return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+    return formatInstantWithZone(value, 'date') || value;
   }
 
   // ── Rendering ────────────────────────────────────────────────────────
@@ -703,9 +717,7 @@ export class ScionPreStartHookList extends LitElement {
           ></sl-textarea>
           <div class="script-meta ${overLimit ? 'over-limit' : ''}">
             <span>Runs inside the agent container before the harness starts.</span>
-            <span
-              >${scriptBytes.toLocaleString()} / ${SCRIPT_MAX_BYTES.toLocaleString()} bytes</span
-            >
+            <span>${formatNumber(scriptBytes)} / ${formatNumber(SCRIPT_MAX_BYTES)} bytes</span>
           </div>
         </div>
 

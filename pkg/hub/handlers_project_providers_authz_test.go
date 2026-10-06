@@ -49,12 +49,16 @@ func providersAuthzSetup(t *testing.T) *providersAuthzFixture {
 	ctx := context.Background()
 
 	f.target = &store.Project{
-		ID:      tid("providers-target"),
-		Name:    "Providers Target",
-		Slug:    "providers-target",
-		OwnerID: f.owner.ID,
+		ID:        tid("providers-target"),
+		Name:      "Providers Target",
+		Slug:      "providers-target",
+		OwnerID:   f.owner.ID,
+		CreatedBy: f.owner.ID,
 	}
 	require.NoError(t, f.store.CreateProject(ctx, f.target))
+	// Project authority comes from the project-owner binding, not OwnerID
+	// (ptone/scion#2586).
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.target.ID, f.owner.ID))
 
 	mkBroker := func(name string) *store.RuntimeBroker {
 		b := &store.RuntimeBroker{

@@ -36,6 +36,73 @@ func TestGetGlobalDir(t *testing.T) {
 	}
 }
 
+// TestIsGlobalProjectDir covers the resolved-path comparison directly,
+// including the case a name-based check (GetProjectName(dir) == "global")
+// gets wrong: an ordinary project whose own directory happens to produce
+// the slug "global" is not the global project, and a symlinked ~/.scion
+// is still recognized as itself.
+func TestIsGlobalProjectDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	globalDir := filepath.Join(tmpHome, GlobalDir)
+	if err := os.MkdirAll(globalDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		dir  string
+		want bool
+	}{
+		{name: "real global dir", dir: globalDir, want: true},
+		{name: "real global dir with trailing slash", dir: globalDir + string(filepath.Separator), want: true},
+		{name: "ordinary dir literally named global", dir: filepath.Join(tmpHome, "src", "global", ".scion"), want: false},
+		{name: "unrelated dir under $HOME", dir: filepath.Join(tmpHome, "other", ".scion"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsGlobalProjectDir(tt.dir); got != tt.want {
+				t.Errorf("IsGlobalProjectDir(%q) = %v, want %v", tt.dir, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsGlobalProjectDir_ResolvesSymlinkedGlobalDir covers ~/.scion itself
+// symlinked to another location (a real, supported layout elsewhere in this
+// codebase -- see TestValidateWorkspaceSource_RejectsAncestorsWithSymlinkedScionHome
+// in pkg/runtime): the global directory must still be recognized as itself
+// through the symlink, not only by its pre-resolution spelling.
+func TestIsGlobalProjectDir_ResolvesSymlinkedGlobalDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	_ = os.Setenv("HOME", tmpHome)
+	defer func() { _ = os.Setenv("HOME", origHome) }()
+
+	realScionData := filepath.Join(tmpHome, "..", "scion-data")
+	realScionData, err := filepath.Abs(realScionData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(realScionData, 0755); err != nil {
+		t.Fatal(err)
+	}
+	globalDir := filepath.Join(tmpHome, GlobalDir)
+	if err := os.Symlink(realScionData, globalDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if !IsGlobalProjectDir(globalDir) {
+		t.Errorf("IsGlobalProjectDir(%q) = false, want true (symlinked global dir)", globalDir)
+	}
+	if !IsGlobalProjectDir(realScionData) {
+		t.Errorf("IsGlobalProjectDir(%q) = false, want true (symlink target itself)", realScionData)
+	}
+}
+
 func TestGetProjectName(t *testing.T) {
 	tmpDir := t.TempDir()
 

@@ -17,12 +17,14 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/storedtime"
 	"github.com/google/uuid"
 )
 
@@ -71,12 +73,9 @@ type WebChatStore interface {
 
 	// GetThreads returns thread watermarks for the given user and project,
 	// ordered by last_activity_at descending, limited to `limit` rows.
-	// This is the backing query for GET /api/v1/chat/threads.
+	// The wave-1 thread-rail route this backed is gone; the remaining
+	// caller is a test that reads back TouchThread's watermark write.
 	GetThreads(ctx context.Context, userID, projectID string, limit int) ([]WebChatThread, error)
-
-	// MarkThreadRead advances the last_read_at watermark for the given
-	// (user, project, agent) thread to the current time.
-	MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error
 
 	// --- Wave-2 Topic methods ---
 
@@ -97,9 +96,16 @@ type WebChatStore interface {
 	GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error)
 
 	// ListTopics returns all non-deleted topics for a project, ordered by
-	// last_activity_at DESC. If no #general topic exists, one is lazily
-	// created (covers pre-existing projects).
+	// last_activity_at DESC. It creates nothing; EnsureGeneralTopic is what
+	// creates a project's #general topic.
 	ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error)
+
+	// ListTopicsByProjects returns the non-deleted topics of every project
+	// in projectIDs in one query: the union of ListTopics over those
+	// projects, ordered by project_id and then last_activity_at DESC. It
+	// creates nothing. Callers bound len(projectIDs) to stay under the
+	// driver's bind-parameter limit.
+	ListTopicsByProjects(ctx context.Context, projectIDs []string) ([]WebChatTopic, error)
 
 	// UpdateTopic applies partial updates (rename, set/clear default_agent).
 	UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error
@@ -364,6 +370,10 @@ type WebChatDM struct {
 	LastActivityAt  time.Time
 }
 
+// ErrInvalidSearchCursor is returned (wrapped) by SearchChatMessages when the
+// client-supplied cursor cannot be parsed. Handlers map it to 400.
+var ErrInvalidSearchCursor = errors.New("invalid search cursor")
+
 // ChatSearchFilter defines query parameters for searching chat messages.
 type ChatSearchFilter struct {
 	Query           string   // search text (required, min 2 chars)
@@ -608,7 +618,7 @@ DO UPDATE SET
     last_message_id = excluded.last_message_id,
     last_activity_at = excluded.last_activity_at
 `
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, messageID, activityAt)
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, messageID, activityAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: touch thread: %w", err)
 	}
@@ -625,7 +635,7 @@ DO UPDATE SET
     last_channel = excluded.last_channel,
     last_message_at = excluded.last_message_at
 `
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, messageAt)
+	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID, channel, messageAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: record channel: %w", err)
 	}
@@ -699,41 +709,15 @@ SELECT agent_id, COALESCE(last_message_id, ''), COALESCE(last_activity_at, ''), 
 		if err := rows.Scan(&t.AgentID, &t.LastMessageID, &activityStr, &readStr); err != nil {
 			return nil, fmt.Errorf("webchat store: scan thread: %w", err)
 		}
-		if activityStr != "" {
-			if parsed, err := time.Parse(time.RFC3339Nano, activityStr); err == nil {
-				t.LastActivityAt = parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", activityStr); err == nil {
-				t.LastActivityAt = parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", activityStr); err == nil {
-				t.LastActivityAt = parsed
-			}
-		}
-		if readStr != nil && *readStr != "" {
-			if parsed, err := time.Parse(time.RFC3339Nano, *readStr); err == nil {
-				t.LastReadAt = &parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", *readStr); err == nil {
-				t.LastReadAt = &parsed
-			} else if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", *readStr); err == nil {
+		t.LastActivityAt = parseSQLiteTime(activityStr)
+		if readStr != nil {
+			if parsed := parseSQLiteTime(*readStr); !parsed.IsZero() {
 				t.LastReadAt = &parsed
 			}
 		}
 		threads = append(threads, t)
 	}
 	return threads, rows.Err()
-}
-
-// MarkThreadRead advances the last_read_at watermark to now.
-func (s *sqliteWebChatStore) MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error {
-	const query = `
-UPDATE webchat_thread
-   SET last_read_at = ?
- WHERE user_id = ? AND project_id = ? AND agent_id = ?
-`
-	_, err := s.db.ExecContext(ctx, query, time.Now().UTC().Format(time.RFC3339Nano), userID, projectID, agentID)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark thread read: %w", err)
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -835,11 +819,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?)
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
-		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+		// conversations is an ent table: bind a time.Time, not RFC3339 text.
+		createdAt := topic.CreatedAt.UTC()
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
 			 VALUES (?, ?, 'group', 'native', ?, '', ?, ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), now, now)
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), createdAt, createdAt)
 		if err != nil {
 			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
 		}
@@ -922,6 +907,55 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 		return nil, fmt.Errorf("webchat store: list topics rows: %w", err)
 	}
 
+	return topics, nil
+}
+
+// ListTopicsByProjects returns non-deleted topics for several projects in
+// one query, ordered by project_id and then last_activity_at DESC.
+func (s *sqliteWebChatStore) ListTopicsByProjects(ctx context.Context, projectIDs []string) ([]WebChatTopic, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(projectIDs))
+	args := make([]interface{}, len(projectIDs))
+	for i, id := range projectIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf(`
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       COALESCE(last_activity_at, ''), deleted_at
+  FROM webchat_topic
+ WHERE project_id IN (%s) AND deleted_at IS NULL
+ ORDER BY project_id, last_activity_at DESC
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var topics []WebChatTopic
+	for rows.Next() {
+		var t WebChatTopic
+		var isGeneral int
+		var createdAtStr, activityStr string
+		var deletedAtStr *string
+		if err := rows.Scan(&t.ID, &t.ProjectID, &t.Name, &isGeneral, &t.DefaultAgent,
+			&t.ConversationID,
+			&t.CreatedBy, &createdAtStr, &t.LastMessageID, &activityStr, &deletedAtStr); err != nil {
+			return nil, fmt.Errorf("webchat store: scan topic: %w", err)
+		}
+		t.IsGeneral = isGeneral != 0
+		t.CreatedAt = parseSQLiteTime(createdAtStr)
+		t.LastActivityAt = parseSQLiteTime(activityStr)
+		topics = append(topics, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list topics by projects rows: %w", err)
+	}
 	return topics, nil
 }
 
@@ -1083,7 +1117,9 @@ func (s *sqliteWebChatStore) TouchTopicActivity(ctx context.Context, topicID, me
 func (s *sqliteWebChatStore) EnsureGeneralTopic(ctx context.Context, projectID, createdBy string) (string, bool, error) {
 	newID := uuid.New().String()
 	convID := uuid.New().String()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	// nowT is bound into the ent conversations table, now into webchat_topic.
+	nowT := time.Now().UTC()
+	now := nowT.Format(time.RFC3339Nano)
 
 	// DEF-156: derive the external_ref that will be written on the linked
 	// conversation row, using the same derivation as CreateTopic and Route 3.
@@ -1152,7 +1188,7 @@ ON CONFLICT DO NOTHING`
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
 			 VALUES (?, ?, 'group', 'native', ?, '', 'general', 'active', ?, ?)`,
-			convID, projectID, extRef, now, now)
+			convID, projectID, extRef, nowT, nowT)
 		if err != nil {
 			return "", false, fmt.Errorf("webchat store: create conversation for general topic: %w", err)
 		}
@@ -1519,12 +1555,20 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 		}
 	}
 
-	// Keyset pagination cursor: "timestamp|id"
+	// Keyset pagination cursor: "timestamp|id", the timestamp in RFC3339Nano.
+	// messages.created is an ent column, which stores time.Time.String() text,
+	// so the cursor is bound as a time.Time: compared as an RFC3339 string the
+	// "T" separator sorts after the stored " ", and the cursor never advances.
 	if filter.Cursor != "" {
 		cursorParts := strings.SplitN(filter.Cursor, "|", 2)
 		if len(cursorParts) == 2 {
+			cursorAt, err := time.Parse(time.RFC3339Nano, cursorParts[0])
+			if err != nil {
+				return nil, "", fmt.Errorf("webchat store: search messages: %w: timestamp: %w", ErrInvalidSearchCursor, err)
+			}
+			cursorAt = cursorAt.UTC()
 			conditions = append(conditions, "(created < ? OR (created = ? AND id < ?))")
-			args = append(args, cursorParts[0], cursorParts[0], cursorParts[1])
+			args = append(args, cursorAt, cursorAt, cursorParts[1])
 		}
 	}
 
@@ -1754,7 +1798,8 @@ func (s *sqliteWebChatStore) backfillTopicConversations() error {
 			if needMint {
 				convID = uuid.New().String()
 			}
-			now := time.Now().UTC().Format(time.RFC3339Nano)
+			// Bound into the ent conversations table: a time.Time, not RFC3339 text.
+			now := time.Now().UTC()
 
 			tx, err := s.db.BeginTx(context.Background(), nil)
 			if err != nil {
@@ -1976,7 +2021,7 @@ func (s *sqliteWebChatStore) CreateAttachment(ctx context.Context, meta Attachme
 INSERT INTO webchat_attachment (id, project_id, filename, mime_type, size, uploaded_by, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
 `
-	_, err := s.db.ExecContext(ctx, query, meta.ID, meta.ProjectID, meta.Filename, meta.MimeType, meta.Size, meta.UploadedBy, meta.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, query, meta.ID, meta.ProjectID, meta.Filename, meta.MimeType, meta.Size, meta.UploadedBy, meta.CreatedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: create attachment: %w", err)
 	}
@@ -2100,22 +2145,17 @@ WHERE ma.message_id IN (%s)
 // Helpers
 // ---------------------------------------------------------------------------
 
-// parseSQLiteTime parses a timestamp string stored by SQLite in multiple
-// possible formats (mirrors the wave-1 parsing in GetThreads).
+// parseSQLiteTime parses a timestamp read from a webchat_* TEXT column (or
+// scanned as text from an ent column) and returns it in UTC, or the zero time
+// when s is empty or unparseable. Current writers store RFC3339Nano in UTC;
+// storedtime.Parse covers the legacy layouts, including the Go time.Time.String()
+// text the driver wrote for a bound time.Time.
 func parseSQLiteTime(s string) time.Time {
-	if s == "" {
+	parsed, err := storedtime.Parse(s)
+	if err != nil {
 		return time.Time{}
 	}
-	if parsed, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return parsed
-	}
-	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999-07:00", s); err == nil {
-		return parsed
-	}
-	if parsed, err := time.Parse("2006-01-02 15:04:05.999999999", s); err == nil {
-		return parsed
-	}
-	return time.Time{}
+	return parsed
 }
 
 // nullableString returns nil for empty strings, suitable for nullable TEXT columns.
@@ -2221,11 +2261,11 @@ func (s *sqliteWebChatStore) GetMessageExt(ctx context.Context, messageID string
 	}
 	ext.ReplyToID = replyToID.String
 	if editedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, editedAt.String)
+		t := parseSQLiteTime(editedAt.String)
 		ext.EditedAt = &t
 	}
 	if deletedAt.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, deletedAt.String)
+		t := parseSQLiteTime(deletedAt.String)
 		ext.DeletedAt = &t
 	}
 	return &ext, nil
@@ -2258,11 +2298,11 @@ func (s *sqliteWebChatStore) GetMessageExts(ctx context.Context, messageIDs []st
 		}
 		ext.ReplyToID = replyToID.String
 		if editedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, editedAt.String)
+			t := parseSQLiteTime(editedAt.String)
 			ext.EditedAt = &t
 		}
 		if deletedAt.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, deletedAt.String)
+			t := parseSQLiteTime(deletedAt.String)
 			ext.DeletedAt = &t
 		}
 		result[ext.MessageID] = &ext
@@ -2278,7 +2318,7 @@ VALUES (?, ?)
 ON CONFLICT (message_id)
 DO UPDATE SET edited_at = excluded.edited_at
 `
-	_, err := s.db.ExecContext(ctx, query, messageID, editedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, query, messageID, editedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: set message edited: %w", err)
 	}
@@ -2293,7 +2333,7 @@ VALUES (?, ?)
 ON CONFLICT (message_id)
 DO UPDATE SET deleted_at = excluded.deleted_at
 `
-	_, err := s.db.ExecContext(ctx, query, messageID, deletedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, query, messageID, deletedAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("webchat store: set message deleted: %w", err)
 	}
@@ -2412,11 +2452,12 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 		// same as CreateTopic's mint branch — otherwise a promoted DM starts
 		// with its topic default set and its conversation default NULL,
 		// which is exactly the F1 drift this PR exists to eliminate.
-		now := topic.CreatedAt.UTC().Format(time.RFC3339Nano)
+		// conversations is an ent table: bind a time.Time, not RFC3339 text.
+		createdAt := topic.CreatedAt.UTC()
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
 			 VALUES (?, ?, 'group', 'native', ?, '', ?, ?, 'active', ?, ?)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), now, now)
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, nullableString(topic.DefaultAgentID), createdAt, createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
 		}

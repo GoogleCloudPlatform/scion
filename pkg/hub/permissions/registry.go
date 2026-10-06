@@ -20,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 )
 
 const (
@@ -39,6 +41,17 @@ const (
 	ResourceRoleBinding       = "role_binding"
 	ResourceScheduledEvent    = "scheduled_event"
 	ResourceAccessConstraint  = "access_constraint"
+	// ResourceSecret, ResourceEnvVar and ResourceSkillInjection are the
+	// material-delivery resource types (ptone/scion#2129): the typed target
+	// of an agent secret, stored environment variable or stored skill
+	// reference, as distinct from ResourceProject/ResourceSkill.
+	ResourceSecret         = "secret"
+	ResourceEnvVar         = "env_var"
+	ResourceSkillInjection = "skill_injection"
+	// ResourceArtifact is the artifact service's resource type
+	// (pkg/artifacts). Artifact permissions are checked in the hub's
+	// artifacts.Host adapter against the artifact's home project.
+	ResourceArtifact = "artifact"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -65,6 +78,23 @@ const (
 	ActionSetMessageMode = "set_message_mode"
 	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
+	// ActionDeliver and ActionUse distinguish launch-time material delivery
+	// from an agent's own runtime retrieval or token-mint request over the
+	// same or a related resource (ptone/scion#2129). Neither is a read-only
+	// action.
+	ActionDeliver = "deliver"
+	ActionUse     = "use"
+
+	// PermissionGCPServiceAccountUse is the gcp_service_account.use
+	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
+	// this one permission keys off a constant rather than a literal string.
+	// The Registry row below keeps its ID as the literal string, not this
+	// constant: pkg/hub/authzop/catalog_test.go reads registry.go as text
+	// and takes the first quoted string on each line starting with "{ID:"
+	// as that row's ID, so an identifier there would make it read the
+	// row's Description as the ID. TestMaterialPermissions_Registered pins
+	// the constant against the row.
+	PermissionGCPServiceAccountUse = "gcp_service_account.use"
 
 	UATScopeAgentManage         = "agent:manage"
 	UATScopeSkillManage         = "skill:manage"
@@ -108,10 +138,10 @@ type Permission struct {
 	NonRouteUse    []string
 	// ExcludeFromManageAlias keeps this permission's UAT scope out of the
 	// resource's "<resource>:manage" convenience alias. Used for observation
-	// permissions (agent.attach, agent.port_access) that project owners/admins
-	// no longer hold through their role, so that they can still mint
-	// agent:manage tokens (miller79/scion#88). The scope remains available
-	// for explicit selection.
+	// permissions (agent.attach, agent.port_access) that some project roles
+	// do not hold (owners/admins lack attach; members lack
+	// port_access), so that holders of those roles can still mint
+	// agent:manage tokens. The scope remains available for explicit selection.
 	ExcludeFromManageAlias bool
 }
 
@@ -126,7 +156,7 @@ var Registry = []Permission{
 	{ID: "agent.list", Resource: ResourceAgent, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "agent:list", Description: "List agents in the project", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/authz.go"}},
 	{ID: "agent.update", Resource: ResourceAgent, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.delete", Resource: ResourceAgent, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "agent:delete", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Delete agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/handlers_agent_delete_authz_test.go"}},
-	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions (terminal, exec, env, reset-auth)", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go"}, ExcludeFromManageAlias: true},
+	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions (terminal, exec, env, reset-auth)", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go", "pkg/hub/authorize_agentkeys.go:authorizeAgentKeys"}, ExcludeFromManageAlias: true},
 	{ID: "agent.lifecycle", Resource: ResourceAgent, Action: ActionLifecycle, CapabilityKind: CapabilityResource, UATScope: "agent:lifecycle", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Start, stop, suspend, restart, restore, and reincarnate agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/handlers_agents_core.go:handleAgentAction", "pkg/hub/handlers_agent_reincarnate.go:authorizeAgentReincarnate"}},
 	{ID: "agent.port_access", Resource: ResourceAgent, Action: ActionPortAccess, CapabilityKind: CapabilityResource, UATScope: "agent:port_access", Description: "Access agent forwarded ports", Enforcement: []string{"pkg/hub/port_forward_handlers.go"}, ExcludeFromManageAlias: true},
 	{ID: "agent.stop_all", Resource: ResourceAgent, Action: ActionStopAll, CapabilityKind: CapabilityScope, Description: "Stop all agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
@@ -141,6 +171,12 @@ var Registry = []Permission{
 	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
+
+	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", AgentScopes: []string{"project:artifact:write"}, Description: "Publish new versions of artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
@@ -180,15 +216,10 @@ var Registry = []Permission{
 
 	// broker.create is a hub-level permission: registration is gated by an
 	// explicit hub-member role grant (seed.go hubMemberPermissionIDs), not by
-	// mere authentication. The agreed cross-workstream UAT selector name for
-	// this permission is "broker:create" (ptone/scion#2104, ptone/scion#2107),
-	// but it has no UATScope yet: today's UATs are project-bound, and
-	// enforceUATConstraints already rejects any project-scoped UAT against
-	// this hub-level resource. ptone/scion#2123 introduces hub-bound UAT
-	// boundaries; only then does a broker:create selector become
-	// mintable/usable, and this entry gains UATScope: "broker:create" at that
-	// point.
-	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
+	// mere authentication. Its UAT selector "broker:create" is mintable only
+	// on a hub-boundary token (PermissionAllowedBoundaries). Broker creation
+	// does not admit bearer credentials (authorizeBrokerCreate).
+	{ID: "broker.create", Resource: ResourceBroker, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "broker:create", Description: "Create brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerCreate", "pkg/hub/handlers_projects_core.go"}},
 	{ID: "broker.read", Resource: ResourceBroker, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "broker:read", Description: "Read brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.update", Resource: ResourceBroker, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 	{ID: "broker.delete", Resource: ResourceBroker, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
@@ -201,7 +232,14 @@ var Registry = []Permission{
 	{ID: "gcp_service_account.list", Resource: ResourceGCPServiceAccount, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "gcp_service_account:list", Description: "List GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.verify", Resource: ResourceGCPServiceAccount, Action: ActionVerify, CapabilityKind: CapabilityResource, UATScope: "gcp_service_account:verify", Description: "Verify GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
 	{ID: "gcp_service_account.mint", Resource: ResourceGCPServiceAccount, Action: ActionMint, CapabilityKind: CapabilityScope, Description: "Mint GCP service account tokens", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},
-	{ID: "gcp_service_account.assign", Resource: ResourceGCPServiceAccount, Action: ActionAssign, CapabilityKind: CapabilityResource, UATScope: "gcp_service_account:assign", AgentScopes: []string{"project:agent:create"}, Description: "Assign GCP service accounts to agents", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go", "pkg/hub/authz.go"}},
+	// AgentScopes names project:agent:sa_assign only, its own agent scope
+	// distinct from project:agent:create (ptone/scion#2339): a ceiling that
+	// covers agent.create does not thereby cover this permission, and vice
+	// versa. authz.go's effectiveAgentScopes adds project:agent:sa_assign for
+	// a verified agent JWT signed before the split that holds
+	// project:agent:create, so such a token keeps authorizing this
+	// permission.
+	{ID: "gcp_service_account.assign", Resource: ResourceGCPServiceAccount, Action: ActionAssign, CapabilityKind: CapabilityResource, UATScope: "gcp_service_account:assign", AgentScopes: []string{"project:agent:sa_assign"}, Description: "Assign GCP service accounts to agents", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go", "pkg/hub/authz.go"}},
 
 	// Hub resource type — hub-level administrative operations (Phase 2 D4 resolution)
 	{ID: "hub.settings.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read hub settings", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -222,6 +260,7 @@ var Registry = []Permission{
 	{ID: "hub.project_defaults.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.project_defaults.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.messaging.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update messaging switches", Enforcement: []string{"pkg/hub/route_metadata.go:admin.messaging", "pkg/hub/admin_messaging.go:handleAdminMessaging"}},
+	{ID: "hub.experiments.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Read and update hub-wide experiment overrides", Enforcement: []string{"pkg/hub/route_metadata.go:admin.experiments", "pkg/hub/admin_experiments.go:handleAdminExperiments"}},
 	{ID: "hub.auth_reset.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Reset all auth", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -278,6 +317,26 @@ var Registry = []Permission{
 	{ID: "agent.token_refresh", Resource: ResourceAgent, Action: "token_refresh", AgentScopes: []string{"agent:token:refresh"}, Description: "Refresh own agent token", NonRouteUse: []string{"agent token refresh endpoint"}},
 	{ID: "agent.port_forward", Resource: ResourceAgent, Action: "port_forward", AgentScopes: []string{"agent:port:forward"}, Description: "Register and hold forwarded ports", NonRouteUse: []string{"agent port tunnel endpoints"}},
 	{ID: "agent.identity_token", Resource: ResourceAgent, Action: "identity_token", AgentScopes: []string{"agent:identity:token"}, Description: "Request OIDC identity tokens", NonRouteUse: []string{"agent identity token endpoint"}},
+
+	// Material delivery and runtime-use permissions (ptone/scion#2129).
+	// *.deliver governs launch-time delivery of a secret, stored environment
+	// variable or stored skill reference to a target agent. It carries no
+	// AgentScopes and is intended for the internal hub-delivery credential
+	// only (ptone/scion#2228), never an agent JWT. Holding *.deliver through a
+	// role never substitutes for the association, progeny or skill-default
+	// grant required for the selected item.
+	// secret.use governs an agent's own runtime retrieval and is admitted
+	// under an agent JWT via the AgentScopes mapping below. gcp_service_account.use
+	// keeps AgentScopes nil: the GCP token scope names one service account
+	// instance (project:gcp:token:<sa-id>), so its agent-credential admission
+	// is decided per resource instead of from this permission's static
+	// scope list. See pkg/hub/authz.go's agent-scope restriction and its
+	// request-local synthetic grant, both keyed on PermissionGCPServiceAccountUse.
+	{ID: "secret.deliver", Resource: ResourceSecret, Action: ActionDeliver, Description: "Deliver a secret to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "env_var.deliver", Resource: ResourceEnvVar, Action: ActionDeliver, Description: "Deliver a stored environment variable to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
+	{ID: "secret.use", Resource: ResourceSecret, Action: ActionUse, AgentScopes: []string{"project:secret:read"}, Description: "Retrieve a secret value at runtime by key", Enforcement: []string{"pkg/hub/material_runtime.go"}},
+	{ID: "gcp_service_account.use", Resource: ResourceGCPServiceAccount, Action: ActionUse, Description: "Mint a token as an assigned GCP service account", NonRouteUse: []string{"GCP token mint request"}},
 }
 
 // ResourceActions returns item-level capability actions keyed by resource type.
@@ -388,35 +447,17 @@ func uatScopesForResource(resource string) []string {
 	return out
 }
 
-// LegacyUATScopeImplications maps a UAT scope to additional scopes it
-// implicitly carries for tokens minted before a permission split. Before
-// agent.lifecycle existed, start/stop/suspend/restart/restore were enforced
-// through agent.attach, and agent:manage expanded (at mint time) to include
-// agent:attach. Tokens holding agent:attach therefore keep lifecycle authority
-// so that existing CI tokens continue to work (miller79/scion#88).
-//
-// NOTE: this map is NOT honored on the Decide path today
-// (enforceUATConstraints uses exact HasScope) — only inconsistently through
-// CanDelegate's intersectCredentialCaveats. Decide enforces exact scopes:
-// attach does not imply lifecycle. Any future alignment must narrow
-// CanDelegate to match Decide's exact-scope behavior, never widen Decide to
-// match CanDelegate.
-var LegacyUATScopeImplications = map[string][]string{
-	"agent:attach": {"agent:lifecycle"},
-}
-
 // BoundaryKind identifies the credential-side boundary a UAT is issued
 // under: confined to one project, or spanning the hub (including
 // cross-project use, subject to the holder's live authority on each
-// resolved target — see pkg/hub/authz_boundary.go). Canonical here so that
-// permissions data (SelectorMapping, PermissionAllowedBoundaries in
-// project_applicability.go) can reference it without pkg/hub/permissions
-// depending on pkg/hub. pkg/hub aliases this type rather than redeclaring it.
-type BoundaryKind string
+// resolved target — see pkg/hub/authz_boundary.go). The dependency-neutral
+// credentialmeta package owns the canonical enum so permissions and audit
+// metadata cannot drift. pkg/hub aliases this type through permissions.
+type BoundaryKind = credentialmeta.BoundaryKind
 
 const (
-	BoundaryKindProject BoundaryKind = "project"
-	BoundaryKindHub     BoundaryKind = "hub"
+	BoundaryKindProject = credentialmeta.BoundaryProject
+	BoundaryKindHub     = credentialmeta.BoundaryHub
 )
 
 // ValidBoundary is defined in project_applicability.go (shared with
@@ -434,13 +475,12 @@ const (
 //
 // This table is derived from the existing Permission.UATScope field and
 // UATManageAliases/UATManageScopesFor, not a second hand-maintained
-// selector vocabulary: it is the replacement for useraccesstoken.go's
-// scopeToPermissionIDs, which reconstructs "resource:action" and would
-// silently collapse two permissions sharing a resource/action pair (e.g.
+// selector vocabulary: a resource:action reconstruction would silently
+// collapse two permissions sharing a resource/action pair (e.g.
 // hub.settings.read and hub.config.read, both {hub, read}) into one
-// selector once either becomes UAT-selectable. A.2 owns wiring the
-// mint/runtime call sites to this table; A.1 owns the table and its
-// build/validate logic.
+// selector once either becomes UAT-selectable. Mint resolves selectors
+// through this table, and runtime authorization and delegation enforce the
+// ceiling persisted from that resolution.
 type SelectorMapping struct {
 	Selector          string
 	PermissionIDs     []string

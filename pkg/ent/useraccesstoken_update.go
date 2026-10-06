@@ -99,6 +99,26 @@ func (_u *UserAccessTokenUpdate) SetNillableProjectID(v *uuid.UUID) *UserAccessT
 	return _u
 }
 
+// ClearProjectID clears the value of the "project_id" field.
+func (_u *UserAccessTokenUpdate) ClearProjectID() *UserAccessTokenUpdate {
+	_u.mutation.ClearProjectID()
+	return _u
+}
+
+// SetBoundaryKind sets the "boundary_kind" field.
+func (_u *UserAccessTokenUpdate) SetBoundaryKind(v string) *UserAccessTokenUpdate {
+	_u.mutation.SetBoundaryKind(v)
+	return _u
+}
+
+// SetNillableBoundaryKind sets the "boundary_kind" field if the given value is not nil.
+func (_u *UserAccessTokenUpdate) SetNillableBoundaryKind(v *string) *UserAccessTokenUpdate {
+	if v != nil {
+		_u.SetBoundaryKind(*v)
+	}
+	return _u
+}
+
 // SetScopes sets the "scopes" field.
 func (_u *UserAccessTokenUpdate) SetScopes(v string) *UserAccessTokenUpdate {
 	_u.mutation.SetScopes(v)
@@ -110,6 +130,47 @@ func (_u *UserAccessTokenUpdate) SetNillableScopes(v *string) *UserAccessTokenUp
 	if v != nil {
 		_u.SetScopes(*v)
 	}
+	return _u
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_u *UserAccessTokenUpdate) SetCeilingVersion(v int32) *UserAccessTokenUpdate {
+	_u.mutation.ResetCeilingVersion()
+	_u.mutation.SetCeilingVersion(v)
+	return _u
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_u *UserAccessTokenUpdate) SetNillableCeilingVersion(v *int32) *UserAccessTokenUpdate {
+	if v != nil {
+		_u.SetCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddCeilingVersion adds value to the "ceiling_version" field.
+func (_u *UserAccessTokenUpdate) AddCeilingVersion(v int32) *UserAccessTokenUpdate {
+	_u.mutation.AddCeilingVersion(v)
+	return _u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdate) SetCeilingPermissionIds(v string) *UserAccessTokenUpdate {
+	_u.mutation.SetCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_u *UserAccessTokenUpdate) SetNillableCeilingPermissionIds(v *string) *UserAccessTokenUpdate {
+	if v != nil {
+		_u.SetCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdate) ClearCeilingPermissionIds() *UserAccessTokenUpdate {
+	_u.mutation.ClearCeilingPermissionIds()
 	return _u
 }
 
@@ -216,6 +277,11 @@ func (_u *UserAccessTokenUpdate) check() error {
 			return &ValidationError{Name: "key_hash", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.key_hash": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BoundaryKind(); ok {
+		if err := useraccesstoken.BoundaryKindValidator(v); err != nil {
+			return &ValidationError{Name: "boundary_kind", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.boundary_kind": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Scopes(); ok {
 		if err := useraccesstoken.ScopesValidator(v); err != nil {
 			return &ValidationError{Name: "scopes", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.scopes": %w`, err)}
@@ -251,8 +317,26 @@ func (_u *UserAccessTokenUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(useraccesstoken.FieldProjectID, field.TypeUUID, value)
 	}
+	if _u.mutation.ProjectIDCleared() {
+		_spec.ClearField(useraccesstoken.FieldProjectID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BoundaryKind(); ok {
+		_spec.SetField(useraccesstoken.FieldBoundaryKind, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.Scopes(); ok {
 		_spec.SetField(useraccesstoken.FieldScopes, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingVersion(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedCeilingVersion(); ok {
+		_spec.AddField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.CeilingPermissionIdsCleared() {
+		_spec.ClearField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString)
 	}
 	if value, ok := _u.mutation.Revoked(); ok {
 		_spec.SetField(useraccesstoken.FieldRevoked, field.TypeBool, value)
@@ -365,6 +449,26 @@ func (_u *UserAccessTokenUpdateOne) SetNillableProjectID(v *uuid.UUID) *UserAcce
 	return _u
 }
 
+// ClearProjectID clears the value of the "project_id" field.
+func (_u *UserAccessTokenUpdateOne) ClearProjectID() *UserAccessTokenUpdateOne {
+	_u.mutation.ClearProjectID()
+	return _u
+}
+
+// SetBoundaryKind sets the "boundary_kind" field.
+func (_u *UserAccessTokenUpdateOne) SetBoundaryKind(v string) *UserAccessTokenUpdateOne {
+	_u.mutation.SetBoundaryKind(v)
+	return _u
+}
+
+// SetNillableBoundaryKind sets the "boundary_kind" field if the given value is not nil.
+func (_u *UserAccessTokenUpdateOne) SetNillableBoundaryKind(v *string) *UserAccessTokenUpdateOne {
+	if v != nil {
+		_u.SetBoundaryKind(*v)
+	}
+	return _u
+}
+
 // SetScopes sets the "scopes" field.
 func (_u *UserAccessTokenUpdateOne) SetScopes(v string) *UserAccessTokenUpdateOne {
 	_u.mutation.SetScopes(v)
@@ -376,6 +480,47 @@ func (_u *UserAccessTokenUpdateOne) SetNillableScopes(v *string) *UserAccessToke
 	if v != nil {
 		_u.SetScopes(*v)
 	}
+	return _u
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (_u *UserAccessTokenUpdateOne) SetCeilingVersion(v int32) *UserAccessTokenUpdateOne {
+	_u.mutation.ResetCeilingVersion()
+	_u.mutation.SetCeilingVersion(v)
+	return _u
+}
+
+// SetNillableCeilingVersion sets the "ceiling_version" field if the given value is not nil.
+func (_u *UserAccessTokenUpdateOne) SetNillableCeilingVersion(v *int32) *UserAccessTokenUpdateOne {
+	if v != nil {
+		_u.SetCeilingVersion(*v)
+	}
+	return _u
+}
+
+// AddCeilingVersion adds value to the "ceiling_version" field.
+func (_u *UserAccessTokenUpdateOne) AddCeilingVersion(v int32) *UserAccessTokenUpdateOne {
+	_u.mutation.AddCeilingVersion(v)
+	return _u
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdateOne) SetCeilingPermissionIds(v string) *UserAccessTokenUpdateOne {
+	_u.mutation.SetCeilingPermissionIds(v)
+	return _u
+}
+
+// SetNillableCeilingPermissionIds sets the "ceiling_permission_ids" field if the given value is not nil.
+func (_u *UserAccessTokenUpdateOne) SetNillableCeilingPermissionIds(v *string) *UserAccessTokenUpdateOne {
+	if v != nil {
+		_u.SetCeilingPermissionIds(*v)
+	}
+	return _u
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (_u *UserAccessTokenUpdateOne) ClearCeilingPermissionIds() *UserAccessTokenUpdateOne {
+	_u.mutation.ClearCeilingPermissionIds()
 	return _u
 }
 
@@ -495,6 +640,11 @@ func (_u *UserAccessTokenUpdateOne) check() error {
 			return &ValidationError{Name: "key_hash", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.key_hash": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.BoundaryKind(); ok {
+		if err := useraccesstoken.BoundaryKindValidator(v); err != nil {
+			return &ValidationError{Name: "boundary_kind", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.boundary_kind": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Scopes(); ok {
 		if err := useraccesstoken.ScopesValidator(v); err != nil {
 			return &ValidationError{Name: "scopes", err: fmt.Errorf(`ent: validator failed for field "UserAccessToken.scopes": %w`, err)}
@@ -547,8 +697,26 @@ func (_u *UserAccessTokenUpdateOne) sqlSave(ctx context.Context) (_node *UserAcc
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(useraccesstoken.FieldProjectID, field.TypeUUID, value)
 	}
+	if _u.mutation.ProjectIDCleared() {
+		_spec.ClearField(useraccesstoken.FieldProjectID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BoundaryKind(); ok {
+		_spec.SetField(useraccesstoken.FieldBoundaryKind, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.Scopes(); ok {
 		_spec.SetField(useraccesstoken.FieldScopes, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.CeilingVersion(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.AddedCeilingVersion(); ok {
+		_spec.AddField(useraccesstoken.FieldCeilingVersion, field.TypeInt32, value)
+	}
+	if value, ok := _u.mutation.CeilingPermissionIds(); ok {
+		_spec.SetField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString, value)
+	}
+	if _u.mutation.CeilingPermissionIdsCleared() {
+		_spec.ClearField(useraccesstoken.FieldCeilingPermissionIds, field.TypeString)
 	}
 	if value, ok := _u.mutation.Revoked(); ok {
 		_spec.SetField(useraccesstoken.FieldRevoked, field.TypeBool, value)

@@ -104,6 +104,7 @@ func buildTestTree() *cobra.Command {
 	hubToken.AddCommand(&cobra.Command{Use: "list"})
 	hubToken.AddCommand(&cobra.Command{Use: "revoke"})
 	hubToken.AddCommand(&cobra.Command{Use: "delete"})
+	hubToken.AddCommand(&cobra.Command{Use: "scopes"})
 	hub.AddCommand(hubToken)
 
 	hubBrk := &cobra.Command{Use: "brokers"}
@@ -119,6 +120,8 @@ func buildTestTree() *cobra.Command {
 	hubSecret := &cobra.Command{Use: "secret"}
 	hubSecret.AddCommand(&cobra.Command{Use: "set"})
 	hubSecret.AddCommand(&cobra.Command{Use: "get"})
+	hubSecret.AddCommand(&cobra.Command{Use: "migrate"})
+	hubSecret.AddCommand(&cobra.Command{Use: "migrate-names"})
 	hub.AddCommand(hubSecret)
 
 	hubNotif := &cobra.Command{Use: "notifications"}
@@ -239,7 +242,8 @@ func TestApplyModeRestrictions_Assistant(t *testing.T) {
 	// These commands should be removed
 	removed := []string{
 		"hub.auth", "hub.auth.login", "hub.auth.logout",
-		"hub.token", "hub.token.create", "hub.token.list", "hub.token.revoke", "hub.token.delete",
+		"hub.token", "hub.token.create", "hub.token.list", "hub.token.revoke", "hub.token.delete", "hub.token.scopes",
+		"hub.secret.migrate-names",
 		"project.reconnect",
 		"config.migrate", "config.cd-config", "config.cd-project",
 		"cdw",
@@ -254,7 +258,7 @@ func TestApplyModeRestrictions_Assistant(t *testing.T) {
 		"create", "delete", "list", "start", "stop", "attach",
 		"config", "config.list", "config.set", "config.get", "config.validate", "config.dir", "config.schema",
 		"hub", "hub.status", "hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.brokers", "hub.env", "hub.secret",
+		"hub.brokers", "hub.env", "hub.secret", "hub.secret.set", "hub.secret.get", "hub.secret.migrate",
 		"project", "project.init", "project.list", "project.prune", "project.service-accounts",
 		"server", "server.start", "server.stop",
 		"broker",
@@ -399,7 +403,7 @@ func TestRemoveCommands_DoesNotPanicOnEmptyTree(t *testing.T) {
 
 func TestAssistantDeniedList(t *testing.T) {
 	expectedDenied := []string{
-		"hub.auth", "hub.token",
+		"hub.auth", "hub.token", "hub.secret.migrate-names",
 		"project.reconnect",
 		"config.migrate", "config.cd-config", "config.cd-project",
 		"cdw", "clean",
@@ -447,13 +451,62 @@ func TestAgentAllowedList(t *testing.T) {
 		"config.set", "config.validate", "config.migrate",
 		"config.list", "config.get", "config.dir", "config.schema",
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
-		"hub.auth", "hub.token", "hub.brokers",
+		"hub.auth", "hub.token", "hub.token.scopes", "hub.brokers",
 		"hub.env", "hub.secret", "hub.status", "hub.notifications",
 		"messages.read",
 		"shared-dir.create", "shared-dir.remove",
 	}
 	for _, path := range notAllowed {
 		assert.False(t, agentAllowed[path], "agentAllowed should NOT contain %s", path)
+	}
+}
+
+// TestHubSecretMigrateNamesCmd_DeniedInAssistantAndAgentModes pins the
+// ptone-decided CLI mode for the ptone/scion#2152 rename/migration command:
+// human mode only. Assistant mode denies it explicitly via assistantDenied;
+// agent mode denies it because the entire "hub" subtree is absent from
+// agentAllowed (an allow-list), so it is removed regardless of the
+// assistantDenied entry.
+func TestHubSecretMigrateNamesCmd_DeniedInAssistantAndAgentModes(t *testing.T) {
+	for _, mode := range []string{"assistant", "agent"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("SCION_CLI_MODE", mode)
+			root := buildTestTree()
+			applyModeRestrictions(root)
+			remaining := collectCommandNames(root)
+			assert.NotContains(t, remaining, "hub.secret.migrate-names",
+				"hub secret migrate-names must be denied in %s mode", mode)
+		})
+	}
+
+	// Human mode (the default) keeps it.
+	t.Setenv("SCION_CLI_MODE", "human")
+	root := buildTestTree()
+	applyModeRestrictions(root)
+	remaining := collectCommandNames(root)
+	assert.Contains(t, remaining, "hub.secret.migrate-names")
+}
+
+// TestHubSecretMigrateNamesCmd_DeniedAgainstRealTree runs the same assertion
+// against the real command tree (rootCmd), so it also fails if the new
+// command's registration path ever changes shape (e.g. moved to a different
+// parent) in a way that would silently stop matching the assistantDenied key.
+func TestHubSecretMigrateNamesCmd_DeniedAgainstRealTree(t *testing.T) {
+	real := resolveCommandPath(rootCmd, "hub.secret.migrate-names")
+	require.NotNil(t, real, "hub secret migrate-names must exist in the real command tree")
+
+	for _, mode := range []string{"assistant", "agent"} {
+		t.Run(mode, func(t *testing.T) {
+			root := &cobra.Command{Use: "scion"}
+			hubReal := resolveCommandPath(rootCmd, "hub")
+			require.NotNil(t, hubReal)
+			root.AddCommand(cloneCommandShape(hubReal))
+
+			t.Setenv("SCION_CLI_MODE", mode)
+			applyModeRestrictions(root)
+			assert.Nil(t, resolveCommandPath(root, "hub.secret.migrate-names"),
+				"hub secret migrate-names must be denied in %s mode", mode)
+		})
 	}
 }
 
@@ -522,6 +575,15 @@ func TestAgentAllowedSkillBrowse(t *testing.T) {
 	}
 }
 
+// ptone/scion#2257: a large-DM offload stub names `scion conversation
+// get-message <ref> <id> --body` as its fetch command, so the recipient
+// agent must be able to run it in agent mode.
+func TestAgentAllowedConversationGetMessage(t *testing.T) {
+	assert.True(t, agentAllowed["conversation.get-message"], "agentAllowed should contain conversation.get-message")
+	assert.NotNil(t, resolveCommandPath(rootCmd, "conversation.get-message"),
+		"agentAllowed key conversation.get-message must resolve to a real command")
+}
+
 // cloneCommandShape copies the names of cmd and its subcommands into a fresh
 // tree, so mode filtering can run against the real command layout without
 // mutating the shared rootCmd.
@@ -554,4 +616,55 @@ func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
 	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.show"},
 		collectCommandNames(root),
 		"agent mode must keep exactly the read-only skill browse verbs")
+}
+
+// TestHubTokenScopesCommand_ModeRestricted pins the mode-availability
+// decision for "scion hub token scopes" (ptone/scion#2122): although it is
+// read-only, token management stays session-only, so it inherits "human
+// only" from its parent hub.token rather than getting its own allowlist
+// entry -- consistent with every other hub.token subcommand.
+func TestHubTokenScopesCommand_ModeRestricted(t *testing.T) {
+	require.NotNil(t, resolveCommandPath(rootCmd, "hub.token.scopes"),
+		"hub.token.scopes must exist in the real command tree in human mode")
+
+	t.Run("assistant mode removes it along with its parent", func(t *testing.T) {
+		root := &cobra.Command{Use: "scion"}
+		real := resolveCommandPath(rootCmd, "hub")
+		require.NotNil(t, real)
+		root.AddCommand(cloneCommandShape(real))
+		t.Setenv("SCION_CLI_MODE", "assistant")
+		applyModeRestrictions(root)
+		assert.Nil(t, resolveCommandPath(root, "hub.token.scopes"))
+		assert.Nil(t, resolveCommandPath(root, "hub.token"))
+	})
+
+	t.Run("agent mode removes it: not in agentAllowed", func(t *testing.T) {
+		assert.False(t, agentAllowed["hub.token.scopes"],
+			"agentAllowed must NOT contain hub.token.scopes: it stays human-only like the rest of hub.token")
+		root := &cobra.Command{Use: "scion"}
+		real := resolveCommandPath(rootCmd, "hub")
+		require.NotNil(t, real)
+		root.AddCommand(cloneCommandShape(real))
+		t.Setenv("SCION_CLI_MODE", "agent")
+		applyModeRestrictions(root)
+		assert.Nil(t, resolveCommandPath(root, "hub.token.scopes"))
+	})
+}
+
+// TestAgentModeAllowsKeys covers the A.6 gap: pins, against the real command
+// tree (not just the agentAllowed map TestAgentAllowedList already checks),
+// that "keys" survives applyModeRestrictions in agent mode -- an agent
+// running inside its own container must be able to send terminal
+// keystrokes to another agent it created.
+func TestAgentModeAllowsKeys(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	root := &cobra.Command{Use: "scion"}
+	real := resolveCommandPath(rootCmd, "keys")
+	require.NotNil(t, real, "real command %q must exist", "keys")
+	root.AddCommand(cloneCommandShape(real))
+
+	applyModeRestrictions(root)
+
+	assert.Equal(t, []string{"keys"}, collectCommandNames(root),
+		"agent mode must keep the keys command")
 }

@@ -93,13 +93,16 @@ type RuntimeBrokerProjectUploadResponse struct {
 // 5. Updates sync state
 func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	ctx := r.Context()
 
-	// Hub-managed projects don't need cache refresh — they are the source of truth
+	// Hub-managed projects don't need cache refresh — they are the source of truth.
+	// Empty-per-agent projects (design #2703) take this branch too: their
+	// agents' directories are private and broker-local, so there is no
+	// remote project workspace to cache (P5 hides the Files tab).
 	if project.GitRemote == "" && !s.isLinkedProject(ctx, project) {
 		Conflict(w, "Cache refresh is only applicable to linked projects with remote workspaces")
 		return
@@ -122,6 +125,9 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 	// Perform the cache refresh
 	resp, err := s.refreshProjectCacheFromBroker(ctx, project, brokerID, stor)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		RuntimeError(w, "Cache refresh failed: "+err.Error())
 		return
 	}
@@ -133,7 +139,7 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 // GET /api/v1/projects/{projectId}/workspace/cache/status
 func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -142,7 +148,9 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	// Check if a cache exists on disk
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		InternalError(w)
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
 		return
 	}
 
@@ -179,7 +187,7 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 // POST /api/v1/projects/{projectId}/workspace/cache/notify
 func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -195,7 +203,9 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	// Download the latest workspace from GCS to local cache
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		InternalError(w)
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
 		return
 	}
 

@@ -239,6 +239,46 @@ func (_u *RuntimeBrokerUpdate) ClearRuntimes() *RuntimeBrokerUpdate {
 	return _u
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (_u *RuntimeBrokerUpdate) SetDefaultProfile(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetDefaultProfile(v)
+	return _u
+}
+
+// SetNillableDefaultProfile sets the "default_profile" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableDefaultProfile(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetDefaultProfile(*v)
+	}
+	return _u
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (_u *RuntimeBrokerUpdate) ClearDefaultProfile() *RuntimeBrokerUpdate {
+	_u.mutation.ClearDefaultProfile()
+	return _u
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (_u *RuntimeBrokerUpdate) SetWorkspaceStorage(v string) *RuntimeBrokerUpdate {
+	_u.mutation.SetWorkspaceStorage(v)
+	return _u
+}
+
+// SetNillableWorkspaceStorage sets the "workspace_storage" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableWorkspaceStorage(v *string) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetWorkspaceStorage(*v)
+	}
+	return _u
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (_u *RuntimeBrokerUpdate) ClearWorkspaceStorage() *RuntimeBrokerUpdate {
+	_u.mutation.ClearWorkspaceStorage()
+	return _u
+}
+
 // SetLabels sets the "labels" field.
 func (_u *RuntimeBrokerUpdate) SetLabels(v map[string]string) *RuntimeBrokerUpdate {
 	_u.mutation.SetLabels(v)
@@ -548,6 +588,18 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if _u.mutation.RuntimesCleared() {
 		_spec.ClearField(runtimebroker.FieldRuntimes, field.TypeString)
 	}
+	if value, ok := _u.mutation.DefaultProfile(); ok {
+		_spec.SetField(runtimebroker.FieldDefaultProfile, field.TypeString, value)
+	}
+	if _u.mutation.DefaultProfileCleared() {
+		_spec.ClearField(runtimebroker.FieldDefaultProfile, field.TypeString)
+	}
+	if value, ok := _u.mutation.WorkspaceStorage(); ok {
+		_spec.SetField(runtimebroker.FieldWorkspaceStorage, field.TypeString, value)
+	}
+	if _u.mutation.WorkspaceStorageCleared() {
+		_spec.ClearField(runtimebroker.FieldWorkspaceStorage, field.TypeString)
+	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 	}
@@ -836,6 +888,46 @@ func (_u *RuntimeBrokerUpdateOne) SetNillableRuntimes(v *string) *RuntimeBrokerU
 // ClearRuntimes clears the value of the "runtimes" field.
 func (_u *RuntimeBrokerUpdateOne) ClearRuntimes() *RuntimeBrokerUpdateOne {
 	_u.mutation.ClearRuntimes()
+	return _u
+}
+
+// SetDefaultProfile sets the "default_profile" field.
+func (_u *RuntimeBrokerUpdateOne) SetDefaultProfile(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetDefaultProfile(v)
+	return _u
+}
+
+// SetNillableDefaultProfile sets the "default_profile" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableDefaultProfile(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetDefaultProfile(*v)
+	}
+	return _u
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (_u *RuntimeBrokerUpdateOne) ClearDefaultProfile() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearDefaultProfile()
+	return _u
+}
+
+// SetWorkspaceStorage sets the "workspace_storage" field.
+func (_u *RuntimeBrokerUpdateOne) SetWorkspaceStorage(v string) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetWorkspaceStorage(v)
+	return _u
+}
+
+// SetNillableWorkspaceStorage sets the "workspace_storage" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableWorkspaceStorage(v *string) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetWorkspaceStorage(*v)
+	}
+	return _u
+}
+
+// ClearWorkspaceStorage clears the value of the "workspace_storage" field.
+func (_u *RuntimeBrokerUpdateOne) ClearWorkspaceStorage() *RuntimeBrokerUpdateOne {
+	_u.mutation.ClearWorkspaceStorage()
 	return _u
 }
 
@@ -1177,6 +1269,18 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if _u.mutation.RuntimesCleared() {
 		_spec.ClearField(runtimebroker.FieldRuntimes, field.TypeString)
+	}
+	if value, ok := _u.mutation.DefaultProfile(); ok {
+		_spec.SetField(runtimebroker.FieldDefaultProfile, field.TypeString, value)
+	}
+	if _u.mutation.DefaultProfileCleared() {
+		_spec.ClearField(runtimebroker.FieldDefaultProfile, field.TypeString)
+	}
+	if value, ok := _u.mutation.WorkspaceStorage(); ok {
+		_spec.SetField(runtimebroker.FieldWorkspaceStorage, field.TypeString, value)
+	}
+	if _u.mutation.WorkspaceStorageCleared() {
+		_spec.ClearField(runtimebroker.FieldWorkspaceStorage, field.TypeString)
 	}
 	if value, ok := _u.mutation.Labels(); ok {
 		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
