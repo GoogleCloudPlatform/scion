@@ -7,6 +7,7 @@ package hooks
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -77,7 +78,32 @@ func TestLoadHarnessManifestRequirement_LifecycleEventsHonored(t *testing.T) {
 	}
 }
 
-func TestLoadHarnessManifestRequirement_BuiltinNotRequired(t *testing.T) {
+func TestLoadHarnessManifestRequirement_BuiltinRequiredWithError(t *testing.T) {
+	home := t.TempDir()
+	bundle := filepath.Join(home, ".scion", "harness")
+	if err := os.MkdirAll(bundle, 0755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"harness_config": {"harness": "claude", "provisioner": {"type": "builtin"}}}`
+	if err := os.WriteFile(filepath.Join(bundle, "manifest.json"), []byte(manifest), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadHarnessManifestRequirement(home)
+	if err == nil {
+		t.Fatal("expected an error for the unusable builtin provisioner")
+	}
+	if !got.Required {
+		t.Fatal("expected Required=true for builtin provisioner")
+	}
+	for _, want := range []string{`harness type "claude"`, `"builtin"`, "scion harness-config upgrade <harness-config> --activate-script", "harnesses/claude"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+// A manifest without a harness type does not print an empty type.
+func TestLoadHarnessManifestRequirement_BuiltinWithoutHarnessType(t *testing.T) {
 	home := t.TempDir()
 	bundle := filepath.Join(home, ".scion", "harness")
 	if err := os.MkdirAll(bundle, 0755); err != nil {
@@ -88,11 +114,11 @@ func TestLoadHarnessManifestRequirement_BuiltinNotRequired(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := LoadHarnessManifestRequirement(home)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !got.Required {
+		t.Fatalf("expected Required=true and an error, got %+v, %v", got, err)
 	}
-	if got.Required {
-		t.Fatal("expected Required=false for builtin provisioner")
+	if !strings.Contains(err.Error(), "the agent's harness-config is staged") || strings.Contains(err.Error(), `""`) || strings.Contains(err.Error(), "harnesses/,") {
+		t.Errorf("unexpected message: %v", err)
 	}
 }
 
