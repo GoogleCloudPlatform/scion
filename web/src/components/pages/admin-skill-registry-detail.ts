@@ -30,6 +30,7 @@ import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface PinnedHash {
   uri: string;
@@ -436,8 +437,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to delete registry'));
       }
-      window.history.pushState({}, '', '/admin/skill-registries');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/admin/skill-registries');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {

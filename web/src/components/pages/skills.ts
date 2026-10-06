@@ -31,6 +31,7 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /** Skills requested per page; the server's maximum list limit. */
 const SKILLS_PAGE_SIZE = 200;
@@ -611,8 +612,7 @@ export class ScionPageSkills extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/skills/${skill.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/skills/${skill.id}`);
         }}
       >
         <td>

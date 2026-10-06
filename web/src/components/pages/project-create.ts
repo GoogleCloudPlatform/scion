@@ -42,6 +42,7 @@ import { can, isEmptyPerAgentWorkspace } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type WorkspaceType = 'git' | 'shared' | 'empty-per-agent' | 'linked';
 type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
@@ -980,8 +981,7 @@ export class ScionPageProjectCreate extends LitElement {
   }
 
   private navigateToProject(projectId: string): void {
-    window.history.pushState({}, '', `/projects/${projectId}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateTo(`/projects/${projectId}`);
   }
 
   private async handleSubmit(_e: Event): Promise<void> {

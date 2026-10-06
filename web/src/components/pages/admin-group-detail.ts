@@ -45,7 +45,7 @@ import type { GroupUpdatedDetail } from '../shared/group-form-dialog.js';
 import type { GroupDeletedDetail } from '../shared/group-delete-dialog.js';
 import { apiFetch } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import { getGroup, listMembers, GroupsApiError } from '../../client/groups-api.js';
 import { formatRelativeTime } from '../../utils/time.js';
 
