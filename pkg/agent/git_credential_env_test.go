@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -156,12 +157,17 @@ func TestStripGitCredentialRunConfig_DoesNotMutateInputs(t *testing.T) {
 // --- Start-level tests: one per env source -------------------------------
 
 type gitCredFixture struct {
-	hcDirEnv     map[string]string // broker-local harness-config directory env
-	settingsEnv  map[string]string // broker settings harness_configs entry env
-	templateEnv  map[string]string // broker-local template env
-	agentCfgEnv  map[string]string // persisted scion-agent.json env (nil: no agent dir yet)
-	authEnvKey   string            // harness-config auth required_env key, if any
-	stagedSecret string            // pre-existing staged auth secret file name, if any
+	hcDirEnv    map[string]string // broker-local harness-config directory env
+	settingsEnv map[string]string // broker settings harness_configs entry env
+	templateEnv map[string]string // broker-local template env
+	agentCfgEnv map[string]string // persisted scion-agent.json env (nil: no agent dir yet)
+	authEnvKey  string            // harness-config auth required_env key, if any
+	// stagedSecret, if set, names an auth secret file an earlier start
+	// staged. It is seeded, with a non-credential OTHER_SECRET, into the
+	// control plane's secrets record for the test harness-config, which a
+	// start restores into the cleared staged secrets directory. Restores
+	// apply only to a container-script harness (containerScript).
+	stagedSecret string
 	// containerScript makes the harness a container-script harness, which
 	// stages auth env values as files in the agent home.
 	containerScript bool
@@ -242,16 +248,22 @@ func (f gitCredFixture) setup(t *testing.T) (projectScionDir, agentDir string) {
 		t.Fatal(err)
 	}
 	if f.stagedSecret != "" {
-		dir := filepath.Join(agentDir, "home", ".scion", "harness", "secrets")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+		if err := os.MkdirAll(record, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, f.stagedSecret), []byte("fake-staged"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(record, f.stagedSecret), []byte("fake-staged"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "OTHER_SECRET"), []byte("fake-other"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(record, "OTHER_SECRET"), []byte("fake-other"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		id := harnessConfigIdentity{
+			Name:     "test-harness",
+			Source:   string(config.HarnessConfigSourceBrokerLocal),
+			Revision: config.ComputeHarnessConfigRevision(hcDir),
+		}
+		writeJSONFile(t, filepath.Join(record, secretsIdentityFile), id)
 	}
 	return projectScionDir, agentDir
 }
@@ -470,8 +482,14 @@ func TestStart_GitCredentials_VariableSecretStripped(t *testing.T) {
 	}
 }
 
+// TestStart_GitCredentials_StagedAuthFileRemoved pins that an auth secret
+// file an earlier start staged, which this start restores from the control
+// plane's secrets record, does not reach the agent home without the hub's
+// allowance, while a non-credential restored file does; with the allowance
+// the restored file is left alone.
 func TestStart_GitCredentials_StagedAuthFileRemoved(t *testing.T) {
-	project, agentDir := gitCredFixture{agentCfgEnv: map[string]string{}, stagedSecret: "GH_TOKEN"}.setup(t)
+	fixture := gitCredFixture{agentCfgEnv: map[string]string{}, stagedSecret: "GH_TOKEN", containerScript: true}
+	project, agentDir := fixture.setup(t)
 	runCredStart(t, project, api.StartOptions{BrokerMode: true, NoAuth: true})
 	dir := filepath.Join(agentDir, "home", ".scion", "harness", "secrets")
 	if _, err := os.Stat(filepath.Join(dir, "GH_TOKEN")); !os.IsNotExist(err) {
@@ -480,19 +498,28 @@ func TestStart_GitCredentials_StagedAuthFileRemoved(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "OTHER_SECRET")); err != nil {
 		t.Errorf("non-credential staged file removed: %v", err)
 	}
+
+	// Control: with the allowance the restored file is left alone, so the
+	// test exercises the restore.
+	project, agentDir = fixture.setup(t)
+	runCredStart(t, project, api.StartOptions{BrokerMode: true, NoAuth: true, AllowGitCredentials: true})
+	dir = filepath.Join(agentDir, "home", ".scion", "harness", "secrets")
+	if _, err := os.Stat(filepath.Join(dir, "GH_TOKEN")); err != nil {
+		t.Fatalf("control: allowed start did not restore GH_TOKEN (err=%v); the test does not exercise the restore", err)
+	}
 }
 
 // TestStart_GitCredentials_AllowedIsUnchanged pins that with the hub's
 // allowance each covered source (env layers, auth, environment-type and
 // variable-type secrets) still delivers its credential key and value, as
-// before the policy existed, and that the staged file is left alone.
+// before the policy existed. That an allowed start leaves a restored staged
+// file alone is pinned by TestStart_GitCredentials_StagedAuthFileRemoved.
 func TestStart_GitCredentials_AllowedIsUnchanged(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", fakeHostCred)
-	project, agentDir := gitCredFixture{
-		settingsEnv:  map[string]string{"GH_ENTRY": "fake-entry"},
-		agentCfgEnv:  map[string]string{"GITHUB_TOKEN": "", "GH_PERSISTED": "fake-persisted", "REFERS_TO_CRED": "${GITHUB_TOKEN}"},
-		authEnvKey:   "GH_TOKEN",
-		stagedSecret: "GH_STAGED",
+	project, _ := gitCredFixture{
+		settingsEnv: map[string]string{"GH_ENTRY": "fake-entry"},
+		agentCfgEnv: map[string]string{"GITHUB_TOKEN": "", "GH_PERSISTED": "fake-persisted", "REFERS_TO_CRED": "${GITHUB_TOKEN}"},
+		authEnvKey:  "GH_TOKEN",
 	}.setup(t)
 	opts := api.StartOptions{
 		BrokerMode: true, AllowGitCredentials: true,
@@ -520,10 +547,6 @@ func TestStart_GitCredentials_AllowedIsUnchanged(t *testing.T) {
 			t.Errorf("allowed: %s = %q, want %q", k, allowed[k], v)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(agentDir, "home", ".scion", "harness", "secrets", "GH_STAGED")); err != nil {
-		t.Errorf("allowed: staged file removed: %v", err)
-	}
-
 	// A local start (no hub) is unchanged too.
 	local := containerEnv(runCredStart(t, project, api.StartOptions{NoAuth: true}))
 	if local["GITHUB_TOKEN"] != fakeHostCred || local["GH_PERSISTED"] != "fake-persisted" {
