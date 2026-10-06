@@ -1141,7 +1141,9 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 // checked before quota and run intent), fail the start-dispatch setup
 // (beginStartDispatchHTTP, branches 1 and 2: the quota reservation, the
 // starting-phase write, or a delete claim taking the row) or run-intent
-// bookkeeping, or get a dispatch error. The one exception is a
+// bookkeeping, or get a dispatch error, or find, after a start dispatch that
+// landed, that a delete won (409 delete_in_progress; existingAgentDeleteWon,
+// existingAgentGoneAfterLanding). The one exception is a
 // dispatch-time start-guard refusal reporting a launch already in flight,
 // which is answered like the start gate above → existingAgentStarted.
 // Branch 3 writes an error → existingAgentErrored when recording run intent,
@@ -1275,6 +1277,9 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
+		if s.existingAgentDeleteWon(ctx, w, sd, existingAgent.ID) {
+			return existingAgentErrored
+		}
 
 		if existingAgent.Phase == string(state.PhaseSuspended) {
 			existingAgent.Phase = string(state.PhaseRunning)
@@ -1291,6 +1296,9 @@ func (s *Server) handleExistingAgent(
 		existingAgent.Message = ""
 		existingAgent.StalledFromActivity = ""
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			if s.existingAgentGoneAfterLanding(ctx, w, sd, existingAgent.ID, err) {
+				return existingAgentErrored
+			}
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
 		sd.settle()
@@ -1388,6 +1396,9 @@ func (s *Server) handleExistingAgent(
 				}
 				return existingAgentErrored
 			}
+			if s.existingAgentDeleteWon(ctx, w, sd, existingAgent.ID) {
+				return existingAgentErrored
+			}
 
 			existingAgent.Phase = string(state.PhaseRunning)
 			// Clear any exit reason/code left from the prior generation —
@@ -1403,6 +1414,9 @@ func (s *Server) handleExistingAgent(
 			existingAgent.Message = ""
 			existingAgent.StalledFromActivity = ""
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
+				if s.existingAgentGoneAfterLanding(ctx, w, sd, existingAgent.ID, err) {
+					return existingAgentErrored
+				}
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
 			sd.settle()
@@ -1537,6 +1551,9 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
+		if s.existingAgentDeleteWon(ctx, w, nil, existingAgent.ID) {
+			return existingAgentErrored
+		}
 
 		// If the broker didn't set a running phase, default to running.
 		if existingAgent.Phase == string(state.PhaseCreated) ||
@@ -1548,6 +1565,9 @@ func (s *Server) handleExistingAgent(
 		existingAgent.ExitReason = ""
 		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			if s.existingAgentGoneAfterLanding(ctx, w, nil, existingAgent.ID, err) {
+				return existingAgentErrored
+			}
 			// Log but continue — agent was started.
 			s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)
 		}
@@ -2274,4 +2294,32 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 	}
 
 	return false, nil
+}
+
+// existingAgentDeleteWon answers 409 delete_in_progress when the broker start
+// of an existing agent landed but a delete won while the broker call was in
+// flight (deleteWonAfterLanding), as the lifecycle start does
+// (ptone/scion#3255). The dispatch has already tried to remove the landed run
+// (compensateLandedRun); its outcome is in the dispatch warnings. The delete
+// engine owns the row and its reservation, so sd is settled, not rolled
+// back, and nothing is written. It reports whether it answered.
+func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string) bool {
+	if !s.deleteWonAfterLanding(ctx, agentID) {
+		return false
+	}
+	sd.settle()
+	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
+	return true
+}
+
+// existingAgentGoneAfterLanding is the same answer when the post-start write
+// finds the row gone (hard-deleted after the re-read). It reports whether it
+// answered.
+func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string, err error) bool {
+	if !errors.Is(err, store.ErrNotFound) {
+		return false
+	}
+	sd.settle()
+	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
+	return true
 }
