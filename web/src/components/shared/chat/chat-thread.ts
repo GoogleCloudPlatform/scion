@@ -1337,6 +1337,10 @@ export class ScionChatThread extends LitElement {
     this.loaded = false;
     this.error = null;
     this.sendError = null;
+    // A send still in flight belongs to the conversation we just left; its
+    // completion will not touch `sending` (fetchId guard), so release the
+    // composer here.
+    this.sending = false;
     this.pinnedToBottom = true;
     this.loadingOlder = false;
 
@@ -2612,7 +2616,9 @@ export class ScionChatThread extends LitElement {
       }
       onError?.(error);
     } finally {
-      this.sending = false;
+      // After a switch, `sending` belongs to the new conversation (the
+      // switch reset it), so a stale send must not clear it.
+      if (sendFetchId === this.fetchId) this.sending = false;
     }
   }
 
