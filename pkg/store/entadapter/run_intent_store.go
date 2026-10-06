@@ -98,6 +98,7 @@ func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent s
 	if _, err := ltx.client.Agent.UpdateOneID(uid).
 		SetRunIntent(string(intent)).
 		SetRunIntentAt(at).
+		SetRunIntentMarkedAt(at).
 		Save(ctx); err != nil {
 		return "", time.Time{}, mapError(err)
 	}

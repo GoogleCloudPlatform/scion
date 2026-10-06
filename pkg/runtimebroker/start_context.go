@@ -974,7 +974,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		isGitWorkspace = util.IsGitRepoDir(opts.Workspace)
 	}
 	if !isGitWorkspace {
-		isGitWorkspace = in.ResolvedEnv["SCION_WORKSPACE_GIT"] == "true"
+		// Parsed like sciontool init does (util.ParseBool), so both agree.
+		isGitWorkspace, _ = util.ParseBool(in.ResolvedEnv["SCION_WORKSPACE_GIT"])
 	}
 	if emptyPerAgent {
 		// Never git, whatever a stale resolvedEnv claims.

@@ -14,7 +14,11 @@
 
 package hub
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+)
 
 // authorizeScheduledDispatchAgentAuthoring requires that authoring a
 // dispatch_agent scheduled event or schedule — creating one, or any update,
@@ -39,8 +43,10 @@ func (s *Server) authorizeScheduledDispatchAgentAuthoring(w http.ResponseWriter,
 		return false
 	}
 	if scopedUATDeniedForFutureDispatchAuthoring(identity) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"scheduled agent creation requires a credential whose scope can be applied at execution time", nil)
+		// Session-only with the GOV_PENDING reason (session_only_gate.go).
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			"scheduled agent creation requires a credential whose scope can be applied at execution time",
+			authzop.ReasonGovernancePending)
 		return false
 	}
 	return true

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -77,7 +78,7 @@ func emptyTerminalWorkspaceResponse() terminalWorkspaceResponse {
 func (s *Server) handleUserMeTerminalWorkspace(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	actor, ok := s.requireSessionCredential(w, ctx)
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonInteractiveState)
 	if !ok {
 		return
 	}

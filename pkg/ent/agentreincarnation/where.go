@@ -110,6 +110,21 @@ func Handoff(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldHandoff, v))
 }
 
+// SourceBrokerID applies equality check predicate on the "source_broker_id" field. It's identical to SourceBrokerIDEQ.
+func SourceBrokerID(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldSourceBrokerID, v))
+}
+
+// TargetBrokerID applies equality check predicate on the "target_broker_id" field. It's identical to TargetBrokerIDEQ.
+func TargetBrokerID(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldTargetBrokerID, v))
+}
+
+// SourceCleanup applies equality check predicate on the "source_cleanup" field. It's identical to SourceCleanupEQ.
+func SourceCleanup(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldSourceCleanup, v))
+}
+
 // AgentIDEQ applies the EQ predicate on the "agent_id" field.
 func AgentIDEQ(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldEQ(FieldAgentID, v))
@@ -778,6 +793,231 @@ func HandoffEqualFold(v string) predicate.AgentReincarnation {
 // HandoffContainsFold applies the ContainsFold predicate on the "handoff" field.
 func HandoffContainsFold(v string) predicate.AgentReincarnation {
 	return predicate.AgentReincarnation(sql.FieldContainsFold(FieldHandoff, v))
+}
+
+// SourceBrokerIDEQ applies the EQ predicate on the "source_broker_id" field.
+func SourceBrokerIDEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDNEQ applies the NEQ predicate on the "source_broker_id" field.
+func SourceBrokerIDNEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNEQ(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDIn applies the In predicate on the "source_broker_id" field.
+func SourceBrokerIDIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIn(FieldSourceBrokerID, vs...))
+}
+
+// SourceBrokerIDNotIn applies the NotIn predicate on the "source_broker_id" field.
+func SourceBrokerIDNotIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotIn(FieldSourceBrokerID, vs...))
+}
+
+// SourceBrokerIDGT applies the GT predicate on the "source_broker_id" field.
+func SourceBrokerIDGT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGT(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDGTE applies the GTE predicate on the "source_broker_id" field.
+func SourceBrokerIDGTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGTE(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDLT applies the LT predicate on the "source_broker_id" field.
+func SourceBrokerIDLT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLT(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDLTE applies the LTE predicate on the "source_broker_id" field.
+func SourceBrokerIDLTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLTE(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDContains applies the Contains predicate on the "source_broker_id" field.
+func SourceBrokerIDContains(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContains(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDHasPrefix applies the HasPrefix predicate on the "source_broker_id" field.
+func SourceBrokerIDHasPrefix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasPrefix(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDHasSuffix applies the HasSuffix predicate on the "source_broker_id" field.
+func SourceBrokerIDHasSuffix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasSuffix(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDIsNil applies the IsNil predicate on the "source_broker_id" field.
+func SourceBrokerIDIsNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIsNull(FieldSourceBrokerID))
+}
+
+// SourceBrokerIDNotNil applies the NotNil predicate on the "source_broker_id" field.
+func SourceBrokerIDNotNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotNull(FieldSourceBrokerID))
+}
+
+// SourceBrokerIDEqualFold applies the EqualFold predicate on the "source_broker_id" field.
+func SourceBrokerIDEqualFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEqualFold(FieldSourceBrokerID, v))
+}
+
+// SourceBrokerIDContainsFold applies the ContainsFold predicate on the "source_broker_id" field.
+func SourceBrokerIDContainsFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContainsFold(FieldSourceBrokerID, v))
+}
+
+// TargetBrokerIDEQ applies the EQ predicate on the "target_broker_id" field.
+func TargetBrokerIDEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDNEQ applies the NEQ predicate on the "target_broker_id" field.
+func TargetBrokerIDNEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNEQ(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDIn applies the In predicate on the "target_broker_id" field.
+func TargetBrokerIDIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIn(FieldTargetBrokerID, vs...))
+}
+
+// TargetBrokerIDNotIn applies the NotIn predicate on the "target_broker_id" field.
+func TargetBrokerIDNotIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotIn(FieldTargetBrokerID, vs...))
+}
+
+// TargetBrokerIDGT applies the GT predicate on the "target_broker_id" field.
+func TargetBrokerIDGT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGT(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDGTE applies the GTE predicate on the "target_broker_id" field.
+func TargetBrokerIDGTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGTE(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDLT applies the LT predicate on the "target_broker_id" field.
+func TargetBrokerIDLT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLT(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDLTE applies the LTE predicate on the "target_broker_id" field.
+func TargetBrokerIDLTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLTE(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDContains applies the Contains predicate on the "target_broker_id" field.
+func TargetBrokerIDContains(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContains(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDHasPrefix applies the HasPrefix predicate on the "target_broker_id" field.
+func TargetBrokerIDHasPrefix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasPrefix(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDHasSuffix applies the HasSuffix predicate on the "target_broker_id" field.
+func TargetBrokerIDHasSuffix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasSuffix(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDIsNil applies the IsNil predicate on the "target_broker_id" field.
+func TargetBrokerIDIsNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIsNull(FieldTargetBrokerID))
+}
+
+// TargetBrokerIDNotNil applies the NotNil predicate on the "target_broker_id" field.
+func TargetBrokerIDNotNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotNull(FieldTargetBrokerID))
+}
+
+// TargetBrokerIDEqualFold applies the EqualFold predicate on the "target_broker_id" field.
+func TargetBrokerIDEqualFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEqualFold(FieldTargetBrokerID, v))
+}
+
+// TargetBrokerIDContainsFold applies the ContainsFold predicate on the "target_broker_id" field.
+func TargetBrokerIDContainsFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContainsFold(FieldTargetBrokerID, v))
+}
+
+// SourceCleanupEQ applies the EQ predicate on the "source_cleanup" field.
+func SourceCleanupEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEQ(FieldSourceCleanup, v))
+}
+
+// SourceCleanupNEQ applies the NEQ predicate on the "source_cleanup" field.
+func SourceCleanupNEQ(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNEQ(FieldSourceCleanup, v))
+}
+
+// SourceCleanupIn applies the In predicate on the "source_cleanup" field.
+func SourceCleanupIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIn(FieldSourceCleanup, vs...))
+}
+
+// SourceCleanupNotIn applies the NotIn predicate on the "source_cleanup" field.
+func SourceCleanupNotIn(vs ...string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotIn(FieldSourceCleanup, vs...))
+}
+
+// SourceCleanupGT applies the GT predicate on the "source_cleanup" field.
+func SourceCleanupGT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGT(FieldSourceCleanup, v))
+}
+
+// SourceCleanupGTE applies the GTE predicate on the "source_cleanup" field.
+func SourceCleanupGTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldGTE(FieldSourceCleanup, v))
+}
+
+// SourceCleanupLT applies the LT predicate on the "source_cleanup" field.
+func SourceCleanupLT(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLT(FieldSourceCleanup, v))
+}
+
+// SourceCleanupLTE applies the LTE predicate on the "source_cleanup" field.
+func SourceCleanupLTE(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldLTE(FieldSourceCleanup, v))
+}
+
+// SourceCleanupContains applies the Contains predicate on the "source_cleanup" field.
+func SourceCleanupContains(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContains(FieldSourceCleanup, v))
+}
+
+// SourceCleanupHasPrefix applies the HasPrefix predicate on the "source_cleanup" field.
+func SourceCleanupHasPrefix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasPrefix(FieldSourceCleanup, v))
+}
+
+// SourceCleanupHasSuffix applies the HasSuffix predicate on the "source_cleanup" field.
+func SourceCleanupHasSuffix(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldHasSuffix(FieldSourceCleanup, v))
+}
+
+// SourceCleanupIsNil applies the IsNil predicate on the "source_cleanup" field.
+func SourceCleanupIsNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldIsNull(FieldSourceCleanup))
+}
+
+// SourceCleanupNotNil applies the NotNil predicate on the "source_cleanup" field.
+func SourceCleanupNotNil() predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldNotNull(FieldSourceCleanup))
+}
+
+// SourceCleanupEqualFold applies the EqualFold predicate on the "source_cleanup" field.
+func SourceCleanupEqualFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldEqualFold(FieldSourceCleanup, v))
+}
+
+// SourceCleanupContainsFold applies the ContainsFold predicate on the "source_cleanup" field.
+func SourceCleanupContainsFold(v string) predicate.AgentReincarnation {
+	return predicate.AgentReincarnation(sql.FieldContainsFold(FieldSourceCleanup, v))
 }
 
 // And groups predicates with the AND operator between them.

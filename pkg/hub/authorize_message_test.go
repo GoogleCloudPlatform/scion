@@ -40,11 +40,29 @@ const (
 func msgAuthzSetup(t *testing.T) (*Server, store.Store, *store.User, *store.User, string) {
 	t.Helper()
 	srv, s := testServer(t)
+	owner, member, projectID := msgAuthzSetupOn(t, srv, s)
+	return srv, s, owner, member, projectID
+}
+
+// msgAuthzSetupWithFault is msgAuthzSetup with a switch-gated store wrapper
+// (see installStoreFault) installed before the fixture's audited setup
+// (seedProjectCreatorMembership emits a mutation audit whose goroutine
+// reads srv.store). Tests call fault.Arm() where they used to assign
+// srv.store, which would race that goroutine (ptone/scion#3184).
+func msgAuthzSetupWithFault[W store.Store](t *testing.T, wrap func(inner store.Store, fault *storeFaultSwitch) W) (*Server, store.Store, *store.User, *store.User, string, W, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, wrapped, fault := testServerWithStoreFault(t, wrap)
+	owner, member, projectID := msgAuthzSetupOn(t, srv, s)
+	return srv, s, owner, member, projectID, wrapped, fault
+}
+
+func msgAuthzSetupOn(t *testing.T, srv *Server, s store.Store) (owner, member *store.User, projectID string) {
+	t.Helper()
 	ctx := context.Background()
 
-	projectID := tid(msgAuthzProjectID)
+	projectID = tid(msgAuthzProjectID)
 
-	owner := &store.User{
+	owner = &store.User{
 		ID:          tid("msg-owner"),
 		Email:       "owner@test.com",
 		DisplayName: "Project Owner",
@@ -55,7 +73,7 @@ func msgAuthzSetup(t *testing.T) (*Server, store.Store, *store.User, *store.User
 	require_NoError(t, s.CreateUser(ctx, owner))
 	ensureHubMembership(ctx, s, owner.ID)
 
-	member := &store.User{
+	member = &store.User{
 		ID:          tid("msg-member"),
 		Email:       "member@test.com",
 		DisplayName: "Project Member",
@@ -85,7 +103,7 @@ func msgAuthzSetup(t *testing.T) (*Server, store.Store, *store.User, *store.User
 	// kernel requires role bindings — the User.Role field alone is not enough.
 	createTestUserWithRole(t, s, tid("msg-superadmin"), "admin@test.com", "admin", store.SystemRoleSuperAdmin)
 
-	return srv, s, owner, member, projectID
+	return owner, member, projectID
 }
 
 // msgAuthzAddProjectMember adds a user to the project's members group and creates the
