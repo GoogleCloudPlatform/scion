@@ -379,6 +379,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			Phase:           sr.info.Phase,
 			Activity:        sr.info.Activity,
 			ContainerStatus: sr.info.ContainerStatus,
+			RunID:           sr.info.RunID,
 
 			WorkspacePlacement: sr.info.WorkspacePlacement,
 		}
