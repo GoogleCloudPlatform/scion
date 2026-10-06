@@ -28,8 +28,8 @@ The chart renders:
 - A `ServiceAccount`, optionally annotated for Workload Identity.
 - A namespaced `Role` and `RoleBinding` for managing agent pods, or a
   `ClusterRole` and `ClusterRoleBinding` when `runtime.listAllNamespaces` is `true`.
-- A `Secret` holding the hub's `settings.yaml`, mounted read-only, and a
-  `ConfigMap` with the hub's environment.
+- A `Secret` holding the hub's `settings.yaml`, mounted read-only (unless
+  `config.existingSecret` is set), and a `ConfigMap` with the hub's environment.
 - A `Secret` holding the session secret, only when you set `auth.sessionSecret`.
 
 The chart does **not** create an Ingress, Gateway, load balancer, IAP
@@ -62,9 +62,12 @@ that.
 
 ## 2. Build the hub image
 
-The chart runs the hub with `runAsNonRoot: true` as uid 1000. This setting
-cannot be overridden. It needs the non-root `hub-gke` stage of the repository's
-root `Dockerfile`, which also embeds the web UI.
+The chart always sets `runAsNonRoot: true`, and no value overrides it. The uid
+and gid default to 1000 (`hub.securityContext.runAsUser` and
+`hub.securityContext.runAsGroup` in `values.yaml`), which is what the `hub-gke`
+image expects. A value of 0 for either is refused. The chart needs the non-root
+`hub-gke` stage of the repository's root `Dockerfile`, which also embeds the web
+UI.
 
 :::danger[Do not use the published scion-hub image]
 The published `scion-hub` image (built from `image-build/hub/Dockerfile`) runs
@@ -127,6 +130,11 @@ This is the smallest set of values that renders. It keeps the default
 `database.driver: sqlite` and `storage.provider: local`, so the hub database and
 blobs are stored in an `emptyDir` in the pod and **are lost whenever the pod is
 replaced**. Use it to try the chart out, not to run a deployment.
+
+With the default `auth.mode: proxy` and a placeholder audience, the hub refuses
+every request until IAP is in front of it. To try the chart out without IAP, use
+`auth.mode: oauth` with a web OAuth client instead (see
+[Authentication](#4-authentication)), and remove `auth.proxy`.
 
 ```yaml
 # values-minimal.yaml. Replace every <...> placeholder.
@@ -323,12 +331,16 @@ database:
 
 ### Example: refused render
 
-This example is **intentionally refused**. It is `values-ha.yaml` with
-`auth.transport` removed, so the render stops before any manifest is produced:
+This example is **intentionally refused**. It is a standalone values file, not
+an overlay: a copy of `values-ha.yaml` with `auth.transport` removed. Pass it on
+its own (`-f values-ha-no-transport.yaml`, without `-f values-ha.yaml`); layered
+over `values-ha.yaml`, the `transport` block from that file still applies and
+the render succeeds. Only the `auth` block is shown below, because it is the
+only part that differs. The render stops before any manifest is produced:
 
 ```yaml
-# values-ha-no-transport.yaml. Expected to FAIL.
-# Identical to values-ha.yaml except that the auth block has no transport.
+# values-ha-no-transport.yaml. Expected to FAIL. A standalone file, not an overlay:
+# copy every other block from values-ha.yaml unchanged. Only the auth block differs.
 auth:
   mode: proxy
   existingSecret: scion-hub-session
@@ -474,6 +486,6 @@ kubectl logs -n scion-system -l app.kubernetes.io/name=scion-hub -c cloud-sql-pr
   readiness probe does not restart the pod.
 - **Every request returns 401 after install:** the IAP audience is still a
   placeholder, or does not match the backend service. Look for the placeholder
-  warning in the hub log.
+  warning in the hub log (logged only on an HA shape).
 - **Users are signed out intermittently:** replicas disagree on the session
   secret. Check that every pod was restarted after the secret changed.
