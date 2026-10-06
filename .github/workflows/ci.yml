@@ -602,6 +602,15 @@ jobs:
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-webchat-postgres
 
+      # The pkg/artifacts store is likewise not an Ent store (it creates its
+      # own artifact_* tables at Init), so it has its own Postgres SQL. Its
+      # store tests run once per dialect; this step adds the Postgres pass.
+      - name: Run artifact store tests (SQLite and Postgres)
+        if: ${{ !cancelled() }}
+        env:
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-artifacts-postgres
+
       # tz-refactor design §2.2 / AC1: the real-binary timestamp contract
       # test. It runs the SQLite and Postgres cases (about 2-3 minutes,
       # including the binary build) and runs

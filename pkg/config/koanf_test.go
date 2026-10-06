@@ -425,9 +425,7 @@ hub:
 func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -435,9 +433,11 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// SCION_PROJECT_ID maps to the same key, so a value inherited from the
+	// environment could win depending on env order. Clear both first.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
 	// Set SCION_HUB_PROJECT_ID env var — should map to top-level project_id
-	_ = os.Setenv("SCION_HUB_PROJECT_ID", "env-project-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_PROJECT_ID") }()
+	t.Setenv("SCION_HUB_PROJECT_ID", "env-project-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -458,9 +458,7 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -468,8 +466,12 @@ func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// legitimately populate ProjectID and would make this test fail for a
+	// reason unrelated to the legacy variable.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
@@ -489,9 +491,7 @@ func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project")
 	projectScionDir := filepath.Join(projectDir, ".scion")
@@ -504,8 +504,12 @@ func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars. The file
+	// value currently out-ranks them, but clear them so the assertion
+	// depends only on the file and the legacy variable.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {

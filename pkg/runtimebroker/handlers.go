@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -325,6 +326,45 @@ func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
 			continue
 		}
 		out = append(out, hubclient.ProfileAttachState{Name: p.Name, Attach: *p.Attach})
+	}
+	return out
+}
+
+// loadHeartbeatMappingSettings loads the broker's global settings plus the
+// DB-backed overlay, the source of kubernetes_service_account_mappings at
+// dispatch (resolveKubernetesAssignIdentity). A variable so tests can
+// substitute settings.
+var loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	return vs, err
+}
+
+// heartbeatProfileSAMappings returns, sorted by profile name, the GSA
+// mappings of each Kubernetes profile (by resolved runtime type) in the
+// broker's global settings, for the heartbeat's ProfileSAMappings field.
+// Nil when the settings cannot be read, so the hub keeps what it has; an
+// empty result when there are no Kubernetes profiles.
+func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState {
+	vs, err := loadHeartbeatMappingSettings()
+	if err != nil || vs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(vs.Profiles))
+	for name := range vs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := []hubclient.ProfileSAMappingsState{}
+	for _, name := range names {
+		gsas, isKubernetes, _ := vs.ProfileKubernetesSAMappings(name)
+		if !isKubernetes {
+			continue
+		}
+		state := hubclient.ProfileSAMappingsState{Name: name, ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}}
+		for _, gsa := range gsas {
+			state.ServiceAccountMappings = append(state.ServiceAccountMappings, hubclient.BrokerProfileSAMapping{GSA: gsa})
+		}
+		out = append(out, state)
 	}
 	return out
 }
@@ -6541,9 +6581,9 @@ func projectIDAtPath(path string) string {
 // or path is the project's external config dir
 // ~/.scion/project-configs/<slug>__<short-id>/.scion, whose name encodes the
 // project ID (non-git linked projects record that dir as the agent's project
-// path).
+// path). A projectID outside the project ID format never matches.
 func pathIdentifiesAs(path, projectID string) bool {
-	if path == "" || projectID == "" {
+	if path == "" || config.ValidateProjectID(projectID) != nil {
 		return false
 	}
 	if projectIDAtPath(path) == projectID {
@@ -6618,14 +6658,17 @@ func trustedEntryProjectPath(path, projectID string) bool {
 // function is ever reached.
 //
 // When projectID is set, only a project directory whose recorded project ID
-// (the project-id file) equals projectID is considered, so a same-named
-// agent in another project is never returned (ptone/scion#1819). When
-// projectID is empty, the name must be found in exactly one project; more
-// than one is reported as an ambiguity error rather than a guess.
+// (the project-id file, or the .scion marker file of a project without git)
+// equals projectID is considered, so a same-named agent in another project
+// is never returned (ptone/scion#1819). When projectID is empty, the name
+// must be found in exactly one project; more than one is reported as an
+// ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion/project-configs/ (shared-workspace agents,
-// whose state lives external to the shared checkout).
+// whose state lives external to the shared checkout). For a project whose
+// .scion is a marker file, the returned dir is the external config dir the
+// marker resolves to, where its agents live.
 func findAgentInHubManagedProjects(agentName, projectID string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -6642,11 +6685,26 @@ func findAgentInHubManagedProjects(agentName, projectID string) (string, error) 
 				continue
 			}
 			scionDir := filepath.Join(baseDir, entry.Name(), ".scion")
-			if projectID != "" {
-				recorded, err := config.ReadProjectID(scionDir)
-				if err != nil || recorded != projectID {
+			// A hub-native project without git records its identity in a
+			// .scion marker FILE rather than a project-id file, and its
+			// agents live in the external config dir the marker points at
+			// (ptone/scion#2839), so both the identity and the agents dir
+			// are resolved marker-aware.
+			if projectID != "" && projectIDAtPath(scionDir) != projectID {
+				continue
+			}
+			if config.IsProjectMarkerFile(scionDir) {
+				resolved, err := config.GetResolvedProjectDir(scionDir)
+				if err != nil || resolved == "" || resolved == scionDir {
 					continue
 				}
+				scionDir = resolved
+			}
+			// Two marker files can resolve to the same external config
+			// dir (the same project under two entries): that is one
+			// project, not an ambiguity.
+			if slices.Contains(found, scionDir) {
+				continue
 			}
 			if hubManagedProjectHasAgent(scionDir, agentName) {
 				found = append(found, scionDir)
