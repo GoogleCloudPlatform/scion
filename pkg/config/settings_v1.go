@@ -305,6 +305,52 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	return out, source
 }
 
+// ResolveSharedDirStorageBackend returns the backend ("local" or "nfs")
+// that applies to the shared dir dirName for agents using profileName,
+// the settings key it came from, and whether that key is a per-dir
+// shared_dir_storage_backends entry. The nearest level wins: the
+// profile's shared_dir_storage_backends entry for dirName, else the
+// profile's shared_dir_storage_backend, else the same two keys on the
+// profile's runtime entry, else server.shared_dir_storage.backend. A
+// profile's single value therefore wins over a runtime entry's per-dir
+// entry; to keep one dir on another backend, name it in the profile's
+// own shared_dir_storage_backends. If profileName is empty,
+// vs.ActiveProfile is used. backend is "" and source is "" when nothing
+// is configured (the local layout). The value is returned as written;
+// callers validate it.
+//
+// For a dir no per-dir entry names, the result matches the backend of
+// ResolveSharedDirStorage. Call this only on global settings, as for
+// ResolveSharedDirStorage.
+func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
+	if vs == nil {
+		return "", "", false
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profile, ok := vs.Profiles[profileName]; ok {
+		if v := profile.SharedDirStorageBackends[dirName]; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backends." + dirName, true
+		}
+		if v := profile.SharedDirStorageBackend; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backend", false
+		}
+		if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+			if v := rt.SharedDirStorageBackends[dirName]; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backends." + dirName, true
+			}
+			if v := rt.SharedDirStorageBackend; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backend", false
+			}
+		}
+	}
+	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
+		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
+	}
+	return "", "", false
+}
+
 // SharedDirStorageNFSAnywhere reports whether the global backend or any
 // runtime or profile override selects nfs, and returns the nfs-backed
 // config to use for project-wide operations such as cleanup. It is nil
@@ -323,12 +369,12 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	}
 	found := false
 	for _, rt := range vs.Runtimes {
-		if rt.SharedDirStorageBackend == "nfs" {
+		if rt.SharedDirStorageBackend == "nfs" || mapSelectsNFS(rt.SharedDirStorageBackends) {
 			found = true
 		}
 	}
 	for _, p := range vs.Profiles {
-		if p.SharedDirStorageBackend == "nfs" {
+		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
 			found = true
 		}
 	}
@@ -342,19 +388,72 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	return out, true
 }
 
-// ValidateSharedDirStorageBackends checks shared_dir_storage_backend on
-// every runtime and profile entry: the value must be empty, "local" or
-// "nfs", and "nfs" needs a complete server.shared_dir_storage.nfs block
-// (global may be nil). This checks configuration only; it never looks at
-// the filesystem. Each error's Path names the settings key. Results are
-// sorted by path.
+// SharedDirNamePattern is the shared dir name rule of api.ValidateSharedDirs
+// as a regular expression, for the settings schemas.
+const SharedDirNamePattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+
+// ValidateSharedDirStorageBackendValues checks the parts of
+// shared_dir_storage_backend and shared_dir_storage_backends that do not
+// depend on server.shared_dir_storage: each single value is empty, "local"
+// or "nfs", and each per-dir entry is keyed by a valid shared dir name and
+// is "local" or "nfs". ValidateSharedDirStorageBackends checks these and
+// the nfs block. Results are sorted by path.
+func ValidateSharedDirStorageBackendValues(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, nil, false)
+}
+
+// mapSelectsNFS reports whether any entry of a shared_dir_storage_backends
+// map selects nfs.
+func mapSelectsNFS(m map[string]string) bool {
+	for _, v := range m {
+		if v == "nfs" {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateSharedDirStorageBackends checks shared_dir_storage_backend and
+// shared_dir_storage_backends on every runtime and profile entry: a single
+// value must be empty, "local" or "nfs"; a per-dir entry must be keyed by a
+// valid shared dir name and be "local" or "nfs". "nfs" needs a complete
+// server.shared_dir_storage.nfs block (global may be nil). A per-dir entry
+// for a dir that a project does not have is valid: settings are global,
+// shared dirs are per project, and agent start ignores such an entry. This
+// checks configuration only; it never looks at the filesystem. Each
+// error's Path names the settings key. Results are sorted by path.
 func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, global, true)
+}
+
+// validateSharedDirStorageBackends implements
+// ValidateSharedDirStorageBackends, and ValidateSharedDirStorageBackendValues
+// when checkNFSBlock is false.
+func validateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig, checkNFSBlock bool) []ValidationError {
 	var errs []ValidationError
-	check := func(path, backend string) {
+	var check func(path, backend string)
+	checkDirs := func(prefix string, dirs map[string]string) {
+		for name, backend := range dirs {
+			path := prefix + ".shared_dir_storage_backends." + name
+			if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+				errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("invalid shared dir name %q (must be lowercase alphanumeric with hyphens, e.g. \"build-cache\")", name)})
+				continue
+			}
+			if backend == "" {
+				errs = append(errs, ValidationError{Path: path, Message: "must be \"local\" or \"nfs\" (got \"\")"})
+				continue
+			}
+			check(path, backend)
+		}
+	}
+	check = func(path, backend string) {
 		switch backend {
 		case "", "local":
 			return
 		case "nfs":
+			if !checkNFSBlock {
+				return
+			}
 			cfg := &V1SharedDirStorageConfig{Backend: "nfs"}
 			if global != nil {
 				cfg.NFS = global.NFS
@@ -368,9 +467,11 @@ func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profi
 	}
 	for name, rt := range runtimes {
 		check("runtimes."+name+".shared_dir_storage_backend", rt.SharedDirStorageBackend)
+		checkDirs("runtimes."+name, rt.SharedDirStorageBackends)
 	}
 	for name, p := range profiles {
 		check("profiles."+name+".shared_dir_storage_backend", p.SharedDirStorageBackend)
+		checkDirs("profiles."+name, p.SharedDirStorageBackends)
 	}
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
 	return errs
@@ -478,6 +579,82 @@ func (vs *VersionedSettings) ResolveKubernetesServiceAccountMappingForSelection(
 		}
 	}
 	return "", false
+}
+
+// KubernetesServiceAccountMappingGSAs returns, sorted, every GSA email that
+// ResolveKubernetesServiceAccountMappingForSelection(profileName,
+// runtimeEntryName, gsa) resolves to a KSA: the union of the profile-level
+// and runtime-entry-level kubernetes_service_account_mappings keys with a
+// non-empty value. Keys that are not lowercase are left out, since the
+// resolver lowercases the GSA before the lookup and so never matches them.
+// The result is nil when nothing is mapped.
+//
+// A broker reports this set per profile to the Hub (BrokerProfile
+// ServiceAccountMappings), which uses it to warn about registered GSAs no
+// profile maps (ptone/scion#3329 phase 2).
+func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	add := func(m map[string]string) {
+		for gsa, ksa := range m {
+			if ksa != "" && gsa == strings.ToLower(gsa) {
+				seen[gsa] = true
+			}
+		}
+	}
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok {
+			add(profile.KubernetesServiceAccountMappings)
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok {
+			add(rtConfig.KubernetesServiceAccountMappings)
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for gsa := range seen {
+		out = append(out, gsa)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ProfileKubernetesSAMappings describes profileName for the GSA-mapping
+// early warning (ptone/scion#3329 phase 2): the GSAs it maps to a KSA
+// (KubernetesServiceAccountMappingGSAs over the profile and the runtime
+// entry it selects), and whether its runtime is Kubernetes. The runtime type
+// is the entry's Type, or the entry key when Type is unset, so a custom key
+// such as "gke" with type kubernetes counts. known is false when the
+// profile is not in these settings (for example a broker's synthetic
+// "default" profile) or names no runtime entry, and the other results are
+// then empty.
+func (vs *VersionedSettings) ProfileKubernetesSAMappings(profileName string) (gsas []string, isKubernetes, known bool) {
+	if vs == nil {
+		return nil, false, false
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.Runtime == "" {
+		// A profile without a runtime entry cannot be resolved here; the
+		// caller treats it as unknown.
+		return nil, false, false
+	}
+	runtimeType := profile.Runtime
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.Type != "" {
+		runtimeType = rt.Type
+	}
+	switch runtimeType {
+	// The same names the Hub treats as Kubernetes (isKubernetesRuntimeType).
+	case "kubernetes", "k8s", "remote":
+		return vs.KubernetesServiceAccountMappingGSAs(profileName, profile.Runtime), true, true
+	default:
+		return nil, false, true
+	}
 }
 
 // ResolveKubernetesNamespace returns the namespace configured on the
@@ -1700,9 +1877,11 @@ func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
 // C1/T1/S-F2). A project's settings must not be able to redirect Docker
 // bind-mount sources to an operator-unapproved host path.
 //
-// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
-// StorageClass) are not used by shared_dir_storage. Warning about them being
-// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+// The workspace-storage-only fields on V1NFSConfig (UID, MountOptions,
+// StorageClass, AutoMount) are not used by shared_dir_storage; see
+// IgnoredNFSFields. GID is used: when non-zero it is the only leaf group id
+// an agent may be given as a supplemental group (ptone/scion#3155, see
+// pkg/agent.sharedDirLeafGroups).
 type V1SharedDirStorageConfig struct {
 	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
 	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
@@ -1812,14 +1991,13 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	set  func(nfs *V1NFSConfig) bool
 }{
 	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
-	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
 	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
+// fields (uid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -2138,6 +2316,12 @@ type V1RuntimeConfig struct {
 	// server.shared_dir_storage.nfs. Read from global settings only; see
 	// ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents whose
+	// profile uses this runtime entry. A dir it does not name uses
+	// SharedDirStorageBackend. The profile's own settings win over this
+	// entry. See ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	// HomeStorageBackend overrides server.home_storage.backend ("local" or
 	// "nfs") for agents whose profile uses this runtime entry. A profile's
 	// own value wins over it. Read from global settings only; see
@@ -2381,6 +2565,12 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents using this
+	// profile. A dir it does not name uses SharedDirStorageBackend. Both
+	// win over the profile's runtime entry. See
+	// ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	// HomeStorageBackend overrides server.home_storage.backend ("local" or
 	// "nfs") for agents using this profile. It wins over the same key on
 	// the profile's runtime entry. Read from global settings only; see
@@ -2537,9 +2727,16 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // Both the versioned and legacy env key mappers drop them via this list so
 // that koanf's Unmarshal never fails just because one of them is present in
 // the process environment.
+//
+// SCION_HUB is the exception to "consumed by another subsystem": nothing in
+// scion reads a bare SCION_HUB, but left mapped it lands on the top-level
+// key "hub" as a string and collides with the struct-typed hub settings.
+// Hub settings come from the SCION_HUB_* variables (e.g.
+// SCION_HUB_ENDPOINT), which are unaffected.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
+	"SCION_HUB",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -2559,6 +2756,7 @@ func versionedEnvKeyMapper(s string) string {
 		return mapped
 	}
 	if isSettingsExcludedEnv(s) {
+		// See settingsExcludedEnvVars for every excluded name and the reason.
 		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
 		// consumed directly by sciontool's auto-expose scanner
 		// (pkg/sciontool/autoexpose), not read as settings overrides. Left

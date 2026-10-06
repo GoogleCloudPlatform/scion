@@ -44,6 +44,22 @@ var skillsListCmd = &cobra.Command{
 	RunE:  runSkillsList,
 }
 
+// skillsListTags returns every --tags value given to skills list, whether
+// the flag was repeated (--tags a --tags b) or comma-separated (--tags a,b),
+// trimmed and with empty entries dropped. Before ptone/scion#2863 the flag
+// was a single-value string, so a repeated --tags silently kept only the
+// last value.
+func skillsListTags(cmd *cobra.Command) []string {
+	raw, _ := cmd.Flags().GetStringSlice("tags")
+	var tags []string
+	for _, t := range raw {
+		if t = strings.TrimSpace(t); t != "" {
+			tags = append(tags, t)
+		}
+	}
+	return tags
+}
+
 func runSkillsList(cmd *cobra.Command, args []string) error {
 	hubCtx, err := CheckHubAvailability(projectPath)
 	if err != nil {
@@ -55,15 +71,12 @@ func runSkillsList(cmd *cobra.Command, args []string) error {
 
 	scope, _ := cmd.Flags().GetString("scope")
 	search, _ := cmd.Flags().GetString("search")
-	tags, _ := cmd.Flags().GetString("tags")
 
 	opts := &hubclient.ListSkillsOptions{
 		Scope:  scope,
 		Search: search,
 		Status: "active",
-	}
-	if tags != "" {
-		opts.Tags = strings.Split(tags, ",")
+		Tags:   skillsListTags(cmd),
 	}
 
 	// The list endpoint applies the caller's read-scope boundary before
@@ -233,7 +246,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	skillID, _ := cmd.Flags().GetString("skill-id")
 
 	if version == "" {
-		return fmt.Errorf("--version is required")
+		return newUsageError("--version is required")
 	}
 
 	// Verify SKILL.md exists
@@ -499,10 +512,10 @@ func runSkillsDeprecate(cmd *cobra.Command, args []string) error {
 	replacement, _ := cmd.Flags().GetString("replacement")
 
 	if version == "" {
-		return fmt.Errorf("--version is required")
+		return newUsageError("--version is required")
 	}
 	if message == "" {
-		return fmt.Errorf("--message is required")
+		return newUsageError("--message is required")
 	}
 
 	skillSvc := hubCtx.Client.Skills()
@@ -676,7 +689,7 @@ func init() {
 	// Flags for list command
 	skillsListCmd.Flags().String("scope", "", "Filter by scope (core, global, project, user)")
 	skillsListCmd.Flags().String("search", "", "Search skills by name, description, or tags")
-	skillsListCmd.Flags().String("tags", "", "Filter by tags (comma-separated, AND semantics)")
+	skillsListCmd.Flags().StringSlice("tags", nil, "Filter by tags (repeatable or comma-separated, AND semantics; each value is parsed as CSV, so a tag containing a double quote must be CSV-quoted)")
 
 	// Flags for deprecate command
 	skillsDeprecateCmd.Flags().String("version", "", "Version to deprecate (required)")

@@ -89,6 +89,7 @@ import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
+import { navigateTo, stripBasePath } from '../../client/navigation.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -247,24 +248,41 @@ export class ScionPageAgentDetail extends LitElement {
     }
     .header-title {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 0.75rem;
       margin-bottom: 0.5rem;
     }
-    .header-title sl-icon {
+    .header-title > sl-icon {
+      flex-shrink: 0;
       color: var(--scion-primary, #3b82f6);
       font-size: 1.5rem;
+      /* Centre the icon on the first line of the name: (1.95rem h1 line box
+         - 1.5rem icon) / 2. */
+      margin-top: 0.225rem;
+    }
+    /* A long name wraps on its own line; the badges then follow on the next
+       line instead of floating beside a multi-line name. */
+    .header-title-text {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
     }
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
+      line-height: 1.3;
       color: var(--scion-text, #1e293b);
       margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .header-meta {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 1rem;
+      gap: 0.5rem 1rem;
       margin-top: 0.5rem;
     }
     .template-badge {
@@ -276,6 +294,9 @@ export class ScionPageAgentDetail extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
+      /* One long template name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .project-link,
     .broker-link {
@@ -285,6 +306,15 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-text-muted, #64748b);
       text-decoration: none;
       font-size: 0.875rem;
+      /* One long project or broker name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    /* The icon keeps its size when a long name wraps beside it. */
+    .template-badge sl-icon,
+    .project-link sl-icon,
+    .broker-link sl-icon {
+      flex-shrink: 0;
     }
     .project-link:hover,
     .broker-link:hover {
@@ -405,6 +435,28 @@ export class ScionPageAgentDetail extends LitElement {
     .info-value.mono {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
+    }
+    /* Messaging: the mode select needs more room than an info-grid column
+       gives it, so this card wraps instead of letting the select overlap the
+       reachability column. */
+    .messaging-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+    }
+    .messaging-grid .messaging-mode {
+      flex: 1 1 280px;
+      min-width: 0;
+    }
+    .messaging-grid .messaging-reach {
+      flex: 1 1 200px;
+      min-width: 0;
+    }
+    /* Cap the select, not its column, so a read-only mode description can
+       use the full column width. */
+    .messaging-mode sl-select {
+      width: 100%;
+      max-width: 360px;
     }
 
     /* ---- Task summary ---- */
@@ -724,28 +776,21 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  /** Dispatch SPA navigation via the document-level nav-click listener. */
-  private navigateViaSpa(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
-    );
-  }
-
   /**
    * True while this element is still attached AND the app's current route
    * is still this agent's detail page. Guards the deferred SPA-redirect in
    * {@link showDeletedStateThenRedirect}: `renderRoute` (main.ts) keeps the
    * previous page connected-but-hidden behind `/terminals`, so
    * `isConnected` alone cannot distinguish "visible" from "hidden behind
-   * another route". An `endsWith` check (rather than importing
-   * `stripBasePath` from main.ts, which is out of scope for this fix)
-   * tolerates a reverse-proxy base path. Trailing slashes are stripped
-   * first so `/agents/<id>/` still counts as this agent's route.
+   * another route". The base path is stripped the same way the router does
+   * (so this works behind a reverse proxy), then the app path must be
+   * exactly this agent's route. Trailing slashes are stripped first so
+   * `/agents/<id>/` still counts as this agent's route.
    */
   private isOnThisAgentRoute(): boolean {
     if (!this.isConnected || typeof window === 'undefined') return false;
-    const pathname = window.location.pathname.replace(/\/+$/, '');
-    return pathname.endsWith(`/agents/${this.agentId}`);
+    const appPath = stripBasePath(window.location.pathname).replace(/\/+$/, '');
+    return appPath === `/agents/${this.agentId}`;
   }
 
   /**
@@ -780,7 +825,7 @@ export class ScionPageAgentDetail extends LitElement {
     this.deleteRedirectTimer = setTimeout(() => {
       this.deleteRedirectTimer = null;
       if (this.isOnThisAgentRoute()) {
-        this.navigateViaSpa(this.redirectTarget);
+        navigateTo(this.redirectTarget);
       }
     }, DELETE_REDIRECT_DELAY_MS);
   }
@@ -1336,13 +1381,18 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             <sl-icon name="cpu"></sl-icon>
-            <h1>${agent.name}</h1>
-            ${agentStatusBadge(agent)}
-            <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
-            <scion-message-mode-badge
-              mode=${agent.messageMode || 'project'}
-              size="medium"
-            ></scion-message-mode-badge>
+            <div class="header-title-text">
+              <h1>${agent.name}</h1>
+              ${agentStatusBadge(agent)}
+              <scion-deletion-badge
+                .deletion=${this.deletingView(agent)}
+                live
+              ></scion-deletion-badge>
+              <scion-message-mode-badge
+                mode=${agent.messageMode || 'project'}
+                size="medium"
+              ></scion-message-mode-badge>
+            </div>
           </div>
           <div class="header-meta">
             <span class="template-badge">
@@ -1937,8 +1987,8 @@ export class ScionPageAgentDetail extends LitElement {
     return html`
       <div class="card">
         <h3 class="card-title">Messaging</h3>
-        <div class="info-grid">
-          <div class="info-item">
+        <div class="messaging-grid">
+          <div class="info-item messaging-mode">
             <span class="info-label">Message Mode</span>
             <span class="info-value">
               ${canSetMode
@@ -1950,7 +2000,6 @@ export class ScionPageAgentDetail extends LitElement {
                         const newMode = (e.target as HTMLSelectElement).value as MessageMode;
                         void this.handleModeChange(newMode, e.target as HTMLElement);
                       }}
-                      style="min-width: 280px; max-width: 360px;"
                     >
                       ${(Object.keys(MESSAGE_MODE_DISPLAY) as MessageMode[]).map(
                         (mode) => html`
@@ -1995,7 +2044,7 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
           ${messageability && 'reachableAgentCount' in messageability
             ? html`
-                <div class="info-item">
+                <div class="info-item messaging-reach">
                   <span class="info-label">Reachability</span>
                   <span class="info-value">
                     Can reach ${messageability.reachableAgentCount} agents,

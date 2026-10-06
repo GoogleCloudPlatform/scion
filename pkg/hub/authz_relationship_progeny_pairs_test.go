@@ -309,7 +309,7 @@ func TestProgenyPair_SecretUseRequiresProgeny(t *testing.T) {
 			"fed", f.projectOwnerID, []string{f.projectOwnerID}, scopes)
 		d := decidePerm(f.authz, fed, res, ActionUse, "secret.use", false)
 		assert.False(t, d.Allowed, "reason %q", d.Reason)
-		out := f.authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), res, ActionUse, "secret.use", nil, false)
+		out := f.authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), res, ActionUse, "secret.use", nil, false, nil)
 		assert.Nil(t, out.accepted)
 	})
 

@@ -167,6 +167,9 @@ func (s *Server) handleProjectImportResources(
 	var failures []ImportFailure
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
@@ -332,6 +335,9 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	var failures []ImportFailure
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
 		return
 	}
@@ -542,6 +548,9 @@ func (s *Server) handleProjectDiscoverResources(
 		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
 		return
 	}
@@ -662,6 +671,9 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 
 	names, skipped, err := s.discoverFromRemote(ctx, projectID, sourceURL, kind)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, ErrCodeDiscoverFailed, err.Error(), nil)
 		return
 	}

@@ -34,7 +34,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import { getPrincipalIcon } from '../shared/role-binding-utils.js';
 import '../shared/principal-picker.js';
@@ -161,13 +161,16 @@ export class ScionPageAdminRoleDetail extends LitElement {
 
     .header-info {
       flex: 1;
+      min-width: 0;
     }
 
+    /* A long role name breaks inside its line beside the actions. */
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0 0 0.25rem 0;
+      overflow-wrap: anywhere;
     }
 
     .header-description {

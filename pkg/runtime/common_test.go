@@ -29,7 +29,9 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
@@ -220,6 +222,18 @@ func TestAppendContainerResourceArgs(t *testing.T) {
 				Requests: api.ResourceList{Memory: "512Mi", CPU: "250m"},
 			},
 			want: []string{"run", "-t", "--memory", "1g", "--memory-reservation", "512m", "--cpus", "1.5"},
+		},
+		{
+			// The built-in default spec (limits.cpu only) must produce only
+			// --cpus: the Kubernetes request defaults never reach Docker/Podman.
+			name:      "builtin default cpu limit only",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}},
+			want:      []string{"run", "-t", "--cpus", "2"},
+		},
+		{
+			name:      "disk only is not mapped",
+			resources: &api.ResourceSpec{Disk: "20Gi"},
+			want:      []string{"run", "-t"},
 		},
 		{
 			name:      "invalid memory limit",
@@ -1295,6 +1309,497 @@ func TestScionDirNotShadowedWhenWorkspaceInsideRepo(t *testing.T) {
 	// Should NOT have the tmpfs shadow
 	if strings.Contains(argStr, "tmpfs") {
 		t.Errorf("expected no tmpfs shadow mount, got: %s", argStr)
+	}
+}
+
+// setupHubManagedBaseRepo creates a fake shared base repo under
+// <home>/.scion/projects/<slug> (the hub-native worktree-per-agent
+// convention) with a .git admin dir (config, hooks/, info/) and an
+// agent worktree directory, and points $HOME at home so
+// isHubManagedWorktreeBase resolves it as hub-managed. Returns the repo
+// root and the worktree path.
+func setupHubManagedBaseRepo(t *testing.T, agentName string) (repoRoot, workspace string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot = filepath.Join(home, config.GlobalDir, config.ProjectsDir, "myproject")
+	gitDir := filepath.Join(repoRoot, ".git")
+	for _, d := range []string{filepath.Join(gitDir, "hooks"), filepath.Join(gitDir, "info")} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("failed to create %s: %v", d, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n"), 0644); err != nil {
+		t.Fatalf("failed to write .git/config: %v", err)
+	}
+
+	workspace = filepath.Join(repoRoot, "worktrees", agentName)
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	return repoRoot, workspace
+}
+
+func TestNarrowGitAdminMounts_HubNativeDocker(t *testing.T) {
+	// Part A: for a hub-native worktree-per-agent base repo, Docker runs must
+	// layer read-only mounts over the shared base's .git admin surface
+	// (config, hooks/, info/) on top of the rw .git mount, so the container
+	// can no longer write a hook/filter/config key the broker will later
+	// honor host-side.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	// The rw base .git mount must remain (agents still need to commit).
+	wantRW := fmt.Sprintf("-v %s:/repo-root/.git ", filepath.Join(repoRoot, ".git"))
+	if !strings.Contains(argStr, wantRW) {
+		t.Errorf("expected rw base .git mount %q, got: %s", wantRW, argStr)
+	}
+
+	for _, sub := range []string{"config", "hooks", "info"} {
+		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(repoRoot, ".git", sub), sub)
+		if !strings.Contains(argStr, want) {
+			t.Errorf("expected narrowed read-only mount %q, got: %s", want, argStr)
+		}
+	}
+
+	// config.worktree was never created for this agent, so it must not be
+	// mounted (mounting a nonexistent source would make Docker create an
+	// empty file on the host).
+	if strings.Contains(argStr, "config.worktree") {
+		t.Errorf("did not expect a config.worktree mount when the file does not exist, got: %s", argStr)
+	}
+}
+
+func TestNarrowGitAdminMounts_SkippedForLinkedProject(t *testing.T) {
+	// Part A must NOT engage for a linked project — its base is the user's
+	// own checkout (outside ~/.scion/projects), and their own hooks
+	// legitimately run today.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir() // an unrelated path outside ~/.scion/projects
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "hooks"), 0755); err != nil {
+		t.Fatalf("failed to create hooks dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n"), 0644); err != nil {
+		t.Fatalf("failed to write .git/config: %v", err)
+	}
+	workspace := filepath.Join(repoRoot, "worktrees", "agent-1")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	if strings.Contains(argStr, ":/repo-root/.git/config:ro") ||
+		strings.Contains(argStr, ":/repo-root/.git/hooks:ro") ||
+		strings.Contains(argStr, ":/repo-root/.git/info:ro") {
+		t.Errorf("linked project must not get the narrowed admin-dir mount, got: %s", argStr)
+	}
+}
+
+func TestNarrowGitAdminMounts_SkippedForNonDockerRuntime(t *testing.T) {
+	// The mount narrowing is gated to Docker only; podman/apple (and any
+	// RuntimeName not yet extended) must fall through unchanged until their
+	// own support lands.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+
+	for _, runtimeName := range []string{"", "podman", "apple"} {
+		args, err := buildCommonRunArgs(RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			RuntimeName:  runtimeName,
+			RepoRoot:     repoRoot,
+			Workspace:    workspace,
+		})
+		if err != nil {
+			t.Fatalf("buildCommonRunArgs failed for runtime %q: %v", runtimeName, err)
+		}
+		argStr := strings.Join(args, " ")
+		if strings.Contains(argStr, ":/repo-root/.git/config:ro") {
+			t.Errorf("runtime %q must not get the narrowed admin-dir mount (narrowing is docker-only), got: %s", runtimeName, argStr)
+		}
+	}
+}
+
+func TestNarrowGitAdminMounts_CreatesMissingHooksAndInfoDirs(t *testing.T) {
+	// An empty/custom init.templateDir (or `git init --template=`) can
+	// produce a base without .git/hooks or .git/info. Skipping the mount in
+	// that case would fail open: the container could then create its own
+	// writable hooks/info directly in the rw .git root. narrowGitAdminMounts
+	// must create both on the host before mounting.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repoRoot := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "myproject")
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately do NOT create hooks/ or info/.
+	workspace := filepath.Join(repoRoot, "worktrees", "agent-1")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "hooks")); err == nil {
+		t.Fatal("test setup invariant broken: hooks/ should not exist yet")
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	for _, sub := range []string{"hooks", "info"} {
+		if _, statErr := os.Stat(filepath.Join(gitDir, sub)); statErr != nil {
+			t.Errorf("expected narrowGitAdminMounts to create %s on the host, got: %v", sub, statErr)
+		}
+		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
+		if !strings.Contains(argStr, want) {
+			t.Errorf("expected read-only mount %q even though %s was initially missing, got: %s", want, sub, argStr)
+		}
+	}
+}
+
+func TestNarrowSharerRegistryMounts_HubNativeDocker(t *testing.T) {
+	// Part B: for a hub-native worktree-per-agent base, Docker runs must
+	// layer read-only mounts over the sharer registry directory and this
+	// worktree's admin back-link file, alongside Part A's broader surface.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+	gitDir := filepath.Join(repoRoot, ".git")
+	backLinkDir := filepath.Join(gitDir, "worktrees", "agent-1")
+	if err := os.MkdirAll(backLinkDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backLinkDir, "gitdir"), []byte(filepath.Join(workspace, ".git")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	sharersDir := filepath.Join(gitDir, "scion-sharers")
+	if _, statErr := os.Stat(sharersDir); statErr != nil {
+		t.Errorf("expected narrowSharerRegistryMounts to create the sharer-registry dir on the host, got: %v", statErr)
+	}
+	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", sharersDir)
+	if !strings.Contains(argStr, wantSharers) {
+		t.Errorf("expected read-only sharer-registry mount %q, got: %s", wantSharers, argStr)
+	}
+
+	wantBackLink := fmt.Sprintf("-v %s:/repo-root/.git/worktrees/agent-1/gitdir:ro", filepath.Join(backLinkDir, "gitdir"))
+	if !strings.Contains(argStr, wantBackLink) {
+		t.Errorf("expected read-only admin back-link mount %q, got: %s", wantBackLink, argStr)
+	}
+
+	// Part A's broader surface must still apply too (both parts are additive
+	// for a hub-native base).
+	for _, sub := range []string{"config", "hooks", "info"} {
+		want := fmt.Sprintf("-v %s:/repo-root/.git/%s:ro", filepath.Join(gitDir, sub), sub)
+		if !strings.Contains(argStr, want) {
+			t.Errorf("expected Part A mount %q to still apply, got: %s", want, argStr)
+		}
+	}
+}
+
+func TestNarrowSharerRegistryMounts_LocalDocker(t *testing.T) {
+	// Part B's two low-risk paths extend to LOCAL (non-hub-managed) bases —
+	// unlike Part A's broader admin surface, which must stay hub-native-only.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir() // outside ~/.scion/projects — a linked/local base
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "hooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte("[core]\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(repoRoot, "worktrees", "agent-1")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	backLinkDir := filepath.Join(gitDir, "worktrees", "agent-1")
+	if err := os.MkdirAll(backLinkDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backLinkDir, "gitdir"), []byte(filepath.Join(workspace, ".git")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if isHubManagedWorktreeBase(repoRoot) {
+		t.Fatal("test setup invariant broken: repoRoot must be a local (non-hub-managed) base")
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	// Part A must NOT apply to a local base.
+	if strings.Contains(argStr, ":/repo-root/.git/config:ro") ||
+		strings.Contains(argStr, ":/repo-root/.git/hooks:ro") ||
+		strings.Contains(argStr, ":/repo-root/.git/info:ro") {
+		t.Errorf("local base must not get Part A's broader admin-dir mount, got: %s", argStr)
+	}
+
+	// Part B's two paths MUST still apply to a local base.
+	sharersDir := filepath.Join(gitDir, "scion-sharers")
+	if _, statErr := os.Stat(sharersDir); statErr != nil {
+		t.Errorf("expected narrowSharerRegistryMounts to create the sharer-registry dir on the host, got: %v", statErr)
+	}
+	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", sharersDir)
+	if !strings.Contains(argStr, wantSharers) {
+		t.Errorf("expected read-only sharer-registry mount %q on a local base, got: %s", wantSharers, argStr)
+	}
+	wantBackLink := fmt.Sprintf("-v %s:/repo-root/.git/worktrees/agent-1/gitdir:ro", filepath.Join(backLinkDir, "gitdir"))
+	if !strings.Contains(argStr, wantBackLink) {
+		t.Errorf("expected read-only admin back-link mount %q on a local base, got: %s", wantBackLink, argStr)
+	}
+}
+
+// TestNarrowSharerRegistryMounts_LocalRealAgentLayout pins the headline local
+// behavior against the REAL local worktree-mode layout, not just a
+// convenient stand-in: pkg/agent.ProvisionAgent's local path puts an agent's
+// worktree at <projectDir>/agents/<agentName>/workspace, and git's own admin
+// directory name for that worktree (the last path element of the gitdir
+// pointer in <workspace>/.git) does not have to match agentName — `git
+// worktree add` appends a numeric suffix on a name collision, so
+// resolveWorktreeAdminName reads the real name from that gitfile rather than
+// assuming filepath.Base(workspace). This test builds exactly that gitfile
+// (naming admin dir "workspace1", distinct from the agent name "agent-1")
+// and confirms the back-link mount follows the resolved name, not the agent
+// name, while the sharer-registry mount is unaffected by any of this.
+func TestNarrowSharerRegistryMounts_LocalRealAgentLayout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := t.TempDir() // a local base, outside ~/.scion/projects
+	gitDir := filepath.Join(repoRoot, ".git")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The real local layout: <projectDir>/agents/<agentName>/workspace, where
+	// projectDir is <repoRoot>/.scion (config.SelectAgentsRoot's shape).
+	workspace := filepath.Join(repoRoot, ".scion", "agents", "agent-1", "workspace")
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The admin dir's resolved name ("workspace1") intentionally differs from
+	// the agent name ("agent-1") — this is what forces resolveWorktreeAdminName
+	// to actually read the gitfile rather than fall back to filepath.Base.
+	adminDir := filepath.Join(gitDir, "worktrees", "workspace1")
+	if err := os.MkdirAll(adminDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adminDir, "gitdir"), []byte(filepath.Join(workspace, ".git")+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".git"), []byte("gitdir: "+adminDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if isHubManagedWorktreeBase(repoRoot) {
+		t.Fatal("test setup invariant broken: repoRoot must be a local (non-hub-managed) base")
+	}
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	wantBackLink := fmt.Sprintf("-v %s:/repo-root/.git/worktrees/workspace1/gitdir:ro", filepath.Join(adminDir, "gitdir"))
+	if !strings.Contains(argStr, wantBackLink) {
+		t.Errorf("expected the back-link mount to use the resolved admin name %q, got: %s", wantBackLink, argStr)
+	}
+	if strings.Contains(argStr, "worktrees/agent-1/gitdir") {
+		t.Errorf("back-link mount must not use the agent name when the gitfile resolves to a different admin name, got: %s", argStr)
+	}
+
+	sharersDir := filepath.Join(gitDir, "scion-sharers")
+	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", sharersDir)
+	if !strings.Contains(argStr, wantSharers) {
+		t.Errorf("expected the sharer-registry mount independent of admin-name resolution, got: %s", argStr)
+	}
+}
+
+func TestNarrowSharerRegistryMounts_SkippedForNonDockerRuntime(t *testing.T) {
+	// Part B stays gated on the same Docker-only runtime check as Part A —
+	// only the isHubManagedWorktreeBase condition differs between them.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+
+	for _, runtimeName := range []string{"", "podman", "apple"} {
+		args, err := buildCommonRunArgs(RunConfig{
+			Harness:      &harness.Generic{},
+			Name:         "test-agent",
+			UnixUsername: "scion",
+			Image:        "scion-agent:latest",
+			RuntimeName:  runtimeName,
+			RepoRoot:     repoRoot,
+			Workspace:    workspace,
+		})
+		if err != nil {
+			t.Fatalf("buildCommonRunArgs failed for runtime %q: %v", runtimeName, err)
+		}
+		argStr := strings.Join(args, " ")
+		if strings.Contains(argStr, "scion-sharers") {
+			t.Errorf("runtime %q must not get the sharer-registry mount (Docker-only), got: %s", runtimeName, argStr)
+		}
+	}
+}
+
+func TestNarrowSharerRegistryMounts_SkipsMissingBackLink(t *testing.T) {
+	// The admin back-link file is written once by `git worktree add` before
+	// this worktree's container ever starts. A base with no worktrees yet
+	// legitimately has none — skip-if-missing, like config.worktree, not a
+	// create-first fail-open gap like the sharer-registry directory.
+	repoRoot, workspace := setupHubManagedBaseRepo(t, "agent-1")
+	// Deliberately do NOT create .git/worktrees/agent-1/gitdir.
+
+	args, err := buildCommonRunArgs(RunConfig{
+		Harness:      &harness.Generic{},
+		Name:         "test-agent",
+		UnixUsername: "scion",
+		Image:        "scion-agent:latest",
+		RuntimeName:  "docker",
+		RepoRoot:     repoRoot,
+		Workspace:    workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs failed: %v", err)
+	}
+	argStr := strings.Join(args, " ")
+
+	if strings.Contains(argStr, "/gitdir:ro") {
+		t.Errorf("did not expect a gitdir back-link mount when the file does not exist, got: %s", argStr)
+	}
+	// The sharer-registry directory mount must still apply independently.
+	wantSharers := fmt.Sprintf("-v %s:/repo-root/.git/scion-sharers:ro", filepath.Join(repoRoot, ".git", "scion-sharers"))
+	if !strings.Contains(argStr, wantSharers) {
+		t.Errorf("expected the sharer-registry mount regardless of the back-link file, got: %s", argStr)
+	}
+}
+
+// TestSharerRegistryDirName_MatchesProvisionRegistryLayout is a drift
+// tripwire, not a behavior test: sharerRegistryDirName is a literal
+// duplicating pkg/provision's own (unexported) registry directory name,
+// because that name isn't part of provision's public API. Duplicated
+// literals can silently drift — if provision ever renamed its registry
+// directory, this mount would fail open (silently narrowing nothing) rather
+// than failing loudly. Exercising the real registry write path and asserting
+// the marker lands under sharerRegistryDirName catches that drift here,
+// without changing provision's API.
+func TestSharerRegistryDirName_MatchesProvisionRegistryLayout(t *testing.T) {
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	branch := "shared-branch"
+	worktreePath := provision.WorktreePath(base, "agent-1")
+
+	if err := provision.RegisterSharer(base, "", branch, worktreePath, "agent-1"); err != nil {
+		t.Fatalf("RegisterSharer: %v", err)
+	}
+
+	markerDir := filepath.Join(base, ".git", sharerRegistryDirName)
+	entries, err := os.ReadDir(markerDir)
+	if err != nil {
+		t.Fatalf("expected the sharer registry to write its marker under .git/%s (the exact directory "+
+			"narrowSharerRegistryMounts narrows) — if this fails, pkg/provision's registry directory name "+
+			"and sharerRegistryDirName in this package have drifted apart: %v", sharerRegistryDirName, err)
+	}
+	if len(entries) == 0 {
+		t.Errorf("expected at least one marker file under %s, found none", markerDir)
+	}
+}
+
+func TestIsHubManagedWorktreeBase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	hubNative := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "myproject")
+	linked := filepath.Join(home, "dev", "myproject")
+
+	if !isHubManagedWorktreeBase(hubNative) {
+		t.Errorf("expected %q (under GlobalDir/ProjectsDir) to be hub-managed", hubNative)
+	}
+	if isHubManagedWorktreeBase(linked) {
+		t.Errorf("expected %q (outside GlobalDir) to NOT be hub-managed", linked)
+	}
+	if isHubManagedWorktreeBase("") {
+		t.Errorf("expected empty repoRoot to NOT be hub-managed")
 	}
 }
 

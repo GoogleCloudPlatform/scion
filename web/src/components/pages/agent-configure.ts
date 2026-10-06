@@ -26,7 +26,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type {

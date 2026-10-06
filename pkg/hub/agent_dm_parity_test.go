@@ -82,6 +82,10 @@ func paritySetup(t *testing.T) (
 		CreatedBy: owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	// The owner messages its agents through the ancestry allow, which
+	// requires active project access (ptone/scion#2141); the binding grants
+	// no permission itself.
+	grantProjectAccessOnly(t, s, owner.ID, project.ID)
 
 	brokerID := tid("parity-broker")
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
@@ -279,9 +283,8 @@ func TestParityAC2_RateLimitSharedAcrossAdapters(t *testing.T) {
 	// Configure a very tight rate limit (1 per minute).
 	srv.chatSendLimiter = newChatSendLimiterWithRates(
 		map[chatSenderClass]float64{
-			chatSenderHuman:       60,
-			chatSenderAgent:       1,
-			chatSenderAgentMirror: 1,
+			chatSenderHuman: 60,
+			chatSenderAgent: 1,
 		}, time.Now)
 
 	// First send via outbound: should succeed.
@@ -547,9 +550,8 @@ func TestParityAC2_TypeSwitchCannotBypassBudget(t *testing.T) {
 	// Configure a very tight rate limit.
 	srv.chatSendLimiter = newChatSendLimiterWithRates(
 		map[chatSenderClass]float64{
-			chatSenderHuman:       60,
-			chatSenderAgent:       1,
-			chatSenderAgentMirror: 1,
+			chatSenderHuman: 60,
+			chatSenderAgent: 1,
 		}, time.Now)
 
 	// First send with type "instruction" via outbound.

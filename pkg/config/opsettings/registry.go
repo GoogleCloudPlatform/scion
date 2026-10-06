@@ -64,6 +64,19 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
+// settings-v1.schema.json: shared dir name keys (lowercase letters, digits
+// and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
+func sharedDirStorageBackendsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"propertyNames": map[string]interface{}{
+			"pattern": config.SharedDirNamePattern,
+		},
+		"additionalProperties": map[string]interface{}{"type": "string", "enum": []string{"local", "nfs"}},
+	}
+}
+
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
 // Layer-0 (bootstrap) and must not be written via the admin API.
@@ -227,6 +240,14 @@ func init() {
 			Name:       "experiments",
 			KoanfPaths: nil,
 			New:        func() any { return &ExperimentsSettings{} },
+		},
+		{
+			// artifacts is durable via DB but has no settings.yaml
+			// representation. Absent DB row = compiled defaults (see
+			// ArtifactsSettings). Seeding skips this section (KoanfPaths nil).
+			Name:       "artifacts",
+			KoanfPaths: nil,
+			New:        func() any { return &ArtifactsSettings{} },
 		},
 	}
 
@@ -420,6 +441,24 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
+		// artifacts schema is hand-written -- it is runtime/API-owned state
+		// with no $defs in settings-v1.schema.json. The per-field minimums
+		// match ArtifactsSettings.Resolve; the cross-field rules (file limit
+		// <= bundle limit, default TTL <= max TTL) are not expressible here
+		// and are enforced by Resolve, which fails closed.
+		"artifacts": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enabled":                map[string]interface{}{"type": "boolean"},
+				"max_file_bytes":         map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_bundle_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_files":              map[string]interface{}{"type": "integer", "minimum": 1},
+				"default_retention_days": map[string]interface{}{"type": "integer", "minimum": 0},
+				"link_default_ttl_hours": map[string]interface{}{"type": "integer", "minimum": 1},
+				"link_max_ttl_hours":     map[string]interface{}{"type": "integer", "minimum": 1},
+			},
+			"additionalProperties": false,
+		},
 		"telemetry": buildTelemetrySchema(defs),
 		"agent_defaults": {
 			"type": "object",
@@ -462,22 +501,23 @@ func compileSchemas() {
 			"additionalProperties": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"type":                       map[string]interface{}{"type": "string"},
-					"host":                       map[string]interface{}{"type": "string"},
-					"context":                    map[string]interface{}{"type": "string"},
-					"namespace":                  map[string]interface{}{"type": "string", "maxLength": 63, "pattern": dns1123LabelOrEmptyPattern},
-					"env":                        map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
-					"sync":                       map[string]interface{}{"type": "string"},
-					"gke":                        map[string]interface{}{"type": "boolean"},
-					"list_all_namespaces":        map[string]interface{}{"type": "boolean"},
-					"priority_class_name":        map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
-					"cloudrun":                   map[string]interface{}{"type": "object"},
-					"shared_dir_storage_class":   map[string]interface{}{"type": "string"},
-					"shared_dir_size":            map[string]interface{}{"type": "string"},
-					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
-					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
+					"type":                        map[string]interface{}{"type": "string"},
+					"host":                        map[string]interface{}{"type": "string"},
+					"context":                     map[string]interface{}{"type": "string"},
+					"namespace":                   map[string]interface{}{"type": "string", "maxLength": 63, "pattern": dns1123LabelOrEmptyPattern},
+					"env":                         map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					"sync":                        map[string]interface{}{"type": "string"},
+					"gke":                         map[string]interface{}{"type": "boolean"},
+					"list_all_namespaces":         map[string]interface{}{"type": "boolean"},
+					"priority_class_name":         map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
+					"cloudrun":                    map[string]interface{}{"type": "object"},
+					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
+					"shared_dir_size":             map[string]interface{}{"type": "string"},
+					"safe_to_evict":               map[string]interface{}{"type": "boolean"},
+					"shared_dir_storage_backend":  map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"shared_dir_storage_backends": sharedDirStorageBackendsSchema(),
+					"home_storage_backend":        map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":           map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
@@ -513,13 +553,14 @@ func compileSchemas() {
 							},
 						},
 					},
-					"secrets":                    map[string]interface{}{"type": "array"},
-					"shared_dir_storage_class":   map[string]interface{}{"type": "string"},
-					"shared_dir_size":            map[string]interface{}{"type": "string"},
-					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
-					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
+					"secrets":                     map[string]interface{}{"type": "array"},
+					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
+					"shared_dir_size":             map[string]interface{}{"type": "string"},
+					"safe_to_evict":               map[string]interface{}{"type": "boolean"},
+					"shared_dir_storage_backend":  map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"shared_dir_storage_backends": sharedDirStorageBackendsSchema(),
+					"home_storage_backend":        map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":           map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),

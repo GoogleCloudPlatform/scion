@@ -29,6 +29,7 @@ import type { ScionPageAgentDetail } from './agent-detail.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the chat tests do.
+// Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
   stateManager: new EventTarget(),
@@ -240,7 +241,7 @@ describe('agent detail status badges', () => {
   function headerBadge(agent: Agent): Element {
     const page = makePage(agent);
     const tpl = (page as unknown as { renderHeader(): TemplateResult }).renderHeader();
-    const badge = renderTo(tpl).querySelector('.header-title > scion-status-badge');
+    const badge = renderTo(tpl).querySelector('.header-title-text > scion-status-badge');
     expect(badge).not.toBeNull();
     return badge!;
   }

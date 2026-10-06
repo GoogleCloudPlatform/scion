@@ -47,6 +47,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: scion
 {{- end }}
 
+{{- /*
+CONTRACT: a Terraform-owned NEG Service selects hub pods by exactly these two
+labels. Changing the keys or their derivation leaves that Service with no
+endpoints and breaks the load balancer without any error here. Pinned by
+tests/render-guards.sh ("Deployment selector labels are a contract").
+*/}}
 {{- define "scion-hub.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "scion-hub.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -538,7 +544,7 @@ answered first every time, so the missing layer behind it could not be seen. Bot
 layers are now asserted separately in the guard table.
 */}}
 {{- define "scion-hub.image" -}}
-{{- $repository := required "image.repository is required: set it to a hub image built from the root Dockerfile with --target hub-gke. Note that the hub-gke stage is added by the image-build change that accompanies this chart and is NOT in the root Dockerfile yet, so that build fails today with an unknown-target error. The chart has no default and cannot have one - that image is not published anywhere, and the published artifact named scion-hub is NOT it: it runs as root (image-build/hub/Dockerfile:24), which this chart's runAsNonRoot refuses, and it is built with -tags no_embed_web (image-build/scion-base/Dockerfile:55), so --enable-web has nothing to serve." .Values.image.repository }}
+{{- $repository := required "image.repository is required: set it to a hub image built from the root Dockerfile with --target hub-gke (image-build/cloudbuild-hub-gke.yaml builds and pushes it as scion-hub-gke). The chart has no default and cannot have one - it has no canonical registry to point at, and the published artifact named scion-hub is NOT it: it runs as root (image-build/hub/Dockerfile:24), which this chart's runAsNonRoot refuses, and it is built with -tags no_embed_web (image-build/scion-base/Dockerfile:55), so --enable-web has nothing to serve." .Values.image.repository }}
 {{- if and .Values.image.tag .Values.image.digest }}
 {{- fail "image.tag and image.digest are mutually exclusive: set image.digest (preferred) or image.tag, not both." }}
 {{- end }}
@@ -1742,7 +1748,7 @@ Exactly one list is.
 
 {{- /*
 5. THESE ARE DELIVERED THROUGH A CHANNEL OTHER THAN argv, AND argv WINS OVER IT
-   SILENTLY. Two of the five are delivered by this chart and three are not, and
+   SILENTLY. Four of the five are delivered by this chart and one is not, and
    that split is the paragraph. It was one claim about five flags until the
    settings rendering landed, and it is two claims now.
 
@@ -1752,17 +1758,19 @@ Exactly one list is.
                      reaching the container by envFrom at
                      templates/deployment.yaml:147-148.
      storage-bucket  server.storage.bucket in the rendered settings.yaml.
+     db              server.database.url in the rendered settings.yaml, under
+                     postgres. Landed with Cloud SQL.
+     admin-emails    server.hub.admin_emails in the rendered settings.yaml, from
+                     hub.adminEmails. parseAdminEmails
+                     (cmd/server_foreground.go) reads argv first and consults
+                     the settings file only when argv is empty.
 
    NOT DELIVERED HERE. Live on argv, nothing to disagree with, would simply take
    effect if passed:
 
-     db              cfg.Database.URL, cmd/server_foreground.go:875-877.
-                     Arrives with Cloud SQL.
-     storage-dir     cfg.Storage.LocalPath, cmd/server_foreground.go:890-892.
+     storage-dir     cfg.Storage.LocalPath, loadAndReconcileConfig
+                     (cmd/server_foreground.go).
                      Arrives with the workspace share.
-     admin-emails    cfg.Hub.AdminEmails, cmd/server_foreground.go:1402-1409 and
-                     :2116-2124. Both sites read argv first and consult the
-                     settings file only when argv is empty. No phase claims it.
 
    THIS HEADER WAS CORRECT AND STOPPED BEING CORRECT WITHOUT THE FILE BEING
    EDITED. It read "there is no second source yet for anything to disagree with"
@@ -1775,24 +1783,25 @@ Exactly one list is.
    of the chart still hold - it is how they go stale unnoticed.
 
    ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
-   where it lands instead. For base-url, storage-bucket and - since the Cloud SQL
-   phase - db, that is the first list above, and the answer is still not argv.
-   For the other two, admin-emails and storage-dir, it is nowhere yet. None of
+   where it lands instead. For base-url, storage-bucket, db (since the Cloud SQL
+   phase) and admin-emails (since hub.adminEmails), that is the first list
+   above, and the answer is still not argv. For storage-dir it is nowhere yet. None of
    the five is rendered as an argument ($setByChart), none selects
    which configuration is loaded ($neverPassed), none is a flag that no longer
    exists ($removedFlags), none is inert or misnamed ($aliasOrIgnored), and
    none weakens authentication ($unsafeToPass).
 
-   The harm is present for three of the five and scheduled for the other two.
-   Passing -base-url, -storage-bucket or -db today makes argv the silent winner
-   over a value this chart rendered, and nothing logs the disagreement. -db
-   joined that group when the Cloud SQL phase started rendering
-   server.database.url, and the move was forced rather than remembered:
-   hack/verify.sh carries the delivery state as a committed number per flag and
-   goes red when a channel appears without this paragraph being re-tensed in the
-   same diff. Passing admin-emails or storage-dir today changes a setting nothing
-   else sets; the same silent overriding starts the day its channel lands, with
-   no edit here to mark it. The
+   The harm is present for four of the five and scheduled for the fifth.
+   Passing -base-url, -storage-bucket, -db or -admin-emails today makes argv the
+   silent winner over a value this chart rendered, and nothing logs the
+   disagreement. -db joined that group when the Cloud SQL phase started
+   rendering server.database.url, and -admin-emails when hub.adminEmails started
+   rendering server.hub.admin_emails; both moves were forced rather than
+   remembered: hack/verify.sh carries the delivery state as a committed number
+   per flag and goes red when a channel appears without this paragraph being
+   re-tensed in the same diff. Passing storage-dir today changes a setting
+   nothing else sets; the same silent overriding starts the day its channel
+   lands, with no edit here to mark it. The
    asymmetry is what decides it - reserving costs an operator a flag they have no
    reason to want, un-reserving is a deliberate act with a place to record itself
    (see the closing paragraph), and reserving after the fact requires somebody to
@@ -2057,7 +2066,7 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
 {{- end }}
 {{- if has $flag $ownedByConfig }}
-{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Two of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket onto server.storage.bucket in the settings file it renders, so passing either makes argv the winner over a value already set here. The other three - -db, -storage-dir and -admin-emails - have no second source in this release and would simply take effect; they stay reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Four of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket, -db and -admin-emails onto server.storage.bucket, server.database.url and server.hub.admin_emails in the settings file it renders, so passing any of them makes argv the winner over a value set here. The fifth, -storage-dir, has no second source in this release and would simply take effect; it stays reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
@@ -2321,8 +2330,40 @@ container env entries alike, and asserting this guard refuses every one of them.
 {{- end }}
 {{- range $entry := .Values.hub.extraEnv }}
 {{- $name := toString (dig "name" "" $entry) }}
-{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
-{{- fail (printf "hub.extraEnv may not set %s. Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go) becomes true while the chart's HA checks never run, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
+{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC|SECRETS)_" $name }}
+{{- fail (printf "hub.extraEnv may not set %s (SCION_SERVER_DATABASE_*, SCION_SERVER_OIDC_* and SCION_SERVER_SECRETS_* are refused). Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go) becomes true while the chart's HA checks never run, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead. The same holds for SCION_SERVER_SECRETS_BACKEND, which binds to server.secrets.backend after settings.yaml and can select gcpsm with no project, a hub that only logs the backend error and runs with no secret backend; configure it through secrets.backend and secrets.gcpsm, which render server.secrets." $name) }}
+{{- end }}
+{{- /*
+TWO NAMES THAT REACH THE SETTINGS DOCUMENT THROUGH THE KOANF ENV LAYER, refused
+here rather than modelled. LoadVersionedSettings (pkg/config/settings_v1.go)
+loads SCION_* environment variables on top of settings.yaml, so these do more
+than the registry check in scion-hub.settings can see from the rendered file:
+
+  SCION_ACTIVE_PROFILE overrides active_profile, so the profile whose
+  image_registry the hub resolves is not the one the chart read. Refused in
+  every form, literal or valueFrom. Set active_profile through config.extra -
+  which assertNoExtraCollision refuses today, because the chart writes it - or
+  not at all.
+
+  SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY with an empty literal
+  value. requireImageRegistryForBroker (cmd/server_foreground.go) skips an empty
+  variable, so neither is a registry source. For SCION_IMAGE_REGISTRY it is
+  worse: the env layer has already replaced the settings file's image_registry
+  with "", so a registry the chart rendered is erased and the hub refuses to
+  start. The maintenance name is refused alongside it so that the two names
+  follow one rule. An entry with no value and no valueFrom is the same empty
+  string to Kubernetes and is refused too. A non-empty value is accepted and
+  counts as a registry source; a valueFrom is accepted unread.
+
+Applied here, in the extraEnv guard, so that it also holds under
+config.existingSecret, where the settings file is the operator's but the
+environment is still the chart's.
+*/}}
+{{- if eq $name "SCION_ACTIVE_PROFILE" }}
+{{- fail "hub.extraEnv may not set SCION_ACTIVE_PROFILE: the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go), so it would replace active_profile and change which profile's image_registry the hub resolves, without the chart's registry check seeing it. Set active_profile through config.extra instead; the chart renders active_profile: default, so changing it there is refused as a collision until the chart supports it." }}
+{{- end }}
+{{- if and (has $name (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY")) (not (dig "valueFrom" "" $entry)) (eq (toString (dig "value" "" $entry)) "") }}
+{{- fail (printf "hub.extraEnv may not set %s to an empty value. An empty value is not a registry source: requireImageRegistryForBroker (cmd/server_foreground.go) skips it. An empty SCION_IMAGE_REGISTRY also erases the rendered one, because the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go) and image_registry becomes \"\", so the hub refuses to start with no registry. Remove the entry, or give it a non-empty value or a valueFrom." $name) }}
 {{- end }}
 {{- if has $name $shadowable }}
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}
@@ -2423,7 +2464,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
 {{- end }}
 
 {{/*
@@ -2473,6 +2514,16 @@ it; keep that call.
 {{- if .Values.config.extra }}{{- $inline = append $inline "config.extra" }}{{- end }}
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
+{{- if .Values.hub.adminEmails }}{{- $inline = append $inline "hub.adminEmails" }}{{- end }}
+{{- /*
+secrets.backend has a non-empty default, but local is also what renders nothing,
+so any other value was typed. The gcpsm leaves default empty.
+*/}}
+{{- $secretsInline := .Values.secrets | default (dict) }}
+{{- $gcpsmInline := $secretsInline.gcpsm | default (dict) }}
+{{- if ne (toString ($secretsInline.backend | default "local")) "local" }}{{- $inline = append $inline "secrets.backend" }}{{- end }}
+{{- if $gcpsmInline.projectId }}{{- $inline = append $inline "secrets.gcpsm.projectId" }}{{- end }}
+{{- if $gcpsmInline.replicationLocations }}{{- $inline = append $inline "secrets.gcpsm.replicationLocations" }}{{- end }}
 {{- /*
 PHASE 2 DELTA. The three database leaves below are the append this comment asked
 later phases for, and phase 2 owed it: phase 2 is what introduced the database
@@ -3037,6 +3088,14 @@ real deep merge rather than a text append.
 {{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
 {{- include "scion-hub.assertNoCredential" (dict "value" .Values.hub.name "source" "hub.name") }}
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
+{{- /*
+server.hub.admin_emails, the V1ServerHubConfig spelling. Omitted when empty:
+parseAdminEmails (cmd/server_foreground.go) treats an absent list and an empty
+one the same, and an absent key keeps the rendered file free of a no-op line.
+*/}}
+{{- with .Values.hub.adminEmails }}
+{{- $hub = set $hub "admin_emails" (toStrings .) }}
+{{- end }}
 
 {{- /*
 server.database. The key is url, not dsn. Pool settings are here now because they
@@ -3213,6 +3272,44 @@ nothing, so it is refused rather than discarded.
 {{- end }}
 
 {{- /*
+server.secrets: the secret backend. Snake_case, as V1SecretsConfig binds it
+(pkg/config/settings_v1.go). local is the hub's own default (NewBackend treats
+"" and local alike), so it renders nothing.
+
+gcpsm WITHOUT A PROJECT IS REFUSED BECAUSE THE HUB DOES NOT REFUSE IT.
+NewGCPBackend returns "gcpsm backend requires a GCP project ID", and the caller
+in cmd/server_foreground.go logs that as a warning and carries on with a nil
+backend - the hub starts, passes /readyz, and every secret operation fails.
+
+The gcpsm fields under backend local reach nothing, so they are refused rather
+than discarded. gcp_credentials is not rendered: on GKE the hub uses
+Application Default Credentials from Workload Identity, and an inline key does
+not belong in a value. IAM for Secret Manager is not this chart's.
+*/}}
+{{- $secretsValues := .Values.secrets | default (dict) }}
+{{- $secretsBackend := toString ($secretsValues.backend | default "local") }}
+{{- $gcpsmValues := $secretsValues.gcpsm | default (dict) }}
+{{- $gcpProjectId := trim (toString ($gcpsmValues.projectId | default "")) }}
+{{- $gcpLocations := $gcpsmValues.replicationLocations | default (list) }}
+{{- if eq $secretsBackend "gcpsm" }}
+{{- if not $gcpProjectId }}
+{{- fail "secrets.backend is gcpsm, which requires secrets.gcpsm.projectId. The hub does not refuse to start without it: NewGCPBackend fails with \"gcpsm backend requires a GCP project ID\", the server logs that as a warning (cmd/server_foreground.go) and runs with no secret backend, so every secret read and write fails at request time." }}
+{{- end }}
+{{- $secretsOut := dict "backend" "gcpsm" "gcp_project_id" $gcpProjectId }}
+{{- if $gcpLocations }}
+{{- $secretsOut = set $secretsOut "gcp_replication_locations" (toStrings $gcpLocations) }}
+{{- end }}
+{{- $server = set $server "secrets" $secretsOut }}
+{{- else }}
+{{- $inertSecrets := list }}
+{{- if $gcpProjectId }}{{- $inertSecrets = append $inertSecrets "secrets.gcpsm.projectId" }}{{- end }}
+{{- if $gcpLocations }}{{- $inertSecrets = append $inertSecrets "secrets.gcpsm.replicationLocations" }}{{- end }}
+{{- if $inertSecrets }}
+{{- fail (printf "%s set while secrets.backend is %s. The chart renders server.secrets only for backend gcpsm, so the value would reach nothing. Set secrets.backend: gcpsm, or remove it." (join " and " $inertSecrets) $secretsBackend) }}
+{{- end }}
+{{- end }}
+
+{{- /*
 LOAD-BEARING. schema_version is not boilerplate and it is not redundant with
 anything. Do not drop it, and do not let it be dropped by an override path that
 happens not to be covered.
@@ -3260,6 +3357,73 @@ was measured doing exactly that, landing in the Secret AND moving the
 checksum/settings digest. The projection cannot enumerate its way out of an
 open-ended surface; this turns the injection into a render failure instead. */}}
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.config.extra "source" "config.extra") }}
+{{- /*
+AN IMAGE REGISTRY IS REQUIRED, because the hub refuses to start without one.
+This chart always runs the hub with an in-process runtime broker: it renders
+--enable-runtime-broker, which sets cfg.RuntimeBroker.Enabled, and $setByChart
+refuses an --enable-runtime-broker=false in hub.args. With the broker enabled,
+runServerForeground calls requireImageRegistryForBroker
+(cmd/server_foreground.go) before starting it, and that returns "image_registry
+is not configured, but the runtime broker requires it" unless one of these is
+non-empty:
+
+  1. SCION_IMAGE_REGISTRY in the environment
+  2. SCION_MAINTENANCE_IMAGE_REGISTRY in the environment
+  3. image_registry resolved from settings.yaml for the active profile
+     (VersionedSettings.ResolveImageRegistry: profiles.<active>.image_registry,
+     else the top-level image_registry)
+
+Those are the cases accepted here, read off the merged document and
+hub.extraEnv: agents.imageRegistry and config.extra both reach (3), and an
+extraEnv entry of either name with a non-empty value or a valueFrom reaches (1)
+or (2). A valueFrom is accepted unread because the chart cannot see what it
+resolves to.
+
+This is only correct because scion-hub.assertExtraEnv refuses the two env
+entries that would change (3) behind the file's back. The koanf env layer in
+LoadVersionedSettings applies SCION_* variables over settings.yaml, so
+SCION_ACTIVE_PROFILE would change which profile (3) reads, and an empty
+SCION_IMAGE_REGISTRY would overwrite the top-level image_registry with "". The
+chart refuses SCION_ACTIVE_PROFILE in hub.extraEnv outright and refuses either
+registry variable with an empty literal value, rather than modelling the env
+layer's precedence here. The hub's DB-backed settings overlay does not count: startRuntimeBroker
+installs it after this check has run.
+
+Not the check described under --profile in the reserved-flag comments. That
+one, config.RequireImageRegistry in cmd/root.go, is skipped for the server
+subtree and never runs on hub start; this one is in the server itself and
+always does.
+
+Not evaluated under config.existingSecret, where this define is not reached:
+the settings file is the operator's, and the hub's own check still applies.
+Runs after the document assertions so that a more specific refusal about the
+same render is reported first.
+*/}}
+{{- $activeProfile := toString (dig "active_profile" "" $doc) }}
+{{- $registryFromSettings := toString (dig "image_registry" "" $doc) }}
+{{- $profilesDoc := dig "profiles" (dict) $doc }}
+{{- if kindIs "map" $profilesDoc }}
+{{- $profileDoc := index $profilesDoc $activeProfile }}
+{{- if kindIs "map" $profileDoc }}
+{{- $profileRegistry := toString (dig "image_registry" "" $profileDoc) }}
+{{- if $profileRegistry }}{{- $registryFromSettings = $profileRegistry }}{{- end }}
+{{- end }}
+{{- end }}
+{{- $registryFromEnv := false }}
+{{- range $entry := .Values.hub.extraEnv }}
+{{- if has (toString (dig "name" "" $entry)) (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY") }}
+{{- if or (dig "value" "" $entry) (dig "valueFrom" "" $entry) }}
+{{- $registryFromEnv = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not (or $registryFromSettings $registryFromEnv) }}
+{{- /* An extraEnv refusal is the more specific diagnosis when one applies - an
+empty SCION_IMAGE_REGISTRY, or SCION_ACTIVE_PROFILE moving off the profile read
+here - and this Secret renders before the Deployment that runs the guard. */}}
+{{- include "scion-hub.assertExtraEnv" . }}
+{{- fail "agents.imageRegistry is required: this chart always runs the hub with an in-process runtime broker (--enable-runtime-broker), and with the broker enabled the hub refuses to start without an image registry (requireImageRegistryForBroker, cmd/server_foreground.go: \"image_registry is not configured, but the runtime broker requires it\"). Set agents.imageRegistry to the registry prefix agent images are pulled from, for example us-docker.pkg.dev/<project>/<repo>. The hub also accepts image_registry for the active profile through config.extra, or SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv." }}
+{{- end }}
 {{- $rendered }}
 {{- end }}
 

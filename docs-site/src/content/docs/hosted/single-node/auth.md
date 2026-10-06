@@ -396,7 +396,7 @@ Communication between the Hub and a Runtime Broker (in both directions) is secur
 - **Payload Integrity**: The request body is included in the signature, preventing tampering.
 - **Replay Protection**: Every request includes a timestamp and a unique nonce.
 
-A shared secret is established during the `scion broker register` flow and is stored locally in `~/.scion/broker-credentials.json`.
+A shared secret is established during the `scion runtime-broker register` flow and is stored locally in `~/.scion/hub-credentials/<name>.json`, one file per Hub connection.
 
 ### Provider Authorization
 
@@ -420,7 +420,7 @@ Scion provides a native mechanism to assign Google Cloud Platform (GCP) identiti
 
 When creating an agent, you can configure its **GCP Identity Mode**:
 
-- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with Block is rejected, including an agent with no GCP identity mode configured, which is dispatched as Block. On Kubernetes, set Passthrough or Assign explicitly. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
+- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with an explicit Block is rejected. An agent with no GCP identity mode configured gets Passthrough on Kubernetes instead. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
 - **Assign**: Assigns a specific Google Service Account to the agent.
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
   - Token requests are proxied to the Scion Hub, which uses its own broad permissions to generate a short-lived access token for the requested Service Account (via the `iam.serviceAccounts.getAccessToken` permission).

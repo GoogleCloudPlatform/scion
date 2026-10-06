@@ -61,9 +61,13 @@ func (e *UTCTimestampNormalizeExecutor) Run(ctx context.Context, logger io.Write
 //   - applied-config-tz-cleanup: its description promises a safe re-run that
 //     converts 0. A run strips TZ from both env copies, so a second run
 //     skips every agent it already handled and writes no agent row.
+//   - auto-expose-env-normalize: a run removes every stamp it re-derives, so
+//     a second run finds nothing to do; an agent skipped because a lookup
+//     failed is retried by the next run.
 var rerunnableMigrations = map[string]bool{
 	entadapter.UTCTimestampNormalizeKey:  true,
 	entadapter.AppliedConfigTZCleanupKey: true,
+	entadapter.AutoExposeEnvNormalizeKey: true,
 }
 
 // storeDB returns the store's *sql.DB and ent dialect, or nil and "" when

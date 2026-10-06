@@ -30,7 +30,8 @@ import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
 } from '../components/shared/palette/quick-palette-host.js';
-import { isMacPlatform } from '../components/shared/header.js';
+import '../components/shared/header.js';
+import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import '../components/terminal/terminal-pane.js';
 
@@ -143,6 +144,18 @@ export class TerminalWorkspaceRoot {
   private paletteFocusAgentId: string | null = null;
   /** Whether the palette's close animation and Shoelace's own focus restore have both finished. */
   private paletteDialogSettled = false;
+  /**
+   * The agent last selected in the open terminals rail (click, or Enter or
+   * Space on its button), whose terminal takes keyboard focus once its
+   * pane is visible — see {@link focusRailTarget}. Only a rail selection
+   * sets it, so reconnects, restores and other ways of opening a pane never
+   * move focus. Cleared once used, when focus lands somewhere other than
+   * the rail or that pane, when the palette opens, when the workspace is
+   * hidden, and when that agent's entry is removed (the rail close button
+   * removes it at once), so a pane that turns up much later cannot take
+   * focus.
+   */
+  private railFocusAgentId: string | null = null;
   /**
    * Multi-pane placement for a palette-picked agent with no session yet:
    * set by {@link selectFromPalette} before it asks `main.ts` to open the
@@ -599,11 +612,22 @@ export class TerminalWorkspaceRoot {
    * land in the pane the palette was opened from, which is not a user move.
    */
   private readonly handleGlobalFocusIn = (e: FocusEvent): void => {
+    // One pass over the path: note whether focus is in the rail list or in
+    // a pane, and handle the pane it landed in.
+    let inRailOrPane = false;
     for (const node of e.composedPath()) {
+      if (node === this.railList) inRailOrPane = true;
       if (!(node instanceof Element) || node.tagName !== 'SCION-TERMINAL-PANE') continue;
+      inRailOrPane = true;
       for (const [key, pane] of this.panes) {
         if (pane === node) {
           this.lastFocusedPaneSessionKey = key;
+          if (
+            this.railFocusAgentId !== null &&
+            this.entries.get(key)?.state.agentId !== this.railFocusAgentId
+          ) {
+            this.railFocusAgentId = null;
+          }
           if (
             this.paletteDialogSettled &&
             this.paletteFocusAgentId !== null &&
@@ -615,6 +639,9 @@ export class TerminalWorkspaceRoot {
         }
       }
     }
+    // Focus moving anywhere outside the rail and the panes (another control,
+    // a dialog) means the user has moved on: drop a pending rail target.
+    if (!inRailOrPane) this.railFocusAgentId = null;
   };
 
   /**
@@ -626,6 +653,7 @@ export class TerminalWorkspaceRoot {
   private openPalette(): void {
     if (this.paletteHost.isOpen) return;
     this.paletteFocusAgentId = null;
+    this.railFocusAgentId = null;
     this.paletteHost.open();
   }
 
@@ -642,6 +670,25 @@ export class TerminalWorkspaceRoot {
     const pane = key ? this.panes.get(key) : undefined;
     if (!pane || pane.hidden) return;
     this.paletteFocusAgentId = null;
+    pane.focusTerminal();
+  }
+
+  /**
+   * Moves keyboard focus into the terminal of the agent selected in the
+   * rail once its pane is visible. Runs right after the rail selection (the
+   * pane may already be on screen, and navigating to the route it already
+   * shows changes nothing) and after every refresh, since a pane brought to
+   * the front, or created for the selection, becomes visible only then.
+   * `focusTerminal` focuses the xterm input, or the pane itself until the
+   * terminal mounts, which then takes focus on its own.
+   */
+  private focusRailTarget(): void {
+    const agentId = this.railFocusAgentId;
+    if (!agentId) return;
+    const key = this.findSessionKeyByAgentId(agentId);
+    const pane = key ? this.panes.get(key) : undefined;
+    if (!pane || pane.hidden || !this.layoutManager.getVisibleSlots().includes(key)) return;
+    this.railFocusAgentId = null;
     pane.focusTerminal();
   }
 
@@ -750,7 +797,10 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
-    if (!visible) this.paletteHost.hide();
+    if (!visible) {
+      this.paletteHost.hide();
+      this.railFocusAgentId = null;
+    }
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
     if (visible && !this._frameEntered) {
@@ -783,6 +833,9 @@ export class TerminalWorkspaceRoot {
       // Close in layout manager to clear all preset references
       this.layoutManager.close(key);
       if (this.lastFocusedPaneSessionKey === key) this.lastFocusedPaneSessionKey = null;
+      // Closed from the rail, or removed elsewhere: a pane opened later for
+      // the same agent must not take focus from this old selection.
+      if (this.railFocusAgentId === entry.state.agentId) this.railFocusAgentId = null;
     }
     for (const session of sessions) {
       if (this.entries.has(session.state.key)) continue;
@@ -966,6 +1019,7 @@ export class TerminalWorkspaceRoot {
     this.refreshPaneVisibility();
     this.publishCount();
     this.focusPaletteTarget();
+    this.focusRailTarget();
   }
 
   /** Update layout toolbar button highlighting. */
@@ -1272,8 +1326,15 @@ export class TerminalWorkspaceRoot {
     return item;
   }
 
+  /**
+   * Rail selection (a click, or Enter or Space on the rail button, which
+   * the browser turns into a click): navigates to the agent and moves
+   * keyboard focus into its terminal — see {@link focusRailTarget}.
+   */
   private openSessionRoute(entry: RailEntry): void {
+    this.railFocusAgentId = entry.state.agentId;
     this.dispatchNavigation(`/terminals/${entry.state.agentId}`);
+    this.focusRailTarget();
   }
 
   private dispatchNavigation(path: string): void {
