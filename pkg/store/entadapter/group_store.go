@@ -853,15 +853,11 @@ SELECT id FROM effective`, p1)
 	return result, nil
 }
 
-// maxParentGroupDepth caps the recursion depth of the ancestor CTE.
-// This is a safety limit to bound query cost in pathological hierarchies;
-// in practice group nesting should be shallow.
-const maxParentGroupDepth = 32
-
 // GetParentGroups returns all ancestor groups of the given group — groups that
 // transitively contain this group as a child — via a recursive CTE that walks
 // the parent_groups edge upward. The group itself is NOT included in the
-// result. Recursion depth is capped at maxParentGroupDepth levels.
+// result. The walk has no depth limit: it resolves the same closure that
+// GetEffectiveGroups resolves for a member, and UNION ends it on a cycle.
 func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
 	uid, err := parseUUID(groupID)
 	if err != nil {
@@ -871,14 +867,13 @@ func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]str
 	drv := s.client.Driver()
 	p1 := sqlUUIDPh(drv.Dialect(), 1)
 
-	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id, depth) AS (
-    SELECT group_id, 1 FROM group_child_groups WHERE parent_group_id = %s
-    UNION ALL
-    SELECT gc.group_id, a.depth + 1 FROM group_child_groups gc
+	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id) AS (
+    SELECT group_id FROM group_child_groups WHERE parent_group_id = %s
+    UNION
+    SELECT gc.group_id FROM group_child_groups gc
     JOIN ancestors a ON gc.parent_group_id = a.id
-    WHERE a.depth < %d
 )
-SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
+SELECT id FROM ancestors`, p1)
 
 	rows := &entsql.Rows{}
 	if err := drv.Query(ctx, query, []any{uid}, rows); err != nil {
