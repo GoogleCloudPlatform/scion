@@ -897,10 +897,10 @@ type startDuringStopStatusStore struct {
 
 func (s startDuringStopStatusStore) UpdateAgentStatus(ctx context.Context, id string, upd store.AgentStatusUpdate) error {
 	if upd.IfRunID != "" && s.fired.CompareAndSwap(false, true) {
-		_, err := s.Store.ClaimAgentStart(ctx, id, "new-start-hub", store.StartClaimUser, "", time.Minute)
+		_, err := s.ClaimAgentStart(ctx, id, "new-start-hub", store.StartClaimUser, "", time.Minute)
 		*s.claimErr = err
 		if err == nil {
-			if cur, gerr := s.Store.GetAgent(ctx, id); gerr == nil {
+			if cur, gerr := s.GetAgent(ctx, id); gerr == nil {
 				_, _ = s.srv.checkAndReserveBrokerQuota(ctx, cur)
 			}
 		}
