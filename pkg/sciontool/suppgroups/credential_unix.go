@@ -23,7 +23,10 @@ import "syscall"
 // never nil: an empty, non-nil slice states explicitly that every other
 // supplementary group is cleared, which is what Go does for nil as well.
 // Use it at every site where sciontool drops to the agent user, so a hook
-// or service writing into a shared dir behaves like the harness.
+// or service writing into a shared dir behaves like the harness. The
+// init-time git commands (configureGitCommand in cmd/sciontool/commands/init.go)
+// and the rootless keep-id early drop (setupHostUser in the same file)
+// deliberately do not use it, because they run before shared dirs are used.
 func Credential(uid, gid uint32) *syscall.Credential {
 	groups := FromEnv()
 	if groups == nil {

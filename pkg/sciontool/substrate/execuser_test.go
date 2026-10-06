@@ -16,13 +16,14 @@ package substrate
 
 import (
 	"fmt"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 )
 
 // TestTrustBundleEnvPairs_AllCAVarsSet is test (b): with all 5 candidate
