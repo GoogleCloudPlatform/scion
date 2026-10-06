@@ -281,8 +281,8 @@ func isPrincipalInputsLoad(stack []string) bool {
 // an installed memo. It asserts that no call made for a relationship
 // candidate observes either memo key, except the project-access stage
 // (relationshipProjectAccessStage), which evaluates the requester's own
-// project access and must read the requester's input memo (never the edges
-// memo); user owners admitted through membership and through system
+// project access and must read the requester's input memo (and never looks
+// up delegation edges); user owners admitted through membership and through system
 // authority exercise it and must decide as without the memo. It also
 // asserts that the delegation ceiling never observes the input memo, and
 // that the memoized loaders observe the input memo only from their known
@@ -379,7 +379,11 @@ func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 		// the requester's memo: it evaluates the requester's own access.
 		projectAccessStage := candidate && stackHas(rec.stack, "relationshipProjectAccessStage")
 		if projectAccessStage {
-			assert.False(t, rec.hasEdgesMemo, "%s #%d inside the project-access stage observed the edges memo", rec.method, rec.n)
+			// The request context carries both keys; the stage must never
+			// reach the edges memo's only consumer, the delegation-edge
+			// lookup.
+			assert.NotEqual(t, "GetDelegationEdgesForDelegate", rec.method,
+				"#%d: the project-access stage must not look up delegation edges", rec.n)
 			if rec.hasInputMemo {
 				projectAccessStageMemo++
 			}
