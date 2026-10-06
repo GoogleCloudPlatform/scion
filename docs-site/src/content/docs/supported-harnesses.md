@@ -14,6 +14,17 @@ projection, and MCP configuration across all bundles. See
 [Harness-Specific Settings](/scion/reference/harness-settings/) for how bundles are packaged and
 managed.
 
+A harness-config that still declares `provisioner.type: builtin`, or a container-script provisioner
+with an empty `command`, cannot be launched: the start fails before the container is created and
+the error names the fix for where the config lives. A Runtime Broker rejects it with
+`422 harness_config_unusable`; through the Hub, the message is currently included in the dispatch
+error, which the Hub reports as a runtime error. For a global harness-config of a bundled harness the
+fix is `scion harness-config upgrade <name> --activate-script`; for a project or template copy, edit
+its `config.yaml` (on the broker host, when the broker launched from its own copy); for a Hub
+harness-config, pull it with `scion harness-config pull <name>`, repair it, and upload it with
+`scion harness-config sync <name>` (add `--global` for a global record). See `harnesses/README.md`
+for details.
+
 `antigravity` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`,
 `grok-build`, and `muse-code` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::
@@ -103,7 +114,9 @@ OpenCode supports two authentication methods (auto-detected in this order):
 - **Auth File** (`auth-file`): Uses `~/.local/share/opencode/auth.json` if available. Scion copies this file from your host when the agent is created.
 
 ### Configuration
-- **Config File**: `~/.config/opencode/opencode.json`.
+- **Config File**: `~/.config/opencode/opencode.json`, in the current opencode schema. The provisioner merges `model`, MCP servers (under `mcp`) and, for Vertex AI, `google-vertex/...` default models plus `disabled_providers: ["github-copilot"]` into this file. An explicit `SCION_MODEL` wins over the Vertex default, and the Vertex default never replaces a `model` already in the file. A file that is not plain JSON (for example one with comments) is left unchanged, with a warning.
+- **Size aliases**: the bundled `model_aliases` are not yet in opencode's `provider/model` form, so the provisioner skips them with a warning and leaves `model` unchanged (ptone/scion#3065).
+- **`opencode.jsonc`**: opencode loads `opencode.jsonc` after `opencode.json`, so its keys (including `model`) override the file the provisioner writes.
 - **Environment**: Respects standard OpenCode environment variables.
 - **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. The provisioning script resolves it with `scion_harness.resolve_model`, which maps a size alias through the harness-config's `model_aliases` to configure the underlying model.
 - **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.

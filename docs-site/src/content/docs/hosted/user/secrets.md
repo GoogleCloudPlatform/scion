@@ -33,6 +33,14 @@ runtime_broker  <  hub  <  project  <  user
 ```
 Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
 
+### Reserved Names
+
+Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) are reserved for Scion's own control-plane variables. The Hub rejects with a validation error any environment variable, or `environment`-type secret, whose key or target uses one of these prefixes. `file` and `variable` secrets are not affected.
+
+Values stored under a reserved name before this check existed are not deleted, but they are never used: the Hub drops them at dispatch and the Runtime Broker drops them again before injection. If a variable or secret collides with a value the runtime sets itself, the runtime's value wins.
+
+`SCION_METADATA_MODE` is always set by the Hub. It comes from the agent's GCP identity configuration and defaults to `block`. A Runtime Broker only accepts an elevated mode (anything other than `block`) when the Hub's dispatch includes its source marker. Otherwise the Runtime Broker downgrades it, so a stored value or an older Hub cannot turn on metadata access.
+
 ---
 ## Injection Modes
 
@@ -143,6 +151,13 @@ Secrets can be projected into the agent container in three ways:
 1.  **Environment** (Default): Injected as a standard environment variable.
 2.  **File**: Written to a specific path on the agent's filesystem.
 3.  **Variable**: Added to a JSON file at `~/.scion/secrets.json` for programmatic access by the harness.
+
+On the Cloud Run runtimes, secrets are delivered to the agent container as environment values, with these limits:
+
+- **File and variable secrets** are sent together in one environment value, capped at 32 KiB on Cloud Run Instances and at a 128 KiB entry on `cloudrun-sandbox`. File secrets are base64-encoded inside that base64 value and variable secrets are not, so the total room for them is about 18-24 KiB on Cloud Run Instances and about 72-96 KiB on `cloudrun-sandbox`, depending on the mix. A larger set fails agent start with an error naming the largest secret.
+- **Environment secrets** are limited to a 32 KiB value each on Cloud Run Instances and a 128 KiB `KEY=VALUE` entry each on `cloudrun-sandbox`. A larger one fails agent start with an error naming it.
+- **Reserved keys:** environment secrets cannot set `SCION_STAGED_SECRETS` or `SCION_OTEL_GCP_CREDENTIALS` on either runtime. On Cloud Run Instances they also cannot override `SCION_HOST_UID` or `SCION_HOST_GID`; on `cloudrun-sandbox` they also cannot override `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_WORKSPACE_PATH`, `HOME`, `USER` or `LOGNAME`. The runtime sets these itself.
+- **Existing keys:** a key that is already in the agent environment takes precedence over an environment secret with the same name, and the secret is not applied.
 
 ### Updating Secret Metadata
 

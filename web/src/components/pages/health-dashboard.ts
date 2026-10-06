@@ -23,7 +23,6 @@
  * - Broker status (per-broker cards)
  * - Agent health summary
  * - Dispatch pipeline status
- * - Stall detection configuration (editable)
  *
  * Auto-refreshes every 30 seconds via polling.
  */
@@ -32,7 +31,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { showToast } from '../../utils/toast.js';
 import { formatRelative } from '../../utils/time.js';
 
 interface HealthSummary {
@@ -64,7 +62,8 @@ interface HealthSummary {
     runtime_available: boolean;
     agent_count: number;
     agent_healthy: number;
-    last_heartbeat: string;
+    /** Null or the Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
+    last_heartbeat: string | null;
   }>;
   agents: {
     total: number;
@@ -77,10 +76,6 @@ interface HealthSummary {
     stuck_messages: number;
     failed_1h: number;
   } | null;
-  stall_config: {
-    threshold_seconds: number;
-    auto_suspend: boolean;
-  };
 }
 
 @customElement('scion-page-health-dashboard')
@@ -96,15 +91,6 @@ export class ScionPageHealthDashboard extends LitElement {
 
   @state()
   private autoRefresh = true;
-
-  @state()
-  private editingStall = false;
-
-  @state()
-  private stallAutoSuspend = false;
-
-  @state()
-  private savingStall = false;
 
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -151,10 +137,6 @@ export class ScionPageHealthDashboard extends LitElement {
       }
       this.data = await res.json();
       this.error = null;
-      // Sync stall config editor state
-      if (this.data && !this.editingStall) {
-        this.stallAutoSuspend = this.data.stall_config.auto_suspend;
-      }
     } catch (e) {
       this.error = e instanceof Error ? e.message : 'Network error';
     } finally {
@@ -197,32 +179,6 @@ export class ScionPageHealthDashboard extends LitElement {
         return 'var(--scion-error, #ef4444)';
       default:
         return 'var(--scion-text-muted, #94a3b8)';
-    }
-  }
-
-  private async saveStallConfig(): Promise<void> {
-    this.savingStall = true;
-    try {
-      const settings: Record<string, unknown> = {
-        'server.hub.auto_suspend_stalled': this.stallAutoSuspend,
-      };
-      const res = await apiFetch('/api/v1/admin/server-config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
-      });
-      if (!res.ok) {
-        const msg = await extractApiError(res, 'Failed to save stall settings');
-        showToast(msg, 'danger');
-        return;
-      }
-      showToast('Stall detection settings saved', 'success');
-      this.editingStall = false;
-      void this.fetchData();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Save failed', 'danger');
-    } finally {
-      this.savingStall = false;
     }
   }
 
@@ -342,7 +298,8 @@ export class ScionPageHealthDashboard extends LitElement {
     }
 
     .broker-card {
-      background: var(--scion-surface-alt, #f8fafc);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
       padding: 1rem;
@@ -352,6 +309,7 @@ export class ScionPageHealthDashboard extends LitElement {
 
     .broker-name {
       font-weight: 600;
+      color: var(--scion-text, #1e293b);
       margin-bottom: 0.5rem;
     }
 
@@ -389,81 +347,6 @@ export class ScionPageHealthDashboard extends LitElement {
       color: var(--scion-error, #ef4444);
     }
 
-    .stall-config {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .stall-config .stat-row {
-      flex: 1;
-      min-width: 200px;
-    }
-
-    .edit-btn {
-      background: none;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.25rem 0.625rem;
-      font-size: 0.75rem;
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .edit-btn:hover {
-      background: var(--scion-surface-hover, #f1f5f9);
-    }
-
-    .stall-edit-form {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
-    }
-
-    .stall-edit-form label {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .stall-edit-form input[type='number'] {
-      width: 60px;
-      padding: 0.25rem 0.5rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.25rem;
-      font-size: 0.875rem;
-    }
-
-    .save-btn {
-      background: var(--scion-primary, #3b82f6);
-      color: white;
-      border: none;
-      border-radius: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-    }
-
-    .save-btn:hover {
-      opacity: 0.9;
-    }
-
-    .save-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .cancel-btn {
-      background: none;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
-      cursor: pointer;
-      color: var(--scion-text-muted, #64748b);
-    }
-
     .loading,
     .error-msg {
       text-align: center;
@@ -473,16 +356,6 @@ export class ScionPageHealthDashboard extends LitElement {
 
     .error-msg {
       color: var(--scion-error, #ef4444);
-    }
-
-    .alerts-link {
-      font-size: 0.875rem;
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-    }
-
-    .alerts-link:hover {
-      text-decoration: underline;
     }
 
     .overall-status {
@@ -572,26 +445,8 @@ export class ScionPageHealthDashboard extends LitElement {
       <!-- Agents -->
       ${this.renderAgentsCard(d)}
 
-      <!-- Dispatch & Stall Config -->
-      <div class="grid-2">${this.renderDispatchCard(d)} ${this.renderStallCard(d)}</div>
-
-      <!-- Recent Alerts placeholder -->
-      <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Recent Alerts</div>
-          <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-            View recent alerts in the
-            <a
-              class="alerts-link"
-              href="https://console.cloud.google.com/monitoring/alerting"
-              target="_blank"
-              rel="noopener"
-            >
-              GCP Cloud Monitoring Console
-            </a>
-          </div>
-        </div>
-      </div>
+      <!-- Dispatch -->
+      <div class="grid-full">${this.renderDispatchCard(d)}</div>
     `;
   }
 
@@ -691,11 +546,7 @@ export class ScionPageHealthDashboard extends LitElement {
                   <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
                     NFS: not reported
                   </div>
-                  ${b.last_heartbeat
-                    ? html`<div class="broker-stat">
-                        Heartbeat: ${this.timeAgo(b.last_heartbeat)}
-                      </div>`
-                    : nothing}
+                  <div class="broker-stat">Heartbeat: ${formatHeartbeatAge(b.last_heartbeat)}</div>
                 </div>
               `
             )}
@@ -780,89 +631,21 @@ export class ScionPageHealthDashboard extends LitElement {
       </div>
     `;
   }
+}
 
-  private renderStallCard(d: HealthSummary) {
-    if (this.editingStall) {
-      return html`
-        <div class="card">
-          <div class="card-title">Stall Detection Settings</div>
-          <!-- Threshold is a startup-time ServerConfig setting and cannot be
-               changed at runtime via the operational settings API. Display it
-               as read-only. Only auto_suspend_stalled is a runtime setting. -->
-          <div class="stat-row" style="margin-bottom:0.75rem">
-            <span class="label">Stalled Threshold</span>
-            <span
-              >${Math.round(d.stall_config.threshold_seconds / 60)} min
-              <span style="font-size:0.75rem;color:var(--scion-text-muted,#94a3b8)"
-                >(set at startup)</span
-              ></span
-            >
-          </div>
-          <div class="stall-edit-form">
-            <label style="display:flex;align-items:center;gap:0.375rem">
-              <input
-                type="checkbox"
-                .checked=${this.stallAutoSuspend}
-                @change=${() => {
-                  this.stallAutoSuspend = !this.stallAutoSuspend;
-                }}
-              />
-              Auto-suspend stalled agents
-            </label>
-            <button
-              class="save-btn"
-              ?disabled=${this.savingStall}
-              @click=${() => void this.saveStallConfig()}
-            >
-              ${this.savingStall ? 'Saving...' : 'Save'}
-            </button>
-            <button
-              class="cancel-btn"
-              @click=${() => {
-                this.editingStall = false;
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      `;
-    }
-
-    return html`
-      <div class="card">
-        <div
-          class="card-title"
-          style="display:flex;justify-content:space-between;align-items:center"
-        >
-          Stall Detection Settings
-          <button
-            class="edit-btn"
-            @click=${() => {
-              this.editingStall = true;
-            }}
-          >
-            Edit
-          </button>
-        </div>
-        <div class="stat-row">
-          <span class="label">Stalled Threshold</span
-          ><span>${Math.round(d.stall_config.threshold_seconds / 60)} min</span>
-        </div>
-        <div class="stat-row">
-          <span class="label">Auto-Suspend Stalled</span
-          ><span>${d.stall_config.auto_suspend ? 'enabled' : 'disabled'}</span>
-        </div>
-      </div>
-    `;
-  }
-
-  private timeAgo(isoDate: string): string {
-    if (!isoDate) return 'never';
-    const ms = new Date(isoDate).getTime();
-    if (Number.isNaN(ms)) return 'unknown';
-    // A future instant is clock skew between hub and browser.
-    if (ms > Date.now()) return 'just now';
-    return formatRelative(isoDate, { style: 'narrow' });
-  }
+/**
+ * Formats a broker heartbeat as a relative age. A null, undefined or
+ * empty value, the Go zero time (`0001-01-01T00:00:00Z`), or any other
+ * non-positive instant (the Unix epoch itself or any earlier time) means
+ * the heartbeat was never reported and renders as "never". An unparsable
+ * value renders as "unknown" and a future instant as "just now".
+ */
+export function formatHeartbeatAge(isoDate: string | null | undefined): string {
+  if (!isoDate) return 'never';
+  const ms = new Date(isoDate).getTime();
+  if (Number.isNaN(ms)) return 'unknown';
+  if (ms <= 0) return 'never';
+  // A future instant is clock skew between hub and browser.
+  if (ms > Date.now()) return 'just now';
+  return formatRelative(isoDate, { style: 'narrow' });
 }

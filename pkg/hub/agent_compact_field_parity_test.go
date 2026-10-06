@@ -347,11 +347,11 @@ var compactParityCells = map[string]compactParityCell{
 	"agent-binding project":       {http.StatusOK, true},
 	"agent-binding other-project": {http.StatusNotFound, false},
 
-	// The ceiling carries agent:list only: the global list returns rows,
-	// and both project endpoints return an empty list.
+	// The ceiling carries agent:list only: every endpoint lists the agents
+	// the holder can read (the agent-list rule).
 	"hub-uat global":        {http.StatusOK, true},
-	"hub-uat project":       {http.StatusOK, false},
-	"hub-uat other-project": {http.StatusOK, false},
+	"hub-uat project":       {http.StatusOK, true},
+	"hub-uat other-project": {http.StatusOK, true},
 
 	"agent-no-project-read global":        {http.StatusForbidden, false},
 	"agent-no-project-read project":       {http.StatusForbidden, false},

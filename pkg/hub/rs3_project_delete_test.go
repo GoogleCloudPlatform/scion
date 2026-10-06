@@ -386,6 +386,8 @@ func TestRS3_ProjectDeleteScopedUATDenied(t *testing.T) {
 	assert.False(t, decision.Allowed)
 	assert.Equal(t, ErrCodeCredentialInsufficient, decision.DenialCode)
 	assert.Equal(t, 403, decision.HTTPStatus)
+	// Project delete is session-only with the IRREVERSIBLE_CASCADE reason.
+	assert.Equal(t, sessionOnlyDenialDetails(authzop.ReasonIrreversibleCascade), decision.Details)
 }
 
 // TestRS3_ProjectDeleteUnrecognizedCredentialKindDenied: an unrecognized

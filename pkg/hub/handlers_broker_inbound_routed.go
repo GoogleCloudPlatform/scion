@@ -331,6 +331,10 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// routedRefusalError is the constant per-recipient error for a refused
+// routed delivery, whatever the internal reason.
+const routedRefusalError = "message delivery refused"
+
 // dispatchRoutedParams holds parameters for a single recipient dispatch.
 type dispatchRoutedParams struct {
 	agent            *store.Agent
@@ -367,7 +371,9 @@ func (s *Server) dispatchRoutedRecipient(
 		s.messageLog.Warn("routed inbound authorization denied",
 			"agent_slug", agent.Slug, "reason", reason)
 		result.Status = "unauthorized"
-		result.Error = reason
+		// The response carries one constant public refusal; the internal
+		// reason stays in the log above.
+		result.Error = routedRefusalError
 		return result
 	}
 
