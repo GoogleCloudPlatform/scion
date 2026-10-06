@@ -629,71 +629,6 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 	// Determine the project and agent from the topic.
 	projectID, agentSlug := parseTopicComponents(topic)
 
-	// A Scion direct-message conversation key in ThreadID names a Hub
-	// conversation, not a Discord channel, so it is never sent to Discord
-	// as a channel ID. Such a message is resolved to the addressed user's
-	// own Discord channel below and is never broadcast.
-	directKeyed := msg.ThreadID != "" && isScionDMKey(msg.ThreadID)
-	discordThreadID := msg.ThreadID
-	if directKeyed {
-		discordThreadID = ""
-	}
-
-	// Collect target channel IDs via dynamic routing.
-	var channelIDs []string
-
-	// Priority 0: Thread routing — ThreadID maps directly to a Discord
-	// channel or thread snowflake. This takes precedence over all other
-	// routing so replies land in the same channel/thread as the original.
-	if discordThreadID != "" {
-		channelIDs = append(channelIDs, discordThreadID)
-	}
-
-	// Priority 1: Direct channel ID from metadata.
-	if len(channelIDs) == 0 && msg != nil && msg.Metadata != nil {
-		if chID, ok := msg.Metadata["discord_channel_id"]; ok && chID != "" {
-			channelIDs = append(channelIDs, chID)
-		}
-	}
-
-	// Priority 2: Look up via ConversationContext for the recipient.
-	if len(channelIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
-		ccSlug := agentSlug
-		if ccSlug == "" && msg.Sender != "" && strings.HasPrefix(msg.Sender, "agent:") {
-			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
-		}
-		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, msg.RecipientID, projectID, ccSlug)
-	}
-
-	// Priority 2b: a direct message with no stored channel goes to the
-	// Discord DM channel of the addressed user's linked Discord account.
-	if len(channelIDs) == 0 && directKeyed {
-		dmChannelID, err := b.resolveRecipientDMChannel(ctx, msg.Recipient, msg.RecipientID)
-		if err != nil {
-			return fmt.Errorf("discord: cannot deliver direct message to %s: %w", msg.Recipient, err)
-		}
-		channelIDs = append(channelIDs, dmChannelID)
-	}
-
-	// Priority 3: Broadcast to all ChannelLinks for the project. Never
-	// used for direct messages.
-	if len(channelIDs) == 0 && !directKeyed && projectID != "" && store != nil {
-		links, err := store.GetChannelLinksForProject(ctx, projectID)
-		if err != nil {
-			b.log.Warn("Failed to get channel links for broadcast", "project_id", projectID, "error", err)
-		}
-		for _, link := range links {
-			if link.Active {
-				channelIDs = append(channelIDs, link.ChannelID)
-			}
-		}
-	}
-
-	if len(channelIDs) == 0 {
-		b.log.Debug("No Discord channel for topic, dropping message", "topic", topic)
-		return nil
-	}
-
 	// Discard the retired end-of-turn assistant-reply mirror; an older hub
 	// may still forward it.
 	if msg != nil && msg.Type == messages.TypeAssistantReply {
@@ -727,6 +662,76 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		text = formatMessage(msg, agentSlug)
 	}
 	if text == "" {
+		return nil
+	}
+
+	// Only an all-digit ThreadID is a Discord channel or thread ID. Any
+	// other ThreadID (such as a Scion direct-message conversation key) is
+	// never sent to Discord as a channel ID: the message is resolved to the
+	// addressed user's own Discord channel below and is never broadcast.
+	recipientRouted := msg.ThreadID != "" && !isDiscordSnowflake(msg.ThreadID)
+	discordThreadID := msg.ThreadID
+	if recipientRouted {
+		discordThreadID = ""
+		if !strings.HasPrefix(msg.Recipient, "user:") {
+			b.log.Debug("No Discord channel for a non-Discord thread ID without a user recipient, dropping message",
+				"topic", topic, "recipient", msg.Recipient)
+			return nil
+		}
+	}
+
+	// Collect target channel IDs via dynamic routing.
+	var channelIDs []string
+
+	// Priority 0: Thread routing — ThreadID maps directly to a Discord
+	// channel or thread snowflake. This takes precedence over all other
+	// routing so replies land in the same channel/thread as the original.
+	if discordThreadID != "" {
+		channelIDs = append(channelIDs, discordThreadID)
+	}
+
+	// Priority 1: Direct channel ID from metadata.
+	if len(channelIDs) == 0 && msg != nil && msg.Metadata != nil {
+		if chID, ok := msg.Metadata["discord_channel_id"]; ok && chID != "" {
+			channelIDs = append(channelIDs, chID)
+		}
+	}
+
+	// Priority 2: Look up via ConversationContext for the recipient.
+	if len(channelIDs) == 0 && msg != nil && msg.Recipient != "" && store != nil {
+		ccSlug := agentSlug
+		if ccSlug == "" && msg.Sender != "" && strings.HasPrefix(msg.Sender, "agent:") {
+			ccSlug = strings.TrimPrefix(msg.Sender, "agent:")
+		}
+		channelIDs = b.resolveRecipientChannels(ctx, msg.Recipient, msg.RecipientID, projectID, ccSlug)
+	}
+
+	// Priority 2b: a direct message with no stored channel goes to the
+	// Discord DM channel of the addressed user's linked Discord account.
+	if len(channelIDs) == 0 && recipientRouted {
+		dmChannelID, err := b.resolveRecipientDMChannel(ctx, msg.Recipient, msg.RecipientID)
+		if err != nil {
+			return fmt.Errorf("discord: cannot deliver direct message to %s: %w", msg.Recipient, err)
+		}
+		channelIDs = append(channelIDs, dmChannelID)
+	}
+
+	// Priority 3: Broadcast to all ChannelLinks for the project. Never
+	// used for direct messages.
+	if len(channelIDs) == 0 && !recipientRouted && projectID != "" && store != nil {
+		links, err := store.GetChannelLinksForProject(ctx, projectID)
+		if err != nil {
+			b.log.Warn("Failed to get channel links for broadcast", "project_id", projectID, "error", err)
+		}
+		for _, link := range links {
+			if link.Active {
+				channelIDs = append(channelIDs, link.ChannelID)
+			}
+		}
+	}
+
+	if len(channelIDs) == 0 {
+		b.log.Debug("No Discord channel for topic, dropping message", "topic", topic)
 		return nil
 	}
 
@@ -2474,10 +2479,18 @@ func (b *DiscordBroker) resolveRecipientDMChannel(ctx context.Context, recipient
 	return channelID, nil
 }
 
-// isScionDMKey reports whether threadID is a Scion direct-message
-// conversation key rather than a Discord channel or thread ID.
-func isScionDMKey(threadID string) bool {
-	return strings.HasPrefix(threadID, "dm:")
+// isDiscordSnowflake reports whether id has the form of a Discord channel
+// or thread ID (a non-empty string of ASCII digits).
+func isDiscordSnowflake(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveStaleChannelSlugs updates ChannelLinks where ProjectSlug equals

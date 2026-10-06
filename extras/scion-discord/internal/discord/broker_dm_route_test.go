@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -200,10 +202,118 @@ func TestPublish_DiscordThreadID_StillRoutesDirectly(t *testing.T) {
 	assert.Empty(t, f.dmCreateCalls())
 }
 
-func TestIsScionDMKey(t *testing.T) {
+func TestIsDiscordSnowflake(t *testing.T) {
 	key, err := messages.DMConversationKey("agent", dmTestAgentID, "user", dmTestUserID)
 	require.NoError(t, err)
-	assert.True(t, isScionDMKey(key))
-	assert.False(t, isScionDMKey("600000000000000001"))
-	assert.False(t, isScionDMKey(""))
+	assert.True(t, isDiscordSnowflake("600000000000000001"))
+	assert.False(t, isDiscordSnowflake(key))
+	assert.False(t, isDiscordSnowflake("agent:"+dmTestAgentID))
+	assert.False(t, isDiscordSnowflake("12a4"))
+	assert.False(t, isDiscordSnowflake(""))
+}
+
+// A direct message that is not addressed to a user (for example an
+// agent-to-agent copy) has no Discord channel to resolve: it is dropped
+// without an error and nothing is sent.
+func TestPublish_DirectMessage_NonUserRecipient_SendsNothingWithoutError(t *testing.T) {
+	for _, recipient := range []string{"agent:reviewer", ""} {
+		t.Run(fmt.Sprintf("recipient=%q", recipient), func(t *testing.T) {
+			f := newDMRouteFixture(t)
+			msg := directMessage(t, dmTestEmail, dmTestUserID)
+			msg.Recipient = recipient
+			msg.RecipientID = "33333333-3333-4333-8333-333333333333"
+
+			require.NoError(t, f.broker.Publish(context.Background(), dmTestTopic(), msg))
+
+			assert.Empty(t, sentChannelIDs(f.transport), "nothing is sent, including to the project's linked channels")
+			assert.Empty(t, f.dmCreateCalls())
+		})
+	}
+}
+
+// A dropped message makes no Discord call: the retired assistant-reply
+// mirror is discarded before the DM channel is resolved.
+func TestPublish_DirectMessage_AssistantReply_OpensNoDMChannel(t *testing.T) {
+	f := newDMRouteFixture(t)
+	msg := directMessage(t, dmTestEmail, dmTestUserID)
+	msg.Type = messages.TypeAssistantReply
+
+	require.NoError(t, f.broker.Publish(context.Background(), dmTestTopic(), msg))
+
+	assert.Empty(t, f.dmCreateCalls())
+	assert.Empty(t, f.transport.paths, "no Discord REST call is made")
+}
+
+// Without the test seam, the DM channel is opened through the gateway
+// session's REST API.
+func TestPublish_DirectMessage_DefaultOpensDMChannelThroughSession(t *testing.T) {
+	f := newDMRouteFixture(t)
+	f.broker.createDMChannel = nil
+	const dmChannelID = "700000000000000001"
+	rt := &dmChannelTransport{channelID: dmChannelID}
+	f.broker.session.Client = &http.Client{Transport: rt}
+
+	require.NoError(t, f.broker.Publish(context.Background(), dmTestTopic(), directMessage(t, dmTestEmail, dmTestUserID)))
+
+	require.Len(t, rt.createBodies, 1, "POST /users/@me/channels is called once")
+	assert.Contains(t, rt.createBodies[0], dmTestDiscordID)
+	assert.Equal(t, []string{dmChannelID}, rt.messageChannels)
+}
+
+// The user's latest stored channel in the project is used when there is
+// none for this agent.
+func TestPublish_DirectMessage_UsesLatestProjectChannel(t *testing.T) {
+	f := newDMRouteFixture(t)
+	const otherAgentCh = "800000000000000001"
+	require.NoError(t, f.store.SetConversationContext(context.Background(), &ConversationContext{
+		DiscordUserID: dmTestDiscordID,
+		ProjectID:     dmTestProjectID,
+		AgentSlug:     "other-agent",
+		LastChannelID: otherAgentCh,
+		LastMessageAt: time.Now(),
+	}))
+
+	require.NoError(t, f.broker.Publish(context.Background(), dmTestTopic(), directMessage(t, dmTestEmail, dmTestUserID)))
+
+	assert.Equal(t, []string{otherAgentCh}, sentChannelIDs(f.transport))
+	assert.Empty(t, f.dmCreateCalls())
+}
+
+// Any thread ID that is not a Discord ID is resolved through the
+// recipient, never sent to Discord as a channel ID.
+func TestPublish_NonDiscordThreadID_ResolvesThroughRecipient(t *testing.T) {
+	f := newDMRouteFixture(t)
+	msg := directMessage(t, dmTestEmail, dmTestUserID)
+	msg.ThreadID = "agent:" + dmTestAgentID
+
+	require.NoError(t, f.broker.Publish(context.Background(), dmTestTopic(), msg))
+
+	assert.Equal(t, []string{f.createID}, sentChannelIDs(f.transport))
+	assert.Equal(t, []string{dmTestDiscordID}, f.dmCreateCalls())
+}
+
+// dmChannelTransport answers the Discord create-DM call with a channel and
+// records it and every message post.
+type dmChannelTransport struct {
+	channelID       string
+	createBodies    []string
+	messageChannels []string
+}
+
+func (rt *dmChannelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body := `{}`
+	switch {
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/users/@me/channels"):
+		b, _ := io.ReadAll(req.Body)
+		rt.createBodies = append(rt.createBodies, string(b))
+		body = fmt.Sprintf(`{"id":%q,"type":1}`, rt.channelID)
+	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/messages"):
+		rt.messageChannels = append(rt.messageChannels, sentChannelIDs(&recordingTransport{paths: []string{req.URL.Path}})...)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
 }
