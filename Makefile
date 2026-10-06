@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-artifacts-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -72,21 +72,22 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit and pkg/store/entadapter tests with SQLite
+## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus
 # perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests,
 # which carry the same `//go:build !no_sqlite` constraint for the same
 # reason (ptone/scion#2393, ptone/scion#2851), and pkg/conduit's
 # relay/router tests, which run against the SQLite-backed conduit
-# registry store.
+# registry store, and pkg/artifacts, whose store and service tests run on
+# SQLite.
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 40m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/...
+		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/...
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
@@ -278,6 +279,34 @@ test-webchat-postgres:
 			exit 1; \
 		fi; \
 	done
+
+## test-artifacts-postgres: Run the pkg/artifacts tests: store tests on SQLite and a real Postgres (service tests on SQLite)
+# Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The artifact
+# store is not an Ent store (design D3: own tables, created by Init), so like
+# the web chat store it has its own Postgres SQL and its own Postgres tests.
+# Every store test runs once per dialect as a /sqlite and a /postgres
+# subtest; the Postgres subtests are added only when the DSN is set, so the
+# target fails if the variable is unset, if any test skips, or if no
+# /postgres subtest passed. Each test works in its own throwaway schema.
+# CI runs this in the T1 Launch Store PostgreSQL Tests job.
+test-artifacts-postgres:
+	@echo "Running pkg/artifacts tests (store tests on SQLite and Postgres)..."
+	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently be left out." >&2; \
+		exit 1; \
+	fi
+	@go test -count=1 -timeout 10m -v ./pkg/artifacts/... > /tmp/test-artifacts-postgres.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-artifacts-postgres.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-artifacts-postgres.log; then \
+		echo "ERROR: an artifact test was skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: [^ ]+/postgres ' /tmp/test-artifacts-postgres.log; then \
+		echo "ERROR: no Postgres subtest passed." >&2; \
+		exit 1; \
+	fi
 
 ## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
 # It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values

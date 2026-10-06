@@ -792,6 +792,17 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--cross-project-enabled <bool>` (enable or disable cross-project messaging), `--revision <int>` (required, optimistic concurrency revision).
     - `get`: Show the current hub-wide messaging settings and revision.
 
+## Artifacts
+
+### `scion artifact`
+
+Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
+
+- `scion artifact publish <file>`: Publish one file as a new artifact in the current project; prints its reference and web page URL.
+    - Flags: `--title <title>` (default: the file name).
+- `scion artifact get <ref>`: Write an artifact's entry file to stdout.
+    - Flags: `--out`, `-o <path>` (write to a file, or into an existing directory under the file's name).
+
 ## Notification Management
 
 ### `scion notifications`
