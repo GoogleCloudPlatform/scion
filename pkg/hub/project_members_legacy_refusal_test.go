@@ -43,8 +43,10 @@ import (
 // legacyMemberCanDelegateReason is the CanDelegate refusal reason the
 // hub-override actor (custom project.read+project.manage role plus system
 // hub-admin) gets when delegating a built-in role it does not hold all
-// permissions of.
-const legacyMemberCanDelegateReason = "actor lacks permission for delegation: agent.create"
+// permissions of. CanDelegate names the first permission of the target
+// role's list (seed.go) the actor lacks; the built-in project roles list
+// artifact.create first.
+const legacyMemberCanDelegateReason = "actor lacks permission for delegation: artifact.create"
 
 func legacyMembersPath(projectID string) string {
 	return "/api/v1/projects/" + projectID + "/members"
@@ -211,7 +213,7 @@ func mmrDeleteSystemSuperAdminBindings(t *testing.T, s store.Store, userID strin
 // actor's system super-admin binding, so the in-transaction hub-authority
 // revalidation fails and AddMember must refuse with the exact under-lock
 // decision before anything is written. A hub-admin actor cannot be used
-// here: CanDelegate refuses it pre-transaction (it lacks agent.create).
+// here: CanDelegate refuses it pre-transaction (it lacks the role's permissions).
 func TestAddMember_LegacyPOST_NoProjectRoleUnderLockRefusal(t *testing.T) {
 	f := setupMMRFixture(t)
 	ctx := context.Background()

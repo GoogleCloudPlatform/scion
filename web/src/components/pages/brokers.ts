@@ -31,6 +31,7 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -444,8 +445,7 @@ export class ScionPageBrokers extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/brokers/${broker.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/brokers/${broker.id}`);
         }}
       >
         <td>

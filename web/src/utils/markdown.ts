@@ -25,9 +25,48 @@
  * ensures anchors open in a new tab with rel="noopener noreferrer".
  */
 
+/** Options for one render call. */
+export interface MarkdownRenderOptions {
+  /**
+   * Keep only images the page's own origin serves (relative and
+   * same-origin URLs, and data: images). Images from any other host are
+   * replaced by their alt text, so showing the content makes the viewer's
+   * browser fetch nothing from elsewhere.
+   */
+  sameOriginImagesOnly?: boolean;
+}
+
 /** Result of the lazy-loaded renderer. */
 export interface MarkdownRenderer {
-  render(markdown: string): string;
+  render(markdown: string, options?: MarkdownRenderOptions): string;
+}
+
+/**
+ * Reports whether an image source is served by the page's own origin:
+ * a relative or same-origin URL, or a data: image.
+ */
+export function isSameOriginImageSrc(src: string, origin: string): boolean {
+  const value = src.trim();
+  if (value === '') return false;
+  if (/^data:image\//i.test(value)) return true;
+  try {
+    return new URL(value, origin + '/').origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+/** Replaces every image not served by origin with its alt text. */
+function dropOffOriginImages(html: string, origin: string): string {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  for (const img of Array.from(tpl.content.querySelectorAll('img'))) {
+    const src = img.getAttribute('src') ?? '';
+    if (img.hasAttribute('srcset') || !isSameOriginImageSrc(src, origin)) {
+      img.replaceWith(document.createTextNode(img.getAttribute('alt') ?? ''));
+    }
+  }
+  return tpl.innerHTML;
 }
 
 let rendererPromise: Promise<MarkdownRenderer> | null = null;
@@ -64,9 +103,12 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
       });
 
       return {
-        render(markdown: string): string {
+        render(markdown: string, options?: MarkdownRenderOptions): string {
           const rawHtml = marked.parse(markdown, { async: false }) as string;
-          return purify.sanitize(rawHtml);
+          const clean = purify.sanitize(rawHtml);
+          return options?.sameOriginImagesOnly
+            ? dropOffOriginImages(clean, window.location.origin)
+            : clean;
         },
       };
     })();

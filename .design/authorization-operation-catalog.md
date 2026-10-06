@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 114
+**Operations:** 119
 
 ## Table of Contents
 
@@ -40,6 +40,8 @@
 - [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule
 - [schedule.event.update](#scheduleeventupdate) — Update a recurring schedule
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
+- [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
+- [artifact.create](#artifactcreate) — Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
 - [chat.access](#chataccess) — Access chat threads, spaces, topics, and messages within a project
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition
@@ -53,6 +55,7 @@
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary)
 - [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary)
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary)
+- [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
@@ -69,6 +72,8 @@
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
 - [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
+- [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
+- [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
@@ -1427,6 +1432,72 @@
 
 ---
 
+## artifact.read
+
+**Domain:** artifact
+
+**Description:** Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}` |
+| http_route | GET | `/api/v1/artifacts/{id}/files/{path}` |
+| http_route | GET | `/api/v1/artifacts/{id}/versions/{seq}/files/{path}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoAgentsSameProject`
+
+---
+
+## artifact.create
+
+**Domain:** artifact
+
+**Description:** Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_query`; boundaries `project`, `hub`; pinned by `TestArtifactsUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** project-from-query
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoAgentsSameProject`
+
+---
+
 ## agent.message.send
 
 **Domain:** agent.message
@@ -1961,6 +2032,44 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## credential.token.read
+
+**Domain:** credential
+
+**Description:** List or read the caller's own user access tokens
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/auth/tokens` |
+| http_route | GET | `/api/v1/auth/tokens/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `user.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`, `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+### Exemptions
+
+- **authentication_only:** Token reads are authenticated-only (user reads own tokens); no per-resource permission required beyond session validity (scope: self-token management only) — waives: `base_permission`
 
 ---
 
@@ -2547,6 +2656,82 @@
 ### Exemptions
 
 - **authentication_only:** Sign-in flow step that reads and changes no hub state; no resource permission applies (scope: session logout) — waives: `base_permission`, `denial_codes`
+
+---
+
+## user.session.revoke
+
+**Domain:** user
+
+**Description:** Revoke every cookie session of a user (platform admin only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/{id}/revoke-sessions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `SESSION_RECOVERY`)
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** peer_superior
+- Only an unscoped local platform admin may revoke another user's sessions
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+### Exemptions
+
+- **hub_admin:** Platform-admin role check (requireAdminFor); the session generation increment is logged, not audited (scope: user session revocation) — waives: `base_permission`, `audit_obligation`
+
+---
+
+## user.terminalworkspace
+
+**Domain:** user
+
+**Description:** Read or replace the caller's own terminal workspace
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/terminal-workspace` |
+| http_route | PUT | `/api/v1/users/me/terminal-workspace` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+### Exemptions
+
+- **authentication_only:** The path names no user; the subject is always the caller, so no resource permission applies (scope: caller's own terminal workspace) — waives: `base_permission`
 
 ---
 
