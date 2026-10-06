@@ -645,8 +645,10 @@ func (s *GroupStore) GetGroupMembers(ctx context.Context, groupID string) ([]sto
 	var members []store.GroupMember
 
 	// Query GroupMembership records (user and agent members)
+	// Orphaned rows (principal deleted, both IDs NULL) are skipped so the
+	// listing never carries a blank member.
 	memberships, err := s.client.GroupMembership.Query().
-		Where(groupmembership.GroupIDEQ(groupUID)).
+		Where(groupmembership.GroupIDEQ(groupUID), liveGroupMembership()).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -1029,6 +1031,7 @@ func (s *GroupStore) CountGroupMembersByRole(ctx context.Context, groupID, role 
 		Where(
 			groupmembership.GroupIDEQ(groupUID),
 			groupmembership.RoleEQ(groupmembership.Role(role)),
+			liveGroupMembership(),
 		).
 		Count(ctx)
 	if err != nil {
@@ -1036,6 +1039,108 @@ func (s *GroupStore) CountGroupMembersByRole(ctx context.Context, groupID, role 
 	}
 
 	return count, nil
+}
+
+// liveGroupMembership matches membership rows that still reference a user or
+// an agent. The user_id and agent_id FKs are ON DELETE SET NULL, so a row
+// whose principal was deleted keeps existing with both columns NULL; such a
+// row is always an orphan (ptone/scion#2769).
+func liveGroupMembership() predicate.GroupMembership {
+	return groupmembership.Or(
+		groupmembership.UserIDNotNil(),
+		groupmembership.AgentIDNotNil(),
+	)
+}
+
+// DeleteGroupMembershipsForUser removes every group membership of userID.
+//
+// On PostgreSQL it first locks the groups the user owns FOR NO KEY UPDATE,
+// in ascending group-ID order, so a user delete takes its locks in the same
+// order as before the explicit membership delete existed: owned group rows
+// (which the user-row delete's owner_id SET NULL updates), then membership
+// rows. Locking memberships first would invert that order against
+// ProjectDeletionService, which deletes a project group's row and then the
+// next group's memberships, and could deadlock (40P01) when the user owns
+// one project group and is a member of another (ptone/scion#2769). See
+// lockOwnedGroupIDs for why the strength is FOR NO KEY UPDATE. On SQLite
+// the lock is a plain read (writes are already serialized).
+func (s *GroupStore) DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return 0, err
+	}
+	if err := lockOwnedGroupIDs(ctx, s.client, uid); err != nil {
+		return 0, fmt.Errorf("lock owned groups: %w", mapError(err))
+	}
+	return s.client.GroupMembership.Delete().
+		Where(groupmembership.UserIDEQ(uid)).
+		Exec(ctx)
+}
+
+// lockOwnedGroupIDs locks the groups owned by userID FOR NO KEY UPDATE, in
+// ascending ID order, on PostgreSQL. On SQLite it is a plain read.
+//
+// FOR NO KEY UPDATE is exactly the lock the user-row delete's owner_id ON
+// DELETE SET NULL takes (an UPDATE of a non-key column), so the explicit lock
+// adds no wait edge that the user delete did not already have. It still
+// conflicts with a concurrent DELETE of the group row (the project-group
+// cascade), which is what the lock order needs. FOR UPDATE would be too
+// strong: it also conflicts with the FOR KEY SHARE lock PostgreSQL's FK check
+// takes on a group row when a membership, child-group edge or policy binding
+// referencing it is inserted, so a transaction that holds one of the user's
+// memberships and then inserts such a row into an owned group would deadlock
+// with the user delete (40P01).
+func lockOwnedGroupIDs(ctx context.Context, client *ent.Client, userID uuid.UUID) error {
+	q := client.Group.Query().
+		Where(group.OwnerIDEQ(userID)).
+		Order(ent.Asc(group.FieldID))
+	if client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate(func(o *entsql.LockOptions) { o.Strength = entsql.LockNoKeyUpdate })
+	}
+	_, err := q.IDs(ctx)
+	return err
+}
+
+// groupMembershipDeleteBatchSize caps the IN(...) list of one
+// DeleteGroupMembershipsForAgents statement.
+const groupMembershipDeleteBatchSize = 500
+
+// DeleteGroupMembershipsForAgents removes every group membership of the
+// given agents. An empty ids slice is a no-op.
+func (s *GroupStore) DeleteGroupMembershipsForAgents(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	uids := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return 0, err
+		}
+		uids = append(uids, uid)
+	}
+	var total int
+	for _, batch := range chunkUUIDs(uids, groupMembershipDeleteBatchSize) {
+		n, err := s.client.GroupMembership.Delete().
+			Where(groupmembership.AgentIDIn(batch...)).
+			Exec(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// DeleteOrphanedGroupMemberships removes membership rows whose user and agent
+// are both NULL.
+func (s *GroupStore) DeleteOrphanedGroupMemberships(ctx context.Context) (int, error) {
+	return s.client.GroupMembership.Delete().
+		Where(
+			groupmembership.UserIDIsNil(),
+			groupmembership.AgentIDIsNil(),
+		).
+		Exec(ctx)
 }
 
 // GetGroupsByIDs retrieves groups by a list of IDs.

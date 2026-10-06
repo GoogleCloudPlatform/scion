@@ -156,9 +156,10 @@ const (
 //  5. Checks credential ceiling (session JWT only, no scoped UAT/agent).
 //  6. Acquires the project membership lock for serialization.
 //  7. Re-evaluates authority under lock (TOCTOU closure).
-//  8. Performs security-relevant cascading deletes within the transaction.
-//  9. Deletes the project row.
-//  10. Writes the atomic audit record.
+//  8. Locks the project's agent rows (PostgreSQL: FOR UPDATE, by ID).
+//  9. Performs security-relevant cascading deletes within the transaction.
+//  10. Deletes the project row.
+//  11. Writes the atomic audit record.
 //
 // Returns (result, nil) on success, (nil, decision) on denial.
 func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDeleteRequest) (*ProjectDeleteResult, *ProjectDeleteDecision) {
@@ -248,7 +249,8 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		isSuperAdmin = svc.authz.IsSystemAdmin(ctx, req.Actor.ID())
 	}
 
-	// 6–10. Transactional phase: lock, re-check, cascade, delete, audit.
+	// 6–11. Transactional phase: lock, re-check, lock agents, cascade,
+	// delete, audit.
 	var result *ProjectDeleteResult
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
 		// 6. Acquire project-scoped serialization lock.
@@ -276,18 +278,32 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			})
 		}
 
-		// 8. Cascade security-relevant state within the transaction.
+		// 8. Lock the project's agent rows (PostgreSQL: FOR UPDATE, in
+		// agent-ID order) before the cascade deletes any group or
+		// membership. A project-scoped group can contain agent memberships,
+		// and purge, finalize-hard and DeleteAgent lock the agent before
+		// deleting its memberships; deleting memberships first here would
+		// invert that order and could deadlock (40P01). DeleteProject below
+		// re-locks the same rows in the same order, which is a no-op. A
+		// concurrent user delete locks the groups the user owns before the
+		// user's memberships (DeleteGroupMembershipsForUser), matching the
+		// cascade's group-row-then-memberships order below.
+		if err := tx.LockProjectAgents(ctx, req.ProjectID); err != nil {
+			return fmt.Errorf("lock project agents for deletion: %w", err)
+		}
+
+		// 9. Cascade security-relevant state within the transaction.
 		cascadeSummary, err := svc.cascadeSecurityState(ctx, tx, req.ProjectID)
 		if err != nil {
 			return fmt.Errorf("cascade security state: %w", err)
 		}
 
-		// 9. Delete the project row.
+		// 10. Delete the project row.
 		if err := tx.DeleteProject(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("delete project: %w", err)
 		}
 
-		// 10. Write atomic audit record with before and after state.
+		// 11. Write atomic audit record with before and after state.
 		afterJSON, _ := json.Marshal(cascadeSummary)
 		auditRecord := &store.MutationAuditRecord{
 			MutationType: "project_delete",
@@ -660,8 +676,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 
 	// 11. Agent credentials — project-scoped agent auth tokens.
 	// No FK from credentials to agents. Parent agent records are deleted by
-	// CompositeStore.DeleteProject (step 9), but credential rows would survive
-	// as orphans. Delete transactionally before agent deletion.
+	// CompositeStore.DeleteProject (Delete step 10), but credential rows
+	// would survive as orphans. Delete transactionally before agent deletion.
 	if n, err := tx.DeleteAgentCredentialsByProject(ctx, projectID); err != nil {
 		return cs, fmt.Errorf("cascade agent credentials: %w", err)
 	} else {

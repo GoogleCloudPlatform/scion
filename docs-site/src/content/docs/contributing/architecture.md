@@ -402,7 +402,7 @@ The control channel uses a custom WebSocket protocol (`pkg/wsprotocol`) with the
 1. Admin creates a broker record in the Hub: `POST /api/v1/runtime-brokers`.
 2. Hub generates a short-lived **join token**: `POST /api/v1/brokers/join`.
 3. Broker uses the join token to obtain HMAC credentials: `POST /api/v1/brokers/join` (with token).
-4. Broker stores credentials locally (`~/.scion/broker-credentials.json`).
+4. Broker stores credentials locally, one file per Hub connection (`~/.scion/hub-credentials/<name>.json`). A legacy `~/.scion/broker-credentials.json` is migrated into that directory on first use.
 5. Broker authenticates subsequent requests using HMAC-SHA256 signatures.
 
 ---

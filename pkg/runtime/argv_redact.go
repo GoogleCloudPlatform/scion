@@ -60,8 +60,8 @@ import (
 const envValueRedactionFloor = 8
 
 // externalEnvValues returns the KEY=VALUE env entries that originated OUTSIDE
-// the runtime -- broker-supplied cfg.Env and harness-supplied env -- and that
-// survived into the final env map.
+// the runtime -- broker-supplied cfg.Env, harness-supplied env and
+// resolved-auth env vars -- and that survived into the final env map.
 //
 // WHY NOT SIMPLY EVERY VALUE THE RUNTIME PUT IN ARGV. Because that measurably
 // destroys the diagnostic. envFor synthesises HOME=/home/scion,
@@ -81,16 +81,26 @@ const envValueRedactionFloor = 8
 // could carry a secret arrives from outside, and that is precisely the set
 // returned.
 func externalEnvValues(cfg RunConfig, env map[string]string) map[string]string {
-	external := make(map[string]string)
+	// Collect every external value per key rather than letting one source
+	// overwrite another. Which source wins in env depends on precedence
+	// (cfg.Env, harness, resolved auth, resolved secrets folded into
+	// cfg.Env); keeping all candidates means the value that reached argv is
+	// in the set whatever that precedence is.
+	external := make(map[string][]string)
 
 	for _, e := range cfg.Env {
 		if k, v, ok := strings.Cut(e, "="); ok {
-			external[k] = v
+			external[k] = append(external[k], v)
 		}
 	}
 	if cfg.Harness != nil {
 		for k, v := range cfg.Harness.GetEnv(cfg.Name, sandboxAgentHome, cfg.UnixUsername) {
-			external[k] = v
+			external[k] = append(external[k], v)
+		}
+	}
+	if cfg.ResolvedAuth != nil {
+		for k, v := range cfg.ResolvedAuth.EnvVars {
+			external[k] = append(external[k], v)
 		}
 	}
 
@@ -99,9 +109,16 @@ func externalEnvValues(cfg RunConfig, env map[string]string) map[string]string {
 	// value that was never passed cannot leak -- redacting it would remove a
 	// coincidentally matching string from the message for no benefit.
 	live := make(map[string]string, len(external))
-	for k, v := range external {
-		if env[k] == v {
-			live[k] = v
+	for k, vs := range external {
+		got, ok := env[k]
+		if !ok {
+			continue
+		}
+		for _, v := range vs {
+			if v == got {
+				live[k] = v
+				break
+			}
 		}
 	}
 	return live

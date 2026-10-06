@@ -173,6 +173,16 @@ var RelationshipPolicies = []RelationshipPolicy{
 		},
 	},
 	{
+		// launcher/agent/agent (ptone/scion#3409): an agent reads the status
+		// of an agent it directly launched, in the same project. The rule
+		// produces a candidate only on the single-agent GET routes.
+		Relationship:   "launcher",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   ResourceAgent,
+		PermissionIDs:  []string{"agent.read"},
+		ReadOnly:       true,
+	},
+	{
 		// progeny/agent/secret (TestRelationshipCharacterization_Progeny). The
 		// Decide resource type is "secret"; the permission is registered on
 		// project (reviewed cross-type cell).

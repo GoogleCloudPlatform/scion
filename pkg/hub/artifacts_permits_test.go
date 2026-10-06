@@ -32,7 +32,13 @@ import (
 // A scoped user access token keeps its own restrictions: it is not treated
 // as the plain user behind it.
 func TestArtifactHostPermits(t *testing.T) {
-	host := newArtifactHost(&Server{})
+	srv, s := testServer(t)
+	host := newArtifactHost(srv)
+	// A real agent with a recorded delegation edge, so its chain allows the
+	// artifact permissions (agentChainAllows).
+	p1 := artifactProject(t, s, "permits-p1")
+	chained, _ := artifactAgent(t, srv, s, p1.ID, "permits-agent", AgentRoleFull)
+	agent := func(scopes ...AgentTokenScope) Identity { return artifactTestAgent(chained.ID, p1.ID, scopes...) }
 	alice := NewAuthenticatedUser("user-1", "alice@example.com", "Alice", "member", "api")
 	uat := func(project string, scopes ...string) Identity { return artifactTestUAT(t, alice, project, scopes...) }
 	synthetic := &agentIdentityWrapper{&AgentTokenClaims{
@@ -56,12 +62,13 @@ func TestArtifactHostPermits(t *testing.T) {
 		{"UAT read scope does not create", uat("p1", "artifact:read"), "p1", artifacts.PermissionCreate, false},
 		{"UAT with artifact:create", uat("p1", "artifact:create"), "p1", artifacts.PermissionCreate, true},
 
-		{"agent with the read scope", artifactTestAgent("agent-1", "p1", ScopeProjectArtifactRead), "p1", artifacts.PermissionRead, true},
-		{"agent read scope, other home project", artifactTestAgent("agent-1", "p1", ScopeProjectArtifactRead), "p2", artifacts.PermissionRead, true},
-		{"agent without the read scope", artifactTestAgent("agent-1", "p1", ScopeProjectRead), "p1", artifacts.PermissionRead, false},
-		{"agent without the write scope", artifactTestAgent("agent-1", "p1", ScopeProjectArtifactRead), "p1", artifacts.PermissionCreate, false},
-		{"agent with the write scope", artifactTestAgent("agent-1", "p1", ScopeProjectArtifactWrite), "p1", artifacts.PermissionCreate, true},
-		{"agent delete is never permitted", artifactTestAgent("agent-1", "p1", ScopeProjectArtifactRead, ScopeProjectArtifactWrite), "p1", artifacts.PermissionDelete, false},
+		{"agent with the read scope", agent(ScopeProjectArtifactRead), p1.ID, artifacts.PermissionRead, true},
+		{"agent read scope, artifact homed elsewhere", agent(ScopeProjectArtifactRead), "p2", artifacts.PermissionRead, true},
+		{"agent without the read scope", agent(ScopeProjectRead), p1.ID, artifacts.PermissionRead, false},
+		{"agent without the write scope", agent(ScopeProjectArtifactRead), p1.ID, artifacts.PermissionCreate, false},
+		{"agent with the write scope", agent(ScopeProjectArtifactWrite), p1.ID, artifacts.PermissionCreate, true},
+		{"agent delete is never permitted", agent(ScopeProjectArtifactRead, ScopeProjectArtifactWrite), p1.ID, artifacts.PermissionDelete, false},
+		{"agent with scopes but no delegation edge", artifactTestAgent("agent-without-edge", p1.ID, ScopeProjectArtifactRead), p1.ID, artifacts.PermissionRead, false},
 		{"in-process agent identity without a token", synthetic, "p1", artifacts.PermissionRead, false},
 
 		{"federated agent", NewFederatedAgentIdentity("https://other.example.com", "remote-agent", "remote-proj", "remote", "root", nil, nil), "p1", artifacts.PermissionRead, false},

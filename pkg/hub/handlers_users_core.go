@@ -1168,6 +1168,20 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return fmt.Errorf("delete skill injections: %w", err)
 		}
 
+		// Remove the user's group memberships before the user row: the
+		// FK is ON DELETE SET NULL, so afterwards they would be orphans
+		// that still count toward group roles (ptone/scion#2769). Residual
+		// race on PostgreSQL: a concurrent AddGroupMember for this user can
+		// insert a row this delete does not see, which the FK then nulls.
+		// It is harmless: orphaned rows are excluded from counts and
+		// listings, and the startup sweep removes them. On PostgreSQL the
+		// call first locks the groups this user owns, so the transaction
+		// takes owned group rows before membership rows, like a concurrent
+		// project delete's group cascade (no 40P01 between the two).
+		if _, err := tx.DeleteGroupMembershipsForUser(ctx, id); err != nil {
+			return fmt.Errorf("delete group memberships: %w", err)
+		}
+
 		// Delete the user record.
 		if err := tx.DeleteUser(ctx, id); err != nil {
 			return fmt.Errorf("delete user: %w", err)

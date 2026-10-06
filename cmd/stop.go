@@ -262,11 +262,11 @@ func stopAllAgents() error {
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "stop",
 			"results": jsonResults,
-		})
+		}, hasErrors, "failed to stop some agents")
 	}
 
 	var errs []string
@@ -416,20 +416,16 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 
 	wg.Wait()
 
-	if stopRm && hubCtx.ProjectPath != "" {
-		removedAny := false
-		for _, r := range results {
+	if stopRm {
+		// Confirmed removals get the same local cleanup as scion delete
+		// (ptone/scion#2896): agent files, worktree and sync state. It runs
+		// here, one agent at a time, because git worktree operations must
+		// not overlap. The branch is kept, as with a local stop --rm.
+		for i := range results {
+			r := &results[i]
 			if r.Removed && r.Error == "" {
-				removedAny = true
-				break
-			}
-		}
-		if removedAny {
-			// Keep sync watermark current after hub-side delete operations.
-			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
-			for _, r := range results {
-				if r.Removed && r.Error == "" {
-					hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, r.Name)
+				if _, err := cleanupAfterHubDelete(hubCtx, r.Name, false); err != nil {
+					r.Warnings = append(r.Warnings, stopRmCleanupWarning(r.Name, err))
 				}
 			}
 		}
@@ -466,11 +462,11 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "stop",
 			"results": jsonResults,
-		})
+		}, hasErrors, "failed to stop some agents via Hub")
 	}
 
 	var errs []string
@@ -555,19 +551,24 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 			statusf("Agent '%s' stopped via Hub; %s.\n", agentName, msg)
 			return nil
 		}
-		if hubCtx.ProjectPath != "" {
-			// Keep sync watermark current after hub-side delete operations.
-			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
-			hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
+		// Same local cleanup as scion delete (ptone/scion#2896); the branch
+		// is kept, as with a local stop --rm.
+		var warnings []string
+		if _, err := cleanupAfterHubDelete(hubCtx, agentName, false); err != nil {
+			warnings = append(warnings, stopRmCleanupWarning(agentName, err))
 		}
 		if isJSONOutput() {
 			return outputJSON(ActionResult{
-				Status:  "success",
-				Command: "stop",
-				Agent:   agentName,
-				Message: fmt.Sprintf("Agent '%s' stopped and removed via Hub.", agentName),
-				Details: map[string]interface{}{"removed": true, "hub": true},
+				Status:   "success",
+				Command:  "stop",
+				Agent:    agentName,
+				Message:  fmt.Sprintf("Agent '%s' stopped and removed via Hub.", agentName),
+				Warnings: warnings,
+				Details:  map[string]interface{}{"removed": true, "hub": true},
 			})
+		}
+		for _, w := range warnings {
+			statusf("Warning: %s\n", w)
 		}
 		statusf("Agent '%s' stopped and removed via Hub.\n", agentName)
 	} else {
@@ -584,6 +585,13 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 	}
 
 	return nil
+}
+
+// stopRmCleanupWarning is the warning for a stop --rm whose Hub removal
+// was confirmed but whose local cleanup failed. The command still succeeds.
+// stop --rm keeps the git branch, so the retry command does too.
+func stopRmCleanupWarning(agentName string, err error) string {
+	return fmt.Sprintf("removed via Hub but local cleanup failed: %v; run '%s' to retry", err, noHubDeleteCommand(agentName, true))
 }
 
 // stopQueuedNotRemovedMessage is printed when stop --rm finds the stop queued
@@ -626,7 +634,7 @@ func printLifecycleWarnings(resp *hubclient.LifecycleResponse) {
 }
 
 func init() {
-	stopCmd.Flags().BoolVar(&stopRm, "rm", false, "Remove the agent after stopping")
+	stopCmd.Flags().BoolVar(&stopRm, "rm", false, "Remove the agent after stopping, including its local files and worktree (the git branch is kept)")
 	stopCmd.Flags().BoolVarP(&stopAll, "all", "a", false, "Stop all running agents in the current project")
 	rootCmd.AddCommand(stopCmd)
 }
