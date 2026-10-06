@@ -47,6 +47,11 @@ vi.mock('../../client/main.js', () => ({
   stateManager: new EventTarget(),
 }));
 
+// The platform the shortcut handler sees; false (not a Mac) unless a test
+// sets it.
+const platform = vi.hoisted(() => ({ mac: false }));
+vi.mock('../../utils/platform.js', () => ({ isMacPlatform: () => platform.mac }));
+
 vi.mock('../../client/api.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../client/api.js')>();
   return {
@@ -135,6 +140,7 @@ beforeEach(() => {
 afterEach(() => {
   document.body.innerHTML = '';
   Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+  platform.mac = false;
 });
 
 /**
@@ -236,6 +242,106 @@ describe('_handleGlobalKeydown: modifier/IME/repeat/key guards (eligible fixture
     const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
     page._handleGlobalKeydown(makeKeydownEvent({ key: 'K', metaKey: true }));
     expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('_handleGlobalKeydown: macOS Ctrl+K in a text field keeps its native meaning', () => {
+  function editableTargets(): Array<[string, Element]> {
+    const editable = document.createElement('div');
+    editable.contentEditable = 'true';
+    // happy-dom has no editing host; the property is what the handler reads.
+    Object.defineProperty(editable, 'isContentEditable', { value: true });
+    return [
+      ['textarea', document.createElement('textarea')],
+      ['input', document.createElement('input')],
+      ['contenteditable', editable],
+    ];
+  }
+
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field, unprevented', () => {
+    platform.mac = true;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ ctrlKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).not.toHaveBeenCalled();
+      expect(e.defaultPrevented, name).toBe(false);
+    }
+  });
+
+  it('on a Mac, counts every text-taking input type as a text field', () => {
+    platform.mac = true;
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const input = document.createElement('input');
+      input.type = type;
+      page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [input] }));
+      expect(togglePalette, type).not.toHaveBeenCalled();
+    }
+  });
+
+  it('on a Mac, Ctrl+K on a non-text, read-only or disabled field opens the palette', () => {
+    platform.mac = true;
+    const fields: Array<[string, Element]> = [];
+    for (const type of ['checkbox', 'button', 'range']) {
+      const input = document.createElement('input');
+      input.type = type;
+      fields.push([`input ${type}`, input]);
+    }
+    const readOnlyInput = document.createElement('input');
+    readOnlyInput.readOnly = true;
+    const disabledInput = document.createElement('input');
+    disabledInput.disabled = true;
+    const readOnlyTextarea = document.createElement('textarea');
+    readOnlyTextarea.readOnly = true;
+    const disabledTextarea = document.createElement('textarea');
+    disabledTextarea.disabled = true;
+    fields.push(
+      ['read-only input', readOnlyInput],
+      ['disabled input', disabledInput],
+      ['read-only textarea', readOnlyTextarea],
+      ['disabled textarea', disabledTextarea]
+    );
+    for (const [name, field] of fields) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ ctrlKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented, name).toBe(true);
+    }
+  });
+
+  it('on a Mac, Cmd+K typed in a text field still opens the palette', () => {
+    platform.mac = true;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      const e = makeKeydownEvent({ metaKey: true, path: [field] });
+      page._handleGlobalKeydown(e);
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+      expect(e.defaultPrevented, name).toBe(true);
+    }
+  });
+
+  it('on a Mac, Ctrl+K outside a text field still opens the palette', () => {
+    platform.mac = true;
+    const page = createEligiblePage();
+    const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+    page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [document.body] }));
+    expect(togglePalette).toHaveBeenCalledTimes(1);
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', () => {
+    platform.mac = false;
+    for (const [name, field] of editableTargets()) {
+      const page = createEligiblePage();
+      const togglePalette = vi.spyOn(page, 'togglePalette').mockResolvedValue(undefined);
+      page._handleGlobalKeydown(makeKeydownEvent({ ctrlKey: true, path: [field] }));
+      expect(togglePalette, name).toHaveBeenCalledTimes(1);
+    }
   });
 });
 
