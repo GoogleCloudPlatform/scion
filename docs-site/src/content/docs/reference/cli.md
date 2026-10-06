@@ -179,11 +179,11 @@ start or stop was recorded first. With `--rm`, a queued stop does not remove the
 **Usage:** `scion stop <agent-name> [flags]`
 
 - **Flags:**
-    - `--rm`: Remove the agent after stopping. Once the removal is confirmed, the agent's local
+    - `--rm`: Remove the agent after stopping. In Hub mode the command waits for the Hub to
+      confirm the removal, as [`scion delete`](#scion-delete-or-rm) does, and prints that removal
+      is in progress if the Hub answers `202`. Once the removal is confirmed, the agent's local
       files (agent directory and worktree) are removed too, as with `scion delete`; its git branch
-      is kept. In Hub mode the command waits for the Hub to confirm the removal, as
-      `scion delete` does, and prints that removal is in progress if the Hub answers `202`.
-      If the Hub accepts the removal but cannot confirm it, or the removal fails, local
+      is kept. If the Hub accepts the removal but cannot confirm it, or the removal fails, local
       files are left in place. If the local cleanup itself fails, the command still succeeds and
       prints a warning suggesting `scion --no-hub delete --preserve-branch <agent-name>`.
     - `-a, --all`: Stop all running agents in the current project. If any agent fails to stop
