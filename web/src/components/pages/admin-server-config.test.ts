@@ -2061,16 +2061,14 @@ describe('scion-page-admin-server-config', () => {
   });
 
   describe('Cloud Run runtime editor field names (ptone/scion#3475)', () => {
-    function cloudRunConfig(tier: Record<string, unknown>) {
-      return makeBaseConfig({
-        ...tier,
-        runtimes: {
-          crun: {
-            type: 'cloudrun',
-            cloudrun: { project_id: 'proj-a', location: 'us-central1' },
-          },
-        },
-      });
+    function cloudRunConfig(
+      tier: Record<string, unknown>,
+      runtime: Record<string, unknown> = {
+        type: 'cloudrun',
+        cloudrun: { project_id: 'proj-a', location: 'us-central1' },
+      }
+    ) {
+      return makeBaseConfig({ ...tier, runtimes: { crun: runtime } });
     }
 
     function cloudRunInputs(el: HTMLElement): {
@@ -2131,7 +2129,193 @@ describe('scion-page-admin-server-config', () => {
           project_id: 'proj-b',
           location: 'europe-west1',
         });
+        expect('cloudrun_instances' in capturedPayload!.runtimes.crun).toBe(false);
       });
+
+      it(`${mode} mode: cloudrun-instances reads and sends the cloudrun_instances block`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(
+            cloudRunConfig(tier, {
+              type: 'cloudrun-instances',
+              cloudrun_instances: { project_id: 'proj-a', region: 'us-central1' },
+            }),
+            {
+              schemaResponse: {
+                sections: {
+                  ...SCHEMA_RESPONSE.sections,
+                  runtimes: { koanf_paths: ['runtimes'] },
+                },
+              },
+              putHandler: (body) => {
+                if ('runtimes' in body) capturedPayload = body;
+                return { status: 200, body: { reload: { applied: [] } } };
+              },
+            }
+          )
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun_instances).toEqual({
+          project_id: 'proj-b',
+          region: 'europe-west1',
+        });
+        expect('cloudrun' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      for (const [from, to, fromBlock, toBlock, toFields] of [
+        [
+          'cloudrun',
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          { project_id: 'proj-b', region: 'europe-west1' },
+        ],
+        [
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          'cloudrun',
+          { project_id: 'proj-b', location: 'europe-west1' },
+        ],
+      ] as const) {
+        it(`${mode} mode: switching ${from} to ${to} drops the ${fromBlock} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          const fromFields =
+            from === 'cloudrun'
+              ? { project_id: 'proj-a', location: 'us-central1' }
+              : { project_id: 'proj-a', region: 'us-central1' };
+          element = await createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, {
+                type: from,
+                sync: 'tar',
+                env: { FOO: 'bar' },
+                [fromBlock]: fromFields,
+              }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) capturedPayload = body;
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = to;
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await (element as any).updateComplete;
+
+          const { project, location } = cloudRunInputs(element);
+          expect(project.getAttribute('value')).toBe('');
+          expect(location.getAttribute('value')).toBe('');
+          project.value = 'proj-b';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = 'europe-west1';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(to);
+          expect(fromBlock in crun).toBe(false);
+          expect(crun[toBlock]).toEqual(toFields);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+          expect(crun.sync).toBe('tar');
+        });
+      }
+
+      for (const [type, block, fields] of [
+        ['cloudrun', 'cloudrun', { project_id: 'proj-a', location: 'us-central1' }],
+        [
+          'cloudrun-instances',
+          'cloudrun_instances',
+          { project_id: 'proj-a', region: 'us-central1' },
+        ],
+      ] as const) {
+        const loadRuntime = async (onPut: (body: Record<string, any>) => void) =>
+          createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, { type, env: { FOO: 'bar' }, [block]: fields }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) onPut(body);
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+        it(`${mode} mode: clearing both ${type} fields drops the ${block} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          const { project, location } = cloudRunInputs(element);
+          project.value = '';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = '';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(type);
+          expect(block in crun).toBe(false);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+
+        it(`${mode} mode: switching ${type} to docker drops both Cloud Run blocks`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          element = await loadRuntime((body) => (capturedPayload = body));
+
+          // Finds the runtime type select by its cloudrun-instances option;
+          // update this if another runtime-type select appears on the page.
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = 'docker';
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe('docker');
+          expect('cloudrun' in crun).toBe(false);
+          expect('cloudrun_instances' in crun).toBe(false);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+        });
+      }
     }
   });
 
