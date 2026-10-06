@@ -110,13 +110,18 @@ type HeartbeatService struct {
 
 	// profileSAMappings, when set, returns each Kubernetes profile's GSA
 	// mappings, or nil when they cannot be read. They are sent on the first
-	// successful heartbeat and again whenever they change
-	// (sentSAMappingsKey), so a broker restart or a mapping edit refreshes
-	// the hub without a re-registration.
+	// successful heartbeat, whenever they change, and every
+	// saMappingsResendInterval, so a broker restart or a mapping edit
+	// refreshes the hub without a re-registration.
 	profileSAMappings func() []hubclient.ProfileSAMappingsState
 	// sentSAMappingsKey is the fingerprint of the last profileSAMappings
-	// the hub accepted, "" before the first (guarded by mu).
+	// the hub accepted, "" before the first, and sentSAMappingsAt when it
+	// was accepted (both guarded by mu). Unchanged mappings are re-sent
+	// once saMappingsResendInterval has passed, so a hub that lost or never
+	// stored a report (an upgrade under a running broker, an overlapping
+	// send) catches up; the hub persists only on change.
 	sentSAMappingsKey string
+	sentSAMappingsAt  time.Time
 
 	// defaultProfile, when set, returns the broker's default (active)
 	// profile name, reported on every heartbeat. A nil func, or a nil
@@ -317,14 +322,20 @@ func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 	if saKey != "" {
 		s.mu.Lock()
 		s.sentSAMappingsKey = saKey
+		s.sentSAMappingsAt = time.Now()
 		s.mu.Unlock()
 	}
 	return nil
 }
 
+// saMappingsResendInterval is how often unchanged profile SA mappings are
+// re-sent on the heartbeat.
+const saMappingsResendInterval = 10 * time.Minute
+
 // addProfileSAMappings sets heartbeat.ProfileSAMappings when the current
 // mappings differ from the last ones the hub accepted (always on the first
-// heartbeat), and returns their fingerprint, or "" when nothing was added.
+// heartbeat) or saMappingsResendInterval has passed since then, and returns
+// their fingerprint, or "" when nothing was added.
 func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeartbeat) string {
 	if s.profileSAMappings == nil {
 		return ""
@@ -339,9 +350,9 @@ func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeart
 	}
 	key := string(b)
 	s.mu.Lock()
-	unchanged := key == s.sentSAMappingsKey
+	skip := key == s.sentSAMappingsKey && time.Since(s.sentSAMappingsAt) < saMappingsResendInterval
 	s.mu.Unlock()
-	if unchanged {
+	if skip {
 		return ""
 	}
 	heartbeat.ProfileSAMappings = mappings

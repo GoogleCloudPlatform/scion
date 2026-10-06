@@ -54,6 +54,13 @@ func TestHeartbeat_ProfileSAMappingsSentOnFirstAndOnChange(t *testing.T) {
 	assert.Equal(t, current, send().ProfileSAMappings, "a failed send is retried on the next heartbeat")
 	assert.Nil(t, send().ProfileSAMappings)
 
+	// Unchanged mappings are re-sent once the resend interval has passed.
+	hb.mu.Lock()
+	hb.sentSAMappingsAt = time.Now().Add(-saMappingsResendInterval - time.Second)
+	hb.mu.Unlock()
+	assert.Equal(t, current, send().ProfileSAMappings, "unchanged mappings are re-sent after the interval")
+	assert.Nil(t, send().ProfileSAMappings, "and not again until the next interval")
+
 	// Unreadable settings (nil) send nothing and do not reset the state.
 	hb.profileSAMappings = func() []hubclient.ProfileSAMappingsState { return nil }
 	assert.Nil(t, send().ProfileSAMappings)

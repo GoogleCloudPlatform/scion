@@ -146,11 +146,12 @@ func init() {
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 }
 
-// resolveProjectForSA resolves the project ID and creates a hub client for SA operations.
 // resolveProjectForSA is a variable so tests can point the service-account
 // commands at a fake Hub.
 var resolveProjectForSA = resolveLinkedProjectForSA
 
+// resolveLinkedProjectForSA resolves the project ID and creates a hub client
+// for SA operations.
 func resolveLinkedProjectForSA() (hubclient.Client, string, error) {
 	settings, client, err := loadHubClient()
 	if err != nil {

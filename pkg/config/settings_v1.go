@@ -531,13 +531,16 @@ func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, ru
 // is the entry's Type, or the entry key when Type is unset, so a custom key
 // such as "gke" with type kubernetes counts. known is false when the
 // profile is not in these settings (for example a broker's synthetic
-// "default" profile), and the other results are then empty.
+// "default" profile) or names no runtime entry, and the other results are
+// then empty.
 func (vs *VersionedSettings) ProfileKubernetesSAMappings(profileName string) (gsas []string, isKubernetes, known bool) {
 	if vs == nil {
 		return nil, false, false
 	}
 	profile, ok := vs.Profiles[profileName]
-	if !ok {
+	if !ok || profile.Runtime == "" {
+		// A profile without a runtime entry cannot be resolved here; the
+		// caller treats it as unknown.
 		return nil, false, false
 	}
 	runtimeType := profile.Runtime

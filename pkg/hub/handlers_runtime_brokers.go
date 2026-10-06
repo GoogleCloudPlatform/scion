@@ -720,9 +720,13 @@ type brokerProfileSAMappings struct {
 
 // applyProfileSAMappings stores each reported profile's GSA mappings on the
 // stored profile of the same name and marks it MappingsReported, and
-// reports whether anything changed. Like applyProfileAttach, a reported
-// name with no stored profile is ignored, and a broker with no stored
-// profiles (a flat Runtime Broker row) gets nothing.
+// reports whether anything changed. The report lists every Kubernetes
+// profile of the broker, so a stored profile it omits (for example one
+// switched from Kubernetes to docker) has its report cleared. Like
+// applyProfileAttach, a reported name with no stored profile is ignored, a
+// broker with no stored profiles (a flat Runtime Broker row) gets nothing,
+// and an absent report (an older broker, or an empty list, which the wire
+// format omits) changes nothing.
 func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerProfileSAMappings) bool {
 	if len(reported) == 0 || len(profiles) == 0 {
 		return false
@@ -735,6 +739,11 @@ func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerPro
 	for i := range profiles {
 		mappings, ok := byName[profiles[i].Name]
 		if !ok {
+			if profiles[i].MappingsReported || len(profiles[i].ServiceAccountMappings) > 0 {
+				profiles[i].MappingsReported = false
+				profiles[i].ServiceAccountMappings = nil
+				changed = true
+			}
 			continue
 		}
 		if profiles[i].MappingsReported && reflect.DeepEqual(profiles[i].ServiceAccountMappings, mappings) {

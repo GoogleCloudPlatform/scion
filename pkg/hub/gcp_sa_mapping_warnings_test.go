@@ -249,6 +249,34 @@ func TestProjectSAMappingWarnings_EmbeddedBrokerReadsLiveSettings(t *testing.T) 
 	assert.Empty(t, srv.projectSAMappingWarnings(context.Background(), projectID, unmapped))
 }
 
+// A live profile that names no runtime entry is unknown: it falls back to
+// its stored record and counts as unreported.
+func TestProjectSAMappingWarnings_EmbeddedProfileWithoutRuntimeIsUnknown(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	b := addProviderBroker(t, s, projectID, "embedded",
+		store.BrokerProfile{Name: "noruntime", Type: "kubernetes"},
+		k8sProfile("k8s", true, mappedGSA),
+	)
+	srv.SetEmbeddedBrokerID(b.ID)
+	prev := loadEmbeddedBrokerMappingSettings
+	t.Cleanup(func() { loadEmbeddedBrokerMappingSettings = prev })
+	loadEmbeddedBrokerMappingSettings = func() (*config.VersionedSettings, error) {
+		return &config.VersionedSettings{
+			Profiles: map[string]config.V1ProfileConfig{
+				"noruntime": {},
+				"k8s":       {Runtime: "kubernetes"},
+			},
+			Runtimes: map[string]config.V1RuntimeConfig{
+				"kubernetes": {KubernetesServiceAccountMappings: map[string]string{mappedGSA: "ksa"}},
+			},
+		}, nil
+	}
+	got := srv.projectSAMappingWarnings(context.Background(), projectID, mappingTestSA(t, s, projectID, unmappedGSA))
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0], "profiles checked: embedded/k8s;")
+	assert.Contains(t, got[0], "1 Kubernetes profile(s) did not report")
+}
+
 // Live settings are not loaded for an embedded broker whose profiles are
 // all local-only.
 func TestProjectSAMappingWarnings_EmbeddedBrokerLoadsLazily(t *testing.T) {
@@ -312,15 +340,34 @@ func TestApplyProfileSAMappings(t *testing.T) {
 		assert.True(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: nil}}))
 		assert.True(t, profiles[0].MappingsReported)
 	})
+	t.Run("reported empty again (stored nil) is not a change", func(t *testing.T) {
+		profiles := []store.BrokerProfile{{Name: "k8s", MappingsReported: true}}
+		assert.False(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: m()}}))
+		assert.True(t, profiles[0].MappingsReported)
+	})
+	t.Run("a stored profile the report omits is cleared", func(t *testing.T) {
+		profiles := []store.BrokerProfile{
+			{Name: "k8s", MappingsReported: true, ServiceAccountMappings: m(mappedGSA)},
+			{Name: "was-k8s", Type: "docker", MappingsReported: true, ServiceAccountMappings: m(mappedGSA)},
+		}
+		assert.True(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: m(mappedGSA)}}))
+		assert.True(t, profiles[0].MappingsReported, "the reported profile keeps its report")
+		assert.False(t, profiles[1].MappingsReported, "the omitted profile's report is cleared")
+		assert.Empty(t, profiles[1].ServiceAccountMappings)
+	})
 	t.Run("flat row (no stored profiles) gets nothing", func(t *testing.T) {
 		var profiles []store.BrokerProfile
 		assert.False(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: m(mappedGSA)}}))
 		assert.Empty(t, profiles)
 	})
-	t.Run("no field (older broker) changes nothing", func(t *testing.T) {
-		profiles := []store.BrokerProfile{{Name: "k8s", MappingsReported: true, ServiceAccountMappings: m(mappedGSA)}}
+	t.Run("no field (older broker) changes nothing, nothing is cleared", func(t *testing.T) {
+		profiles := []store.BrokerProfile{
+			{Name: "k8s", MappingsReported: true, ServiceAccountMappings: m(mappedGSA)},
+			{Name: "other", MappingsReported: true, ServiceAccountMappings: m(unmappedGSA)},
+		}
 		assert.False(t, applyProfileSAMappings(profiles, nil))
 		assert.Equal(t, m(mappedGSA), profiles[0].ServiceAccountMappings)
+		assert.True(t, profiles[1].MappingsReported)
 	})
 }
 

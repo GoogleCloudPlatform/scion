@@ -59,3 +59,29 @@ func TestKubernetesServiceAccountMappingGSAs(t *testing.T) {
 	assert.Nil(t, vs.KubernetesServiceAccountMappingGSAs("missing", "missing"))
 	assert.Nil(t, (*VersionedSettings)(nil).KubernetesServiceAccountMappingGSAs("gke", "k8s"))
 }
+
+func TestProfileKubernetesSAMappings(t *testing.T) {
+	vs := &VersionedSettings{
+		Profiles: map[string]V1ProfileConfig{
+			"gke":       {Runtime: "gke-entry"},
+			"local":     {Runtime: "docker"},
+			"noruntime": {},
+		},
+		Runtimes: map[string]V1RuntimeConfig{
+			"gke-entry": {Type: "kubernetes", KubernetesServiceAccountMappings: map[string]string{"a@x.iam.gserviceaccount.com": "ksa"}},
+		},
+	}
+	gsas, isK8s, known := vs.ProfileKubernetesSAMappings("gke")
+	assert.Equal(t, []string{"a@x.iam.gserviceaccount.com"}, gsas)
+	assert.True(t, isK8s, "a custom key with type kubernetes is Kubernetes")
+	assert.True(t, known)
+
+	_, isK8s, known = vs.ProfileKubernetesSAMappings("local")
+	assert.False(t, isK8s)
+	assert.True(t, known)
+
+	_, _, known = vs.ProfileKubernetesSAMappings("noruntime")
+	assert.False(t, known, "a profile without a runtime entry is unknown")
+	_, _, known = vs.ProfileKubernetesSAMappings("missing")
+	assert.False(t, known)
+}
