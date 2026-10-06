@@ -339,7 +339,7 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 		var err error
 		cursorCreated, cursorID, err = decodeCursor(opts.Cursor)
 		if err != nil {
-			return nil, fmt.Errorf("invalid cursor: %w", store.ErrInvalidInput)
+			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
 		cursorCreated = cursorCreated.UTC()
 		query.Where(schedule.Or(
