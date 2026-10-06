@@ -1413,7 +1413,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// DeletionHoldsRow is a superset of entAgentDeletionActive.
 	deleteHolds := entAgentDeletionActive(current, now)
 	if su.StartWrite {
-		deleteHolds = entAgentToStore(current).DeletionHoldsRow(now)
+		deleteHolds = store.DeletionHoldsRow(current.DeletionState, current.DeletionLeaseAt, now)
 	}
 	if current.DeletedAt != nil || deleteHolds {
 		su.Phase = ""
