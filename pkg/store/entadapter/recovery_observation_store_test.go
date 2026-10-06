@@ -166,3 +166,25 @@ func TestRecoveryObs_UpsertsOverConcurrentInsert(t *testing.T) {
 	assert.Equal(t, "broker-1", got[a.ID].BrokerID)
 	require.NotNil(t, got[a.ID].FirstAbsentAt)
 }
+
+// Observations and the inventory time are written with one store-clock
+// value, and read back equal on either backend.
+func TestRecoveryObs_StoredTimesMatchInventoryTime(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "obs-times")
+	at, err := s.RecordRecoveryObservations(ctx, "broker-1", []string{"B", "A"}, []store.RecoveryObservation{
+		{AgentID: a.ID, Target: "A", State: store.ObservedAbsent},
+	})
+	require.NoError(t, err)
+	got, err := s.GetRecoveryObservations(ctx, []string{a.ID})
+	require.NoError(t, err)
+	inv, err := s.ListBrokerTargetInventory(ctx, "broker-1")
+	require.NoError(t, err)
+	require.Len(t, inv, 2)
+	for _, r := range inv {
+		assert.True(t, r.LastCompleteInventoryAt.Equal(at), "target %s inventory time %v, written %v", r.Target, r.LastCompleteInventoryAt, at)
+	}
+	assert.True(t, got[a.ID].ObservedAt.Equal(inv[0].LastCompleteInventoryAt), "observed_at %v equals the inventory time %v", got[a.ID].ObservedAt, inv[0].LastCompleteInventoryAt)
+	assert.True(t, got[a.ID].FirstAbsentAt.Equal(at))
+}

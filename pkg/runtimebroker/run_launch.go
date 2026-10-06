@@ -378,6 +378,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			Phase:           sr.info.Phase,
 			Activity:        sr.info.Activity,
 			ContainerStatus: sr.info.ContainerStatus,
+
+			WorkspacePlacement: sr.info.WorkspacePlacement,
 		}
 	}
 	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", info)
@@ -464,6 +466,13 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 	if !launchMarkerMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID) {
 		// A newer launch's marker write means this one's files are no
 		// longer this launch's to delete (design §3.8.4).
+		return
+	}
+	if owner := agentFilesRunOwner(lc.opts.Name, lc.opts.ProjectPath, lc.opts.RunID); owner != "" {
+		// The files record a different run as their owner
+		// (ptone/scion#2675): they are not this launch's to delete.
+		s.agentLifecycleLog.Info("runLaunch: skipped agent file cleanup: the agent's files belong to another run",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", lc.opts.RunID, "files_run_id", owner)
 		return
 	}
 	if _, err := agent.DeleteAgentFiles(lc.opts.Name, lc.opts.ProjectPath, true); err != nil {

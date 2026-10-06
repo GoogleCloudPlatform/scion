@@ -674,7 +674,7 @@ func (d *raceClaimDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 }
 
 // Review N4 (and N1 over HTTP): a start that loses the race to a delete
-// claim publishes and returns the stored row (phase unchanged, deletion
+// claim publishes and returns the stored row (the phase the claim found, deletion
 // populated), not the requested phase with deletion:null.
 func TestDeleteGate_StartLosesRaceToDeleteClaim(t *testing.T) {
 	for i, initial := range []*deleteSeed{
@@ -700,9 +700,15 @@ func TestDeleteGate_StartLosesRaceToDeleteClaim(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			require.Equal(t, 1, disp.starts)
 
+			// The start marked the stopped agent starting before it
+			// dispatched (beginStartDispatch, ptone/scion#2014), so that is
+			// the phase the racing claim keeps; the start's running write
+			// is dropped.
+			stored := string(state.PhaseStarting)
+
 			var body map[string]interface{}
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-			assert.Equal(t, string(state.PhaseStopped), body["phase"], "response carries the stored phase")
+			assert.Equal(t, stored, body["phase"], "response carries the stored phase")
 			d, ok := body["deletion"].(map[string]interface{})
 			require.True(t, ok, "response carries the racing delete: %s", rec.Body.String())
 			assert.Equal(t, store.DeletionStateDeleting, d["state"])
@@ -710,12 +716,12 @@ func TestDeleteGate_StartLosesRaceToDeleteClaim(t *testing.T) {
 			published := pub.publishedAgents()
 			require.NotEmpty(t, published)
 			last := published[len(published)-1]
-			assert.Equal(t, string(state.PhaseStopped), last.Phase, "event carries the stored phase")
+			assert.Equal(t, stored, last.Phase, "event carries the stored phase")
 			require.NotNil(t, store.ComputeAgentDeletion(last, time.Now()))
 
 			got, err := s.GetAgent(context.Background(), agent.ID)
 			require.NoError(t, err)
-			assert.Equal(t, string(state.PhaseStopped), got.Phase)
+			assert.Equal(t, stored, got.Phase)
 			assert.Equal(t, store.DeletionStateDeleting, got.DeletionState, "the racing claim's marker is kept")
 		})
 	}
@@ -962,17 +968,38 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 }
 
 // admissionClaimStore seeds a newer delete failure right after the
-// reincarnate handler creates its record: after the gate, before the worker.
+// reincarnate handler's claim transaction creates its record and commits:
+// after the gate, before the worker.
 type admissionClaimStore struct {
 	store.Store
 	t *testing.T
 }
 
-func (a *admissionClaimStore) CreateAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation) error {
+func (a *admissionClaimStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	rec := &admissionClaimTx{}
+	if err := a.Store.WithTx(ctx, func(tx store.Store) error {
+		rec.Store = tx
+		return fn(rec)
+	}); err != nil {
+		return err
+	}
+	if rec.agentID != "" {
+		seedAgentDeletion(a.t, a.Store, rec.agentID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+	}
+	return nil
+}
+
+// admissionClaimTx records the agent a reincarnation record is created for.
+type admissionClaimTx struct {
+	store.Store
+	agentID string
+}
+
+func (a *admissionClaimTx) CreateAgentReincarnation(ctx context.Context, rec *store.AgentReincarnation) error {
 	if err := a.Store.CreateAgentReincarnation(ctx, rec); err != nil {
 		return err
 	}
-	seedAgentDeletion(a.t, a.Store, rec.AgentID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+	a.agentID = rec.AgentID
 	return nil
 }
 

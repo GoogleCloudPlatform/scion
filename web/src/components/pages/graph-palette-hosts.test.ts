@@ -401,3 +401,24 @@ describe('project page', () => {
     await expectPickFocusesTree(el, 'a3');
   });
 });
+
+describe('tree view hosts with a complete set', () => {
+  it('/agents and the project page leave the ancestor-not-loaded marker off', async () => {
+    store.set('scion-view-agents', 'graph');
+    const agentsPage = await mount('scion-page-agents');
+    await setState(agentsPage, { agents: AGENTS });
+    const agentsTree = agentsPage.renderRoot.querySelector('scion-agent-tree-view');
+    expect(agentsTree).not.toBeNull();
+    expect(agentsTree?.markMissingAncestors).toBe(false);
+    agentsPage.remove();
+
+    store.set('scion-view-project-agents', 'graph');
+    const projectPage = await mount('scion-page-project-detail', (el) => {
+      (el as GraphPage & { projectId: string }).projectId = PROJECT_ID;
+    });
+    await setState(projectPage, { agents: AGENTS.filter((a) => a.projectId === PROJECT_ID) });
+    const projectTree = projectPage.renderRoot.querySelector('scion-agent-tree-view');
+    expect(projectTree).not.toBeNull();
+    expect(projectTree?.markMissingAncestors).toBe(false);
+  });
+});

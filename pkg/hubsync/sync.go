@@ -1506,34 +1506,29 @@ func cleanupProjectBrokerCredentials(projectPath string) {
 			return
 		}
 
-		vs, err := config.LoadSingleFileVersioned(projectPath)
+		// Load, modify and save under the settings-file lock.
+		err := config.LoadModifySaveVersionedSettings(projectPath, func(vs *config.VersionedSettings) error {
+			if vs.Server == nil || vs.Server.Broker == nil {
+				return config.ErrSkipSave
+			}
+			modified := false
+			if vs.Server.Broker.BrokerID != "" {
+				vs.Server.Broker.BrokerID = ""
+				modified = true
+				debugf("Removed stale server.broker.broker_id from project settings")
+			}
+			if vs.Server.Broker.BrokerToken != "" {
+				vs.Server.Broker.BrokerToken = ""
+				modified = true
+				debugf("Removed stale server.broker.broker_token from project settings")
+			}
+			if !modified {
+				return config.ErrSkipSave
+			}
+			return nil
+		})
 		if err != nil {
-			debugf("Warning: failed to load v1 project settings: %v", err)
-			return
-		}
-
-		if vs.Server == nil || vs.Server.Broker == nil {
-			return
-		}
-
-		modified := false
-		if vs.Server.Broker.BrokerID != "" {
-			vs.Server.Broker.BrokerID = ""
-			modified = true
-			debugf("Removed stale server.broker.broker_id from project settings")
-		}
-		if vs.Server.Broker.BrokerToken != "" {
-			vs.Server.Broker.BrokerToken = ""
-			modified = true
-			debugf("Removed stale server.broker.broker_token from project settings")
-		}
-
-		if !modified {
-			return
-		}
-
-		if err := config.SaveVersionedSettings(projectPath, vs); err != nil {
-			debugf("Warning: failed to write cleaned v1 settings: %v", err)
+			debugf("Warning: failed to clean v1 project settings: %v", err)
 		}
 		return
 	}

@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
 )
 
 var (
@@ -30,11 +32,28 @@ var versionCmd = &cobra.Command{
 	Short: "Print sciontool version information",
 	Long:  `Print version, commit, and build time information for sciontool.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if versionFeatures {
+			for _, f := range Features() {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), f)
+			}
+			return
+		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), getVersionString())
 	},
 }
 
+// versionFeatures selects the capability list instead of the version.
+var versionFeatures bool
+
+// Features returns the capability tokens this sciontool supports, one
+// contract per token. A broker that relies on a contract checks for its
+// token in the image's sciontool before using it.
+func Features() []string {
+	return []string{homeprep.FeatureToken}
+}
+
 func init() {
+	versionCmd.Flags().BoolVar(&versionFeatures, "features", false, "Print the supported capability tokens, one per line")
 	rootCmd.AddCommand(versionCmd)
 }
 

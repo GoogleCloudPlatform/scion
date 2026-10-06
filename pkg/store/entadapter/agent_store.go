@@ -139,12 +139,16 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
 		RunID:               a.RunID,
+		WorkspacePlacement:  a.WorkspacePlacement,
 		DeletionState:       a.DeletionState,
 		DeletionClaim:       a.DeletionClaim,
 		DeletionCode:        a.DeletionCode,
 		DeletionError:       a.DeletionError,
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
+	}
+	if a.SoftDeleteOpID != nil {
+		sa.SoftDeleteOpID = *a.SoftDeleteOpID
 	}
 	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
 	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
@@ -431,6 +435,26 @@ func (s *AgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[stri
 	}
 
 	return result, nil
+}
+
+// SetAgentSoftDeleteOpID sets soft_delete_op_id, or clears it when opID is
+// empty. It is the column's only writer; it neither checks nor bumps
+// state_version.
+func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	update := s.client.Agent.UpdateOneID(uid)
+	if opID == "" {
+		update.ClearSoftDeleteOpID()
+	} else {
+		update.SetSoftDeleteOpID(opID)
+	}
+	if err := update.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
 }
 
 // UpdateAgent updates an existing agent using optimistic locking on
@@ -1366,6 +1390,10 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 
+	if su.IfPhase != "" && current.Phase != su.IfPhase {
+		return store.ErrPhaseMismatch
+	}
+
 	now := time.Now()
 
 	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
@@ -1382,6 +1410,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.Message = ""
 		su.ClearExit = false
 		su.ClearMessageIf = ""
+		su.ClearTerminalRemnants = false
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1427,7 +1456,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// being terminal so routine running→running heartbeats (which carry their own
 	// sticky-stalled rules in the broker handler) are left untouched. An explicit
 	// message in the same update (su.Message != "") wins and is set below.
-	if su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error") {
+	// ClearTerminalRemnants applies the same clear whatever the current phase
+	// (a lifecycle start's final write; see store.AgentStatusUpdate).
+	if su.ClearTerminalRemnants || (su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error")) {
 		if su.Message == "" {
 			upd.SetMessage("")
 		}
@@ -1502,6 +1533,25 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 	return tx.Commit()
+}
+
+// SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
+func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	affected, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid)).
+		SetWorkspacePlacement(placement).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // UpdateAgentExposedPorts applies a partial exposed-port update without using

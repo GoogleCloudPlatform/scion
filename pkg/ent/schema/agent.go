@@ -114,6 +114,15 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("runtime_broker_id").
 			Optional(),
+		// workspace_placement is where the agent's last start placed its
+		// workspace, as reported by its broker: "export" (the broker's
+		// shared NFS workspace export) or "local". "" means unknown (not
+		// reported since the field existed). Validated as a string rather
+		// than an ent enum so future placements need no migration; readers
+		// treat an unrecognised value as not on the export.
+		field.String("workspace_placement").
+			Optional().
+			Default(""),
 		field.Bool("web_pty_enabled").
 			Default(false),
 		field.JSON("exposed_ports", []store.ExposedPort{}).
@@ -412,6 +421,16 @@ func (Agent) Fields() []ent.Field {
 		field.String("start_claim_launch_id").
 			Optional().
 			Default(""),
+
+		// soft_delete_op_id is the operation ID of the soft delete that
+		// produced the current DeletedAt. The soft delete deactivates the
+		// agent's delegation edges under this ID, and restore reactivates
+		// exactly those edges, then clears it. NULL on a live agent and on
+		// an agent soft-deleted before the column existed. Lifecycle
+		// bookkeeping only: no authorization decision reads it.
+		field.String("soft_delete_op_id").
+			Optional().
+			Nillable(),
 	}
 }
 
