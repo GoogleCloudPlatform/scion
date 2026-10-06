@@ -1336,6 +1336,10 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// userScopedDataSweepDone is closed when the startup sweep of deleted
+	// users' user-scope data ends (startUserScopedDataSweep).
+	userScopedDataSweepDone <-chan struct{}
+
 	// decisionAuditWriter is the buffered decision audit writer wired into
 	// authzService. CleanupResources does not close it: it runs before
 	// the HTTP drain, and requests still being served then emit records.
@@ -2233,6 +2237,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	if cfg.DevAuthToken != "" {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
+
+	// Remove user-scope secrets and env vars whose user no longer exists
+	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
+	// whole sweep, lookup and removal, runs in the background under one time
+	// budget and is non-fatal; see startUserScopedDataSweep.
+	srv.userScopedDataSweepDone = srv.startUserScopedDataSweep(srv.ctx)
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.

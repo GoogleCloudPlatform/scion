@@ -1152,11 +1152,21 @@ var errInvalidDisplayName = errors.New("invalid display name")
 // errors.Is before falling through to the transaction's own errors, which
 // include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
 // for reasons unrelated to the display name itself.
+//
+// Before the write it takes a shared lock on the row of the user the user
+// delete guard would count for the agent and re-checks that the user exists
+// (lockAgentGuardUserTx, ptone/scion#2769). For a scheduled dispatch that is
+// the schedule's creator (CreatedBy, the agent has no owner) when the
+// creator is a user; a creator that no longer exists fails the create with
+// errAgentOwnerUserMissing.
 func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
 	if _, err := api.ValidateDisplayName(slug); err != nil {
 		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
 	}
 	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := lockAgentGuardUserTx(ctx, tx, agent); err != nil {
+			return err
+		}
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
 		}
@@ -2102,6 +2112,11 @@ func (s *Server) createAgentInProject(
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
 			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot create the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {
