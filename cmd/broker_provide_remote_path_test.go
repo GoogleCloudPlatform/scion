@@ -255,3 +255,34 @@ func TestResolveProvidePath_RemoteCleansAndRefusesDotScion(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveProvidePath_RemotePOSIXPathPreserved checks that a remote path
+// is validated and cleaned with slash-only rules, whatever this host's OS:
+// a clean POSIX path is sent byte for byte, cleaning never introduces a
+// backslash, and a path that is absolute only by this host's rules (a
+// Windows drive path) is refused rather than translated.
+func TestResolveProvidePath_RemotePOSIXPathPreserved(t *testing.T) {
+	for _, p := range []string{"/srv/projects/my-repo", "/home/u/work space/repo", "/"} {
+		got, err := resolveProvidePath(p, "proj", "proj", true)
+		if err != nil {
+			t.Fatalf("%q: %v", p, err)
+		}
+		if got != p {
+			t.Errorf("%q: sent %q, want it unchanged", p, got)
+		}
+	}
+
+	got, err := resolveProvidePath("/srv//a/./b/", "proj", "proj", true)
+	if err != nil {
+		t.Fatalf("resolveProvidePath: %v", err)
+	}
+	if got != "/srv/a/b" {
+		t.Errorf("got %q, want /srv/a/b with forward slashes", got)
+	}
+
+	for _, p := range []string{`C:\work\repo`, `\\server\share\repo`} {
+		if _, err := resolveProvidePath(p, "proj", "proj", true); err == nil {
+			t.Errorf("%q: a non-POSIX path must be refused for a remote broker", p)
+		}
+	}
+}
