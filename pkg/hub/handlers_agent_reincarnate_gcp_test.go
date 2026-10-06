@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -117,6 +118,42 @@ func TestReincarnateAgent_AllowedForAdmissibleGCPSA(t *testing.T) {
 	require.GreaterOrEqual(t, calls, 1)
 	require.NotNil(t, configs[0].GCPIdentity)
 	assert.Equal(t, sa.ID, configs[0].GCPIdentity.ServiceAccountID)
+}
+
+// The check runs on the patched config: an agent whose kept service
+// account is no longer allowed can still be reincarnated onto a verified
+// one passed as ServiceAccount, and the next generation runs with it.
+func TestReincarnateAgent_PatchedGCPSAReplacesInadmissibleKeptSA(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newReincarnateTestAgent(t, s, project, broker, nil)
+			kept := assignAgentGCPSA(t, s, agent, fmt.Sprintf("kept-%v", dryRun), false, store.GCPVerificationUnverified)
+			replacement := patchTestSA(t, s, project.ID, true, "someone")
+
+			rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{DryRun: dryRun, ServiceAccount: replacement.ID})
+
+			if dryRun {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				var resp ReincarnateAgentResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				assert.Equal(t, "planned", resp.State)
+				require.NotNil(t, resp.Plan.ServiceAccount)
+				assert.Equal(t, FieldChange{Old: kept.Email, New: replacement.Email}, *resp.Plan.ServiceAccount)
+				return
+			}
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			settled := waitForReincarnationSettled(t, s, agent.ID)
+			assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State)
+
+			calls, configs := disp.reprovisionSnapshot()
+			require.GreaterOrEqual(t, calls, 1)
+			require.NotEmpty(t, configs)
+			require.NotNil(t, configs[0].GCPIdentity)
+			assert.Equal(t, replacement.ID, configs[0].GCPIdentity.ServiceAccountID)
+		})
+	}
 }
 
 // An agent with no GCP service account assigned is unaffected.
