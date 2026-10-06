@@ -287,13 +287,12 @@ func dropAuthorityCeilingColumns(t *testing.T, db *sql.DB, perColumn bool) {
 // scheduled_events tables to their shape before the authority ceiling
 // columns, inserts a row in each the way that schema wrote them, migrates,
 // and checks that both rows read back with an unrecorded ceiling. The SQLite
-// case always runs. The Postgres case runs under -tags integration with
-// SCION_TEST_POSTGRES_URL set.
+// case runs in the SQLite build. The Postgres case runs under -tags
+// integration with SCION_TEST_POSTGRES_URL set, as the Postgres CI job
+// (make test-launch-store-postgres) runs the entadapter suite.
 func TestMigrationExistingSchedulesUnrecorded(t *testing.T) {
 	t.Run("sqlite", func(t *testing.T) {
-		if enttest.Active() {
-			t.Skip("SQLite case runs in the SQLite build")
-		}
+		enttest.SkipOnPostgres(t, "the SQLite case runs in the SQLite build")
 		ctx := context.Background()
 		dsn := "file:" + filepath.Join(t.TempDir(), "test.db")
 
