@@ -666,6 +666,11 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
+	// The access probes judge the config the next generation runs with: a
+	// --service-account patch replaces a passthrough identity, so the
+	// passthrough gate (and the self-move passthrough refusal) follow the
+	// patched GCP identity, not the outgoing one.
+	in.Probes = s.moveProbesFor(r, project, fresh)
 	v, ref := evaluateMoveEligibility(in)
 	if ref != nil {
 		writeMoveRefusal(w, ref, v)

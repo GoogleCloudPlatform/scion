@@ -71,8 +71,13 @@ func (m *AgentManager) CheckNFSMoveWorkspace(projectPath, projectID, agentName, 
 		return "", fmt.Errorf("unknown expected NFS workspace kind %q", kind)
 	}
 	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		return path, fmt.Errorf("%w: %s does not exist", ErrMoveWorkspaceMissing, path)
+	case err != nil:
+		return path, fmt.Errorf("%w: stat %s failed: %v", ErrMoveWorkspaceMissing, path, err)
+	case !info.IsDir():
+		return path, fmt.Errorf("%w: %s is not a directory", ErrMoveWorkspaceMissing, path)
 	}
 	return path, nil
 }
