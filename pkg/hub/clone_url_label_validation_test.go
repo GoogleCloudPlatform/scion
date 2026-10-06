@@ -527,6 +527,9 @@ func TestProjectClone_GitRemoteOverrideQueryCharInPassword(t *testing.T) {
 		"https://user:" + cloneURLLabelSentinel + "/o/r?W@github.com/org/repo",
 		"https://user:" + cloneURLLabelSentinel + "/o/r#W@github.com/org/repo",
 		"https://user:" + cloneURLLabelSentinel + "?W@github.com/org/repo",
+		// A numeric password parses as a port once the query is cut, so only
+		// the cut guard refuses this one.
+		"https://user:8443/x9/y9?W@github.com/org/repo",
 	} {
 		t.Run(fmt.Sprintf("case %d", i), func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
@@ -537,8 +540,10 @@ func TestProjectClone_GitRemoteOverrideQueryCharInPassword(t *testing.T) {
 			require.NoError(t, err)
 			for _, p := range projects.Items {
 				assert.NotContains(t, strings.ToLower(p.GitRemote), strings.ToLower(cloneURLLabelSentinel))
+				assert.NotContains(t, p.GitRemote, "x9/y9", "password prefix stored in GitRemote")
 				for k, v := range p.Labels {
 					assert.NotContains(t, v, cloneURLLabelSentinel, "credential prefix stored in %s", k)
+					assert.NotContains(t, v, "x9/y9", "password prefix stored in %s", k)
 				}
 			}
 		})

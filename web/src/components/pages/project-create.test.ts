@@ -694,6 +694,23 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(q(el, '#templateGitRemote')?.getAttribute('aria-invalid')).toBe('false');
   });
 
+  it('flags an override whose ? or # falls inside the userinfo as invalid, without showing it', async () => {
+    const { el, requests } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'userinfo-query', 'sl-input');
+    await setValue(el, '#templateGitRemote', 'https://user:PSECRET?W@github.com/acme/payments.git', 'sl-input');
+    q(el, '#templateGitRemote')!.dispatchEvent(new Event('sl-blur'));
+    await el.updateComplete;
+
+    expect(text(q(el, '.git-remote-error'))).toContain('must be a remote git URL');
+    expect(q(el, '#templateGitRemote')?.getAttribute('aria-invalid')).toBe('true');
+    expect(text(q(el, '.summary-repository'))).not.toContain('PSECRET');
+    await submit(el);
+    expect(posts(requests)).toEqual([]);
+  });
+
   it('shows a hub 400 on gitRemote inline on the override field', async () => {
     const { el } = await createForm({
       templates: [GIT_TEMPLATE],
@@ -1135,6 +1152,10 @@ describe('deriveCloneUrl', () => {
   let derive: (remote: string) => string;
   beforeAll(async () => {
     ({ deriveCloneUrl: derive } = await import('./project-create.js'));
+  });
+
+  it.each(['https://user:PSECRET?W@github.com/org/repo', ''])('returns empty for %j', (input) => {
+    expect(derive(input)).toBe('');
   });
 
   it.each([

@@ -199,6 +199,8 @@ export function cloneUrlCredentialHint(remote: string): string | null {
  */
 export function deriveCloneUrl(remote: string): string {
   let cloneUrl = displayGitRemote(remote);
+  // Nothing usable after sanitizing (empty, or a '?'/'#' inside the userinfo).
+  if (!cloneUrl) return '';
   // An ssh:// port is the ssh daemon's, not the https server's.
   if (/^ssh:\/\//i.test(trimRemote(remote))) {
     cloneUrl = cloneUrl.replace(/^([^/]+):\d+(?=\/|$)/, '$1');
@@ -1127,7 +1129,7 @@ export class ScionPageProjectCreate extends LitElement {
         body.gitRemote = trimmedUrl;
         const labels: Record<string, string> = {
           'scion.dev/default-branch': this.branch.trim() || 'main',
-          'scion.dev/clone-url': cloneUrl,
+          ...(cloneUrl ? { 'scion.dev/clone-url': cloneUrl } : {}),
           'scion.dev/source-url': trimmedUrl,
         };
         if (this.gitWorkspaceMode === 'shared') {

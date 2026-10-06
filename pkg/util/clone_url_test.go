@@ -348,8 +348,15 @@ func TestNormalizeGitRemote_IPv6SCP(t *testing.T) {
 	if got := NormalizeGitRemote("git@[::1]:org/repo.git"); got != "[::1]/org/repo" {
 		t.Fatalf("NormalizeGitRemote(git@[::1]:org/repo.git) = %q, want %q", got, "[::1]/org/repo")
 	}
+	// A valid IPv6 bracket followed by '/' (from ssh://) is not malformed.
+	if got := NormalizeGitRemote("ssh://git@[::1]/o/r"); got != "[::1]/o/r" {
+		t.Errorf("NormalizeGitRemote(ssh://git@[::1]/o/r) = %q, want %q", got, "[::1]/o/r")
+	}
+	if got := NormalizeGitRemote("ssh://git:PW@[::1]/o/r"); strings.Contains(got, "PW") || strings.Contains(got, "pw") {
+		t.Errorf("NormalizeGitRemote(ssh://git:PW@[::1]/o/r) = %q keeps the password", got)
+	}
 	// A non-IPv6 bracket keeps its '@' so a persisting caller refuses it.
-	for _, r := range []string{"git@[x@PW]:org/repo", "git@[notipv6]x@PW:org/repo", "git@[::1@PW]:org/repo"} {
+	for _, r := range []string{"git@[x@PW]:org/repo", "git@[notipv6]x@PW:org/repo", "git@[::1@PW]:org/repo", "git@[::1]x@PW:org/repo"} {
 		got := NormalizeGitRemote(r)
 		if !strings.Contains(got, "@") {
 			t.Errorf("NormalizeGitRemote(%q) = %q; a malformed bracket must keep its '@'", r, got)
