@@ -2978,6 +2978,17 @@ func resolveIsSharedGitWorkspace() bool {
 var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
 	"configureSharedWorkspaceGit: privilege drop required but uid/gid were not both set; refusing to run git as root")
 
+// errSharedWorkspaceGitNoUsableGID is returned when this process is root and
+// a distinct workload uid exists but no usable gid accompanies it, so git
+// config cannot run as the workload. The write is skipped rather than run
+// as root against the workload's home, regardless of RequirePrivilegeDrop.
+var errSharedWorkspaceGitNoUsableGID = errors.New(
+	"configureSharedWorkspaceGit: distinct workload uid has no usable gid; skipping rather than running git as root")
+
+// sharedWorkspaceGitGetuid is os.Getuid, swappable in tests so the
+// root-with-uid-only case can be exercised without running as root.
+var sharedWorkspaceGitGetuid = os.Getuid
+
 // configureSharedWorkspaceGit sets up git credentials for shared-workspace
 // (git-workspace hybrid) projects. The workspace is a pre-cloned git repo
 // shared by all agents; each agent gets its own credential helper in
@@ -3000,6 +3011,10 @@ var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
 // When RequirePrivilegeDrop is set but uid/gid are not both usable, this
 // refuses outright (errSharedWorkspaceGitPrivilegeDropRequired) rather than
 // running git config as root against a directory the workload controls.
+//
+// When this process is root and a distinct workload uid exists without a
+// usable gid, there is no complete identity to drop to, so this skips the
+// write (errSharedWorkspaceGitNoUsableGID) instead of running git as root.
 //
 // Otherwise (rootless, where PID 1 already IS the workload's own uid with
 // no separate root identity to protect against, or an unenforced runtime
@@ -3030,6 +3045,8 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		configureCmd = func(cmd *exec.Cmd) { configureGitCommand(cmd, uid, gid) }
 	case requirePrivilegeDrop:
 		return errSharedWorkspaceGitPrivilegeDropRequired
+	case uid > 0 && sharedWorkspaceGitGetuid() == 0:
+		return fmt.Errorf("uid=%d gid=%d: %w", uid, gid, errSharedWorkspaceGitNoUsableGID)
 	default:
 		configureCmd = func(cmd *exec.Cmd) {}
 	}
