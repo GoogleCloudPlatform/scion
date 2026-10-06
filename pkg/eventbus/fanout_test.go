@@ -777,3 +777,44 @@ func TestFanOutEventBus_InProcessFailureWrappedInSentinel(t *testing.T) {
 		})
 	}
 }
+
+func TestFanOutEventBus_SubscribeNilHandler(t *testing.T) {
+	inproc := NewInProcessEventBus(slog.Default())
+	external := newStubEventBus()
+	var externalSubs int
+	external.subscribeFunc = func(_ string, _ EventHandler) (Subscription, error) {
+		externalSubs++
+		return &stubSubscription{}, nil
+	}
+
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: inproc},
+		{Name: "external", Bus: external},
+	}, slog.Default())
+	defer func() { _ = fan.Close() }()
+
+	sub, err := fan.Subscribe("test.>", nil)
+	if !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("Subscribe(nil) error = %v, want ErrNilHandler", err)
+	}
+	if sub != nil {
+		t.Fatalf("Subscribe(nil) returned a non-nil subscription")
+	}
+	if externalSubs != 0 {
+		t.Errorf("external spoke subscribed %d times, want 0", externalSubs)
+	}
+
+	// The rejected pattern must not be replayed onto spokes added later.
+	added := newStubEventBus()
+	var replayed []string
+	added.subscribeFunc = func(pattern string, _ EventHandler) (Subscription, error) {
+		replayed = append(replayed, pattern)
+		return &stubSubscription{}, nil
+	}
+	if err := fan.AddSpoke(NamedEventBus{Name: "added", Bus: added}); err != nil {
+		t.Fatalf("AddSpoke: %v", err)
+	}
+	if len(replayed) != 0 {
+		t.Errorf("rejected pattern replayed onto new spoke: %v", replayed)
+	}
+}

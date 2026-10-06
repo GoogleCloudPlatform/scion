@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -67,7 +66,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		Kind:  registry.PrincipalAgent,
 		ID:    agent.ID,
 		Want:  registry.Want{ProjectID: agent.ProjectID, Capability: grant.StreamKindTCP},
-		Agent: relay.AgentIncarnationFacts{LaunchID: agent.LaunchID, Generation: int64(agent.Generation)},
+		Agent: agentIncarnationFacts(agent),
 	}
 	var conn net.Conn
 	err := rt.router.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
