@@ -48,6 +48,7 @@ import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import { defaultTriggersHint } from '../../shared/notification-triggers.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import type { EnvEntry } from '../shared/env-editor.js';
@@ -1702,10 +1703,7 @@ export class ScionPageAgentCreate extends LitElement {
         >
           Notify me on important agent state changes
         </sl-checkbox>
-        <sl-tooltip
-          content="You will be notified when this agent reaches: Completed, Waiting for Input, or Limits Exceeded."
-          hoist
-        >
+        <sl-tooltip content=${defaultTriggersHint()} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>

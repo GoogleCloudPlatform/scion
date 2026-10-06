@@ -502,12 +502,12 @@ const VISIBILITY_RESOURCES = new Set(['agent', 'project']);
 const VISIBILITY_ACTIONS = new Set(['read', 'list']);
 
 /**
- * Whether a listing row shows the agent present with no delete running: its
- * deletion view is an explicit null (no delete active or failed) or a failed
- * delete. Such a row read on a later feed means the agent was restored since
- * an earlier feed saw it deleted. A row still deleting, one with a state this
- * client does not know, or one without the deletion key says nothing about a
- * restore.
+ * Whether a listing row (or the feed's row after a status event) shows the
+ * agent present with no active delete: its deletion view is an explicit null
+ * (never deleted, restored, or no delete active) or a failed delete. Such a
+ * row read on a later feed means the agent is live again, whatever an earlier
+ * feed saw. A row still deleting, one with a state this client does not know,
+ * or one without the deletion key says nothing about that.
  */
 export function listedWithoutActiveDelete(row: Agent): boolean {
   const deletion = row.deletion;
@@ -533,10 +533,11 @@ export class AgentStore {
   /** The current feed was marked as holding the complete hub set. */
   private feedHoldsHubSet = false;
   /**
-   * Agents deleted on earlier feeds: a later feed's walks and probes must
-   * not bring them back. A restore the feed reports clears one. A restore
-   * while no feed is open goes unseen; a later walk or probe row that lists
-   * the agent with no delete running clears it (see releaseRestored).
+   * Agents deleted on earlier feeds: a later feed's walks, probes and live
+   * events must not bring them back. A restore the feed reports clears one.
+   * A restore while no feed is open goes unseen; a later walk or probe row,
+   * or a status event, that shows the agent with no delete running clears
+   * it (see releaseRestored and withoutCarried).
    */
   private readonly carriedTombstones = new Set<string>();
   /** Agent ids whose single-agent read is in flight on the current feed. */
@@ -1502,11 +1503,40 @@ export class AgentStore {
   }
 
   /**
+   * Hold back upserts for agents an earlier feed saw deleted. The current
+   * feed has not seen those deletes, so a live event can still add such an
+   * agent to it. An upsert releases the carried tombstone when the feed's
+   * row shows the agent with no delete running (see
+   * {@link listedWithoutActiveDelete}); only a status event sets that view
+   * live, since a created event carries none. Otherwise the upsert is
+   * dropped and the tombstone kept. A restore event releases the tombstone
+   * before this runs. The feed's own tombstones are not involved: the feed
+   * never reports an upsert for an agent it saw deleted.
+   */
+  private withoutCarried(feed: StateManager, change: AgentsChangedDetail): AgentsChangedDetail {
+    if (this.carriedTombstones.size === 0 || change.upserted.length === 0) return change;
+    let kept: string[] | null = null;
+    change.upserted.forEach((id, i) => {
+      if (this.carriedTombstones.has(id)) {
+        const agent = feed.getAgent(id);
+        if (!agent || !listedWithoutActiveDelete(agent)) {
+          kept ??= change.upserted.slice(0, i);
+          return;
+        }
+        this.carriedTombstones.delete(id);
+      }
+      kept?.push(id);
+    });
+    return kept ? { ...change, upserted: kept } : change;
+  }
+
+  /**
    * Apply one coalesced feed flush to every entry, notifying each changed
    * entry once. With `only`, the rows came from that entry's own read: only
    * it adds rows it lacks, and the others update rows they already hold.
    */
-  private applyChange(feed: StateManager, change: AgentsChangedDetail, only?: Entry): void {
+  private applyChange(feed: StateManager, rawChange: AgentsChangedDetail, only?: Entry): void {
+    const change = this.withoutCarried(feed, rawChange);
     const added = new Set<string>();
     for (const entry of this.entries.values()) {
       // An entry that never loaded and is not loading holds no rows to keep

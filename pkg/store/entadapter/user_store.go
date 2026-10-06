@@ -16,10 +16,12 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	entschema "github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
@@ -252,6 +254,51 @@ func (s *UserStore) UpdateUserLastSeen(ctx context.Context, id string, t time.Ti
 		return mapError(err)
 	}
 	return nil
+}
+
+// LockUserRow locks the user row until the surrounding transaction ends.
+// On PostgreSQL it runs
+//
+//	SELECT id FROM users WHERE id = $1 FOR UPDATE      (exclusive)
+//	SELECT id FROM users WHERE id = $1 FOR KEY SHARE   (shared)
+//
+// so a user delete and an agent create or restore for that user serialize
+// under READ COMMITTED (ptone/scion#2769). The shared mode is FOR KEY SHARE,
+// not FOR SHARE: it conflicts only with FOR UPDATE (which the delete takes,
+// and which DELETE takes too), so plain UPDATEs of the user row, which take
+// FOR NO KEY UPDATE (last seen, profile edits, session revoke), do not wait
+// for an open create or restore transaction. On SQLite all writes are already
+// database-serialized, so it issues a plain read (the same dialect check as
+// ProjectStore.LockProjectForMembership).
+func (s *UserStore) LockUserRow(ctx context.Context, id string, exclusive bool) error {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return err
+	}
+
+	q := s.client.User.Query().Where(user.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		if exclusive {
+			q = q.ForUpdate()
+		} else {
+			q = q.ForShare(lockKeyShare)
+		}
+	}
+
+	exists, err := q.Exist(ctx)
+	if err != nil {
+		return fmt.Errorf("lock user row: %w", mapError(err))
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// lockKeyShare turns ForShare into SELECT ... FOR KEY SHARE (the generated
+// UserQuery has no lock-strength option of its own).
+func lockKeyShare(o *sql.LockOptions) {
+	o.Strength = sql.LockKeyShare
 }
 
 // DeleteUser removes a user by ID.
