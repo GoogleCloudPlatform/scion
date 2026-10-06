@@ -1275,6 +1275,13 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.AncestorID != "" {
 		preds = append(preds, ancestryContains(filter.AncestorID))
 	}
+	if filter.CreatedBy != "" {
+		createdByUID, err := parseUUID(filter.CreatedBy)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, agent.CreatedByEQ(createdByUID))
+	}
 	for k, v := range filter.Labels {
 		preds = append(preds, labelContains(k, v))
 	}
@@ -1407,8 +1414,15 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// soft-deleted, a status report must not move phase, activity or the
 	// exit fields — a report read before the delete claim cannot land after
 	// it. The handler applies the same guard (guardAgentPhaseTransition);
-	// this repeats it on the locked row.
-	if current.DeletedAt != nil || entAgentDeletionActive(current, now) {
+	// this repeats it on the locked row. A start's own write (StartWrite)
+	// is held by the start-block rule instead, which also covers a
+	// finalizing row whose lease expired.
+	// DeletionHoldsRow is a superset of entAgentDeletionActive.
+	deleteHolds := entAgentDeletionActive(current, now)
+	if su.StartWrite {
+		deleteHolds = store.DeletionHoldsRow(current.DeletionState, current.DeletionLeaseAt, now)
+	}
+	if current.DeletedAt != nil || deleteHolds {
 		su.Phase = ""
 		su.Activity = ""
 		su.ExitCode = nil
