@@ -1526,13 +1526,20 @@ describe('isQuickPaletteShortcut', () => {
     expect(isQuickPaletteShortcut(handled)).toBe(false);
   });
 
-  /** A Ctrl+K or Cmd+K keydown typed in `el`, which is put in the document. */
-  const typedIn = (el: HTMLElement, init: KeyboardEventInit): KeyboardEvent => {
+  /**
+   * Whether a K keydown typed in `el`, which is put in the document, is the
+   * shortcut, as a document listener sees it during dispatch (an event's
+   * path is cleared once dispatch ends).
+   */
+  const shortcutTypedIn = (el: HTMLElement, init: KeyboardEventInit): boolean => {
     document.body.append(el);
-    let seen: KeyboardEvent | undefined;
-    document.addEventListener('keydown', (e) => (seen = e), { once: true });
+    let result: boolean | undefined;
+    document.addEventListener('keydown', (e) => (result = isQuickPaletteShortcut(e)), {
+      once: true,
+    });
     el.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true, ...init }));
-    return seen!;
+    expect(result).toBeDefined();
+    return result!;
   };
   const inputOf = (
     type: string,
@@ -1553,11 +1560,11 @@ describe('isQuickPaletteShortcut', () => {
   it('on a Mac, leaves Ctrl+K typed in an editable text field to the field', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
     for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
-      expect(isQuickPaletteShortcut(typedIn(inputOf(type), { ctrlKey: true }))).toBe(false);
+      expect(shortcutTypedIn(inputOf(type), { ctrlKey: true })).toBe(false);
     }
     const textarea = document.createElement('textarea');
-    expect(isQuickPaletteShortcut(typedIn(textarea, { ctrlKey: true }))).toBe(false);
-    expect(isQuickPaletteShortcut(typedIn(editable(), { ctrlKey: true }))).toBe(false);
+    expect(shortcutTypedIn(textarea, { ctrlKey: true })).toBe(false);
+    expect(shortcutTypedIn(editable(), { ctrlKey: true })).toBe(false);
   });
 
   it('on a Mac, a field inside a shadow root counts by its own element', () => {
@@ -1566,12 +1573,14 @@ describe('isQuickPaletteShortcut', () => {
     document.body.append(host);
     const input = inputOf('text');
     host.attachShadow({ mode: 'open' }).append(input);
-    let seen: KeyboardEvent | undefined;
-    document.addEventListener('keydown', (e) => (seen = e), { once: true });
+    let result: boolean | undefined;
+    document.addEventListener('keydown', (e) => (result = isQuickPaletteShortcut(e)), {
+      once: true,
+    });
     input.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, composed: true })
     );
-    expect(isQuickPaletteShortcut(seen!)).toBe(false);
+    expect(result).toBe(false);
   });
 
   it('on a Mac, Ctrl+K on a non-text, read-only or disabled field is the shortcut', () => {
@@ -1586,20 +1595,20 @@ describe('isQuickPaletteShortcut', () => {
       document.createElement('button'),
     ];
     for (const el of fields) {
-      expect(isQuickPaletteShortcut(typedIn(el, { ctrlKey: true }))).toBe(true);
+      expect(shortcutTypedIn(el, { ctrlKey: true })).toBe(true);
     }
   });
 
   it('on a Mac, Cmd+K typed in a text field is the shortcut', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
-    expect(isQuickPaletteShortcut(typedIn(inputOf('text'), { metaKey: true }))).toBe(true);
-    expect(isQuickPaletteShortcut(typedIn(editable(), { metaKey: true }))).toBe(true);
+    expect(shortcutTypedIn(inputOf('text'), { metaKey: true })).toBe(true);
+    expect(shortcutTypedIn(editable(), { metaKey: true })).toBe(true);
   });
 
   it('off a Mac, Ctrl+K typed in a text field is the shortcut', () => {
     vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
-    expect(isQuickPaletteShortcut(typedIn(inputOf('text'), { ctrlKey: true }))).toBe(true);
+    expect(shortcutTypedIn(inputOf('text'), { ctrlKey: true })).toBe(true);
     const textarea = document.createElement('textarea');
-    expect(isQuickPaletteShortcut(typedIn(textarea, { ctrlKey: true }))).toBe(true);
+    expect(shortcutTypedIn(textarea, { ctrlKey: true })).toBe(true);
   });
 });
