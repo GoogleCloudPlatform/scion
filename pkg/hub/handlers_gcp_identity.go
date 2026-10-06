@@ -1186,8 +1186,9 @@ func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPI
 // start and restart, so an agent whose assigned GCP service account would be
 // refused a token fails fast with an actionable message instead of starting
 // and failing later inside the container. It runs on the lifecycle
-// start/restart route and on each branch of handleExistingAgent that starts
-// or resumes an existing agent (the create-endpoint path the CLI uses).
+// start/restart route, on each branch of handleExistingAgent that starts
+// or resumes an existing agent (the create-endpoint path the CLI uses), and
+// on reincarnate, including its dry-run and dry-run move variants.
 // Agents without an applied assign-mode GCP identity are unaffected.
 //
 // It writes the response and returns true when the start must not proceed:
