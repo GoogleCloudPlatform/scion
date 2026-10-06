@@ -262,10 +262,10 @@ func (s *ProjectStore) LockProjectAgents(ctx context.Context, projectID string) 
 
 // lockProjectAgentIDs returns the IDs of the project's agents (soft-deleted
 // ones included) in ascending ID order. On PostgreSQL the rows are locked
-// FOR UPDATE, so the locks are taken in ID order: the order every path that
-// deletes agent group memberships uses (DeleteAgent, DeleteProject,
-// PurgeDeletedAgents, finalize-hard), so they cannot deadlock (40P01) on
-// overlapping agents. Shared by LockProjectAgents and
+// FOR UPDATE, so the locks are taken in ID order: the order every agent
+// hard-delete path (and the project delete) uses (DeleteAgent, DeleteProject,
+// ProjectDeletionService via LockProjectAgents, PurgeDeletedAgents,
+// finalize-hard), so they cannot deadlock (40P01) on overlapping agents. Shared by LockProjectAgents and
 // CompositeStore.DeleteProject so both lock the same way.
 func lockProjectAgentIDs(ctx context.Context, client *ent.Client, projectID uuid.UUID) ([]uuid.UUID, error) {
 	q := client.Agent.Query().

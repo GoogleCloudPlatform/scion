@@ -400,3 +400,97 @@ func TestDeleteGroupMembershipsForUser_LockOrderVsProjectGroupCascade(t *testing
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	assert.Zero(t, orphanedMembershipCount(t, cs))
 }
+
+// TestDeleteGroupMembershipsForUser_OwnedGroupLockAllowsMemberInsert: the
+// owned-group lock DeleteGroupMembershipsForUser takes is FOR NO KEY UPDATE
+// (the lock the user-row delete's owner_id SET NULL takes), not FOR UPDATE.
+// FOR UPDATE also conflicts with the FOR KEY SHARE lock PostgreSQL's FK check
+// takes on a group row when a membership referencing it is inserted.
+//
+// User U owns group G and is a member of group Gx. T2 deletes M(U,Gx),
+// holding that row. T1 deletes U: it locks G, then its membership delete
+// waits on T2's M(U,Gx). T2 then inserts M(X,G) for another user X, whose FK
+// check needs KEY SHARE on G. With FOR UPDATE that waits on T1, which waits
+// on T2: deadlock (SQLSTATE 40P01). With FOR NO KEY UPDATE the insert does
+// not wait, T2 commits, and T1 finishes.
+func TestDeleteGroupMembershipsForUser_OwnedGroupLockAllowsMemberInsert(t *testing.T) {
+	skipUnlessPostgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), lockOrderTimeout)
+	defer cancel()
+	cs := newTestCompositeStore(t)
+	db := cs.DB()
+	require.NotNil(t, db, "raw database handle needed to watch for lock waits")
+
+	u := newCleanupUser(t, cs, "ogl-owner@example.com")
+	x := newCleanupUser(t, cs, "ogl-other@example.com")
+	g := uuid.NewString()
+	require.NoError(t, cs.CreateGroup(ctx, &store.Group{
+		ID: g, Name: "ogl-g", Slug: "ogl-g-" + g[:8], GroupType: store.GroupTypeExplicit, OwnerID: u,
+	}))
+	gx := newCleanupGroup(t, cs, "ogl-gx-"+uuid.NewString()[:8])
+	addCleanupMember(t, cs, gx, store.GroupMemberTypeUser, u, store.GroupMemberRoleMember)
+
+	// T2: delete U's membership in Gx and hold the row lock.
+	tx, err := cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t2Done := false
+	defer func() {
+		if !t2Done {
+			_ = tx.Rollback()
+		}
+	}()
+	t2 := newTxCompositeStore(tx)
+	require.NoError(t, t2.RemoveGroupMember(ctx, gx, store.GroupMemberTypeUser, u))
+
+	// T1: the user delete, which must wait on T2's lock on M(U,Gx).
+	t1Err := make(chan error, 1)
+	go func() {
+		t1Err <- cs.WithTx(ctx, func(tx store.Store) error {
+			if _, err := tx.DeleteGroupMembershipsForUser(ctx, u); err != nil {
+				return err
+			}
+			return tx.DeleteUser(ctx, u)
+		})
+	}()
+
+	// Wait until T1 has locked G and is blocked on M(U,Gx).
+	require.Eventually(t, func() bool {
+		var waiting int
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			return false
+		}
+		return waiting > 0
+	}, lockOrderTimeout/2, 20*time.Millisecond, "the user delete never waited on U's membership row")
+
+	// T2 inserts a membership of X into U's owned group G, then commits.
+	t2Err := t2.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: g, MemberType: store.GroupMemberTypeUser, MemberID: x, Role: store.GroupMemberRoleMember,
+	})
+	if t2Err == nil {
+		t2Err = tx.Commit()
+	} else {
+		_ = tx.Rollback()
+	}
+	t2Done = true
+
+	var err1 error
+	select {
+	case err1 = <-t1Err:
+	case <-time.After(lockOrderTimeout):
+		t.Fatal("the user delete did not finish")
+	}
+	assert.NoError(t, t2Err, "the membership insert must not fail (40P01 means the owned-group lock blocks the FK check)")
+	assert.NoError(t, err1, "the user delete must not fail (40P01 means the owned-group lock blocks the FK check)")
+	if t.Failed() {
+		return
+	}
+	_, err = cs.GetUser(ctx, u)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	members, err := cs.GetGroupMembers(ctx, g)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, x, members[0].MemberID)
+	assert.Zero(t, orphanedMembershipCount(t, cs))
+}

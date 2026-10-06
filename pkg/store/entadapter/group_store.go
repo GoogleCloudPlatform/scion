@@ -1059,15 +1059,16 @@ func liveGroupMembership() predicate.GroupMembership {
 
 // DeleteGroupMembershipsForUser removes every group membership of userID.
 //
-// On PostgreSQL it first locks the groups the user owns FOR UPDATE, in
-// ascending group-ID order, so a user delete takes its locks in the same
+// On PostgreSQL it first locks the groups the user owns FOR NO KEY UPDATE,
+// in ascending group-ID order, so a user delete takes its locks in the same
 // order as before the explicit membership delete existed: owned group rows
 // (which the user-row delete's owner_id SET NULL updates), then membership
 // rows. Locking memberships first would invert that order against
 // ProjectDeletionService, which deletes a project group's row and then the
 // next group's memberships, and could deadlock (40P01) when the user owns
-// one project group and is a member of another (ptone/scion#2769). On
-// SQLite the lock is a plain read (writes are already serialized).
+// one project group and is a member of another (ptone/scion#2769). See
+// lockOwnedGroupIDs for why the strength is FOR NO KEY UPDATE. On SQLite
+// the lock is a plain read (writes are already serialized).
 func (s *GroupStore) DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error) {
 	uid, err := parseUUID(userID)
 	if err != nil {
@@ -1081,14 +1082,25 @@ func (s *GroupStore) DeleteGroupMembershipsForUser(ctx context.Context, userID s
 		Exec(ctx)
 }
 
-// lockOwnedGroupIDs locks the groups owned by userID FOR UPDATE, in
+// lockOwnedGroupIDs locks the groups owned by userID FOR NO KEY UPDATE, in
 // ascending ID order, on PostgreSQL. On SQLite it is a plain read.
+//
+// FOR NO KEY UPDATE is exactly the lock the user-row delete's owner_id ON
+// DELETE SET NULL takes (an UPDATE of a non-key column), so the explicit lock
+// adds no wait edge that the user delete did not already have. It still
+// conflicts with a concurrent DELETE of the group row (the project-group
+// cascade), which is what the lock order needs. FOR UPDATE would be too
+// strong: it also conflicts with the FOR KEY SHARE lock PostgreSQL's FK check
+// takes on a group row when a membership, child-group edge or policy binding
+// referencing it is inserted, so a transaction that holds one of the user's
+// memberships and then inserts such a row into an owned group would deadlock
+// with the user delete (40P01).
 func lockOwnedGroupIDs(ctx context.Context, client *ent.Client, userID uuid.UUID) error {
 	q := client.Group.Query().
 		Where(group.OwnerIDEQ(userID)).
 		Order(ent.Asc(group.FieldID))
 	if client.Driver().Dialect() == dialect.Postgres {
-		q = q.ForUpdate()
+		q = q.ForUpdate(func(o *entsql.LockOptions) { o.Strength = entsql.LockNoKeyUpdate })
 	}
 	_, err := q.IDs(ctx)
 	return err

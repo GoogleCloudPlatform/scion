@@ -1662,11 +1662,14 @@ type GroupStore interface {
 	// rows no longer carry the user ID (ptone/scion#2769).
 	//
 	// Must be called inside the same transaction as the user delete. On
-	// PostgreSQL it first locks the groups the user owns (SELECT ... FOR
-	// UPDATE ordered by ID), so the transaction locks owned group rows
+	// PostgreSQL it first locks the groups the user owns (SELECT ... FOR NO
+	// KEY UPDATE ordered by ID), so the transaction locks owned group rows
 	// before membership rows, matching ProjectDeletionService's
 	// group-row-then-memberships order and avoiding a deadlock with a
-	// concurrent project delete.
+	// concurrent project delete. The strength is FOR NO KEY UPDATE, the lock
+	// the user-row delete's owner_id SET NULL takes, not FOR UPDATE: it must
+	// not conflict with the FK check's FOR KEY SHARE taken when a membership,
+	// child-group edge or policy binding referencing the group is inserted.
 	DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error)
 
 	// DeleteGroupMembershipsForAgents removes every group membership of the

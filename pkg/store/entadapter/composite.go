@@ -323,9 +323,9 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 //
 // On PostgreSQL the agent-ID query (lockProjectAgentIDs, shared with
 // LockProjectAgents) locks the project's agent rows FOR UPDATE, in ascending
-// ID order, before their memberships are deleted. Every path that deletes
-// agent memberships takes locks agent -> membership -> agent delete, with the
-// agent locks in ascending ID order: DeleteAgent and finalize-hard (one
+// ID order, before their memberships are deleted. Every agent hard-delete
+// path (and the project delete) takes locks agent -> membership -> agent
+// delete, with the agent locks in ascending ID order: DeleteAgent and finalize-hard (one
 // agent), PurgeDeletedAgents (ascending across all batches), this method, and
 // ProjectDeletionService, which calls LockProjectAgents before its
 // project-group cascade deletes any membership. So none of them can deadlock
@@ -334,10 +334,14 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // The user-delete path (deleteUser and the admin allow-list delete in
 // pkg/hub) also overlaps ProjectDeletionService's group cascade, which
 // deletes each project group's memberships and then its row. Its
-// DeleteGroupMembershipsForUser call locks the groups the user owns (FOR
-// UPDATE, ascending ID) before deleting the user's memberships, so it takes
-// owned group rows before membership rows, the same order as the cascade,
-// and the user-row delete's owner_id SET NULL finds those rows already held.
+// DeleteGroupMembershipsForUser call locks the groups the user owns (FOR NO
+// KEY UPDATE, ascending ID) before deleting the user's memberships, so it
+// takes owned group rows before membership rows, the same order as the
+// cascade, and the user-row delete's owner_id SET NULL finds those rows
+// already held. FOR NO KEY UPDATE is the lock that SET NULL takes; unlike FOR
+// UPDATE it does not conflict with the FK check's FOR KEY SHARE when a
+// membership, child-group edge or binding referencing an owned group is
+// inserted.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if !c.inTx {
 		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })

@@ -167,11 +167,15 @@ test-fixture-coverage:
 # order). A fourth run covers the production project-delete path in pkg/hub
 # (TestProjectDeletionService_LockOrderNoDeadlock: ProjectDeletionService
 # locks the project's agents before its project-group cascade deletes agent
-# memberships), selected by name so only that test runs here. In the first
-# run, the TestDeleteGroupMembershipsForUser_ prefix also selects
+# memberships), selected by name so only that test runs here. In the second
+# run (the entadapter allow-list), the TestDeleteGroupMembershipsForUser_
+# prefix also selects
 # TestDeleteGroupMembershipsForUser_LockOrderVsProjectGroupCascade (a user
 # delete locks the groups it owns before its memberships, so it cannot
-# deadlock against a project delete's group cascade).
+# deadlock against a project delete's group cascade) and
+# TestDeleteGroupMembershipsForUser_OwnedGroupLockAllowsMemberInsert (that
+# lock is FOR NO KEY UPDATE, so it does not block the FK check of a
+# membership inserted into an owned group, which would deadlock).
 #
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
