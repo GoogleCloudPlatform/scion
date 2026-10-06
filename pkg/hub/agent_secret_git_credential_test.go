@@ -139,8 +139,8 @@ func TestAgentSecretRead_GitCredentialKeys_RequireAllowance(t *testing.T) {
 // refused GitHub credential key is decided from the key name and the
 // allowance alone, on both scopes: no secret metadata or value is read, and
 // the answer is byte-identical for a key that exists in the requested scope,
-// one that exists only in the other scope, and one that exists nowhere. The
-// audit items record the reason.
+// one that exists only in the other scope, one that exists nowhere, and an
+// ungated key that does not exist. The audit items record the reason.
 func TestAgentSecretRead_GitCredentialKeys_RefusedBeforeBackendRead(t *testing.T) {
 	f := gitCredentialSecretFixture(t, "git-cred-no-read", &store.AgentAppliedConfig{})
 	ctx := context.Background()
@@ -172,17 +172,17 @@ func TestAgentSecretRead_GitCredentialKeys_RefusedBeforeBackendRead(t *testing.T
 	}
 	require.Equal(t, want, resp.Secrets)
 
-	// Get, both scopes: the same 404 body for every key.
+	// Get, both scopes: the same 404 body for every refused key.
+	refusedBody := map[string]string{}
 	for _, scope := range []string{"project", "user"} {
-		var firstBody string
 		for i, k := range keys {
 			getRec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/"+k+"?scope="+scope, nil, f.Token)
 			require.Equal(t, http.StatusNotFound, getRec.Code, "get %s scope=%s: %s", k, scope, getRec.Body.String())
 			if i == 0 {
-				firstBody = getRec.Body.String()
+				refusedBody[scope] = getRec.Body.String()
 				continue
 			}
-			require.Equal(t, firstBody, getRec.Body.String(), "get %s scope=%s body", k, scope)
+			require.Equal(t, refusedBody[scope], getRec.Body.String(), "get %s scope=%s body", k, scope)
 		}
 	}
 
@@ -196,6 +196,16 @@ func TestAgentSecretRead_GitCredentialKeys_RefusedBeforeBackendRead(t *testing.T
 			require.False(t, item.Selected)
 			require.Equal(t, ReasonGitCredentialNotAllowed, item.Reason, "key %s", item.Key)
 		}
+	}
+
+	// A refused key is also indistinguishable from a key that is not a
+	// GitHub credential and simply does not exist: same 404 body on both
+	// scopes. (This request does read metadata, so it comes after the
+	// zero-read assertions above.)
+	for _, scope := range []string{"project", "user"} {
+		getRec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/PLAIN_ABSENT?scope="+scope, nil, f.Token)
+		require.Equal(t, http.StatusNotFound, getRec.Code, "get PLAIN_ABSENT scope=%s: %s", scope, getRec.Body.String())
+		require.Equal(t, refusedBody[scope], getRec.Body.String(), "get PLAIN_ABSENT scope=%s body", scope)
 	}
 }
 
