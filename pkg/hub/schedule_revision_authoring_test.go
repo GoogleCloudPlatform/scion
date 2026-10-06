@@ -343,6 +343,33 @@ func nonAdmittedScheduleUser(t *testing.T, s store.Store, id string) UserIdentit
 	return u
 }
 
+// scheduleOnlyUser returns a stored, active user whose only binding in
+// projectID is a project role holding the scheduled_event permissions: the
+// route-level schedule check admits it, and nothing else in the project
+// does, so a resume denial comes from the resume re-authorization.
+func scheduleOnlyUser(t *testing.T, s store.Store, projectID, id string) UserIdentity {
+	t.Helper()
+	ctx := context.Background()
+	u := nonAdmittedScheduleUser(t, s, id)
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        id + "-schedules",
+		Description: "scheduled events only",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"scheduled_event.list", "scheduled_event.read", "scheduled_event.update"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      id,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	return u
+}
+
 func TestResumeNonAdmittedDenied_DispatchAgent(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("resume-na-da-owner"))
@@ -350,9 +377,10 @@ func TestResumeNonAdmittedDenied_DispatchAgent(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	outsider := nonAdmittedScheduleUser(t, s, tid("resume-na-da-outsider"))
+	outsider := scheduleOnlyUser(t, s, projectID, tid("resume-na-da-outsider"))
 	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id+"/resume", http.MethodPost, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), agentCreateDenyMessage, "the denial is the resume's agent-create re-authorization")
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
@@ -363,9 +391,10 @@ func TestResumeNonAdmittedDenied_Message(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	outsider := nonAdmittedScheduleUser(t, s, tid("resume-na-msg-outsider"))
+	outsider := scheduleOnlyUser(t, s, projectID, tid("resume-na-msg-outsider"))
 	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id+"/resume", http.MethodPost, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the resume's scheduled-message re-authorization")
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
