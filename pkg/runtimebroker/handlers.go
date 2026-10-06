@@ -5336,8 +5336,10 @@ func hubManagedProjectSharedDirsBase(globalDir, projectPath, slug, requestedProj
 	if _, err := os.Lstat(want); os.IsNotExist(err) {
 		return "", nil
 	} else if err != nil && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP) {
-		// ENOTDIR and ELOOP mean the layout is wrong, not unreadable;
-		// the containment check below rejects it.
+		// ENOTDIR and ELOOP here only come from a broken project-configs
+		// root (or a component above it) that is not a directory or loops;
+		// the project's own entry was classified above. The containment
+		// check below rejects it.
 		return "", fmt.Errorf("%w: %v", errSharedDirStorageUnreadable, err)
 	}
 	if !projectConfigPathContained(globalDir, want) {

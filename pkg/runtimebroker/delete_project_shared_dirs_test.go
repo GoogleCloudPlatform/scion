@@ -196,6 +196,8 @@ func TestDeleteProject_CraftedMarkers_KeepStorageOutsideProject(t *testing.T) {
 		// setup writes the crafted project proj-a and returns a file that
 		// must survive the delete.
 		setup func(t *testing.T, home string) string
+		// check, when set, runs extra assertions after the delete.
+		check func(t *testing.T, home string)
 	}{
 		{
 			name: "slug pointing at another project-configs entry",
@@ -238,6 +240,17 @@ func TestDeleteProject_CraftedMarkers_KeepStorageOutsideProject(t *testing.T) {
 				symlinkInto(t, outside, filepath.Join(home, ".scion", "project-configs", "proj-a__"+short, "shared-dirs"))
 				return keep
 			},
+			check: func(t *testing.T, home string) {
+				// The symlink itself is left alone, not just its target.
+				link := filepath.Join(home, ".scion", "project-configs", "proj-a__"+short, "shared-dirs")
+				info, err := os.Lstat(link)
+				if err != nil {
+					t.Fatalf("expected shared-dirs symlink to survive: %v", err)
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("expected shared-dirs to still be a symlink, got mode %v", info.Mode())
+				}
+			},
 		},
 		{
 			// Marker ID and slug match the request, but the external dir
@@ -273,6 +286,9 @@ func TestDeleteProject_CraftedMarkers_KeepStorageOutsideProject(t *testing.T) {
 				t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
 			}
 			assertPresent(t, keep)
+			if tc.check != nil {
+				tc.check(t, home)
+			}
 			assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
 		})
 	}
