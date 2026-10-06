@@ -4714,23 +4714,21 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// hub.asyncAgentLaunch is on.
 		agent.LaunchAsyncOptIn = true
 
-		// E.2b: success-path audit for scheduled dispatch. The deny-path
-		// records for this same CanDelegate check are in
-		// authorizeScheduledAgentCreate above. ActorPrincipalKind/ID mirror
-		// that deny-audit convention (the resolved creator/execution
-		// identity, required non-empty by the ent schema) — the cutover rule
-		// keeps the fire-time execution/authorization identity as CreatedBy,
-		// so the deny and allow audits for the same check agree on who the
-		// actor is.
+		// Success-path audit for scheduled dispatch. The deny-path records
+		// for this same CanDelegate check are in
+		// authorizeScheduledAgentCreate above. ActorPrincipalKind/ID are the
+		// resolved revision principal (the fire's execution identity),
+		// required non-empty by the ent schema, so the deny and allow audits
+		// for this check name the same actor.
 		//
 		// The audit record is written in the agent-create transaction below.
 		//
 		// The recorded initiator's credential is copied onto the audit ONLY
-		// when the initiator is the same principal as the creator/executor
-		// identity (initiatorMatchesExecutor, scheduled_initiator.go): after
-		// an update or resume by a different user, the initiator is not the
-		// creator, and this check exists specifically to prevent naming
-		// principal A with principal B's credential. dev_local additionally
+		// when the initiator is the same principal as the execution identity
+		// (initiatorMatchesExecutor, scheduled_initiator.go). The fire runs
+		// as the recorded initiator, so for any revision that resolves,
+		// initiatorMatchesExecutor holds; the check stays as a guard so a
+		// credential is never paired with a different principal. dev_local
 		// matches when both sides resolve to the well-known DevUserID —
 		// initiatorMatchesExecutor's doc comment has the exact condition and
 		// why it's needed (scheduledCreatorIdentity never reconstructs the

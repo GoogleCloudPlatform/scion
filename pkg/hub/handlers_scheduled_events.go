@@ -347,10 +347,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		Payload:   payload,
 		Status:    store.ScheduledEventPending,
 		CreatedBy: createdBy,
-		// E.2b: record the authoring request's initiator attribution in the
-		// same write as the event row (design check (a): atomic by
-		// construction, since ScheduleEvent below issues a single insert),
-		// together with the credential's frozen ceiling.
+		// Record the authoring request's initiator attribution in the same
+		// write as the event row (atomic by construction, since
+		// ScheduleEvent below issues a single insert), together with the
+		// credential's frozen ceiling.
 		InitiatorAttribution: newInitiatorAttribution(r.Context()),
 		AuthorityCeiling:     ceiling,
 	}

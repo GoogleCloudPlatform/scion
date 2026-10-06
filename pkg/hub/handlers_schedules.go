@@ -307,9 +307,9 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		Status:    store.ScheduleStatusActive,
 		NextRunAt: &nextRunAt,
 		CreatedBy: createdBy,
-		// E.2b: record the authoring request's initiator attribution in the
-		// same write as the schedule row (design check (a)), together with
-		// the credential's frozen ceiling.
+		// Record the authoring request's initiator attribution in the same
+		// write as the schedule row, together with the credential's frozen
+		// ceiling.
 		InitiatorAttribution: newInitiatorAttribution(r.Context()),
 		AuthorityCeiling:     ceiling,
 	}
@@ -675,7 +675,7 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
-	// Ruling Q2: status, next_run_at, the re-attribution and its ceiling are one write,
+	// Status, next_run_at, the re-attribution and its ceiling are one write,
 	// not two — a failure here must be reported as an error, never as a 200
 	// naming an attribution that was never persisted. prevRevisionKnown
 	// comes from AuthorizationRevision, the same field the store predicates
