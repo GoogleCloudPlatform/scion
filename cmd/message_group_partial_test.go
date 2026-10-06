@@ -220,6 +220,66 @@ func runGroupJSON(t *testing.T, h *groupFakeHub, recips []messages.GroupRecipien
 	return got, sendErr
 }
 
+// assertRetryRoundTrips checks that retry, a group send's retry_recipient,
+// is accepted by the parser the command uses for its recipient argument and
+// names exactly the want recipients (in agent:x / user:x form). group[]
+// needs at least two recipients, so one failure must be a bare recipient.
+func assertRetryRoundTrips(t *testing.T, retry string, want ...string) {
+	t.Helper()
+	parsed, err := parseRecipientArg(retry)
+	require.NoError(t, err, "retry_recipient %q must be a valid recipient argument", retry)
+	var got []string
+	switch {
+	case parsed.group != nil:
+		for _, r := range parsed.group {
+			got = append(got, r.String())
+		}
+	case parsed.userRecipient != "":
+		got = []string{parsed.userRecipient}
+	case parsed.agentName != "":
+		got = []string{"agent:" + parsed.agentName}
+	default:
+		t.Fatalf("retry_recipient %q parsed as a conversation reference, not a recipient", retry)
+	}
+	assert.Equal(t, want, got, "retry_recipient %q must name exactly the failed recipients", retry)
+}
+
+func TestRetryRecipientArg3510_RoundTrips(t *testing.T) {
+	assert.Empty(t, retryRecipientArg(nil))
+	cases := [][]string{
+		{"agent:agent-b"},
+		{"user:alice"},
+		{"agent:agent-b", "user:alice"},
+		{"agent:agent-a", "agent:agent-b", "agent:agent-c"},
+	}
+	for _, failed := range cases {
+		assertRetryRoundTrips(t, retryRecipientArg(failed), failed...)
+	}
+}
+
+// Two or more failures are retried as one group[] send naming only them.
+func TestSendGroupMessage3510_MultipleFailuresRetryGroup(t *testing.T) {
+	groupTestState(t, "json")
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	h := newGroupFakeHub(t, map[string]groupOutcome{
+		"agent-a":    ok(),
+		"agent-b":    hubErr(http.StatusForbidden),
+		"agent-c":    hubErr(http.StatusGatewayTimeout),
+		"user:alice": hubErr(http.StatusNotFound),
+	})
+	recips := append(agentRecipients("agent-a", "agent-b", "agent-c"),
+		messages.GroupRecipient{Kind: messages.RecipientUser, Name: "alice"})
+
+	got, sendErr := runGroupJSON(t, h, recips)
+
+	require.Error(t, sendErr)
+	assert.Equal(t, exitCodeGroupPartial, exitCodeFor(sendErr))
+	assert.Equal(t, 2, got.Failed)
+	assert.Equal(t, "group[agent:agent-b,user:alice]", got.RetryRecipient)
+	assertRetryRoundTrips(t, got.RetryRecipient, "agent:agent-b", "user:alice")
+	assert.Contains(t, sendErr.Error(), `sending to "group[agent:agent-b,user:alice]"`)
+}
+
 func TestSendGroupMessage3510_PartialHumanOutputAndExitCode(t *testing.T) {
 	groupTestState(t, "")
 	h := newGroupFakeHub(t, map[string]groupOutcome{
@@ -236,13 +296,13 @@ func TestSendGroupMessage3510_PartialHumanOutputAndExitCode(t *testing.T) {
 	require.Error(t, sendErr)
 	assert.Equal(t, exitCodeGroupPartial, exitCodeFor(sendErr), "partial success must use the partial exit code")
 	assert.Contains(t, sendErr.Error(), "group delivery partially failed: 2 delivered, 0 deferred, 1 failed (of 3 total)")
-	assert.Contains(t, sendErr.Error(), "retry only group[agent:agent-b]")
+	assert.Contains(t, sendErr.Error(), `retry only the failed recipients by sending to "agent:agent-b"`)
 
 	assert.Contains(t, out, "Group delivery incomplete: 2 delivered, 0 deferred, 1 failed (of 3 total).")
 	assert.Contains(t, out, "Delivered (2): agent:agent-a, agent:agent-c\n", "summary must list the delivered set in input order; got:\n%s", out)
 	assert.Contains(t, out, "Failed (1):\n  agent:agent-b: ")
 	assert.Contains(t, out, "boom for agent-b", "the failure reason must be shown")
-	assert.Contains(t, out, `send to "group[agent:agent-b]"`)
+	assert.Contains(t, out, `send to "agent:agent-b"`)
 	assert.NotContains(t, out, "Group delivery complete", "an incomplete send must not be reported complete")
 	assert.NotContains(t, out, "Interrupted", "nothing was interrupted")
 }
@@ -271,7 +331,8 @@ func TestSendGroupMessage3510_PartialJSONOutput(t *testing.T) {
 	assert.Contains(t, got.Results[1].Error, "boom for agent-b")
 	assert.Equal(t, "unknown", got.Results[2].Status, "a gateway timeout does not prove the message was not delivered")
 	assert.Contains(t, got.Results[2].Error, "may have been delivered")
-	assert.Equal(t, "group[agent:agent-b]", got.RetryRecipient, "retry must name only definite failures")
+	assert.Equal(t, "agent:agent-b", got.RetryRecipient, "retry must name only definite failures")
+	assertRetryRoundTrips(t, got.RetryRecipient, "agent:agent-b")
 }
 
 // The Hub answers 202 {"status":"ambiguous"} when it may or may not have
@@ -319,7 +380,8 @@ func TestSendGroupMessage3510_GatewayErrorClassification(t *testing.T) {
 	for i, w := range want {
 		assert.Equal(t, w, got.Results[i].Status, "status for %s", names[i])
 	}
-	assert.Equal(t, "group[agent:agent-dfail]", got.RetryRecipient, "the Hub's definite delivery_failed must be retryable")
+	assert.Equal(t, "agent:agent-dfail", got.RetryRecipient, "the Hub's definite delivery_failed must be retryable")
+	assertRetryRoundTrips(t, got.RetryRecipient, "agent:agent-dfail")
 }
 
 // When no recipient definitely failed but some may have the message, the
@@ -400,7 +462,8 @@ func TestSendGroupMessage3510_UserRecipients(t *testing.T) {
 	assert.Contains(t, got.Results[1].Error, "boom for user:alice")
 	assert.Equal(t, "unknown", got.Results[2].Status)
 	assert.Equal(t, "unknown", got.Results[3].Status)
-	assert.Equal(t, "group[user:alice]", got.RetryRecipient)
+	assert.Equal(t, "user:alice", got.RetryRecipient)
+	assertRetryRoundTrips(t, got.RetryRecipient, "user:alice")
 	assert.True(t, h.seen("POST outbound user:alice"), "user recipients must use the outbound endpoint")
 }
 
@@ -409,16 +472,14 @@ func TestSendGroupMessage3510_UserRecipients(t *testing.T) {
 type testFanOut struct {
 	active atomic.Bool
 	cancel context.CancelFunc
-	ready  chan struct{}
 }
 
-func newTestFanOut() *testFanOut { return &testFanOut{ready: make(chan struct{})} }
+func newTestFanOut() *testFanOut { return &testFanOut{} }
 
 func (f *testFanOut) hook(parent context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
 	f.cancel = cancel
 	f.active.Store(true)
-	close(f.ready)
 	return ctx, func() {
 		f.active.Store(false)
 		cancel()

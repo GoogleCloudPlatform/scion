@@ -127,7 +127,8 @@ deferred (saved while the agent reincarnates), failed (with the reason), or
 unknown (no definite answer: a timeout, a gateway error, or the Hub
 reporting delivery as ambiguous, so it may have been delivered). With
 --format json the output is an object with the counts, a "results" list, and
-a "retry_recipient" group[] naming only the failed recipients.
+a "retry_recipient" naming only the failed recipients, ready to pass back as
+the recipient argument (agent:x or user:x for one, group[...] for several).
 
 Exit codes:
   0  Sent. For a group, every recipient was delivered or deferred.
@@ -205,38 +206,14 @@ Examples:
 				message = strings.Join(args[1:], " ")
 			}
 
-			// Try parsing as an S4 conversation reference first.
-			// This catches conv:<uuid>, @<agent-slug>, @<email>, #<thread>.
-			if ref, err := messaging.ParseReference(recipient); err == nil {
-				// DEF-138: conv:<uuid> and #<thread> are now fully supported.
-				// Delivery routing through explicit conversation assertion
-				// (P-1..P-3) means the conversation_id survives to the
-				// persisting writer. The gate that previously rejected these
-				// two kinds is removed.
-				convRef = ref
-			} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
-				// Looks like a conversation reference but failed to parse.
-				// Parse-failure-denies: fail loudly, do not fall through to legacy paths.
-				return newUsageError("invalid conversation reference: %w", err)
-			} else if strings.HasPrefix(recipient, "@") {
-				// @ prefix is exclusively a conversation reference in the new grammar.
-				// A bare email without leading @ falls through to the legacy path below.
-				return newUsageError("invalid conversation reference: %w", err)
-			} else if messages.IsGroupRecipient(recipient) {
-				parsed, err := messages.ParseGroupRecipient(recipient)
-				if err != nil {
-					return newUsageError("invalid group recipient: %w", err)
-				}
-				groupRecipients = parsed
-			} else if strings.HasPrefix(recipient, "user:") {
-				userRecipient = recipient
-			} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
-				// Legacy bare email — treat as user recipient for backward compat.
-				userRecipient = "user:" + recipient
-			} else {
-				// Strip optional "agent:" prefix for backwards compatibility
-				agentName = api.Slugify(strings.TrimPrefix(recipient, "agent:"))
+			parsedRecip, err := parseRecipientArg(recipient)
+			if err != nil {
+				return err
 			}
+			agentName = parsedRecip.agentName
+			userRecipient = parsedRecip.userRecipient
+			groupRecipients = parsedRecip.group
+			convRef = parsedRecip.convRef
 		}
 
 		// Validate --body-file conflicts
@@ -985,6 +962,68 @@ type groupRecipientResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// retryRecipientArg builds a recipient argument for scion message naming the
+// given failed recipients. group[] requires at least two recipients, so a
+// single failure is returned as the bare recipient. It returns "" when there
+// is nothing to retry.
+func retryRecipientArg(failed []string) string {
+	switch len(failed) {
+	case 0:
+		return ""
+	case 1:
+		return failed[0]
+	default:
+		return "group[" + strings.Join(failed, ",") + "]"
+	}
+}
+
+// recipientArg is the parsed form of the recipient argument to scion message.
+// Exactly one field is set.
+type recipientArg struct {
+	agentName     string
+	userRecipient string
+	group         []messages.GroupRecipient
+	convRef       *messaging.Reference // S4 conversation reference (conv:, @, #)
+}
+
+// parseRecipientArg classifies the recipient argument to scion message. It is
+// the single parser for that argument, so any recipient string the command
+// prints for reuse (such as a group send's retry_recipient) must parse here.
+func parseRecipientArg(recipient string) (recipientArg, error) {
+	// Try parsing as an S4 conversation reference first.
+	// This catches conv:<uuid>, @<agent-slug>, @<email>, #<thread>.
+	if ref, err := messaging.ParseReference(recipient); err == nil {
+		// DEF-138: conv:<uuid> and #<thread> are now fully supported.
+		// Delivery routing through explicit conversation assertion
+		// (P-1..P-3) means the conversation_id survives to the
+		// persisting writer. The gate that previously rejected these
+		// two kinds is removed.
+		return recipientArg{convRef: ref}, nil
+	} else if strings.HasPrefix(recipient, "conv:") || strings.HasPrefix(recipient, "#") {
+		// Looks like a conversation reference but failed to parse.
+		// Parse-failure-denies: fail loudly, do not fall through to legacy paths.
+		return recipientArg{}, newUsageError("invalid conversation reference: %w", err)
+	} else if strings.HasPrefix(recipient, "@") {
+		// @ prefix is exclusively a conversation reference in the new grammar.
+		// A bare email without leading @ falls through to the legacy path below.
+		return recipientArg{}, newUsageError("invalid conversation reference: %w", err)
+	} else if messages.IsGroupRecipient(recipient) {
+		parsed, err := messages.ParseGroupRecipient(recipient)
+		if err != nil {
+			return recipientArg{}, newUsageError("invalid group recipient: %w", err)
+		}
+		return recipientArg{group: parsed}, nil
+	} else if strings.HasPrefix(recipient, "user:") {
+		return recipientArg{userRecipient: recipient}, nil
+	} else if strings.Contains(recipient, "@") && !strings.HasPrefix(recipient, "agent:") {
+		// Legacy bare email — treat as user recipient for backward compat.
+		return recipientArg{userRecipient: "user:" + recipient}, nil
+	} else {
+		// Strip optional "agent:" prefix for backwards compatibility
+		return recipientArg{agentName: api.Slugify(strings.TrimPrefix(recipient, "agent:"))}, nil
+	}
+}
+
 // groupSendResult is the --format json output of a group[] send.
 type groupSendResult struct {
 	GroupID   string                 `json:"group_id"`
@@ -994,9 +1033,11 @@ type groupSendResult struct {
 	Failed    int                    `json:"failed"`
 	Unknown   int                    `json:"unknown"`
 	Results   []groupRecipientResult `json:"results"`
-	// RetryRecipient is a group[] recipient argument naming only the
-	// recipients that definitely did not receive the message. Recipients
-	// with status "unknown" are left out: re-sending to them may duplicate.
+	// RetryRecipient is a recipient argument naming only the recipients
+	// that definitely did not receive the message: the bare recipient
+	// (agent:x or user:x) when one failed, group[...] when two or more did.
+	// Recipients with status "unknown" are left out: re-sending to them may
+	// duplicate.
 	RetryRecipient string `json:"retry_recipient,omitempty"`
 }
 
@@ -1249,9 +1290,7 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 			interrupted = true
 		}
 	}
-	if len(retryRecips) > 0 {
-		summary.RetryRecipient = "group[" + strings.Join(retryRecips, ",") + "]"
-	}
+	summary.RetryRecipient = retryRecipientArg(retryRecips)
 
 	// A25.7 O1: honour --json for group sends the same way the
 	// single-recipient paths do. ptone/scion#3510: the JSON is an object
@@ -1323,7 +1362,7 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 		msg = "group delivery interrupted: " + counts
 	}
 	if summary.RetryRecipient != "" {
-		msg += "; do not resend to the whole group, retry only " + summary.RetryRecipient
+		msg += fmt.Sprintf("; do not resend to the whole group, retry only the failed recipients by sending to %q", summary.RetryRecipient)
 	} else {
 		msg += "; do not resend to the whole group"
 	}
@@ -1389,6 +1428,8 @@ func printGroupSendSummary(s groupSendResult, interrupted bool) {
 		}
 	}
 	if s.RetryRecipient != "" {
+		// RetryRecipient is a valid recipient argument for any number of
+		// failures (bare for one, group[...] for several).
 		fmt.Printf("To retry only the failed recipients, send to %q.\n", s.RetryRecipient)
 	}
 }
