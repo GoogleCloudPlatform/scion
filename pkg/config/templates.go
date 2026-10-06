@@ -324,6 +324,9 @@ var templateHashPattern = regexp.MustCompile(`(?i)^(sha256:)?[0-9a-f]{64}$`)
 // isTemplateHashName reports whether s is a content hash rather than a
 // template name: the prefixed form cache directories use today, or any
 // other letter case or the bare 64-hex digest (templateHashPattern).
+// transfer.IsContentHash is a strict subset of templateHashPattern; it is
+// kept on purpose, only to tie this check to the cache's canonical hash
+// form, so a change to that form is reflected here too.
 func isTemplateHashName(s string) bool {
 	return transfer.IsContentHash(s) || templateHashPattern.MatchString(s)
 }
