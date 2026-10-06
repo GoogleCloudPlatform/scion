@@ -13,7 +13,16 @@ resource "kubernetes_namespace" "this" {
 # rights in hub B's namespace (a project-wide container.developer role,
 # as used in some non-Terraform deployment docs, would remove that
 # isolation).
+#
+# create_hub_rbac = false skips this Role and its RoleBinding below. Only
+# hub-gke does that: its Helm chart renders its own Role/RoleBinding in this
+# namespace for the hub pod's Kubernetes service account (rbac.create,
+# runtime.namespace), and a hub pod authenticates to the API server as that
+# KSA, not as the hub GSA's email or unique_id, so these subjects would match
+# nothing there.
 resource "kubernetes_role" "hub" {
+  count = var.create_hub_rbac ? 1 : 0
+
   metadata {
     name      = "${var.hub_name}-hub"
     namespace = kubernetes_namespace.this.metadata[0].name
@@ -71,6 +80,8 @@ resource "kubernetes_role" "hub" {
 # to request userinfo.email — dropping it now would just trade today's
 # outage for a silent one later.
 resource "kubernetes_role_binding" "hub" {
+  count = var.create_hub_rbac ? 1 : 0
+
   metadata {
     name      = "${var.hub_name}-hub"
     namespace = kubernetes_namespace.this.metadata[0].name
@@ -79,7 +90,7 @@ resource "kubernetes_role_binding" "hub" {
   role_ref {
     api_group = "rbac.authorization.k8s.io"
     kind      = "Role"
-    name      = kubernetes_role.hub.metadata[0].name
+    name      = kubernetes_role.hub[0].metadata[0].name
   }
 
   # Matches nothing today (GKE can't see this email without
@@ -97,6 +108,20 @@ resource "kubernetes_role_binding" "hub" {
     kind      = "User"
     name      = var.hub_sa_unique_id
   }
+}
+
+# Both resources gained count = var.create_hub_rbac ? 1 : 0, which moves
+# their addresses to [0]. Without these moved blocks every already-applied
+# hub would plan a destroy and re-create of its RBAC, a window in which the
+# hub's pod operations are denied.
+moved {
+  from = kubernetes_role.hub
+  to   = kubernetes_role.hub[0]
+}
+
+moved {
+  from = kubernetes_role_binding.hub
+  to   = kubernetes_role_binding.hub[0]
 }
 
 # Agent pods run as the namespace's pre-existing "default" KSA (setup-gcp.md
