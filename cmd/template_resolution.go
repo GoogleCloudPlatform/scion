@@ -81,8 +81,11 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 	// --template-scope is a plain word (no URI ambiguity, unlike the
 	// --template prefix parsed below), so reject unknown values rather than
 	// defaulting.
+	// Callers (RunAgent, create) validate it first as a usage error; this
+	// guard is marked the same way so the usage block still wins if it
+	// fires through the caller's wrapHubError.
 	if err := validateTemplateScope(templateScope); err != nil {
-		return nil, err
+		return nil, asUsageError(err)
 	}
 
 	// Parse scope prefix if present (e.g., "global:claude", "project:custom")

@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -156,9 +157,10 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 
 	if !agentCallerAuthorized {
 		// 5. D7: DENY UATs — no scope exists for set_message_mode.
+		// Session-only with the GOV_PENDING reason (session_only_gate.go).
 		if _, ok := identity.(*ScopedUserIdentity); ok {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Scoped tokens cannot change message mode", nil)
+			writeSessionOnlyDenial(w, ErrCodeForbidden,
+				"Scoped tokens cannot change message mode", authzop.ReasonGovernancePending)
 			return
 		}
 

@@ -55,24 +55,26 @@ import (
 // access from outside this file is the bug this comment exists to prevent
 // from coming back.
 type mockManager struct {
-	mu                    sync.Mutex
-	agents                []api.AgentInfo
-	startCalls            int
-	stopCalls             int
-	deleteCalls           int
-	startErr              error
-	provisionErr          error
-	stopErr               error
-	listErr               error
-	deleteTargetErr       error
-	messageErr            error
-	lastStartOpts         api.StartOptions
-	lastDeleteProjectPath string
-	lastDeleteAgentID     string
-	lastDeleteContainerID string
-	lastDeleteRunID       string
-	lastDeleteFiles       bool
-	lastStopAgentID       string
+	mu                     sync.Mutex
+	agents                 []api.AgentInfo
+	startCalls             int
+	stopCalls              int
+	deleteCalls            int
+	startErr               error
+	provisionErr           error
+	stopErr                error
+	listErr                error
+	deleteTargetErr        error
+	messageErr             error
+	lastStartOpts          api.StartOptions
+	lastDeleteProjectPath  string
+	lastDeleteAgentID      string
+	lastDeleteContainerID  string
+	lastDeleteRunID        string
+	lastDeleteFiles        bool
+	lastDeleteRemoveBranch bool
+	lastStopAgentID        string
+	lastStopRunID          string
 	// lastStartCtx captures the context passed to Start, so tests can assert
 	// on what was attached to it (e.g. a skill resolver, #1960) without a
 	// real container runtime or ProvisionAgent call.
@@ -143,11 +145,23 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 	return agent, nil
 }
 
-func (m *mockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
 	m.lastStopAgentID = agentID
+	m.lastStopRunID = runID
+	return m.stopErr
+}
+
+// StopTarget records the resolved entry the broker stops; it counts as a
+// stop call, like Stop, so existing stop assertions hold either way.
+func (m *mockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopCalls++
+	m.lastStopAgentID = ref.ID
+	m.lastStopRunID = ref.RunID
 	return m.stopErr
 }
 
@@ -168,6 +182,7 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref ru
 	m.lastDeleteContainerID = ref.ID
 	m.lastDeleteRunID = ref.RunID
 	m.lastDeleteFiles = deleteFiles
+	m.lastDeleteRemoveBranch = removeBranch
 	m.deleteCalls++
 	if m.deleteTargetErr != nil {
 		return false, m.deleteTargetErr

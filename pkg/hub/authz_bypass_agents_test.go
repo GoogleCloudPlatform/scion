@@ -157,6 +157,10 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 		OwnerID: f.owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, f.other))
+	// The owner relationship on a project agent requires active project
+	// access (ptone/scion#2141); the binding grants no permissions itself.
+	grantProjectAccessOnly(t, s, f.owner.ID, f.proj.ID)
+	grantProjectAccessOnly(t, s, f.owner.ID, f.other.ID)
 
 	// An auto-provide broker, so that agent creation can resolve a broker and
 	// the create tests exercise the authorization gate rather than dying at
@@ -578,6 +582,9 @@ func TestBypassAgents_UpdateAgentServiceAccountChecks(t *testing.T) {
 			Created:     time.Now(),
 		}
 		require.NoError(t, f.store.CreateUser(context.Background(), updater))
+		// Active project access for the owner relationship (ptone/scion#2141);
+		// the binding grants no permission, including no service account read.
+		grantProjectAccessOnly(t, f.store, updater.ID, f.proj.ID)
 
 		owned := &store.Agent{
 			ID:        uuid.New().String(),
@@ -715,9 +722,10 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("agent reads a project peer", func(t *testing.T) {
 		// CO1: same as self-read — agent.read has no AgentScopes mapping,
 		// so the credential scope restriction blocks individual agent reads.
+		// An agent caller's denial reads as not found (ptone/scion#3409).
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
+		assert.Equal(t, http.StatusNotFound, rec.Code,
 			"CO1: agent.read has no AgentScopes mapping; agent must be denied; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
@@ -825,7 +833,7 @@ func TestGetAgent_SelfRead(t *testing.T) {
 	t.Run("baseline role still cannot read a peer", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil, ScopesForRole(AgentRoleBaseline)...)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "peer read: %s", rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, "peer read: %s", rec.Body.String())
 	})
 
 	t.Run("token without project:read cannot read itself", func(t *testing.T) {

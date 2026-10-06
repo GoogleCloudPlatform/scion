@@ -41,6 +41,12 @@ var (
 	// conflict.
 	ErrPhaseMismatch = fmt.Errorf("agent phase changed: %w", ErrVersionConflict)
 
+	// ErrRunChanged is returned by UpdateAgentStatus when
+	// AgentStatusUpdate.IfRunID is set and the stored run_id differs
+	// (ptone/scion#2550): the row has moved to a newer run since the caller
+	// dispatched its operation. It wraps ErrVersionConflict.
+	ErrRunChanged = fmt.Errorf("agent run changed: %w", ErrVersionConflict)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
@@ -420,7 +426,8 @@ type AgentStore interface {
 	// SetAgentWorkspacePlacement records where the agent's broker placed its
 	// workspace on the latest start (see Agent.WorkspacePlacement). It is a
 	// narrow single-column write that neither checks nor bumps
-	// state_version. Returns ErrNotFound if the agent doesn't exist.
+	// state_version. Returns ErrNotFound if the agent doesn't exist or is
+	// soft-deleted (a soft-deleted row is never written).
 	SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error
 
 	// UpdateAgentExposedPorts updates only exposed port registrations.
@@ -620,9 +627,10 @@ type AgentStore interface {
 	// records run intent running in the same write (run_intent_at strictly
 	// increasing, as SetRunIntent). It requires that no claim is held, the
 	// agent is not deleted or being deleted, and no reincarnation is in
-	// flight. Returns *ClaimHeldError when a claim is held, ErrClaimPredicate
-	// when the agent is otherwise not eligible, and ErrNotFound when it does
-	// not exist.
+	// flight. Returns ErrDeleteInProgress when a delete holds the row or the
+	// agent is soft-deleted (as SwapRunIntent does for a running intent),
+	// *ClaimHeldError when a claim is held, ErrClaimPredicate when the agent
+	// is otherwise not eligible, and ErrNotFound when it does not exist.
 	ClaimAgentStart(ctx context.Context, agentID, owner string, kind StartClaimKind, target string, ttl time.Duration) (StartClaim, error)
 
 	// ClaimAgentStop takes a live claim of kind StartClaimStop, used while a
@@ -663,6 +671,13 @@ type AgentStore interface {
 	// name: claims owned by its previous process can no longer be renewed.
 	// excludeOwner (this process's own owner value) is never demoted.
 	DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, excludeOwner string, holds StartClaimHolds) (int, error)
+
+	// ConvertUnconfirmedToStop replaces the unconfirmed claim claimID with a
+	// live stop-kind claim owned by owner, with a lease of ttl, when the agent
+	// has no active launch. It is taken before the hub stops a container an
+	// unconfirmed start left running, so no start can claim the agent while
+	// that stop is applied. ErrClaimPredicate when the claim changed.
+	ConvertUnconfirmedToStop(ctx context.Context, agentID, claimID, owner string, ttl time.Duration) (StartClaim, error)
 
 	// ReleaseUnconfirmedStart clears claimID when it is unconfirmed and the
 	// agent has no active launch.
@@ -968,6 +983,13 @@ type AgentStatusUpdate struct {
 	// update's transaction; otherwise UpdateAgentStatus returns
 	// ErrPhaseMismatch and writes nothing. Internal to the hub — json:"-".
 	IfPhase string `json:"-"`
+	// IfRunID, when non-empty, makes the update conditional on the stored
+	// run_id equalling IfRunID, checked on the row read inside the update's
+	// transaction; otherwise UpdateAgentStatus returns ErrRunChanged and
+	// writes nothing (ptone/scion#2550). A hub that records the result of a
+	// stop dispatched for run X sets it to X, so the stop never marks a
+	// newer run stopped. Internal to the hub — json:"-".
+	IfRunID string `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -1040,6 +1062,17 @@ type ProjectStore interface {
 	// Must be called inside a transaction (WithTx) before any membership
 	// reads or writes. Returns ErrNotFound if the project does not exist.
 	LockProjectForMembership(ctx context.Context, projectID string) error
+
+	// LockProjectAgents locks every agent row of the project (soft-deleted
+	// ones included) in ascending agent-ID order. On PostgreSQL this is
+	// SELECT ... FOR UPDATE ordered by ID; on SQLite it is a plain read.
+	//
+	// Must be called inside a transaction (WithTx). Call it before deleting
+	// any group membership that may belong to one of the project's agents
+	// (for example a project-scoped group), so the transaction locks agent
+	// rows before membership rows, in ID order, like every other path that
+	// deletes agent memberships. Not finding any agents is not an error.
+	LockProjectAgents(ctx context.Context, projectID string) error
 
 	// UpdateProjectMessagingPolicy updates only the cross-project inbound
 	// policy and its revision using optimistic concurrency. The
@@ -1656,8 +1689,52 @@ type GroupStore interface {
 	// through group membership.
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
 
+	// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+	// child group of parentGroupID. It returns ErrNotFound when no edge row
+	// was deleted, including when another transaction removed it first.
+	// It refuses project_agents parent groups with ErrInvalidInput, as
+	// RemoveGroupMember does, but unlike RemoveGroupMember it does not bump
+	// the parent group's updated timestamp.
+	RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error
+
+	// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+	// given group as a direct child group (one level only, no ancestors). A
+	// group with a self-edge is included in its own result. The result is
+	// sorted and empty, not ErrNotFound, when there are none.
+	GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error)
+
 	// CountGroupMembersByRole counts how many members of a group have the given role.
+	// Only memberships that still reference a user or an agent are counted;
+	// orphaned rows (user and agent both cleared by ON DELETE SET NULL) are not.
 	CountGroupMembersByRole(ctx context.Context, groupID, role string) (int, error)
+
+	// DeleteGroupMembershipsForUser removes every group membership of the
+	// given user and returns the number of rows removed. Call it before the
+	// user row is deleted: the FK is ON DELETE SET NULL, so afterwards the
+	// rows no longer carry the user ID (ptone/scion#2769).
+	//
+	// Must be called inside the same transaction as the user delete. On
+	// PostgreSQL it first locks the groups the user owns (SELECT ... FOR NO
+	// KEY UPDATE ordered by ID), so the transaction locks owned group rows
+	// before membership rows, matching ProjectDeletionService's
+	// group-row-then-memberships order and avoiding a deadlock with a
+	// concurrent project delete. The strength is FOR NO KEY UPDATE, the lock
+	// the user-row delete's owner_id SET NULL takes, not FOR UPDATE: it must
+	// not conflict with the FK check's FOR KEY SHARE taken when a membership,
+	// child-group edge or policy binding referencing the group is inserted.
+	DeleteGroupMembershipsForUser(ctx context.Context, userID string) (int, error)
+
+	// DeleteGroupMembershipsForAgents removes every group membership of the
+	// given agents and returns the number of rows removed. Call it before the
+	// agent rows are deleted, for the same reason as
+	// DeleteGroupMembershipsForUser. An empty ids slice is a no-op.
+	DeleteGroupMembershipsForAgents(ctx context.Context, ids []string) (int, error)
+
+	// DeleteOrphanedGroupMemberships removes group memberships whose user and
+	// agent are both NULL and returns the number of rows removed. Such rows
+	// are always orphans: group-in-group membership uses the child-group
+	// edge, never a membership row. Idempotent.
+	DeleteOrphanedGroupMemberships(ctx context.Context) (int, error)
 
 	// GetGroupsByIDs retrieves groups by a list of IDs.
 	// Returns only groups that exist; missing IDs are silently skipped.

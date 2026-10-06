@@ -593,7 +593,11 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 	// Bucket B — IMMUTABLE: same value even when input is different.
 	t.Run("B_immutable", func(t *testing.T) {
 		assert.Equal(t, initialID, r2.ID, "ID must not change")
-		assert.True(t, initialCreatedAt.Equal(r2.CreatedAt), "CreatedAt must not change (got %v vs %v)", initialCreatedAt, r2.CreatedAt)
+		// r1.CreatedAt is the in-memory value (nanosecond precision) while
+		// r2.CreatedAt was read back from the database (microseconds on
+		// Postgres): compare exactly at the stored precision.
+		assert.True(t, sameInstantAtStoredPrecision(initialCreatedAt, r2.CreatedAt),
+			"CreatedAt must not change (got %v vs %v)", initialCreatedAt, r2.CreatedAt)
 		// Kind: the upsert passed the same Kind ("group"). Upserting with a different
 		// Kind is silently ignored — the update path does not call SetKind. This is
 		// believed correct and load-bearing: a direct conversation must not become a

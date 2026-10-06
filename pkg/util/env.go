@@ -17,6 +17,8 @@ package util
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // ExpandEnv replaces ${var} or $var in the string according to the values
@@ -44,4 +46,44 @@ func FirstNonEmpty(ss ...string) string {
 		}
 	}
 	return ""
+}
+
+// ParseBool parses s as a boolean. Leading and trailing whitespace is
+// stripped (file-mounted secrets often end in a newline) and matching is
+// case-insensitive. It accepts every spelling strconv.ParseBool understands
+// (1, t, true, 0, f, false) plus yes/y/on as true and no/n/off as false.
+// ok is false when s is empty or not a recognized spelling.
+func ParseBool(s string) (value, ok bool) {
+	v := strings.ToLower(strings.TrimSpace(s))
+	if v == "" {
+		return false, false
+	}
+	if b, err := strconv.ParseBool(v); err == nil {
+		return b, true
+	}
+	switch v {
+	case "yes", "y", "on":
+		return true, true
+	case "no", "n", "off":
+		return false, true
+	}
+	return false, false
+}
+
+// LookupBoolEnv parses the named environment variable with ParseBool.
+// ok is false when the variable is unset, empty, or not a recognized
+// spelling. Callers that want to warn about a typo can check
+// os.Getenv(key) for a non-empty value when ok is false.
+func LookupBoolEnv(key string) (value, ok bool) {
+	return ParseBool(os.Getenv(key))
+}
+
+// ParseBoolEnv returns the boolean value of the named environment variable
+// (see ParseBool for the accepted spellings), or defaultVal when the
+// variable is unset, empty, or not a recognized spelling.
+func ParseBoolEnv(key string, defaultVal bool) bool {
+	if v, ok := LookupBoolEnv(key); ok {
+		return v
+	}
+	return defaultVal
 }

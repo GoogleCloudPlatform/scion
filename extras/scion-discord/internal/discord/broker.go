@@ -43,6 +43,15 @@ const (
 	// dedupTTL is how long a message ID is remembered for deduplication.
 	dedupTTL = 5 * time.Minute
 
+	// askUserExpiry is how long a posted question accepts button and
+	// modal answers.
+	askUserExpiry = 24 * time.Hour
+
+	// askUserCleanupInterval is the minimum time between deletions of
+	// expired ask-user entries. Answer handlers check expiry themselves,
+	// so cleanup only needs to run occasionally.
+	askUserCleanupInterval = time.Hour
+
 	// OriginMarkerKey is the config key injected into outbound messages
 	// to identify messages originating from the scion hub.
 	OriginMarkerKey = "scion_origin"
@@ -215,6 +224,15 @@ type DiscordBroker struct {
 	// channel, sender and reply kind.
 	replyCooldown   map[string]time.Time
 	replyCooldownMu sync.Mutex
+
+	// lastAskUserCleanup is when expired ask-user entries were last
+	// deleted; askUserCleanupMu guards it.
+	lastAskUserCleanup time.Time
+	askUserCleanupMu   sync.Mutex
+
+	// now returns the current time; nil means time.Now. Tests set it to
+	// control the ask-user cleanup cadence.
+	now func() time.Time
 
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
@@ -852,8 +870,12 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 					})
 				}
 			}
+		} else if msg.Type == messages.TypeInputNeeded && store != nil && senderSlug != "" {
+			// Questions get answer buttons and a pending ask-user entry.
+			err = b.sendInputNeeded(ctx, session, sendQueue, store, channelID, text, msg, senderSlug, projectID, files)
 		} else {
-			// Send via bot API (state changes, input-needed, non-agent messages).
+			// Send via bot API (state changes, non-agent messages, and
+			// input-needed without a store or sender slug).
 			if sendQueue != nil {
 				_, err = sendQueue.Send(ctx, channelID, text, nil, nil, files)
 			} else {
@@ -875,6 +897,82 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sendInputNeeded posts an input-needed message with answer buttons and
+// records the pending ask-user entry that the button and modal handlers
+// look up. Each channel gets its own request ID.
+func (b *DiscordBroker) sendInputNeeded(
+	ctx context.Context,
+	session *discordgo.Session,
+	sendQueue *SendQueue,
+	store Store,
+	channelID, text string,
+	msg *messages.StructuredMessage,
+	agentSlug, projectID string,
+	files []*discordgo.File,
+) error {
+	requestID := generateRequestID()
+	_, components := RenderInputNeeded(msg, agentSlug, requestID)
+
+	var sent *discordgo.Message
+	var err error
+	if sendQueue != nil {
+		sent, err = sendQueue.Send(ctx, channelID, text, nil, components, files)
+	} else {
+		sent, err = session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Content:    text,
+			Components: components,
+			Files:      files,
+		})
+	}
+	if err != nil {
+		return err
+	}
+
+	// Stored choices match the rendered buttons (nil for Reply/Dismiss)
+	// and keep the full text of any truncated label.
+	pending := &PendingAskUser{
+		RequestID: requestID,
+		ChannelID: channelID,
+		AgentSlug: agentSlug,
+		ProjectID: projectID,
+		Choices:   inputNeededChoices(msg),
+		ExpiresAt: time.Now().Add(askUserExpiry),
+	}
+	if sent != nil {
+		pending.MessageID = sent.ID
+	}
+	if b.askUserCleanupDue() {
+		if _, delErr := store.DeleteExpiredAskUsers(ctx); delErr != nil {
+			b.log.Warn("Failed to delete expired ask-user entries", "error", delErr)
+		}
+	}
+	// The message is already posted, so a failed write is logged rather
+	// than returned; returning it would not make the buttons answerable.
+	if createErr := store.CreatePendingAskUser(ctx, pending); createErr != nil {
+		b.log.Error("Failed to record pending ask-user; its buttons will not work",
+			"request_id", requestID, "channel_id", channelID,
+			"message_id", pending.MessageID, "error", createErr)
+	}
+	return nil
+}
+
+// askUserCleanupDue reports whether expired ask-user entries should be
+// deleted now, and if so records the time. Cleanup runs on the first call
+// and then at most once per askUserCleanupInterval.
+func (b *DiscordBroker) askUserCleanupDue() bool {
+	now := time.Now()
+	if b.now != nil {
+		now = b.now()
+	}
+	b.askUserCleanupMu.Lock()
+	defer b.askUserCleanupMu.Unlock()
+	if !b.lastAskUserCleanup.IsZero() && now.Sub(b.lastAskUserCleanup) < askUserCleanupInterval {
+		return false
+	}
+	b.lastAskUserCleanup = now
+	return true
 }
 
 // Close shuts down the Discord broker, closing the gateway session,
@@ -1389,9 +1487,12 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// included as implicit primary when explicit agent mentions are present).
 	targets, isAll := resolveTargetAgents(m, botUserID, effectiveDefault, agents)
 
-	// Fallback: reply-to-bot message — extract agent from webhook username.
+	// Fallback: a reply to an agent message posted through the plugin's
+	// own webhook goes to that agent (the webhook username is its slug).
 	if len(targets) == 0 && m.ReferencedMessage != nil {
-		slug := agentFromReply(m.ReferencedMessage, botUserID)
+		slug := agentFromReply(m.ReferencedMessage, func(webhookID string) bool {
+			return b.ownsWebhook(m.ChannelID, webhookID)
+		})
 		if slug != "" {
 			targets = []string{slug}
 		}
@@ -2203,7 +2304,13 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 	if ref.Author != nil && botUserID != "" && ref.Author.ID == botUserID && ref.WebhookID == "" {
 		return true
 	}
-	if ref.WebhookID == "" {
+	return b.ownsWebhook(m.ChannelID, ref.WebhookID)
+}
+
+// ownsWebhook reports whether webhookID is the webhook this plugin uses
+// to post agent messages in channelID. It never creates a webhook.
+func (b *DiscordBroker) ownsWebhook(channelID, webhookID string) bool {
+	if webhookID == "" {
 		return false
 	}
 	b.mu.RLock()
@@ -2213,11 +2320,10 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 		return false
 	}
 	// Threads use their parent channel's webhook.
-	channelID := m.ChannelID
-	if parentID, isThread := b.resolveThreadParent(m.ChannelID); isThread {
+	if parentID, isThread := b.resolveThreadParent(channelID); isThread {
 		channelID = parentID
 	}
-	return webhooks.owns(channelID, ref.WebhookID)
+	return webhooks.owns(channelID, webhookID)
 }
 
 // defaultAgentApplies reports whether an unaddressed message would go to
