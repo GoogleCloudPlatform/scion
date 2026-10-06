@@ -186,10 +186,10 @@ func (c fixtureClock) Now() time.Time { return c.now() }
 func (f *conduitProxyFixture) startAgent(t *testing.T) (stop func()) {
 	t.Helper()
 	admitted := make(chan *conduitv1.Welcome, 4)
-	stop, _ = f.runAgent(t, f.launched.LaunchID, admitted)
+	stop, _ = f.runAgent(t, f.launched.RunID, admitted)
 	select {
 	case w := <-admitted:
-		require.Equal(t, f.launched.LaunchID, w.GetEndpointIncarnation())
+		require.Equal(t, f.launched.RunID, w.GetEndpointIncarnation())
 	case <-time.After(10 * time.Second):
 		t.Fatal("conduit session not admitted")
 	}
