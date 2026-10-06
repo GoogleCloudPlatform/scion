@@ -324,5 +324,8 @@ func effectiveRuntimeProfileName(requestProfile string, project *store.Project) 
 	if project == nil {
 		return ""
 	}
-	return projectSettingsFromAnnotations(project).ActiveProfile
+	if p := projectSettingsFromAnnotations(project).ActiveProfile; p != nil {
+		return *p
+	}
+	return ""
 }
