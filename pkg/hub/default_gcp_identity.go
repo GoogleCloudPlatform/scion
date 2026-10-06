@@ -160,7 +160,7 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 		return nil, fmt.Errorf("%s GCP service account is not available in this project; "+
 			"update %s", tier.subject(), tier.setting())
 	}
-	if !sa.Verified {
+	if !gcpServiceAccountVerified(sa) {
 		slog.Warn(tier.name+"-default SA assignment failed: service account not verified",
 			"surface", surface,
 			"project_id", projectID,
@@ -322,8 +322,10 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 // dispatch resolves to on runtimeBrokerID is one the hub-default passthrough
 // rung may apply to: a local container runtime that shares its host's
 // metadata server (hubDefaultPassthroughRuntimeTypes, above). A
-// kubernetes-type profile, or a profile that cannot be resolved at all,
-// fails closed to block.
+// kubernetes-type profile, or a profile that cannot be resolved at all, is
+// denied: the caller then leaves the agent's GCP identity unset, the hub
+// sends no metadata mode, and the broker applies its runtime default
+// ("block" on most runtimes, "passthrough" on Kubernetes).
 //
 // Unlike brokerHasCloudRunSandboxProfile (handlers_agents_core.go), which
 // treats a broker as qualifying when any one of its profiles matches, this
