@@ -22,9 +22,11 @@ import (
 )
 
 func TestIsolateHome(t *testing.T) {
-	// Restore the original HOME afterwards; IsolateHome itself does not.
+	// Restore the original HOME and USERPROFILE afterwards; IsolateHome
+	// itself does not.
 	t.Setenv("HOME", os.Getenv("HOME"))
-	orig := os.Getenv("HOME")
+	t.Setenv("USERPROFILE", os.Getenv("USERPROFILE"))
+	orig, _ := os.UserHomeDir()
 
 	teardown := IsolateHome("scion-testutil-home-*")
 
@@ -37,6 +39,14 @@ func TestIsolateHome(t *testing.T) {
 	// regressed and left HOME unchanged.
 	if home == "" || home == orig {
 		t.Fatalf("HOME was not changed (still %q)", home)
+	}
+	// Both variables must point at the scratch dir: os.UserHomeDir() reads
+	// HOME on Linux/macOS and USERPROFILE on Windows.
+	if got := os.Getenv("HOME"); got != home {
+		t.Fatalf("HOME = %q, want %q", got, home)
+	}
+	if got := os.Getenv("USERPROFILE"); got != home {
+		t.Fatalf("USERPROFILE = %q, want %q", got, home)
 	}
 	if !strings.HasPrefix(filepath.Base(home), "scion-testutil-home-") {
 		t.Fatalf("HOME = %q, want a scion-testutil-home-* scratch dir", home)

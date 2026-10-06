@@ -22,15 +22,14 @@ import (
 	"os"
 )
 
-// IsolateHome points $HOME at a freshly created temporary directory for the
-// lifetime of the test binary, so tests keep scion state (~/.scion/...) off
-// the real developer/agent HOME. Scion resolves its global config root
-// through os.UserHomeDir() (and some code reads os.Getenv("HOME")
-// directly); on Linux and macOS both read the same $HOME. os.UserHomeDir()
-// uses %USERPROFILE% on Windows instead, so this isolation is Linux/macOS
-// scoped.
+// IsolateHome points $HOME (and %USERPROFILE%, which os.UserHomeDir() reads
+// on Windows) at a freshly created temporary directory for the lifetime of
+// the test binary, so tests keep scion state (~/.scion/...) off the real
+// developer/agent HOME. Scion resolves its global config root through
+// os.UserHomeDir() (and some code reads os.Getenv("HOME") directly). Setting
+// USERPROFILE is harmless on Linux and macOS, where nothing reads it.
 //
-// Only HOME is overridden. XDG_* variables and os.UserConfigDir /
+// Only HOME and USERPROFILE are overridden. XDG_* variables and os.UserConfigDir /
 // os.UserCacheDir were considered, but no non-test code in pkg/ or cmd/
 // resolves scion state through them today, so isolating them would have
 // no effect.
@@ -38,7 +37,7 @@ import (
 // This does not reach package init code in dependencies that runs before
 // TestMain (e.g. rclone's fs/config creating its own config dir).
 //
-// After pointing $HOME at the scratch directory, IsolateHome asserts that
+// After pointing these variables at the scratch directory, IsolateHome asserts that
 // os.UserHomeDir() resolves to it, as a cheap sanity check that the override
 // took effect before any test runs. Any failure exits the process, since
 // running tests against the real HOME is never acceptable.
@@ -49,7 +48,7 @@ import (
 // once such a test finishes.
 //
 // Returns a teardown func that removes the scratch directory. It does not
-// restore $HOME, since TestMain calls it right before os.Exit.
+// restore $HOME or %USERPROFILE%, since TestMain calls it right before os.Exit.
 func IsolateHome(prefix string) (teardown func()) {
 	tmpHome, err := os.MkdirTemp("", prefix)
 	if err != nil {
@@ -60,11 +59,15 @@ func IsolateHome(prefix string) (teardown func()) {
 		fmt.Fprintf(os.Stderr, "testutil.IsolateHome: setting HOME: %v\n", err)
 		os.Exit(1)
 	}
+	if err := os.Setenv("USERPROFILE", tmpHome); err != nil {
+		fmt.Fprintf(os.Stderr, "testutil.IsolateHome: setting USERPROFILE: %v\n", err)
+		os.Exit(1)
+	}
 
 	if got, err := os.UserHomeDir(); err != nil || got != tmpHome {
 		fmt.Fprintf(os.Stderr,
 			"testutil.IsolateHome: os.UserHomeDir() = %q, err=%v; want %q — "+
-				"HOME override did not take effect in this process\n",
+				"home override did not take effect in this process\n",
 			got, err, tmpHome)
 		os.Exit(1)
 	}
