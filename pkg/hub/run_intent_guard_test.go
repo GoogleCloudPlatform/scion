@@ -82,6 +82,15 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// Reincarnation stops and restarts the container in place; the agent
 	// is meant to keep running throughout.
 	"Server.runReincarnationWorker": {kind: intentUnchanged},
+	// Starts run under a start claim, which records intent running
+	// (withStartClaim records it itself while start claims are off).
+	"Server.startAgentCore": {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
+	// A start that completed after a stop was accepted: intent is already
+	// stopped.
+	"Server.compensatingStop": {kind: intentUnchanged},
+	// The start-claim reaper stops a container an unconfirmed start left
+	// running past its hold; the agent's intent is left as it is.
+	"Server.stopUnconfirmedStart": {kind: intentUnchanged},
 	// Removes a run that landed after its agent was deleted or a delete
 	// claimed it: the row is gone, or the delete engine records the stopped
 	// intent itself (ptone/scion#3055).

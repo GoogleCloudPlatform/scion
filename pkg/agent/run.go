@@ -187,7 +187,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return nil, err
 				}
 			}
-			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: a.ContainerID, RunID: a.RunID}); err != nil {
+			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: runtime.AgentOperationID(a), RunID: a.RunID}); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
@@ -1676,6 +1676,10 @@ authDone:
 
 	// The run ID was fixed (minted if absent) at the top of Start.
 	runID := opts.RunID
+	// SCION_LAUNCH_ID carries the same value as the run label, so the
+	// container's env and label cannot disagree. Any value from the
+	// request or template env is replaced.
+	agentEnv = withLaunchIDEnv(agentEnv, runID)
 
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
@@ -1722,7 +1726,9 @@ authDone:
 		// package already sets from the same opts.GitClone for other
 		// purposes; previously nothing set GitCloneForInit at all, so the
 		// k8s init container never ran for ANY project, git or not.
-		GitCloneForInit:  opts.GitClone,
+		// A shared-plain git project has no GitClone; its workspace clone
+		// settings are used instead (nfsInitGitClone).
+		GitCloneForInit:  nfsInitGitClone(opts),
 		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
@@ -2359,6 +2365,22 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	}
 	sortDroppedBrokerEnv(dropped)
 	return agentEnv, warnings, missingKeys, dropped
+}
+
+// envLaunchID is the container env variable carrying the run ID, which
+// sciontool presents to the hub's conduit endpoint as its launch id.
+const envLaunchID = "SCION_LAUNCH_ID"
+
+// withLaunchIDEnv returns env with every SCION_LAUNCH_ID entry replaced by
+// a single one set to runID.
+func withLaunchIDEnv(env []string, runID string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, envLaunchID+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, envLaunchID+"="+runID)
 }
 
 // resolveAuthEnvOverlay injects settings-declared env vars into opts.Env and
