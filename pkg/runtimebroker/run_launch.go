@@ -244,9 +244,13 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// launch (cleanupAbortedLaunch's marker check can never match),
 			// so fail the launch here rather than starting the runtime with
 			// no way to clean up its files on abort.
+			//
+			// The report carries fixed text (ptone/scion#3113): the os error
+			// names broker filesystem paths. The full error is logged here.
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
-				"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", "failed to write launch marker: "+err.Error())
+				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
+				"launch_id", rec.ID, "error", err)
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", runtimeOpError("write launch marker", err).Error())
 			return
 		}
 	}

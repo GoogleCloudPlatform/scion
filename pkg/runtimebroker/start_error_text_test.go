@@ -15,19 +15,24 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const (
@@ -93,9 +98,9 @@ func syncCreateFailure(t *testing.T, name string, startErr error) (code, message
 }
 
 // assertDetailOnlyInLog checks the runtime detail stayed out of the client
-// message and reached the broker's "agent start failed" log record, which
-// names the agent, project and run.
-func assertDetailOnlyInLog(t *testing.T, message, logs, agentID, detail string) {
+// message and reached the broker's logMsg log record, which names the
+// agent, project and run.
+func assertDetailOnlyInLog(t *testing.T, message, logs, logMsg, agentID, detail string) {
 	t.Helper()
 	if strings.Contains(message, detail) {
 		t.Errorf("client message leaked runtime detail %q: %q", detail, message)
@@ -103,13 +108,13 @@ func assertDetailOnlyInLog(t *testing.T, message, logs, agentID, detail string) 
 	var rec map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
 		var r map[string]any
-		if json.Unmarshal([]byte(line), &r) == nil && r["msg"] == "runLaunch: agent start failed" {
+		if json.Unmarshal([]byte(line), &r) == nil && r["msg"] == logMsg {
 			rec = r
 			break
 		}
 	}
 	if rec == nil {
-		t.Fatalf("no \"runLaunch: agent start failed\" log record; logs: %s", logs)
+		t.Fatalf("no %q log record; logs: %s", logMsg, logs)
 	}
 	if got, _ := rec["error"].(string); !strings.Contains(got, detail) {
 		t.Errorf("log record error = %q, want it to carry the runtime detail %q", got, detail)
@@ -175,7 +180,7 @@ func TestAsyncStartError_NormalisedText(t *testing.T) {
 			if report.Message != c.wantMsg {
 				t.Errorf("async message = %q, want %q", report.Message, c.wantMsg)
 			}
-			assertDetailOnlyInLog(t, report.Message, logs, name, c.detail)
+			assertDetailOnlyInLog(t, report.Message, logs, "runLaunch: agent start failed", name, c.detail)
 
 			if !c.checkSync {
 				return
@@ -233,4 +238,95 @@ func TestStartAndRestart_NameInUse_FixedText(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAsyncCreate_PreflightRuntimeError_FixedText: a Preflight failure
+// other than a missing template answers the async create with the same
+// fixed text the synchronous create gives for the same runtime error, and
+// the detail reaches only the broker log (ptone/scion#3113).
+func TestAsyncCreate_PreflightRuntimeError_FixedText(t *testing.T) {
+	const name = "agent-preflight-runtime-error"
+	rawErr := errors.New(identityLeakingRuntimeError)
+	mgr := newAsyncManager()
+	mgr.setPreflightErr(rawErr)
+	srv, _ := newAsyncTestServer(t, mgr)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+
+	w := postCreate(t, srv, map[string]any{
+		"id": name, "name": name, "asyncLaunch": true, "launchId": "L-" + name,
+		"projectId": startErrTextProjectID, "runId": startErrTextRunID,
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error body: %v (%s)", err, w.Body.String())
+	}
+	if resp.Error.Code != ErrCodeRuntimeError {
+		t.Errorf("code = %q, want %q", resp.Error.Code, ErrCodeRuntimeError)
+	}
+	_, syncMsg := syncCreateFailure(t, name, rawErr)
+	if resp.Error.Message != syncMsg {
+		t.Errorf("preflight message = %q, want the synchronous create's text %q", resp.Error.Message, syncMsg)
+	}
+	assertDetailOnlyInLog(t, resp.Error.Message, logs.String(), "Agent create failed: preflight", name, "my-actor-7f3")
+}
+
+// TestRunLaunch_LaunchMarkerWriteFailure_FixedText: a launch-marker write
+// failure reports fixed text under runtime_error; the os error, which
+// names a broker path, reaches only the broker log (ptone/scion#3113).
+func TestRunLaunch_LaunchMarkerWriteFailure_FixedText(t *testing.T) {
+	const name = "agent-marker-fail"
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	// Block the markers directory with a regular file so MkdirAll fails.
+	projectPath := t.TempDir()
+	markersDir, err := launchMarkersDir(projectPath, false)
+	if err != nil {
+		t.Fatalf("launchMarkersDir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(markersDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markersDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newLaunchRecord("L-"+name, name, store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	lc := launchCtx{
+		req:  CreateAgentRequest{ID: name, Name: name, ProjectID: startErrTextProjectID},
+		opts: api.StartOptions{Name: name, ProjectPath: projectPath, RunID: startErrTextRunID},
+		mgr:  mgr,
+		key:  launchKey{Slug: name},
+	}
+	srv.runLaunch(ctx, rec, lc)
+
+	var failed *hubclient.AgentLaunchReport
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			failed = r.Report
+		}
+	}
+	if failed == nil {
+		t.Fatalf("no failed terminal report; reports: %+v", rtb.getLaunchReports())
+	}
+	if failed.ErrorCode != "runtime_error" || failed.Message != "Failed to write launch marker" {
+		t.Errorf("terminal = code %q message %q, want runtime_error with the fixed marker text", failed.ErrorCode, failed.Message)
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Errorf("Start must not run after a marker write failure, got %d calls", n)
+	}
+	assertDetailOnlyInLog(t, failed.Message, logs.String(),
+		"runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files", name, markersDir)
 }
