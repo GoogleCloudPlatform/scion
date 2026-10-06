@@ -2755,14 +2755,14 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 	}
 	if updates.Slug != "" {
 		newSlug := updates.Slug
-		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
-			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
-			return
-		}
-		if newSlug != oldSlug && !requireProjectSlugFormat(w, newSlug) {
-			return
-		}
 		if newSlug != oldSlug {
+			if isReservedProjectSlug(newSlug) {
+				ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+				return
+			}
+			if !requireProjectSlugFormat(w, newSlug) {
+				return
+			}
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
 				writeErrorFromErr(w, err, "")
