@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+	_ "time/tzdata" // the zone cases below must not depend on the host's zoneinfo
 
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -85,6 +86,8 @@ func TestQueryConfigLocation(t *testing.T) {
 
 	assert.Equal(t, ":p1", applyQueryOptions([]QueryOption{WithProjectID("p1")}).cacheKeySuffix())
 	assert.Equal(t, ":p1", applyQueryOptions([]QueryOption{WithProjectID("p1"), WithLocation(time.UTC)}).cacheKeySuffix())
+	assert.Equal(t, ":p1", cfg.projectCacheKeySuffix(), "the summary has no day buckets and is shared across zones")
+	assert.Equal(t, "@America/Chicago", applyQueryOptions([]QueryOption{WithLocation(loc)}).cacheKeySuffix())
 	assert.Equal(t, time.UTC, metricsQueryWindowFor(time.Now(), 7, &queryConfig{}).loc, "days default to UTC")
 }
 
@@ -99,4 +102,8 @@ func TestDashboardLocation(t *testing.T) {
 	assert.Nil(t, loc("tz=Not%2FA_Zone"), "unknown zone")
 	assert.Nil(t, loc("tz=Local"), "server-local zone is not the viewer's")
 	assert.Nil(t, loc("tz=../../etc/passwd"), "not a zone name")
+	assert.Nil(t, loc("tz=localtime"), "tzdata implementation file, not a zone")
+	assert.Nil(t, loc("tz=Factory"), "tzdata placeholder, not a zone")
+	assert.Nil(t, loc("tz=right%2FAmerica%2FChicago"), "host-dependent right/ tree")
+	assert.Nil(t, loc("tz=%2Fetc%2Flocaltime"), "absolute path")
 }

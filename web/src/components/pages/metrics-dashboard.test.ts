@@ -151,8 +151,8 @@ describe('scion-page-metrics — UTC day-bucket labels', () => {
     vi.unstubAllGlobals();
   });
 
-  it('exports the UTC day axis title', () => {
-    expect(mod.DAY_BUCKET_AXIS_TITLE).toBe('Day (UTC)');
+  it('titles the day axis in UTC when no zone resolves', () => {
+    expect(mod.dayAxisTitle(undefined)).toBe('Day (UTC)');
   });
 
   it.each([
@@ -258,6 +258,28 @@ describe('scion-page-metrics — viewer time zone', () => {
     const { urls } = await dashboardRequests();
     const params = new URL(urls()[0], 'http://localhost').searchParams;
     expect(params.get('tz')).toBe('Asia/Tokyo');
+  });
+
+  it('names the Display timezone, not the browser zone, in headings, axis and request', async () => {
+    pinBrowserTimeZone('America/Chicago');
+    setPreferredTimeZone('Asia/Tokyo');
+    const element = await mountOnTab('sessions');
+
+    const rendered = [...(element.shadowRoot?.querySelectorAll('.chart-section-title') ?? [])].map(
+      (h) => h.textContent?.trim()
+    );
+    expect(rendered).toEqual(['Daily Sessions (Asia/Tokyo)', 'Active Agents per Day (Asia/Tokyo)']);
+    for (const config of chartConfigs.slice(-2)) {
+      expect(config.options.scales.x.title).toMatchObject({ text: 'Day (Asia/Tokyo)' });
+    }
+
+    const fetchMock = globalThis.fetch as unknown as { mock: { calls: unknown[][] } };
+    const sessionsUrl = fetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .find((u) => u.includes('view=sessions'));
+    expect(sessionsUrl).toBeDefined();
+    expect(new URL(sessionsUrl!, 'http://localhost').searchParams.get('tz')).toBe('Asia/Tokyo');
+    element.remove();
   });
 
   it('reloads the days when the Display timezone changes', async () => {

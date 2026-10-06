@@ -25,7 +25,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	_ "time/tzdata" // day buckets use the viewer's time zone; don't depend on the image's zoneinfo
 
 	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
@@ -212,14 +211,22 @@ func applyQueryOptions(opts []QueryOption) *queryConfig {
 	return cfg
 }
 
-// cacheKeySuffix returns a cache key suffix for the query config:
-// ":projectID" for project-scoped queries, plus "@zone" when days are
-// bucketed in a zone other than UTC. Global UTC queries return "".
-func (c *queryConfig) cacheKeySuffix() string {
-	suffix := ""
+// projectCacheKeySuffix returns ":projectID" for project-scoped queries and
+// "" for global ones. Views without daily buckets (the summary) key on this
+// alone, so viewers in different zones share them.
+func (c *queryConfig) projectCacheKeySuffix() string {
 	if c.ProjectID != "" {
-		suffix = ":" + c.ProjectID
+		return ":" + c.ProjectID
 	}
+	return ""
+}
+
+// cacheKeySuffix returns a cache key suffix for views with daily buckets:
+// projectCacheKeySuffix plus "@zone" when days are bucketed in a zone other
+// than UTC, so viewers in different zones never share day buckets. Global
+// UTC queries return "".
+func (c *queryConfig) cacheKeySuffix() string {
+	suffix := c.projectCacheKeySuffix()
 	if loc := c.location(); loc != time.UTC {
 		suffix += "@" + loc.String()
 	}
@@ -331,7 +338,8 @@ func tokenTypeFilter(tokenType string) string {
 // QuerySummary returns aggregate metric counts for the given period.
 func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays int, opts ...QueryOption) (*DashboardSummary, error) {
 	cfg := applyQueryOptions(opts)
-	cacheKey := fmt.Sprintf("summary:%d%s", periodDays, cfg.cacheKeySuffix())
+	// The summary has no daily buckets, so it is not keyed by zone.
+	cacheKey := fmt.Sprintf("summary:%d%s", periodDays, cfg.projectCacheKeySuffix())
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*DashboardSummary), nil
 	}
@@ -961,11 +969,18 @@ func (s *Server) handleProjectMetricsDashboard(w http.ResponseWriter, r *http.Re
 }
 
 // dashboardLocation returns the time zone named by the request's "tz" query
-// parameter (an IANA name such as "America/Chicago", as the browser reports
-// it), or nil when it is absent or unknown, in which case days stay in UTC.
+// parameter (an IANA name such as "America/Chicago": the web page sends the
+// viewer's effective Display timezone), or nil when it is absent or not a
+// portable IANA zone name, in which case days stay in UTC. It applies the
+// same check as the per-user Display timezone preference
+// (validateIANATimezone), so "Local", "localtime", "right/..." and path-like
+// values are rejected rather than resolved against the hub host.
 func dashboardLocation(r *http.Request) *time.Location {
 	name := r.URL.Query().Get("tz")
-	if name == "" || len(name) > 64 || name == "Local" {
+	if name == "" || len(name) > 64 {
+		return nil
+	}
+	if err := validateIANATimezone(name); err != nil {
 		return nil
 	}
 	loc, err := time.LoadLocation(name)

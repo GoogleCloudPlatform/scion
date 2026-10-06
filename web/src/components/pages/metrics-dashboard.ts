@@ -75,14 +75,14 @@ const CHART_COLORS = [
 
 /**
  * The page asks the hub to bucket daily series in the viewer's Display
- * timezone (the `tz` parameter): the user's timezone preference, or the
- * browser's zone when none is set. The axis title and the chart headings name
- * the zone the days are in, so a reader always knows which calendar the dates
- * use. Without a zone the hub buckets by UTC day.
+ * timezone (the `tz` parameter), i.e. `effectiveTimeZone()`: the user's
+ * Display timezone preference, or the browser's zone when the preference is
+ * Auto (unset). The axis title and the chart headings name that zone, so a
+ * reader always knows which calendar the dates use. Without a zone the hub
+ * buckets by UTC day.
  */
-export const DAY_BUCKET_AXIS_TITLE = 'Day (UTC)';
 
-/** The viewer's Display timezone (IANA name), if one resolves. */
+/** The viewer's effective Display timezone (IANA name), if one resolves. */
 export function displayTimeZone(): string | undefined {
   try {
     return effectiveTimeZone() || undefined;
