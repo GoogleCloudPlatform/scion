@@ -198,11 +198,14 @@ export function cloneUrlCredentialHint(remote: string): string | null {
  * ssh://git@host/... or deploy@host:team/proj must not survive here.
  */
 export function deriveCloneUrl(remote: string): string {
-  let cloneUrl = displayGitRemote(remote);
+  // git+ssh:// and ssh+git:// are ssh:// (mirror of util.canonicalSSHScheme),
+  // so the login is kept as transport and dropped by displayGitRemote below.
+  const canonical = trimRemote(remote).replace(/^(git\+ssh|ssh\+git):\/\//i, 'ssh://');
+  let cloneUrl = displayGitRemote(canonical);
   // Nothing usable after sanitizing (empty, or a '?'/'#' inside the userinfo).
   if (!cloneUrl) return '';
   // An ssh:// port is the ssh daemon's, not the https server's.
-  if (/^ssh:\/\//i.test(trimRemote(remote))) {
+  if (/^ssh:\/\//i.test(canonical)) {
     cloneUrl = cloneUrl.replace(/^([^/]+):\d+(?=\/|$)/, '$1');
   }
   const lowerUrl = cloneUrl.toLowerCase();

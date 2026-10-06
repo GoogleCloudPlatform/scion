@@ -1169,6 +1169,10 @@ describe('deriveCloneUrl', () => {
     ['https://dev.azure.com/org/proj/_git/repo.git', 'https://dev.azure.com/org/proj/_git/repo'],
     ['ssh://git@host:22/org/repo', 'https://host/org/repo.git'],
     ['SSH://git@host:2222/org/repo.git', 'https://host/org/repo.git'],
+    ['git+ssh://git@host:22/org/repo', 'https://host/org/repo.git'],
+    ['ssh+git://git@host:2222/org/repo.git', 'https://host/org/repo.git'],
+    ['GIT+SSH://deploy@host:22/org/repo', 'https://host/org/repo.git'],
+    ['git+ssh://git@host/org/repo', 'https://host/org/repo.git'],
     ['https://host:8443/org/repo', 'https://host:8443/org/repo.git'],
   ])('derives %s', (input, want) => {
     const got = derive(input);
