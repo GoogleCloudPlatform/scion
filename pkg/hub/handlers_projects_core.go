@@ -902,16 +902,17 @@ func hubManagedProjectPath(slug string) (string, error) {
 }
 
 // validateProjectSlug accepts only slugs that name a single directory directly
-// under a projects root: non-empty, free of path separators and "..", not ".",
-// and unchanged by path cleaning.
+// under a projects root: non-empty, free of path separators, ":" and "..",
+// not ".", and unchanged by path cleaning. The character rules apply the same
+// way on every platform.
 func validateProjectSlug(slug string) error {
 	if slug == "" {
 		return fmt.Errorf("project slug must not be empty")
 	}
-	if strings.Contains(slug, "/") || strings.Contains(slug, "\\") || strings.Contains(slug, "..") {
+	if strings.ContainsAny(slug, "/\\:") || strings.Contains(slug, "..") {
 		return fmt.Errorf("project slug contains invalid characters")
 	}
-	if slug == "." || filepath.Clean(slug) != slug || filepath.Base(slug) != slug || filepath.VolumeName(slug) != "" {
+	if slug == "." || filepath.Clean(slug) != slug || filepath.Base(slug) != slug {
 		return fmt.Errorf("project slug must name a single directory directly under the projects root")
 	}
 	return nil

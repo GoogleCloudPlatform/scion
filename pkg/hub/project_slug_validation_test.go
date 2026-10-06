@@ -27,7 +27,7 @@ func TestValidateProjectSlug_AcceptsOnlyDirectChildNames(t *testing.T) {
 		assert.NoError(t, validateProjectSlug(slug), "slug %q names a direct child and must be accepted", slug)
 	}
 
-	rejected := []string{"", ".", "..", "a/b", "a\\b", "/", "\\", "a..b", "./a", "a/", "/a"}
+	rejected := []string{"", ".", "..", "a/b", "a\\b", "/", "\\", "a..b", "./a", "a/", "/a", "C:foo", "c:", "a:b"}
 	for _, slug := range rejected {
 		assert.Error(t, validateProjectSlug(slug), "slug %q does not name a direct child and must be rejected", slug)
 	}
