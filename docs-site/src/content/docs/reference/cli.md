@@ -275,7 +275,7 @@ Sends a message to a running agent or user.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
 - **Group sends and exit codes:**
-  A `group[...]` send reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (the Hub gave no answer, for example a timeout, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a `group[...]` recipient naming only the failed ones. With `--format json` the output is an object:
+  A `group[...]` send reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (no definite answer, for example a timeout, a gateway error, or the Hub reporting delivery as `ambiguous`, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a `group[...]` recipient naming only the failed ones. With `--format json` the output is an object:
   ```json
   {
     "group_id": "…",
@@ -288,7 +288,8 @@ Sends a message to a running agent or user.
     "retry_recipient": "group[agent:b]"
   }
   ```
-  `scion message` exits `0` when the message was sent (for a group, every recipient was delivered or deferred), `1` when it was not sent (for a group, no recipient received it, so the whole send can be retried), and `3` when a group send partly succeeded. On exit `3`, do not resend to the whole group: retry only `retry_recipient`, and check `unknown` recipients before you resend to them. An interrupt (Ctrl-C or `SIGTERM`) during a group send cancels the in-flight sends and still prints the results.
+  Earlier versions printed only a bare array of results; that array is now the `results` field (`jq '.results[]'` instead of `jq '.[]'`).
+  `scion message` exits `0` when the message was sent (for a group, every recipient was delivered or deferred), `1` when it was not sent (for a group, no recipient received it, so the whole send can be retried), and `3` when a group send partly succeeded. On exit `3`, do not resend to the whole group: retry only `retry_recipient`, and check `unknown` recipients before you resend to them. An interrupt (Ctrl-C or `SIGTERM`) while the group sends are in progress cancels them and still prints the results: sends already in flight are `unknown`, sends not yet started are `failed` (not sent), and `@mention`/`--cc` notifications are skipped. Outside that window an interrupt exits immediately.
 
 - **Message Body Formatting:**
   The command delivers the `<message>` argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient receives.

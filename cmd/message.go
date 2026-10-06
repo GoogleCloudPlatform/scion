@@ -124,7 +124,8 @@ shell snippets verbatim, use --body-file or stdin with a quoted heredoc:
 
 Group sends (group[...]) report each recipient's outcome: delivered,
 deferred (saved while the agent reincarnates), failed (with the reason), or
-unknown (no answer from the Hub, so it may have been delivered). With
+unknown (no definite answer: a timeout, a gateway error, or the Hub
+reporting delivery as ambiguous, so it may have been delivered). With
 --format json the output is an object with the counts, a "results" list, and
 a "retry_recipient" group[] naming only the failed recipients.
 
@@ -958,8 +959,9 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 // Group send result statuses. "delivered", "deferred" and "failed" match the
 // Hub's own group[] vocabulary (GroupMessageRecipientResult). "unknown" is
 // CLI-only: the request got no definite answer from the Hub (timeout,
-// dropped connection, interrupt, gateway error), so the message may or may
-// not have reached that recipient.
+// dropped connection, interrupt, gateway error, or the Hub's own
+// "ambiguous" outcome), so the message may or may not have reached that
+// recipient.
 const (
 	groupStatusDelivered = "delivered"
 	groupStatusDeferred  = "deferred"
@@ -1015,13 +1017,24 @@ func (e *groupSendError) ExitCode() int {
 	return 1
 }
 
+// hubCodeDeliveryFailed is the Hub's error code for a definite dispatch
+// failure: the message was persisted and marked failed (HTTP 502).
+const hubCodeDeliveryFailed = "delivery_failed"
+
 // classifyGroupSendError maps a per-recipient send error to a result status
-// and reason. A Hub error response is a definite failure, except a gateway
-// error (502/504), which says nothing about whether the Hub delivered. No
-// response at all (timeout, connection reset, interrupt) is also unknown.
+// and reason. A Hub error response is a definite failure, and so is the Hub's
+// 502 with code delivery_failed (it marked the message failed). Any other
+// 502/504 is unknown: one with no Hub error envelope comes from a proxy or
+// load balancer and says nothing about delivery, a 502 runtime_error can wrap
+// a mid-flight deadline, and a 504 broker_timeout is kept unknown as the
+// conservative choice. No response at all (timeout, connection reset,
+// interrupt) is also unknown.
 func classifyGroupSendError(err error) (string, string) {
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusBadGateway && apiErr.Code == hubCodeDeliveryFailed {
+			return groupStatusFailed, err.Error()
+		}
 		if apiErr.StatusCode == http.StatusBadGateway || apiErr.StatusCode == http.StatusGatewayTimeout {
 			return groupStatusUnknown, err.Error() + "; it may have been delivered"
 		}
@@ -1030,16 +1043,31 @@ func classifyGroupSendError(err error) (string, string) {
 	return groupStatusUnknown, "no response from Hub: " + err.Error() + "; it may have been delivered"
 }
 
-func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecipient, message string, interrupt bool) error {
-	// An interrupt (Ctrl-C, or a harness timeout's SIGTERM) cancels the
-	// in-flight sends instead of killing the process, so the results for
-	// recipients already delivered are still reported (ptone/scion#3510).
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return sendGroupMessageViaHubCtx(ctx, hubCtx, recipients, message, interrupt)
+// groupSendHooks are the seams sendGroupMessageViaHubCtx uses for signal
+// handling, so tests can drive an interrupt without sending a real signal.
+type groupSendHooks struct {
+	// fanOutContext derives the context for the per-recipient sends. It is
+	// called right before the fan-out starts, and the returned stop function
+	// is called as soon as every send has returned.
+	fanOutContext func(context.Context) (context.Context, context.CancelFunc)
+	// onRecord, if set, is called after each recipient's result is stored.
+	onRecord func(groupRecipientResult)
 }
 
-func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recipients []messages.GroupRecipient, message string, interrupt bool) error {
+func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecipient, message string, interrupt bool) error {
+	// An interrupt (Ctrl-C, or a harness timeout's SIGTERM) during the
+	// fan-out cancels the in-flight sends instead of killing the process, so
+	// the results for recipients already delivered are still reported
+	// (ptone/scion#3510). The handler covers only the fan-out: before and
+	// after it, a signal keeps its default behaviour and exits at once.
+	return sendGroupMessageViaHubCtx(hubCtx, recipients, message, interrupt, groupSendHooks{
+		fanOutContext: func(parent context.Context) (context.Context, context.CancelFunc) {
+			return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+		},
+	})
+}
+
+func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRecipient, message string, interrupt bool, hooks groupSendHooks) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -1071,12 +1099,18 @@ func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recip
 	// "Status == deferred" check (see sendMessageViaHub above).
 
 	results := make([]groupRecipientResult, len(recipients))
+	// cutShort[i] is set when recipient i's send was stopped by an interrupt
+	// (never sent, or cancelled in flight), as opposed to finishing on its own.
+	cutShort := make([]bool, len(recipients))
 	var wg sync.WaitGroup
 
 	// record stores one recipient's result and streams a progress line, so
 	// a send that is killed outright still leaves the delivered lines behind.
 	record := func(idx int, res groupRecipientResult) {
 		results[idx] = res
+		if hooks.onRecord != nil {
+			hooks.onRecord(res)
+		}
 		if isJSONOutput() {
 			return
 		}
@@ -1091,19 +1125,47 @@ func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recip
 			fmt.Printf("  Failed: %s: %s\n", res.Recipient, res.Error)
 		}
 	}
+
+	// The signal handler is installed only for the fan-out (see
+	// sendGroupMessageViaHub) and removed as soon as every send returns.
+	fanCtx, stopFanOut := hooks.fanOutContext(context.Background())
+	defer stopFanOut()
+
 	recordErr := func(idx int, recipStr string, err error) {
+		if fanCtx.Err() != nil {
+			cutShort[idx] = true
+		}
 		status, reason := classifyGroupSendError(err)
 		record(idx, groupRecipientResult{Recipient: recipStr, Status: status, Error: reason})
+	}
+	// recordAmbiguous handles the Hub's 202 "ambiguous" outcome: it may or
+	// may not have dispatched the message, so it is unknown, not delivered.
+	recordAmbiguous := func(idx int, recipStr, messageID string) {
+		record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusUnknown,
+			Error: fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID)})
 	}
 
 	for i, r := range recipients {
 		wg.Add(1)
 		go func(idx int, recip messages.GroupRecipient) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+			recipStr := recip.String()
+
+			// An interrupt before this request was started means it was
+			// never sent, so nothing was delivered and it is safe to retry:
+			// report it failed (and so in retry_recipient), not unknown. Once
+			// the request has started there is no telling whether the Hub
+			// acted on it, so a later cancellation is unknown.
+			if fanCtx.Err() != nil {
+				cutShort[idx] = true
+				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusFailed,
+					Error: "not sent: interrupted before the request was sent"})
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(fanCtx, 30*time.Second)
 			defer cancel()
 
-			recipStr := recip.String()
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
@@ -1118,6 +1180,10 @@ func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recip
 				}
 				if sendResp != nil && sendResp.Status == "deferred" {
 					record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred})
+					return
+				}
+				if sendResp != nil && sendResp.Status == "ambiguous" {
+					recordAmbiguous(idx, recipStr, sendResp.MessageID)
 					return
 				}
 				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
@@ -1143,8 +1209,13 @@ func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recip
 					ThreadID:    msgThreadID,
 					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 				}
-				if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+				outResp, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+				if err != nil {
 					recordErr(idx, recipStr, err)
+					return
+				}
+				if outResp != nil && outResp.Status == "ambiguous" {
+					recordAmbiguous(idx, recipStr, outResp.MessageID)
 					return
 				}
 				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
@@ -1152,10 +1223,14 @@ func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recip
 		}(i, r)
 	}
 	wg.Wait()
+	// signalled must be read before stopFanOut, which cancels fanCtx.
+	signalled := fanCtx.Err() != nil
+	stopFanOut()
 
 	summary := groupSendResult{GroupID: groupID, Total: len(recipients), Results: results}
 	var retryRecips []string
-	for _, r := range results {
+	interrupted := false
+	for i, r := range results {
 		switch r.Status {
 		case groupStatusDelivered:
 			summary.Delivered++
@@ -1167,11 +1242,16 @@ func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recip
 			summary.Failed++
 			retryRecips = append(retryRecips, r.Recipient)
 		}
+		// Only call the send interrupted if the interrupt actually cut a
+		// recipient's send short; a signal that arrives after the last send
+		// finished does not change any outcome.
+		if cutShort[i] {
+			interrupted = true
+		}
 	}
 	if len(retryRecips) > 0 {
 		summary.RetryRecipient = "group[" + strings.Join(retryRecips, ",") + "]"
 	}
-	interrupted := parent.Err() != nil
 
 	// A25.7 O1: honour --json for group sends the same way the
 	// single-recipient paths do. ptone/scion#3510: the JSON is an object
@@ -1188,11 +1268,14 @@ func sendGroupMessageViaHubCtx(parent context.Context, hubCtx *HubContext, recip
 	// @mention and --cc fan-out for group messages: mentioned agents that are
 	// not already group recipients receive a TypeMention notification.
 	// This runs regardless of partial delivery — mention recipients are
-	// independent of the group — but not after an interrupt.
+	// independent of the group — but not after an interrupt was received.
 	var mentionNames []string
 	mentionNames = append(mentionNames, extractMentions(message)...)
 	mentionNames = append(mentionNames, parseCCFlag(msgCC)...)
-	if len(mentionNames) > 0 && !interrupted {
+	if len(mentionNames) > 0 && signalled {
+		fmt.Fprintln(os.Stderr, "Interrupted: @mention and --cc notifications were not sent.")
+	}
+	if len(mentionNames) > 0 && !signalled {
 		// Build a mention source that reflects the group
 		mentionSource := "group[" + strings.Join(recipientStrs, ",") + "]"
 
