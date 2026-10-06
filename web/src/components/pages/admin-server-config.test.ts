@@ -2174,6 +2174,78 @@ describe('scion-page-admin-server-config', () => {
         });
         expect('cloudrun' in capturedPayload!.runtimes.crun).toBe(false);
       });
+
+      for (const [from, to, fromBlock, toBlock, toFields] of [
+        [
+          'cloudrun',
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          { project_id: 'proj-b', region: 'europe-west1' },
+        ],
+        [
+          'cloudrun-instances',
+          'cloudrun',
+          'cloudrun_instances',
+          'cloudrun',
+          { project_id: 'proj-b', location: 'europe-west1' },
+        ],
+      ] as const) {
+        it(`${mode} mode: switching ${from} to ${to} drops the ${fromBlock} block`, async () => {
+          let capturedPayload: Record<string, any> | null = null;
+          const fromFields =
+            from === 'cloudrun'
+              ? { project_id: 'proj-a', location: 'us-central1' }
+              : { project_id: 'proj-a', region: 'us-central1' };
+          element = await createComponent(
+            createFetchHandler(
+              cloudRunConfig(tier, {
+                type: from,
+                sync: 'tar',
+                env: { FOO: 'bar' },
+                [fromBlock]: fromFields,
+              }),
+              {
+                schemaResponse: {
+                  sections: {
+                    ...SCHEMA_RESPONSE.sections,
+                    runtimes: { koanf_paths: ['runtimes'] },
+                  },
+                },
+                putHandler: (body) => {
+                  if ('runtimes' in body) capturedPayload = body;
+                  return { status: 200, body: { reload: { applied: [] } } };
+                },
+              }
+            )
+          );
+
+          const typeSelect = queryAll(element, 'sl-select').find((s) =>
+            s.querySelector('sl-option[value="cloudrun-instances"]')
+          ) as HTMLElement & { value: string };
+          expect(typeSelect).toBeDefined();
+          typeSelect.value = to;
+          typeSelect.dispatchEvent(new Event('sl-change'));
+          await (element as any).updateComplete;
+
+          const { project, location } = cloudRunInputs(element);
+          expect(project.getAttribute('value')).toBe('');
+          expect(location.getAttribute('value')).toBe('');
+          project.value = 'proj-b';
+          project.dispatchEvent(new Event('sl-input'));
+          location.value = 'europe-west1';
+          location.dispatchEvent(new Event('sl-input'));
+          await saveAndCapture(element);
+
+          expect(capturedPayload).not.toBeNull();
+          const crun = capturedPayload!.runtimes.crun;
+          expect(crun.type).toBe(to);
+          expect(fromBlock in crun).toBe(false);
+          expect(crun[toBlock]).toEqual(toFields);
+          expect(crun.env).toEqual({ FOO: 'bar' });
+          expect(crun.sync).toBe('tar');
+        });
+      }
     }
   });
 

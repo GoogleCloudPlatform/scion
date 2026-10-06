@@ -289,6 +289,27 @@ interface V1RuntimeConfig {
   home_storage_leaf?: string;
 }
 
+// Sets or clears one key in a runtime's Cloud Run block, and drops the
+// block when it becomes empty.
+function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
+  rt: V1RuntimeConfig,
+  block: B,
+  key: keyof NonNullable<V1RuntimeConfig[B]>,
+  value: string
+): void {
+  const next: Record<string, string> = { ...rt[block] };
+  if (value) {
+    next[key as string] = value;
+  } else {
+    delete next[key as string];
+  }
+  if (Object.keys(next).length > 0) {
+    rt[block] = next as V1RuntimeConfig[B];
+  } else {
+    delete rt[block];
+  }
+}
+
 interface V1ProfileConfig {
   runtime?: string;
   default_template?: string;
@@ -4684,31 +4705,14 @@ export class ScionPageAdminServerConfig extends LitElement {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
     if (rt.type === 'cloudrun-instances') {
-      const ci = { ...(rt.cloudrun_instances || {}) };
-      const key: keyof V1CloudRunInstancesConfig = field === 'project' ? 'project_id' : 'region';
-      if (value) {
-        ci[key] = value;
-      } else {
-        delete ci[key];
-      }
-      if (Object.keys(ci).length > 0) {
-        rt.cloudrun_instances = ci;
-      } else {
-        delete rt.cloudrun_instances;
-      }
+      setCloudRunKey(
+        rt,
+        'cloudrun_instances',
+        field === 'project' ? 'project_id' : 'region',
+        value
+      );
     } else {
-      const cr = { ...(rt.cloudrun || {}) };
-      const key: keyof V1CloudRunConfig = field === 'project' ? 'project_id' : 'location';
-      if (value) {
-        cr[key] = value;
-      } else {
-        delete cr[key];
-      }
-      if (Object.keys(cr).length > 0) {
-        rt.cloudrun = cr;
-      } else {
-        delete rt.cloudrun;
-      }
+      setCloudRunKey(rt, 'cloudrun', field === 'project' ? 'project_id' : 'location', value);
     }
     updated[name] = rt;
     this.runtimes = updated;
