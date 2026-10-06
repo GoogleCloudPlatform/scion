@@ -292,7 +292,7 @@ func TestSchedule_ResumeDispatchAgentScopedUATDenied(t *testing.T) {
 
 	// Resume re-authorizes the resumer for every schedule type, so a paused
 	// "message" schedule is held to the scheduled-message authoring rule.
-	// That rule allows a target that does not resolve yet (the fire-time
+	// That rule allows a target that does not resolve at authoring (the fire-time
 	// check is definitive), as here; TestResumeScopedUATDenied_Message
 	// covers a resolvable target.
 	t.Run("scoped UAT resume of a message schedule follows the message rule", func(t *testing.T) {

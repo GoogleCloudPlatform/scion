@@ -4097,8 +4097,8 @@ func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.Sc
 			auth.PrincipalKind, auth.PrincipalID, evt.ProjectID, decision.Reason)
 	}
 
-	// CanDelegate check (Phase 1F): at fire time, verify the principal still
-	// holds the scopes it would delegate to the new agent.
+	// CanDelegate check (Phase 1F): at fire time, verify the principal holds
+	// the scopes it would delegate to the new agent.
 	delegateDecision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
 		Type:      GrantTypeAgentDelegation,
 		AgentRole: string(delegatedRole),

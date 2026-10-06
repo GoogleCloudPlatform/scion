@@ -225,7 +225,7 @@ func TestSchedFireUsesRevisionPrincipalNotCreatedBy(t *testing.T) {
 	_, edge := f.child(t, "sched-rev-1")
 	assert.Equal(t, b.ID, edge.DelegatorID)
 
-	// A (the history creator) loses all authority: the fire still runs as B.
+	// A (the history creator) loses all authority: the fire runs as B.
 	require.NoError(t, f.store.DeleteUser(ctx, f.creator.ID))
 	evt2 := withSessionRevision(f.event("sched-rev-2"), b.ID)
 	require.NoError(t, f.fire(t, evt2))
@@ -496,7 +496,7 @@ func TestSchedDevLocalRevisionDeniedWhenDevAuthDisabled(t *testing.T) {
 	f.assertNoChild(t, "sched-dev-off-c")
 }
 
-// A legacy_unknown row whose descriptive principal kind is dev still denies:
+// A legacy_unknown row whose descriptive principal kind is dev denies:
 // nothing is inferred from descriptive fields.
 func TestSchedLegacyUnknownDevRowDenied(t *testing.T) {
 	f := newSchedFire(t, "sched-dev-legacy")
@@ -621,28 +621,28 @@ func TestSchedChildEdgeProvenanceFields(t *testing.T) {
 }
 
 // The scheduled child's edge records provenance the same way the
-// interactive create path does for the same user, apart from the scheduler
+// request create path does for the same user, apart from the scheduler
 // credential and its references.
-func TestSchedChildProvenanceParityWithInteractiveCreate(t *testing.T) {
+func TestSchedChildProvenanceParityWithRequestCreate(t *testing.T) {
 	f := newSchedFire(t, "sched-parity")
-	_, interactive := f.createdAgent(t, f.create(t, authUser(f.creator), CreateAgentRequest{Name: "sched-parity-i", AgentRole: string(AgentRoleNone)}), "sched-parity-i")
+	_, direct := f.createdAgent(t, f.create(t, authUser(f.creator), CreateAgentRequest{Name: "sched-parity-i", AgentRole: string(AgentRoleNone)}), "sched-parity-i")
 
 	evt := withSessionRevision(f.event("sched-parity-s"), f.creator.ID)
 	require.NoError(t, f.fire(t, evt))
 	_, scheduled := f.child(t, "sched-parity-s")
 
-	assert.Equal(t, interactive.DelegatorType, scheduled.DelegatorType)
-	assert.Equal(t, interactive.DelegatorID, scheduled.DelegatorID)
-	assert.Equal(t, interactive.DelegateType, scheduled.DelegateType)
-	assert.Equal(t, interactive.ScopeType, scheduled.ScopeType)
-	assert.Equal(t, interactive.ScopeID, scheduled.ScopeID)
-	assert.Equal(t, interactive.Role, scheduled.Role)
-	assert.Equal(t, interactive.Active, scheduled.Active)
-	assert.Equal(t, interactive.EffectCeiling, scheduled.EffectCeiling)
-	assert.Equal(t, interactive.ProvenanceVersion, scheduled.ProvenanceVersion)
-	assert.Equal(t, interactive.SourcePrincipalKind, scheduled.SourcePrincipalKind)
-	assert.Equal(t, interactive.SourcePrincipalID, scheduled.SourcePrincipalID)
-	assert.Equal(t, store.SourceCredentialSession, interactive.SourceCredentialKind)
+	assert.Equal(t, direct.DelegatorType, scheduled.DelegatorType)
+	assert.Equal(t, direct.DelegatorID, scheduled.DelegatorID)
+	assert.Equal(t, direct.DelegateType, scheduled.DelegateType)
+	assert.Equal(t, direct.ScopeType, scheduled.ScopeType)
+	assert.Equal(t, direct.ScopeID, scheduled.ScopeID)
+	assert.Equal(t, direct.Role, scheduled.Role)
+	assert.Equal(t, direct.Active, scheduled.Active)
+	assert.Equal(t, direct.EffectCeiling, scheduled.EffectCeiling)
+	assert.Equal(t, direct.ProvenanceVersion, scheduled.ProvenanceVersion)
+	assert.Equal(t, direct.SourcePrincipalKind, scheduled.SourcePrincipalKind)
+	assert.Equal(t, direct.SourcePrincipalID, scheduled.SourcePrincipalID)
+	assert.Equal(t, store.SourceCredentialSession, direct.SourceCredentialKind)
 	assert.Equal(t, store.SourceCredentialScheduler, scheduled.SourceCredentialKind)
 	assert.Equal(t, evt.ID, scheduled.SourceEventID)
 }
@@ -683,7 +683,7 @@ func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: uatCeiling.PermissionIDs},
 	}))
 
-	// The revision recorded earlier still holds the deliver IDs; the fire
+	// The revision recorded earlier holds the deliver IDs; the fire
 	// intersects it with P's current chain, which holds none.
 	evt2 := evt
 	evt2.ID = api.NewUUID()

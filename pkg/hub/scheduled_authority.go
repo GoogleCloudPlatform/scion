@@ -357,7 +357,7 @@ func (s *Server) resolveScheduledAgent(ctx context.Context, auth *ScheduledAutho
 // returned for evt.
 //
 // Ceiling: the revision's frozen ceiling. For an agent principal it is
-// intersected with the ceiling an interactive write by that agent carries at
+// intersected with the ceiling a request-authorized write by that agent carries at
 // fire time (agentRowEffectCeiling, including the deliver eligibility of the
 // agent's current chain), so a permission survives only if both allow it.
 // It is never a live UAT or agent ceiling on its own.
