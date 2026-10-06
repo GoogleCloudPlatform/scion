@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // P1.3 part 1 (ptone/scion#3269): the agent API exposes the stored placement.
@@ -97,12 +96,15 @@ func TestAgentAPI_PinnedRuntimeTargetView(t *testing.T) {
 	assert.True(t, found, "pinned agent listed")
 
 	// The view is read-only: a PATCH naming it changes nothing.
-	_ = doRequest(t, f.srv, http.MethodPatch, "/api/v1/agents/"+legacy.ID, map[string]interface{}{
+	patch := doRequest(t, f.srv, http.MethodPatch, "/api/v1/agents/"+legacy.ID, map[string]interface{}{
 		"pinnedRuntimeTarget": map[string]interface{}{"id": f.flat.RuntimeTarget.ID, "type": "docker", "runtimeBrokerId": f.flat.ID},
 	})
+	require.Equal(t, http.StatusOK, patch.Code, "the PATCH reaches the handler: %s", patch.Body.String())
+	var patched map[string]interface{}
+	require.NoError(t, json.Unmarshal(patch.Body.Bytes(), &patched))
+	assert.NotContains(t, patched, "pinnedRuntimeTarget", "the PATCH response carries no pin")
 	after, err := f.s.GetAgent(ctx, legacy.ID)
 	require.NoError(t, err)
 	assert.False(t, after.IsPinned(), "pinnedRuntimeTarget cannot be written through the API")
 	assert.Equal(t, f.legacy.ID, after.RuntimeBrokerID)
-	_ = store.PinnedPlacement{}
 }

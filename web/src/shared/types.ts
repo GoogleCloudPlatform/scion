@@ -874,9 +874,6 @@ export interface BrokerProfile {
   available: boolean;
 }
 
-/**
- * Runtime Broker information from the Hub API
- */
 /** Stored descriptor of a flat Runtime Broker's single runtime target. */
 export interface RuntimeTargetDescriptor {
   id: string;
@@ -891,6 +888,9 @@ export interface PinnedRuntimeTarget {
   runtimeBrokerId: string;
 }
 
+/**
+ * Runtime Broker information from the Hub API
+ */
 export interface RuntimeBroker {
   id: string;
   name: string;

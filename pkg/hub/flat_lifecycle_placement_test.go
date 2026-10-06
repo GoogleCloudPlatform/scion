@@ -69,11 +69,10 @@ func TestFlatPlacement_StaysOnSavedInstanceAcrossDefaultChangeAndRestart(t *test
 	f.project.DefaultRuntimeBrokerID = f.legacy.ID
 	require.NoError(t, f.s.UpdateProject(ctx, f.project))
 	setProjectAnnotations(t, f.s, f.project, map[string]string{projectSettingActiveProfile: "local"})
-	f.srv.mu.Lock()
-	f.srv.config.AgentDefaults.DefaultRuntimeBroker = f.legacy.ID
-	f.srv.mu.Unlock()
 
 	// Simulated service restart; lifecycle does not depend on the experiment.
+	// The Hub default is set on the restarted server (a write before the
+	// restart would be replaced by the new server's config).
 	restartFlatHub(t, f, false)
 	f.srv.mu.Lock()
 	f.srv.config.AgentDefaults.DefaultRuntimeBroker = f.legacy.ID
@@ -86,7 +85,7 @@ func TestFlatPlacement_StaysOnSavedInstanceAcrossDefaultChangeAndRestart(t *test
 		assert.Equal(t, f.flat.ID, got.RuntimeBrokerID, "%s: runtime_broker_id", step)
 		assert.Equal(t, f.flat.ID, got.PinnedRuntimeBrokerID, "%s: pinned Runtime Broker", step)
 		assert.Equal(t, f.flat.RuntimeTarget.ID, got.PinnedRuntimeTargetID, "%s: pinned target", step)
-		assert.Equal(t, "docker", got.PinnedRuntimeTargetType, "%s: pinned target type", step)
+		assert.Equal(t, f.flat.RuntimeTarget.Type, got.PinnedRuntimeTargetType, "%s: pinned target type", step)
 	}
 
 	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/stop", nil)
