@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -28,7 +30,8 @@ import (
 // TestUnreadMentionKeys_Postgres covers the Postgres-only parts of the
 // unread-mention query: the text-to-uuid cast of message_id, and the
 // UUID-shape guard that turns an empty or malformed watermark into "no
-// watermark" instead of a cast error. It also covers the orphan sweep.
+// watermark" instead of a cast error. It also covers the orphan sweep,
+// including a non-UUID message_id.
 //
 // It runs in a throwaway schema with a minimal messages table, so it never
 // touches an existing messages table in the target database.
@@ -101,10 +104,13 @@ func TestUnreadMentionKeys_Postgres(t *testing.T) {
 	require.Empty(t, other)
 
 	// The orphan sweep drops a row whose message is gone and keeps the rest.
+	// A non-UUID message_id must not fail the sweep on the uuid cast; it
+	// can never match a message, so it is swept as an orphan too.
 	require.NoError(t, wcs.RecordMentions(ctx, "orphan", api.NewUUID(), []string{user}))
+	require.NoError(t, wcs.RecordMentions(ctx, "legacy", "not-a-uuid", []string{user}))
 	n, err := wcs.PurgeOrphanMentions(ctx)
 	require.NoError(t, err)
-	require.Equal(t, 1, n)
+	require.Equal(t, 2, n)
 	var left int
 	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM webchat_mention`).Scan(&left))
 	require.Equal(t, len(cases), left)
