@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
@@ -49,7 +50,7 @@ import (
 
 // relayFixture is a conduit fixture with a running in-process relay, the
 // hub's public handler on an httptest server and an agent that has an
-// active launch (so it has a launch_id).
+// current run (so it has a run id, its launch id).
 type relayFixture struct {
 	*conduitFixture
 	public   *httptest.Server
@@ -69,11 +70,11 @@ func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture
 		RuntimeBrokerID: "broker-1", Phase: string(state.PhaseCreated),
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, agent))
-	_, err := f.store.BeginLaunch(ctx, agent.ID, "create", time.Hour)
+	_, err := f.store.SetAgentRunID(ctx, agent.ID, uuid.NewString())
 	require.NoError(t, err)
 	f.launched, err = f.store.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
-	require.NotEmpty(t, f.launched.LaunchID)
+	require.NotEmpty(t, f.launched.RunID)
 
 	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
 	f.reg = registry.New(f.regStore, registry.Config{})
@@ -175,10 +176,10 @@ func TestConduitEndpoint_AgentSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, ps.Sessions, "a refused Hello writes no row")
 
-	_, wel, err := f.dial(t, tok, f.launched.LaunchID)
+	_, wel, err := f.dial(t, tok, f.launched.RunID)
 	require.NoError(t, err)
 	assert.Equal(t, "hub-a", wel.GetRelayInstanceId())
-	assert.Equal(t, f.launched.LaunchID, wel.GetEndpointIncarnation())
+	assert.Equal(t, f.launched.RunID, wel.GetEndpointIncarnation())
 	assert.NotEmpty(t, wel.GetGrantKeys(), "Welcome carries the grant keys")
 	ps, err = f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalAgent, f.launched.ID)
 	require.NoError(t, err)
@@ -269,7 +270,7 @@ func TestStartConduitRelay_StartupChecks(t *testing.T) {
 // GoAway the hub's relay sends.
 func TestConduitRelay_ReconnectWindowWired(t *testing.T) {
 	f := newRelayFixture(t, func(o *ConduitRelayOptions) { o.ReconnectWindow = 1500 * time.Millisecond })
-	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.LaunchID)
+	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.RunID)
 	require.NoError(t, err)
 	ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalAgent, f.launched.ID)
 	require.NoError(t, err)
@@ -292,7 +293,7 @@ func TestConduitRelay_ReconnectWindowWired(t *testing.T) {
 // 4401, deletes its rows on every relay and forgets its epoch.
 func TestConduitForgetAgent(t *testing.T) {
 	f := newRelayFixture(t, nil)
-	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.LaunchID)
+	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.RunID)
 	require.NoError(t, err)
 	ctx := context.Background()
 	// A row of the same agent on another (stale) relay.
@@ -331,7 +332,7 @@ func TestConduitAgentDeletedDuringHandshake(t *testing.T) {
 			})
 		}
 	})
-	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.LaunchID)
+	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.RunID)
 	if err == nil {
 		select {
 		case <-sess.Done():
@@ -415,14 +416,14 @@ func TestConduitInternalHandler_SignedInAllModes(t *testing.T) {
 	t.Cleanup(internal.Close)
 	caller := newOIDCModeAuth(t, "hub-b", "own", nil, nil)
 
-	_, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.LaunchID)
+	_, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.RunID)
 	require.NoError(t, err)
 	ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalAgent, f.launched.ID)
 	require.NoError(t, err)
 	require.Len(t, ps.Sessions, 1)
 	base := internal.URL + relay.InternalPathPrefix
 	rpcURL := base + "sessions/" + ps.Sessions[0].Session.SessionID + "/rpc"
-	want, err := json.Marshal(map[string]string{"project_id": f.launched.ProjectID, "incarnation": f.launched.LaunchID})
+	want, err := json.Marshal(map[string]string{"project_id": f.launched.ProjectID, "incarnation": f.launched.RunID})
 	require.NoError(t, err)
 	rpcBody, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1"})
 	require.NoError(t, err)

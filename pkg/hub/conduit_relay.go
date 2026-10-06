@@ -431,7 +431,7 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 		Kind:      registry.PrincipalAgent,
 		ID:        agent.ID,
 		ProjectID: agent.ProjectID,
-		Agent:     relay.AgentIncarnationFacts{LaunchID: agent.LaunchID, Generation: int64(agent.Generation)},
+		Agent:     agentIncarnationFacts(agent),
 	}
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
@@ -446,4 +446,13 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", agent.ID, "error", err)
 		}
 	}
+}
+
+// agentIncarnationFacts returns the agent-row values that conduit admission
+// and routing compare a session's endpoint incarnation with. The agent's
+// launch id is its current run id (agents.run_id): the broker labels each
+// container it starts with the run id and passes the same value in
+// SCION_LAUNCH_ID, which sciontool presents in Hello.
+func agentIncarnationFacts(agent *store.Agent) relay.AgentIncarnationFacts {
+	return relay.AgentIncarnationFacts{LaunchID: agent.RunID, Generation: int64(agent.Generation)}
 }
