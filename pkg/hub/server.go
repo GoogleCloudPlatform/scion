@@ -4381,7 +4381,8 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
 // project-default/hub-default GCP identity ladder in createAgentInProject
 // (handlers_agents_core.go). A scheduled dispatch carries no explicit
-// gcp_identity, so the ladder here starts one rung down: project default,
+// gcp_identity, so the ladder here starts one rung down: the per-profile
+// default for the profile the agent runs under, then the project default,
 // then — when the project has no default at all — the hub default, then
 // block (#1927). The same checks run in the same order at each assign rung
 // (SA reachable from the project, SA verified, then the full
@@ -4411,6 +4412,20 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) error {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	// A per-profile default for the profile this agent runs under wins over
+	// the project-wide default, as on the create path.
+	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
+			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
+		if err != nil {
+			return err
+		}
+		agent.AppliedConfig.GCPIdentity = cfg
+		pinResolvedProfile(agent.AppliedConfig, profileName)
+		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
+			"project_id", agent.ProjectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
+		return nil
 	}
 	projectSettings := projectSettingsFromAnnotations(project)
 	switch projectSettings.DefaultGCPIdentityMode {
