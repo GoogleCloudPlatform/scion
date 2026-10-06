@@ -354,6 +354,18 @@ const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
   'number',
 ]);
 
+type PromoteToastVariant = 'success' | 'warning' | 'danger';
+
+/**
+ * Icon for each promote toast variant. Callers outside the type system
+ * fall back to 'exclamation-circle'.
+ */
+const PROMOTE_TOAST_ICONS: Readonly<Record<PromoteToastVariant, string>> = {
+  success: 'check-circle',
+  warning: 'exclamation-triangle',
+  danger: 'exclamation-circle',
+};
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -6135,10 +6147,7 @@ export class ScionPageChat extends LitElement {
   }
 
   /** Show a toast notification for promote results. */
-  private showPromoteToast(
-    message: string,
-    variant: 'success' | 'warning' | 'danger' = 'success'
-  ): void {
+  private showPromoteToast(message: string, variant: PromoteToastVariant = 'success'): void {
     // Build the content from DOM nodes and text so the message is never
     // parsed as HTML.
     const alert = Object.assign(document.createElement('sl-alert'), {
@@ -6147,14 +6156,7 @@ export class ScionPageChat extends LitElement {
       duration: 4000,
     });
     const icon = document.createElement('sl-icon');
-    icon.setAttribute(
-      'name',
-      variant === 'success'
-        ? 'check-circle'
-        : variant === 'warning'
-          ? 'exclamation-triangle'
-          : 'exclamation-circle'
-    );
+    icon.setAttribute('name', PROMOTE_TOAST_ICONS[variant] ?? 'exclamation-circle');
     icon.setAttribute('slot', 'icon');
     alert.append(icon, document.createTextNode(message));
     document.body.appendChild(alert);

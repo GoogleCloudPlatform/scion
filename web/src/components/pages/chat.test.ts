@@ -1275,6 +1275,14 @@ describe('chat page — promote toast', () => {
 
     expect(lastAlert().querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-triangle');
   });
+
+  it('falls back to the danger icon for an unknown variant', () => {
+    const el = createPage();
+
+    el.showPromoteToast('Odd', 'neutral' as never);
+
+    expect(lastAlert().querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-circle');
+  });
 });
 
 describe('chat page — late route lookups', () => {
