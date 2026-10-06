@@ -337,10 +337,10 @@ func (p *Pipeline) ApplyHarnessEnvOverlay(ctx context.Context, overlay map[strin
 	}
 	if previous := p.usageDeriver.Swap(deriver); previous != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+		defer cancel()
 		if err := previous.Shutdown(shutdownCtx); err != nil {
 			log.Error("Usage deriver shutdown error: %v", err)
 		}
-		cancel()
 	}
 	if len(deriver.rules) > 0 {
 		log.Info("Usage derivation enabled from harness env overlay (source: %s, harness: %s)", sel.Source, sel.Harness)
