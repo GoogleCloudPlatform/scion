@@ -215,8 +215,8 @@ const ALWAYS_EMITTED: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Whether Go's `omitempty` drops `value`: absent, null, or an empty string,
- * list or map, as the store's own emptiness check reads it.
+ * Whether `value` is empty as the store reads it (absent, null, or an empty
+ * string, list or map), the values Go's `omitempty` drops.
  */
 function isEmpty(value: unknown): boolean {
   if (value === undefined || value === null || value === '') return true;
