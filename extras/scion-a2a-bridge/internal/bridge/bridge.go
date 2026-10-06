@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -1652,6 +1653,45 @@ func (b *Bridge) GetProjectConfig(projectSlug string) *ProjectConfig {
 	return nil
 }
 
+// errCodeDeleteInProgress is the hub's error code for an operation that lost
+// to an agent delete. A local copy until the shared apiclient constant
+// (ptone/scion#3492) lands; swap it for that then.
+const errCodeDeleteInProgress = "delete_in_progress"
+
+// isDeleteInProgress reports whether err is the hub's delete_in_progress
+// answer.
+func isDeleteInProgress(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.Code == errCodeDeleteInProgress
+}
+
+// agentBeingDeleted reports whether a listed agent is going away: it is
+// soft-deleted, or a delete holds it (its deletion view reads deleting,
+// which includes the hub's finalizing step). A failed delete leaves the
+// agent live, so it is not being deleted.
+func agentBeingDeleted(a *hubclient.Agent) bool {
+	if !a.DeletedAt.IsZero() {
+		return true
+	}
+	return a.Deletion != nil && a.Deletion.State == hubclient.DeletionStateDeleting
+}
+
+// findAdoptableAgent returns the first listed agent whose name or slug is
+// agentSlug, skipping agents that are being deleted (ptone/scion#3455).
+func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) (agentID, projectID string, found bool) {
+	for i := range agents {
+		a := &agents[i]
+		if a.Name != agentSlug && a.Slug != agentSlug {
+			continue
+		}
+		if agentBeingDeleted(a) {
+			continue
+		}
+		return a.ID, a.ProjectID, true
+	}
+	return "", "", false
+}
+
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
 func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, error) {
 	if contextID != "" {
@@ -1676,14 +1716,7 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 		return nil, fmt.Errorf("list agents: %w", err)
 	}
 
-	var agentID, projectID string
-	for _, a := range agents.Agents {
-		if a.Name == agentSlug || a.Slug == agentSlug {
-			agentID = a.ID
-			projectID = a.ProjectID
-			break
-		}
-	}
+	agentID, projectID, _ := findAdoptableAgent(agents.Agents, agentSlug)
 	if agentID == "" {
 		projectCfg := b.GetProjectConfig(projectSlug)
 		if projectCfg == nil || !projectCfg.AutoProvision || projectCfg.DefaultTemplate == "" {
@@ -1698,20 +1731,20 @@ func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, con
 			Labels:    map[string]string{"a2a-bridge/auto-provisioned": "true"},
 		})
 		if err != nil {
+			// The hub answers delete_in_progress when the agent this create
+			// made was deleted before the create completed: an agent of
+			// that name found now is the one being deleted, so it is not
+			// adopted (ptone/scion#3455).
+			if isDeleteInProgress(err) {
+				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
+			}
 			// Concurrent create may have succeeded; re-list to find the agent.
 			retryAgents, retryErr := b.hubClient.Agents().List(ctx, &hubclient.ListAgentsOptions{ProjectID: projectSlug})
 			if retryErr != nil {
 				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}
-			found := false
-			for _, a := range retryAgents.Agents {
-				if a.Name == agentSlug || a.Slug == agentSlug {
-					agentID = a.ID
-					projectID = a.ProjectID
-					found = true
-					break
-				}
-			}
+			var found bool
+			agentID, projectID, found = findAdoptableAgent(retryAgents.Agents, agentSlug)
 			if !found {
 				return nil, fmt.Errorf("auto-provision agent %q: %w", agentSlug, err)
 			}
