@@ -1216,6 +1216,32 @@ func TestDispatchAgentFire_SuccessAuditCarriesExecutorAndPairedCredential(t *tes
 		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
 	})
 
+	t.Run("uat revision: the token is paired as a UAT credential", func(t *testing.T) {
+		sf := &schedFire{uatCreateFixture: &uatCreateFixture{bypassAgentsFixture: f, creator: f.owner}}
+		tok := sf.storedUAT(t, minimalSelectors(t)...)
+		evt := withUATRevision(store.ScheduledEvent{
+			ID:        tid("e2b-r4-uat-evt"),
+			ProjectID: f.proj.ID,
+			EventType: "dispatch_agent",
+			FireAt:    time.Now(),
+			Payload:   `{"agentName":"r4-uat-agent"}`,
+			CreatedBy: f.owner.ID,
+		}, tok)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		f.srv.scheduler.fireEvent(ctx, evt, false)
+
+		agent, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "r4-uat-agent")
+		require.NoError(t, err)
+
+		rec := waitForAudit(t, agent.ID)
+		assert.Equal(t, "user", rec.ActorPrincipalKind)
+		assert.Equal(t, f.owner.ID, rec.ActorPrincipalID)
+		assert.Equal(t, string(CredentialKindUAT), rec.ActorCredentialType)
+		assert.Equal(t, tok.ID, rec.ActorCredentialID)
+		assert.Equal(t, "scheduler", rec.ExecutorKind)
+		assert.Equal(t, "scheduled_event:"+evt.ID, rec.ExecutorID)
+	})
+
 	t.Run("legacy_unknown initiator: the fire is refused", func(t *testing.T) {
 		evt := store.ScheduledEvent{
 			ID:        tid("e2b-r4-legacy-evt"),
