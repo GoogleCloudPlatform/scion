@@ -41,8 +41,14 @@ type AgentReincarnation struct {
 	// NewAppliedConfig holds the value of the "new_applied_config" field.
 	NewAppliedConfig string `json:"new_applied_config,omitempty"`
 	// Handoff holds the value of the "handoff" field.
-	Handoff      string `json:"handoff,omitempty"`
-	selectValues sql.SelectValues
+	Handoff string `json:"handoff,omitempty"`
+	// SourceBrokerID holds the value of the "source_broker_id" field.
+	SourceBrokerID string `json:"source_broker_id,omitempty"`
+	// TargetBrokerID holds the value of the "target_broker_id" field.
+	TargetBrokerID string `json:"target_broker_id,omitempty"`
+	// SourceCleanup holds the value of the "source_cleanup" field.
+	SourceCleanup string `json:"source_cleanup,omitempty"`
+	selectValues  sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -52,7 +58,7 @@ func (*AgentReincarnation) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case agentreincarnation.FieldFromGeneration, agentreincarnation.FieldToGeneration:
 			values[i] = new(sql.NullInt64)
-		case agentreincarnation.FieldAgentID, agentreincarnation.FieldRequestedBy, agentreincarnation.FieldState, agentreincarnation.FieldError, agentreincarnation.FieldPreviousAppliedConfig, agentreincarnation.FieldNewAppliedConfig, agentreincarnation.FieldHandoff:
+		case agentreincarnation.FieldAgentID, agentreincarnation.FieldRequestedBy, agentreincarnation.FieldState, agentreincarnation.FieldError, agentreincarnation.FieldPreviousAppliedConfig, agentreincarnation.FieldNewAppliedConfig, agentreincarnation.FieldHandoff, agentreincarnation.FieldSourceBrokerID, agentreincarnation.FieldTargetBrokerID, agentreincarnation.FieldSourceCleanup:
 			values[i] = new(sql.NullString)
 		case agentreincarnation.FieldRequestedAt, agentreincarnation.FieldUpdatedAt, agentreincarnation.FieldCompletedAt:
 			values[i] = new(sql.NullTime)
@@ -152,6 +158,24 @@ func (_m *AgentReincarnation) assignValues(columns []string, values []any) error
 			} else if value.Valid {
 				_m.Handoff = value.String
 			}
+		case agentreincarnation.FieldSourceBrokerID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_broker_id", values[i])
+			} else if value.Valid {
+				_m.SourceBrokerID = value.String
+			}
+		case agentreincarnation.FieldTargetBrokerID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field target_broker_id", values[i])
+			} else if value.Valid {
+				_m.TargetBrokerID = value.String
+			}
+		case agentreincarnation.FieldSourceCleanup:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field source_cleanup", values[i])
+			} else if value.Valid {
+				_m.SourceCleanup = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -225,6 +249,15 @@ func (_m *AgentReincarnation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("handoff=")
 	builder.WriteString(_m.Handoff)
+	builder.WriteString(", ")
+	builder.WriteString("source_broker_id=")
+	builder.WriteString(_m.SourceBrokerID)
+	builder.WriteString(", ")
+	builder.WriteString("target_broker_id=")
+	builder.WriteString(_m.TargetBrokerID)
+	builder.WriteString(", ")
+	builder.WriteString("source_cleanup=")
+	builder.WriteString(_m.SourceCleanup)
 	builder.WriteByte(')')
 	return builder.String()
 }

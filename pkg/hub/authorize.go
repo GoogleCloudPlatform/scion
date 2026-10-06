@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -538,6 +539,14 @@ func agentActionPermission(action string) Action {
 // "Authentication required"), but the distinction is worth keeping honest:
 // this helper gates the hub's admin endpoints.
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	return s.requireAdminFor(w, r, "")
+}
+
+// requireAdminFor is requireAdmin for a session-only admin operation. A
+// scoped user access token is refused with the same 403 as requireAdmin,
+// plus the session-only reason details (session_only_gate.go). An empty
+// reason writes the plain 403.
+func (s *Server) requireAdminFor(w http.ResponseWriter, r *http.Request, reason authzop.SessionOnlyReason) (UserIdentity, bool) {
 	// Synthetic resource: requireAdmin is a role check on the hub itself
 	// rather than a policy check on an addressable resource.
 	resource := Resource{Type: "hub", ID: r.URL.Path}
@@ -559,14 +568,19 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (UserIdent
 		return nil, false
 	}
 	if !IsUnscopedLocalPlatformAdmin(user) {
-		reason := "not an admin"
-		if IsScopedUserIdentity(user) {
-			reason = "scoped user access token"
+		denial := "not an admin"
+		scoped := IsScopedUserIdentity(user)
+		if scoped {
+			denial = "scoped user access token"
 		} else if _, federated := user.(FederatedIdentity); federated {
-			reason = "federated identity is not a local platform admin"
+			denial = "federated identity is not a local platform admin"
 		}
-		logAuthzDenial(r, identity, resource, ActionManage, reason)
-		Forbidden(w)
+		logAuthzDenial(r, identity, resource, ActionManage, denial)
+		if scoped && reason != "" {
+			writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", reason)
+		} else {
+			Forbidden(w)
+		}
 		return nil, false
 	}
 	return user, true

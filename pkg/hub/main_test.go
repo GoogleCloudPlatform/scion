@@ -29,10 +29,13 @@ import (
 // build, so the two are kept behind mutually exclusive build tags.
 //
 // It also starts the memory guard (mem_guard_helpers_test.go), which aborts
-// the binary with goroutine stacks if process memory runs away.
+// the binary with goroutine stacks if process memory runs away, and clears
+// the ambient GCP project env (clearAmbientGCPProjectEnv) so New() never
+// builds real Cloud Logging clients from it (ptone/scion#3188).
 func TestMain(m *testing.M) {
 	stopMemGuard := startMemGuard()
 	teardown := isolateTestHome()
+	clearAmbientGCPProjectEnv()
 	code := m.Run()
 	teardown()
 	stopMemGuard()

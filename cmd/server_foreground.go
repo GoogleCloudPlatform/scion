@@ -361,6 +361,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			log.Fatalf("Hub server failed to start: %v", hubInitErr)
 		}
 
+		// The Hub handler may be served by two listeners (its own and the
+		// WebServer's), so neither listener's Shutdown closes the decision
+		// audit writer; exit.run does, before the store closer deferred
+		// above and before the OTel providers registered below flush, so
+		// the drain's drops and write latencies are exported. On SIGINT
+		// (Ctrl-C, `scion server stop`) it runs after wg.Wait, once both
+		// listeners have drained, so records from requests served during
+		// the drain are written. On an error or early return there is no
+		// wg.Wait: a listener may still be serving or draining, and
+		// records from requests that finish after the close are counted
+		// as shutdown drops.
+		hubSrv.DeferDecisionAuditClose()
+		exit := &hubExitSequence{closeDecisionAudit: hubSrv.CloseDecisionAudit}
+		defer exit.run()
+
 		// The co-located broker registers (startRuntimeBroker, step 13)
 		// only after the Hub API is serving. Mark it as expected now, under
 		// the same condition startRuntimeBroker registers it, so gates that
@@ -379,11 +394,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			if tpErr != nil {
 				log.Printf("WARNING: hub tracing export disabled: %v", tpErr)
 			} else {
-				defer func() {
-					shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					_ = tp.Shutdown(shutdownCtx)
-				}()
+				exit.addFlush(tp.Shutdown)
 				log.Printf("Hub OTel tracing enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}
@@ -397,11 +408,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			if mpErr != nil {
 				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
 			} else {
-				defer func() {
-					shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					_ = mp.Shutdown(shutdownCtx)
-				}()
+				exit.addFlush(mp.Shutdown)
 
 				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
 
@@ -1409,7 +1416,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
-	if err := migrateStore(ctx, cfg, s); err != nil {
+	if err := migrateStore(ctx, s); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
@@ -1425,42 +1432,13 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	return s, entClient, nil
 }
 
-func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.CompositeStore) error {
-	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
-		return s.Migrate(ctx)
-	}
-
-	db := s.DB()
-	if db == nil {
-		return fmt.Errorf("postgres store does not expose a database connection")
-	}
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquiring migration lock connection: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", int64(store.LockSchemaMigration)); err != nil {
-		return fmt.Errorf("acquiring migration advisory lock: %w", err)
-	}
-	locked := true
-	defer func() {
-		if locked {
-			if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", int64(store.LockSchemaMigration)); err != nil {
-				slog.Error("Failed to release migration advisory lock", "error", err)
-			}
-		}
-	}()
-
-	if err := s.Migrate(ctx); err != nil {
-		return err
-	}
-
-	if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", int64(store.LockSchemaMigration)); err != nil {
-		return fmt.Errorf("releasing migration advisory lock: %w", err)
-	}
-	locked = false
-	return nil
+// migrateStore runs the schema migration and seed data. On Postgres it is
+// serialized across Hub replicas by the store.LockSchemaMigration advisory
+// lock; see CompositeStore.MigrateWithSchemaLock, which owns the locked path
+// so its Postgres integration test exercises the same code
+// (ptone/scion#1078).
+func migrateStore(ctx context.Context, s *entadapter.CompositeStore) error {
+	return s.MigrateWithSchemaLock(ctx)
 }
 
 // runWithAdvisoryLock runs fn under a TryAdvisoryLock if the store implements
@@ -2046,6 +2024,13 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub launch reaper metrics disabled: %v", reaperErr)
 	} else {
 		hubSrv.SetReaperMetrics(reaperRec)
+	}
+
+	auditRec, auditErr := hub.NewOTelDecisionAuditMetrics(mp, hubSrv.DecisionAuditQueueDepth)
+	if auditErr != nil {
+		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
+	} else {
+		hubSrv.SetDecisionAuditMetrics(auditRec)
 	}
 
 	return hubDBRec
@@ -3015,15 +3000,15 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 // substrate runtime whose construct-time dependencies failed (building the
 // Kubernetes client, or substrate.Dial's trust-bundle/CA load and API dial,
 // e.g. on an API-server blip at boot) — refusing on those would turn a
-// transient outage into a boot crash loop. The broker starts degraded
-// instead, but that degraded state is not self-healing: the default runtime
-// is resolved once here and is not rebuilt until the broker process
-// restarts, and /healthz still reports healthy (the "error" runtime counts
-// as an available runtime in the health check), so nothing restarts the
-// broker automatically. Operators must alert on the logged degraded "error"
-// runtime line and restart the broker to rebuild the runtime. It also
-// includes, for example, a Kubernetes client that fails Verify at startup,
-// or a missing container CLI.
+// transient outage into a boot crash loop. It also includes, for example, a
+// Kubernetes client that fails Verify at startup, or a missing container
+// CLI. The broker starts degraded instead, but that degraded state is not
+// self-healing: the default runtime is resolved once here and is not
+// rebuilt until the broker process restarts. /healthz reports status
+// "degraded" with checks["runtime"] = "unavailable" but still answers 200,
+// so a liveness probe does not restart the broker; /readyz returns 503, and
+// the Broker /healthz and /readyz uptime checks alert. Operators restart the
+// broker to rebuild the runtime once the cause is fixed.
 //
 // Named profiles other than the default are unaffected: those are resolved
 // lazily, per request, and this check only ever sees the one runtime
@@ -3271,6 +3256,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
+		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,
 		DefaultProfile:                brokerDefaultProfile,
 		Debug:                         enableDebug,
@@ -3916,4 +3902,29 @@ func telemetryGCPProjectFromSecret(ctx context.Context, sb secret.SecretBackend,
 		return ""
 	}
 	return gcputil.ParseProjectID([]byte(sw.Value))
+}
+
+// hubExitSequence is the Hub's exit work in runServerStart, deferred as
+// one call so its order is fixed and tested: drain and close the decision
+// audit writer first, then flush the OTel providers in reverse order of
+// registration (as separate defers would), so the drain's drops and write
+// latencies reach the final export.
+type hubExitSequence struct {
+	closeDecisionAudit func(context.Context)
+	flushes            []func(context.Context) error
+}
+
+func (h *hubExitSequence) addFlush(f func(context.Context) error) {
+	h.flushes = append(h.flushes, f)
+}
+
+func (h *hubExitSequence) run() {
+	h.closeDecisionAudit(context.Background())
+	for i := len(h.flushes) - 1; i >= 0; i-- {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := h.flushes[i](ctx); err != nil {
+			log.Printf("WARNING: hub OTel flush on exit: %v", err)
+		}
+		cancel()
+	}
 }

@@ -83,6 +83,7 @@ type mockRuntimeBrokerClient struct {
 	lastCreateReq              *RemoteCreateAgentRequest
 	lastDeleteOpts             struct {
 		deleteFiles, removeBranch bool
+		localOnly                 bool
 		runID                     string
 		notAfter                  time.Time
 	}
@@ -191,6 +192,7 @@ func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 	m.lastDeleteOpts.removeBranch = opts.RemoveBranch
 	m.lastDeleteOpts.runID = opts.RunID
 	m.lastDeleteOpts.notAfter = opts.NotAfter
+	m.lastDeleteOpts.localOnly = opts.LocalOnly
 	return m.returnErr
 }
 

@@ -382,8 +382,12 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			Reprovision:            true,
 			AsyncLaunch:            true,
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(defaultRuntime),
-			// Cross-broker agent move is not implemented by this broker.
-			AgentMove: false,
+			// This broker honours localOnly deletes and confirms a moved
+			// agent's NFS workspace before provisioning it (agent move).
+			AgentMove: true,
+			// This broker's reprovision reuses an empty-per-agent
+			// workspace in place (miller79/scion#167).
+			ReprovisionEmptyPerAgent: true,
 		},
 	}
 	if s.workspaceStorage != nil {
