@@ -79,12 +79,6 @@ type startContextInputs struct {
 	Name    string
 	AgentID string // Hub UUID (for env injection and logging)
 	Slug    string
-	// LaunchID is the launch identifier of the request, when the Hub sent
-	// one. It is injected as SCION_LAUNCH_ID, which sciontool presents to
-	// the conduit endpoint as its endpoint incarnation. Empty when the
-	// request carries none (no hub path records launches yet;
-	// ptone/scion#2933).
-	LaunchID string
 
 	// Project
 	ProjectPath string
@@ -587,16 +581,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		env["SCION_AGENT_ID"] = in.AgentID
 		classifyBrokerEnv("SCION_AGENT_ID", api.EnvKindPlain)
 	}
-	// SCION_LAUNCH_ID is broker-owned: a value from the resolved env is
-	// never passed through, so the container presents either the launch id
-	// of this request or none.
-	if in.LaunchID != "" {
-		env["SCION_LAUNCH_ID"] = in.LaunchID
-		classifyBrokerEnv("SCION_LAUNCH_ID", api.EnvKindPlain)
-	} else {
-		delete(env, "SCION_LAUNCH_ID")
-		delete(envCls, "SCION_LAUNCH_ID")
-	}
+	// SCION_LAUNCH_ID is broker-owned: Manager.Start sets it from the run
+	// ID it labels the container with, so a resolved-env value is never
+	// passed through.
+	delete(env, "SCION_LAUNCH_ID")
+	delete(envCls, "SCION_LAUNCH_ID")
 	if in.ProjectID != "" {
 		env["SCION_PROJECT_ID"] = in.ProjectID
 		classifyBrokerEnv("SCION_PROJECT_ID", api.EnvKindPlain)
@@ -869,6 +858,15 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		classifyBrokerEnv("SCION_SHARED_WORKSPACE", api.EnvKindPlain)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Shared workspace mode enabled", "agent_id", in.AgentID)
+		}
+		// The shared workspace's clone settings only reach the runtime as
+		// the Kubernetes init container's clone settings (GitCloneForInit).
+		// They never set GitClone, so the workspace is still mounted, not
+		// cloned per agent. Ignored when GitClone is set: that request asks
+		// for a per-agent clone instead.
+		if gc := in.Config.SharedWorkspaceClone; gc != nil && gc.URL != "" && in.Config.GitClone == nil {
+			gcCopy := *gc
+			opts.SharedWorkspaceClone = &gcCopy
 		}
 	}
 
@@ -1408,9 +1406,8 @@ func validateMountedWorktree(workspacePath, base string) error {
 // provision.ProvisionShared makes internally (its "sentinel exists" step). A
 // caller that already knows a worktree it must not touch exists uses this to
 // decide not to call ProvisionShared at all when either is missing —
-// ProvisionShared's own self-heal (gitCloneWorkspace's removeDirContents)
-// assumes no worktree can exist yet whenever the sentinel is missing, and
-// would otherwise wipe every worktree under the shared base.
+// ProvisionShared clones whenever the sentinel is missing, which assumes no
+// worktree can exist yet under the shared base.
 //
 // The sentinel is looked for in exactly the directories ProvisionShared
 // checks (in.SentinelDirs: the sentinel directory, the base's parent by
@@ -1524,10 +1521,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	}
 
 	// When a worktree that must not be touched already exists, ProvisionShared
-	// must never be allowed to reach its own self-heal path: gitCloneWorkspace's
-	// removeDirContents can fire once the provisioning sentinel is missing, and
-	// wipes every worktree under the shared base — including this one — while
-	// ProvisionShared still returns success. Fail closed instead whenever
+	// must never be allowed to re-run its clone step, which runs once the
+	// provisioning sentinel is missing and assumes no worktree exists under
+	// the shared base yet. Fail closed instead whenever
 	// either the sentinel or the shared base's .git is missing, which is a
 	// superset of that trigger condition.
 	if preExisted && !worktreeBaseIsProvisioned(result.ProvisionInput) {
