@@ -101,7 +101,7 @@ const DEFAULT_PAGE_TIMEOUT_MS = 60_000;
 export interface PaginationErrorDetails {
   /** HTTP status of the failed page response. */
   status?: number;
-  /** The failed response's body: parsed JSON when it was JSON, else its text capped at 500 characters (absent if unreadable or empty). */
+  /** The failed response's body: parsed JSON when it was JSON, else its text; text, including a JSON string body, is capped at 500 characters (absent if unreadable or empty). */
   body?: unknown;
   /** The hub's human-readable error message from a JSON body, when it had one, capped at 500 characters. */
   hubMessage?: string;
