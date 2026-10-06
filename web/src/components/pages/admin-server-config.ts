@@ -255,9 +255,10 @@ interface V1TelemetryConfig {
   local?: V1TelemetryLocalConfig;
 }
 
+// Keys match the hub's CloudRunConfig (pkg/config/settings_v1.go).
 interface V1CloudRunConfig {
-  project?: string;
-  region?: string;
+  project_id?: string;
+  location?: string;
 }
 
 interface V1RuntimeConfig {
@@ -4508,12 +4509,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Project</label>
                   <sl-input
-                    value=${rt.cloudrun?.project || ''}
+                    value=${rt.cloudrun?.project_id || ''}
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
                       this.updateRuntimeCloudRun(
                         name,
-                        'project',
+                        'project_id',
                         (e.target as HTMLInputElement).value
                       );
                     }}
@@ -4522,13 +4523,13 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Region</label>
                   <sl-input
-                    value=${rt.cloudrun?.region || ''}
+                    value=${rt.cloudrun?.location || ''}
                     placeholder="e.g. us-central1"
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
                       this.updateRuntimeCloudRun(
                         name,
-                        'region',
+                        'location',
                         (e.target as HTMLInputElement).value
                       );
                     }}
@@ -4648,7 +4649,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.runtimes = updated;
   }
 
-  private updateRuntimeCloudRun(name: string, field: 'project' | 'region', value: string): void {
+  private updateRuntimeCloudRun(name: string, field: keyof V1CloudRunConfig, value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
     const cr = { ...(rt.cloudrun || {}) };

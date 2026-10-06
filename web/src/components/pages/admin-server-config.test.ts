@@ -2059,6 +2059,81 @@ describe('scion-page-admin-server-config', () => {
       expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
     });
   });
+  describe('Cloud Run runtime editor field names (ptone/scion#3475)', () => {
+    function cloudRunConfig(tier: Record<string, unknown>) {
+      return makeBaseConfig({
+        ...tier,
+        runtimes: {
+          crun: {
+            type: 'cloudrun',
+            cloudrun: { project_id: 'proj-a', location: 'us-central1' },
+          },
+        },
+      });
+    }
+
+    function cloudRunInputs(el: HTMLElement): {
+      project: HTMLElement & { value: string };
+      location: HTMLElement & { value: string };
+    } {
+      const fields = queryAll(el, '.form-field');
+      const byLabel = (label: string) => {
+        const field = fields.find((f) => f.querySelector('label')?.textContent?.trim() === label);
+        return field?.querySelector('sl-input') as HTMLElement & { value: string };
+      };
+      return { project: byLabel('GCP Project'), location: byLabel('GCP Region') };
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    for (const [mode, tier] of [
+      ['file', {}],
+      ['db', { settings_tier: 'db' }],
+    ] as const) {
+      it(`${mode} mode: reads and sends project_id and location`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(cloudRunConfig(tier), {
+            schemaResponse: {
+              sections: {
+                ...SCHEMA_RESPONSE.sections,
+                runtimes: { koanf_paths: ['runtimes'] },
+              },
+            },
+            putHandler: (body) => {
+              if ('runtimes' in body) capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun).toEqual({
+          project_id: 'proj-b',
+          location: 'europe-west1',
+        });
+      });
+    }
+  });
+
   describe('home storage on runtimes and profiles', () => {
     function homeConfig() {
       return makeBaseConfig({
