@@ -43,8 +43,9 @@ import (
 
 // Environment variables read by sciontool.
 const (
-	// EnvLaunchID carries the agent's launch id, set by the broker when
-	// the hub request carries one. It is presented as
+	// EnvLaunchID carries the agent's launch id: the hub-minted run id
+	// of the run that created this container, the same value as its
+	// scion.run_id label. It is presented as
 	// Hello.capabilities.endpoint_incarnation.
 	EnvLaunchID = "SCION_LAUNCH_ID"
 	// EnvHubConduit is set to "true" by a hub that serves conduit
@@ -98,8 +99,8 @@ type Options struct {
 	HubURL string
 	// AgentID and ProjectID identify this agent.
 	AgentID, ProjectID string
-	// LaunchID is the broker-provided launch id (EnvLaunchID); empty
-	// when the broker sent none.
+	// LaunchID is the container's run id (EnvLaunchID); empty only for a
+	// container created by a broker that did not set it.
 	LaunchID string
 	// ClientVersion is reported in Hello.
 	ClientVersion string

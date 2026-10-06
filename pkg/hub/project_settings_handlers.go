@@ -569,7 +569,9 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 			settings.DefaultThinkingLevel = &n
 		}
 	}
-	settings.ActiveProfile = project.Annotations[projectSettingActiveProfile]
+	if v := project.Annotations[projectSettingActiveProfile]; v != "" {
+		settings.ActiveProfile = &v
+	}
 
 	if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
 		if b, err := strconv.ParseBool(val); err == nil {
@@ -652,7 +654,12 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	} else {
 		delete(project.Annotations, projectSettingDefaultThinkingLevel)
 	}
-	setOrDelete(project.Annotations, projectSettingActiveProfile, settings.ActiveProfile)
+	// The active profile is kept when the field is absent: the web settings
+	// page sends a full body that does not carry it, and a save there must
+	// not wipe it (ptone/scion#3383). An explicit empty string clears it.
+	if settings.ActiveProfile != nil {
+		setOrDelete(project.Annotations, projectSettingActiveProfile, *settings.ActiveProfile)
+	}
 
 	if settings.TelemetryEnabled != nil {
 		project.Annotations[projectSettingTelemetryEnabled] = strconv.FormatBool(*settings.TelemetryEnabled)
@@ -777,8 +784,8 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// broker-local defaults for a hub-created agent — and it degrades
 	// gracefully: resolveManagerForOpts returns the default manager when
 	// ResolveRuntime errors, so a stale annotation cannot fail dispatch.
-	if ac.Profile == "" && settings.ActiveProfile != "" {
-		ac.Profile = settings.ActiveProfile
+	if ac.Profile == "" && settings.ActiveProfile != nil && *settings.ActiveProfile != "" {
+		ac.Profile = *settings.ActiveProfile
 	}
 
 	// Check if there are any project limit/resource defaults to apply
