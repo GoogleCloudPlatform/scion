@@ -1109,7 +1109,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			// already run with both memo keys masked) and any future caller
 			// get the same guarantee without relying on this call site.
 			var hopNote unrecordedHopNote
-			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(contextWithUnrecordedHopNote(maskAuthzInputs(ctx), &hopNote), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause)
+			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeilingWithNote(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause, &hopNote)
 			if ceilingErr != nil {
 				decision.Allowed = false
 				decision.Reason = "delegation ceiling check failed (fail-closed): " + ceilingErr.Error()

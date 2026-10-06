@@ -664,7 +664,7 @@ func TestUnrecordedHopAdoptableOnlyForAdoptedCeilingPermissions(t *testing.T) {
 	}
 	note := func(edge *store.DelegationEdge, permissionID string) bool {
 		var n unrecordedHopNote
-		a.logUnrecordedHop(contextWithUnrecordedHopNote(context.Background(), &n), DenyCauseCeilingUnrecorded, edge, permissionID)
+		a.logUnrecordedHop(&n, DenyCauseCeilingUnrecorded, edge, permissionID)
 		return n.adoptable
 	}
 	assert.True(t, note(unrecorded, "gcp_service_account.assign"))

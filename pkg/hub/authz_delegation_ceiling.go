@@ -158,6 +158,22 @@ func (a *AuthzService) checkDelegationCeiling(
 	explain *[]DecisionStep,
 	cause *DenyCause,
 ) (bool, string, error) {
+	return a.checkDelegationCeilingWithNote(ctx, req, permissionID, agentID, explain, cause, nil)
+}
+
+// checkDelegationCeilingWithNote is checkDelegationCeiling that also fills
+// note, when non-nil, from an unrecorded-hop denial (see
+// unrecordedHopNote). The note is an explicit out-parameter, so nothing is
+// stored in the request context.
+func (a *AuthzService) checkDelegationCeilingWithNote(
+	ctx context.Context,
+	req AuthzRequest,
+	permissionID string,
+	agentID string,
+	explain *[]DecisionStep,
+	cause *DenyCause,
+	note *unrecordedHopNote,
+) (bool, string, error) {
 	// A hubDeliveryIdentity principal (ptone/scion#2228 part 2) never takes
 	// the ordinary delegator-permission proof below: it is routed to its own
 	// arm before the AgentIdentity assertion this function would otherwise
@@ -192,7 +208,7 @@ func (a *AuthzService) checkDelegationCeiling(
 	}
 
 	attested := req.Principal.Identity != nil && AncestryIsHubAttested(req.Principal.Identity)
-	return a.walkDelegationChainWithCause(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause)
+	return a.walkDelegationChainWithNote(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause, note)
 }
 
 // maxDelegationDepth limits the delegation chain walk.
@@ -236,6 +252,24 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
+) (bool, string, error) {
+	return a.walkDelegationChainWithNote(ctx, resource, action, permissionID, agentID, attested, scopeType, scopeID, explain, cause, nil)
+}
+
+// walkDelegationChainWithNote is walkDelegationChainWithCause that also
+// fills note, when non-nil, from a hop's ceiling_unrecorded denial (see
+// logUnrecordedHop).
+func (a *AuthzService) walkDelegationChainWithNote(
+	ctx context.Context,
+	resource Resource,
+	action Action,
+	permissionID string,
+	agentID string,
+	attested bool,
+	scopeType, scopeID string,
+	explain *[]DecisionStep,
+	cause *DenyCause,
+	note *unrecordedHopNote,
 ) (bool, string, error) {
 	// The delegator side is evaluated for principals other than the
 	// requester, so it must never read the requester's memoized principals
@@ -369,7 +403,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
-				a.logUnrecordedHop(ctx, c, edge, permissionID)
+				a.logUnrecordedHop(note, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -397,7 +431,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
-				a.logUnrecordedHop(ctx, c, edge, permissionID)
+				a.logUnrecordedHop(note, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -413,34 +447,29 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	}
 }
 
-// unrecordedHopNoteKey is the context key of an unrecordedHopNote.
-type unrecordedHopNoteKey struct{}
-
 // unrecordedHopNote receives, from a chain walk, whether a
 // ceiling_unrecorded denial came from a hop that delegation-provenance
 // adoption can address: an unrecorded row (provenance version 0), denied a
 // permission an adopted ceiling carries. A hop denied only because its
-// provenance version is not understood is not adoptable. The note is descriptive: it selects response details and is
-// never read by an authorization decision.
+// provenance version is not understood is not adoptable. The note is
+// descriptive: it selects response details and is never read by an
+// authorization decision. It is passed as an explicit out-parameter and is
+// never stored in a request context.
 type unrecordedHopNote struct {
 	adoptable bool
 }
 
-func contextWithUnrecordedHopNote(ctx context.Context, note *unrecordedHopNote) context.Context {
-	return context.WithValue(ctx, unrecordedHopNoteKey{}, note)
-}
-
 // logUnrecordedHop logs at Debug, server-side only, the delegate whose hop
 // denied with ceiling_unrecorded, so an admin can correlate the denial with
-// the delegation-adoption status view, and fills the context's
-// unrecordedHopNote. Nothing here reaches the caller.
-func (a *AuthzService) logUnrecordedHop(ctx context.Context, cause DenyCause, edge *store.DelegationEdge, permissionID string) {
+// the delegation-adoption status view, and fills note when it is non-nil.
+// Nothing here reaches the caller.
+func (a *AuthzService) logUnrecordedHop(note *unrecordedHopNote, cause DenyCause, edge *store.DelegationEdge, permissionID string) {
 	if cause != DenyCauseCeilingUnrecorded {
 		return
 	}
 	unrecordedRow := edge.ProvenanceVersion == 0 && edge.Kind == store.EffectCeilingUnrecorded
 	adoptable := unrecordedRow && adoptionCeilingCovers(permissionID)
-	if note, ok := ctx.Value(unrecordedHopNoteKey{}).(*unrecordedHopNote); ok && note != nil {
+	if note != nil {
 		note.adoptable = adoptable
 	}
 	if a.logger == nil {
