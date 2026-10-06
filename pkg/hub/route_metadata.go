@@ -730,6 +730,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
 	},
+	// Conduit grant key rotation, behind hub.conduit. Returns kids and
+	// timestamps only.
+	"/api/v1/admin/conduit/grant-keys/rotate": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,

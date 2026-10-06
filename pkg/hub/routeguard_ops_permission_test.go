@@ -114,6 +114,7 @@ func TestRouteGuardOpsPermissions(t *testing.T) {
 		{"/api/v1/admin/maintenance/check-updates", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/restart", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/agents/reset-auth-all", "hub.auth_reset.execute", "hub", "execute"},
+		{"/api/v1/admin/conduit/grant-keys/rotate", "hub.conduit_grant_keys.execute", "hub", "execute"},
 		{"/api/v1/admin/diagnostics/logs", "hub.diagnostics.read", "hub", "read"},
 		{"/api/v1/admin/diagnostics/logs/stream", "hub.diagnostics.read", "hub", "read"},
 	}
