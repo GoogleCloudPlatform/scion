@@ -52,6 +52,9 @@ const START_BLANK = 'blank';
 /** Safety cap on template-list pages followed (see loadTemplates). */
 const MAX_TEMPLATE_PAGES = 20;
 
+/** Maximum project slug length; matches api.MaxSlugLength on the hub. */
+const MAX_SLUG_LENGTH = 63;
+
 /** A project template as returned by GET /api/v1/projects?isTemplate=true. */
 interface ProjectTemplate {
   id: string;
@@ -824,12 +827,21 @@ export class ScionPageProjectCreate extends LitElement {
     }
   `;
 
+  /**
+   * Derive a slug the same way the hub's api.Slugify does: strip accents,
+   * lowercase, collapse non-alphanumerics to single hyphens, trim hyphens and
+   * cap the length at MAX_SLUG_LENGTH. The hub accepts a slug only in this
+   * format.
+   */
   private slugify(text: string): string {
     return text
+      .normalize('NFD')
+      .replace(/\p{Mn}/gu, '')
       .toLowerCase()
-      .trim()
       .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '');
+      .replace(/^-+|-+$/g, '')
+      .slice(0, MAX_SLUG_LENGTH)
+      .replace(/-+$/, '');
   }
 
   /**

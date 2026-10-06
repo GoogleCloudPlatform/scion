@@ -483,6 +483,22 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     ]);
   });
 
+  it('Blank derives a slug in the hub slug format from the name', async () => {
+    const { el, requests } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    const longName = `Café ${'x'.repeat(57)} notes`;
+    await setValue(el, '#name', longName, 'sl-input');
+    await submit(el);
+
+    // The 63-character cut lands on a hyphen, which is trimmed.
+    const expected = `cafe-${'x'.repeat(57)}`;
+    expect(expected).toHaveLength(62);
+    expect(posts(requests)).toEqual([
+      { path: '/api/v1/projects', method: 'POST', body: { name: longName, slug: expected } },
+    ]);
+  });
+
   it('announces a membership change for a project created from Blank', async () => {
     const { el } = await createForm({ templates: [GIT_TEMPLATE] });
     element = el;
