@@ -16,7 +16,13 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AccessDeniedDetail } from './api.js';
-import { apiFetch, _resetSuspendedState, ACCESS_DENIED_UNREADABLE_REASON } from './api.js';
+import {
+  apiErrorMessageFromBody,
+  apiFetch,
+  extractApiError,
+  _resetSuspendedState,
+  ACCESS_DENIED_UNREADABLE_REASON,
+} from './api.js';
 
 /**
  * Build a fake Response with the given status and JSON body.
@@ -565,5 +571,36 @@ describe('apiFetch — 403 body read aborted by the request signal', () => {
 
     await apiFetch('/api/v1/plain', { signal: controller.signal });
     expect(captured).toEqual([{}]);
+  });
+});
+
+describe('apiErrorMessageFromBody / extractApiError', () => {
+  it('reads {error: {message}}, appending error.details.guidance', () => {
+    expect(apiErrorMessageFromBody({ error: { code: 'x', message: 'nope' } })).toBe('nope');
+    expect(
+      apiErrorMessageFromBody({
+        error: { message: 'clone failed', details: { guidance: 'retry' } },
+      })
+    ).toBe('clone failed — retry');
+  });
+
+  it('reads {message} and {error: "..."}', () => {
+    expect(apiErrorMessageFromBody({ message: 'quota' })).toBe('quota');
+    expect(apiErrorMessageFromBody({ error: 'bad cursor' })).toBe('bad cursor');
+  });
+
+  it('returns undefined for bodies without a message', () => {
+    for (const body of [null, undefined, 'text', 42, [], {}, { error: { code: 'x' } }]) {
+      expect(apiErrorMessageFromBody(body)).toBeUndefined();
+    }
+  });
+
+  it('extractApiError uses it and falls back for non-JSON or message-less bodies', async () => {
+    const json = (b: unknown) => new Response(JSON.stringify(b), { status: 400 });
+    expect(
+      await extractApiError(json({ error: { message: 'm', details: { guidance: 'g' } } }), 'fb')
+    ).toBe('m — g');
+    expect(await extractApiError(json({ error: { code: 'x' } }), 'fb')).toBe('fb');
+    expect(await extractApiError(new Response('<html>', { status: 502 }), 'fb')).toBe('fb');
   });
 });
