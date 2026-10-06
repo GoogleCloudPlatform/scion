@@ -528,3 +528,188 @@ describe('scion-schedule-list edit dialog', () => {
     expect(dialog.querySelector('input.edit-resume')).toBeNull();
   });
 });
+
+/** A fetch stub whose responses the test releases one by one, in any order. */
+function deferredFetch(): {
+  calls: { method: string; url: string; resolve: (r: Response) => void }[];
+} {
+  const calls: { method: string; url: string; resolve: (r: Response) => void }[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          calls.push({ method: init?.method ?? 'GET', url: String(input), resolve });
+        })
+    )
+  );
+  return { calls };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+type ListEl = HTMLElement & {
+  projectId: string;
+  updateComplete: Promise<unknown>;
+};
+
+interface ListInternals {
+  loading: boolean;
+  loadSchedules(): Promise<void>;
+  editSchedule: Record<string, unknown> | null;
+  editError: string | null;
+}
+
+// A slower, older load must not overwrite a newer one (ptone/scion#2643 review).
+describe('scion-schedule-list overlapping loads', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function startTwoLoads(): Promise<{
+    el: ListEl;
+    calls: ReturnType<typeof deferredFetch>['calls'];
+    loadB: Promise<void>;
+  }> {
+    const { calls } = deferredFetch();
+    const el = document.createElement('scion-schedule-list') as ListEl;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el); // load A
+    await el.updateComplete;
+    const loadB = (el as unknown as ListInternals).loadSchedules();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toHaveLength(2);
+    return { el, calls, loadB };
+  }
+
+  it('keeps the newer result when the older load resolves last', async () => {
+    const { el, calls, loadB } = await startTwoLoads();
+    calls[1]!.resolve(jsonResponse({ schedules: [schedule({ id: 'b', name: 'newer-row' })] }));
+    await loadB;
+    await settle(el);
+    calls[0]!.resolve(jsonResponse({ schedules: [schedule({ id: 'a', name: 'older-row' })] }));
+    await settle(el);
+
+    rowFor(el, 'newer-row');
+    expect(el.shadowRoot!.textContent).not.toContain('older-row');
+    expect((el as unknown as ListInternals).loading).toBe(false);
+  });
+
+  it('ignores an older load that fails after the newer one succeeded', async () => {
+    const { el, calls, loadB } = await startTwoLoads();
+    calls[1]!.resolve(jsonResponse({ schedules: [schedule({ id: 'b', name: 'newer-row' })] }));
+    await loadB;
+    await settle(el);
+    calls[0]!.resolve(jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500));
+    await settle(el);
+
+    rowFor(el, 'newer-row');
+    expect(el.shadowRoot!.querySelector('.error-details')).toBeNull();
+    expect((el as unknown as ListInternals).loading).toBe(false);
+  });
+});
+
+// The edit dialog stays open while its PATCH is in flight, so a late result
+// cannot land on a different dialog (ptone/scion#2643 review).
+describe('scion-schedule-list edit dialog while saving', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function mountAndSave(): Promise<{
+    el: ListEl;
+    dialog: HTMLElement;
+    calls: ReturnType<typeof deferredFetch>['calls'];
+  }> {
+    const { calls } = deferredFetch();
+    const el = document.createElement('scion-schedule-list') as ListEl;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    calls[0]!.resolve(
+      jsonResponse({
+        schedules: [schedule({ id: 's-1', name: 'one' }), schedule({ id: 's-2', name: 'two' })],
+      })
+    );
+    await settle(el);
+    (rowFor(el, 'one').querySelector('sl-icon-button[label="Edit"]') as HTMLElement).click();
+    await settle(el);
+    const dialog = el.shadowRoot!.querySelector('sl-dialog[label^="Edit Schedule"]') as HTMLElement;
+    const cron = dialog.querySelector('sl-input.edit-cron') as HTMLInputElement;
+    cron.value = '*/5 * * * *';
+    cron.dispatchEvent(new Event('sl-input'));
+    await settle(el);
+    (dialog.querySelector('sl-button.edit-save') as HTMLElement).click();
+    await settle(el);
+    expect(calls.at(-1)?.method).toBe('PATCH');
+    return { el, dialog, calls };
+  }
+
+  function editDialog(el: HTMLElement): HTMLElement | null {
+    return el.shadowRoot!.querySelector('sl-dialog[label^="Edit Schedule"]');
+  }
+
+  it('refuses to close while the save is in flight, then shows its error', async () => {
+    const { el, dialog, calls } = await mountAndSave();
+
+    const req = new Event('sl-request-close', { cancelable: true });
+    dialog.dispatchEvent(req);
+    expect(req.defaultPrevented).toBe(true);
+    const cancel = dialog.querySelector('sl-button.edit-cancel') as HTMLElement;
+    expect(cancel.hasAttribute('disabled')).toBe(true);
+    cancel.click();
+    await settle(el);
+    expect(editDialog(el)).toBe(dialog);
+    // Opening another row's dialog is refused too.
+    (rowFor(el, 'two').querySelector('sl-icon-button[label="Edit"]') as HTMLElement).click();
+    await settle(el);
+    expect(editDialog(el)?.getAttribute('label')).toBe('Edit Schedule: one');
+
+    calls
+      .at(-1)!
+      .resolve(
+        jsonResponse({ error: { code: 'revision_conflict', message: 'refresh and retry' } }, 409)
+      );
+    await settle(el);
+    expect(editDialog(el)?.querySelector('.dialog-error')?.textContent).toContain(
+      'refresh and retry'
+    );
+    expect(cancel.hasAttribute('disabled')).toBe(false);
+    const after = new Event('sl-request-close', { cancelable: true });
+    editDialog(el)!.dispatchEvent(after);
+    expect(after.defaultPrevented).toBe(false);
+    await settle(el);
+    expect(editDialog(el)).toBeNull();
+  });
+
+  it('drops a late result if the dialog was replaced anyway', async () => {
+    const { el, calls } = await mountAndSave();
+    // Force the replacement the UI guards against.
+    const i = el as unknown as ListInternals;
+    const other = schedule({ id: 's-2', name: 'two' });
+    i.editSchedule = other;
+    await settle(el);
+
+    calls.at(-1)!.resolve(jsonResponse({ error: { code: 'internal', message: 'old error' } }, 500));
+    await settle(el);
+    expect(i.editSchedule).toBe(other);
+    expect(i.editError).toBeNull();
+  });
+});

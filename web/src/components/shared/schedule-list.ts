@@ -26,8 +26,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import type { ApiFetchOptions } from '../../client/api.js';
-import { paginateAll } from '../../client/paginate-all.js';
+import { paginateAll, PaginationError } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -108,19 +107,6 @@ interface ListResponse {
 
 /** Page size requested when loading the schedule list; every page is followed. */
 export const SCHEDULE_PAGE_SIZE = 100;
-
-/**
- * Issues one schedule list page request. A failed page is thrown with the
- * hub's error message, which paginateAll passes through, rather than a bare
- * status code.
- */
-async function fetchSchedulePage(path: string, options: ApiFetchOptions): Promise<Response> {
-  const res = await apiFetch(path, options);
-  if (!res.ok) {
-    throw new Error(await extractApiError(res, `HTTP ${res.status}: ${res.statusText}`));
-  }
-  return res;
-}
 
 @customElement('scion-schedule-list')
 export class ScionScheduleList extends LitElement {
@@ -210,7 +196,6 @@ export class ScionScheduleList extends LitElement {
         path: `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules`,
         pageSize: SCHEDULE_PAGE_SIZE,
         label: 'schedules list',
-        fetch: fetchSchedulePage,
         parsePage: (body) => {
           const data = body as ListResponse;
           return { items: data.schedules ?? [], nextCursor: data.nextCursor ?? '' };
@@ -222,7 +207,14 @@ export class ScionScheduleList extends LitElement {
     } catch (err) {
       if (generation !== this.loadGeneration) return;
       console.error('Failed to load schedules:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load schedules';
+      // Prefer the hub's own message for a failed page over the generic
+      // "request failed: <status>" text.
+      this.error =
+        err instanceof PaginationError && err.hubMessage
+          ? err.hubMessage
+          : err instanceof Error
+            ? err.message
+            : 'Failed to load schedules';
     } finally {
       if (generation === this.loadGeneration) this.loading = false;
     }
@@ -292,6 +284,7 @@ export class ScionScheduleList extends LitElement {
   }
 
   private openEditDialog(sched: Schedule): void {
+    if (this.editLoading) return;
     this.detailOpen = false;
     this.editSchedule = sched;
     this.editName = sched.name;
@@ -301,6 +294,9 @@ export class ScionScheduleList extends LitElement {
   }
 
   private closeEditDialog(): void {
+    // A save in flight owns the dialog until it settles: closing now would
+    // let its result land on whatever dialog is open next.
+    if (this.editLoading) return;
     this.editSchedule = null;
     this.editError = null;
   }
@@ -324,6 +320,9 @@ export class ScionScheduleList extends LitElement {
     }
     this.editLoading = true;
     this.editError = null;
+    // Writes below are guarded on the dialog still showing this schedule, in
+    // case it was replaced while the PATCH was in flight.
+    const current = (): boolean => this.editSchedule === sched;
     try {
       const response = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(sched.id)}`,
@@ -336,10 +335,13 @@ export class ScionScheduleList extends LitElement {
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
-      this.closeEditDialog();
+      this.editLoading = false;
+      if (current()) this.closeEditDialog();
       await this.loadSchedules();
     } catch (err) {
-      this.editError = err instanceof Error ? err.message : 'Failed to update schedule';
+      if (current()) {
+        this.editError = err instanceof Error ? err.message : 'Failed to update schedule';
+      }
     } finally {
       this.editLoading = false;
     }
@@ -762,7 +764,13 @@ export class ScionScheduleList extends LitElement {
       <sl-dialog
         label="Edit Schedule: ${sched.name}"
         open
-        @sl-request-close=${(): void => this.closeEditDialog()}
+        @sl-request-close=${(e: Event): void => {
+          if (this.editLoading) {
+            e.preventDefault();
+            return;
+          }
+          this.closeEditDialog();
+        }}
       >
         <form class="dialog-form edit-form" @submit=${(e: Event): void => void this.handleEdit(e)}>
           ${this.editError
@@ -813,7 +821,12 @@ export class ScionScheduleList extends LitElement {
             : nothing}
         </form>
 
-        <sl-button slot="footer" variant="default" @click=${(): void => this.closeEditDialog()}
+        <sl-button
+          slot="footer"
+          variant="default"
+          class="edit-cancel"
+          ?disabled=${this.editLoading}
+          @click=${(): void => this.closeEditDialog()}
           >Cancel</sl-button
         >
         <sl-button
