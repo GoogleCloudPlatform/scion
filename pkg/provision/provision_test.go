@@ -4108,6 +4108,11 @@ func TestSafeGitCommand_TrustedHookAndGlobalFilterStillRun(t *testing.T) {
 	// git-lfs install also adds).
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// Ignore the host's system gitconfig. A host with git-lfs installed
+	// system-wide (as on GitHub-hosted runners) sets filter.lfs.process,
+	// which git uses in place of the smudge command configured below, so
+	// the stand-in smudge script would never run.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	marker := filepath.Join(t.TempDir(), "marker")
 	t.Setenv("MARKER_FILE", marker)
 
