@@ -410,3 +410,114 @@ func (s *sqlStore) ListGrants(ctx context.Context, artifactID string) ([]Grant, 
 	}
 	return out, nil
 }
+
+// maxCandidateScopes bounds the scope refs one ListCandidates query binds,
+// well below every driver's placeholder limit.
+const maxCandidateScopes = 500
+
+// ListCandidates implements Store.
+func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Candidate, error) {
+	if q.PrincipalKind == "" || q.PrincipalRef == "" {
+		return nil, errors.New("artifacts: ListCandidates needs a principal")
+	}
+	if q.Limit <= 0 {
+		return nil, errors.New("artifacts: ListCandidates needs a positive limit")
+	}
+	if len(q.ScopeRefs) > maxCandidateScopes {
+		return nil, fmt.Errorf("artifacts: ListCandidates accepts at most %d scopes", maxCandidateScopes)
+	}
+	now := s.timeArg(q.Now)
+	var (
+		b    strings.Builder
+		args []any
+	)
+	b.WriteString(`SELECT a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title,
+		a.current_seq, a.expires_at, a.created_at, a.updated_at, v.kind
+		FROM artifact a
+		LEFT JOIN artifact_version v ON v.artifact_id = a.id AND v.seq = a.current_seq
+		WHERE a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)
+		AND ((a.owner_kind = ? AND a.owner_ref = ?)`)
+	args = append(args, now, q.PrincipalKind, q.PrincipalRef)
+	if !q.OwnedOnly {
+		b.WriteString(` OR EXISTS (
+			SELECT 1 FROM artifact_grant g WHERE g.artifact_id = a.id
+			AND (g.expires_at IS NULL OR g.expires_at > ?)
+			AND g.permission IN (?, ?, ?)
+			AND ((g.subject_kind = ? AND g.subject_ref = ?)`)
+		args = append(args, now, GrantRead, GrantWrite, GrantAdmin,
+			SubjectPrincipal, PrincipalRef(q.PrincipalKind, q.PrincipalRef))
+		s.writeScopeGrants(&b, &args, q.ScopeRefs)
+		b.WriteString("))")
+	}
+	b.WriteString(")")
+	if q.Search != "" {
+		pattern := "%" + escapeLike(strings.ToLower(q.Search)) + "%"
+		b.WriteString(` AND (LOWER(a.title) LIKE ? ESCAPE '\' OR LOWER(COALESCE(a."key", '')) LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern)
+	}
+	if q.ReviewPending {
+		b.WriteString(" AND v.kind = ?")
+		args = append(args, VersionKindReview)
+	}
+	if q.After != nil {
+		at := s.timeArg(q.After.UpdatedAt)
+		b.WriteString(" AND (a.updated_at < ? OR (a.updated_at = ? AND a.id < ?))")
+		args = append(args, at, at, q.After.ID)
+	}
+	b.WriteString(" ORDER BY a.updated_at DESC, a.id DESC LIMIT ?")
+	args = append(args, q.Limit)
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(b.String()), args...)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: list candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Candidate
+	for rows.Next() {
+		var (
+			c                         Candidate
+			key, kind                 sql.NullString
+			seq                       sql.NullInt64
+			expires, created, updated dbTime
+		)
+		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
+			&seq, &expires, &created, &updated, &kind); err != nil {
+			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
+		}
+		c.Key = key.String
+		c.CurrentSeq = int(seq.Int64)
+		c.ExpiresAt = expires.ptr()
+		c.CreatedAt = created.Time
+		c.UpdatedAt = updated.Time
+		c.CurrentKind = kind.String
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: list candidates: %w", err)
+	}
+	return out, nil
+}
+
+// writeScopeGrants appends the scope grant arm of the candidate query.
+func (s *sqlStore) writeScopeGrants(b *strings.Builder, args *[]any, refs []string) {
+	if len(refs) == 0 {
+		return
+	}
+	b.WriteString(" OR (g.subject_kind = ? AND g.subject_ref IN (")
+	*args = append(*args, SubjectScope)
+	for i, ref := range refs {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString("?")
+		*args = append(*args, ref)
+	}
+	b.WriteString("))")
+}
+
+// escapeLike escapes the LIKE wildcards and the escape character itself,
+// so a search matches literally under ESCAPE '\'.
+func escapeLike(v string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(v)
+}

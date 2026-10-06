@@ -56,7 +56,13 @@ const fileCSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inl
 //
 // An expired artifact is unreadable to everyone.
 func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
-	kind, ref, _, ok := s.host.Principal(ctx)
+	return canReadWith(ctx, s.host, b, a)
+}
+
+// canReadWith is canRead asking host. The list endpoint passes a host that
+// memoizes answers for the length of one request.
+func canReadWith(ctx context.Context, host Host, b backend, a *Artifact) bool {
+	kind, ref, _, ok := host.Principal(ctx)
 	if !ok {
 		return false
 	}
@@ -65,14 +71,14 @@ func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 		return false
 	}
 	// 1. Credential.
-	if !s.host.Permits(ctx, a.ScopeRef, PermissionRead) {
+	if !host.Permits(ctx, a.ScopeRef, PermissionRead) {
 		return false
 	}
 	// 2. Owner, or host policy in the home scope.
 	if kind == a.OwnerKind && ref == a.OwnerRef {
 		return true
 	}
-	if s.host.Authorize(ctx, a.ScopeRef, PermissionRead) {
+	if host.Authorize(ctx, a.ScopeRef, PermissionRead) {
 		return true
 	}
 	// 3. Grants.
@@ -94,7 +100,7 @@ func (s *Service) canRead(ctx context.Context, b backend, a *Artifact) bool {
 				return true
 			}
 		case SubjectScope:
-			if g.SubjectRef != "" && g.SubjectRef != a.ScopeRef && s.host.Authorize(ctx, g.SubjectRef, PermissionRead) {
+			if g.SubjectRef != "" && g.SubjectRef != a.ScopeRef && host.Authorize(ctx, g.SubjectRef, PermissionRead) {
 				return true
 			}
 		}

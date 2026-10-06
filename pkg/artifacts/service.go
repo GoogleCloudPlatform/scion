@@ -179,6 +179,8 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 // ServeHTTP routes a request:
 //
 //	POST /api/v1/artifacts?name=<file>[&title=][&scope=]   single-file publish
+//	GET  /api/v1/artifacts?mine=1[&q=][&review_pending=1][&limit=][&cursor=]
+//	                                                       artifacts the caller owns or is granted
 //	GET  /api/v1/artifacts/{id}                            metadata of the current version
 //	GET  /api/v1/artifacts/{id}/files/{path}               a file of the current version
 //	GET  /api/v1/artifacts/{id}/versions/{seq}/files/{path} a file of version seq
@@ -192,11 +194,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rest = strings.TrimPrefix(rest, "/")
 	if rest == "" {
-		if r.Method != http.MethodPost {
-			writeMethodNotAllowed(w, http.MethodPost)
-			return
+		switch {
+		case r.Method == http.MethodPost:
+			s.handlePublish(w, r)
+		case isRead(r.Method):
+			s.handleList(w, r)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
 		}
-		s.handlePublish(w, r)
 		return
 	}
 	segs, ok := splitEscapedPath(rest)

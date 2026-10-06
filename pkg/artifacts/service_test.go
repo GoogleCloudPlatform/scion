@@ -78,7 +78,9 @@ func TestUnconfiguredServiceRoutes(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/v1/artifacts/shared/token", http.StatusNotFound},
 		{http.MethodGet, "/api/v1/artifacts/abc/unknown", http.StatusNotFound},
-		{http.MethodGet, "/api/v1/artifacts", http.StatusMethodNotAllowed},
+		{http.MethodGet, "/api/v1/artifacts", http.StatusBadRequest},
+		{http.MethodGet, "/api/v1/artifacts?mine=1", http.StatusServiceUnavailable},
+		{http.MethodPut, "/api/v1/artifacts", http.StatusMethodNotAllowed},
 		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
 		{http.MethodDelete, "/api/v1/artifacts/abc", http.StatusNotFound},
 	} {
@@ -95,13 +97,14 @@ func TestUnconfiguredServiceRoutes(t *testing.T) {
 }
 
 // TestHostIsStringOnly pins the string-only contract: every Host method
-// takes a context plus strings and returns strings and bools only, so it can
-// be served remotely.
+// takes a context plus strings and returns strings, string slices, bools
+// and errors only, so it can be served remotely.
 func TestHostIsStringOnly(t *testing.T) {
 	ctxType := reflect.TypeOf((*context.Context)(nil)).Elem()
+	errType := reflect.TypeOf((*error)(nil)).Elem()
 	host := reflect.TypeOf((*Host)(nil)).Elem()
-	if host.NumMethod() != 3 {
-		t.Fatalf("Host has %d methods, want 3 (Principal, Authorize, Permits)", host.NumMethod())
+	if host.NumMethod() != 6 {
+		t.Fatalf("Host has %d methods, want 6 (Principal, Authorize, Permits, MemberScopes, SealCursor, OpenCursor)", host.NumMethod())
 	}
 	for i := 0; i < host.NumMethod(); i++ {
 		m := host.Method(i)
@@ -114,8 +117,12 @@ func TestHostIsStringOnly(t *testing.T) {
 			}
 		}
 		for j := 0; j < m.Type.NumOut(); j++ {
-			if k := m.Type.Out(j).Kind(); k != reflect.String && k != reflect.Bool {
-				t.Errorf("%s: result %d is %v, want string or bool", m.Name, j, m.Type.Out(j))
+			out := m.Type.Out(j)
+			switch {
+			case out.Kind() == reflect.String, out.Kind() == reflect.Bool, out == errType:
+			case out.Kind() == reflect.Slice && out.Elem().Kind() == reflect.String:
+			default:
+				t.Errorf("%s: result %d is %v, want string, []string, bool or error", m.Name, j, out)
 			}
 		}
 	}
