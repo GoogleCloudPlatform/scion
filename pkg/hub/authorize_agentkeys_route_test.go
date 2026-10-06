@@ -892,3 +892,104 @@ func TestAgentActionKeysRoute_Unauthenticated401_NoOperationID(t *testing.T) {
 		})
 	}
 }
+
+// keysParityOutcome is one expected /keys route result: the HTTP status and
+// error code. An admitted call reaches real admission and ends in 503
+// keys_unavailable, because the fixture server has no dispatcher.
+type keysParityOutcome struct {
+	status int
+	code   string
+}
+
+var (
+	keysParityAdmitted     = keysParityOutcome{http.StatusServiceUnavailable, "keys_unavailable"}
+	keysParityDenied       = keysParityOutcome{http.StatusForbidden, "keys_denied"}
+	keysParityCrossProject = keysParityOutcome{http.StatusUnprocessableEntity, "cross_project_keys_unsupported"}
+)
+
+// TestAgentActionKeysRoute_ParityTable pins the allow and deny result of the
+// keys gate for user session, user access token (UAT) and agent callers, on
+// both route shapes, for a same-project and a cross-project target. Every
+// request goes through the real mux and the real authentication middleware.
+// The expected values are the attach-based results (ptone/scion#3517): the
+// gate's evaluator may change, these results may not.
+func TestAgentActionKeysRoute_ParityTable(t *testing.T) {
+	f := newAgentKeysRouteFixture(t)
+	createTestUserWithProjectRole(t, f.store, f.owner.ID, f.owner.Email, f.projectA.ID, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, f.store, f.owner.ID, f.owner.Email, f.projectB.ID, store.ProjectRoleOwner)
+
+	type requester func(t *testing.T, path string) *httptest.ResponseRecorder
+	asUser := func(u *store.User) requester {
+		return func(t *testing.T, path string) *httptest.ResponseRecorder {
+			return doRequestAsUser(t, f.srv, u, http.MethodPost, path, validKeysBody)
+		}
+	}
+	withUAT := func(projectID string, scopes ...string) requester {
+		key := mintScopedUAT(t, f.srv, f.owner.ID, projectID, scopes)
+		return func(t *testing.T, path string) *httptest.ResponseRecorder {
+			return doRequestWithUAT(t, f.srv, key, http.MethodPost, path, validKeysBody)
+		}
+	}
+	asAgent := func(name, projectID string, scopes ...AgentTokenScope) requester {
+		token := f.agentToken(t, tid(name), projectID, scopes...)
+		return func(t *testing.T, path string) *httptest.ResponseRecorder {
+			return doRequestWithAgentToken(t, f.srv, http.MethodPost, path, validKeysBody, token)
+		}
+	}
+
+	ownerSession := asUser(f.owner)
+	nonOwnerSession := asUser(f.nonOwner)
+	uatAttachA := withUAT(f.projectA.ID, "agent:attach")
+	uatAttachB := withUAT(f.projectB.ID, "agent:attach")
+	uatLifecycleA := withUAT(f.projectA.ID, "agent:lifecycle")
+	uatMessageA := withUAT(f.projectA.ID, "agent:message")
+	agentLifecycleA := asAgent("agentkeys-parity-lifecycle", f.projectA.ID, ScopeAgentLifecycle)
+	agentCreateA := asAgent("agentkeys-parity-create", f.projectA.ID, ScopeAgentCreate)
+	agentNotifyA := asAgent("agentkeys-parity-notify", f.projectA.ID, ScopeAgentNotify)
+	agentNoScopeA := asAgent("agentkeys-parity-noscope", f.projectA.ID)
+
+	cases := []struct {
+		name         string
+		do           requester
+		target       *store.Agent
+		wantTopLevel keysParityOutcome
+		wantProject  keysParityOutcome
+	}{
+		// User session: attach authority on the target decides; project
+		// boundaries do not apply to a human caller.
+		{"user owner, same project", ownerSession, f.agentInA, keysParityAdmitted, keysParityAdmitted},
+		{"user owner, cross project", ownerSession, f.agentInB, keysParityAdmitted, keysParityAdmitted},
+		{"user non-owner, same project", nonOwnerSession, f.agentInA, keysParityDenied, keysParityDenied},
+		{"user non-owner, cross project", nonOwnerSession, f.agentInB, keysParityDenied, keysParityDenied},
+
+		// UAT: the token's project boundary and exact scopes apply on top of
+		// the holder's attach authority.
+		{"UAT attach scope, token project matches target", uatAttachA, f.agentInA, keysParityAdmitted, keysParityAdmitted},
+		{"UAT attach scope, token project differs from target", uatAttachA, f.agentInB, keysParityDenied, keysParityDenied},
+		{"UAT attach scope in other project, matching target", uatAttachB, f.agentInB, keysParityAdmitted, keysParityAdmitted},
+		{"UAT lifecycle scope only, same project", uatLifecycleA, f.agentInA, keysParityDenied, keysParityDenied},
+		{"UAT message scope only, same project", uatMessageA, f.agentInA, keysParityDenied, keysParityDenied},
+		{"UAT lifecycle scope only, cross project", uatLifecycleA, f.agentInB, keysParityDenied, keysParityDenied},
+
+		// Agent credential: lifecycle scope and the target's project are
+		// required; a project mismatch has its own outcome. The project-scoped
+		// route decides the mismatch before scope and before target lookup.
+		{"agent lifecycle scope, same project", agentLifecycleA, f.agentInA, keysParityAdmitted, keysParityAdmitted},
+		{"agent lifecycle scope, cross project", agentLifecycleA, f.agentInB, keysParityCrossProject, keysParityCrossProject},
+		{"agent create scope only, same project", agentCreateA, f.agentInA, keysParityDenied, keysParityDenied},
+		{"agent create scope only, cross project", agentCreateA, f.agentInB, keysParityDenied, keysParityCrossProject},
+		{"agent notify scope only, same project", agentNotifyA, f.agentInA, keysParityDenied, keysParityDenied},
+		{"agent with no scopes, same project", agentNoScopeA, f.agentInA, keysParityDenied, keysParityDenied},
+		{"agent with no scopes, cross project", agentNoScopeA, f.agentInB, keysParityDenied, keysParityCrossProject},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			topLevel := tc.do(t, "/api/v1/agents/"+tc.target.ID+"/keys")
+			assertKeysDenialOutcome(t, "top-level", topLevel, tc.wantTopLevel.status, tc.wantTopLevel.code)
+
+			projectScoped := tc.do(t, "/api/v1/projects/"+tc.target.ProjectID+"/agents/"+tc.target.Slug+"/keys")
+			assertKeysDenialOutcome(t, "project-scoped", projectScoped, tc.wantProject.status, tc.wantProject.code)
+		})
+	}
+}
