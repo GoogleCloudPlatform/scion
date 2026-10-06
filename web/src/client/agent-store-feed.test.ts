@@ -1196,3 +1196,172 @@ describe('listedWithoutActiveDelete', () => {
     expect(listedWithoutActiveDelete(agent('a', { deletion: unknown }))).toBe(false);
   });
 });
+
+describe('AgentStore live events for agents deleted on an earlier feed', () => {
+  const deleting = {
+    state: 'deleting',
+    soft: false,
+    claim: 1,
+    startedAt: '2026-01-01T00:00:00Z',
+    leaseExpiresAt: '2026-01-01T00:00:20Z',
+  } as const;
+
+  /**
+   * Load the hub list, delete a2 over SSE, let the feed close idle, then
+   * retain the list again on a new feed. The server no longer lists a2, so
+   * only live events on the new feed can bring it back.
+   */
+  async function onNewFeedAfterDelete(): Promise<ReturnType<typeof createHarness>> {
+    const h = createHarness([agent('a1', { deletion: null }), agent('a2', { deletion: null })]);
+    const release = h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    await h.emitAgent('deleted', { agentId: 'a2' });
+    h.server.agents = h.server.agents.filter((a) => a.id !== 'a2');
+    release();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.feeds[0]?.isConnected).toBe(false);
+
+    h.store.retain(HUB, () => {});
+    const again = h.store.ensure(HUB);
+    await h.connect();
+    expect(h.feeds).toHaveLength(2);
+    expect(ids(await again)).toEqual(['a1']);
+    return h;
+  }
+
+  it('an unmarked created event does not show the agent', async () => {
+    const h = await onNewFeedAfterDelete();
+    await h.emitAgent('created', created('a2'));
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+    expect(h.server.agentFetches('a2')).toBe(0);
+  });
+
+  it('a status event with the delete running does not show the agent', async () => {
+    const h = await onNewFeedAfterDelete();
+    await h.emitAgent('created', created('a2'));
+    await h.emitAgent('status', {
+      agentId: 'a2',
+      projectId: 'p1',
+      phase: 'stopping',
+      deletion: { ...deleting },
+    });
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+  });
+
+  it('a status event with no deletion key on a row that never had one does not show the agent', async () => {
+    const h = await onNewFeedAfterDelete();
+    await h.emitAgent('created', created('a2'));
+    await h.emitAgent('status', { agentId: 'a2', projectId: 'p1', phase: 'stopped' });
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+  });
+
+  it('a status event with no delete shows the agent, and a later walk keeps it', async () => {
+    const h = await onNewFeedAfterDelete();
+    await h.emitAgent('created', created('a2'));
+    await h.emitAgent('status', {
+      agentId: 'a2',
+      projectId: 'p1',
+      phase: 'running',
+      deletion: null,
+    });
+    expect(ids(h.store.peek(HUB))).toEqual(['a1', 'a2']);
+
+    // The server lists it again only without the deletion key: the
+    // tombstone is gone, so the walk keeps the agent.
+    h.server.agents.push(agent('a2'));
+    h.events.dispatchEvent(new CustomEvent('scion:membership-changed'));
+    await h.connect();
+    expect(ids(h.store.peek(HUB))).toEqual(['a1', 'a2']);
+  });
+
+  it('a status event with a failed delete shows the agent', async () => {
+    const h = await onNewFeedAfterDelete();
+    await h.emitAgent('created', created('a2'));
+    await h.emitAgent('status', {
+      agentId: 'a2',
+      projectId: 'p1',
+      phase: 'running',
+      deletion: { state: 'failed', soft: false, claim: 2, startedAt: '2026-01-02T00:00:00Z' },
+    });
+    expect(ids(h.store.peek(HUB))).toEqual(['a1', 'a2']);
+  });
+
+  it('an agent the new feed also saw deleted stays hidden, even when an event shows no delete', async () => {
+    const h = await onNewFeedAfterDelete();
+    await h.emitAgent('deleted', { agentId: 'a2' });
+    // A stale unmarked created and a status with no delete, in one flush.
+    h.stream().emit('project.p1.agent.created', created('a2'));
+    h.stream().emit('project.p1.agent.status', {
+      agentId: 'a2',
+      projectId: 'p1',
+      phase: 'running',
+      deletion: null,
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+    expect(h.feeds[1]?.getAgent('a2')).toBeUndefined();
+  });
+
+  it('in one flush, updates a row it holds and keeps hiding a carried agent listed after it', async () => {
+    const h = await onNewFeedAfterDelete();
+    // A status for a1 (held, not carried) and an unmarked created for a2
+    // (carried), coalesced into one flush with a1 first.
+    h.stream().emit('project.p1.agent.status', {
+      agentId: 'a1',
+      projectId: 'p1',
+      phase: 'stopped',
+      deletion: null,
+    });
+    h.stream().emit('project.p1.agent.created', created('a2'));
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+    expect(find(h.store.peek(HUB), 'a1')?.phase).toBe('stopped');
+  });
+
+  it('in one flush, keeps hiding carried agents listed around a row it holds, and updates that row', async () => {
+    // a2 and a3 are both carried to the new feed.
+    const h = createHarness([
+      agent('a1', { deletion: null }),
+      agent('a2', { deletion: null }),
+      agent('a3', { deletion: null }),
+    ]);
+    const release = h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    await h.emitAgent('deleted', { agentId: 'a2' });
+    await h.emitAgent('deleted', { agentId: 'a3' });
+    h.server.agents = h.server.agents.filter((a) => a.id === 'a1');
+    release();
+    await vi.advanceTimersByTimeAsync(60_000);
+    h.store.retain(HUB, () => {});
+    const again = h.store.ensure(HUB);
+    await h.connect();
+    expect(ids(await again)).toEqual(['a1']);
+
+    // One flush, carried a2 first: an unmarked created for a2, a status
+    // for held a1, then an unmarked created for a3.
+    h.stream().emit('project.p1.agent.created', created('a2'));
+    h.stream().emit('project.p1.agent.status', {
+      agentId: 'a1',
+      projectId: 'p1',
+      phase: 'stopped',
+      deletion: null,
+    });
+    h.stream().emit('project.p1.agent.created', created('a3'));
+    await vi.advanceTimersByTimeAsync(100);
+    await settle();
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+    expect(find(h.store.peek(HUB), 'a1')?.phase).toBe('stopped');
+  });
+
+  it('a restored created event still shows the agent', async () => {
+    const h = await onNewFeedAfterDelete();
+    await h.emitAgent('created', { ...created('a2'), restoredAt: '2026-01-03T00:00:00Z' });
+    expect(ids(h.store.peek(HUB))).toEqual(['a1', 'a2']);
+  });
+});
