@@ -1017,6 +1017,9 @@ type RemoteCreateAgentRequest struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath.
+	// Brokers that predate it ignore it and use their own bucket setting.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with env requirements.
