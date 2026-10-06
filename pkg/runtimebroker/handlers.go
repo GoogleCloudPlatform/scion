@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1063,7 +1064,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               req.Name,
 		AgentID:            req.ID,
-		LaunchID:           req.LaunchID,
 		Slug:               req.Slug,
 		ProjectPath:        req.ProjectPath,
 		ProjectSlug:        req.ProjectSlug,
@@ -2419,6 +2419,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
+	defer s.reportRuntimePanic(ctx, w, mgr, id, projectID, opts.RunID, "start agent")
 	agentInfo, err := mgr.Start(ctx, opts)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -2804,6 +2805,38 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	})
 }
 
+// reportRuntimePanic is deferred by startAgent and restartAgent just before
+// their first runtime call. A panic from that point on may follow a runtime
+// action (restart's stop, or part of Manager.Start), so it is answered like
+// a failed Manager.Start, with startFailureDetails, rather than by the
+// recovery middleware's generic error, which carries no start marker.
+func (s *Server) reportRuntimePanic(ctx context.Context, w http.ResponseWriter, mgr agent.Manager, id, projectID, runID, op string) {
+	p := recover()
+	if p == nil {
+		return
+	}
+	s.agentLifecycleLog.Error("Agent "+op+" panicked",
+		"agent_id", id, "panic", p, "stack", string(debug.Stack()))
+	details := s.panicFailureDetails(ctx, mgr, id, projectID, runID)
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+		runtimeOpError(op, fmt.Errorf("panic: %v", p)).Error(), details)
+}
+
+// panicFailureDetails is startFailureDetails for reportRuntimePanic. The
+// runtime that panicked may panic again while it is re-listed for the
+// current run; that panic is recovered here and the details fall back to
+// startAttemptedDetails, so the startAttempted marker is still sent.
+func (s *Server) panicFailureDetails(ctx context.Context, mgr agent.Manager, id, projectID, runID string) (details map[string]interface{}) {
+	defer func() {
+		if p := recover(); p != nil {
+			s.agentLifecycleLog.Error("Agent start failure: re-listing the runtime panicked",
+				"agent_id", id, "panic", p)
+			details = startAttemptedDetails(runID)
+		}
+	}()
+	return s.startFailureDetails(ctx, mgr, id, projectID, runID)
+}
+
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	// Tracked until the start leg, including Run's deferred cleanup, has
 	// returned.
@@ -2962,6 +2995,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		s.writeRuntimeOpError(w, ctx, "restart agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
+	// From here on the restart touches the runtime (the stop, then the
+	// start), so a panic is reported as an attempted start.
+	defer s.reportRuntimePanic(ctx, w, mgr, id, projectID, opts.RunID, "restart agent")
 	// An empty target means the agent isn't present in this project — skip the
 	// stop (don't risk stopping a same-slug agent in another project) and let
 	// the start below create it.
