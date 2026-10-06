@@ -1306,7 +1306,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			// No Runtime Broker-reported profile is written onto a pinned
 			// (flat) agent, or onto any agent of a flat Runtime Broker.
-			if agentHB.Profile != "" && !agent.IsPinned() && !heartbeatBrokerIsFlat(loadHeartbeatBroker) && (agent.AppliedConfig == nil || agent.AppliedConfig.Profile == "") {
+			// The broker row is read last, only when a backfill would
+			// otherwise happen.
+			if agentHB.Profile != "" && !agent.IsPinned() && (agent.AppliedConfig == nil || agent.AppliedConfig.Profile == "") && !heartbeatBrokerIsFlat(loadHeartbeatBroker) {
 				if agent.AppliedConfig == nil {
 					agent.AppliedConfig = &store.AgentAppliedConfig{}
 				}
