@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -30,9 +31,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,11 +193,11 @@ func TestCloneSharedWorkspaceProject_HubProjectIDIsWorkspaceIdentity(t *testing.
 
 		workspacePath, err := hubManagedProjectPath(project.Slug)
 		require.NoError(t, err)
-		ident, err := readWorkspaceIdentity(workspacePath)
+		ident, err := config.ReadWorkspaceIdentity(workspacePath)
 		require.NoError(t, err)
 		require.NotNil(t, ident)
-		assert.Equal(t, project.ID, ident.id)
-		assert.Equal(t, markerForm, ident.marker != nil)
+		assert.Equal(t, project.ID, ident.ID)
+		assert.Equal(t, markerForm, ident.Marker != nil)
 
 		want, err := projectConfigRoot(project.Slug, project.ID)
 		require.NoError(t, err)
@@ -260,10 +264,10 @@ func TestAlignClonedProjectIdentities_ExistingCloneUsesRecordDir(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, want, workspaceConfigRoot(t, workspacePath))
 
-		ident, err := readWorkspaceIdentity(workspacePath)
+		ident, err := config.ReadWorkspaceIdentity(workspacePath)
 		require.NoError(t, err)
-		assert.Equal(t, project.ID, ident.id)
-		assert.Equal(t, markerForm, ident.marker != nil, "the identity keeps its on-disk form")
+		assert.Equal(t, project.ID, ident.ID)
+		assert.Equal(t, markerForm, ident.Marker != nil, "the identity keeps its on-disk form")
 
 		assert.NoDirExists(t, previous)
 		assert.Equal(t, "schema_version: \"1\"\n", readFile(t, filepath.Join(want, config.DotScion, "settings.yaml")))
@@ -347,9 +351,9 @@ func TestAlignClonedProjectIdentities_OtherProjectsUnchanged(t *testing.T) {
 		{"worktree", worktreeWS, worktreeRoot, worktreeID},
 		{"native", nativeWS, nativeRoot, nativeID},
 	} {
-		ident, err := readWorkspaceIdentity(tc.ws)
+		ident, err := config.ReadWorkspaceIdentity(tc.ws)
 		require.NoError(t, err, tc.name)
-		assert.Equal(t, tc.id, ident.id, tc.name)
+		assert.Equal(t, tc.id, ident.ID, tc.name)
 		assert.Equal(t, tc.root, workspaceConfigRoot(t, tc.ws), tc.name)
 		assert.Equal(t, "shared", readFile(t, filepath.Join(tc.root, config.SharedDirsSubdir, "data", "file.txt")), tc.name)
 	}
@@ -378,9 +382,9 @@ func TestAlignClonedProjectIdentities_WaitsForAgentsToStop(t *testing.T) {
 		counts := srv.alignClonedProjectIdentities(ctx)
 		assert.Equal(t, 1, counts.skippedInUse, phase)
 
-		ident, err := readWorkspaceIdentity(workspacePath)
+		ident, err := config.ReadWorkspaceIdentity(workspacePath)
 		require.NoError(t, err)
-		assert.Equal(t, localID, ident.id, "identity is kept while an agent is %s", phase)
+		assert.Equal(t, localID, ident.ID, "identity is kept while an agent is %s", phase)
 		assert.DirExists(t, previous)
 	}
 
@@ -423,9 +427,9 @@ func TestAlignWorkspaceProjectIdentity_PopulatedRecordDirSkipsProject(t *testing
 		assert.Equal(t, 1, counts.skippedTargetExists)
 	}
 
-	ident, err := readWorkspaceIdentity(workspacePath)
+	ident, err := config.ReadWorkspaceIdentity(workspacePath)
 	require.NoError(t, err)
-	assert.Equal(t, localID, ident.id, "identity is unchanged")
+	assert.Equal(t, localID, ident.ID, "identity is unchanged")
 	assert.Equal(t, previous, workspaceConfigRoot(t, workspacePath))
 	assert.Equal(t, "kept\n", readFile(t, filepath.Join(want, config.DotScion, "settings.yaml")))
 	assert.Equal(t, "shared", readFile(t, filepath.Join(previous, config.SharedDirsSubdir, "data", "file.txt")))
@@ -659,33 +663,75 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 }
 
 // TestHubWorkspaceDownloads_UseIdentityKeepingHelper checks that every hub
-// download of a workspace upload goes through syncHubWorkspaceFromGCS: the
-// only reference to gcp.SyncFromGCS in the hub package is the variable that
-// helper calls.
+// download of a workspace upload goes through syncHubWorkspaceFromGCS:
+//   - the only reference to gcp.SyncFromGCS in the hub package is the
+//     declaration of syncFromGCSIntoHubWorkspace;
+//   - syncFromGCSIntoHubWorkspace is used only inside
+//     syncHubWorkspaceFromGCS;
+//   - syncHubWorkspaceFromGCS is called once from each of the four
+//     functions that download a broker workspace upload into a hub
+//     workspace, and from nowhere else.
 func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
-	var refs []string
+	var gcpRefs []string
+	varUses := map[string]int{}
+	helperCalls := map[string]int{}
 	for _, file := range files {
 		if strings.HasSuffix(file, "_test.go") {
 			continue
 		}
 		f, err := parser.ParseFile(fset, file, nil, 0)
 		require.NoError(t, err, file)
-		ast.Inspect(f, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "SyncFromGCS" {
+
+		// Package-level declarations outside functions.
+		for _, decl := range f.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(gen, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "SyncFromGCS" {
+					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "gcp" {
+						gcpRefs = append(gcpRefs, "decl")
+					}
+				}
 				return true
+			})
+		}
+
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
 			}
-			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "gcp" {
-				refs = append(refs, fset.Position(sel.Pos()).String())
-			}
-			return true
-		})
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "gcp" && x.Sel.Name == "SyncFromGCS" {
+						gcpRefs = append(gcpRefs, fn.Name.Name)
+					}
+					if x.Sel.Name == "syncHubWorkspaceFromGCS" {
+						helperCalls[fn.Name.Name]++
+					}
+				case *ast.Ident:
+					if x.Name == "syncFromGCSIntoHubWorkspace" {
+						varUses[fn.Name.Name]++
+					}
+				}
+				return true
+			})
+		}
 	}
-	require.Len(t, refs, 1, "gcp.SyncFromGCS references: %v", refs)
-	assert.Contains(t, refs[0], "cloned_project_identity.go")
+	assert.Equal(t, []string{"decl"}, gcpRefs, "gcp.SyncFromGCS references")
+	assert.Equal(t, map[string]int{"syncHubWorkspaceFromGCS": 1}, varUses, "syncFromGCSIntoHubWorkspace uses")
+	assert.Equal(t, map[string]int{
+		"syncWorkspaceOnStop":           1,
+		"syncHubManagedWorkspaceBack":   1,
+		"refreshProjectCacheFromBroker": 1,
+		"handleProjectCacheNotify":      1,
+	}, helperCalls, "syncHubWorkspaceFromGCS callers")
 }
 
 func TestRecordHubWorkspace(t *testing.T) {
@@ -756,4 +802,202 @@ func TestCloneSharedWorkspaceProject_RecordsHubWorkspace(t *testing.T) {
 	got, err := config.ReadWorkspaceRecord(path)
 	require.NoError(t, err)
 	assert.Equal(t, project.ID, got)
+}
+
+// replaceScionEntry replaces the workspace .scion entry with one of the
+// given form ("dir" with a project-id and another file, or "marker"), as a
+// download carrying the other form would.
+func replaceScionEntry(workspacePath, form string) error {
+	scionPath := filepath.Join(workspacePath, config.DotScion)
+	if err := os.RemoveAll(scionPath); err != nil {
+		return err
+	}
+	if form == "marker" {
+		return config.WriteProjectMarker(scionPath, &config.ProjectMarker{
+			ProjectID: "copied-id", ProjectName: "copied", ProjectSlug: "copied",
+		})
+	}
+	if err := os.MkdirAll(filepath.Join(scionPath, "templates"), 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(scionPath, "templates", "t.yaml"), []byte("t"), 0644); err != nil {
+		return err
+	}
+	return config.WriteProjectID(scionPath, "copied-id")
+}
+
+func TestSyncHubWorkspaceFromGCS_KeepsIdentityFormWhenDownloadChangesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, downloadForm string
+		seed               func(t *testing.T, scionPath string)
+	}{
+		{"marker kept over downloaded directory", "dir", func(t *testing.T, p string) {
+			require.NoError(t, config.WriteProjectMarker(p, &config.ProjectMarker{
+				ProjectID: api.NewUUID(), ProjectName: "hub", ProjectSlug: "hub",
+			}))
+		}},
+		{"directory kept over downloaded marker", "marker", func(t *testing.T, p string) {
+			require.NoError(t, os.MkdirAll(p, 0755))
+			require.NoError(t, config.WriteProjectID(p, api.NewUUID()))
+		}},
+		{"directory without project-id kept over downloaded marker", "marker", func(t *testing.T, p string) {
+			require.NoError(t, os.MkdirAll(p, 0755))
+		}},
+		{"no entry kept over downloaded directory", "dir", func(t *testing.T, p string) {}},
+		{"no entry kept over downloaded marker", "marker", func(t *testing.T, p string) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identityTestHome(t)
+			srv, _ := testServer(t)
+			orig := syncFromGCSIntoHubWorkspace
+			t.Cleanup(func() { syncFromGCSIntoHubWorkspace = orig })
+			syncFromGCSIntoHubWorkspace = func(_ context.Context, _, _, workspacePath string) error {
+				if err := os.WriteFile(filepath.Join(workspacePath, "synced.txt"), []byte("synced"), 0644); err != nil {
+					return err
+				}
+				return replaceScionEntry(workspacePath, tc.downloadForm)
+			}
+			workspacePath := t.TempDir()
+			tc.seed(t, filepath.Join(workspacePath, config.DotScion))
+			before := identitySnapshot(t, workspacePath)
+
+			require.NoError(t, srv.syncHubWorkspaceFromGCS(context.Background(), "bucket", "prefix", workspacePath))
+
+			assert.Equal(t, before, identitySnapshot(t, workspacePath))
+			assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")))
+		})
+	}
+}
+
+func TestSyncHubWorkspaceFromGCS_ReportsIdentityNotKept(t *testing.T) {
+	identityTestHome(t)
+	srv, _ := testServer(t)
+	workspacePath := t.TempDir()
+	scionPath := filepath.Join(workspacePath, config.DotScion)
+	require.NoError(t, config.WriteProjectMarker(scionPath, &config.ProjectMarker{
+		ProjectID: api.NewUUID(), ProjectName: "hub", ProjectSlug: "hub",
+	}))
+
+	// The download leaves a .scion directory that cannot be removed.
+	locked := filepath.Join(scionPath, "locked")
+	orig := syncFromGCSIntoHubWorkspace
+	t.Cleanup(func() {
+		syncFromGCSIntoHubWorkspace = orig
+		_ = os.Chmod(locked, 0755)
+	})
+	syncFromGCSIntoHubWorkspace = func(_ context.Context, _, _, _ string) error {
+		if err := os.Remove(scionPath); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(locked, 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(locked, "f"), []byte("f"), 0644); err != nil {
+			return err
+		}
+		return os.Chmod(locked, 0500)
+	}
+
+	err := srv.syncHubWorkspaceFromGCS(context.Background(), "bucket", "prefix", workspacePath)
+	require.ErrorIs(t, err, errHubIdentityNotKept)
+}
+
+// sameHomeManager is the smallest agent.Manager a broker create needs.
+type sameHomeManager struct {
+	agent.Manager
+}
+
+func (m *sameHomeManager) List(context.Context, map[string]string) ([]api.AgentInfo, error) {
+	return nil, nil
+}
+
+func (m *sameHomeManager) Preflight(context.Context, api.StartOptions) error { return nil }
+
+func (m *sameHomeManager) Provision(context.Context, api.StartOptions) (*api.ScionConfig, error) {
+	return &api.ScionConfig{}, nil
+}
+
+func (m *sameHomeManager) Start(_ context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	return &api.AgentInfo{ID: "container-1", Name: opts.Name, Phase: "running"}, nil
+}
+
+// TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity runs the hub's record
+// writer and a broker against one HOME. All coordination between them is on
+// disk, so this covers a broker in the hub process and a broker in a
+// separate process with the same HOME alike. The hub workspace carries an
+// identity other than the hub project ID (an older clone the hub step has
+// not aligned yet); the broker's create (with and without a workspace
+// upload) must leave it, and its project config directory, unchanged.
+func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		markerForm    bool
+		brokerRecord  bool
+		withWorkspace bool
+	}{
+		{"project-id file, upload", false, false, true},
+		{"marker file, upload", true, false, true},
+		{"project-id file, broker record present, upload", false, true, true},
+		{"marker file, broker record present, no upload", true, true, false},
+		{"project-id file, no upload", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identityTestHome(t)
+			hubSrv, st := testServer(t)
+			ctx := context.Background()
+
+			project := sharedWorkspaceProject("same-home")
+			require.NoError(t, st.CreateProject(ctx, project))
+			localID := api.NewUUID()
+			workspacePath, previous := seedWorkspaceIdentity(t, project.Slug, localID, tc.markerForm)
+
+			recorded, err := hubSrv.recordHubWorkspace(project)
+			require.NoError(t, err)
+			require.True(t, recorded)
+
+			brokerRecord, err := config.BrokerWorkspaceRecordPath(project.Slug)
+			require.NoError(t, err)
+			if tc.brokerRecord {
+				require.NoError(t, config.WriteWorkspaceRecord(brokerRecord, project.ID))
+			}
+			before := identitySnapshot(t, workspacePath)
+
+			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerID = "same-home-broker"
+			cfg.BrokerName = "same-home-broker"
+			cfg.StorageBucket = "bucket"
+			brokerSrv := runtimebroker.New(cfg, &sameHomeManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+			brokerSrv.SetWorkspaceDownloader(func(_ context.Context, _, _, localPath string) error {
+				return os.WriteFile(filepath.Join(localPath, "downloaded.txt"), []byte("downloaded"), 0644)
+			})
+
+			createReq := runtimebroker.CreateAgentRequest{
+				ID:          "agent-same-home",
+				Name:        "agent-same-home",
+				ProjectID:   project.ID,
+				ProjectSlug: project.Slug,
+			}
+			if tc.withWorkspace {
+				// A broker the hub treats as remote: workspace upload.
+				createReq.WorkspaceStoragePath = "workspaces/" + project.ID
+			} else {
+				// A broker the hub treats as local: the hub workspace path.
+				createReq.WorkspaceMode = store.WorkspaceModeShared
+				createReq.Config = &runtimebroker.CreateAgentConfig{Workspace: workspacePath}
+			}
+			body, err := json.Marshal(createReq)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(body)))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			brokerSrv.Handler().ServeHTTP(rec, req)
+			require.Less(t, rec.Code, 300, rec.Body.String())
+
+			assert.Equal(t, before, identitySnapshot(t, workspacePath), "hub workspace identity unchanged")
+			assert.Equal(t, previous, workspaceConfigRoot(t, workspacePath), "project config directory unchanged")
+			if !tc.brokerRecord {
+				assert.NoFileExists(t, brokerRecord, "no broker record for the hub's own workspace")
+			}
+		})
+	}
 }

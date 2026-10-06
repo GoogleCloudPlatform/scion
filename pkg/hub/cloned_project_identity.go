@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -87,76 +86,12 @@ func (e *alignError) Unwrap() error { return e.err }
 
 func alignFailed(step string, err error) error { return &alignError{step: step, err: err} }
 
-// workspaceIdentity is the project identity recorded in a workspace's .scion
-// entry, in either of its two on-disk forms.
-type workspaceIdentity struct {
-	scionPath string
-	// marker is set when .scion is a marker file; nil when it is a
-	// directory holding a project-id file.
-	marker *config.ProjectMarker
-	id     string
-	slug   string
-}
-
-// readWorkspaceIdentity reads the project identity of the workspace at
-// workspacePath. It returns (nil, nil) when the workspace has no .scion entry.
-func readWorkspaceIdentity(workspacePath string) (*workspaceIdentity, error) {
-	scionPath := filepath.Join(workspacePath, config.DotScion)
-	info, err := os.Lstat(scionPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	switch {
-	case info.Mode().IsRegular():
-		marker, err := config.ReadProjectMarker(scionPath)
-		if err != nil {
-			return nil, err
-		}
-		return &workspaceIdentity{scionPath: scionPath, marker: marker, id: marker.ProjectID, slug: marker.ProjectSlug}, nil
-	case info.IsDir():
-		id, err := config.ReadProjectID(scionPath)
-		if err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-		return &workspaceIdentity{
-			scionPath: scionPath,
-			id:        id,
-			slug:      api.Slugify(config.GetProjectName(scionPath)),
-		}, nil
-	default:
-		return nil, fmt.Errorf("unsupported .scion entry type")
-	}
-}
-
-// matches reports whether the identity already is projectID under slug.
-func (w *workspaceIdentity) matches(slug, projectID string) bool {
-	if w.id != projectID {
-		return false
-	}
-	return w.marker == nil || w.slug == slug
-}
-
-// write records projectID (and, for marker files, slug) as the identity.
-func (w *workspaceIdentity) write(slug, projectID string) error {
-	if w.marker == nil {
-		return config.WriteProjectID(w.scionPath, projectID)
-	}
-	updated := *w.marker
-	updated.ProjectID = projectID
-	updated.ProjectSlug = slug
-	return config.WriteProjectMarker(w.scionPath, &updated)
-}
-
 // confinedProjectConfigRoot returns ~/.scion/project-configs/<slug>__<id8>
 // for slug and projectID. ok is false unless projectID is a valid project
-// ID, slug is a valid project slug, and the result is a direct child of the
-// project-configs directory named exactly <slug>__<id8>.
+// ID and config.ConfinedProjectConfigRoot accepts slug and projectID (its
+// path-element rule includes validateProjectSlug's).
 func confinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
-	if !shareddirs.ValidProjectID(projectID) || validateProjectSlug(slug) != nil {
+	if !shareddirs.ValidProjectID(projectID) {
 		return "", false
 	}
 	return config.ConfinedProjectConfigRoot(slug, projectID)
@@ -181,14 +116,14 @@ func confinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 // inUse is called after all checks and immediately before the first change;
 // when it reports true, nothing is changed (alignSkippedInUse).
 func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse func() (bool, error)) (identityAlignment, error) {
-	current, err := readWorkspaceIdentity(workspacePath)
+	current, err := config.ReadWorkspaceIdentity(workspacePath)
 	if err != nil {
 		return identityAlignment{}, alignFailed("read workspace identity", err)
 	}
 	if current == nil {
 		return identityAlignment{Outcome: alignNoIdentity}, nil
 	}
-	if current.matches(slug, projectID) {
+	if current.Matches(slug, projectID) {
 		return identityAlignment{Outcome: alignAlreadyMatching}, nil
 	}
 
@@ -197,8 +132,8 @@ func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse 
 		return identityAlignment{Outcome: alignSkippedUnexpectedIdentity}, nil
 	}
 	var previous string
-	if current.id != "" {
-		if previous, ok = confinedProjectConfigRoot(current.slug, current.id); !ok {
+	if current.ID != "" {
+		if previous, ok = confinedProjectConfigRoot(current.Slug, current.ID); !ok {
 			return identityAlignment{Outcome: alignSkippedUnexpectedIdentity}, nil
 		}
 	}
@@ -231,7 +166,7 @@ func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse 
 		}
 		res.Relocated = true
 	}
-	if err := current.write(slug, projectID); err != nil {
+	if err := current.Write(slug, projectID); err != nil {
 		return identityAlignment{Outcome: alignAligned, Relocated: res.Relocated}, alignFailed("write workspace identity", err)
 	}
 	return res, nil
@@ -581,19 +516,33 @@ func (s *Server) recordHubWorkspace(project *store.Project) (recorded bool, err 
 // workspace. A variable so tests can stand in for GCS.
 var syncFromGCSIntoHubWorkspace = gcp.SyncFromGCS
 
+// Errors returned by syncHubWorkspaceFromGCS. They carry no paths; details
+// are logged by project-neutral step, operation and errno.
+var (
+	errHubIdentityUnreadable = errors.New("hub workspace identity could not be read; workspace download skipped")
+	errHubIdentityNotKept    = errors.New("hub workspace identity could not be kept after workspace download")
+)
+
 // syncHubWorkspaceFromGCS downloads a broker's workspace upload into the hub
 // workspace at workspacePath, keeping the hub workspace's own project
-// identity (.scion marker file, or .scion/project-id) as it was before the
-// download. The hub workspace identity is set only by the hub itself.
+// identity as it was before the download: the .scion entry keeps its form
+// (marker file, directory, or none) and its identity content (marker
+// content, or .scion/project-id content or absence). The hub workspace
+// identity is set only by the hub itself. When the identity cannot be read
+// beforehand, nothing is downloaded; when it cannot be put back, an error
+// is returned.
 func (s *Server) syncHubWorkspaceFromGCS(ctx context.Context, bucket, prefix, workspacePath string) error {
 	saved, err := captureWorkspaceIdentity(workspacePath)
 	if err != nil {
-		return alignFailed("read hub workspace identity", err)
+		s.workspaceLog.Warn("hub workspace identity could not be read, workspace download skipped",
+			alignErrorAttrs(alignFailed("read hub workspace identity", err))...)
+		return errHubIdentityUnreadable
 	}
 	syncErr := syncFromGCSIntoHubWorkspace(ctx, bucket, prefix, workspacePath)
 	if err := saved.restore(); err != nil {
 		s.workspaceLog.Warn("hub workspace identity could not be kept after workspace download",
 			alignErrorAttrs(alignFailed("keep hub workspace identity", err))...)
+		return errors.Join(syncErr, errHubIdentityNotKept)
 	}
 	return syncErr
 }
@@ -649,8 +598,11 @@ func (w *savedWorkspaceIdentity) projectIDPath() string {
 	return filepath.Join(w.scionPath, projectkeys.ProjectIDFile)
 }
 
-// restore puts the captured identity back. Files other than the identity
-// itself are left as the download wrote them.
+// restore puts the captured identity back. The captured form is
+// authoritative: a .scion entry of another form left by the download is
+// removed first (the hub workspace had no entry of that form, so nothing the
+// hub kept is lost). Files other than the identity inside a .scion
+// directory are left as the download wrote them.
 func (w *savedWorkspaceIdentity) restore() error {
 	info, err := os.Lstat(w.scionPath)
 	exists := err == nil
@@ -663,45 +615,55 @@ func (w *savedWorkspaceIdentity) restore() error {
 		if !exists {
 			return nil
 		}
-		if info.Mode().IsRegular() {
-			return os.Remove(w.scionPath)
-		}
-		if info.IsDir() {
-			return removeIfExists(w.projectIDPath())
-		}
-		return fmt.Errorf("unsupported .scion entry type")
+		return os.RemoveAll(w.scionPath)
 
 	case identityEntryMarker:
 		if exists && !info.Mode().IsRegular() {
-			return fmt.Errorf(".scion entry form changed")
+			if err := os.RemoveAll(w.scionPath); err != nil {
+				return err
+			}
 		}
 		return writeIfDifferent(w.scionPath, w.content)
 
 	case identityEntryDir:
 		if exists && !info.IsDir() {
-			return fmt.Errorf(".scion entry form changed")
-		}
-		if !w.hasProjectID {
-			return removeIfExists(w.projectIDPath())
+			if err := os.Remove(w.scionPath); err != nil {
+				return err
+			}
 		}
 		if err := os.MkdirAll(w.scionPath, 0755); err != nil {
 			return err
+		}
+		if !w.hasProjectID {
+			return removeIfExists(w.projectIDPath())
 		}
 		return writeIfDifferent(w.projectIDPath(), w.content)
 	}
 	return nil
 }
 
+// removeIfExists removes the entry at path, whatever its type; an absent
+// entry is not an error.
 func removeIfExists(path string) error {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return os.RemoveAll(path)
 }
 
+// writeIfDifferent makes path a regular file holding content. An entry of
+// another type at path (directory, symlink) is removed first, so the write
+// never goes through it.
 func writeIfDifferent(path string, content []byte) error {
-	if current, err := os.ReadFile(path); err == nil && string(current) == string(content) {
-		return nil
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	case err == nil:
+		if current, err := os.ReadFile(path); err == nil && string(current) == string(content) {
+			return nil
+		}
+	case !os.IsNotExist(err):
+		return err
 	}
 	return os.WriteFile(path, content, 0644)
 }

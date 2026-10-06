@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Workspace records name which side populated a hub-managed project
@@ -74,9 +76,10 @@ func ReadWorkspaceRecord(path string) (string, error) {
 
 // ConfinedProjectConfigRoot returns the project config directory
 // ~/.scion/project-configs/<slug>__<id8> for slug and projectID. ok is false
-// unless slug and projectID are single path elements and the result is a
-// direct child of the project-configs directory named exactly <slug>__<id8>.
-// Callers apply the project ID grammar themselves.
+// unless slug and projectID are single path elements (non-empty, not ".",
+// no "..", no path separator; this includes the hub's project slug rules)
+// and the result is a direct child of the project-configs directory named
+// exactly <slug>__<id8>. Callers apply the project ID grammar themselves.
 func ConfinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 	if !isSinglePathElement(slug) || !isSinglePathElement(projectID) {
 		return "", false
@@ -97,4 +100,73 @@ func ConfinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 // isSinglePathElement reports whether s is usable as one path element.
 func isSinglePathElement(s string) bool {
 	return s != "" && s != "." && !strings.Contains(s, "..") && !strings.ContainsAny(s, `/\`)
+}
+
+// WorkspaceIdentity is the project identity recorded in a workspace's .scion
+// entry, in either of its two on-disk forms.
+type WorkspaceIdentity struct {
+	// ScionPath is <workspace>/.scion.
+	ScionPath string
+	// Marker is set when .scion is a marker file; nil when it is a
+	// directory holding a project-id file.
+	Marker *ProjectMarker
+	// ID is the recorded project ID; empty for a directory without a
+	// project-id file.
+	ID string
+	// Slug is the marker's project slug, or for a directory the slug
+	// derived from the workspace directory name.
+	Slug string
+}
+
+// ReadWorkspaceIdentity reads the project identity of the workspace at
+// workspacePath. It returns (nil, nil) when the workspace has no .scion
+// entry, and an error for a .scion entry that is neither a regular file nor
+// a directory.
+func ReadWorkspaceIdentity(workspacePath string) (*WorkspaceIdentity, error) {
+	scionPath := filepath.Join(workspacePath, DotScion)
+	info, err := os.Lstat(scionPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	switch {
+	case info.Mode().IsRegular():
+		marker, err := ReadProjectMarker(scionPath)
+		if err != nil {
+			return nil, err
+		}
+		return &WorkspaceIdentity{ScionPath: scionPath, Marker: marker, ID: marker.ProjectID, Slug: marker.ProjectSlug}, nil
+	case info.IsDir():
+		id, err := ReadProjectID(scionPath)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		return &WorkspaceIdentity{ScionPath: scionPath, ID: id, Slug: api.Slugify(GetProjectName(scionPath))}, nil
+	default:
+		return nil, fmt.Errorf("unsupported .scion entry type")
+	}
+}
+
+// Matches reports whether the identity already is projectID under slug.
+// The slug of a directory identity follows from the workspace path and is
+// not compared.
+func (w *WorkspaceIdentity) Matches(slug, projectID string) bool {
+	if w.ID != projectID {
+		return false
+	}
+	return w.Marker == nil || w.Slug == slug
+}
+
+// Write records projectID (and, for a marker file, slug) as the identity,
+// in the form the entry already has. Other marker fields are kept.
+func (w *WorkspaceIdentity) Write(slug, projectID string) error {
+	if w.Marker == nil {
+		return WriteProjectID(w.ScionPath, projectID)
+	}
+	updated := *w.Marker
+	updated.ProjectID = projectID
+	updated.ProjectSlug = slug
+	return WriteProjectMarker(w.ScionPath, &updated)
 }
