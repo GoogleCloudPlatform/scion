@@ -234,15 +234,10 @@ func TestAdoptedParentChildCeilingIsSubsetOfAncestors(t *testing.T) {
 	assert.Equal(t, hubDeliveryPermissionList, deliverOf(childEdge.PermissionIDs), "the adopted chain passes delivery eligibility")
 }
 
-// fullRolePermissionsAfterCompatibilityV1 lists the permissions a
-// session-created full parent gives a new child that were registered after
-// the frozen compatibility policy V1. The adopted ceiling leaves them out;
-// a change to this list is a change to the parity, not to V1.
-var fullRolePermissionsAfterCompatibilityV1 = []string{"artifact.read"}
-
 // Parity: the adopted full ceiling is what a session-created full parent
-// gives a new child, plus gcp_service_account.use, minus the permissions
-// registered after compatibility policy V1.
+// gives a new child, plus gcp_service_account.use, minus the permissions no
+// compatibility policy V1 ceiling carries. Each permission left out must be
+// one unrecorded chains never held (legacyChainExcludedPermissions).
 func TestAdoptedEdgeMatchesNewChildParity(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-parity")
 	runBootAdoption(t, f.store)
@@ -257,18 +252,15 @@ func TestAdoptedEdgeMatchesNewChildParity(t *testing.T) {
 			withoutUse = append(withoutUse, id)
 		}
 	}
-	later := map[string]bool{}
-	for _, id := range fullRolePermissionsAfterCompatibilityV1 {
-		later[id] = true
-	}
 	var childAtV1 []string
 	for _, id := range childEdge.PermissionIDs {
-		if !later[id] {
+		if adoptionCeilingCovers(id) {
 			childAtV1 = append(childAtV1, id)
+			continue
 		}
+		assert.True(t, legacyChainExcludedPermissions[id], "%s is left out of the adopted ceiling but held by unrecorded chains", id)
 	}
 	assert.Equal(t, childAtV1, withoutUse)
-	assert.Subset(t, childEdge.PermissionIDs, fullRolePermissionsAfterCompatibilityV1, "each listed permission is in the new child's ceiling")
 	assert.True(t, roleFitsCeiling(adopted.EffectCeiling, AgentRoleFull))
 }
 
