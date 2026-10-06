@@ -469,11 +469,11 @@ func TestLoadSettingsKoanfV1LegacyEnvNeverAdopted(t *testing.T) {
 	}
 
 	// Agent containers export the canonical project-ID env vars, which
-	// would legitimately populate ProjectID and mask what this test checks.
+	// legitimately populate ProjectID and would make this test fail for a
+	// reason unrelated to the legacy variable.
 	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
 	if err != nil {
