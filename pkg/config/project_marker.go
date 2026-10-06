@@ -15,9 +15,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -35,13 +38,42 @@ type ProjectMarker struct {
 	Type        string `yaml:"type,omitempty"` // "shadow" for shadowed projects
 }
 
+// ErrInvalidProjectID reports a project ID that does not match the project
+// ID format accepted by ValidateProjectID.
+var ErrInvalidProjectID = errors.New("invalid project ID")
+
+// projectIDPattern is the project ID format. GenerateProjectID produces
+// canonical UUIDs, which match it; it also admits other tokens of up to 128
+// letters, digits, '.', '_' and '-' that start with a letter or digit. Every
+// matching ID is a single, non-special path element.
+var projectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ValidateProjectID returns an error wrapping ErrInvalidProjectID unless id
+// matches the project ID format.
+func ValidateProjectID(id string) error {
+	if !projectIDPattern.MatchString(id) {
+		return fmt.Errorf("%w: %q", ErrInvalidProjectID, id)
+	}
+	return nil
+}
+
+// invalidShortID is the ShortUUID of a project ID that fails
+// ValidateProjectID. It contains a '-', which never appears in the short form
+// of a valid ID, so it cannot coincide with one.
+const invalidShortID = "invalid-id"
+
 // IsShadow returns true if this marker represents a shadowed project.
 func (m *ProjectMarker) IsShadow() bool {
 	return m.Type == "shadow"
 }
 
 // ShortUUID returns a short form of the project ID for use in directory names.
+// The result is always a single path element: an ID that fails
+// ValidateProjectID yields a fixed placeholder.
 func (m ProjectMarker) ShortUUID() string {
+	if ValidateProjectID(m.ProjectID) != nil {
+		return invalidShortID
+	}
 	id := strings.ReplaceAll(m.ProjectID, "-", "")
 	if len(id) > 8 {
 		return id[:8]
@@ -50,13 +82,23 @@ func (m ProjectMarker) ShortUUID() string {
 }
 
 // DirName returns the directory name used under ~/.scion/project-configs/.
+// The result is always a single path element: a slug containing a path
+// separator or NUL is replaced by its slugified form.
 func (m ProjectMarker) DirName() string {
-	return fmt.Sprintf("%s__%s", m.ProjectSlug, m.ShortUUID())
+	slug := m.ProjectSlug
+	if strings.ContainsAny(slug, "/\\\x00") {
+		slug = api.Slugify(slug)
+	}
+	return fmt.Sprintf("%s__%s", slug, m.ShortUUID())
 }
 
 // ExternalProjectPath returns the absolute path to the external project config
 // directory: ~/.scion/project-configs/<project-slug>__<short-uuid>/.scion/
+// It returns an error if the project ID does not match the project ID format.
 func (m ProjectMarker) ExternalProjectPath() (string, error) {
+	if err := ValidateProjectID(m.ProjectID); err != nil {
+		return "", err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -93,6 +135,9 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 	}
 	if marker.ProjectID == "" || marker.ProjectSlug == "" {
 		return nil, fmt.Errorf("invalid project marker at %s: missing project-id or project-slug", path)
+	}
+	if err := ValidateProjectID(marker.ProjectID); err != nil {
+		return nil, fmt.Errorf("invalid project marker at %s: %w", path, err)
 	}
 	return &marker, nil
 }
@@ -202,20 +247,63 @@ func ExtractSlugFromExternalDir(dirName string) string {
 // re-checked, so a project-id removed later or a grove-id that appears
 // later are both handled correctly): when the rewrite cannot happen (e.g. a
 // read-only filesystem), the legacy value is used for this call only.
+// A value that does not match the project ID format (see ValidateProjectID)
+// is reported as an error wrapping ErrInvalidProjectID.
 func ReadProjectID(projectDir string) (string, error) {
 	overrides := MigrateLegacyProject(projectDir, currentProjectMigrationReporter())
 
-	data, err := os.ReadFile(filepath.Join(projectDir, projectkeys.ProjectIDFile))
+	path := filepath.Join(projectDir, projectkeys.ProjectIDFile)
+	data, err := os.ReadFile(path)
 	if err == nil {
-		return strings.TrimSpace(string(data)), nil
+		return checkedProjectID(path, strings.TrimSpace(string(data)))
 	}
 	if !os.IsNotExist(err) {
 		return "", err
 	}
 	if overrides.ProjectID != "" {
-		return overrides.ProjectID, nil
+		return checkedProjectID(path, overrides.ProjectID)
 	}
 	return "", err
+}
+
+// checkedProjectID returns id if it matches the project ID format, and
+// otherwise an error naming the file it was read from.
+func checkedProjectID(path, id string) (string, error) {
+	if err := ValidateProjectID(id); err != nil {
+		return "", fmt.Errorf("project-id at %s: %w", path, err)
+	}
+	return id, nil
+}
+
+// mkdirUnderProjectConfigs creates dir and any missing parents. dir must be
+// below ~/.scion/project-configs. The first element below that directory
+// (the <slug>__<short-uuid> project dir) is created through an os.Root opened
+// on it, so it is created inside project-configs; an existing entry of that
+// name, including a symlink, is accepted as is. The rest of dir is then
+// created with os.MkdirAll.
+func mkdirUnderProjectConfigs(dir string, perm os.FileMode) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	parent := filepath.Join(home, GlobalDir, ProjectConfigsDir)
+	rel, err := filepath.Rel(parent, dir)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return fmt.Errorf("directory %s is not below %s", dir, parent)
+	}
+	if err := os.MkdirAll(parent, perm); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	first, _, _ := strings.Cut(rel, string(filepath.Separator))
+	if err := root.Mkdir(first, perm); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	return os.MkdirAll(dir, perm)
 }
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.
