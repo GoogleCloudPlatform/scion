@@ -990,6 +990,14 @@ type AgentStatusUpdate struct {
 	// stop dispatched for run X sets it to X, so the stop never marks a
 	// newer run stopped. Internal to the hub — json:"-".
 	IfRunID string `json:"-"`
+	// StartWrite marks a start's own post-dispatch status write. Its delete
+	// guard uses the start-block rule (DeletionHoldsRow) instead of the
+	// lease-aware active rule: a finalizing row holds even with its lease
+	// expired (teardown already ran; only a retry or force moves it on), so
+	// a start that landed after such a delete keeps the delete's phase, as
+	// the hub's deleteWonAfterLanding check answers. A status report
+	// (heartbeat) keeps the lease-aware rule. Internal to the hub — json:"-".
+	StartWrite bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
