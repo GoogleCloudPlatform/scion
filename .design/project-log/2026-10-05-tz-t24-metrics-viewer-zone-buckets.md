@@ -43,6 +43,8 @@ All four findings were fixed; none declined.
 
 - Second sync: upstream main (tip c56be66, which includes 159532c67) was merged in as 0e65dd2, again with no rebase. `git show --remerge-diff` is empty and the diff against upstream lists only this task's 14 files. On the merged tree, `go build ./pkg/hub/...`, the time-literals gate, the targeted pkg/hub tests, web typecheck and the three web test files all pass.
 
+- Third sync: upstream main 218a758 was merged in as 1d23019, again with no rebase. `git show --remerge-diff` is empty and only this task's 14 files differ from upstream. On the merged tree, `go build ./pkg/hub/...`, the time-literals gate, the targeted pkg/hub tests, web typecheck and the three web test files all pass.
+
 ## Follow-ups noticed (not done)
 
 - `QueryProjectSummary` ("Last 24 hours") stays a rolling 24h window with no buckets, so the zone does not affect it.
