@@ -375,7 +375,7 @@ func init() {
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
-	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Project path to register for this broker, resolved on this host (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory). With --broker naming another host's broker, give an absolute path on that host; it is sent unchanged")
+	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Project path to register for this broker, resolved on this host (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory). With --broker naming another host's broker, give the absolute path to the project root (the directory containing .scion) on that host; it is sent as given")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
 
@@ -1168,7 +1168,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, resp.Project.Name)
 	if localProjectPath != "" {
-		fmt.Printf("Local project path: %s\n", localProjectPath)
+		fmt.Println(providePathSummary(localProjectPath, brokerName, isRemoteBroker && brokerID != getLocalBrokerID()))
 	} else {
 		fmt.Println("No local path sent; an existing provider path for this broker is kept (a stored global-directory path is cleared), otherwise the broker uses its hub-managed project directory.")
 	}
@@ -1222,17 +1222,21 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 // that directory for any other project makes the broker treat its global
 // directory as that project.
 //
-// For a remote broker (one that is not this host's broker) the path names a
-// directory on the broker's host, so it is not resolved or checked against
-// this host's filesystem: it must be absolute and is sent unchanged. The hub
-// and the broker validate it, including the global-directory check
-// (ptone/scion#3157).
+// For a remote broker (one that is not this host's broker) the path is the
+// absolute project root (the directory containing .scion) on the broker's
+// host, so it is not resolved or checked against this host's filesystem: it
+// is sent as given, cleaned. A path naming the .scion directory itself is
+// refused with a hint to pass its parent (ptone/scion#3157).
 func resolveProvidePath(path, projectName, projectSlug string, remote bool) (string, error) {
 	if remote {
 		if !filepath.IsAbs(path) {
 			return "", fmt.Errorf("--path %q must be an absolute path on the broker's host when --broker names a remote broker", path)
 		}
-		return path, nil
+		cleaned := filepath.Clean(path)
+		if filepath.Base(cleaned) == config.DotScion {
+			return "", fmt.Errorf("--path %q names a .scion directory; for a remote broker pass the project root that contains it: %s", path, filepath.Dir(cleaned))
+		}
+		return cleaned, nil
 	}
 	resolved, isGlobal, err := config.ResolveProjectPath(path)
 	if err != nil {
