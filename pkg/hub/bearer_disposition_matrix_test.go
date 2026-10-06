@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -296,9 +297,11 @@ func sessionOnlyDetailsOf(rec *httptest.ResponseRecorder) (reason, credential st
 // every catalogued HTTP, SSE and WebSocket entry point and checks the
 // result against the operation's recorded bearer disposition:
 //   - admit: a hub token with the selector and live authority is not
-//     refused (no 401/403); a token of the same user with an unrelated
-//     selector, and a project token for another project, are refused
-//     (403, or 404 on a GET, where read handlers hide the record);
+//     refused and reaches the seeded target (no 401, 403 or 404; a 5xx
+//     only on a row listed in bearerMatrixPositiveServerErrors); a token
+//     of the same user with an unrelated selector, and a project token for
+//     another project, are refused (403, or 404 on a GET, where read
+//     handlers hide the record); each row's three statuses are logged;
 //   - admit_self: a token with an unrelated selector is not refused, and
 //     the disposition names the test that pins its result filter;
 //   - session_only: a hub token of a super-admin carrying every mintable
@@ -359,29 +362,37 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			// (b) ceiling: the same user, an unrelated selector.
 			refusedWith404 := false
 			unrelated := m.mint(t, hubBoundary(), []string{bearerMatrixUnrelatedSelector(sel)})
-			if rec := m.request(t, e, unrelated); !bearerMatrixRefused(ep.Method, rec.Code) {
-				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
-			} else if rec.Code == http.StatusNotFound {
+			ceilingRec := m.request(t, e, unrelated)
+			if !bearerMatrixRefused(ep.Method, ceilingRec.Code) {
+				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, ceilingRec.Code, bearerMatrixRefusal(ep.Method), ceilingRec.Body.String())
+			} else if ceilingRec.Code == http.StatusNotFound {
 				refusedWith404 = true
 			}
 
 			// (c) boundary: a project token for another project, or for a
 			// hub-only permission, a project token for the fixture project.
+			// The super-admin owns the other project, so that token must
+			// mint; only a hub-only selector may be refused at mint, which
+			// enforces the boundary there.
 			hubOnly := !bearerMatrixHasBoundary(d, authzop.BearerBoundaryProject)
 			boundProject := m.otherProject
 			if hubOnly {
 				boundProject = m.ids.project
 			}
+			boundaryStatus := "not minted"
 			if key := m.tryMint(projectBoundary(boundProject), []string{sel}); key != "" {
 				rec := m.request(t, e, key)
+				boundaryStatus = strconv.Itoa(rec.Code)
 				if rec.Code == http.StatusNotFound {
 					refusedWith404 = true
 				}
 				if !bearerMatrixRefused(ep.Method, rec.Code) {
 					t.Errorf("%s: a project token for %s got %d, want %s: %s", label, boundProject, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
 				}
-			} else {
+			} else if hubOnly {
 				t.Logf("%s: a project token for %s with %s cannot be minted; the boundary is enforced at mint", label, boundProject, sel)
+			} else {
+				t.Errorf("%s: a project token for %s with %s must mint for the boundary probe", label, boundProject, sel)
 			}
 
 			// (a) positive: the selector on an allowed boundary.
@@ -390,16 +401,32 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 				boundary = projectBoundary(m.ids.project)
 			}
 			rec := m.request(t, e, m.mint(t, boundary, []string{sel}))
+			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d", label, ceilingRec.Code, boundaryStatus, rec.Code)
 			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 				t.Errorf("%s: a %s token with %s got %d, want neither 401 nor 403: %s", label, boundary.Kind, sel, rec.Code, rec.Body.String())
 			}
-			// A WebSocket upgrade cannot return 2xx to a plain request, so
-			// for a WebSocket row the admitting token must get a status
-			// other than 401, 403 or 404 on the seeded target, which shows
-			// both authorization and existence; the refusing tokens above
-			// got 403 or 404 on the same target.
-			if ep.Kind == authzop.EntryPointWebSocket && rec.Code == http.StatusNotFound {
-				t.Errorf("%s: WebSocket row: the admitting token got 404, so the seeded target is not reached: %s", label, rec.Body.String())
+			// The admitting token must reach the seeded target, so a 404
+			// fails every row. A WebSocket upgrade cannot return 2xx to a
+			// plain request, so for a WebSocket row a status other than
+			// 401, 403 or 404 shows both authorization and existence; the
+			// refusing tokens above got 403 or 404 on the same target.
+			if rec.Code == http.StatusNotFound {
+				t.Errorf("%s: the admitting token got 404, so the seeded target is not reached: %s", label, rec.Body.String())
+			}
+			// A positive 5xx is expected only on the rows listed in
+			// bearerMatrixPositiveServerErrors, with exactly that status,
+			// and never carries an authorization or credential error code.
+			if want, ok := bearerMatrixPositiveServerErrors[e.key()]; ok {
+				if rec.Code != want.Status {
+					t.Errorf("%s: the admitting token got %d, want %d (%s): %s", label, rec.Code, want.Status, want.Reason, rec.Body.String())
+				}
+			} else if rec.Code >= 500 {
+				t.Errorf("%s: the admitting token got %d, and the row is not in bearerMatrixPositiveServerErrors: %s", label, rec.Code, rec.Body.String())
+			}
+			if rec.Code >= 500 {
+				if code := bearerMatrixErrorCode(rec); bearerMatrixAuthzErrorCodes[code] {
+					t.Errorf("%s: the admitting token got %d with authorization or credential code %q: %s", label, rec.Code, code, rec.Body.String())
+				}
 			}
 			// A 404 counts as a refusal only when the admitting token
 			// proves the same target exists: a 2xx, or for a WebSocket
@@ -438,6 +465,53 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 	if counts["admit"] == 0 || counts["session_only"] == 0 {
 		t.Fatalf("the matrix exercised no admit or no session_only entry point: %v", counts)
 	}
+}
+
+// bearerMatrixPositiveServerError is the status an admitting token gets on
+// a row whose handler fails after authorization in the test server.
+type bearerMatrixPositiveServerError struct {
+	Status int
+	Reason string
+}
+
+// bearerMatrixPositiveServerErrors lists every admit row whose admitting
+// token gets a 5xx in the test server, with the status and the reason the
+// handler fails after its authorization check.
+var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositiveServerError{
+	{"agent.lifecycle.resetauth", http.MethodPost, "/api/v1/agents/{id}/reset-auth"}: {
+		http.StatusInternalServerError, "the test server configures no agent dispatcher"},
+	{"agent.lifecycle.resetauth", http.MethodPost, "/api/v1/projects/{projectId}/agents/{id}/reset-auth"}: {
+		http.StatusInternalServerError, "the test server configures no agent dispatcher"},
+	{"agent.lifecycle.exec", http.MethodPost, "/api/v1/agents/{id}/exec"}: {
+		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
+	{"agent.lifecycle.exec", http.MethodPost, "/api/v1/projects/{projectId}/agents/{id}/exec"}: {
+		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
+	{"template.update", http.MethodPut, "/api/v1/templates/{id}"}: {
+		http.StatusInternalServerError, "the empty update body fails at the store write"},
+	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
+		http.StatusInternalServerError, "the empty update body fails at the store write"},
+}
+
+// bearerMatrixAuthzErrorCodes are error codes that report an authorization
+// or credential refusal; an admitting token's 5xx never carries one.
+var bearerMatrixAuthzErrorCodes = map[string]bool{
+	ErrCodeUnauthorized:                     true,
+	ErrCodeForbidden:                        true,
+	ErrCodeMembershipCredentialInsufficient: true,
+	ErrCodeRoleAssignmentForbidden:          true,
+	ErrCodeMutationPermissionLost:           true,
+	ErrCodeSecretScopeRestricted:            true,
+	ErrCodeMessageDenied:                    true,
+	ErrCodePrincipalIneligible:              true,
+}
+
+// bearerMatrixErrorCode returns error.code of an error response, or "".
+func bearerMatrixErrorCode(rec *httptest.ResponseRecorder) string {
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		return ""
+	}
+	return resp.Error.Code
 }
 
 // bearerMatrixRefused reports whether status refuses a token. A refusal is
@@ -485,7 +559,8 @@ func declaredTestFunctions(t *testing.T) map[string]bool {
 // exclusion to name a live catalog entry point whose disposition the matrix
 // would otherwise exercise, to give a reason, and to name a declared test
 // as its Pin. Every Pin recorded on a catalog disposition must also name a
-// declared test.
+// declared test. Every expected positive server error names an admit row,
+// a 5xx status and a reason.
 func TestBearerMatrixExclusions_NotStaleAndPinned(t *testing.T) {
 	declared := declaredTestFunctions(t)
 	exercised := map[liveInventoryKey]bool{}
@@ -504,6 +579,20 @@ func TestBearerMatrixExclusions_NotStaleAndPinned(t *testing.T) {
 		}
 		if ex.Pin == "" || !declared[ex.Pin] {
 			t.Errorf("matrix exclusion %v: Pin %q is not a declared test in pkg/hub", key, ex.Pin)
+		}
+	}
+	admitRows := map[liveInventoryKey]bool{}
+	for _, e := range bearerMatrixEntries() {
+		if e.Spec.Bearer.Kind == authzop.BearerAdmit {
+			admitRows[e.key()] = true
+		}
+	}
+	for key, want := range bearerMatrixPositiveServerErrors {
+		if !admitRows[key] {
+			t.Errorf("stale positive server error row %v: no catalog entry point with an admit disposition", key)
+		}
+		if want.Status < 500 || strings.TrimSpace(want.Reason) == "" {
+			t.Errorf("positive server error row %v needs a 5xx status and a reason", key)
 		}
 	}
 	for _, spec := range authzop.Catalog {
