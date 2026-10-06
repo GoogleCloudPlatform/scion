@@ -33,6 +33,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 const (
@@ -142,7 +144,17 @@ func (c *Cache) Get(contentHash string) (string, bool) {
 // files maps relative file paths to their content. It returns the path to the
 // stored directory. If the content is already present, the existing directory
 // is reused and its last-used time refreshed.
+//
+// Every key in files must be a canonical relative path (see
+// transfer.ValidateRelPath). Files are written through an os.Root opened on the
+// entry directory, so they are only ever created inside that directory.
 func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error) {
+	for relativePath := range files {
+		if err := transfer.ValidateRelPath(relativePath); err != nil {
+			return "", fmt.Errorf("invalid key in files: %w", err)
+		}
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -175,16 +187,9 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 		return "", fmt.Errorf("failed to create template directory: %w", err)
 	}
 
-	for relativePath, content := range files {
-		filePath := filepath.Join(tmpPath, relativePath)
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			_ = os.RemoveAll(tmpPath)
-			return "", fmt.Errorf("failed to create directory for %s: %w", relativePath, err)
-		}
-		if err := os.WriteFile(filePath, content, 0644); err != nil {
-			_ = os.RemoveAll(tmpPath)
-			return "", fmt.Errorf("failed to write file %s: %w", relativePath, err)
-		}
+	if err := writeFilesInDir(tmpPath, files); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return "", err
 	}
 
 	if err := os.Rename(tmpPath, templatePath); err != nil {
@@ -203,6 +208,22 @@ func (c *Cache) Put(contentHash string, files map[string][]byte) (string, error)
 	}
 
 	return templatePath, nil
+}
+
+// writeFilesInDir writes files beneath dir through an os.Root opened on dir.
+func writeFilesInDir(dir string, files map[string][]byte) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("failed to open template directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	for relativePath, content := range files {
+		if err := transfer.WriteFileInRoot(root, relativePath, content, 0644); err != nil {
+			return fmt.Errorf("failed to write file %s: %w", relativePath, err)
+		}
+	}
+	return nil
 }
 
 // evictIfNeeded evicts least-recently-used entries to make room for newSize

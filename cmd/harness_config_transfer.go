@@ -150,15 +150,19 @@ func uploadHarnessConfigFileBySignedURL(
 	return nil
 }
 
-func ensureParentDir(filePath string) error {
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+func ensureParentDir(root *os.Root, relPath string) error {
+	dir := filepath.Dir(filepath.FromSlash(relPath))
+	if dir == "." {
+		return nil
+	}
+	if err := root.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create harness config destination directory: %w", err)
 	}
 	return nil
 }
 
-func writeHarnessConfigFile(filePath string, content []byte) error {
-	if err := os.WriteFile(filePath, content, 0644); err != nil {
+func writeHarnessConfigFile(root *os.Root, relPath string, content []byte) error {
+	if err := root.WriteFile(filepath.FromSlash(relPath), content, 0644); err != nil {
 		return fmt.Errorf("write harness config file: %w", err)
 	}
 	return nil

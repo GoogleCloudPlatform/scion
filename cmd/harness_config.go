@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -881,14 +882,18 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	fmt.Printf("Downloading %d files to %s...\n", len(downloadResp.Files), destPath)
 	useHubFileRead := hasLocalDownloadURLs(downloadResp.Files)
 	type pendingFile struct {
-		path    string
 		content []byte
 		relPath string
 	}
+	// Every entry must be a canonical relative path before anything is fetched
+	// or written.
+	for i, fileInfo := range downloadResp.Files {
+		if err := transfer.ValidateRelPath(fileInfo.Path); err != nil {
+			return fmt.Errorf("invalid path in download entry %d: %w", i, err)
+		}
+	}
 	pending := make([]pendingFile, 0, len(downloadResp.Files))
 	for _, fileInfo := range downloadResp.Files {
-		filePath := filepath.Join(destPath, filepath.FromSlash(fileInfo.Path))
-
 		content, err := downloadHarnessConfigContent(ctx, hubCtx.Client.HarnessConfigs(), hc.ID, fileInfo, useHubFileRead)
 		if err != nil {
 			return err
@@ -896,13 +901,20 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 		if err := verifyHarnessConfigArtifactHash(fileInfo, content); err != nil {
 			return fmt.Errorf("harness-config %q: %w", name, err)
 		}
-		pending = append(pending, pendingFile{path: filePath, content: content, relPath: fileInfo.Path})
+		pending = append(pending, pendingFile{content: content, relPath: fileInfo.Path})
 	}
+
+	// Files are written through an os.Root so they stay inside destPath.
+	root, err := os.OpenRoot(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
 	for _, f := range pending {
-		if err := ensureParentDir(f.path); err != nil {
+		if err := ensureParentDir(root, f.relPath); err != nil {
 			return err
 		}
-		if err := writeHarnessConfigFile(f.path, f.content); err != nil {
+		if err := writeHarnessConfigFile(root, f.relPath, f.content); err != nil {
 			return err
 		}
 		fmt.Printf("  Downloaded: %s\n", f.relPath)
