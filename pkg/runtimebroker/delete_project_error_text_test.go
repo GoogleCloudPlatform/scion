@@ -28,9 +28,6 @@ import (
 // with the fixed "Failed to <op>" text only, and the cause, which names
 // broker paths, reaches the broker log with the project.
 func TestDeleteProjectErrors_FixedText(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("permission bits do not stop root")
-	}
 	const slug = "proj-a"
 
 	// failAbs makes deleteProjectAbs fail for paths with suffix.
@@ -44,8 +41,12 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 		}
 		t.Cleanup(func() { deleteProjectAbs = prev })
 	}
-	// lock chmods dir to mode for the test.
+	// lock chmods dir to mode for the test; the rows that use it skip
+	// under root, which permission bits do not stop.
 	lock := func(t *testing.T, dir string, mode os.FileMode) {
+		if os.Geteuid() == 0 {
+			t.Skip("permission bits do not stop root")
+		}
 		if err := os.Chmod(dir, mode); err != nil {
 			t.Fatal(err)
 		}
@@ -56,44 +57,46 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 		name, op, wantText string
 		projectID          bool
 		// setup arranges the failure and returns the detail that must
-		// reach the log.
-		setup func(t *testing.T, home, ext string) string
+		// reach the log, plus any log fields beyond project_slug it must
+		// carry.
+		setup func(t *testing.T, home, ext string) (string, map[string]string)
 	}{
 		{
 			name: "resolve-project-path", op: opResolveProjectPath, wantText: "Failed to resolve project path",
-			setup: func(t *testing.T, home, _ string) string {
+			setup: func(t *testing.T, home, _ string) (string, map[string]string) {
 				d := "getwd: " + filepath.Join(home, "secret")
 				failAbs(t, "/projects/"+slug, d)
-				return d
+				return d, nil
 			},
 		},
 		{
 			name: "resolve-base-path", op: opResolveProjectsBase, wantText: "Failed to resolve base path",
-			setup: func(t *testing.T, home, _ string) string {
+			setup: func(t *testing.T, home, _ string) (string, map[string]string) {
 				d := "getwd: " + filepath.Join(home, "secret")
 				failAbs(t, "/projects", d)
-				return d
+				return d, nil
 			},
 		},
 		{
 			name: "check-shared-dir", op: opCheckSharedDirStorage, wantText: "Failed to check project shared-dir storage",
 			projectID: true,
-			setup: func(t *testing.T, _, ext string) string {
+			setup: func(t *testing.T, _, ext string) (string, map[string]string) {
 				lock(t, filepath.Dir(seedSharedDir(t, ext, "scratch")), 0o600)
-				return "permission denied"
+				return "permission denied", map[string]string{"project_id": scopeProjA}
 			},
 		},
 		{
 			name: "remove-shared-dir", op: opRemoveSharedDirStorage, wantText: "Failed to remove project shared-dir storage",
 			projectID: true,
-			setup: func(t *testing.T, _, ext string) string {
-				lock(t, filepath.Join(seedSharedDir(t, ext, "scratch"), "scratch"), 0o555)
-				return "permission denied"
+			setup: func(t *testing.T, _, ext string) (string, map[string]string) {
+				base := seedSharedDir(t, ext, "scratch")
+				lock(t, filepath.Join(base, "scratch"), 0o555)
+				return "permission denied", map[string]string{"project_id": scopeProjA, "path": base}
 			},
 		},
 		{
 			name: "remove-project-dir", op: opRemoveProjectDir, wantText: "Failed to remove project directory",
-			setup: func(t *testing.T, home, _ string) string {
+			setup: func(t *testing.T, home, _ string) (string, map[string]string) {
 				locked := filepath.Join(home, ".scion", "projects", slug, "locked")
 				if err := os.MkdirAll(locked, 0o755); err != nil {
 					t.Fatal(err)
@@ -102,7 +105,7 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 					t.Fatal(err)
 				}
 				lock(t, locked, 0o555)
-				return "permission denied"
+				return "permission denied", map[string]string{"path": filepath.Join(home, ".scion", "projects", slug)}
 			},
 		},
 	}
@@ -111,7 +114,7 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 			srv, home := newScopeTestServer(t, &filteringMockManager{})
 			ext, _ := makeHubMarkerProject(t, home, slug, scopeProjA, "dev")
 			logs := captureLifecycleJSONLog(srv)
-			detail := tc.setup(t, home, ext)
+			detail, extra := tc.setup(t, home, ext)
 			projectID := ""
 			if tc.projectID {
 				projectID = scopeProjA
@@ -129,6 +132,14 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 				t.Errorf("message = %q, want %q", msg, tc.wantText)
 			}
 			assertWorkspaceOpLogged(t, logs.String(), tc.op, "project_slug", slug, detail)
+			if len(extra) > 0 {
+				rec := findLogRecord(logs.String(), "runtime op failed", map[string]string{"op": tc.op})
+				for key, want := range extra {
+					if rec[key] != want {
+						t.Errorf("log record %s = %v, want %q", key, rec[key], want)
+					}
+				}
+			}
 		})
 	}
 }
