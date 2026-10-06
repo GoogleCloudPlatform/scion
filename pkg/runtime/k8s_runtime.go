@@ -4390,7 +4390,9 @@ func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
 // env and, when groups is non-empty, appends the broker's own value listing
 // exactly those gids (ptone/scion#3155).
 func withSupplementalGIDsEnv(env []corev1.EnvVar, groups []int64) []corev1.EnvVar {
-	out := env[:0:0]
+	// A new backing array (room for the broker's own entry), so the
+	// caller's slice is never modified.
+	out := make([]corev1.EnvVar, 0, len(env)+1)
 	for _, ev := range env {
 		if ev.Name != SupplementalGIDsEnvVar {
 			out = append(out, ev)

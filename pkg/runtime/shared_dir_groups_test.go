@@ -107,7 +107,7 @@ func TestSharedDirSupplementalGroups(t *testing.T) {
 }
 
 // podEnvValues returns every value of name in the pod's containers' env.
-func podEnvValues(_ any, containers []corev1.Container, name string) []string {
+func podEnvValues(containers []corev1.Container, name string) []string {
 	var vals []string
 	for _, c := range containers {
 		for _, e := range c.Env {
@@ -132,8 +132,8 @@ func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
 		pod, err := rt.buildPod("default", sharedDirGroupsRunConfig(4242, fsGroup, 4343))
 		require.NoError(t, err)
 		assert.Equal(t, []int64{4242, 4343}, pod.Spec.SecurityContext.SupplementalGroups)
-		assert.Equal(t, []string{fmt.Sprintf("4242,%d,4343", fsGroup)}, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
-		assert.Empty(t, podEnvValues(pod, pod.Spec.InitContainers, SupplementalGIDsEnvVar), "init containers unchanged")
+		assert.Equal(t, []string{fmt.Sprintf("4242,%d,4343", fsGroup)}, podEnvValues(pod.Spec.Containers, SupplementalGIDsEnvVar))
+		assert.Empty(t, podEnvValues(pod.Spec.InitContainers, SupplementalGIDsEnvVar), "init containers unchanged")
 	})
 	// The leaf gid equals fsGroup: no supplementalGroups entry, but the pod
 	// holds it through fsGroup, so its umask group bits are still cleared.
@@ -141,13 +141,13 @@ func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
 		pod, err := rt.buildPod("default", sharedDirGroupsRunConfig(fsGroup))
 		require.NoError(t, err)
 		assert.Nil(t, pod.Spec.SecurityContext.SupplementalGroups)
-		assert.Equal(t, []string{fmt.Sprintf("%d", fsGroup)}, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+		assert.Equal(t, []string{fmt.Sprintf("%d", fsGroup)}, podEnvValues(pod.Spec.Containers, SupplementalGIDsEnvVar))
 	})
 	t.Run("no groups leaves it unset", func(t *testing.T) {
 		cfg := sharedDirGroupsRunConfig()
 		pod, err := rt.buildPod("default", cfg)
 		require.NoError(t, err)
-		assert.Empty(t, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+		assert.Empty(t, podEnvValues(pod.Spec.Containers, SupplementalGIDsEnvVar))
 	})
 	t.Run("template value is dropped without groups", func(t *testing.T) {
 		cfg := sharedDirGroupsRunConfig()
@@ -155,7 +155,7 @@ func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
 		cfg.Env = []string{SupplementalGIDsEnvVar + "=27"}
 		pod, err := rt.buildPod("default", cfg)
 		require.NoError(t, err)
-		assert.Empty(t, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+		assert.Empty(t, podEnvValues(pod.Spec.Containers, SupplementalGIDsEnvVar))
 	})
 	t.Run("secret targeting it is dropped", func(t *testing.T) {
 		for _, groups := range [][]int64{nil, {4242}} {
@@ -174,7 +174,7 @@ func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
 					}
 				}
 			}
-			assert.Equal(t, want, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+			assert.Equal(t, want, podEnvValues(pod.Spec.Containers, SupplementalGIDsEnvVar))
 		}
 	})
 	t.Run("template value is replaced with groups", func(t *testing.T) {
@@ -182,7 +182,7 @@ func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
 		cfg.Env = []string{SupplementalGIDsEnvVar + "=0,27"}
 		pod, err := rt.buildPod("default", cfg)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"4242"}, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+		assert.Equal(t, []string{"4242"}, podEnvValues(pod.Spec.Containers, SupplementalGIDsEnvVar))
 	})
 }
 
