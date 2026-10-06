@@ -327,6 +327,12 @@ type CreateBrokerRequest struct {
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	AutoProvide  bool              `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
+	// JoinTokenTTLSeconds is the join token lifetime in seconds. Zero uses
+	// the hub default; otherwise the hub accepts 300 to 86400.
+	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`
+	// PreserveSettings asks the hub to only issue a join token when the
+	// name matches an existing broker, leaving its settings unchanged.
+	PreserveSettings bool `json:"preserveSettings,omitempty"`
 }
 
 // CreateBrokerResponse is returned when creating a new broker.
@@ -335,6 +341,9 @@ type CreateBrokerResponse struct {
 	JoinToken    string `json:"joinToken"`
 	ExpiresAt    string `json:"expiresAt"`
 	Reregistered bool   `json:"reregistered,omitempty"`
+	// Reissued is true when an earlier, unused join token for this broker
+	// was replaced and no longer works.
+	Reissued bool `json:"reissued,omitempty"`
 }
 
 // JoinBrokerRequest is the request to complete broker registration.

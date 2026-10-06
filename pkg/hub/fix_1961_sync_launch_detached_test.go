@@ -52,6 +52,10 @@ const (
 	// probeBlock blocks until the dispatch ctx is done (bounded by
 	// requestCancelWait) and records how it ended.
 	probeBlock
+	// probeBlockStart lets a stop dispatch succeed without probing it and
+	// behaves as probeBlock for every other dispatch: a restart's stop leg
+	// succeeds and its start leg blocks.
+	probeBlockStart
 )
 
 // errProbeNeverDone is returned by a probeBlock dispatch whose ctx was not
@@ -92,7 +96,7 @@ func (d *launchProbeDispatcher) probe(ctx context.Context) error {
 	}
 	d.deadlineIn = append(d.deadlineIn, in)
 	switch d.mode {
-	case probeBlock:
+	case probeBlock, probeBlockStart:
 		if !awaitCanceled(ctx) {
 			d.ctxErrs = append(d.ctxErrs, nil)
 			return errProbeNeverDone
@@ -170,6 +174,9 @@ func (d *launchProbeDispatcher) DispatchAgentStart(ctx context.Context, agent *s
 
 func (d *launchProbeDispatcher) DispatchAgentStop(ctx context.Context, _ *store.Agent) error {
 	d.stopCalls++
+	if d.mode == probeBlockStart {
+		return nil
+	}
 	return d.probe(ctx)
 }
 
@@ -516,19 +523,43 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 	cases := []struct {
 		name string
 		// setup returns the request to send.
-		setup     func(t *testing.T, s store.Store, project *store.Project) (method, path string, body any)
-		storage   bool // configure workspace storage
-		wantCalls int
+		setup   func(t *testing.T, s store.Store, project *store.Project) (method, path string, body any)
+		storage bool // configure workspace storage
+		// blockStartOnly uses probeBlockStart instead of probeBlock.
+		blockStartOnly bool
+		wantCalls      int
 		// check runs extra assertions on the outcome.
 		check func(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder)
 	}{
 		{
-			name: "restart-both-legs",
+			// A stop leg that runs past its own deadline aborts the restart
+			// before the start leg (GoogleCloudPlatform/scion#2486).
+			name: "restart-stop-leg-timeout-aborts",
 			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
-				a := createSiteAgent(t, s, project, "own-deadline-restart", state.PhaseRunning, store.RunIntentRunning)
+				a := createSiteAgent(t, s, project, "own-deadline-restart-stop", state.PhaseRunning, store.RunIntentRunning)
 				return http.MethodPost, "/api/v1/agents/" + a.ID + "/restart", nil
 			},
-			wantCalls: 2,
+			wantCalls: 1,
+			check: func(t *testing.T, _ store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+				assert.Equal(t, 1, disp.stopCalls)
+				assert.Equal(t, 0, disp.startCalls, "a stop that timed out must not be followed by a start")
+				require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+				assert.Equal(t, restartStopFailedRetryAfter, rec.Header().Get("Retry-After"))
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.Equal(t, ErrCodeUnavailable, body.Error.Code)
+				assert.Empty(t, body.Error.Details, "a ctx error carries no broker code")
+			},
+		},
+		{
+			// After a clean stop, the start leg gets its own deadline.
+			name: "restart-start-leg-own-deadline",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-restart-start", state.PhaseRunning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/restart", nil
+			},
+			blockStartOnly: true,
+			wantCalls:      1, // the stop leg is not probed in probeBlockStart
 			check: func(t *testing.T, _ store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
 				assert.Equal(t, 1, disp.stopCalls)
 				assert.Equal(t, 1, disp.startCalls)
@@ -596,6 +627,9 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			shortenSyncDispatchTimeout(t, 50*time.Millisecond)
 			disp := &launchProbeDispatcher{mode: probeBlock}
+			if tc.blockStartOnly {
+				disp.mode = probeBlockStart
+			}
 			srv, s, project := setupCreateAgentServer(t, disp)
 			if tc.storage {
 				srv.SetStorage(newContentMockStorage("test-bucket"))
