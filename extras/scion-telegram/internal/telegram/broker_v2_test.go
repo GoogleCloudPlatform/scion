@@ -1354,6 +1354,21 @@ func TestV2_HandleCallback_RetiredCommentarySettingIsNoOp(t *testing.T) {
 	assert.Equal(t, "cb-com", callbacks[0].CallbackQueryID)
 	assert.Contains(t, callbacks[0].Text, "removed")
 
+	// The card is refreshed in place without the stale Commentary row.
+	tgSrv.mu.Lock()
+	edits := append([]editMessageReplyMarkupRequest(nil), tgSrv.editedMarkups...)
+	tgSrv.mu.Unlock()
+	require.Len(t, edits, 1, "the settings card must be refreshed")
+	assert.Equal(t, int64(-200), edits[0].ChatID)
+	assert.Equal(t, int64(51), edits[0].MessageID)
+	require.NotNil(t, edits[0].ReplyMarkup)
+	require.Len(t, edits[0].ReplyMarkup.InlineKeyboard, 2, "observer and group-notification rows only")
+	for _, row := range edits[0].ReplyMarkup.InlineKeyboard {
+		for _, btn := range row {
+			assert.NotContains(t, btn.CallbackData, "commentary")
+		}
+	}
+
 	link, err := b.store.GetGroupLink(ctx, -200)
 	require.NoError(t, err)
 	require.NotNil(t, link)
