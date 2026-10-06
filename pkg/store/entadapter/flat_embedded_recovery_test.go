@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package entadapter
 
 import (
@@ -62,6 +64,10 @@ func TestFindEmbeddedBroker_SkipsFlatRows(t *testing.T) {
 // target and leftover profiles) and the status, heartbeat, connection,
 // staleness and created-by writers. Only SetRuntimeBrokerTarget changes the
 // display name, and nothing changes the target ID or type.
+//
+// This test runs on SQLite and on Postgres (make test-launch-store-postgres)
+// and must never be dropped, skipped or weakened. Every new Runtime Broker
+// row writer must be added to it.
 func TestFlatRow_EmbeddedLabelAndTargetSurviveEveryWriter(t *testing.T) {
 	ctx := context.Background()
 	fs := newFlatStores(t)

@@ -50,19 +50,38 @@ func TestRelayRuntimeTargetError_RequiresMatchingStatus(t *testing.T) {
 	assert.Nil(t, runtimeTargetDMErrorIfAny(brokerMismatchErr(http.StatusInternalServerError, "b")))
 }
 
-// TestFlatCreateOnExisting_RefusalSettlesMessage: a Runtime Broker refusal on
-// the create-on-existing start is relayed with its own status and recorded
-// as the agent message (definite start failure).
+// TestFlatCreateOnExisting_RefusalSettlesMessage: on each of the three
+// create-on-existing start branches (resume a suspended agent, resume a
+// stopped agent in place, start a created/provisioning agent), a Runtime
+// Broker refusal is relayed with its own status and recorded as the agent
+// message (definite start failure).
 func TestFlatCreateOnExisting_RefusalSettlesMessage(t *testing.T) {
-	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	a := f.pinnedAgent(t, "settle-resume", string(state.PhaseStopped))
-	f.client.returnErr = brokerMismatchErr(http.StatusConflict, f.flat.ID)
-	rec := f.create(t, map[string]interface{}{"name": "settle-resume", "task": "t", "resume": true})
-	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
-	requireNoStartMarkers(t, d)
-	got, err := f.s.GetAgent(context.Background(), a.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "refused by the Runtime Broker", got.Message)
+	cases := []struct {
+		branch string
+		phase  state.Phase
+		resume bool
+	}{
+		{"suspended resume", state.PhaseSuspended, false},
+		{"stopped resume in place", state.PhaseStopped, true},
+		{"created start", state.PhaseCreated, false},
+	}
+	for _, c := range cases {
+		t.Run(c.branch, func(t *testing.T) {
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			slug := tidSlugSafe("settle-" + c.branch)
+			a := f.pinnedAgent(t, slug, string(c.phase))
+			require.Equal(t, existingBranchStart, classifyExistingAgent(a, CreateAgentRequest{Name: slug, Resume: c.resume}),
+				"the case exercises a create-on-existing start branch")
+			f.client.returnErr = brokerMismatchErr(http.StatusConflict, f.flat.ID)
+			rec := f.create(t, map[string]interface{}{"name": slug, "task": "t", "resume": c.resume})
+			d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
+			requireNoStartMarkers(t, d)
+			assert.True(t, f.client.startCalled, "the refusal came from the start dispatch")
+			got, err := f.s.GetAgent(context.Background(), a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "refused by the Runtime Broker", got.Message)
+		})
+	}
 }
 
 // TestFlatWake_RefusalSettlesMessage: the same on the wake-on-DM path.
