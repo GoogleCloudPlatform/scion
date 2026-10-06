@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 	"time"
 
@@ -1138,7 +1139,8 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	// and no --path, no path is sent: the current directory need not belong
 	// to the named project.
 	if brokerProvidePath != "" {
-		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug)
+		remote := isRemoteBroker && brokerID != getLocalBrokerID()
+		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug, remote)
 		if err != nil {
 			return err
 		}
@@ -1219,7 +1221,19 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 // the target project is the global project (hub slug "global"): registering
 // that directory for any other project makes the broker treat its global
 // directory as that project.
-func resolveProvidePath(path, projectName, projectSlug string) (string, error) {
+//
+// For a remote broker (one that is not this host's broker) the path names a
+// directory on the broker's host, so it is not resolved or checked against
+// this host's filesystem: it must be absolute and is sent unchanged. The hub
+// and the broker validate it, including the global-directory check
+// (ptone/scion#3157).
+func resolveProvidePath(path, projectName, projectSlug string, remote bool) (string, error) {
+	if remote {
+		if !filepath.IsAbs(path) {
+			return "", fmt.Errorf("--path %q must be an absolute path on the broker's host when --broker names a remote broker", path)
+		}
+		return path, nil
+	}
 	resolved, isGlobal, err := config.ResolveProjectPath(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve --path %q: %w", path, err)
