@@ -104,8 +104,9 @@ func init() {
 // resolveBrokerJoinToken returns the join token, trimmed of surrounding
 // whitespace. It is read from tokenFile when set ('-' reads stdin), and
 // otherwise from SCION_BROKER_JOIN_TOKEN. A value without the scion_join_
-// prefix is rejected here, before any request is sent.
-func resolveBrokerJoinToken(tokenFile string, stdin io.Reader) (string, error) {
+// prefix is rejected here, before any request is sent. A token file that
+// group or other users can read is used, with a warning written to stderr.
+func resolveBrokerJoinToken(tokenFile string, stdin io.Reader, stderr io.Writer) (string, error) {
 	var token, source string
 	switch tokenFile {
 	case "":
@@ -116,18 +117,26 @@ func resolveBrokerJoinToken(tokenFile string, stdin io.Reader) (string, error) {
 		}
 	case "-":
 		source = "stdin"
-		data, err := io.ReadAll(io.LimitReader(stdin, 64*1024))
+		data, err := readBrokerJoinTokenInput(stdin)
 		if err != nil {
 			return "", fmt.Errorf("failed to read the join token from stdin: %w", err)
 		}
-		token = string(data)
+		token = data
 	default:
 		source = tokenFile
-		data, err := os.ReadFile(tokenFile)
+		f, err := os.Open(tokenFile)
 		if err != nil {
 			return "", fmt.Errorf("failed to read the join token file: %w", err)
 		}
-		token = string(data)
+		if info, statErr := f.Stat(); statErr == nil && info.Mode().Perm()&0o044 != 0 {
+			_, _ = fmt.Fprintf(stderr, "Warning: %s is readable by group or other users (mode %04o); consider chmod 600\n", tokenFile, info.Mode().Perm())
+		}
+		data, err := readBrokerJoinTokenInput(f)
+		_ = f.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read the join token file: %w", err)
+		}
+		token = data
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -137,6 +146,23 @@ func resolveBrokerJoinToken(tokenFile string, stdin io.Reader) (string, error) {
 		return "", fmt.Errorf("the value in %s is not a join token (expected the %s prefix)", source, brokerJoinTokenPrefix)
 	}
 	return token, nil
+}
+
+// maxBrokerJoinTokenInput is the most --token-file reads from a file or
+// stdin. A join token is well under 100 bytes.
+const maxBrokerJoinTokenInput = 64 * 1024
+
+// readBrokerJoinTokenInput reads all of r, failing if it holds more than
+// maxBrokerJoinTokenInput bytes.
+func readBrokerJoinTokenInput(r io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBrokerJoinTokenInput+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxBrokerJoinTokenInput {
+		return "", fmt.Errorf("input is larger than %d bytes, which is too large for a join token", maxBrokerJoinTokenInput)
+	}
+	return string(data), nil
 }
 
 // checkBrokerJoinTarget refuses a join that would replace this host's
@@ -189,7 +215,7 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := resolveBrokerJoinToken(brokerJoinTokenFile, cmd.InOrStdin())
+	token, err := resolveBrokerJoinToken(brokerJoinTokenFile, cmd.InOrStdin(), cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}

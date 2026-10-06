@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -252,6 +253,7 @@ func TestHubBrokersJoinTokenCreate_TextOutput(t *testing.T) {
 	assert.Contains(t, stderr, "Join token for broker 'build-host-3' (ID 11111111-2222-3333-4444-555555555555) expires 2026-10-06T16:00:00Z")
 	assert.Contains(t, stderr, "previous unused join token")
 	assert.Contains(t, stderr, "scion runtime-broker join --broker-id 11111111-2222-3333-4444-555555555555")
+	assert.Contains(t, stderr, "--broker-id 11111111-2222-3333-4444-555555555555 --token-file <path>")
 	assert.NotContains(t, stderr, "scion_join_minted")
 
 	reqs := fake.recorded()
@@ -486,18 +488,49 @@ func TestResolveBrokerJoinToken_Sources(t *testing.T) {
 
 	t.Run("file wins over env", func(t *testing.T) {
 		t.Setenv(envBrokerJoinToken, "scion_join_from_env")
-		got, err := resolveBrokerJoinToken(write("tok", "scion_join_from_file\n"), nil)
+		got, err := resolveBrokerJoinToken(write("tok", "scion_join_from_file\n"), nil, io.Discard)
 		require.NoError(t, err)
 		assert.Equal(t, "scion_join_from_file", got)
 	})
+	t.Run("file at the size limit", func(t *testing.T) {
+		at := "scion_join_" + strings.Repeat("a", maxBrokerJoinTokenInput-len("scion_join_"))
+		got, err := resolveBrokerJoinToken(write("at-limit", at), nil, io.Discard)
+		require.NoError(t, err)
+		assert.Equal(t, at, got)
+	})
+	t.Run("stdin at the size limit", func(t *testing.T) {
+		at := "scion_join_" + strings.Repeat("a", maxBrokerJoinTokenInput-len("scion_join_"))
+		got, err := resolveBrokerJoinToken("-", strings.NewReader(at), io.Discard)
+		require.NoError(t, err)
+		assert.Equal(t, at, got)
+	})
+	t.Run("readable token file warns", func(t *testing.T) {
+		p := write("open", "scion_join_open\n")
+		require.NoError(t, os.Chmod(p, 0o644))
+		var errOut bytes.Buffer
+		got, err := resolveBrokerJoinToken(p, nil, &errOut)
+		require.NoError(t, err, "the file is still used")
+		assert.Equal(t, "scion_join_open", got)
+		assert.Contains(t, errOut.String(), "readable by group or other users")
+		assert.NotContains(t, errOut.String(), "scion_join_open")
+		assert.Equal(t, 1, strings.Count(errOut.String(), "\n"), "one line")
+	})
+	t.Run("private token file does not warn", func(t *testing.T) {
+		p := write("private", "scion_join_private\n")
+		require.NoError(t, os.Chmod(p, 0o600))
+		var errOut bytes.Buffer
+		_, err := resolveBrokerJoinToken(p, nil, &errOut)
+		require.NoError(t, err)
+		assert.Empty(t, errOut.String())
+	})
 	t.Run("stdin", func(t *testing.T) {
-		got, err := resolveBrokerJoinToken("-", strings.NewReader("  scion_join_from_stdin\r\n"))
+		got, err := resolveBrokerJoinToken("-", strings.NewReader("  scion_join_from_stdin\r\n"), io.Discard)
 		require.NoError(t, err)
 		assert.Equal(t, "scion_join_from_stdin", got)
 	})
 	t.Run("env", func(t *testing.T) {
 		t.Setenv(envBrokerJoinToken, "scion_join_from_env")
-		got, err := resolveBrokerJoinToken("", nil)
+		got, err := resolveBrokerJoinToken("", nil, io.Discard)
 		require.NoError(t, err)
 		assert.Equal(t, "scion_join_from_env", got)
 	})
@@ -510,9 +543,11 @@ func TestResolveBrokerJoinToken_Sources(t *testing.T) {
 		{"empty stdin", "-", "", "no join token in stdin"},
 		{"wrong prefix on stdin", "-", "hello", "not a join token"},
 		{"no source", "", "", "no join token: set SCION_BROKER_JOIN_TOKEN or pass --token-file"},
+		{"oversized file", write("big", "scion_join_"+strings.Repeat("a", maxBrokerJoinTokenInput)), "", "too large for a join token"},
+		{"oversized stdin", "-", "scion_join_" + strings.Repeat("a", maxBrokerJoinTokenInput), "too large for a join token"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := resolveBrokerJoinToken(tc.file, strings.NewReader(tc.stdin))
+			_, err := resolveBrokerJoinToken(tc.file, strings.NewReader(tc.stdin), io.Discard)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 			assert.NotContains(t, err.Error(), "scion_dev_x")

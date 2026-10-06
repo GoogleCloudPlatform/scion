@@ -905,7 +905,7 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--port <port>`: Port of the local broker.
 - `scion runtime-broker join`: Join this host to the Hub as an existing broker, using a join token from `scion hub brokers join-token create`. Sends no Hub user credential. Saves credentials to `~/.scion/hub-credentials/<name>.json` and the broker ID to global settings. Does not provide the broker to any project.
     - `--broker-id <id>`: The broker to join as. Default: `SCION_BROKER_ID`.
-    - `--token-file <path|->`: Read the token from a file, or from stdin with `-`. Without it, the token is read from `SCION_BROKER_JOIN_TOKEN`. There is no flag that takes the token itself.
+    - `--token-file <path|->`: Read the token from a file, or from stdin with `-`. Without it, the token is read from `SCION_BROKER_JOIN_TOKEN`. There is no flag that takes the token itself. A file that group or other users can read is still used, with a warning.
     - `--force`: Replace existing credentials for this Hub connection, or a different broker ID in global settings. Without it, `join` stops in either case.
     - `--name <name>`, `--transport-mode`, `--transport-audience`: As for `register`.
     - `--port <port>`: Port of the local broker. If no broker is running there, `join` warns and continues.

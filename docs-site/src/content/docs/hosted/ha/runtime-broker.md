@@ -107,7 +107,7 @@ export SCION_HUB_ENDPOINT=https://hub.example.com
 scion runtime-broker join --broker-id <broker-id> --token-file /path/to/token
 ```
 
-- The token is read from `--token-file` (`-` reads it from stdin), or else from the `SCION_BROKER_JOIN_TOKEN` environment variable. There is no flag that takes the token on the command line.
+- The token is read from `--token-file` (`-` reads it from stdin), or else from the `SCION_BROKER_JOIN_TOKEN` environment variable. There is no flag that takes the token on the command line. If the file can be read by group or other users, `join` prints a warning and still uses it.
 - `--broker-id` can also come from `SCION_BROKER_ID`.
 - The broker server does not have to be running yet; `join` only warns if it is not.
 - `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the Hub endpoint and broker ID in global settings, as `register` does.

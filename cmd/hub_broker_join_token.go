@@ -60,8 +60,9 @@ not added to any project.
 Redeeming a token replaces the broker's credentials. If a host has already
 joined as this broker, it is disconnected once the new token is used.
 
-The token is single use. Run 'scion runtime-broker join' on the broker host
-with the token in SCION_BROKER_JOIN_TOKEN to finish the connection.
+The token is single use. Run 'scion runtime-broker join' on the broker host to
+finish the connection, with the token in a file passed as --token-file ('-' for
+stdin) or in SCION_BROKER_JOIN_TOKEN.
 
 The token is printed on stdout and the instructions on stderr, so
   TOKEN=$(scion hub brokers join-token create my-broker 2>/dev/null)
@@ -174,6 +175,8 @@ func writeBrokerJoinTokenOutput(stdout, stderr io.Writer, out brokerJoinTokenOut
 	}
 	_, _ = fmt.Fprintln(stderr, "On the host run:")
 	_, _ = fmt.Fprintf(stderr, "  SCION_HUB_ENDPOINT=%s SCION_BROKER_JOIN_TOKEN=<token> scion runtime-broker join --broker-id %s\n", out.HubEndpoint, out.BrokerID)
+	_, _ = fmt.Fprintf(stderr, "or, with the token in a file (or '-' for stdin):\n")
+	_, _ = fmt.Fprintf(stderr, "  SCION_HUB_ENDPOINT=%s scion runtime-broker join --broker-id %s --token-file <path>\n", out.HubEndpoint, out.BrokerID)
 	_, err := fmt.Fprintln(stdout, out.JoinToken)
 	return err
 }
