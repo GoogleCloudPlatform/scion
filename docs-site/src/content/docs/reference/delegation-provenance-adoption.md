@@ -155,7 +155,9 @@ alternative: adopting the chain through the route above.
 No edge or ancestor ID is returned to the caller. The Hub's server log, at
 debug level, names the delegate of the unrecorded hop. A hop denied only
 because its provenance version is not supported keeps the same denial
-without these keys, because adoption does not apply to it.
+without these keys, because adoption does not apply to it. So does a denial
+of a permission that no adopted ceiling carries, such as the artifact
+permissions, which unrecorded chains never held.
 
 ## Admin recovery API
 

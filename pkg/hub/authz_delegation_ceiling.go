@@ -418,9 +418,9 @@ type unrecordedHopNoteKey struct{}
 
 // unrecordedHopNote receives, from a chain walk, whether a
 // ceiling_unrecorded denial came from a hop that delegation-provenance
-// adoption can address: an unrecorded row (provenance version 0). A hop
-// denied only because its provenance version is not understood is not
-// adoptable. The note is descriptive: it selects response details and is
+// adoption can address: an unrecorded row (provenance version 0), denied a
+// permission an adopted ceiling carries. A hop denied only because its
+// provenance version is not understood is not adoptable. The note is descriptive: it selects response details and is
 // never read by an authorization decision.
 type unrecordedHopNote struct {
 	adoptable bool
@@ -438,22 +438,49 @@ func (a *AuthzService) logUnrecordedHop(ctx context.Context, cause DenyCause, ed
 	if cause != DenyCauseCeilingUnrecorded {
 		return
 	}
-	adoptable := edge.ProvenanceVersion == 0 && edge.Kind == store.EffectCeilingUnrecorded
+	unrecordedRow := edge.ProvenanceVersion == 0 && edge.Kind == store.EffectCeilingUnrecorded
+	adoptable := unrecordedRow && adoptionCeilingCovers(permissionID)
 	if note, ok := ctx.Value(unrecordedHopNoteKey{}).(*unrecordedHopNote); ok && note != nil {
 		note.adoptable = adoptable
 	}
 	if a.logger == nil {
 		return
 	}
-	if !adoptable {
+	if !unrecordedRow {
 		a.logger.Debug("delegation ceiling: hop with an unsupported provenance version denied a permission that requires recorded provenance",
 			"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
 			"provenance_version", edge.ProvenanceVersion)
 		return
 	}
+	if !adoptable {
+		a.logger.Debug("delegation ceiling: unrecorded hop denied a permission no adopted ceiling carries",
+			"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID)
+		return
+	}
 	a.logger.Debug("delegation ceiling: unrecorded hop denied a permission that requires recorded provenance",
 		"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
 		"remediation_path", delegationAdoptionPath)
+}
+
+// adoptionCeilingIDs is the union of the compatibility policy V1 ceilings
+// over every role, with the assigned-service-account additions.
+var adoptionCeilingIDs = func() map[string]bool {
+	ids := map[string]bool{}
+	for _, role := range permissions.CompatibilityRoles() {
+		row, _ := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, role, true)
+		for _, id := range row {
+			ids[id] = true
+		}
+	}
+	return ids
+}()
+
+// adoptionCeilingCovers reports whether some compatibility policy V1 ceiling
+// carries permissionID. A permission no adopted ceiling carries (for
+// example one registered after V1) is not addressed by adoption, so its
+// ceiling_unrecorded denial does not name adoption as the remedy.
+func adoptionCeilingCovers(permissionID string) bool {
+	return adoptionCeilingIDs[permissionID]
 }
 
 // hopEffectCeilingDeny applies a hop's frozen provenance and effect ceiling

@@ -651,6 +651,31 @@ func TestUnknownProvenanceVersionDenialCarriesNoAdoptionDetails(t *testing.T) {
 
 }
 
+// The adoption details name adoption only for a denial an adopted ceiling
+// would address: an unrecorded row denied a permission some compatibility
+// policy V1 ceiling carries. A permission withheld from every unrecorded
+// chain and absent from V1 (the artifact permissions) is not.
+func TestUnrecordedHopAdoptableOnlyForAdoptedCeilingPermissions(t *testing.T) {
+	a := &AuthzService{}
+	unrecorded := &store.DelegationEdge{EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}}
+	v2 := &store.DelegationEdge{
+		AuthorityProvenance: store.AuthorityProvenance{ProvenanceVersion: 2},
+		EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}
+	note := func(edge *store.DelegationEdge, permissionID string) bool {
+		var n unrecordedHopNote
+		a.logUnrecordedHop(contextWithUnrecordedHopNote(context.Background(), &n), DenyCauseCeilingUnrecorded, edge, permissionID)
+		return n.adoptable
+	}
+	assert.True(t, note(unrecorded, "gcp_service_account.assign"))
+	assert.False(t, note(v2, "gcp_service_account.assign"), "unsupported provenance version")
+	require.NotEmpty(t, legacyChainExcludedPermissions)
+	for id := range legacyChainExcludedPermissions {
+		assert.False(t, adoptionCeilingCovers(id), id)
+		assert.False(t, note(unrecorded, id), id)
+	}
+}
+
 func TestDecisionAdoptionDetailsCause(t *testing.T) {
 	assert.Equal(t, DenyCauseCeilingUnrecorded, Decision{DenyCause: DenyCauseCeilingUnrecorded, adoptionRemediable: true}.adoptionDetailsCause())
 	assert.Empty(t, Decision{DenyCause: DenyCauseCeilingUnrecorded}.adoptionDetailsCause(), "unknown provenance version")
