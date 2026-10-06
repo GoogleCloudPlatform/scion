@@ -864,10 +864,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		endpointsBaseRev = rev
 	}
 
-	// Lifecycle section: keep the start-claim keys a PUT leaves out (the
-	// admin form has no fields for them), and validate them.
+	// Lifecycle section: like access, carry omitted keys forward from the
+	// current row (ptone/scion#3464), and validate the start-claim keys.
+	lifecycleBaseRev := int64(-1)
 	if doc, ok := sectionDocs["lifecycle"]; ok {
-		merged, err := carryForwardStartClaimSettings(r.Context(), ops, doc)
+		merged, rev, err := carryForwardLifecycleSettings(r.Context(), ops, doc, rawBody)
 		if err != nil {
 			slog.Error("PUT server-config: failed to build lifecycle document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
@@ -881,6 +882,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		sectionDocs["lifecycle"] = merged
+		lifecycleBaseRev = rev
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -1081,6 +1083,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = accessBaseRev
 		} else if secName == "endpoints" && endpointsBaseRev >= 0 {
 			expectedRev = endpointsBaseRev
+		} else if secName == "lifecycle" && lifecycleBaseRev >= 0 {
+			expectedRev = lifecycleBaseRev
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
@@ -1775,9 +1779,10 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 // distinguish OMITTED fields from EXPLICITLY-SENT empty values:
 //   - OMITTED → field not in raw JSON → do NOT include in section doc.
 //     The write replaces the whole row, so for most sections an omitted
-//     field is dropped from the DB. The access section is the exception:
-//     handlePutServerConfigDB rebuilds it on the current row
-//     (buildAccessDocOnCurrent), so omitted access fields are kept.
+//     field is dropped from the DB. The access, endpoints and lifecycle
+//     sections are the exception: handlePutServerConfigDB rebuilds them on
+//     the current row (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
+//     carryForwardLifecycleSettings), so their omitted fields are kept.
 //   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
 //     zero value in the section doc, which CLEARS it in the DB
 //

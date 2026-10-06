@@ -145,29 +145,66 @@ func (s *Server) setStartClaimSettings(c StartClaimSettings) bool {
 	return old == nil || *old != n
 }
 
-// carryForwardStartClaimSettings returns the lifecycle section document doc
-// with every start-claim key it leaves empty taken from the current
-// lifecycle row, so a lifecycle PUT that does not mention them (the admin
-// form has no fields for them) keeps them instead of wiping them. The other
-// lifecycle keys keep replace semantics.
-func carryForwardStartClaimSettings(ctx context.Context, ops *OperationalSettings, doc json.RawMessage) (json.RawMessage, error) {
+// carryForwardLifecycleSettings rebuilds the lifecycle section document doc
+// on top of the current lifecycle row, so a PUT changes only the lifecycle
+// keys it carries instead of wiping the others (the same carry-forward as
+// buildAccessDocOnCurrent; ptone/scion#3464):
+//
+//   - auto_suspend_stalled, stalled_threshold, soft_delete_retention and
+//     soft_delete_retain_files are presence-aware: a key the body omits
+//     keeps its current value; an explicitly sent key (including null or
+//     "", which clear it) takes the value in doc.
+//   - The start-claim keys (the admin form has no fields for them) keep
+//     their current value whenever doc leaves them empty.
+//
+// With no row, doc is returned unchanged: absent keys then fall back to the
+// bootstrap value, as before. For a non-managed (seeded) row, keys
+// overridden by a node-local env var are not carried forward, so one node's
+// env value is not pinned into the shared row (see buildAccessDocOnCurrent).
+//
+// It returns the revision the base was read at (0 when no row exists), for
+// use as the CAS expected revision, so a concurrent lifecycle write turns
+// into a 409 rather than a lost update.
+func carryForwardLifecycleSettings(ctx context.Context, ops *OperationalSettings, doc json.RawMessage, rawBody []byte) (json.RawMessage, int64, error) {
 	var next opsettings.LifecycleSettings
 	if err := json.Unmarshal(doc, &next); err != nil {
-		return nil, fmt.Errorf("decoding lifecycle doc: %w", err)
+		return nil, 0, fmt.Errorf("decoding lifecycle doc: %w", err)
 	}
 	row, err := ops.store.GetHubSetting(ctx, "lifecycle")
 	if errors.Is(err, store.ErrNotFound) {
-		return doc, nil
+		return doc, 0, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading current lifecycle row: %w", err)
+		return nil, 0, fmt.Errorf("reading current lifecycle row: %w", err)
 	}
 	var cur opsettings.LifecycleSettings
 	if len(row.Value) > 0 {
 		if err := json.Unmarshal(row.Value, &cur); err != nil {
-			return nil, fmt.Errorf("decoding current lifecycle row: %w", err)
+			return nil, 0, fmt.Errorf("decoding current lifecycle row: %w", err)
 		}
 	}
+	if row.Origin != "managed" {
+		dropEnvOverriddenLifecycleFields(&cur, ops.EnvOverriddenKeys())
+	}
+
+	fp, err := parseFieldPresence(rawBody)
+	if err != nil {
+		fp = nil // omitted-semantics; the typed decode already succeeded
+	}
+	hubFP := fp.nestedPresence("server").nestedPresence("hub")
+	if !hubFP.has("auto_suspend_stalled") {
+		next.AutoSuspendStalled = cur.AutoSuspendStalled
+	}
+	if !hubFP.has("stalled_threshold") {
+		next.StalledThreshold = cur.StalledThreshold
+	}
+	if !hubFP.has("soft_delete_retention") {
+		next.SoftDeleteRetention = cur.SoftDeleteRetention
+	}
+	if !hubFP.has("soft_delete_retain_files") {
+		next.SoftDeleteRetainFiles = cur.SoftDeleteRetainFiles
+	}
+
 	for _, f := range []struct{ dst, src *string }{
 		{&next.StartClaimLeaseTTL, &cur.StartClaimLeaseTTL},
 		{&next.StartMaxDuration, &cur.StartMaxDuration},
@@ -178,7 +215,37 @@ func carryForwardStartClaimSettings(ctx context.Context, ops *OperationalSetting
 			*f.dst = *f.src
 		}
 	}
-	return json.Marshal(next)
+	merged, err := json.Marshal(next)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshalling lifecycle doc: %w", err)
+	}
+	return merged, row.Revision, nil
+}
+
+// dropEnvOverriddenLifecycleFields clears lifecycle fields whose koanf key
+// is overridden by a node-local env var, so an env-derived value in a
+// non-managed base is not carried into the shared row.
+func dropEnvOverriddenLifecycleFields(base *opsettings.LifecycleSettings, envKeys []string) {
+	for _, k := range envKeys {
+		switch k {
+		case "server.hub.auto_suspend_stalled":
+			base.AutoSuspendStalled = nil
+		case "server.hub.stalled_threshold":
+			base.StalledThreshold = ""
+		case "server.hub.soft_delete_retention":
+			base.SoftDeleteRetention = ""
+		case "server.hub.soft_delete_retain_files":
+			base.SoftDeleteRetainFiles = nil
+		case "server.hub.start_claim_lease_ttl":
+			base.StartClaimLeaseTTL = ""
+		case "server.hub.start_max_duration":
+			base.StartMaxDuration = ""
+		case "server.hub.start_unconfirmed_hold":
+			base.StartUnconfirmedHold = ""
+		case "server.hub.start_create_unconfirmed_hold":
+			base.StartCreateUnconfirmedHold = ""
+		}
+	}
 }
 
 // validateStartClaimSettingStrings checks the start-claim keys of a
