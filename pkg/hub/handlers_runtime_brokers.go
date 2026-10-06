@@ -810,6 +810,14 @@ type brokerAgentHeartbeat struct {
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", or "evicted" (see state.ExitReason)
 }
 
+// heartbeatBrokerIsFlat reports whether the Runtime Broker sending a
+// heartbeat is flat. A broker that cannot be read is treated as before (not
+// flat), so legacy heartbeats are unchanged.
+func heartbeatBrokerIsFlat(load func() (*store.RuntimeBroker, error)) bool {
+	b, err := load()
+	return err == nil && b.IsFlat()
+}
+
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -911,12 +919,14 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				"broker_id", id, "error", err)
 		} else {
 			// A flat row never stores Runtime Broker Profiles: a reported
-			// default profile or profile attach is dropped before the write.
-			if broker.IsFlat() && (heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0) {
+			// default profile, profile attach or profile SA mappings are
+			// dropped before the write.
+			if broker.IsFlat() && (heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0) {
 				s.agentLifecycleLog.Warn("heartbeat: ignoring Runtime Broker Profile fields reported for a flat Runtime Broker",
 					"broker_id", id)
 				heartbeat.DefaultProfile = nil
 				heartbeat.ProfileAttach = nil
+				heartbeat.ProfileSAMappings = nil
 			}
 			changed := false
 			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
@@ -1295,8 +1305,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				needsUpdate = true
 			}
 			// No Runtime Broker-reported profile is written onto a pinned
-			// (flat) agent.
-			if agentHB.Profile != "" && !agent.IsPinned() && (agent.AppliedConfig == nil || agent.AppliedConfig.Profile == "") {
+			// (flat) agent, or onto any agent of a flat Runtime Broker.
+			if agentHB.Profile != "" && !agent.IsPinned() && !heartbeatBrokerIsFlat(loadHeartbeatBroker) && (agent.AppliedConfig == nil || agent.AppliedConfig.Profile == "") {
 				if agent.AppliedConfig == nil {
 					agent.AppliedConfig = &store.AgentAppliedConfig{}
 				}
