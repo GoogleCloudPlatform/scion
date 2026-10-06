@@ -290,6 +290,64 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	return nil
 }
 
+// ApplyHarnessEnvOverlay re-selects the usage deriver against the harness
+// env overlay that the pre-start provisioner produced. init starts the
+// pipeline before pre-start hooks run (lifecycle telemetry needs it), so
+// Start can only see init's own environment; a harness that declares
+// SCION_USAGE_SOURCE=native in its provision.py output (claude, codex,
+// gemini, copilot) supplies it only through that overlay, which init hands
+// to the child rather than applying to itself. Without this, Start's
+// deriver stays a no-op for every native-source harness.
+//
+// The overlay is layered over the process environment exactly as the
+// supervisor layers it for the child, but only the usage-selection keys are
+// read: nothing from the overlay is written into this process's own
+// environment. If the effective selection is unchanged the running deriver
+// is kept; otherwise a replacement is built over the same loopback config
+// and swapped in atomically, and the previous one is shut down. Call it
+// before the harness child starts so no native event predates the switch.
+// A nil or stopped pipeline is a no-op.
+func (p *Pipeline) ApplyHarnessEnvOverlay(ctx context.Context, overlay map[string]string) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.running {
+		return nil
+	}
+	sel := usageSelectionFromEnv()
+	if v, ok := overlay[EnvUsageSource]; ok {
+		sel.Source = v
+	}
+	if v, ok := overlay[EnvHarness]; ok {
+		sel.Harness = v
+	}
+	current := p.usageDeriver.Load()
+	if current != nil && current.selection == sel {
+		return nil
+	}
+	loopbackConfig := p.loopbackConfig.Load()
+	if loopbackConfig == nil {
+		return nil
+	}
+	deriver, err := newUsageDeriver(ctx, loopbackConfig, sel)
+	if err != nil {
+		return fmt.Errorf("creating usage deriver from harness env overlay: %w", err)
+	}
+	if previous := p.usageDeriver.Swap(deriver); previous != nil {
+		shutdownCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+		if err := previous.Shutdown(shutdownCtx); err != nil {
+			log.Error("Usage deriver shutdown error: %v", err)
+		}
+		cancel()
+	}
+	if len(deriver.rules) > 0 {
+		log.Info("Usage derivation enabled from harness env overlay (source: %s, harness: %s)", sel.Source, sel.Harness)
+	}
+	return nil
+}
+
 // Stop stops the telemetry pipeline.
 func (p *Pipeline) Stop(ctx context.Context) error {
 	if p == nil {

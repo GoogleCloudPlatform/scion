@@ -809,6 +809,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
+	// The telemetry pipeline started above, before pre-start provisioning
+	// produced the overlay, so its usage deriver only saw init's own env.
+	// A harness declares SCION_USAGE_SOURCE in that overlay, so re-select
+	// the deriver now, before the child starts emitting native events.
+	applyHarnessOverlayToTelemetry(telemetryPipeline, harnessEnvOverlay)
+
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
 	if resolveIsSharedGitWorkspace() {
@@ -3763,4 +3769,18 @@ func parseCapBit(statusContent string, bit uint) bool {
 		}
 	}
 	return false
+}
+
+// applyHarnessOverlayToTelemetry hands the harness env overlay to a running
+// telemetry pipeline so usage derivation reflects the harness's declared
+// SCION_USAGE_SOURCE (see telemetry.Pipeline.ApplyHarnessEnvOverlay). It
+// never mutates init's own environment, and a failure only costs derived
+// usage, so it is logged rather than aborting startup.
+func applyHarnessOverlayToTelemetry(pipeline *telemetry.Pipeline, overlay map[string]string) {
+	if pipeline == nil {
+		return
+	}
+	if err := pipeline.ApplyHarnessEnvOverlay(context.Background(), overlay); err != nil {
+		log.Error("Failed to apply harness env overlay to telemetry: %v", err)
+	}
 }
