@@ -277,6 +277,8 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		}, nil
 	case entadapter.AppliedConfigTZCleanupKey:
 		return &AppliedConfigTZCleanupExecutor{Store: s.store}, nil
+	case entadapter.AutoExposeEnvNormalizeKey:
+		return &AutoExposeEnvNormalizeExecutor{Store: s.store}, nil
 	case entadapter.UTCTimestampNormalizeKey:
 		db, dbDialect := s.storeDB()
 		return &UTCTimestampNormalizeExecutor{DB: db, Dialect: dbDialect}, nil

@@ -235,11 +235,26 @@ const deletedDuringCreateMessage = "agent was deleted while it was being created
 // holds the row or has finished. The body carries no agent; warnings (the
 // outcome of the compensating delete of a run that landed) go in details.
 func writeDeletedDuringCreate(w http.ResponseWriter, agentID string, warnings []string) {
+	writeDeleteWon(w, agentID, deletedDuringCreateMessage, warnings)
+}
+
+// deletedWhileStartingMessage is the message of the 409 a synchronous start
+// or restart answers when a delete won after the broker start landed
+// (deleteWonAfterLanding). The row may be gone or soft-deleted, or only held
+// by a delete that has not finished (and may still fail), so the message
+// covers both.
+const deletedWhileStartingMessage = "agent was deleted, or is being deleted, while it was starting"
+
+// writeDeleteWon writes the 409 delete_in_progress answer to a synchronous
+// create, start or restart that lost to a delete after its dispatch: no
+// agent body, details.agentId, and details.warnings (the outcome of the
+// compensating delete of a run that landed) when there are any.
+func writeDeleteWon(w http.ResponseWriter, agentID, message string, warnings []string) {
 	details := map[string]interface{}{"agentId": agentID}
 	if len(warnings) > 0 {
 		details["warnings"] = warnings
 	}
-	writeError(w, http.StatusConflict, ErrCodeDeleteInProgress, deletedDuringCreateMessage, details)
+	writeError(w, http.StatusConflict, ErrCodeDeleteInProgress, message, details)
 }
 
 // deleteClaimedDuringDispatch returns the delete_in_progress refusal when a
@@ -253,6 +268,29 @@ func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
 		return nil
 	}
 	return deleteInProgressRefusal(agentID)
+}
+
+// deleteWonAfterLanding reports whether a synchronous start or restart's
+// broker start landed but a delete won while the broker call was in flight:
+// the row is gone, or deletedOrDeleteHeld (the rule compensateLandedRun,
+// which has already run inside the dispatch, applied to the same row). The
+// caller then answers writeDeleteWon (ptone/scion#3255).
+//
+// A failed re-read reports false: the caller then writes the status as
+// before and answers from the stored row. A failed delete, or a deleting row
+// whose lease expired, leaves the agent live, so it reports false too.
+func (s *Server) deleteWonAfterLanding(ctx context.Context, agentID string) bool {
+	fresh, err := s.store.GetAgent(ctx, agentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return true
+	case err != nil:
+		s.agentLifecycleLog.Warn("failed to re-read agent after the broker started it; cannot check for a delete",
+			"agent_id", agentID, "error", err)
+		return false
+	default:
+		return deletedOrDeleteHeld(fresh)
+	}
 }
 
 // writeRunIntentError answers a failed running-intent write. A refusal
