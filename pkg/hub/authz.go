@@ -254,7 +254,8 @@ func listRowReadCeiling(request AuthzRequest, permissionID string, boundary *Tok
 	}
 	projectBound := boundary != nil && boundary.Kind == BoundaryKindProject &&
 		boundary.ProjectID != "" && boundary.ProjectID == request.Resource.ParentID
-	if !ceiling.Allows("agent.list") && !(projectBound && ceiling.Allows("project.read")) {
+	listScope := ceiling.Allows("agent.list") || (projectBound && ceiling.Allows("project.read"))
+	if !listScope {
 		return ceiling
 	}
 	ceiling.PermissionIDs = append(append([]string{}, ceiling.PermissionIDs...), "agent.read")
