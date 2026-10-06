@@ -175,6 +175,9 @@ const (
 	opAgentResetAuth        authzop.OperationID = "agent.lifecycle.resetauth"
 	opAgentReincarnate      authzop.OperationID = "agent.lifecycle.reincarnate"
 	opAgentSetMessageMode   authzop.OperationID = "agent.setmessagemode"
+	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"
+	opAgentOutboundMessage  authzop.OperationID = "agent.outbound.message"
+	opAgentMetricsReport    authzop.OperationID = "agent.metrics.report"
 )
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {
@@ -183,6 +186,10 @@ func postOp(op authzop.OperationID) map[string]authzop.OperationID {
 
 // agentSubRouteTable lists every agent sub-route. Rows are matched in order;
 // the first match wins. G and D append rows here (see B/plan/g-interfaces.md).
+// Every row names a catalog operation through ops or allMethodsOp, or its
+// pattern is a catalog entry point, or its pattern is listed in
+// authzop.PendingBearerDispositions
+// (TestBearerDisposition_AgentSubRoutesNameAnOperation).
 var agentSubRouteTable = []agentSubRouteRow{
 	// --- /api/v1/agents/ ---
 	{id: AgentRouteStopAll, form: agentFormByID, noAgent: true, segs: []string{"stop-all"}, ops: postOp(opAgentStopAll)},
@@ -216,10 +223,10 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteActionExec, form: agentFormByID, segs: []string{"exec"}, ops: postOp(opAgentExec)},
 	{id: AgentRouteActionRestore, form: agentFormByID, segs: []string{"restore"}, ops: postOp(opAgentLifecycleRestore)},
 	{id: AgentRouteActionEnv, form: agentFormByID, segs: []string{"env"}, ops: postOp(opAgentEnv)},
-	{id: AgentRouteActionTokenRefresh, form: agentFormByID, segs: []string{"token", "refresh"}},
-	{id: AgentRouteActionRefreshToken, form: agentFormByID, segs: []string{"refresh-token"}},
-	{id: AgentRouteActionOutbound, form: agentFormByID, segs: []string{"outbound-message"}},
-	{id: AgentRouteActionMetrics, form: agentFormByID, segs: []string{"metrics"}},
+	{id: AgentRouteActionTokenRefresh, form: agentFormByID, segs: []string{"token", "refresh"}, ops: postOp(opAgentTokenRefresh)},
+	{id: AgentRouteActionRefreshToken, form: agentFormByID, segs: []string{"refresh-token"}, ops: postOp(opAgentTokenRefresh)},
+	{id: AgentRouteActionOutbound, form: agentFormByID, segs: []string{"outbound-message"}, ops: postOp(opAgentOutboundMessage)},
+	{id: AgentRouteActionMetrics, form: agentFormByID, segs: []string{"metrics"}, ops: postOp(opAgentMetricsReport)},
 	{id: AgentRouteActionMessageMode, form: agentFormByID, segs: []string{"set_message_mode"}, ops: postOp(opAgentSetMessageMode)},
 	{id: AgentRouteActionReincarnate, form: agentFormByID, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: AgentRouteActionResetAuth, form: agentFormByID, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
@@ -247,7 +254,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: ProjectAgentRouteActionExec, form: agentFormProject, segs: []string{"exec"}, ops: postOp(opAgentExec)},
 	{id: ProjectAgentRouteActionRestore, form: agentFormProject, segs: []string{"restore"}, ops: postOp(opAgentLifecycleRestore)},
 	{id: ProjectAgentRouteActionEnv, form: agentFormProject, segs: []string{"env"}, ops: postOp(opAgentEnv)},
-	{id: ProjectAgentRouteActionOutbound, form: agentFormProject, segs: []string{"outbound-message"}},
+	{id: ProjectAgentRouteActionOutbound, form: agentFormProject, segs: []string{"outbound-message"}, ops: postOp(opAgentOutboundMessage)},
 	{id: ProjectAgentRouteActionMessageMode, form: agentFormProject, segs: []string{"set_message_mode"}, ops: postOp(opAgentSetMessageMode)},
 	{id: ProjectAgentRouteActionReincarnate, form: agentFormProject, segs: []string{"reincarnate"}, ops: postOp(opAgentReincarnate)},
 	{id: ProjectAgentRouteActionResetAuth, form: agentFormProject, segs: []string{"reset-auth"}, ops: postOp(opAgentResetAuth)},
