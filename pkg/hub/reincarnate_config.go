@@ -62,7 +62,8 @@ import (
 //
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
-// AppliedConfig).
+// AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
+// which wraps errWorkspaceContentTimeout).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
 	return s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, nil)
 }

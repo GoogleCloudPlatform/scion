@@ -2156,14 +2156,16 @@ func (s *Server) createAgentInProject(
 					// Workspace storage did not respond. Dispatching without
 					// the upload would leave the remote broker resolving the
 					// workspace against its own stale or empty project copy,
-					// so the create fails here. Same stage and cleanup as the
-					// workspace-bootstrap failures above: the agent row and
-					// quotas exist, nothing has been dispatched and no
-					// credential has been minted.
+					// so the create fails here and answers 503 without the
+					// path. As with the workspace-bootstrap failures above,
+					// the agent row and quotas exist, nothing has been
+					// dispatched (nil DeleteRuntime) and no credential has
+					// been minted (no revoke). A failed compensation answers
+					// 500 with its correlation ID instead (writeCreateFailure).
 					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
 						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
-					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
-					writeWorkspaceStorageUnavailable(w, workspaceErr)
+					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
+					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
 					return
 				} else if workspaceErr != nil {
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
