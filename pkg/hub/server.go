@@ -621,6 +621,17 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// Image is the user's explicit image (explicitDispatchImage), already
+	// registry-rewritten; empty when the user chose none. The broker applies
+	// it as the top-tier image (opts.Image), the same as create's
+	// Config.Image, so a start or restart ranks the image exactly as the
+	// create did (ptone/scion#1799). A template-derived image is never sent.
+	Image string
+	// SharedWorkspace is set on a restart (the start request already
+	// carries it as its own field) so the broker reads and writes a
+	// shared-workspace agent's state under the same broker-side agents root
+	// as its start (ptone/scion#1799).
+	SharedWorkspace bool
 	// TemplateName is the agent's template slug. The broker uses it for
 	// naming only (the scion.template label, SCION_TEMPLATE_NAME and
 	// agent-info.json), never to locate or load a template. A content hash
@@ -663,6 +674,12 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.Image != "" {
+		payload["image"] = extras.Image
+	}
+	if extras.SharedWorkspace {
+		payload["sharedWorkspace"] = true
 	}
 	if extras.TemplateName != "" && !transfer.IsContentHash(extras.TemplateName) {
 		payload["templateName"] = extras.TemplateName
@@ -1254,6 +1271,11 @@ type RemoteAgentInfo struct {
 	// the runtime entry the broker created or found (ptone/scion#2550).
 	// Older brokers omit it.
 	RunID string `json:"runId,omitempty"`
+	// HarnessConfigSource mirrors runtimebroker.AgentResponse.HarnessConfigSource:
+	// which resolution branch supplied the harness-config (hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
+	// (ptone/scion#620). Older brokers omit it.
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	// WorkspacePlacement mirrors runtimebroker.AgentResponse.WorkspacePlacement:
 	// where the start this answers placed the agent's workspace. Empty
 	// when no start resolved it (provision-only, older brokers).
@@ -1335,6 +1357,10 @@ type Server struct {
 	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
+
+	// userScopedDataSweepDone is closed when the startup sweep of deleted
+	// users' user-scope data ends (startUserScopedDataSweep).
+	userScopedDataSweepDone <-chan struct{}
 
 	// decisionAuditWriter is the buffered decision audit writer wired into
 	// authzService. CleanupResources does not close it: it runs before
@@ -2233,6 +2259,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	if cfg.DevAuthToken != "" {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
+
+	// Remove user-scope secrets and env vars whose user no longer exists
+	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
+	// whole sweep, lookup and removal, runs in the background under one time
+	// budget and is non-fatal; see startUserScopedDataSweep.
+	srv.userScopedDataSweepDone = srv.startUserScopedDataSweep(srv.ctx)
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.
@@ -5296,6 +5328,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// and nothing at start depends on its result.
 	s.startStoredTimestampCheck(ctx)
 
+	// Record the workspaces this hub keeps as its own, and set the hub
+	// project ID as the workspace project identity of hub-cloned projects
+	// created with a locally generated one.
+	s.startClonedProjectIdentityAlignment(ctx)
+
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
 	s.startScheduler(ctx)
@@ -5817,6 +5854,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
+	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
