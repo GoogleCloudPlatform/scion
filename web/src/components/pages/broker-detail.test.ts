@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 
-import type { Agent } from '../../shared/types.js';
+import type { Agent, RuntimeBroker } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import type { ScionPageBrokerDetail } from './broker-detail.js';
 
@@ -65,5 +65,53 @@ describe('broker detail agent card status badge', () => {
     const badge = cardBadge(makeAgent({ phase: 'created' }));
     expect(badge.getAttribute('label')).toBe('created');
     expect(badge.hasAttribute('title')).toBe(false);
+  });
+});
+
+/** Render the page header for `broker` and return the "Created" stat text. */
+function createdStat(broker: Partial<RuntimeBroker>): string {
+  const el = document.createElement('scion-page-broker-detail') as ScionPageBrokerDetail;
+  const page = el as unknown as {
+    loading: boolean;
+    broker: RuntimeBroker | null;
+    render(): TemplateResult;
+  };
+  page.loading = false;
+  page.broker = {
+    id: 'b-1',
+    name: 'broker-1',
+    slug: 'broker-1',
+    version: '1.0.0',
+    status: 'online',
+    connectionState: 'connected',
+    lastHeartbeat: '2026-09-28T12:00:00Z',
+    autoProvide: false,
+    ...broker,
+  } as RuntimeBroker;
+  const host = document.createElement('div');
+  render(page.render(), host);
+  const stat = Array.from(host.querySelectorAll('.stat')).find(
+    (s) => s.querySelector('.stat-label')?.textContent?.trim() === 'Created'
+  );
+  expect(stat).toBeDefined();
+  return stat!.querySelector('.stat-value-sm')?.textContent?.trim() ?? '';
+}
+
+describe('broker detail Created stat', () => {
+  beforeAll(async () => {
+    await import('./broker-detail.js');
+  }, 30_000);
+
+  it('shows the date the hub sends as created', () => {
+    expect(createdStat({ created: '2026-08-14T12:00:00Z' })).toMatch(/Aug 14, 2026/);
+  });
+
+  it('still reads the older createdAt name', () => {
+    expect(createdStat({ createdAt: '2026-07-01T12:00:00Z' })).toMatch(/Jul 1, 2026/);
+  });
+
+  it('shows a dash instead of a blank when the date is missing or invalid', () => {
+    expect(createdStat({})).toBe('—');
+    expect(createdStat({ created: 'not-a-date' })).toBe('—');
   });
 });

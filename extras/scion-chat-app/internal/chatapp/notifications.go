@@ -245,11 +245,16 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		return nil
 	}
 
+	// The retired end-of-turn assistant-reply mirror is one user's turn
+	// text. An older hub may still forward it; discard it rather than let
+	// it fall through to the notification path, which posts to every
+	// space linked to the project.
 	if msg.Type == messages.TypeAssistantReply {
-		if len(msg.Msg) > 500 {
-			msg.Msg = msg.Msg[:500] + fmt.Sprintf("\n[%d chars truncated]", len(msg.Msg)-500)
-		}
-	} else if msg.Type != messages.TypeInstruction {
+		n.log.Debug("discarding retired assistant-reply message", "sender", msg.Sender)
+		return nil
+	}
+
+	if msg.Type != messages.TypeInstruction {
 		n.log.Debug("routing non-instruction user message to notification path",
 			"type", msg.Type,
 			"sender", msg.Sender,

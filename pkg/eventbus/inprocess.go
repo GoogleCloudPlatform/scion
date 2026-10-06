@@ -124,7 +124,12 @@ func isUserMessageTopic(topic string) bool {
 
 // Subscribe registers a handler for messages matching the given pattern.
 // Each subscriber gets a dedicated goroutine for dispatch to avoid blocking the publisher.
+// A nil handler is rejected with ErrNilHandler.
 func (b *InProcessEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
+	if handler == nil {
+		return nil, ErrNilHandler
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
