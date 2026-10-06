@@ -524,6 +524,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if relaySkillResolutionError(w, err) {
 				return
 			}
+			if relayWorkspaceStorageUnconfigured(w, err) {
+				return
+			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
 			return
 		}

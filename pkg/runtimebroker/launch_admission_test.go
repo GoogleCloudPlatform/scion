@@ -1565,6 +1565,50 @@ func TestAsyncCreate_NoWorkspaceBucket_Returns422BeforeAccept(t *testing.T) {
 	}
 }
 
+// TestAsyncCreate_NoRequestBucket_UsesBrokerStorageBucket covers an async
+// create from a hub that sends no workspace bucket, on a broker configured
+// with its own storage bucket (ptone/scion#3422): admission falls back to the
+// broker setting and accepts the launch with a 201, and runLaunch downloads
+// from that bucket. The fake download fails so the launch ends there.
+func TestAsyncCreate_NoRequestBucket_UsesBrokerStorageBucket(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	srv.config.WorktreeBase = t.TempDir()
+	srv.config.StorageBucket = "broker-bucket"
+	fake := installFakeWorkspaceSync(t, errors.New("fake sync failure"))
+
+	var mu sync.Mutex
+	var failedMessage string
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateFailed {
+			mu.Lock()
+			failedMessage = req.Message
+			mu.Unlock()
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-async-broker-bucket", "asyncLaunch": true, "launchId": "L-async-broker-bucket",
+		"launchTimeoutSeconds": 300, "workspaceStoragePath": "some/path",
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s (admission must fall back to the broker bucket)", w.Code, w.Body.String())
+	}
+
+	if !waitUntil(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return failedMessage != ""
+	}) {
+		t.Fatal("expected a failed report once runLaunch's download attempt failed")
+	}
+	if calls := fake.Calls(); len(calls) != 1 || calls[0].bucket != "broker-bucket" {
+		t.Fatalf("downloads = %+v, want exactly one, from the broker setting bucket broker-bucket", calls)
+	}
+}
+
 // TestAsyncCreate_StartSeesAdmissionContextValues covers ctx' being derived
 // from the admission context (which carries values createAgent attaches
 // after r.Context() was read), not r.Context() itself: a value the Hub's

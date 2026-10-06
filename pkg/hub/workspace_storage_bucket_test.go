@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,6 +96,87 @@ func TestDispatchCreateErrorResponse_Other422Stays502(t *testing.T) {
 	dispatchCreateErrorResponse(w, err, "")
 
 	require.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+}
+
+// workspaceStorageUnconfiguredBrokerErr is the broker's refusal for a
+// workspace upload it has no bucket for, as it arrives at the hub.
+func workspaceStorageUnconfiguredBrokerErr() error {
+	return &brokerStatusError{
+		StatusCode: http.StatusUnprocessableEntity,
+		Body:       `{"error":{"code":"workspace_storage_unconfigured","message":"Cannot download the uploaded workspace: no bucket"}}`,
+	}
+}
+
+// requireWorkspaceStorageUnconfigured422 asserts rec carries the relayed
+// broker refusal with the same status, code and message as create.
+func requireWorkspaceStorageUnconfigured422(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, workspaceStorageUnconfiguredErrorCode, resp.Error.Code)
+	require.Equal(t, "Failed to dispatch to runtime broker: Cannot download the uploaded workspace: no bucket", resp.Error.Message)
+}
+
+// TestSyncToFinalize_WorkspaceStorageUnconfiguredRelays422 covers the
+// sync-to finalize dispatch relaying the broker's no-bucket refusal as the
+// same 422 the create path gives, not a 500. With local hub storage no
+// bucket is recorded, so a broker without its own bucket answers this way.
+func TestSyncToFinalize_WorkspaceStorageUnconfiguredRelays422(t *testing.T) {
+	srv, s, stor, disp := testBootstrapServer(t)
+	disp.returnErr = workspaceStorageUnconfiguredBrokerErr()
+	projectID, _ := setupProjectAndBroker(t, s)
+	ctx := context.Background()
+
+	agentID := tid("agent_finalize_no_bucket")
+	agent := &store.Agent{
+		ID:              agentID,
+		Slug:            "finalize-no-bucket",
+		Name:            "Finalize No Bucket",
+		ProjectID:       projectID,
+		RuntimeBrokerID: tid("broker_bootstrap_test"),
+		Phase:           string(state.PhaseProvisioning),
+		AppliedConfig:   &store.AgentAppliedConfig{Task: "test task"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	storagePath := "workspaces/" + projectID + "/" + agentID
+	stor.objects[storagePath+"/files/main.go"] = &storage.Object{Name: storagePath + "/files/main.go"}
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{{Path: "main.go", Size: 10, Hash: "sha256:abc"}}},
+	})
+	requireWorkspaceStorageUnconfigured422(t, rec)
+}
+
+// workspaceStorageUnconfiguredFinalizeDispatcher answers finalize-env with
+// the broker's no-bucket refusal.
+type workspaceStorageUnconfiguredFinalizeDispatcher struct {
+	createAgentDispatcher
+}
+
+func (d *workspaceStorageUnconfiguredFinalizeDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
+	return nil, workspaceStorageUnconfiguredBrokerErr()
+}
+
+// TestSubmitAgentEnv_WorkspaceStorageUnconfiguredRelays422 covers
+// finalize-env, which creates the agent on the broker after an env gather
+// and so can meet the same refusal: it is relayed as create's 422, not a 500.
+func TestSubmitAgentEnv_WorkspaceStorageUnconfiguredRelays422(t *testing.T) {
+	disp := &workspaceStorageUnconfiguredFinalizeDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	agent := &store.Agent{
+		ID:              tid("agent-env-no-bucket"),
+		Name:            "env-no-bucket",
+		Slug:            "env-no-bucket",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: project.DefaultRuntimeBrokerID,
+		Phase:           string(state.PhaseProvisioning),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/env-no-bucket/env",
+		SubmitEnvRequest{Env: map[string]string{"API_KEY": "v"}})
+	requireWorkspaceStorageUnconfigured422(t, rec)
 }
 
 func TestWorkspaceDownloadBucket(t *testing.T) {
