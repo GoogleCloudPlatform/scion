@@ -31,7 +31,7 @@ import {
 
 /** A single unbreakable token, far wider than either column. */
 const LONG_FILE_NAME = `${'investigation'.repeat(4)}.md`;
-const LONG_CONTAINER_PATH = `/scion-volumes/scratchpad/projects/${'roadmap'.repeat(12)}/${LONG_FILE_NAME}`;
+const LONG_CONTAINER_PATH = `/scion-volumes/shared/docs/${'roadmap'.repeat(12)}/${LONG_FILE_NAME}`;
 
 /** Sub-pixel rounding allowance for column-width comparisons. */
 const TOLERANCE_PX = 2;
@@ -154,7 +154,7 @@ test('the two-column palette uses the wider desktop panel', async ({ page }) => 
   expect((await measure(page)).panelWidth).toBeCloseTo(720, 0);
 });
 
-test('the full path stays visible, wrapped within its row', async ({ page }) => {
+test('the document row keeps the full path text', async ({ page }) => {
   await openPaletteWithLongDocument(page);
   const docRow = page
     .locator('scion-quick-palette [aria-labelledby="palette-heading-documents"] .palette-option')
