@@ -39,6 +39,23 @@ display names.
 Use the `gcp.monitoring.AlertPolicy`, `gcp.monitoring.UptimeCheckConfig`, and
 `gcp.monitoring.NotificationChannel` resources with values from these files.
 
+## Hub dashboard
+
+`dashboards/scion-hub.json` is a native Cloud Monitoring dashboard (unlike the
+YAML files above, it needs no conversion). It charts the Hub's DB pool,
+dispatch, notification and launch reaper metrics, grouped by Hub instance
+(`scion_hub_id`). It contains no project ID:
+
+```bash
+gcloud monitoring dashboards create --project=PROJECT_ID \
+  --config-from-file=deploy/monitoring/dashboards/scion-hub.json
+```
+
+The Hub exports these metrics as `workload.googleapis.com/scion.*`.
+`pkg/observability/hubmetrics/dashboard_test.go` checks that every chart
+queries a metric the Hub exports. See the docs page *Hub Monitoring Dashboard*
+for details.
+
 ## Prerequisites
 
 1. Notification channels must be created before alert policies that reference
@@ -55,6 +72,7 @@ Use the `gcp.monitoring.AlertPolicy`, `gcp.monitoring.UptimeCheckConfig`, and
 | `alert-policies.yaml` | 15 alert policies covering DB health, dispatch health, telemetry pipeline, and Hub auth |
 | `uptime-checks.yaml` | 4 uptime checks for Hub and Broker health/readiness endpoints |
 | `notification-channels.yaml` | 3 notification channel definitions (email, Slack, PagerDuty) |
+| `dashboards/scion-hub.json` | Importable Cloud Monitoring dashboard for Hub metrics, per Hub instance |
 
 ## References
 

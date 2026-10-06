@@ -1,0 +1,665 @@
+{
+  "displayName": "Scion Hub",
+  "dashboardFilters": [
+    {
+      "labelKey": "scion_hub_id",
+      "filterType": "METRIC_LABEL"
+    }
+  ],
+  "labels": {
+    "scion": ""
+  },
+  "mosaicLayout": {
+    "columns": 48,
+    "tiles": [
+      {
+        "xPos": 0,
+        "yPos": 0,
+        "width": 48,
+        "height": 4,
+        "widget": {
+          "title": "Database connection pool",
+          "sectionHeader": {
+            "subtitle": "Hub database connection pool, per hub instance.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 4,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "DB pool: active connections",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.pool.connections.active\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "connections",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 4,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "DB pool: idle connections",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.pool.connections.idle\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "connections",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 32,
+        "yPos": 4,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "DB pool: waiting (cumulative wait count)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.pool.connections.waiting\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "waits",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 20,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "DB pool: max connections",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.pool.connections.max\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "connections",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 36,
+        "width": 48,
+        "height": 4,
+        "widget": {
+          "title": "Broker dispatch",
+          "sectionHeader": {
+            "subtitle": "Durable broker dispatch rows, per hub instance.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 40,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Dispatch claimed (per second)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.dispatch.claimed\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "dispatches/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 40,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Dispatch done (per second)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.dispatch.done\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "dispatches/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 32,
+        "yPos": 40,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Dispatch failed (per second)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.dispatch.failed\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "dispatches/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 56,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Stuck pending messages",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.dispatch.message.stuck\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "messages",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 56,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Dispatch intent-to-done latency",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.dispatch.intent_to_done.duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p50 ${metric.labels.scion_hub_id}"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.dispatch.intent_to_done.duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p95 ${metric.labels.scion_hub_id}"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.dispatch.intent_to_done.duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_99",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p99 ${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 72,
+        "width": 48,
+        "height": 4,
+        "widget": {
+          "title": "Event notifications (Postgres LISTEN/NOTIFY)",
+          "sectionHeader": {
+            "subtitle": "Notification delivery lag and drops, per hub instance.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 76,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Notify lag: publish-to-deliver latency",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.notify.publish_to_deliver.duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_50",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p50 ${metric.labels.scion_hub_id}"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.notify.publish_to_deliver.duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_95",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p95 ${metric.labels.scion_hub_id}"
+              },
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.notify.publish_to_deliver.duration\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_DELTA",
+                      "crossSeriesReducer": "REDUCE_PERCENTILE_99",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "p99 ${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "ms",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 76,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Notify drops (per second, by reason)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.db.notify.dropped\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\"",
+                        "metric.label.\"reason\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id} reason=${metric.labels.reason}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "notifications/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 92,
+        "width": 48,
+        "height": 4,
+        "widget": {
+          "title": "Launch reaper",
+          "sectionHeader": {
+            "subtitle": "Async-create launch reaper ticks and errors, per hub instance.",
+            "dividerBelow": true
+          }
+        }
+      },
+      {
+        "xPos": 0,
+        "yPos": 96,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Reaper ticks (per second, by outcome)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.launch_reaper.ticks\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\"",
+                        "metric.label.\"outcome\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id} outcome=${metric.labels.outcome}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "ticks/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 16,
+        "yPos": 96,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Reaper row errors (per second)",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.launch_reaper.row_errors\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_RATE",
+                      "crossSeriesReducer": "REDUCE_SUM",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "rows/s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      },
+      {
+        "xPos": 32,
+        "yPos": 96,
+        "width": 16,
+        "height": 16,
+        "widget": {
+          "title": "Reaper disarmed for",
+          "xyChart": {
+            "dataSets": [
+              {
+                "timeSeriesQuery": {
+                  "timeSeriesFilter": {
+                    "filter": "metric.type=\"workload.googleapis.com/scion.launch_reaper.disarmed_for\"",
+                    "aggregation": {
+                      "alignmentPeriod": "60s",
+                      "perSeriesAligner": "ALIGN_MAX",
+                      "crossSeriesReducer": "REDUCE_MAX",
+                      "groupByFields": [
+                        "metric.label.\"scion_hub_id\""
+                      ]
+                    }
+                  }
+                },
+                "plotType": "LINE",
+                "targetAxis": "Y1",
+                "minAlignmentPeriod": "60s",
+                "legendTemplate": "${metric.labels.scion_hub_id}"
+              }
+            ],
+            "timeshiftDuration": "0s",
+            "yAxis": {
+              "label": "s",
+              "scale": "LINEAR"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

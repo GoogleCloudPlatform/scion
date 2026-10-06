@@ -26,6 +26,22 @@ import (
 
 const defaultExportInterval = 60 * time.Second
 
+// Resource attribute keys that identify the hub replica a metric came from.
+const (
+	// HubIDAttribute is the resource attribute that identifies the hub
+	// instance. In Cloud Monitoring it becomes the metric label HubIDLabel.
+	HubIDAttribute = "scion.hub.id"
+	// HubNameAttribute is the resource attribute that carries the hub's
+	// display name. In Cloud Monitoring it becomes the metric label
+	// "scion_hub_name".
+	HubNameAttribute = "scion.hub.name"
+	// HubIDLabel is the Cloud Monitoring metric label that HubIDAttribute is
+	// written to. The exporter replaces each character that is not a letter
+	// or digit with "_". Dashboards and alert policies group by this label
+	// to show each replica separately.
+	HubIDLabel = "scion_hub_id"
+)
+
 // MetricGroup identifies a logical group of hub metrics that can be
 // independently enabled or disabled.
 type MetricGroup struct {
@@ -53,6 +69,9 @@ type options struct {
 	exportInterval time.Duration
 	hubID          string
 	hubName        string
+	// exporterOpts are extra Cloud Monitoring exporter options. Tests use
+	// them to point the exporter at an in-process fake API server.
+	exporterOpts []mexporter.Option
 }
 
 // WithExportInterval sets the periodic reader interval. Defaults to 60s.
@@ -68,6 +87,11 @@ func WithHubID(id string) Option {
 // WithHubName sets the scion.hub.name resource attribute.
 func WithHubName(name string) Option {
 	return func(o *options) { o.hubName = name }
+}
+
+// withExporterOptions appends Cloud Monitoring exporter options. Test only.
+func withExporterOptions(opts ...mexporter.Option) Option {
+	return func(o *options) { o.exporterOpts = append(o.exporterOpts, opts...) }
 }
 
 // NewMeterProvider creates an OTel SDK MeterProvider that exports to GCP Cloud
@@ -86,7 +110,11 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 		fn(o)
 	}
 
-	baseExporter, err := mexporter.New(mexporter.WithProjectID(gcpProjectID))
+	exporterOpts := append([]mexporter.Option{
+		mexporter.WithProjectID(gcpProjectID),
+		mexporter.WithFilteredResourceAttributes(ResourceAttributeLabelFilter),
+	}, o.exporterOpts...)
+	baseExporter, err := mexporter.New(exporterOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
 	}
@@ -96,13 +124,13 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 		semconv.ServiceName("scion-hub"),
 	}
 	if o.hubID != "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.id", o.hubID))
+		resAttrs = append(resAttrs, attribute.String(HubIDAttribute, o.hubID))
 	}
 	if envHubID := os.Getenv("SCION_HUB_ID"); envHubID != "" && o.hubID == "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.id", envHubID))
+		resAttrs = append(resAttrs, attribute.String(HubIDAttribute, envHubID))
 	}
 	if o.hubName != "" {
-		resAttrs = append(resAttrs, attribute.String("scion.hub.name", o.hubName))
+		resAttrs = append(resAttrs, attribute.String(HubNameAttribute, o.hubName))
 	}
 
 	res, err := resource.New(ctx,
@@ -122,6 +150,24 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 	mpOpts = append(mpOpts, groupDropViews()...)
 
 	return metric.NewMeterProvider(mpOpts...), nil
+}
+
+// ResourceAttributeLabelFilter selects the resource attributes the Cloud
+// Monitoring exporter copies onto every exported point as metric labels. By
+// default the exporter copies only service.name, service.namespace and
+// service.instance.id and drops every other resource attribute. Without this
+// filter, scion.hub.id would never reach Cloud Monitoring, and all replicas
+// would write the same time series. This filter keeps the default set and adds
+// the hub identity attributes.
+func ResourceAttributeLabelFilter(kv attribute.KeyValue) bool {
+	if mexporter.DefaultResourceAttributesFilter(kv) {
+		return true
+	}
+	switch string(kv.Key) {
+	case HubIDAttribute, HubNameAttribute:
+		return kv.Value.AsString() != ""
+	}
+	return false
 }
 
 // groupDropViews returns OTel View options that drop instruments belonging to
