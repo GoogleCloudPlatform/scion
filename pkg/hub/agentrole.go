@@ -35,6 +35,9 @@ func ValidAgentRole(r AgentRole) bool {
 }
 
 // ScopesForRole returns the JWT scopes granted by a named agent role.
+// Scopes in ceilingOptionalRoleScopes (project:artifact:read) are part of the
+// bundle but never decide whether a role fits a ceiling or may be delegated;
+// a mint drops them when the source ceiling lacks their permission.
 // Returns nil for AgentRoleNone (caller should set NoAuth=true instead).
 // GCP token scopes and identity token scopes are NOT included here —
 // they are appended dynamically at dispatch time based on agent config.
@@ -43,7 +46,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 	case AgentRoleNone:
 		return nil
 	case AgentRoleReadOnly:
-		return []AgentTokenScope{ScopeProjectRead}
+		return []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead}
 	case AgentRoleBaseline:
 		return []AgentTokenScope{
 			ScopeProjectRead,
@@ -51,6 +54,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentTokenRefresh,
 			ScopeAgentNotify,
 			ScopeAgentPortForward,
+			ScopeProjectArtifactRead,
 		}
 	case AgentRoleFull:
 		return []AgentTokenScope{
@@ -65,6 +69,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeProjectSecretRead,
 			ScopeProjectTemplateWrite,
 			ScopeAgentSetMessageMode,
+			ScopeProjectArtifactRead,
 		}
 	case "":
 		return ScopesForRole(AgentRoleNone)

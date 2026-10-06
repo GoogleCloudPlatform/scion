@@ -39,7 +39,7 @@ import (
 // item when every field is populated.
 var compactItemAllowlist = []string{
 	"id", "slug", "name", "template", "projectId", "project", "labels",
-	"phase", "activity", "containerStatus", "messageMode", "ancestry",
+	"phase", "activity", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
 	"_capabilities", "_messageability", "deletion",
 }
@@ -726,7 +726,7 @@ func TestAgentCompactView_KeySetIsAllowlist(t *testing.T) {
 		ID: tid("cv-allkeys"), Slug: "cv-allkeys", Name: "All Keys", Template: "claude",
 		ProjectID: f.project.ID, Labels: map[string]string{"k": "v"},
 		Phase: "running", Activity: "executing", ContainerStatus: "Up 5 minutes",
-		MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
+		Message: "Waiting for review", MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
 		CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
 		AppliedConfig: &store.AgentAppliedConfig{CreatorName: "All Keys Creator", Env: map[string]string{"A": "b"}},
 	}

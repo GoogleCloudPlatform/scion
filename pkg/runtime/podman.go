@@ -188,6 +188,8 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 
+	newArgs = appendSharedDirGroupArgs(newArgs, config, podmanRuntimeName(r.Rootless), !r.Rootless)
+
 	newArgs = append(newArgs, args[1:]...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
@@ -476,4 +478,12 @@ func (r *PodmanRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
+}
+
+// podmanRuntimeName names the Podman mode in shared-dir group warnings.
+func podmanRuntimeName(rootless bool) string {
+	if rootless {
+		return "podman (rootless)"
+	}
+	return "podman"
 }

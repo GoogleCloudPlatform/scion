@@ -657,7 +657,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	// If deleteFiles is true and we have storage, delete the files
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			if err := stor.DeletePrefix(ctx, existing.StoragePath); err != nil {
+			if err := stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath)); err != nil {
 				slog.Warn("failed to delete template files", "template_id", id, "storage_path", existing.StoragePath, "error", err)
 			}
 		}
@@ -1064,7 +1064,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			srcPath := source.StoragePath + "/" + file.Path
 			dstPath := storagePath + "/" + file.Path
 			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 				RuntimeError(w, "Failed to copy files: "+err.Error())
 				return
 			}
@@ -1076,7 +1076,7 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 
 	if err := s.store.CreateTemplate(ctx, clone); err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storagePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
