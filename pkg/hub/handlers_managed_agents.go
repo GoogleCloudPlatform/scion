@@ -215,29 +215,65 @@ const (
 // create whose delete won the race (ptone/scion#3454), and returns the
 // warnings for the 409.
 //
-// The delete engine already calls managedAgentDelete on the row it read
-// right after its claim. Whether that row names the interaction this create
-// started depends on whether the create's post-create write landed first:
+// The delete engine already calls managedAgentDelete, but only when the row
+// it read right after its claim has the managed Runtime, and it can only
+// stop an interaction that row names. managedAgentCreate sets both in
+// memory, and only the create's post-create write persists them. So
+// whether the engine stops this create's interaction depends on whether
+// that write landed first:
 //
 //   - recorded (the write succeeded): it landed before the claim, since a
 //     claim bumps state_version and a later write would have conflicted. The
-//     engine's row carries the interaction ID and the engine stops it, so
-//     nothing is done here; this avoids a second delete.
-//   - not recorded: the claim may have come first, so the engine's row has no
-//     interaction ID and the engine cannot stop it. This create holds the
-//     only copy of the ID, so it stops the interaction itself.
+//     engine's row carries the managed Runtime and the interaction ID, and
+//     the engine stops it, so nothing is done here; this avoids a second
+//     stop.
+//   - not recorded: the claim may have come first, so the engine's row has
+//     neither the managed Runtime nor the interaction ID, and the engine
+//     cannot stop it. This create holds the only copy of the ID, so it stops
+//     the interaction itself.
 //
 // A create with no task started no interaction: nothing to clean up.
+//
+// The stop runs detached from the request with its own budget, as
+// compensateLandedRun's delete does: a client that goes away must not leave
+// an interaction running that nothing else can stop. Unlike
+// managedAgentDelete, a failure is reported (stopManagedInteraction).
 func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent, recorded bool) []string {
-	if recorded || agent.Annotations[annotationInteractionID] == "" {
+	interactionID := agent.Annotations[annotationInteractionID]
+	if recorded || interactionID == "" {
 		return nil
 	}
-	if err := s.managedAgentDelete(ctx, agent); err != nil {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), compensatingDeleteTimeout)
+	defer cancel()
+	if err := stopManagedInteraction(cctx, interactionID); err != nil {
 		s.agentLifecycleLog.Warn("Failed to stop the managed agent interaction of a create that lost to a delete",
-			"agent_id", agent.ID, "error", err)
+			"agent_id", agent.ID, "interaction_id", interactionID, "error", err)
 		return []string{managedCreateCompensateFailedWarning + err.Error()}
 	}
 	return []string{managedCreateCompensatedWarning}
+}
+
+// stopManagedInteraction cancels interactionID if it is still in progress,
+// and returns any backend error, including a failed read of the
+// interaction (its state is then unknown). An interaction that has already
+// ended needs no cancel. managedAgentStop is the best-effort variant other
+// callers use; it logs and swallows these errors.
+func stopManagedInteraction(ctx context.Context, interactionID string) error {
+	backend, err := getManagedBackend()
+	if err != nil {
+		return fmt.Errorf("managed agent backend: %w", err)
+	}
+	st, err := backend.GetInteraction(ctx, interactionID)
+	if err != nil {
+		return fmt.Errorf("reading interaction: %w", err)
+	}
+	if st == nil || st.Status != managedagent.StatusInProgress {
+		return nil
+	}
+	if err := backend.CancelInteraction(ctx, interactionID); err != nil {
+		return fmt.Errorf("cancelling interaction: %w", err)
+	}
+	return nil
 }
 
 // handleManagedAgentLifecycle handles lifecycle actions (start, stop, restart) for managed agents.

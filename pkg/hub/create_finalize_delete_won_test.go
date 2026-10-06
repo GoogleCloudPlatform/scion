@@ -116,3 +116,25 @@ func TestSubmitAgentEnv_DeleteWonAfterLanding_Answers409(t *testing.T) {
 		})
 	}
 }
+
+// A finalize that answers 200 returns the dispatch's warnings too: here the
+// dispatcher's delete-won re-read fails, so compensateLandedRun warns that
+// it could not check (the handler's own re-read still sees a live agent).
+func TestWorkspaceFinalize_Live_ReturnsDispatchWarnings(t *testing.T) {
+	srv, f, c := newLandingCompletionServer(t)
+	fs := &failingGetStore{Store: f.store}
+	d := NewHTTPAgentDispatcherWithClient(fs, c, false, slog.Default())
+	d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return AsyncLaunchSettings{} })
+	srv.SetDispatcher(d)
+	agent := f.agent(t, "fin-warn", string(state.PhaseProvisioning), false)
+	c.onLand = func() { fs.fail = true }
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agent.ID),
+		SyncToFinalizeRequest{Manifest: &transfer.Manifest{Version: "1.0"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp SyncToFinalizeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.True(t, resp.Applied)
+	assert.Contains(t, resp.Warnings, "could not check whether the agent was deleted while it was starting: database is unavailable")
+}

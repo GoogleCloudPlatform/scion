@@ -565,11 +565,14 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			s.workspaceLog.Warn("Failed to update agent status after dispatch", "error", err)
 		}
 
+		// The dispatch's warnings (for example a failed delete-won check
+		// in compensateLandedRun) are returned, as env submit does.
 		if emptyPerAgent {
 			resp := SyncToFinalizeResponse{ContentHash: contentHash}
 			if len(req.Manifest.Files) > 0 {
 				resp.Warnings = []string{api.WarningEmptyPerAgentWorkspaceFilesIgnored}
 			}
+			resp.Warnings = append(resp.Warnings, dispatchWarns.Warnings()...)
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -579,6 +582,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			ContentHash:      contentHash,
 			FilesApplied:     len(req.Manifest.Files),
 			BytesTransferred: totalBytes,
+			Warnings:         dispatchWarns.Warnings(),
 		})
 		return
 	}

@@ -19,9 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
@@ -113,6 +116,7 @@ type recordingManagedBackend struct {
 	mu        sync.Mutex
 	cancelled []string
 	cancelErr error
+	getErr    error
 }
 
 func (b *recordingManagedBackend) CreateInteraction(context.Context, managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
@@ -126,6 +130,9 @@ func (b *recordingManagedBackend) CreateInteraction(context.Context, managedagen
 }
 
 func (b *recordingManagedBackend) GetInteraction(_ context.Context, id string) (*managedagent.InteractionState, error) {
+	if b.getErr != nil {
+		return nil, b.getErr
+	}
 	return &managedagent.InteractionState{InteractionID: id, Status: managedagent.StatusInProgress}, nil
 }
 
@@ -283,4 +290,67 @@ func TestCompensateManagedCreate(t *testing.T) {
 
 	assert.Equal(t, []string{managedCreateCompensatedWarning}, srv.compensateManagedCreate(ctx, withID, false))
 	assert.Equal(t, []string{"i-1"}, backend.cancels())
+}
+
+// A stop that fails is reported as failed, never as stopped: a cancel error,
+// or a failed read of the interaction (its state is then unknown).
+func TestManagedCreate_DeleteWon_StopFails_Warns(t *testing.T) {
+	cases := []struct {
+		name       string
+		cancelErr  error
+		getErr     error
+		wantCancel bool
+	}{
+		{name: "cancel fails", cancelErr: errors.New("backend unavailable"), wantCancel: true},
+		{name: "read fails", getErr: errors.New("backend unavailable")},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+			var agentID string
+			backend := &recordingManagedBackend{s: s, projectID: project.ID, cancelErr: tc.cancelErr, getErr: tc.getErr, hook: func(id string) {
+				agentID = id
+				require.NoError(t, s.DeleteAgent(context.Background(), id))
+			}}
+			useManagedBackend(t, backend)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "mgd-stopfail-" + string(rune('a'+i)), ProjectID: project.ID, Task: "do it", Profile: ManagedAgentsProfile,
+			})
+			require.NotEmpty(t, agentID, "the hook ran: %d %s", rec.Code, rec.Body.String())
+			warnings := requireDeletedDuringCreate(t, rec, agentID)
+			require.Len(t, warnings, 1)
+			assert.True(t, strings.HasPrefix(warnings[0], managedCreateCompensateFailedWarning), "got %q", warnings[0])
+			assert.Contains(t, warnings[0], "backend unavailable")
+			if tc.wantCancel {
+				assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the cancel was tried")
+			} else {
+				assert.Empty(t, backend.cancels(), "no cancel without knowing the state")
+			}
+		})
+	}
+}
+
+// The recorded case with the real delete engine: the delete claims the row
+// right after the create's post-create write landed, so the engine's row has
+// the managed Runtime and the interaction ID, and the engine stops the
+// interaction. Exactly one stop: the create does not add a second.
+func TestManagedCreate_DeleteWon_AfterWrite_EngineStopsOnce(t *testing.T) {
+	srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
+	backend := &recordingManagedBackend{s: s, projectID: project.ID}
+	useManagedBackend(t, backend)
+	var agentID string
+	srv.store = &afterRunningWriteStore{Store: s, hook: func(id string) {
+		agentID = id
+		del := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+id, nil)
+		require.Contains(t, []int{http.StatusNoContent, http.StatusAccepted}, del.Code, del.Body.String())
+	}}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "mgd-engine", ProjectID: project.ID, Task: "do it", Profile: ManagedAgentsProfile,
+	})
+	require.NotEmpty(t, agentID, "the hook ran: %d %s", rec.Code, rec.Body.String())
+	assert.Empty(t, requireDeletedDuringCreate(t, rec, agentID), "the delete owns the stop")
+	require.Eventually(t, func() bool { return agentGone(t, s, agentID) }, 10*time.Second, 10*time.Millisecond, "the delete finished")
+	assert.Equal(t, []string{"interaction-1"}, backend.cancels(), "the engine stops the interaction, once")
 }
