@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -115,6 +116,10 @@ const (
 	ReasonCapabilityRequired   = "capability_required"
 	ReasonIdentityNotLocal     = "identity_not_local"
 	ReasonInvalidScope         = "invalid_scope"
+	// ReasonGitCredentialNotAllowed: the key names a GitHub credential
+	// (agent.IsGitCredentialEnvKey) and the agent's applied config does not
+	// allow GitHub credentials (agentAllowsGitCredentials).
+	ReasonGitCredentialNotAllowed = "git_credential_not_allowed"
 )
 
 // selectRuntimeMaterial composes checks 7-9 for one candidate key in one
@@ -125,6 +130,11 @@ const (
 // each hand-compose their own copy of "authorize, then fetch". The agent
 // secret list has no per-key fetch step and its own dual-scope aggregation,
 // so it composes checks 1-7/8 on its own instead of through this function.
+//
+// Before either check, a GitHub credential key is refused for an agent
+// without the allowance (gitCredentialKeyDenied): the item is not allowed
+// and no metadata or value is read, so both endpoints report it as not
+// found.
 //
 // decisionCache must be created once per request and passed to every
 // project-scope call within that request, so the check-7 decision is
@@ -141,6 +151,13 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 	switch scope {
 	case store.ScopeProject:
 		permission = "project.secret_read"
+		if gitCredentialKeyDenied(facts, key) {
+			item = ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonGitCredentialNotAllowed,
+			}
+			return item, nil, permission, detail
+		}
 		decision, decErr := s.projectReadDecision(ctx, ident, facts, decisionCache)
 		if decErr != nil {
 			item = ItemResult{
@@ -151,6 +168,13 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 		}
 		item, detail = s.authorizeRuntimeProjectItem(ctx, key, facts, decision)
 	case store.ScopeUser:
+		if gitCredentialKeyDenied(facts, key) {
+			item = ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny},
+				Reason:    ReasonGitCredentialNotAllowed,
+			}
+			return item, nil, permission, detail
+		}
 		item = s.authorizeRuntimeUserItem(ctx, facts, key)
 	default:
 		return ItemResult{}, nil, "", ""
@@ -168,4 +192,22 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 
 	item.Selected = true
 	return item, sv, permission, detail
+}
+
+// gitCredentialKeyDenied reports whether a runtime read of key is refused
+// because key names a GitHub credential (agent.IsGitCredentialEnvKey, which
+// ignores case) and the agent's applied config does not allow GitHub
+// credentials (agentAllowsGitCredentials). It is decided from the key name
+// and the agent record alone, before any secret metadata or value is read,
+// so a refused key is reported exactly like a missing one whether or not it
+// exists. A nil facts, agent record or applied config is refused.
+func gitCredentialKeyDenied(facts *TargetFacts, key string) bool {
+	if !agent.IsGitCredentialEnvKey(key) {
+		return false
+	}
+	var rec *store.Agent
+	if facts != nil {
+		rec = facts.Agent
+	}
+	return !agentAllowsGitCredentials(rec)
 }
