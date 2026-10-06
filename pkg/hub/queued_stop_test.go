@@ -399,3 +399,181 @@ func TestQueuedStop_OneHeartbeatDrainPerBroker(t *testing.T) {
 	require.Eventually(t, func() bool { return pendingStops(t, f) == 0 }, 5*time.Second, 10*time.Millisecond)
 	assert.Equal(t, int32(2), base.stops.Load(), "each queued stop applied once")
 }
+
+// queuedStopFixture queues a stop for a reserved agent with no drain, and
+// returns the fixture, the agent and the queued intent time.
+func queuedStopFixture(t *testing.T) (*reconcileFixture, *claimTestDispatcher, *store.Agent, time.Time) {
+	t.Helper()
+	f, d, a := newClaimFixture(t)
+	setBrokerAgentCeiling(t, f.s, 5)
+	_, err := f.srv.checkAndReserveBrokerQuota(context.Background(), a)
+	require.NoError(t, err)
+	f.srv.SetDispatcher(nil) // settle only, no drain
+	at := queueStop(t, f, a, "")
+	return f, d, a, at
+}
+
+// assertNotSettled checks the queued stop was left as it was.
+func assertNotSettled(t *testing.T, f *reconcileFixture, a *store.Agent, why string) {
+	t.Helper()
+	assert.True(t, reserved(t, f, a.ID), "reservation kept: "+why)
+	assert.Equal(t, containerStatusStopQueued, getAgent(t, f.s, a.ID).ContainerStatus, "not settled: "+why)
+}
+
+// Each settle guard on its own: the queued stop is not settled while it is
+// no longer the agent's intent or a start may be under way.
+
+func TestQueuedStop_SettleGuard_IntentRunningWithoutClaim(t *testing.T) {
+	f, _, a, _ := queuedStopFixture(t)
+	_, err := f.s.SetRunIntent(context.Background(), a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	f.heartbeat(completeInventory())
+	assertNotSettled(t, f, a, "intent running")
+}
+
+// A stop-kind claim (the drain's or the backstop's own) holds the agent with
+// intent still stopped: that stop owns the outcome, so settle waits.
+func TestQueuedStop_SettleGuard_ClaimWithIntentStopped(t *testing.T) {
+	f, _, a, at := queuedStopFixture(t)
+	_, err := f.s.ClaimAgentStop(context.Background(), a.ID, "other-hub", at, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, store.RunIntentStopped, getAgent(t, f.s, a.ID).RunIntent)
+	f.heartbeat(completeInventory())
+	assertNotSettled(t, f, a, "a claim is held")
+}
+
+func TestQueuedStop_SettleGuard_LifecycleOpActive(t *testing.T) {
+	f, _, a, _ := queuedStopFixture(t)
+	end := f.srv.beginLifecycleOp(a.ID)
+	f.heartbeat(completeInventory())
+	assertNotSettled(t, f, a, "a lifecycle operation is active")
+	end()
+	f.heartbeat(completeInventory())
+	assert.False(t, reserved(t, f, a.ID), "settled once the operation ended")
+}
+
+func TestQueuedStop_SettleGuard_BrokerStartInFlight(t *testing.T) {
+	f, _, a, _ := queuedStopFixture(t)
+	f.send(brokerHeartbeatRequest{
+		Status:         store.BrokerStatusOnline,
+		Inventory:      completeInventory(),
+		Capabilities:   &store.BrokerCapabilities{StartsInFlight: true},
+		StartsInFlight: []brokerStartInFlight{{ProjectID: f.projectID, Slug: a.Slug}},
+		Projects:       []brokerProjectHeartbeat{{ProjectID: f.projectID}},
+	})
+	assertNotSettled(t, f, a, "the broker reports a start in flight")
+	f.heartbeat(completeInventory())
+	assert.False(t, reserved(t, f, a.ID), "settled once no start is in flight")
+}
+
+func TestQueuedStop_SettleGuard_PendingStartRow(t *testing.T) {
+	f, _, a, _ := queuedStopFixture(t)
+	require.NoError(t, f.s.InsertBrokerDispatch(context.Background(), &store.BrokerDispatch{
+		ID: tid("qs-start-" + a.Slug), BrokerID: f.brokerID, AgentID: a.ID, AgentSlug: a.Slug, ProjectID: f.projectID, Op: "start",
+	}))
+	f.heartbeat(completeInventory())
+	assertNotSettled(t, f, a, "a start is queued for the broker")
+}
+
+// rereadChangesStore returns, from the first GetAgent of agentID, a row on
+// which a start has already taken the agent (as the settle's re-read would
+// see one), without changing the stored row.
+type rereadChangesStore struct {
+	store.Store
+	agentID string
+	change  func(a *store.Agent)
+	fired   *atomic.Bool
+}
+
+func (s rereadChangesStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	a, err := s.Store.GetAgent(ctx, id)
+	if err == nil && id == s.agentID && s.fired.CompareAndSwap(false, true) {
+		cp := *a
+		s.change(&cp)
+		return &cp, nil
+	}
+	return a, err
+}
+
+// The list sees the queued stop, but the re-read just before the release
+// sees a claim or a newer intent: nothing is released.
+func TestQueuedStop_SettleGuard_RereadSeesAStart(t *testing.T) {
+	cases := map[string]func(a *store.Agent){
+		"claim held":   func(a *store.Agent) { a.StartClaimID = "c" },
+		"newer intent": func(a *store.Agent) { t := a.RunIntentAt.Add(time.Second); a.RunIntentAt = &t },
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			f, _, a, _ := queuedStopFixture(t)
+			var fired atomic.Bool
+			f.srv.store = rereadChangesStore{Store: f.s, agentID: a.ID, change: change, fired: &fired}
+			f.heartbeat(completeInventory())
+			require.True(t, fired.Load(), "the settle re-read the row")
+			assertNotSettled(t, f, a, name)
+		})
+	}
+}
+
+// claimAfterRereadStore takes a user start claim right after the settle's
+// re-read returns, before the release, as a racing start would.
+type claimAfterRereadStore struct {
+	store.Store
+	agentID string
+	fired   *atomic.Bool
+}
+
+func (s claimAfterRereadStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	a, err := s.Store.GetAgent(ctx, id)
+	if err == nil && id == s.agentID && s.fired.CompareAndSwap(false, true) {
+		if _, cerr := s.Store.ClaimAgentStart(ctx, id, "user-hub", store.StartClaimUser, "", time.Minute); cerr != nil {
+			return nil, cerr
+		}
+	}
+	return a, err
+}
+
+// A start claimed between the settle's re-read and its release keeps its
+// reservation (put back after the release) and its status.
+func TestQueuedStop_StartClaimedDuringTheReleaseKeepsItsReservation(t *testing.T) {
+	f, _, a, _ := queuedStopFixture(t)
+	var fired atomic.Bool
+	f.srv.store = claimAfterRereadStore{Store: f.s, agentID: a.ID, fired: &fired}
+	f.heartbeat(completeInventory())
+	require.True(t, fired.Load(), "the start was claimed during the settle")
+	assert.True(t, reserved(t, f, a.ID), "the start's reservation is held")
+	got := getAgent(t, f.s, a.ID)
+	assert.NotEqual(t, "stopped", got.ContainerStatus)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+}
+
+// A start after a queued stop whose broker reports a container status keeps
+// that status; only the queued-stop notice is cleared.
+func TestQueuedStop_StartAfterQueuedStopKeepsTheBrokersStatus(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	queueStop(t, f, a, "")
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		cur.ContainerStatus = "Up 1 second"
+		return nil
+	}
+	code, body := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusOK, code, body)
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, "Up 1 second", got.ContainerStatus)
+	assert.NotEqual(t, offlineStopMessage, got.Message)
+}
+
+// A stop recorded after a start superseded a queued stop keeps its own
+// state: the start's clear runs only while intent is still running.
+func TestQueuedStop_ClearSkipsAStopRecordedAfterTheStart(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	queueStop(t, f, a, "")
+	snapshot := getAgent(t, f.s, a.ID)
+	// A newer stop queued after the start: intent stopped again.
+	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	f.srv.clearSupersededQueuedStop(ctx, snapshot)
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus)
+	assert.Equal(t, offlineStopMessage, got.Message)
+}

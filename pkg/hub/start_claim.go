@@ -473,15 +473,23 @@ const provisionedRestingNote = "The agent is still provisioned and can be starte
 
 // clearSupersededQueuedStop clears the queued-stop status and notice of an
 // agent whose start succeeded after a stop was queued for its offline
-// broker: the start superseded the stop. The container status becomes
-// running unless the broker reported one.
+// broker: the start superseded the stop. It runs after the start's claim is
+// released, so it re-reads the row and clears only while run intent is still
+// running and the queued status or notice is still there: a stop recorded
+// since keeps its own state. The container status becomes running unless
+// the broker reported one.
 func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
-	upd := store.AgentStatusUpdate{ClearMessageIf: offlineStopMessage}
-	if agent.ContainerStatus == "" || agent.ContainerStatus == containerStatusStopQueued {
-		upd.ContainerStatus = "running"
-	}
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
+	cur, err := s.store.GetAgent(cctx, agent.ID)
+	if err != nil || cur.RunIntent != store.RunIntentRunning ||
+		(cur.ContainerStatus != containerStatusStopQueued && cur.Message != offlineStopMessage) {
+		return
+	}
+	upd := store.AgentStatusUpdate{ClearMessageIf: offlineStopMessage}
+	if cur.ContainerStatus == containerStatusStopQueued {
+		upd.ContainerStatus = "running"
+	}
 	if err := s.store.UpdateAgentStatus(cctx, agent.ID, upd); err != nil {
 		slog.Warn("Start: clearing the superseded queued stop failed", "agent_id", agent.ID, "error", err)
 		return

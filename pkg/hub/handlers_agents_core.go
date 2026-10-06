@@ -962,7 +962,9 @@ type createRollback struct {
 // so a canceled request cannot skip any of them. The cleanup runs
 // synchronously, before the caller writes its error response, so it may delay
 // that response by up to ~45s in the worst case (5s revoke + 30s runtime
-// delete + 5s compensation + 5s release), plus 5s for the fallback below.
+// delete + 5s compensation + 5s release), plus about 20s for the fallback
+// below (up to three row-delete attempts with backoff, then marking the row
+// failed or deactivating its edges).
 // That can exceed a client's own timeout (the CLI's is 30s), in which case
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
