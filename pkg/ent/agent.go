@@ -193,9 +193,11 @@ type AgentEdges struct {
 	Memberships []*GroupMembership `json:"memberships,omitempty"`
 	// PolicyBindings holds the value of the policy_bindings edge.
 	PolicyBindings []*PolicyBinding `json:"policy_bindings,omitempty"`
+	// Holds holds the value of the holds edge.
+	Holds []*AgentHold `json:"holds,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [3]bool
+	loadedTypes [4]bool
 }
 
 // ProjectOrErr returns the Project value or an error if the edge
@@ -225,6 +227,15 @@ func (e AgentEdges) PolicyBindingsOrErr() ([]*PolicyBinding, error) {
 		return e.PolicyBindings, nil
 	}
 	return nil, &NotLoadedError{edge: "policy_bindings"}
+}
+
+// HoldsOrErr returns the Holds value or an error if the edge
+// was not loaded in eager-loading.
+func (e AgentEdges) HoldsOrErr() ([]*AgentHold, error) {
+	if e.loadedTypes[3] {
+		return e.Holds, nil
+	}
+	return nil, &NotLoadedError{edge: "holds"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -798,6 +809,11 @@ func (_m *Agent) QueryMemberships() *GroupMembershipQuery {
 // QueryPolicyBindings queries the "policy_bindings" edge of the Agent entity.
 func (_m *Agent) QueryPolicyBindings() *PolicyBindingQuery {
 	return NewAgentClient(_m.config).QueryPolicyBindings(_m)
+}
+
+// QueryHolds queries the "holds" edge of the Agent entity.
+func (_m *Agent) QueryHolds() *AgentHoldQuery {
+	return NewAgentClient(_m.config).QueryHolds(_m)
 }
 
 // Update returns a builder for updating this Agent.

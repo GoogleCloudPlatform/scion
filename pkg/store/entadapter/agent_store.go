@@ -15,6 +15,7 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -854,6 +855,60 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 		return mapError(err)
 	}
 	return nil
+}
+
+// lockAgentRowsBatch bounds the IDs locked by one statement. Batches are
+// taken in ascending ID order, so batching keeps the global lock order.
+const lockAgentRowsBatch = 1000
+
+// LockAgentRows locks the existing rows among ids, in ascending ID order,
+// with SELECT id FROM agents WHERE id IN (...) ORDER BY id FOR UPDATE on
+// PostgreSQL. PostgreSQL locks rows in the order the sorted scan returns
+// them, so every caller acquires shared rows in the same order. On SQLite the
+// same SELECT runs without the locking clause.
+func (s *AgentStore) LockAgentRows(ctx context.Context, ids []string) error {
+	uids, err := sortedUniqueUUIDs(ids)
+	if err != nil {
+		return err
+	}
+	if len(uids) == 0 {
+		return nil
+	}
+	pg := s.client.Driver().Dialect() == dialect.Postgres
+	for start := 0; start < len(uids); start += lockAgentRowsBatch {
+		end := min(start+lockAgentRowsBatch, len(uids))
+		q := s.client.Agent.Query().
+			Where(agent.IDIn(uids[start:end]...)).
+			Order(ent.Asc(agent.FieldID))
+		if pg {
+			q = q.ForUpdate()
+		}
+		if _, err := q.IDs(ctx); err != nil {
+			return fmt.Errorf("lock agent rows: %w", mapError(err))
+		}
+	}
+	return nil
+}
+
+// sortedUniqueUUIDs parses ids (ErrInvalidInput for a malformed one) and
+// returns them de-duplicated in ascending byte order, which is PostgreSQL's
+// uuid ordering.
+func sortedUniqueUUIDs(ids []string) ([]uuid.UUID, error) {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		uid, err := parseUUID(id)
+		if err != nil {
+			return nil, err
+		}
+		if _, dup := seen[uid]; dup {
+			continue
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i][:], out[j][:]) < 0 })
+	return out, nil
 }
 
 // ListAgents returns agents matching the filter criteria. See the

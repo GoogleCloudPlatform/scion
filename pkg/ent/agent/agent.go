@@ -180,6 +180,8 @@ const (
 	EdgeMemberships = "memberships"
 	// EdgePolicyBindings holds the string denoting the policy_bindings edge name in mutations.
 	EdgePolicyBindings = "policy_bindings"
+	// EdgeHolds holds the string denoting the holds edge name in mutations.
+	EdgeHolds = "holds"
 	// Table holds the table name of the agent in the database.
 	Table = "agents"
 	// ProjectTable is the table that holds the project relation/edge.
@@ -203,6 +205,13 @@ const (
 	PolicyBindingsInverseTable = "policy_bindings"
 	// PolicyBindingsColumn is the table column denoting the policy_bindings relation/edge.
 	PolicyBindingsColumn = "agent_id"
+	// HoldsTable is the table that holds the holds relation/edge.
+	HoldsTable = "agent_holds"
+	// HoldsInverseTable is the table name for the AgentHold entity.
+	// It exists in this package in order to avoid circular dependency with the "agenthold" package.
+	HoldsInverseTable = "agent_holds"
+	// HoldsColumn is the table column denoting the holds relation/edge.
+	HoldsColumn = "agent_id"
 )
 
 // Columns holds all SQL columns for agent fields.
@@ -848,6 +857,20 @@ func ByPolicyBindings(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newPolicyBindingsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByHoldsCount orders the results by holds count.
+func ByHoldsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newHoldsStep(), opts...)
+	}
+}
+
+// ByHolds orders the results by holds terms.
+func ByHolds(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newHoldsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newProjectStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -867,5 +890,12 @@ func newPolicyBindingsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(PolicyBindingsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, true, PolicyBindingsTable, PolicyBindingsColumn),
+	)
+}
+func newHoldsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(HoldsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, HoldsTable, HoldsColumn),
 	)
 }

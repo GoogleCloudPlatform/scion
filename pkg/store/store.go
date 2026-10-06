@@ -260,6 +260,12 @@ type Store interface {
 	// Delegation Edge operations (Permissions Foundation Phase 1G)
 	DelegationEdgeStore
 
+	// Agent Hold operations
+	AgentHoldStore
+
+	// Membership Loss Check operations
+	MembershipLossCheckStore
+
 	// Agent Credential operations (Permissions Foundation Phase 1H)
 	AgentCredentialStore
 
@@ -327,6 +333,15 @@ type AgentStore interface {
 	// DeleteAgent removes an agent by ID.
 	// Returns ErrNotFound if the agent doesn't exist.
 	DeleteAgent(ctx context.Context, id string) error
+
+	// LockAgentRows locks the rows of the given agents for the rest of the
+	// enclosing transaction. On PostgreSQL it runs SELECT ... FOR UPDATE
+	// with the rows ordered by ascending ID, so two transactions locking
+	// overlapping sets always acquire the shared rows in the same order.
+	// On SQLite it is a plain read (writes are already serialized). IDs
+	// with no agent row are skipped. Must be called inside WithTx; returns
+	// ErrInvalidInput for an ID that is not a valid UUID.
+	LockAgentRows(ctx context.Context, ids []string) error
 
 	// ListAgents returns agents matching the filter criteria. With
 	// opts.SortBy empty this is the legacy path (ORDER BY created DESC, id
@@ -2752,6 +2767,98 @@ type DelegationEdgeStore interface {
 	// ReactivateDelegationEdgesForDelegate with the same arguments would
 	// reactivate. It writes nothing.
 	GetDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) ([]*DelegationEdge, error)
+
+	// ListDelegationDescendants returns the agents reachable from the root
+	// principal (q.RootType, q.RootID) inside q.ProjectID, breadth-first.
+	// It follows delegation edges with delegate type agent and scope
+	// (project, q.ProjectID) that are active, or, with
+	// q.IncludeSoftDeleted, inactive with cause
+	// EdgeDeactivationAgentSoftDelete. With q.LegacyLinks it also follows,
+	// within the project, owner_id, created_by (when owner_id is empty) and,
+	// from the root, ancestry. Every agent is expanded at most once, so
+	// cycles terminate. With q.SkipHeldForRoot, agents that already have an
+	// active hold for q.RootID are expanded but not returned or counted.
+	//
+	// The walk never truncates silently: when MaxDepth or MaxNodes is
+	// reached with unvisited descendants remaining, it returns the
+	// descendants found so far together with ErrDescendantLimit.
+	//
+	// The default depth bound (DefaultDescendantMaxDepth, 32) is deliberately
+	// deeper than the delegation ceiling's chain bound: the ceiling refuses
+	// authority through chains longer than its bound, but agents at such
+	// depths still exist and can still run, so a walk that must reach every
+	// agent rooted at a principal has to see past the ceiling's bound.
+	//
+	// Read-only; writes nothing.
+	ListDelegationDescendants(ctx context.Context, q DescendantQuery) (DescendantResult, error)
+}
+
+// =============================================================================
+// Agent Hold Store
+// =============================================================================
+
+// AgentHoldStore defines agent hold persistence operations. Holds are kept in
+// their own table, so agent row writes never change them; hard-deleting an
+// agent removes its holds.
+type AgentHoldStore interface {
+	// CreateAgentHolds inserts holds, skipping any whose (AgentID,
+	// RootPrincipalID) already has an active hold, and returns the number
+	// inserted. Repeating the call, or racing it from another hub
+	// instance, inserts nothing more. Empty ID and zero CreatedAt are
+	// filled in; ClearedAt and the cleared-by fields must be empty. Returns
+	// ErrInvalidInput for an unknown cause or trigger or a missing
+	// agent, project or root principal.
+	CreateAgentHolds(ctx context.Context, holds []*AgentHold) (inserted int, err error)
+
+	// HasActiveAgentHold reports whether the agent has at least one active
+	// hold.
+	HasActiveAgentHold(ctx context.Context, agentID string) (bool, error)
+
+	// ListActiveAgentHolds returns the agent's active holds, oldest first.
+	ListActiveAgentHolds(ctx context.Context, agentID string) ([]*AgentHold, error)
+
+	// ListActiveAgentHoldsByProject returns the active holds of agents in
+	// the project, ordered by ID, paginated with opts.Limit and
+	// opts.Cursor (NextCursor is set when more rows exist). TotalCount is
+	// not computed.
+	ListActiveAgentHoldsByProject(ctx context.Context, projectID string, opts ListOptions) (*ListResult[AgentHold], error)
+
+	// ClearAgentHolds clears every active hold of the agent, recording by
+	// and reason, and returns the number cleared. by.Kind must be
+	// ClearActorUser with a non-empty ID; any other actor returns
+	// ErrInvalidActor and clears nothing.
+	ClearAgentHolds(ctx context.Context, agentID string, by ClearActor, reason string) (int, error)
+}
+
+// =============================================================================
+// Membership Loss Check Store
+// =============================================================================
+
+// MembershipLossCheckStore defines persistence for membership loss checks:
+// durable work items, enqueued in the same transaction as the membership
+// change, claimed with a lease and deleted on completion.
+type MembershipLossCheckStore interface {
+	// EnqueueMembershipLossCheck inserts check. Empty ID and zero
+	// CreatedAt are filled in. Returns ErrInvalidInput for a missing user
+	// or an unknown trigger.
+	EnqueueMembershipLossCheck(ctx context.Context, check *MembershipLossCheck) error
+
+	// ClaimMembershipLossChecks claims up to limit claimable checks
+	// (LeaseUntil empty or past), oldest first: each claimed row gets
+	// LeaseUntil = now + lease and Attempts incremented, and the claimed
+	// rows are returned. On PostgreSQL the selection uses FOR UPDATE SKIP
+	// LOCKED, so concurrent claimers receive disjoint rows without
+	// waiting on each other.
+	ClaimMembershipLossChecks(ctx context.Context, limit int, lease time.Duration) ([]*MembershipLossCheck, error)
+
+	// CompleteMembershipLossCheck deletes the check. Completing a check
+	// that no longer exists is not an error.
+	CompleteMembershipLossCheck(ctx context.Context, id string) error
+
+	// FailMembershipLossCheck records errText as the check's last error.
+	// The lease is kept, so the check becomes claimable again when it
+	// expires. Returns ErrNotFound if the check does not exist.
+	FailMembershipLossCheck(ctx context.Context, id string, errText string) error
 }
 
 // =============================================================================

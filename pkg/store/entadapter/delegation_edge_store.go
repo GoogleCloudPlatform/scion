@@ -19,7 +19,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -324,4 +328,228 @@ func (s *DelegationEdgeStore) ReactivateDelegationEdgesForDelegate(ctx context.C
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// descendantFrontierBatch bounds the parent IDs sent in one IN list.
+const descendantFrontierBatch = 500
+
+// descendantParent is one principal of the walk's current frontier.
+type descendantParent struct {
+	typ string
+	id  string
+}
+
+// ListDelegationDescendants walks level by level from the root principal: at
+// each level it selects the delegation edges (then, with LegacyLinks, the
+// owner_id / created_by / ancestry links) leaving the current frontier, drops
+// agents already visited, and makes the rest the next frontier. See
+// store.DelegationEdgeStore for the contract.
+func (s *DelegationEdgeStore) ListDelegationDescendants(ctx context.Context, q store.DescendantQuery) (store.DescendantResult, error) {
+	var res store.DescendantResult
+	if q.RootType != store.DelegationPrincipalUser && q.RootType != store.DelegationPrincipalAgent {
+		return res, fmt.Errorf("%w: unknown root principal type %q", store.ErrInvalidInput, q.RootType)
+	}
+	if q.RootID == "" {
+		return res, fmt.Errorf("%w: descendant query requires a root principal", store.ErrInvalidInput)
+	}
+	projectID, err := parseUUID(q.ProjectID)
+	if err != nil {
+		return res, err
+	}
+	if q.MaxDepth < 0 || q.MaxNodes < 0 {
+		return res, fmt.Errorf("%w: descendant bounds must not be negative", store.ErrInvalidInput)
+	}
+	maxDepth := q.MaxDepth
+	if maxDepth == 0 {
+		maxDepth = store.DefaultDescendantMaxDepth
+	}
+	maxNodes := q.MaxNodes
+	if maxNodes == 0 {
+		maxNodes = store.DefaultDescendantMaxNodes
+	}
+
+	visited := map[string]bool{}
+	if q.RootType == store.DelegationPrincipalAgent {
+		visited[q.RootID] = true
+	}
+	frontier := []descendantParent{{typ: q.RootType, id: q.RootID}}
+	for depth := 1; len(frontier) > 0; depth++ {
+		level, err := s.descendantLevel(ctx, q, projectID, frontier, depth, visited)
+		if err != nil {
+			return res, err
+		}
+		if len(level) == 0 {
+			break
+		}
+		if depth > maxDepth {
+			return res, store.ErrDescendantLimit
+		}
+		var held map[string]bool
+		if q.SkipHeldForRoot {
+			if held, err = s.heldForRoot(ctx, q, level); err != nil {
+				return res, err
+			}
+		}
+		next := make([]descendantParent, 0, len(level))
+		for _, ref := range level {
+			next = append(next, descendantParent{typ: store.DelegationPrincipalAgent, id: ref.AgentID})
+			if held[ref.AgentID] {
+				continue
+			}
+			if len(res.Agents) >= maxNodes {
+				return res, store.ErrDescendantLimit
+			}
+			res.Agents = append(res.Agents, ref)
+		}
+		frontier = next
+	}
+	return res, nil
+}
+
+// descendantLevel returns the agents first reached at depth from frontier,
+// in order (edge links, then owner, created_by and ancestry links), and
+// marks them visited.
+func (s *DelegationEdgeStore) descendantLevel(ctx context.Context, q store.DescendantQuery, projectID uuid.UUID, frontier []descendantParent, depth int, visited map[string]bool) ([]store.DescendantRef, error) {
+	var level []store.DescendantRef
+	add := func(ref store.DescendantRef) {
+		if visited[ref.AgentID] {
+			return
+		}
+		visited[ref.AgentID] = true
+		level = append(level, ref)
+	}
+	via := func(parentID string) string {
+		if depth == 1 {
+			return ""
+		}
+		return parentID
+	}
+	// Every frontier entry has the same type: the root at depth 1, agents
+	// below it.
+	parentType := frontier[0].typ
+	parentIDs := make([]string, len(frontier))
+	for i, p := range frontier {
+		parentIDs[i] = p.id
+	}
+
+	edgeActive := delegationedge.ActiveEQ(true)
+	if q.IncludeSoftDeleted {
+		edgeActive = delegationedge.Or(
+			delegationedge.ActiveEQ(true),
+			delegationedge.And(
+				delegationedge.ActiveEQ(false),
+				delegationedge.DeactivationCauseEQ(string(store.EdgeDeactivationAgentSoftDelete)),
+			),
+		)
+	}
+	for start := 0; start < len(parentIDs); start += descendantFrontierBatch {
+		chunk := parentIDs[start:min(start+descendantFrontierBatch, len(parentIDs))]
+		edges, err := s.client.DelegationEdge.Query().
+			Where(
+				delegationedge.DelegatorTypeEQ(delegationedge.DelegatorType(parentType)),
+				delegationedge.DelegatorIDIn(chunk...),
+				delegationedge.DelegateTypeEQ(delegationedge.DelegateTypeAgent),
+				delegationedge.ScopeTypeEQ(delegationedge.ScopeTypeProject),
+				delegationedge.ScopeIDEQ(q.ProjectID),
+				edgeActive,
+			).
+			Order(ent.Asc(delegationedge.FieldCreated), ent.Asc(delegationedge.FieldID)).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, e := range edges {
+			add(store.DescendantRef{
+				AgentID:               e.DelegateID,
+				ViaID:                 via(e.DelegatorID),
+				Depth:                 depth,
+				Link:                  store.DescendantLinkEdge,
+				EdgeActive:            e.Active,
+				EdgeDeactivationCause: store.EdgeDeactivationCause(e.DeactivationCause),
+			})
+		}
+	}
+	if !q.LegacyLinks {
+		return level, nil
+	}
+
+	parentUUIDs, _ := parseUUIDs(parentIDs)
+	agentScope := []predicate.Agent{agent.ProjectIDEQ(projectID)}
+	if !q.IncludeSoftDeleted {
+		agentScope = append(agentScope, agent.DeletedAtIsNil())
+	}
+	for start := 0; start < len(parentUUIDs); start += descendantFrontierBatch {
+		chunk := parentUUIDs[start:min(start+descendantFrontierBatch, len(parentUUIDs))]
+		owned, err := s.descendantAgents(ctx, agentScope, agent.OwnerIDIn(chunk...))
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range owned {
+			add(store.DescendantRef{AgentID: a.ID.String(), ViaID: via(a.OwnerID.String()), Depth: depth, Link: store.DescendantLinkOwner})
+		}
+	}
+	for start := 0; start < len(parentUUIDs); start += descendantFrontierBatch {
+		chunk := parentUUIDs[start:min(start+descendantFrontierBatch, len(parentUUIDs))]
+		created, err := s.descendantAgents(ctx, agentScope, agent.OwnerIDIsNil(), agent.CreatedByIn(chunk...))
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range created {
+			add(store.DescendantRef{AgentID: a.ID.String(), ViaID: via(a.CreatedBy.String()), Depth: depth, Link: store.DescendantLinkCreatedBy})
+		}
+	}
+	if depth == 1 {
+		seeded, err := s.descendantAgents(ctx, agentScope, ancestryContains(q.RootID))
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range seeded {
+			add(store.DescendantRef{AgentID: a.ID.String(), Depth: depth, Link: store.DescendantLinkAncestry})
+		}
+	}
+	return level, nil
+}
+
+// descendantAgents returns the agents matching scope and preds with the columns the
+// legacy links need, in creation order.
+func (s *DelegationEdgeStore) descendantAgents(ctx context.Context, scope []predicate.Agent, preds ...predicate.Agent) ([]*ent.Agent, error) {
+	rows, err := s.client.Agent.Query().
+		Where(scope...).
+		Where(preds...).
+		Order(ent.Asc(agent.FieldCreated), ent.Asc(agent.FieldID)).
+		Select(agent.FieldID, agent.FieldOwnerID, agent.FieldCreatedBy).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return rows, nil
+}
+
+// heldForRoot returns which of level's agents have an active hold whose root
+// principal is q's root.
+func (s *DelegationEdgeStore) heldForRoot(ctx context.Context, q store.DescendantQuery, level []store.DescendantRef) (map[string]bool, error) {
+	ids := make([]string, len(level))
+	for i, ref := range level {
+		ids[i] = ref.AgentID
+	}
+	uids, _ := parseUUIDs(ids)
+	held := map[string]bool{}
+	for start := 0; start < len(uids); start += descendantFrontierBatch {
+		chunk := uids[start:min(start+descendantFrontierBatch, len(uids))]
+		holds, err := s.client.AgentHold.Query().
+			Where(
+				agenthold.AgentIDIn(chunk...),
+				agenthold.RootPrincipalTypeEQ(q.RootType),
+				agenthold.RootPrincipalIDEQ(q.RootID),
+				agenthold.ClearedAtIsNil(),
+			).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, h := range holds {
+			held[h.AgentID.String()] = true
+		}
+	}
+	return held, nil
 }
