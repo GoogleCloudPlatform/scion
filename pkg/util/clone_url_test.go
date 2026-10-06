@@ -16,6 +16,7 @@ package util
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -226,5 +227,51 @@ func TestSplitScheme(t *testing.T) {
 		if scheme != tt.scheme || ok != tt.ok {
 			t.Errorf("splitScheme(%q) = %q, %v; want %q, %v", tt.in, scheme, ok, tt.scheme, tt.ok)
 		}
+	}
+}
+
+func TestHTTPSCloneURL(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{"https", "https://github.com/org/repo", "https://github.com/org/repo.git"},
+		{"schemeless", "github.com/org/repo", "https://github.com/org/repo.git"},
+		{"scp git login", "git@github.com:org/repo.git", "https://github.com/org/repo.git"},
+		{"scp custom login", "deploy@host:org/repo", "https://host/org/repo.git"},
+		{"ssh login", "ssh://git@github.com/org/repo", "https://github.com/org/repo.git"},
+		{"ssh port dropped", "ssh://git@host:22/org/repo", "https://host/org/repo.git"},
+		{"https port kept", "https://host:8443/org/repo", "https://host:8443/org/repo.git"},
+		{"https userinfo and query", "https://user:PW@github.com/org/repo?x=1", "https://github.com/org/repo.git"},
+		{"scp userinfo in path", "git@user:PW@host:org/repo", ""},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := HTTPSCloneURL(tt.input)
+			if got != tt.want {
+				t.Fatalf("HTTPSCloneURL(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+			if strings.Contains(got, "PW") {
+				t.Fatalf("credential survived in %q", got)
+			}
+		})
+	}
+}
+
+// TestNormalizeGitRemote_NoAtForLegitRemotes pins the precondition of the
+// hub's git remote '@' guard: ordinary remotes normalize without '@', while
+// an scp remote with a password in the path keeps one (and is refused).
+func TestNormalizeGitRemote_NoAtForLegitRemotes(t *testing.T) {
+	for _, r := range []string{
+		"https://github.com/org/repo", "https://user:PW@github.com/org/repo",
+		"https://TOKEN@github.com/org/repo.git", "ssh://git@github.com/org/repo.git",
+		"git@github.com:org/repo.git", "github.com/org/repo", "http://forgejo:3000/org/repo.git",
+	} {
+		if got := NormalizeGitRemote(r); strings.Contains(got, "@") {
+			t.Errorf("NormalizeGitRemote(%q) = %q, contains '@'", r, got)
+		}
+	}
+	if got := NormalizeGitRemote("git@user:PW@host:org/repo"); !strings.Contains(got, "@") {
+		t.Errorf("NormalizeGitRemote(scp with password) = %q; the hub guard relies on the '@' remaining", got)
 	}
 }

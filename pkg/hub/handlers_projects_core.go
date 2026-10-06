@@ -321,6 +321,10 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	sanitizeSourceURLLabel(req.Labels)
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateNormalizedGitRemote(normalizedRemote); msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// Workspace mode is create-only and server-owned: validate the requested
 	// mode against the project's git-ness and set the label only from the
@@ -1235,6 +1239,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	sanitizeSourceURLLabel(req.Labels)
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateNormalizedGitRemote(normalizedRemote); msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// The workspace-mode label is server-owned (design #2703 §2.4): reject
 	// values register cannot honour before any lookup or mutation.

@@ -1669,11 +1669,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		Slug:          slug,
 		GitRemote:     normalized,
 		WorkspaceMode: hubProjectCreateMode,
-		Labels: map[string]string{
-			store.LabelDefaultBranch: defaultBranch,
-			store.LabelCloneURL:      hubProjectCloneURLLabel(gitURL),
-			store.LabelSourceURL:     gitURL,
-		},
+		Labels:        hubProjectGitSourceLabels(gitURL, defaultBranch),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create project: %w", err)
@@ -2895,9 +2891,26 @@ func listBrokersForProject(ctx context.Context, client hubclient.Client, project
 	}
 }
 
+// hubProjectGitSourceLabels returns the git source labels `hub project
+// create` sends for gitURL. The source-url keeps the URL as entered apart from
+// userinfo, query and fragment (util.SanitizeGitSourceURL). Either URL label
+// is omitted when the URL cannot be sanitized unambiguously.
+func hubProjectGitSourceLabels(gitURL, defaultBranch string) map[string]string {
+	labels := map[string]string{store.LabelDefaultBranch: defaultBranch}
+	if cloneURL := hubProjectCloneURLLabel(gitURL); cloneURL != "" {
+		labels[store.LabelCloneURL] = cloneURL
+	}
+	if src := util.SanitizeGitSourceURL(gitURL); src != "" {
+		labels[store.LabelSourceURL] = src
+	}
+	return labels
+}
+
 // hubProjectCloneURLLabel derives the clone-url label for `hub project create`
-// from the user's git URL. The query string and fragment are dropped first:
-// the hub refuses a clone-url with either, and ToHTTPSCloneURL would keep them.
+// from the user's git URL via util.HTTPSCloneURL, which sanitizes it first
+// (userinfo, query and fragment dropped: the hub refuses a clone-url with any
+// of them) and maps scp and ssh:// remotes to HTTPS. It returns "" when the
+// URL cannot be sanitized unambiguously.
 func hubProjectCloneURLLabel(gitURL string) string {
-	return util.ToHTTPSCloneURL(util.StripQueryAndFragment(gitURL))
+	return util.HTTPSCloneURL(gitURL)
 }

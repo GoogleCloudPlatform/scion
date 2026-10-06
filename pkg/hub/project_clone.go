@@ -215,7 +215,9 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			clone.Labels = make(map[string]string)
 		}
 		clone.Labels[store.LabelCloneURL] = util.ToHTTPSCloneURL(overrideCanonical)
-		clone.Labels[store.LabelSourceURL] = overrideRemote
+		if src := util.SanitizeGitSourceURL(overrideRemote); src != "" {
+			clone.Labels[store.LabelSourceURL] = src
+		}
 		clone.Labels[store.LabelDefaultBranch] = "main"
 	}
 
@@ -1121,10 +1123,17 @@ func validateCloneURLLabelValue(labels map[string]string) string {
 	if !ok {
 		return ""
 	}
+	if err := util.ValidateCloneURLLabel(v); err != nil {
+		return cloneURLRefusalMessage(err)
+	}
+	return ""
+}
+
+// cloneURLRefusalMessage is the constant user-facing 400 message for a
+// refused clone URL. It names what to remove but never echoes the value.
+func cloneURLRefusalMessage(err error) string {
 	var problem string
-	switch err := util.ValidateCloneURLLabel(v); {
-	case err == nil:
-		return ""
+	switch {
 	case errors.Is(err, util.ErrCloneURLInvalid):
 		problem = "remove whitespace and control or non-ASCII characters from the URL"
 	case errors.Is(err, util.ErrCloneURLUserinfo):
@@ -1138,6 +1147,19 @@ func validateCloneURLLabelValue(labels map[string]string) string {
 	}
 	return "Invalid " + store.LabelCloneURL + " label: " + problem +
 		". The label must be a plain repository URL; configure clone authentication with project secrets or the GitHub App instead"
+}
+
+// validateNormalizedGitRemote refuses a git remote whose normalized form
+// (util.NormalizeGitRemote, which drops ordinary userinfo) still contains
+// '@': the input carried a password or an extra '@' in scp form
+// (git@user:PASS@host:org/repo), and storing it would keep the credential in
+// Project.GitRemote. The value is not repaired. The message is the same
+// constant as the clone-url refusal and never echoes the value.
+func validateNormalizedGitRemote(normalized string) string {
+	if strings.Contains(normalized, "@") {
+		return cloneURLRefusalMessage(util.ErrCloneURLUserinfo)
+	}
+	return ""
 }
 
 // sanitizeSourceURLLabel rewrites the source-url label in labels (if any) to

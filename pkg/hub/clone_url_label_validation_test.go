@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // cloneURLLabelSentinel marks the secret part of the credential-bearing test
@@ -390,6 +391,110 @@ func TestProjectClone_SanitizesCopiedGitSourceLabels(t *testing.T) {
 			assert.Equal(t, tt.sourceKept, sourceOK)
 			assert.Equal(t, tt.wantClone, gotClone)
 			assert.Equal(t, tt.wantSource, gotSource)
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverrideSourceURLNoCredentials covers the clone
+// override writer: neither the derived clone-url nor the source-url keeps a
+// credential, for https userinfo and for scp userinfo hidden in the path.
+func TestProjectClone_GitRemoteOverrideSourceURLNoCredentials(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	src := &store.Project{
+		ID:        tid("clone-override-src"),
+		Name:      "Clone Override Source",
+		Slug:      "clone-override-source",
+		GitRemote: "github.com/org/repo",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+		Labels:    map[string]string{store.LabelCloneURL: "https://github.com/org/repo.git"},
+	}
+	require.NoError(t, s.CreateProject(ctx, src))
+
+	tests := []struct {
+		name, override string
+	}{
+		{"https userinfo", "https://user:" + cloneURLLabelSentinel + "@github.com/other/repo"},
+		{"https token-only", "https://" + cloneURLLabelSentinel + "@github.com/other/repo.git"},
+		{"scp userinfo in path", "git@user:" + cloneURLLabelSentinel + "@host:org/repo"},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]string{"name": fmt.Sprintf("Clone Override %d", i), "gitRemote": tt.override})
+			assert.NotContains(t, rec.Body.String(), cloneURLLabelSentinel)
+			if rec.Code != http.StatusCreated {
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				return
+			}
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			stored, err := s.GetProject(ctx, clone.ID)
+			require.NoError(t, err)
+			assert.NotContains(t, stored.GitRemote, cloneURLLabelSentinel)
+			for k, v := range stored.Labels {
+				assert.NotContains(t, v, cloneURLLabelSentinel, "credential survived in %s", k)
+			}
+			assert.NotEmpty(t, stored.Labels[store.LabelSourceURL])
+		})
+	}
+}
+
+// gitRemoteGuardCases: remotes whose normalized form keeps '@' are refused
+// with the clone-url refusal message; ordinary remotes are unaffected.
+var gitRemoteGuardCases = []struct {
+	name, remote string
+	refused      bool
+}{
+	{"scp userinfo in path", "git@user:" + cloneURLLabelSentinel + "@host:org/repo", true},
+	{"scp extra at in host", "git@" + cloneURLLabelSentinel + "@host:org/repo", true},
+	{"https", "https://github.com/org/guard-https", false},
+	{"https userinfo stripped by normalization", "https://user:" + cloneURLLabelSentinel + "@github.com/org/guard-userinfo", false},
+	{"ssh login", "ssh://git@github.com/org/guard-ssh.git", false},
+	{"scp login", "git@github.com:org/guard-scp.git", false},
+}
+
+func assertGitRemoteGuard(t *testing.T, s store.Store, code int, body string, refused bool) {
+	t.Helper()
+	assert.NotContains(t, body, cloneURLLabelSentinel)
+	if refused {
+		require.Equal(t, http.StatusBadRequest, code, body)
+		assert.Contains(t, body, cloneURLRefusalMessage(util.ErrCloneURLUserinfo))
+		assert.Contains(t, body, `"field":"gitRemote"`)
+	} else {
+		require.Less(t, code, 300, body)
+	}
+	projects, err := s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	for _, p := range projects.Items {
+		assert.NotContains(t, p.GitRemote, cloneURLLabelSentinel, "credential stored in GitRemote")
+		assert.NotContains(t, strings.ToLower(p.GitRemote), strings.ToLower(cloneURLLabelSentinel), "credential stored in GitRemote")
+	}
+}
+
+func TestCreateProject_CloneURLGitRemoteGuard(t *testing.T) {
+	srv, s := testServer(t)
+	for i, tc := range gitRemoteGuardCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+				Name:      fmt.Sprintf("Git Remote Guard Create %d", i),
+				GitRemote: tc.remote,
+			})
+			assertGitRemoteGuard(t, s, rec.Code, rec.Body.String(), tc.refused)
+		})
+	}
+}
+
+func TestRegisterProject_CloneURLGitRemoteGuard(t *testing.T) {
+	srv, s := testServer(t)
+	for i, tc := range gitRemoteGuardCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+				Name:      fmt.Sprintf("Git Remote Guard Register %d", i),
+				GitRemote: tc.remote,
+			})
+			assertGitRemoteGuard(t, s, rec.Code, rec.Body.String(), tc.refused)
 		})
 	}
 }

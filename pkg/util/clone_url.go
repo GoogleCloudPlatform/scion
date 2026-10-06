@@ -55,14 +55,41 @@ func NormalizeCloneURL(cloneURL string) string {
 	if _, _, ok := splitScheme(cloneURL); ok {
 		return cloneURL
 	}
-	if login, host, path, ok := splitSCP(cloneURL); ok {
+	if login, _, _, ok := splitSCP(cloneURL); ok {
 		if login == "git" {
 			return cloneURL
 		}
-		return ToHTTPSCloneURL(host + "/" + path)
+		return HTTPSCloneURL(cloneURL)
 	}
 
 	return ToHTTPSCloneURL(cloneURL)
+}
+
+// HTTPSCloneURL returns the HTTPS clone URL for a user-entered git remote, or
+// "" when SanitizeGitSourceURL cannot sanitize it unambiguously. The remote is
+// sanitized first (userinfo, query and fragment dropped). An scp-style remote
+// with any login ("deploy@host:org/repo") maps to host/org/repo, and an
+// ssh:// URL drops its login and port (the port is the ssh daemon's, not the
+// HTTPS server's). Everything else goes through ToHTTPSCloneURL.
+func HTTPSCloneURL(remote string) string {
+	src := SanitizeGitSourceURL(remote)
+	if src == "" {
+		return ""
+	}
+	if _, host, path, ok := splitSCP(src); ok {
+		return ToHTTPSCloneURL(host + "/" + path)
+	}
+	if scheme, rest, ok := splitScheme(src); ok && isSSHScheme(scheme) {
+		authority, path, _ := strings.Cut(rest, "/")
+		if at := strings.LastIndex(authority, "@"); at >= 0 {
+			authority = authority[at+1:]
+		}
+		if isHostAndPort(authority) {
+			authority = authority[:strings.LastIndex(authority, ":")]
+		}
+		return ToHTTPSCloneURL(authority + "/" + path)
+	}
+	return ToHTTPSCloneURL(src)
 }
 
 // ResolveCloneURL returns the URL the Hub clones a project from: the
