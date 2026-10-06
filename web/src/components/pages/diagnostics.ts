@@ -25,7 +25,9 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
+import { navigateTo } from '../../client/navigation.js';
 import '../shared/unified-log-viewer.js';
+import { healthBannerState } from '../../utils/health-status.js';
 
 interface HealthResponse {
   status: string;
@@ -103,6 +105,19 @@ export class ScionPageDiagnostics extends LitElement {
 
     .status-dot.unhealthy {
       background: var(--scion-danger-500, #ef4444);
+    }
+
+    .status-dot.degraded {
+      background: var(--scion-warning-500, #f59e0b);
+    }
+
+    .status-problems {
+      color: var(--scion-badge-warning-text, #92400e);
+      font-size: 0.8125rem;
+    }
+
+    .status-problems.unhealthy {
+      color: var(--scion-badge-danger-text, #991b1b);
     }
 
     .status-dot.unknown {
@@ -245,16 +260,6 @@ export class ScionPageDiagnostics extends LitElement {
     return `https://console.cloud.google.com/logs/query;query=${encoded}?project=${this.gcpProjectId}`;
   }
 
-  private handleNavClick(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', {
-        detail: { path },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
   override render() {
     return html`
       <div class="page-header">
@@ -289,19 +294,11 @@ export class ScionPageDiagnostics extends LitElement {
 
   private renderStatusBanner() {
     const health = this.hubHealth;
-    const status = health?.status || 'unknown';
-    const statusClass =
-      status === 'ok' || status === 'healthy'
-        ? 'healthy'
-        : status === 'unknown'
-          ? 'unknown'
-          : 'unhealthy';
-    const statusLabel =
-      status === 'ok' || status === 'healthy'
-        ? 'Healthy'
-        : status === 'unknown'
-          ? 'Unknown'
-          : status;
+    const {
+      statusClass,
+      label: statusLabel,
+      problems,
+    } = healthBannerState(health as Record<string, unknown> | null);
 
     const cloudStatus = this.cloudLoggingChecked
       ? this.cloudLoggingAvailable
@@ -322,6 +319,11 @@ export class ScionPageDiagnostics extends LitElement {
             <span class="status-dot ${statusClass}"></span>
             ${statusLabel}
           </span>
+          ${problems.length > 0
+            ? html`<span class="status-problems ${statusClass}" title=${problems.join('\n')}
+                >(${problems.join('; ')})</span
+              >`
+            : nothing}
           <span class="status-separator">|</span>
           <span class="status-item">
             Cloud Logging:
@@ -339,7 +341,7 @@ export class ScionPageDiagnostics extends LitElement {
             : nothing}
         </div>
         <div class="status-right">
-          <a class="health-link" @click=${() => this.handleNavClick('/health')}> View Health → </a>
+          <a class="health-link" @click=${() => navigateTo('/health')}> View Health → </a>
         </div>
       </div>
     `;

@@ -31,7 +31,10 @@ package hub
 // for delegation edges, which are the one ceiling input shared per phase.
 // decide's relationship candidates run with both keys masked, so lookups
 // made there for a progeny source user or a source agent's delegation chain
-// never see the requester's memo.
+// never see the requester's memo. The one exception is the project-access
+// stage (relationshipProjectAccessStage): it evaluates the requester's own
+// project access and reads the requester's memo through the request
+// context; every other relationship stage stays masked.
 
 import (
 	"context"
@@ -180,7 +183,10 @@ func delegationEdgesMemoFromContext(ctx context.Context) *authzInputMemo {
 //
 // decide's relationship-candidate step (step 9) runs under the stronger
 // maskAllAuthzMemo instead, so nothing reached from it — including the
-// chain walk via relationshipSourceDelegationHolds — observes either key.
+// chain walk via relationshipSourceDelegationHolds — observes either key,
+// except the project-access stage (relationshipProjectAccessStage), which
+// evaluates the requester's own access on the request context and so reads
+// the requester's memo.
 func maskAuthzInputs(ctx context.Context) context.Context {
 	return context.WithValue(ctx, authzInputsContextKey{}, &authzMemoHolder{masked: true})
 }

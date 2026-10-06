@@ -1362,6 +1362,14 @@ STUBERR
         # wiring tests that opt into GCLOUD_STUB_SSH_SUCCEEDS stop at.
         touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
         ;;
+      "curl -s http://localhost:8080/healthz")
+        # deploy.sh's wait_for_hub_health poll. GCLOUD_STUB_HEALTHZ_BODY
+        # overrides the answer (e.g. a degraded or unhealthy body); the
+        # default is a healthy combined-mode body. Matches only this exact
+        # command, not the `curl -sf` hub_id read.
+        default_healthz='{"status":"healthy","web":{"status":"ok"},"hub":{"status":"healthy"}}'
+        printf '%s\n' "${GCLOUD_STUB_HEALTHZ_BODY-$default_healthz}"
+        ;;
     esac
     exit 0
     ;;

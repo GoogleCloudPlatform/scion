@@ -41,10 +41,10 @@ type stopRecorder struct {
 	ids []string
 }
 
-func (r *stopRecorder) stop(_ context.Context, id string) error {
+func (r *stopRecorder) stop(_ context.Context, ref runtime.RunRef) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ids = append(r.ids, id)
+	r.ids = append(r.ids, ref.ID)
 	return nil
 }
 
