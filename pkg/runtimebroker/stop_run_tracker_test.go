@@ -17,7 +17,9 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -177,6 +179,52 @@ func TestStopAgent_RunScopedCancelsAndWaitsForSameRunStart(t *testing.T) {
 					mgr.StopCalls(), mgr.lastStopAgentID, mgr.lastStopRunID)
 			}
 		})
+	}
+}
+
+// A run-scoped stop that cancelled its own run's in-flight start (the
+// tracked-start leg of cancelledOwn, not a woken launch), and whose
+// StopTarget then gets a runtime run mismatch (for example Kubernetes
+// reporting the pod recreated under a new UID), did act: it is accepted
+// with 202 and a forced heartbeat, never the zero-side-effect 404 (merge
+// review 8, nit 1).
+func TestStopAgent_RuntimeRunMismatchAfterCancelledOwnStart_202(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	hubSvc := &mockRuntimeBrokerService{}
+	hb := NewHeartbeatService(hubSvc, "test-host", time.Hour, mgr, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.hubMu.Lock()
+	srv.hubConnections["local"] = &HubConnection{Name: "local", Heartbeat: hb}
+	srv.hubMu.Unlock()
+	setAgents(mgr, trackedRunEntry("c-1", "run-b"))
+	mgr.mu.Lock()
+	mgr.stopErr = fmt.Errorf("pod ns/same-name was replaced before it could be deleted: %w", runtime.ErrRunMismatch)
+	mgr.mu.Unlock()
+	var stopsDuringCleanup int
+	_, done := startInFlight(t, srv, mgr, "run-b", func() {
+		time.Sleep(30 * time.Millisecond)
+		stopsDuringCleanup = mgr.StopCalls()
+	})
+
+	stopDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { stopDone <- actionWithRun(srv, "stop", "runId=run-b", "") }()
+	waitStopped(t, done)
+	sw := <-stopDone
+	if sw.Code != http.StatusAccepted {
+		t.Fatalf("stop: status %d, want 202: %s", sw.Code, sw.Body.String())
+	}
+	if stopsDuringCleanup != 0 {
+		t.Fatal("the stop ran before the cancelled start finished its cleanup")
+	}
+	if mgr.StopCalls() != 1 || mgr.lastStopAgentID != "c-1" || mgr.lastStopRunID != "run-b" {
+		t.Errorf("stop calls = %d, last {%q, %q}; want one stop of {c-1, run-b}",
+			mgr.StopCalls(), mgr.lastStopAgentID, mgr.lastStopRunID)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(hubSvc.getHeartbeatCalls()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(hubSvc.getHeartbeatCalls()) == 0 {
+		t.Error("the accepted stop did not force a heartbeat")
 	}
 }
 
