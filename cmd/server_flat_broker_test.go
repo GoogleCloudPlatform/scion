@@ -202,3 +202,48 @@ func TestWarnUnhostedFlatIdentities_NoInstancesConfigured(t *testing.T) {
 	warnUnhostedFlatIdentities(globalDir)
 	assert.Contains(t, buf.String(), id.RuntimeBrokerID, "the warning names the unhosted Runtime Broker ID")
 }
+
+// TestFlatRollback_LegacyRecoveryDoesNotAdoptFlatRow: a host with no
+// persisted legacy Runtime Broker ID boots flat, is rolled back to legacy
+// hosting, and later re-adds the instance. The legacy start must not recover
+// (or persist) the flat Runtime Broker ID, the legacy registration must come
+// up, and re-adding the instance restores the same flat identity.
+func TestFlatRollback_LegacyRecoveryDoesNotAdoptFlatRow(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	s := newTestStore(t)
+	srv := flatTestHub(t, s, true)
+	opts := hub.EmbeddedFlatRegistrationOptions{Endpoint: "http://localhost:9800"}
+
+	// 1. Flat boot: the flat row is labelled as the embedded Runtime Broker.
+	flat, err := prepareFlatInstance(ctx, srv, runtime.NewDockerRuntime(), flatTestInstance(),
+		legacyRuntimeBrokerIDs(&config.GlobalConfig{}, &config.Settings{}, nil, globalDir), globalDir, opts, fakeDockerProbe("daemon-1", nil))
+	require.NoError(t, err)
+	flatID := flat.identity.RuntimeBrokerID
+	require.Equal(t, "embedded", flat.row.Labels["scion.io/broker-role"], "the flat instance is the embedded Runtime Broker (R7)")
+
+	// 2. Rollback to legacy hosting with no persisted legacy ID.
+	legacyID := resolveBrokerID(ctx, &config.GlobalConfig{}, &config.Settings{}, nil, globalDir, "", s)
+	assert.NotEqual(t, flatID, legacyID, "the legacy recovery never adopts the flat Runtime Broker ID")
+	if data, readErr := os.ReadFile(filepath.Join(globalDir, "settings.yaml")); readErr == nil {
+		assert.NotContains(t, string(data), flatID, "the flat ID is never persisted as a legacy ID")
+	}
+	_, err = registerGlobalProjectAndBroker(ctx, s, legacyID, "Hosted Broker", "http://localhost:9800", nil, true, &config.Settings{}, nil)
+	require.NoError(t, err, "the legacy rollback comes up as its own Runtime Broker")
+	row, err := s.GetRuntimeBroker(ctx, flatID)
+	require.NoError(t, err)
+	require.NotNil(t, row.RuntimeTarget, "the flat row stays flat")
+	assert.Equal(t, *flat.row.RuntimeTarget, *row.RuntimeTarget, "runtime target ID, type and display name are unchanged")
+	assert.Equal(t, "embedded", row.Labels["scion.io/broker-role"], "the flat row keeps its embedded label across the rollback")
+
+	// 3. Re-adding the instance with the same key restores the same identity.
+	again, err := prepareFlatInstance(ctx, srv, runtime.NewDockerRuntime(), flatTestInstance(),
+		legacyRuntimeBrokerIDs(&config.GlobalConfig{RuntimeBroker: config.RuntimeBrokerConfig{BrokerID: legacyID}}, &config.Settings{}, nil, globalDir),
+		globalDir, opts, fakeDockerProbe("daemon-1", nil))
+	require.NoError(t, err)
+	assert.Equal(t, flatID, again.identity.RuntimeBrokerID)
+	assert.Equal(t, flat.identity.RuntimeTarget.ID, again.row.RuntimeTarget.ID)
+}

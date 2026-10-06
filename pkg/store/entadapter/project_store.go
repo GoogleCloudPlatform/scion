@@ -1144,10 +1144,12 @@ func runtimeBrokerBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) pred
 // FindEmbeddedBroker returns the single embedded broker if exactly one exists,
 // or nil if zero or multiple embedded brokers are found. "Embedded" means the
 // broker's labels JSON contains {"scion.io/broker-role": "embedded"}.
-// Used to recover the broker ID from the DB when settings are lost.
+// Used to recover the legacy broker ID from the DB when settings are lost, so
+// only legacy rows (no stored runtime target) are candidates: a flat Runtime
+// Broker row is never recovered as the legacy identity.
 func (s *ProjectStore) FindEmbeddedBroker(ctx context.Context) (*store.RuntimeBroker, error) {
 	brokers, err := s.client.RuntimeBroker.Query().
-		Where(brokerLabelContains("scion.io/broker-role", "embedded")).
+		Where(brokerLabelContains("scion.io/broker-role", "embedded"), runtimebroker.RuntimeTargetIDIsNil()).
 		Limit(2). // Only need to know if there's exactly one
 		All(ctx)
 	if err != nil {

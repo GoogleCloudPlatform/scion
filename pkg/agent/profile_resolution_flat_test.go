@@ -156,7 +156,14 @@ func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
 	require.NotNil(t, flatCfg)
 	if flatCfg.Resources != nil {
 		assert.NotEqual(t, "7777Mi", flatCfg.Resources.Requests.Memory, "active-profile resources are not provisioned for a flat agent")
+		assert.NotEqual(t, "7", flatCfg.Resources.Limits.CPU, "active-profile harness override resources are not provisioned for a flat agent")
 	}
+	assert.NotContains(t, flatCfg.Env, "PROFILE_ONLY_ENV", "active-profile harness override env is not provisioned for a flat agent")
+	assert.NotContains(t, flatCfg.Image, "profile-only-image", "active-profile harness override image is not provisioned for a flat agent")
+	// Non-profile defaults still apply: the settings harness config's env
+	// and the harness config's own image.
+	assert.Equal(t, "from-settings-harness-config", flatCfg.Env["GLOBAL_HC_ENV"], "the non-profile settings harness config still applies")
+	assert.Equal(t, "test-image:latest", flatCfg.Image, "the harness config's own image still applies")
 	assert.Empty(t, GetSavedProfile("flat-prov", r.fixture.projectScionDir))
 
 	// Legacy provisioning is unchanged.
@@ -165,6 +172,9 @@ func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
 	require.NotNil(t, legacyCfg)
 	require.NotNil(t, legacyCfg.Resources)
 	assert.Equal(t, "7777Mi", legacyCfg.Resources.Requests.Memory)
+	assert.Equal(t, "from-active-profile", legacyCfg.Env["PROFILE_ONLY_ENV"])
+	assert.Equal(t, "profile-only-image:batch", legacyCfg.Image)
+	assert.Equal(t, "from-settings-harness-config", legacyCfg.Env["GLOBAL_HC_ENV"])
 }
 
 func TestForProfileResolution_DoesNotMutateSettings(t *testing.T) {
