@@ -273,14 +273,17 @@ func (sc *saScopeContext) ref(id string) hubclient.GCPServiceAccountRef {
 }
 
 func runSAScopedList(cmd *cobra.Command, args []string) error {
+	// A flag conflict: the hub scope comes only from --global
+	// (saScopeFromGlobalFlag), so check it before resolving the scope
+	// against the hub, and report it as a usage error.
+	if saGlobalListAssignable && saScopeFromGlobalFlag() == store.ScopeHub {
+		return newUsageError("--assignable asks which accounts an agent in a PROJECT could be " +
+			"assigned; it has no meaning with --global, which already lists every hub-scoped account")
+	}
+
 	sc, err := resolveSAScope()
 	if err != nil {
 		return err
-	}
-
-	if saGlobalListAssignable && sc.scope == store.ScopeHub {
-		return fmt.Errorf("--assignable asks which accounts an agent in a PROJECT could be " +
-			"assigned; it has no meaning with --global, which already lists every hub-scoped account")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
