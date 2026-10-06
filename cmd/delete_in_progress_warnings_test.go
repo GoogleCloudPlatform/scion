@@ -54,7 +54,9 @@ func dipRunStart(t *testing.T, stub *hubStartStub, projectID, agentName string) 
 }
 
 // dipRunResume covers the existing-agent POST /agents path that `scion
-// start` on a stopped agent and `scion resume` use.
+// start` on a stopped agent and `scion resume` use. Its stub body mirrors
+// the existing-agent 409 with warnings that ptone/scion#3255 adds; until that
+// lands upstream, this case is defensive.
 func dipRunResume(t *testing.T, stub *hubStartStub, projectID, agentName string) error {
 	return startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", true, nil)
 }
@@ -93,7 +95,7 @@ func TestHubCommands_DeleteInProgressWarnings(t *testing.T) {
 				}
 
 				// Baseline: the same 409 with no warnings, with
-				// details present and with details absent.
+				// details absent and then with details present.
 				baseOut, baseErrOut, baseErr := run(nil)
 				noWarnOut, noWarnErrOut, noWarnErr := run(map[string]interface{}{"agentId": "agent-id"})
 				warnOut, warnErrOut, warnErr := run(map[string]interface{}{

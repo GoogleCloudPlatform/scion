@@ -504,12 +504,15 @@ func wrapHubError(err error) error {
 }
 
 // printDeleteInProgressWarnings writes each string in details.warnings of a
-// 409 delete_in_progress hub error to w as a "Warning: ..." line. The hub
-// uses those warnings to report the outcome of removing a container the
-// broker had already started when the create or start lost to a delete, so
-// a failed removal must reach the user. Any other error, a missing or
-// malformed warnings list, and non-string entries print nothing. The error
-// itself is left to the caller. Warnings go to w even in JSON output mode:
+// 409 delete_in_progress hub error to w as a "Warning: ..." line. A 409
+// delete_in_progress may carry details.warnings (set today on a synchronous
+// create that lost to a delete; ptone/scion#3255 adds it to the start,
+// restart and existing-agent answers) reporting the outcome of removing a
+// container the broker had already started, so a failed removal must reach
+// the user. The helper runs on every hub create and start error path, so
+// it needs no change as the hub adds warnings to more answers. Any other
+// error, a missing or malformed warnings list, and non-string entries print
+// nothing. The error itself is left to the caller. Warnings go to w even in JSON output mode:
 // a failed command prints no JSON result, and its error line also goes to
 // stderr, so stdout stays clean.
 func printDeleteInProgressWarnings(w io.Writer, err error) {
