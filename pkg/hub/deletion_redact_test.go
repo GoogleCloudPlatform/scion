@@ -320,10 +320,12 @@ func (d *raceClaimErrorDispatcher) DispatchAgentStart(ctx context.Context, agent
 	return nil
 }
 
-// A start that loses the race to a delete claim answers from the stored row
-// (handleAgentLifecycle's final response).
-func TestLifecycleStartRacedByDelete_DeletionAdminVsNonAdmin(t *testing.T) {
-	views := map[string]map[string]json.RawMessage{}
+// A start that loses the race to a delete claim after its broker start
+// landed answers 409 delete_in_progress (writeDeleteWon, ptone/scion#3255):
+// no agent and no deletion view, so nothing to redact. The body is the same
+// for an admin and a non-admin caller, and carries no deletion detail.
+func TestLifecycleStartRacedByDelete_409SameForAdminAndNonAdmin(t *testing.T) {
+	bodies := map[string]string{}
 	for _, c := range []struct {
 		name     string
 		identity Identity
@@ -334,17 +336,79 @@ func TestLifecycleStartRacedByDelete_DeletionAdminVsNonAdmin(t *testing.T) {
 		srv, s := testServer(t)
 		srv.SetDispatcher(&raceClaimErrorDispatcher{t: t, s: s, errText: "claim error detail"})
 		srv.SetEventPublisher(&trackingEventPublisher{})
-		agent := setupBrokerAgentInPhase(t, s, "redact-race-"+c.name, state.PhaseStopped)
-		views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, "start")
+		// The same suffix on both servers gives the same agent id, so the
+		// two bodies can be compared byte for byte.
+		agent := setupBrokerAgentInPhase(t, s, "redact-race", state.PhaseStopped)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), c.identity))
+		rec := httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, "start")
+		requireDeleteInProgress(t, rec)
+		body := rec.Body.String()
+		bodies[c.name] = body
+		assert.NotContains(t, body, `"deletion"`, "%s: no deletion view", c.name)
+		assert.NotContains(t, body, "claim error detail", "%s: no deletion error", c.name)
+		var resp struct {
+			Error struct {
+				Code    string                     `json:"code"`
+				Details map[string]json.RawMessage `json:"details"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), body)
+		assert.Equal(t, ErrCodeDeleteInProgress, resp.Error.Code)
+		for k := range resp.Error.Details {
+			assert.Contains(t, []string{"agentId", "warnings"}, k, "%s: unexpected detail %q", c.name, k)
+		}
+		for _, k := range deletionDetailKeys {
+			assert.NotContains(t, resp.Error.Details, k, "%s: detail %s", c.name, k)
+		}
+	}
+	assert.Equal(t, bodies["admin"], bodies["member"], "the 409 body does not depend on the caller")
+}
+
+// raceClaimStopDispatcher seeds a live delete claim with an error text from
+// inside the stop dispatch, so the stop answers from the claimed row.
+type raceClaimStopDispatcher struct {
+	deleteGuardDispatcher
+	t       *testing.T
+	s       store.Store
+	errText string
+}
+
+func (d *raceClaimStopDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	if err := d.deleteGuardDispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		return err
+	}
+	seedDeletionWithError(d.t, d.s, agent.ID, seedLiveDeleting, d.errText)
+	return nil
+}
+
+// A stop that a delete claims while it is dispatched still answers 200 from
+// the stored row, which now carries the deletion view (handleAgentLifecycle's
+// final response). Only the admin sees code, error and claim.
+func TestLifecycleStopRacedByDelete_DeletionAdminVsNonAdmin(t *testing.T) {
+	views := map[string]map[string]json.RawMessage{}
+	for _, c := range []struct {
+		name     string
+		identity Identity
+	}{
+		{"admin", NewAuthenticatedUser("u-admin", "admin@test.com", "Admin", "admin", "web")},
+		{"member", NewAuthenticatedUser("u-m", "m@test.com", "M", "member", "web")},
+	} {
+		srv, s := testServer(t)
+		srv.SetDispatcher(&raceClaimStopDispatcher{t: t, s: s, errText: "claim error detail"})
+		srv.SetEventPublisher(&trackingEventPublisher{})
+		agent := setupBrokerAgentInPhase(t, s, "redact-stop-race-"+c.name, state.PhaseRunning)
+		views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, "stop")
 	}
 	require.NotNil(t, views["admin"])
+	assert.JSONEq(t, `"deleting"`, string(views["admin"]["state"]))
 	assert.JSONEq(t, `"claim error detail"`, string(views["admin"]["error"]))
 	assert.Contains(t, views["admin"], "claim")
-	// The two runs use separate servers, so their timestamps differ:
-	// compare the shape, not the bytes.
+	// Separate servers, so the timestamps differ: compare the shape.
 	require.NotNil(t, views["member"])
 	for _, k := range deletionDetailKeys {
-		assert.NotContains(t, views["member"], k)
+		assert.NotContains(t, views["member"], k, "member sees %s", k)
 	}
 	assert.JSONEq(t, string(views["admin"]["state"]), string(views["member"]["state"]))
 	for _, k := range []string{"startedAt", "leaseExpiresAt", "soft"} {
