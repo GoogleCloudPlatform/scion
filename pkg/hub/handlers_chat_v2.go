@@ -5082,7 +5082,10 @@ func unresolvedMentionNames(results []messages.MentionResult) []string {
 
 // mentionNotifyBudget bounds one notifyHumanMentions call. Callers run it
 // in a background goroutine on context.Background() so it outlives the
-// request; the budget keeps a stalled dispatcher from leaking it.
+// request; the budget keeps a stalled dispatcher from leaking it. The
+// budget covers all recipients, notified one after another: a stalled
+// recipient can use it up, and later recipients then fail on the expired
+// context and are skipped (the notifier logs each failure).
 const mentionNotifyBudget = 15 * time.Second
 
 // notifyHumanMentions fires a mention notification to each user in userIDs.

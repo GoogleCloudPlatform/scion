@@ -2055,6 +2055,12 @@ func (s *pgWebChatStore) addThreadIDIndex() error {
 	return s.markMigrationCompleted("thread_id_index")
 }
 
+// pgUUIDShapeRegex is a quoted SQL literal for the case-insensitive (~*)
+// UUID shape test. Every text-to-uuid cast on webchat columns runs only
+// inside a CASE on this test, so a non-UUID value maps to NULL instead of
+// failing the query.
+const pgUUIDShapeRegex = `'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`
+
 // RecordMentions stores one mention row per user for messageID.
 func (s *pgWebChatStore) RecordMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) error {
 	if conversationKey == "" || messageID == "" || len(userIDs) == 0 {
@@ -2112,12 +2118,12 @@ func (s *pgWebChatStore) UnreadMentionKeys(ctx context.Context, userID string, c
 SELECT DISTINCT wm.conversation_key
   FROM webchat_mention wm
   JOIN messages m ON m.id = (CASE
-        WHEN wm.message_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        WHEN wm.message_id ~* `+pgUUIDShapeRegex+`
         THEN wm.message_id::uuid END)
   LEFT JOIN webchat_read_state rs
          ON rs.user_id = wm.user_id AND rs.conversation_key = wm.conversation_key
   LEFT JOIN messages lr ON lr.id = (CASE
-        WHEN rs.last_read_message_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        WHEN rs.last_read_message_id ~* `+pgUUIDShapeRegex+`
         THEN rs.last_read_message_id::uuid END)
  WHERE wm.user_id = $1 AND wm.conversation_key IN (%s)
    AND (lr.id IS NULL OR m.created > lr.created
@@ -2148,7 +2154,7 @@ func (s *pgWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
 	res, err := s.db.ExecContext(ctx, `
 DELETE FROM webchat_mention wm
  WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = (CASE
-        WHEN wm.message_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        WHEN wm.message_id ~* `+pgUUIDShapeRegex+`
         THEN wm.message_id::uuid END))
 `)
 	if err != nil {
