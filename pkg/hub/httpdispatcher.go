@@ -75,8 +75,8 @@ func (c *HTTPRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	return c.transport.StartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, sharedDirs, sharedWorkspace, resume, extras)
 }
 
-func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
-	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
+	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 }
 
 func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
@@ -3399,7 +3399,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 		return err
 	}
 
-	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID)
+	// Send the row's run ID so the broker stops only that run's entry,
+	// never a newer run recreated under the same name (ptone/scion#2550).
+	// A row with no run ID sends none, and the broker stops by name as
+	// before. The broker's run_mismatch 404 (api.BrokerErrorCodeRunMismatch)
+	// on a run-scoped stop comes back as ErrStopRunNotFound: the requested
+	// run is already gone, and callers must not record the current run as
+	// stopped because of it. Any other 404 is returned as a plain broker
+	// error.
+	err = d.client.StopAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, agent.RunID)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredStop(ctx, agent)
 	}
@@ -3551,12 +3559,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		d.log.Debug("Dispatcher: delete carries run ID",
 			"agent_id", agent.ID, "agent", agent.Slug, "run_id", agent.RunID)
 	}
+	// The delete engine fences its dispatch with a deadline
+	// (ptone/scion#2906); every other caller sends none. opts carries it,
+	// so each previous-run delete below is fenced by the same deadline.
+	var notAfter time.Time
+	if fence, ok := deleteDispatchFenceFrom(ctx); ok {
+		notAfter = fence.notAfter
+	}
 	opts := DeleteAgentOptions{
 		DeleteFiles:  deleteFiles,
 		RemoveBranch: removeBranch,
 		SoftDelete:   softDelete,
 		DeletedAt:    deletedAt,
 		RunID:        agent.RunID,
+		NotAfter:     notAfter,
 	}
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, opts)
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -3580,11 +3596,21 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 //
 // Each delete is the current-run delete with only the run changed (opts
 // carries everything else, including the files flags, so the previous
-// run's files are deleted or kept exactly as the current run's are), and
+// run's files are deleted or kept exactly as the current run's are, and
+// the delete engine's notAfter, so the broker refuses a late previous-run
+// delete with 409 stale_dispatch as it does the current run's,
+// ptone/scion#2906), and
 // is always run-scoped, never by name, so it cannot remove a same-name
 // successor. Newest run first. A run with no entry is the broker's 404,
 // which counts as success; any other error stops and is returned, and the
 // caller's failure handling applies as for the current-run delete.
+//
+// notAfter is computed once per dispatch (by the engine, or by the
+// executing node for an intent), not per run, so a loop over many previous
+// runs that outlasts it has its later deletes refused as stale even while
+// the engine's lease is still being renewed. That is safe and self-healing:
+// the engine abandons the claim without finalizing, and a retry re-claims
+// with a fresh deadline (runs already deleted are then the broker's 404).
 //
 // The empty-RunID guard is defensive: a stored list implies a run ID
 // (SetAgentRunID always writes one, and a settle to "" clears the list),
@@ -3606,7 +3632,9 @@ func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *sto
 		err := d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, prevOpts)
 		if errors.Is(err, ErrLifecycleDeferred) {
 			// Hand the remaining runs to the owning node, whose delete
-			// names them (its repeat of the current run is a 404).
+			// names them (its repeat of the current run is a 404). ctx
+			// still carries the engine's fence, so the intent records the
+			// claim and the owning node re-fences it (ptone/scion#2906).
 			rest := *agent
 			rest.PreviousRunIDs = append([]string(nil), agent.PreviousRunIDs[:i+1]...)
 			return d.deferredDelete(ctx, &rest, opts.DeleteFiles, opts.RemoveBranch, opts.SoftDelete, opts.DeletedAt)
@@ -3823,7 +3851,10 @@ func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Ag
 
 // deferredStop handles a cross-node agent stop.
 func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Agent) error {
-	return d.deferredLifecycle(ctx, agent, "stop", &StopDispatchArgs{}, isStopTerminal)
+	// The intent pins the run this stop was dispatched for, so the owning
+	// node stops that run even if the row's run ID moves on before it
+	// drains the intent (ptone/scion#2550).
+	return d.deferredLifecycle(ctx, agent, "stop", &StopDispatchArgs{RunID: agent.RunID}, isStopTerminal)
 }
 
 // deferredRestart handles a cross-node agent restart.
@@ -3842,6 +3873,12 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		SoftDelete:     softDelete,
 		DeletedAt:      deletedAt,
 		PreviousRunIDs: agent.PreviousRunIDs,
+	}
+	// An engine delete records its claim, not its notAfter: the executing
+	// node checks the claim is still live and computes notAfter when it
+	// actually sends (ptone/scion#2906).
+	if fence, ok := deleteDispatchFenceFrom(ctx); ok {
+		args.Claim = fence.claim
 	}
 	return d.deferredDataOp(ctx, agent, "delete", args)
 }
@@ -3925,6 +3962,10 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 		return nil, err
 	}
 	if result.State == store.DispatchStateFailed {
+		if op == "delete" && staleDeleteDispatchFromText(result.Error) {
+			// Refused as stale on the executing node: nothing was done.
+			return nil, fmt.Errorf("dispatch %s failed: %w (%s)", op, errStaleDeleteDispatch, result.Error)
+		}
 		return nil, dispatchFailureError(result)
 	}
 	return result, nil

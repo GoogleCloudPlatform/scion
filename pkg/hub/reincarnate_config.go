@@ -62,8 +62,20 @@ import (
 //
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
-// AppliedConfig).
+// AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
+// which wraps errWorkspaceContentTimeout).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
+	return s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, nil)
+}
+
+// buildPatchedAppliedConfig is buildFreshAppliedConfig with an optional,
+// already-authorized reincarnate patch (ptone/scion#3302). The patch's
+// Image/Model/ThinkingLevel/HarnessAuth are recorded into a copy of
+// CreateInputs (recordReincarnatePatchEdits) before the pipeline runs, so
+// they take the explicit-input slot and the new generation keeps them; its
+// Role and GCPIdentity replace the kept values. A nil patch is exactly
+// buildFreshAppliedConfig. agent.AppliedConfig is never mutated.
+func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
 	old := agent.AppliedConfig
 	if old == nil {
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
@@ -97,6 +109,12 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	var warnings []string
 	if createInputs == nil {
 		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old, templateEnv)
+	}
+	if patch != nil {
+		// A copy: createInputs may be the outgoing generation's own record
+		// (old.CreateInputs, also saved as PreviousAppliedConfig).
+		createInputs = cloneCreateInputs(createInputs)
+		recordReincarnatePatchEdits(createInputs, patch)
 	}
 
 	fresh := &store.AgentAppliedConfig{
@@ -150,6 +168,21 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		CreateInputs: createInputs,
 	}
 
+	// Kept fields a reincarnate patch replaces. Set before NoAuth is
+	// derived below (role=none implies NoAuth) and before deriveAgentConfig
+	// (GCPIdentity feeds its auto-no-auth check).
+	if patch != nil {
+		if patch.Role != "" {
+			fresh.AgentRole = string(patch.Role)
+			// An explicitly patched role is not a backfilled one.
+			fresh.AgentRoleGrandfathered = false
+		}
+		if patch.GCPIdentity != nil {
+			g := *patch.GCPIdentity
+			fresh.GCPIdentity = &g
+		}
+	}
+
 	// Design §3.5: make an empty (implicit-default) branch explicit, so a
 	// template change cannot silently rename it. Today's implicit default
 	// for clone-per-agent (init.go) and the value here are the same
@@ -200,7 +233,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// resolveDerivedConfig alone would skip the project/hub defaulting step
 	// and let the template win over a project or hub default (design §3.3
 	// Amendment A1 property 1).
-	s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate)
+	if err := s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate); err != nil {
+		return nil, nil, err
+	}
 
 	// Design §3.4 Amendment A11.1(a): fill Image from Hub settings, then the
 	// resolved harness config, when deriveAgentConfig still left it empty.
@@ -336,12 +371,15 @@ func dispatchImageRegistry(dispatcher AgentDispatcher) string {
 //   - InlineConfig.Telemetry is dropped: it is always a hub/project/template
 //     default once populated (see resolveDerivedConfig), never something the
 //     requester provided directly in a way this reconstruction could trust.
-//   - InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] is stripped: it is a
-//     project- or hub-level default, never an explicit request input.
+//   - InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] is stripped: on a legacy
+//     agent it is usually the project or hub default an older hub stamped
+//     there, and cannot be told apart from an explicit value. The caller then
+//     re-derives the project and template tiers through deriveAgentConfig
+//     (resolveAutoExposeEnv), exactly as for an agent with CreateInputs.
 //   - Every other key InlineConfig.Env shares with templateEnv (the CURRENT
 //     template's env map) is also dropped, whatever its value (A1 addendum
-//     2, rule 2): buildAppliedConfig aliases AppliedConfig.Env to
-//     InlineConfig.Env, so a legacy agent's InlineConfig.Env is
+//     2, rule 2): the hub that created a legacy agent aliased
+//     AppliedConfig.Env to InlineConfig.Env, so its InlineConfig.Env is
 //     indistinguishable-by-inspection from a mix of explicit keys and
 //     template defaults merged in at create time. Assuming "the template
 //     still owns this key" errs toward template freshness — reincarnate's
