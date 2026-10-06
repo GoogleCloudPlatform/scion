@@ -299,7 +299,7 @@ test('the agents-only palette keeps the single-group panel width', async ({ page
   await expect(paletteOption(page, 'Bob-bot')).toBeVisible();
 
   // Read the settled panel, not a frame of the dialog's open animation.
-  const panelWidth = () =>
+  const panelWidth = (): Promise<number> =>
     paletteDialog(page).evaluate((dialog) => {
       const panel = dialog.shadowRoot!.querySelector('[part~="panel"]')!;
       return panel.getAnimations().length === 0 ? panel.getBoundingClientRect().width : -1;
