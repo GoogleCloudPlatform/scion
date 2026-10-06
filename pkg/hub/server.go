@@ -4375,7 +4375,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			RuntimeBrokerID: runtimeBrokerID,
 			Phase:           "created",
 			Detached:        true,
-			CreatedBy:       evt.CreatedBy,
+			// The child's creator is the revision principal the fire runs
+			// as, so every reader of CreatedBy (the creator relationship,
+			// the owning-user guard) agrees with the recorded authority.
+			// The event's CreatedBy stays history.
+			CreatedBy: creator.Authority.PrincipalID,
 		}
 
 		// Build applied config with task

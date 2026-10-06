@@ -192,6 +192,15 @@ func (s *Server) resolveScheduledAuthority(ctx context.Context, evt store.Schedu
 	if auth.PrincipalID == "" {
 		return ScheduledAuthority{}, nil, fmt.Errorf("%w: revision has no principal", errScheduledAuthorityDenied)
 	}
+	// A dev_local revision is recorded with the local development user's
+	// identity kind ("dev"); its principal is that user. Any other principal
+	// kind on a dev_local revision is inconsistent and denies.
+	if auth.CredentialKind == store.InitiatorCredentialKindDevLocal {
+		if auth.PrincipalKind != string(PrincipalKindDev) {
+			return ScheduledAuthority{}, nil, fmt.Errorf("%w: dev_local revision with principal kind %q", errScheduledAuthorityDenied, auth.PrincipalKind)
+		}
+		auth.PrincipalKind = store.DelegationPrincipalUser
+	}
 	if err := revisionCeilingConsistent(auth.CredentialKind, auth.Ceiling); err != nil {
 		return ScheduledAuthority{}, nil, err
 	}
@@ -281,12 +290,12 @@ func (s *Server) resolveScheduledUser(ctx context.Context, auth *ScheduledAuthor
 	}, projectID, permissionID, executionProjectClass(permissionID), nil)
 	if err != nil {
 		if errors.Is(err, ErrProjectAccessDenied) {
-			return nil, fmt.Errorf("%w: principal lacks admission to the project", errScheduledAuthorityDenied)
+			return nil, fmt.Errorf("%w: principal %s lacks admission to the project", errScheduledAuthorityDenied, user.ID)
 		}
 		return nil, fmt.Errorf("scheduled authority: project admission: %w", err)
 	}
 	if !admission.Admitted {
-		return nil, fmt.Errorf("%w: principal lacks admission to the project", errScheduledAuthorityDenied)
+		return nil, fmt.Errorf("%w: principal %s lacks admission to the project", errScheduledAuthorityDenied, user.ID)
 	}
 
 	if auth.CredentialKind != store.InitiatorCredentialKindUAT {

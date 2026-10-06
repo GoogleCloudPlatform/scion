@@ -139,10 +139,11 @@ func withUATRevision(evt store.ScheduledEvent, tok *store.UserAccessToken) store
 }
 
 // withDevLocalRevision returns evt carrying a dev_local revision for
-// principalID with the principal ceiling.
+// principalID with the principal ceiling, recorded with the "dev" identity
+// kind as authoring by the local development user records it.
 func withDevLocalRevision(evt store.ScheduledEvent, principalID string) store.ScheduledEvent {
 	evt.InitiatorAttribution = store.InitiatorAttribution{
-		InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+		InitiatorPrincipalKind:  string(PrincipalKindDev),
 		InitiatorPrincipalID:    principalID,
 		InitiatorCredentialKind: store.InitiatorCredentialKindDevLocal,
 		AttributionVersion:      1,
@@ -222,15 +223,17 @@ func TestSchedFireUsesRevisionPrincipalNotCreatedBy(t *testing.T) {
 	evt := withSessionRevision(f.event("sched-rev-1"), b.ID)
 	require.Equal(t, f.creator.ID, evt.CreatedBy)
 	require.NoError(t, f.fire(t, evt))
-	_, edge := f.child(t, "sched-rev-1")
+	child, edge := f.child(t, "sched-rev-1")
 	assert.Equal(t, b.ID, edge.DelegatorID)
+	assert.Equal(t, b.ID, child.CreatedBy, "the child's creator is the revision principal")
 
-	// A (the history creator) loses all authority: the fire runs as B.
+	// A (the history creator) is deleted: the fire runs as B.
 	require.NoError(t, f.store.DeleteUser(ctx, f.creator.ID))
 	evt2 := withSessionRevision(f.event("sched-rev-2"), b.ID)
 	require.NoError(t, f.fire(t, evt2))
-	_, edge = f.child(t, "sched-rev-2")
+	child, edge = f.child(t, "sched-rev-2")
 	assert.Equal(t, b.ID, edge.DelegatorID)
+	assert.Equal(t, b.ID, child.CreatedBy)
 
 	// B loses authority: the fire is denied.
 	b.Status = store.UserStatusSuspended
@@ -280,10 +283,10 @@ func TestSchedAgentPrincipalCarriesStoredAncestry(t *testing.T) {
 	require.NoError(t, err)
 	agentIdent, ok := identity.(*agentIdentityWrapper)
 	require.True(t, ok)
-	assert.Equal(t, parent.Ancestry, agentIdent.Ancestry)
+	assert.Equal(t, parent.Ancestry, agentIdent.AgentTokenClaims.Ancestry)
 	want, err := f.srv.authzService.ceilingFilteredAgentScopes(context.Background(), parent, f.srv.authzService.mintCandidateScopes(parent))
 	require.NoError(t, err)
-	assert.Equal(t, want, agentIdent.Scopes)
+	assert.Equal(t, want, agentIdent.AgentTokenClaims.Scopes)
 }
 
 // The scheduled child's ancestry stays empty (the edge is the record of who
@@ -477,6 +480,12 @@ func TestSchedDevLocalRevisionFires(t *testing.T) {
 		require.ErrorIs(t, err, errScheduledAuthorityDenied)
 		f.assertNoChild(t, "sched-dev-other")
 	})
+	t.Run("dev_local row with a user principal kind", func(t *testing.T) {
+		e := withDevLocalRevision(f.event("sched-dev-userkind"), DevUserID)
+		e.InitiatorPrincipalKind = store.DelegationPrincipalUser
+		require.ErrorIs(t, f.fire(t, e), errScheduledAuthorityDenied)
+		f.assertNoChild(t, "sched-dev-userkind")
+	})
 	t.Run("suspended dev user", func(t *testing.T) {
 		f.seedDevLocalUser(t, store.UserStatusSuspended, true)
 		err := f.fire(t, withDevLocalRevision(f.event("sched-dev-susp"), DevUserID))
@@ -649,7 +658,7 @@ func TestSchedChildProvenanceParityWithRequestCreate(t *testing.T) {
 
 // An agent-authored revision of an agent with a principal chain carries the
 // three deliver IDs, and so does the child's edge. Once the agent's own
-// edge is replaced by a bounded edge without them (the shape a UAT
+// edge is replaced by a bounded edge without them (the shape a token
 // reincarnation records), the next fire's child carries none.
 func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 	f := newSchedFire(t, "sched-deliver")
@@ -670,8 +679,15 @@ func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 	_, err := f.store.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, parent.ID,
 		store.Deactivation{Cause: store.EdgeDeactivationReincarnateReplaced, At: &now, OpID: api.NewUUID()})
 	require.NoError(t, err)
-	uatCeiling := uatCeilingFromSelectors(t, append(minimalSelectors(t), "agent:lifecycle", "agent:delete", "agent:attach",
-		"template:create", "template:update", "gcp_service_account:assign")...)
+	// A bounded edge without any deliver ID, covering the agent's stored
+	// role otherwise (store-seeded; the shape a reincarnation by a token
+	// records, since no token selector covers a deliver permission).
+	var noDeliver []string
+	for _, p := range permissions.Registry {
+		if !containsString(hubDeliveryPermissionList, p.ID) {
+			noDeliver = append(noDeliver, p.ID)
+		}
+	}
 	require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
 		DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.creator.ID,
 		DelegateType: store.DelegationPrincipalAgent, DelegateID: parent.ID,
@@ -680,7 +696,7 @@ func TestSchedAgentDeliverIDsIntersect(t *testing.T) {
 			ProvenanceVersion: store.ProvenanceVersionV1, SourcePrincipalKind: store.DelegationPrincipalUser,
 			SourcePrincipalID: f.creator.ID, SourceCredentialKind: store.SourceCredentialUAT, SourceCredentialID: "uat-reinc",
 		},
-		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: uatCeiling.PermissionIDs},
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: sortedUniqueIDs(noDeliver)},
 	}))
 
 	// The revision recorded earlier holds the deliver IDs; the fire
