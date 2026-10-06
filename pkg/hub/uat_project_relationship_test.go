@@ -148,19 +148,35 @@ func uatpDeleteProjectBinding(t *testing.T, s store.Store, userID, projectID str
 // against an already-stored scope; only current authority decides.
 func uatpInsertLegacyToken(t *testing.T, s store.Store, userID, projectID string, scopes []string) string {
 	t.Helper()
+	return uatpInsertStoredToken(t, s, userID, "", projectID, scopes)
+}
+
+// uatpInsertHubToken inserts a hub-boundary token row with the given
+// scopes and no ceiling version directly into the store, without minting.
+func uatpInsertHubToken(t *testing.T, s store.Store, userID string, scopes []string) string {
+	t.Helper()
+	return uatpInsertStoredToken(t, s, userID, string(BoundaryKindHub), "", scopes)
+}
+
+// uatpInsertStoredToken inserts a token row with the given boundary kind,
+// project ID and scopes, and returns its key. An empty boundary kind
+// stores a project boundary.
+func uatpInsertStoredToken(t *testing.T, s store.Store, userID, boundaryKind, projectID string, scopes []string) string {
+	t.Helper()
 	ctx := context.Background()
 	keyBody := uuid.NewString()
 	key := store.UATPrefix + keyBody
 	hash := sha256.Sum256([]byte(key))
 	require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{
-		ID:        uuid.NewString(),
-		UserID:    userID,
-		Name:      "legacy",
-		Prefix:    key[:len(store.UATPrefix)+UATPrefixLength],
-		KeyHash:   hex.EncodeToString(hash[:]),
-		ProjectID: projectID,
-		Scopes:    scopes,
-		Created:   time.Now(),
+		ID:           uuid.NewString(),
+		UserID:       userID,
+		Name:         "legacy",
+		Prefix:       key[:len(store.UATPrefix)+UATPrefixLength],
+		KeyHash:      hex.EncodeToString(hash[:]),
+		BoundaryKind: boundaryKind,
+		ProjectID:    projectID,
+		Scopes:       scopes,
+		Created:      time.Now(),
 	}))
 	return key
 }
@@ -1351,6 +1367,13 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 		assert.Equal(t, http.StatusForbidden, rec.Code,
 			"a project token is not eligible for a hub-only permission: %s", rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), "Only group owners or admins can add members")
+		projectToken, err := srv.uatService.ValidateToken(ctx, uatKey)
+		require.NoError(t, err)
+		decision := srv.authzService.CheckAccess(ctx, projectToken, groupResource(group), ActionAddMember)
+		assert.False(t, decision.Allowed)
+		assert.Equal(t, bearerReasonBoundaryIneligible, decision.Reason)
+		eval := srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(bearerUser(userID)), projectToken.Boundary(), projectToken.Ceiling(), "group.addMember", groupResource(group), BearerOptions{})
+		assert.Equal(t, BearerStageBoundaryEligibility, eval.Stage, eval.Decision.Reason)
 
 		// A hub token with the selector is admitted through system authority
 		// for the exact permission.
@@ -1364,26 +1387,16 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 			"system authority for the exact permission should admit a hub token: %s", rec.Body.String())
 	})
 
-	t.Run("owner without the system binding is still denied by the project-access gate", func(t *testing.T) {
-		// Identical group-ownership fixture as the positive case above
-		// (OwnerID == caller) -- the pair differs ONLY in the missing
-		// group.addMember system-role binding -- rather than a fixture
-		// with no ownership at all, because addGroupMember's own
-		// role-hierarchy check has a separate allowance for a group's
-		// resource owner, and the owner relationship grant
-		// (checkRelationshipGrants) has no resource-type restriction: if
-		// Decide ever reached the kernel/relationship steps for this
-		// request, ownership alone would admit it regardless of the
-		// group.addMember binding. The project-access gate in
-		// enforceUATConstraints runs BEFORE those steps for a UAT
-		// credential (Decide step 1), so this must still deny -- proving
-		// the positive case above exercises the exact-permission admission
-		// path, not group ownership. A denial via the handler's own "Only
-		// group owners or admins can add members" message would mean the
-		// request passed s.authorize and reached the handler's internal
-		// check instead, which that owner allowance would actually let
-		// through -- so this also asserts the response does NOT contain
-		// that text.
+	t.Run("hub token of a group owner without the system binding is denied at project access", func(t *testing.T) {
+		// The fixture matches the positive case above (OwnerID == caller)
+		// except that the caller holds no group.addMember system binding.
+		// The token is a hub-boundary row carrying group:addMember, so it
+		// passes the ceiling and boundary eligibility stages. The group is
+		// homed in a project the caller is not a member of, so the bearer
+		// gate denies at the project access stage, before group ownership
+		// is considered by the kernel, relationship grants or the handler's
+		// own role-hierarchy check. The response therefore must not carry
+		// the handler's "Only group owners or admins can add members" text.
 		srv, s := testServer(t)
 		ctx := context.Background()
 		projectID := tid("uatp-groupaddmember-nobind-project")
@@ -1403,13 +1416,19 @@ func TestProjectUAT_GroupAddMemberExactSystemPermissionAtRealRoute(t *testing.T)
 		}
 		require.NoError(t, s.CreateGroup(ctx, group))
 
-		uatKey := uatpInsertLegacyToken(t, s, userID, projectID, []string{"group:addMember"})
-		rec := doRequestWithUAT(t, srv, uatKey, http.MethodPost, "/api/v1/groups/"+group.ID+"/members",
+		hubKey := uatpInsertHubToken(t, s, userID, []string{"group:addMember"})
+		rec := doRequestWithUAT(t, srv, hubKey, http.MethodPost, "/api/v1/groups/"+group.ID+"/members",
 			map[string]any{"memberType": "user", "memberId": targetID, "role": "member"})
 		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"group ownership alone must not satisfy the project-access gate: %s", rec.Body.String())
+			"group ownership alone does not satisfy project access: %s", rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), "Only group owners or admins can add members",
-			"denial must come from the project-access gate, not from the handler's owner-allowed role-hierarchy check: %s", rec.Body.String())
+			"the bearer gate denies before the handler's role-hierarchy check: %s", rec.Body.String())
+		hubToken, err := srv.uatService.ValidateToken(ctx, hubKey)
+		require.NoError(t, err)
+		require.Equal(t, BoundaryKindHub, hubToken.Boundary().Kind)
+		eval := srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(bearerUser(userID)), hubToken.Boundary(), hubToken.Ceiling(), "group.addMember", groupResource(group), BearerOptions{})
+		assert.False(t, eval.Decision.Allowed)
+		assert.Equal(t, BearerStageProjectAccess, eval.Stage, eval.Decision.Reason)
 	})
 }
 
