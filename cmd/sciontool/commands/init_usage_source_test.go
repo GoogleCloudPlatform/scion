@@ -257,16 +257,18 @@ func sendClaudeAPIRequest(ctx context.Context, t *testing.T, port int) {
 	}
 }
 
-// TestLoadHarnessEnvOverlayStartupContract pins the two loadHarnessEnvOverlay
-// outcomes the usage-source tests above do not reach: a malformed overlay for
-// a required container-script harness must abort startup (the child would
-// otherwise launch without its credentials), and a harness that declares no
-// overlay yields nothing and no error.
+// TestLoadHarnessEnvOverlayStartupContract pins loadHarnessEnvOverlay's
+// startup contract independent of usage activation: a malformed overlay
+// aborts startup for a required container-script harness (the child would
+// otherwise launch without its credentials) and is logged and ignored for an
+// optional one, and a harness that declares no overlay yields nothing and no
+// error.
 func TestLoadHarnessEnvOverlayStartupContract(t *testing.T) {
 	unsetEnvForTest(t, hooks.HarnessOutputsDirEnv)
 	unsetEnvForTest(t, hooks.HarnessSecretsDirEnv)
 
-	t.Run("malformed_overlay_aborts_required_harness", func(t *testing.T) {
+	malformed := func(t *testing.T, required bool) (hooks.HarnessManifestRequirement, string) {
+		t.Helper()
 		agentHome := t.TempDir()
 		bundleDir := filepath.Join(agentHome, ".scion", "harness")
 		if err := os.MkdirAll(filepath.Join(bundleDir, "outputs"), 0o700); err != nil {
@@ -275,14 +277,26 @@ func TestLoadHarnessEnvOverlayStartupContract(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(bundleDir, "outputs", "env.json"), []byte("{not json"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		req := hooks.HarnessManifestRequirement{
-			Required:       true,
+		return hooks.HarnessManifestRequirement{
+			Required:       required,
 			EnvOverlayPath: "$HOME/.scion/harness/outputs/env.json",
 			BundleDir:      bundleDir,
-		}
+		}, agentHome
+	}
+
+	t.Run("malformed_overlay_aborts_required_harness", func(t *testing.T) {
+		req, agentHome := malformed(t, true)
 		_, _, err := loadHarnessEnvOverlay(context.Background(), req, agentHome, nil)
 		if err == nil || !strings.Contains(err.Error(), "invalid harness env overlay") {
 			t.Fatalf("loadHarnessEnvOverlay error = %v, want an invalid harness env overlay error", err)
+		}
+	})
+
+	t.Run("malformed_overlay_ignored_for_optional_harness", func(t *testing.T) {
+		req, agentHome := malformed(t, false)
+		overlay, policy, err := loadHarnessEnvOverlay(context.Background(), req, agentHome, nil)
+		if err != nil || overlay != nil || policy != "" {
+			t.Fatalf("got overlay %v, policy %q, err %v; want nil, \"\", nil", overlay, policy, err)
 		}
 	})
 
