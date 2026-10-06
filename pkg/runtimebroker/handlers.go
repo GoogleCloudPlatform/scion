@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -94,9 +95,12 @@ func matchesAgentProject(a api.AgentInfo, projectID string) bool {
 func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	checks := make(map[string]string)
 
-	// Check runtime availability
-	if s.runtime != nil {
-		checks[s.runtime.Name()] = "available"
+	// Check runtime availability. A degraded default runtime (the
+	// *runtime.ErrorRuntime the broker falls back to when startup
+	// resolution fails) is reported as unavailable, not as an available
+	// runtime named "error" (ptone/scion#2766).
+	if rt, ok := s.defaultRuntime(); ok {
+		checks[rt.Name()] = "available"
 	} else {
 		checks["runtime"] = "unavailable"
 	}
@@ -178,6 +182,30 @@ func NFSWarnOnlyRuntime(name string) bool {
 	return false
 }
 
+// defaultRuntime returns one snapshot of the broker's default runtime,
+// read under s.mu (SwapRuntime replaces it concurrently), and whether it
+// is usable: set, and not the *runtime.ErrorRuntime placeholder installed
+// when runtime resolution failed at startup.
+func (s *Server) defaultRuntime() (scionrt.Runtime, bool) {
+	s.mu.RLock()
+	rt := s.runtime
+	s.mu.RUnlock()
+	if rt == nil {
+		return nil, false
+	}
+	if _, degraded := rt.(*scionrt.ErrorRuntime); degraded {
+		return rt, false
+	}
+	return rt, true
+}
+
+// handleHealthz is the liveness endpoint. It always answers 200 and carries
+// the overall status (healthy or degraded) in the body. A degraded default
+// runtime does not return 503 here. A restart can clear a transient boot
+// failure, but the CLI and liveness consumers treat any non-200 /healthz
+// as "broker not running", and a persistent fault would restart-loop
+// under a liveness probe. Operators restart after fixing the cause.
+// /readyz returns 503 instead.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -194,8 +222,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if we have a functional runtime
-	if s.runtime == nil {
+	// Check if we have a functional runtime. A degraded default
+	// *runtime.ErrorRuntime cannot run agents, so it is not ready either.
+	if _, ok := s.defaultRuntime(); !ok {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "not_ready",
 			"reason": "no runtime available",
@@ -214,9 +243,16 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One snapshot of the raw default runtime, read under s.mu because
+	// SwapRuntime replaces it concurrently. /info reports it even when it
+	// is the degraded *runtime.ErrorRuntime placeholder.
+	s.mu.RLock()
+	rt := s.runtime
+	s.mu.RUnlock()
+
 	runtimeType := "unknown"
-	if s.runtime != nil {
-		runtimeType = s.runtime.Name()
+	if rt != nil {
+		runtimeType = rt.Name()
 	}
 
 	resp := BrokerInfoResponse{
@@ -230,17 +266,20 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// (scionrt.HasAttachSupport) rather than a blanket true, so a
 			// runtime that opts out via the optional AttachCapableRuntime
 			// interface is reported accurately here too.
-			Attach:      scionrt.HasAttachSupport(s.runtime),
+			Attach:      scionrt.HasAttachSupport(rt),
 			Exec:        true,
 			Reprovision: true,
 			AsyncLaunch: true,
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
-			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
+			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
 			// This broker honours localOnly deletes and confirms a moved
 			// agent's NFS workspace before provisioning it (agent move).
 			AgentMove:      true,
 			StartsInFlight: s.startsInFlight != nil,
+			// This broker's reprovision reuses an empty-per-agent
+			// workspace in place (miller79/scion#167).
+			ReprovisionEmptyPerAgent: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -384,10 +423,14 @@ func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState
 // broker is not "probably fine" just because it's not the default type).
 func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
 	if rtType == defaultRuntimeType {
-		if s.runtime == nil {
+		// Read under s.mu: SwapRuntime replaces s.runtime concurrently.
+		s.mu.RLock()
+		def := s.runtime
+		s.mu.RUnlock()
+		if def == nil {
 			return nil, false
 		}
-		return s.runtime, true
+		return def, true
 	}
 	aux, found := s.findAuxiliaryRuntimeByType(rtType)
 	if !found || aux.Runtime == nil {
@@ -1219,6 +1262,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				BadRequest(w, httpMessage)
 				return
 			}
+			if errors.Is(dlErr, errWorkspaceStorageUnconfigured) {
+				markAttemptFailed(http.StatusUnprocessableEntity, attemptMsg)
+				writeWorkspaceStorageUnconfigured(w)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
 			RuntimeError(w, httpMessage)
 			return
@@ -1489,20 +1537,55 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 // error (400) on the synchronous path rather than a runtime error.
 var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 
+// errWorkspaceStorageUnconfigured marks a downloadWorkspaceFromGCS error
+// caused by having no bucket to download the workspace upload from: the
+// request carries no WorkspaceStorageBucket (a hub that predates it) and the
+// broker has no StorageBucket setting. Answered with
+// writeWorkspaceStorageUnconfigured (422), not a runtime error
+// (ptone/scion#3422).
+var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
+
+// syncWorkspaceFromGCS downloads a workspace upload; a variable so tests
+// can substitute a fake for real GCS.
+var syncWorkspaceFromGCS = gcp.SyncFromGCS
+
+// workspaceStorageUnconfiguredMessage is the user-facing text for
+// errWorkspaceStorageUnconfigured.
+const workspaceStorageUnconfiguredMessage = "Cannot download the uploaded workspace: the create request names no storage bucket and this runtime broker has no storage bucket configured. " +
+	"Update the hub so it sends the workspace bucket, or configure the broker's storage bucket (storage.bucket or --storage-bucket)."
+
+// workspaceStorageBucket returns the bucket a create request's workspace
+// upload is downloaded from: the bucket the hub sent with the request, else
+// this broker's own StorageBucket setting, else "".
+func (s *Server) workspaceStorageBucket(req CreateAgentRequest) string {
+	if req.WorkspaceStorageBucket != "" {
+		return req.WorkspaceStorageBucket
+	}
+	return s.config.StorageBucket
+}
+
+// writeWorkspaceStorageUnconfigured answers a create that cannot download
+// its workspace upload because no bucket is known for it.
+func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeWorkspaceStorageUnconfigured, workspaceStorageUnconfiguredMessage, nil)
+}
+
 // downloadWorkspaceFromGCS performs the non-git GCS workspace bootstrap when
-// req.WorkspaceStoragePath is set. It is a pure extraction of createAgent's
-// original inline admission step (no behavior change), factored out so the
-// async-launch path (runLaunch) can perform exactly the same step in its
-// goroutine (design t1-async-create-v11.md §3.1: "Launch is the GCS
-// workspace download ... plus Manager.Start, in a goroutine").
+// req.WorkspaceStoragePath is set. It was factored out of createAgent's
+// inline admission step so the async-launch path (runLaunch) performs the
+// same step in its goroutine (design t1-async-create-v11.md §3.1: "Launch is
+// the GCS workspace download ... plus Manager.Start, in a goroutine"). It
+// downloads from the request's bucket, else this broker's StorageBucket
+// (workspaceStorageBucket), and refuses before creating the workspace
+// directory when neither is set.
 //
 // Returns opts unchanged when WorkspaceStoragePath is empty. On error it
 // returns: the short status string the synchronous caller records on the
-// dispatch attempt; httpMessage, the exact user-facing text the synchronous
-// path wrote with RuntimeError before this was extracted (byte-identical,
-// capitalized, no wrapped error — design's "byte-identical to today" for the
-// asyncLaunch-absent path); and err, a normal lowercase Go error for the
-// async path's failure report and logging.
+// dispatch attempt; httpMessage, the capitalized user-facing text the
+// synchronous path writes (no wrapped error); and err, a normal lowercase Go
+// error for the async path's failure report and logging. err is
+// errWorkspaceStorageUnconfigured when no bucket is known, which callers
+// answer with a 422 rather than a runtime error.
 func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (updated api.StartOptions, attemptMsg string, httpMessage string, err error) {
 	if req.WorkspaceStoragePath == "" {
 		return opts, "", "", nil
@@ -1515,15 +1598,18 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, attemptMsg, httpMessage, err
 	}
 
+	// Resolve the bucket before creating anything: a broker with no bucket
+	// for the upload refuses the create with errWorkspaceStorageUnconfigured
+	// (422) instead of leaving an empty workspace directory behind.
+	bucket := s.workspaceStorageBucket(req)
+	if bucket == "" {
+		return opts, "storage bucket not configured", workspaceStorageUnconfiguredMessage,
+			errWorkspaceStorageUnconfigured
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		return opts, "failed to create workspace directory", "Failed to create workspace directory: " + mkErr.Error(),
 			fmt.Errorf("failed to create workspace directory: %w", mkErr)
-	}
-
-	bucket := s.config.StorageBucket
-	if bucket == "" {
-		return opts, "storage bucket not configured", "Storage bucket not configured for workspace bootstrap",
-			errors.New("storage bucket not configured for workspace bootstrap")
 	}
 
 	if s.config.Debug {
@@ -1535,7 +1621,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		)
 	}
 
-	if syncErr := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
+	if syncErr := syncWorkspaceFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
 		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
 			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
 	}
@@ -5692,7 +5778,9 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// deleteProject removes the local hub-managed project directory for the given slug.
+// deleteProject removes the local hub-managed project directory for the given
+// slug, together with its shared-dir storage when that lives under
+// ~/.scion/project-configs (see hubManagedProjectSharedDirsBase).
 // Returns 204 on success (including when the directory doesn't exist).
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug string) {
 	globalDir, err := config.GetGlobalDir()
@@ -5728,6 +5816,33 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
+	// Remove the project's shared-dir storage first: it can live outside
+	// the project directory (ptone/scion#2878). Its location is computed
+	// from the request's slug and project ID, but the project's .scion
+	// entry must still be present to corroborate it, so a failure here must
+	// leave that entry in place. The hub does not retry this cleanup
+	// automatically; keeping the entry lets an operator re-run the delete.
+	// A request without a project ID leaves the storage alone. When the
+	// entry disagrees with the request, the storage is left alone and the
+	// project directory is still removed; when the storage location cannot
+	// be read, the delete fails and both stay in place.
+	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
+		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
+	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); errors.Is(err, errSharedDirStorageUnreadable) {
+		s.agentLifecycleLog.Warn("project shared-dir storage could not be checked", "slug", slug, "project_id", requestedID, "error", err)
+		RuntimeError(w, "Failed to check project shared-dir storage: "+err.Error())
+		return
+	} else if err != nil {
+		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
+	} else if sharedDirsBase != "" {
+		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
+			s.agentLifecycleLog.Warn("failed to remove project shared-dir storage", "slug", slug, "path", sharedDirsBase, "error", err)
+			RuntimeError(w, "Failed to remove project shared-dir storage: "+err.Error())
+			return
+		}
+		s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
+	}
+
 	if err := os.RemoveAll(projectPath); err != nil {
 		s.agentLifecycleLog.Warn("failed to remove project directory", "slug", slug, "path", projectPath, "error", err)
 		RuntimeError(w, "Failed to remove project directory: "+err.Error())
@@ -5736,6 +5851,130 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// hubManagedProjectSharedDirsBase returns the shared-dir storage directory
+// <globalDir>/project-configs/<slug>__<short requestedProjectID>/shared-dirs
+// of the hub-managed project at projectPath (~/.scion/projects/<slug>), the
+// location config.GetSharedDirsBasePath gives such a project with split
+// storage, which removing projectPath would leave behind.
+//
+// The path is computed from slug and requestedProjectID (both required);
+// the project's .scion entry (marker file or project-id file) only has to
+// agree with it. It returns ("", nil) when there is nothing to remove: the
+// entry is missing or records no project (legacy layout, storage inside
+// projectPath), or the storage does not exist. It returns an error when the
+// entry disagrees with the request (a different project ID or slug, or a
+// storage location other than the computed one) or the computed directory
+// is not a real directory inside project-configs
+// (projectConfigPathContained); the caller then leaves the storage alone.
+// Other read errors on the .scion entry or during the containment check
+// (for example an unreadable marker) count as absence or disagreement, so
+// the storage is left in place in those cases too.
+// It returns an error wrapping errSharedDirStorageUnreadable when the
+// computed location cannot be read (for example a permission or I/O
+// error), so the caller can fail the delete and keep the .scion entry,
+// letting an operator re-run the delete (the hub does not retry it
+// automatically), instead of leaving the storage behind.
+//
+// This assumes <slug>__<short ID> under project-configs belongs to the
+// project being deleted. A linked (non hub-managed) copy of the same
+// project on this broker with the same slug would share that directory and
+// lose its shared dirs too; that copy belongs to the same hub project the
+// hub is deleting, so its shared dirs go with it.
+func hubManagedProjectSharedDirsBase(globalDir, projectPath, slug, requestedProjectID string) (string, error) {
+	if requestedProjectID == "" {
+		return "", fmt.Errorf("no project ID requested")
+	}
+	if filepath.Base(projectPath) != slug {
+		return "", fmt.Errorf("project path does not match the slug")
+	}
+	dir := expectedProjectConfigDir(globalDir, slug, requestedProjectID)
+	if dir == "" {
+		return "", fmt.Errorf("slug or project ID is not usable as a path component")
+	}
+	want := filepath.Join(dir, config.SharedDirsSubdir)
+
+	scionPath := filepath.Join(projectPath, config.DotScion)
+	recordedID := projectIDAtPath(scionPath)
+	if recordedID == "" {
+		return "", nil
+	}
+	if recordedID != requestedProjectID {
+		return "", fmt.Errorf("project records a different project ID")
+	}
+	var base string
+	if config.IsProjectMarkerFile(scionPath) {
+		marker, err := config.ReadProjectMarker(scionPath)
+		if err != nil {
+			return "", fmt.Errorf("read project marker: %w", err)
+		}
+		if marker.ProjectID != requestedProjectID || marker.ProjectSlug != slug {
+			return "", fmt.Errorf("project marker does not match the request")
+		}
+		ext, err := marker.ExternalProjectPath()
+		if err != nil {
+			return "", fmt.Errorf("resolve project marker: %w", err)
+		}
+		if base, err = config.GetSharedDirsBasePath(ext); err != nil {
+			return "", err
+		}
+	} else {
+		var err error
+		if base, err = config.GetSharedDirsBasePath(scionPath); err != nil {
+			return "", err
+		}
+	}
+	if filepath.Clean(base) != want {
+		return "", fmt.Errorf("shared-dir storage location does not match the request")
+	}
+	// Classify layout errors before probing readability: a symlink or
+	// non-directory at the project's project-configs entry is left alone
+	// rather than reported as unreadable.
+	if info, err := os.Lstat(dir); os.IsNotExist(err) {
+		return "", nil
+	} else if err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
+		return "", fmt.Errorf("shared-dir storage is not a real directory inside project-configs")
+	}
+	if _, err := os.Lstat(want); os.IsNotExist(err) {
+		return "", nil
+	} else if err != nil && !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP) {
+		// ENOTDIR and ELOOP here only come from a broken project-configs
+		// root (or a component above it) that is not a directory or loops;
+		// the project's own entry was classified above. The containment
+		// check below rejects it.
+		return "", fmt.Errorf("%w: %v", errSharedDirStorageUnreadable, err)
+	}
+	if !projectConfigPathContained(globalDir, want) {
+		return "", fmt.Errorf("shared-dir storage is not a real directory inside project-configs")
+	}
+	return want, nil
+}
+
+// errSharedDirStorageUnreadable means a hub-managed project's shared-dir
+// storage location could not be read, so whether there is storage to remove
+// is not known.
+var errSharedDirStorageUnreadable = errors.New("shared-dir storage location could not be read")
+
+// removeProjectConfigsSubtree removes path, which must lie inside
+// <globalDir>/project-configs, through an os.Root opened at project-configs,
+// so no step of the removal (descending into or unlinking entries) can
+// leave that root even if an entry is replaced with a symlink after the
+// caller checked it. The remaining window is a swap of an entry for a
+// symlink to another location inside project-configs between the caller's
+// projectConfigPathContained check and this call.
+func removeProjectConfigsSubtree(globalDir, path string) error {
+	rootDir := filepath.Join(globalDir, config.ProjectConfigsDir)
+	rel, err := filepath.Rel(rootDir, path)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return fmt.Errorf("%s is not inside %s", path, rootDir)
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.RemoveAll(rel)
 }
 
 // errDeleteTargetNotFound means no agent with the requested slug exists in
@@ -6438,15 +6677,22 @@ func trustedEntryProjectPath(path, projectID string) bool {
 // findAgentInHubManagedProjects scans hub-managed project directories
 // (~/.scion/projects/<slug>/.scion/) for an agent directory matching the
 // given name and returns that project's .scion dir path, or "" if none. A
-// project moved from its pre-rename location by config.MigrateLegacyGlobalLayout
-// is found here directly, since the migration runs at broker boot, before this
-// function is ever reached.
+// project moved from its pre-rename location by
+// config.MigrateLegacyGlobalLayout is found here directly, since the
+// migration runs at broker boot, before this function is ever reached.
 //
-// When projectID is set, only a project directory whose recorded project ID
-// (the project-id file, or the .scion marker file of a project without git)
-// equals projectID is considered, so a same-named agent in another project
-// is never returned (ptone/scion#1819). When projectID is empty, the name
-// must be found in exactly one project; more than one is reported as an
+// When .scion is a marker file (a hub-managed project with no git remote),
+// the returned path is the project's external .scion dir under
+// project-configs, where its agent directories live. It is resolved only
+// through hubMarkerProjectScionDir, which accepts the dir named by the
+// directory's slug and project ID and nothing else; the project ID is the
+// requested one, or for an unscoped lookup the marker's own.
+//
+// When projectID is set, only a project directory whose recorded project
+// ID (the project-id file, or the marker file's project-id) equals
+// projectID is considered, so a same-named agent in another project is
+// never returned (ptone/scion#1819). When projectID is empty, the name must
+// be found in exactly one project; more than one is reported as an
 // ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
@@ -6470,17 +6716,27 @@ func findAgentInHubManagedProjects(agentName, projectID string) (string, error) 
 				continue
 			}
 			scionDir := filepath.Join(baseDir, entry.Name(), ".scion")
-			// A hub-native project without git records its identity in a
-			// .scion marker FILE rather than a project-id file, and its
-			// agents live in the external config dir the marker points at
-			// (ptone/scion#2839), so both the identity and the agents dir
-			// are resolved marker-aware.
 			if projectID != "" && projectIDAtPath(scionDir) != projectID {
 				continue
 			}
+			// A hub-managed project with no git remote has a .scion marker
+			// file rather than a directory; its agents live under its
+			// external project-configs dir (ptone/scion#2839). That dir is
+			// computed from the directory name and the project ID (the
+			// requested one, or the marker's own for an unscoped lookup)
+			// and used only if the marker agrees with it and it is a real
+			// directory inside project-configs.
 			if config.IsProjectMarkerFile(scionDir) {
-				resolved, err := config.GetResolvedProjectDir(scionDir)
-				if err != nil || resolved == "" || resolved == scionDir {
+				markerProjectID := projectID
+				if markerProjectID == "" {
+					markerProjectID = projectIDAtPath(scionDir)
+				}
+				resolved := hubMarkerProjectScionDir(globalDir, entry.Name(), markerProjectID, scionDir)
+				if resolved == "" {
+					continue
+				}
+				agentDir := filepath.Join(resolved, "agents", agentName)
+				if _, err := os.Lstat(agentDir); err == nil && !projectConfigPathContained(globalDir, agentDir) {
 					continue
 				}
 				scionDir = resolved
