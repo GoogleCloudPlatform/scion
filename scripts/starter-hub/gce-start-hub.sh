@@ -482,21 +482,30 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
         exit 1
     fi
 
-    # Local health check
+    # Local health check. Match the top-level status only (the body starts
+    # with it; nested hub/broker objects carry their own). Prefer healthy
+    # while waiting; a server still "degraded" at the end is up with a
+    # non-critical problem (e.g. colocated_broker), so warn and continue.
+    # "unhealthy" (a critical check such as the database failed) fails.
     echo ""
     echo "==> Local health check..."
     for i in {1..10}; do
         HEALTH_RESP=$(curl -s http://localhost:8080/healthz || true)
-        if echo "$HEALTH_RESP" | grep -q "\"status\":\"healthy\""; then
+        if echo "$HEALTH_RESP" | grep -q "^{\"status\":\"healthy\""; then
             echo "  -> Local health check passed: $HEALTH_RESP"
             break
         fi
+        if [ "$i" -eq 10 ]; then
+            if echo "$HEALTH_RESP" | grep -q "^{\"status\":\"degraded\""; then
+                echo "  -> WARNING: hub is up but DEGRADED; non-healthy checks are in the response below. See: sudo journalctl -u scion-hub"
+                echo "     $HEALTH_RESP"
+                break
+            fi
+            echo "Error: Local health check failed. Last response: ${HEALTH_RESP:-<none>}"
+            exit 1
+        fi
         echo "  -> Waiting for health check... (${i}/10)"
         sleep 2
-        if [ "$i" -eq 10 ]; then
-             echo "Error: Local health check failed."
-             exit 1
-        fi
     done
 
     echo ""
@@ -507,10 +516,15 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
 
 step "Remote health check..."
 echo "  -> Checking https://${DOMAIN}/healthz..."
+# Same severity rules as the local check: prefer healthy while waiting,
+# accept a still-degraded hub at the end with a visible warning, fail on
+# unhealthy or no answer. Match the top-level status only.
+REMOTE_HEALTH=""
 for i in {1..12}; do
-    if curl -s -k "https://${DOMAIN}/healthz" | grep -q '"status":"healthy"'; then
+    REMOTE_HEALTH=$(curl -s -k "https://${DOMAIN}/healthz" || true)
+    if echo "$REMOTE_HEALTH" | grep -q '^{"status":"healthy"'; then
         echo "  -> Hub is healthy!"
-        curl -s -k "https://${DOMAIN}/healthz"
+        echo "$REMOTE_HEALTH"
         echo ""
         print_summary
         exit 0
@@ -519,5 +533,15 @@ for i in {1..12}; do
     sleep 5
 done
 
-echo "Error: Remote health check failed after 60 seconds."
+if echo "$REMOTE_HEALTH" | grep -q '^{"status":"degraded"'; then
+    echo ""
+    echo "WARNING: Hub is up but DEGRADED after 60 seconds. Non-healthy checks:"
+    echo "$REMOTE_HEALTH"
+    echo "  -> Investigate with: gcloud compute ssh \"${INSTANCE_NAME}\" --zone=\"${ZONE}\" --command \"sudo journalctl -u scion-hub -n 50\""
+    echo ""
+    print_summary
+    exit 0
+fi
+
+echo "Error: Remote health check failed after 60 seconds. Last response: ${REMOTE_HEALTH:-<none>}"
 exit 1
