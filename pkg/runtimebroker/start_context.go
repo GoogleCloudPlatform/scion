@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -133,6 +134,11 @@ type startContextInputs struct {
 	// (ptone/scion#2550), passed to StartOptions.RunID. Empty from an older
 	// hub; pkg/agent then mints one itself.
 	RunID string
+	// TemplateName is the agent's template slug as sent on start and
+	// restart. It is used for naming only (StartOptions.TemplateName) and
+	// never to locate or load a template; a create's Config.Template slug
+	// takes precedence. A content hash is ignored.
+	TemplateName string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -831,6 +837,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	if templateSlug == "" && !transfer.IsContentHash(in.TemplateName) {
+		templateSlug = in.TemplateName
+	}
 	if templateSlug != "" {
 		opts.TemplateName = templateSlug
 	}

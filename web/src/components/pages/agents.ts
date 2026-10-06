@@ -36,15 +36,13 @@ import {
   canLifecycle,
   canMessageAgent,
   isTerminalAvailable,
-  getAgentDisplayStatus,
   isAgentRunning,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
-import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
@@ -71,7 +69,9 @@ import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
-import { readAcceptedDeletion } from '../../shared/agent-deletion.js';
+import '../shared/deletion-banner.js';
+import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
+import type { AgentDeleteRequest } from '../../client/agent-delete.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
@@ -84,7 +84,7 @@ import {
   MESSAGE_MODE_DISPLAY,
   getMessageModeDisplay,
 } from '../../shared/message-mode.js';
-import type { MessageMode } from '../../shared/types.js';
+import type { DeletionInfo, MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
@@ -394,6 +394,14 @@ export class ScionPageAgents extends LitElement {
         box-shadow: var(--scion-shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1));
       }
 
+      .agent-card scion-deletion-banner {
+        margin-top: 0.75rem;
+      }
+
+      td scion-deletion-banner {
+        margin-top: 0.25rem;
+      }
+
       /* Table-specific: inline action buttons */
       .table-actions {
         display: flex;
@@ -576,6 +584,7 @@ export class ScionPageAgents extends LitElement {
     const storedPhase = localStorage.getItem('scion-filter-agents-phase');
     if (
       storedPhase === 'running' ||
+      storedPhase === 'stopping' ||
       storedPhase === 'stopped' ||
       storedPhase === 'suspended' ||
       storedPhase === 'error'
@@ -1121,12 +1130,28 @@ export class ScionPageAgents extends LitElement {
   }
 
   /**
-   * DELETE returned 202: the hub is still deleting (ptone/scion#2483).
-   * Keep the row, show "Deleting…" from the response's `deletion` at once,
-   * and let the SSE `deleted` event remove it in place.
+   * Delete through the shared helper (ptone/scion#2483 phase 2): the row's
+   * Delete button (`event` for the Alt-key bypass), and the failure
+   * banner's Retry (no confirm) and Force. On 204 the row goes now; on 202
+   * the helper has applied "Deleting…" and the SSE `deleted` removes it.
    */
-  private async keepDeletingAgent(agentId: string, response: Response): Promise<void> {
-    stateManager.applyDeleteAccepted(agentId, await readAcceptedDeletion(response));
+  private async deleteAgent(agentId: string, opts: AgentDeleteRequest = {}): Promise<void> {
+    const outcome = await runAgentDelete({
+      agentId,
+      agentName: this.findShownAgent(agentId)?.name,
+      ...opts,
+      onBusy: (busy): void => {
+        this.actionLoading = { ...this.actionLoading, [agentId]: busy };
+      },
+    });
+    if (outcome.kind === 'deleted') {
+      // Drops the row from the held set now; on a paged page the background
+      // refresh drops it (GoogleCloudPlatform/scion#2451).
+      this.applyOptimisticAgents([], [agentId]);
+      this.backgroundRefresh();
+    } else if (outcome.kind === 'failed') {
+      showToast(outcome.message);
+    }
   }
 
   private async handleAgentAction(
@@ -1147,64 +1172,7 @@ export class ScionPageAgents extends LitElement {
     }
 
     if (action === 'delete') {
-      const agentName = this.findShownAgent(agentId)?.name ?? 'this agent';
-      if (
-        !event?.altKey &&
-        !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
-      ) {
-        return;
-      }
-      // Show per-button spinner for delete; don't optimistically remove
-      this.actionLoading = { ...this.actionLoading, [agentId]: true };
-      this.requestUpdate();
-
-      try {
-        const response = await apiFetch(`/api/v1/agents/${agentId}`, {
-          method: 'DELETE',
-        });
-
-        if (!response.ok) {
-          // If the broker is unreachable (502/503), offer a force-delete fallback.
-          if (response.status === 502 || response.status === 503) {
-            const forceConfirmed = await showConfirm(
-              'Delete failed — the broker may be unreachable. Force delete this agent? This will remove the hub record without notifying the broker.',
-              { title: 'Force Delete', confirmText: 'Force Delete', variant: 'danger' }
-            );
-            if (forceConfirmed) {
-              const forceResponse = await apiFetch(`/api/v1/agents/${agentId}?force=true`, {
-                method: 'DELETE',
-              });
-              if (!forceResponse.ok) {
-                throw new Error(
-                  await extractApiError(forceResponse, 'Failed to force delete agent')
-                );
-              }
-              if (forceResponse.status === 202) {
-                await this.keepDeletingAgent(agentId, forceResponse);
-                return;
-              }
-              this.applyOptimisticAgents([], [agentId]);
-              this.backgroundRefresh();
-              return;
-            }
-          }
-          throw new Error(await extractApiError(response, 'Failed to delete agent'));
-        }
-
-        if (response.status === 202) {
-          await this.keepDeletingAgent(agentId, response);
-          return;
-        }
-
-        // Server confirmed — remove from local list
-        this.applyOptimisticAgents([], [agentId]);
-        this.backgroundRefresh();
-      } catch (err) {
-        console.error('Failed to delete agent:', err);
-        showToast(err instanceof Error ? err.message : 'Failed to delete agent');
-      } finally {
-        this.actionLoading = { ...this.actionLoading, [agentId]: false };
-      }
+      await this.deleteAgent(agentId, { event });
       return;
     }
 
@@ -1233,7 +1201,7 @@ export class ScionPageAgents extends LitElement {
       const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `Failed to ${action} agent`));
+        throw new Error(await lifecycleActionErrorMessage(response, `Failed to ${action} agent`));
       }
 
       this.backgroundRefresh();
@@ -1500,6 +1468,12 @@ export class ScionPageAgents extends LitElement {
             @click=${() => this.setPhaseFilter('running')}
           >
             Running
+          </button>
+          <button
+            class=${this.phaseFilter === 'stopping' ? 'active' : ''}
+            @click=${(): void => this.setPhaseFilter('stopping')}
+          >
+            Stopping
           </button>
           <button
             class=${this.phaseFilter === 'stopped' ? 'active' : ''}
@@ -1977,6 +1951,34 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
+  /**
+   * The badge shows only a live delete; a failed one (abandoned included)
+   * shows the failure banner instead (ptone/scion#2483 phase 2).
+   */
+  private deletingView(agent: Agent): DeletionInfo | null {
+    const view = this.deletionLease.view(agent);
+    return view?.state === 'deleting' ? view : null;
+  }
+
+  /**
+   * Failure banner with Retry and Force. Cards get the full form; table
+   * rows the compact one, which fits the status cell.
+   */
+  private renderDeletionBanner(agent: Agent, compact: boolean): TemplateResult | typeof nothing {
+    const view = this.deletionLease.view(agent);
+    if (view?.state !== 'failed') return nothing;
+    return html`<scion-deletion-banner
+      class="deletion-banner"
+      .deletion=${view}
+      agent-name=${agent.name}
+      ?can-delete=${can(agent._capabilities, 'delete')}
+      ?busy=${this.actionLoading[agent.id] || false}
+      ?compact=${compact}
+      @deletion-retry=${(): void => void this.deleteAgent(agent.id, { confirm: false })}
+      @deletion-force=${(): void => void this.deleteAgent(agent.id, { force: true })}
+    ></scion-deletion-banner>`;
+  }
+
   private renderAgentCard(agent: Agent) {
     return html`
       <div class="agent-card">
@@ -2010,14 +2012,9 @@ export class ScionPageAgents extends LitElement {
                 : ''}
             </div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          >
-          </scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
-            .deletion=${this.deletionLease.view(agent)}
+            .deletion=${this.deletingView(agent)}
             size="small"
           ></scion-deletion-badge>
           <scion-message-mode-badge
@@ -2035,6 +2032,7 @@ export class ScionPageAgents extends LitElement {
             : nothing}
         </div>
 
+        ${this.renderDeletionBanner(agent, false)}
         ${agent.taskSummary ? html` <div class="agent-task">${agent.taskSummary}</div> ` : ''}
         ${agent.labels && Object.keys(agent.labels).length > 0
           ? html`<div class="agent-labels" style="margin-top: 0.5em;">
@@ -2107,15 +2105,12 @@ export class ScionPageAgents extends LitElement {
         </td>
         <td class="hide-mobile">${agent.template}</td>
         <td>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
-            .deletion=${this.deletionLease.view(agent)}
+            .deletion=${this.deletingView(agent)}
             size="small"
           ></scion-deletion-badge>
+          ${this.renderDeletionBanner(agent, true)}
         </td>
         <td class="hide-mobile">
           <scion-message-mode-badge
