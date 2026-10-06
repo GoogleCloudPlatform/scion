@@ -2006,20 +2006,27 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// waking it nor rejecting the sender with an ordinary 409 is correct.
 	// The message is still persisted below and the deferred short-circuit
 	// right before dispatch takes over.
-	reincarnating := reincarnationInFlight(agent)
+	// deferDelivery keeps the message without dispatching it: set for a
+	// migrating recipient, or when a wake finds another start in progress.
+	deferDelivery := reincarnationInFlight(agent)
 
-	if req.Wake && !senderIsAgent && !reincarnating {
+	if req.Wake && !senderIsAgent && !deferDelivery {
 		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
 			return
 		}
-		_ = wakeResult // Phase mutation applied in-place on the agent record.
+		// Phase mutation is applied in place on the agent record. When
+		// another start is already in progress, the message is kept,
+		// deferred, exactly as for a migrating recipient.
+		if wakeResult != nil && wakeResult.Outcome == WakeDeferred {
+			deferDelivery = true
+		}
 	}
 
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
-	if !req.Wake && !senderIsAgent && !reincarnating {
+	if !req.Wake && !senderIsAgent && !deferDelivery {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
@@ -2118,7 +2125,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// "deferred" and short-circuits before dispatch below, instead of
 		// the pre-existing optimistic "dispatched" value.
 		humanMsgDispatchState := store.MessageDispatchDispatched
-		if reincarnating {
+		if deferDelivery {
 			humanMsgDispatchState = store.MessageDispatchDeferred
 		}
 		storeMsg := &store.Message{
@@ -2509,7 +2516,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			case AgentDMDeferred:
 				deliveryStatus = "deferred"
 				httpStatus = http.StatusAccepted
-				deferredNote = "agent is reincarnating"
+				deferredNote = deferredReason(agent)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatus)
@@ -2597,7 +2604,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// persistence itself failed above — the message is neither saved nor
 	// dispatched, so the sender must NOT be told it is safe on catch-up.
 	// This must be checked before any dispatch attempt below.
-	if reincarnating && persistedMsgID == "" {
+	if deferDelivery && persistedMsgID == "" {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to persist message; agent is reincarnating, retry", nil)
 		return
@@ -2617,7 +2624,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// notify subscription is independent of whether this specific message
 	// reached the migrating primary. Gating them here silently dropped both
 	// with no way for the sender to tell.
-	if !reincarnating {
+	if !deferDelivery {
 		// Managed agent path: deliver message directly via backend, bypass broker.
 		if isManagedAgentRuntime(agent.Runtime) {
 			if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
@@ -2757,7 +2764,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// group. Skipped when deferred (R1, p2a-r1 review, accepted as-is):
 	// registerGroupPrimary's semantics are "participant = dispatched", and
 	// a deferred message was never dispatched to this primary.
-	if !reincarnating {
+	if !deferDelivery {
 		s.registerGroupPrimary(ctx, groupConversationID, agent)
 	}
 
@@ -2771,7 +2778,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
-	if reincarnating {
+	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
@@ -2780,7 +2787,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Agent:          agent.Slug,
 			AgentPhase:     agent.Phase,
 			MentionResults: mentionResults,
-			Deferred:       "agent is reincarnating",
+			Deferred:       deferredReason(agent),
 		})
 		return
 	}

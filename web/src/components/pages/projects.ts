@@ -30,6 +30,7 @@ import { stateManager } from '../../client/state.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
+import { navigateTo } from '../../client/navigation.js';
 import '../shared/view-toggle.js';
 
 @customElement('scion-page-projects')
@@ -515,8 +516,7 @@ export class ScionPageProjects extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/projects/${project.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/projects/${project.id}`);
         }}
       >
         <td>

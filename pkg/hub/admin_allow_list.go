@@ -151,6 +151,11 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, s.membershipNow()); err != nil {
 			return err
 		}
+		// Same group-membership cleanup as deleteUser (ptone/scion#2769),
+		// including the owned-group lock it takes first on PostgreSQL.
+		if _, err := tx.DeleteGroupMembershipsForUser(r.Context(), existingUser.ID); err != nil {
+			return fmt.Errorf("delete group memberships: %w", err)
+		}
 		if err := tx.DeleteUser(r.Context(), existingUser.ID); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				return errAllowListUserNotFound

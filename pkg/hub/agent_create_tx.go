@@ -139,12 +139,16 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 const (
 	createStageStorage           = "storage"
 	createStageUploadURL         = "upload_url"
+	createStageWorkspaceStorage  = "workspace_storage"
 	createStageManaged           = "managed"
 	createStageRunIntent         = "run_intent"
 	createStageDispatchEnvGather = "dispatch_env_gather"
 	createStageDispatch          = "dispatch"
 	createStageMissingEnv        = "missing_env"
 	createStageProvision         = "provision"
+	// createStageWorkspaceUpload: the hub-managed workspace upload ran past
+	// its own budget (hubWorkspaceUploadTimeout).
+	createStageWorkspaceUpload = "workspace_upload"
 )
 
 // createCompensation is the input of compensateAgentCreate.

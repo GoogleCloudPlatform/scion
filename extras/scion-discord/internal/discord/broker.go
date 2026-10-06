@@ -1389,9 +1389,12 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	// included as implicit primary when explicit agent mentions are present).
 	targets, isAll := resolveTargetAgents(m, botUserID, effectiveDefault, agents)
 
-	// Fallback: reply-to-bot message — extract agent from webhook username.
+	// Fallback: a reply to an agent message posted through the plugin's
+	// own webhook goes to that agent (the webhook username is its slug).
 	if len(targets) == 0 && m.ReferencedMessage != nil {
-		slug := agentFromReply(m.ReferencedMessage, botUserID)
+		slug := agentFromReply(m.ReferencedMessage, func(webhookID string) bool {
+			return b.ownsWebhook(m.ChannelID, webhookID)
+		})
 		if slug != "" {
 			targets = []string{slug}
 		}
@@ -2203,7 +2206,13 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 	if ref.Author != nil && botUserID != "" && ref.Author.ID == botUserID && ref.WebhookID == "" {
 		return true
 	}
-	if ref.WebhookID == "" {
+	return b.ownsWebhook(m.ChannelID, ref.WebhookID)
+}
+
+// ownsWebhook reports whether webhookID is the webhook this plugin uses
+// to post agent messages in channelID. It never creates a webhook.
+func (b *DiscordBroker) ownsWebhook(channelID, webhookID string) bool {
+	if webhookID == "" {
 		return false
 	}
 	b.mu.RLock()
@@ -2213,11 +2222,10 @@ func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID strin
 		return false
 	}
 	// Threads use their parent channel's webhook.
-	channelID := m.ChannelID
-	if parentID, isThread := b.resolveThreadParent(m.ChannelID); isThread {
+	if parentID, isThread := b.resolveThreadParent(channelID); isThread {
 		channelID = parentID
 	}
-	return webhooks.owns(channelID, ref.WebhookID)
+	return webhooks.owns(channelID, webhookID)
 }
 
 // defaultAgentApplies reports whether an unaddressed message would go to

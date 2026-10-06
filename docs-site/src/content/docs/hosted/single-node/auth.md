@@ -396,7 +396,7 @@ Communication between the Hub and a Runtime Broker (in both directions) is secur
 - **Payload Integrity**: The request body is included in the signature, preventing tampering.
 - **Replay Protection**: Every request includes a timestamp and a unique nonce.
 
-A shared secret is established during the `scion broker register` flow and is stored locally in `~/.scion/broker-credentials.json`.
+A shared secret is established during the `scion runtime-broker register` flow and is stored locally in `~/.scion/hub-credentials/<name>.json`, one file per Hub connection.
 
 ### Provider Authorization
 

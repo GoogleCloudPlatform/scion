@@ -143,6 +143,8 @@ func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
 // platform volume backends, "cloudrun-volume" and "gke-shared-volume". The
 // second return is false when wsCfg does not select one of them, or selects
 // one without a volume name; the caller then falls through to the local path.
+// A non-nil error (wrapping errWorkspaceContentTimeout) means the volume or
+// the legacy local path did not respond; see resolveDurableOrLegacyPath.
 //
 // Both backends share one guard. The mount root comes from workspaceMountRoot,
 // the same resolver checkWorkspaceStorageHealth probes for readiness, so the
@@ -154,9 +156,9 @@ func (s *Server) warnEphemeralProjectPath(slug, localPath, volumePath string) {
 //
 // Unlike nfs, the volume backends include subpath_root in the hub-managed
 // path: <mount root>/<subpath_root>/hub-projects/<slug>.
-func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig, slug string) (string, bool) {
+func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig, slug string) (string, bool, error) {
 	if wsCfg == nil {
-		return "", false
+		return "", false, nil
 	}
 
 	var subPathRoot string
@@ -166,28 +168,25 @@ func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig,
 	case wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil:
 		subPathRoot = wsCfg.GKESharedVolume.SubPathRoot
 	default:
-		return "", false
+		return "", false, nil
 	}
 
 	mountRoot := workspaceMountRoot(wsCfg)
 	if mountRoot == "" {
-		return "", false
+		return "", false, nil
 	}
 	// No validation here: ValidateWorkspaceStorage rejects a bad
 	// subpath_root at hub startup, before any path is built.
 	subPathRoot = config.SubPathRootOrDefault(subPathRoot)
 
 	volPath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
-	if hasWorkspaceContent(volPath) {
-		return volPath, true
+	// The legacy local fallback (with warnEphemeral) is worth saying out
+	// loud: on Cloud Run and GKE the local path is always container-ephemeral
+	// storage, so its content disappears on the next restart or reschedule
+	// and the project silently moves to the volume.
+	path, err := s.resolveDurableOrLegacyPath(slug, volPath, true)
+	if err != nil {
+		return "", false, err
 	}
-	// Fallback: check legacy local path. Worth saying out loud: on Cloud Run
-	// and GKE the local path is always container-ephemeral storage, so this
-	// content disappears on the next restart or reschedule and the project
-	// silently moves to the volume.
-	if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-		s.warnEphemeralProjectPath(slug, localPath, volPath)
-		return localPath, true
-	}
-	return volPath, true
+	return path, true, nil
 }
