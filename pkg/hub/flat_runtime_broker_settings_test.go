@@ -205,6 +205,43 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 	})
 }
 
+// TestServerConfigPut_FileModeInstancesAreKnownKeys: server.broker.instances
+// is decoded by the instances guard before the unknown-key rejection runs.
+// A valid entry using every instance field is applied (200, not 422), and
+// an unknown key outside instances in the same body is still rejected with
+// 422 before anything is written.
+func TestServerConfigPut_FileModeInstancesAreKnownKeys(t *testing.T) {
+	const fullInstances = `"instances":[{"key":"other","name":"other-docker","runtime_target":{"type":"docker","display_name":"Other Docker"}}]`
+	t.Run("full-field instances entry is applied", func(t *testing.T) {
+		flatSettingsHome(t, flatInstanceSettingsYAML)
+		rr := putFileModeServerConfig(t, `{"server":{"broker":{"enabled":true,`+fullInstances+`}}}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT: want 200, got %d %s", rr.Code, rr.Body.String())
+		}
+		got := storedInstances(t)
+		if len(got) != 1 || got[0].Key != "other" || got[0].RuntimeTarget == nil || got[0].RuntimeTarget.DisplayName != "Other Docker" {
+			t.Fatalf("full-field entry not applied: %+v", got)
+		}
+	})
+	t.Run("unknown non-instances key in the same body is still 422", func(t *testing.T) {
+		path := flatSettingsHome(t, flatInstanceSettingsYAML)
+		before, _ := os.ReadFile(path)
+		rr := putFileModeServerConfig(t, `{"not_a_setting":"x","server":{"broker":{"enabled":true,`+fullInstances+`}}}`)
+		if rr.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("PUT: want 422, got %d %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "not_a_setting") || strings.Contains(rr.Body.String(), "instances") {
+			t.Fatalf("422 must name only the unknown key: %s", rr.Body.String())
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Fatal("a rejected PUT must not touch settings.yaml")
+		}
+		if got := storedInstances(t); !reflect.DeepEqual(got, wantFlatInstance) {
+			t.Fatalf("instances changed by a rejected PUT: %+v", got)
+		}
+	})
+}
+
 func TestServerConfigPut_WorkstationDBExplicitInstancesValidatedAndApplied(t *testing.T) {
 	path := flatSettingsHome(t, flatInstanceSettingsYAML)
 	srv, _, _ := newSQLiteHubInMode(t, true, nil)
