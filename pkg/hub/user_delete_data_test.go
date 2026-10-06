@@ -489,7 +489,7 @@ func TestRestoreAgent_OwnerUserDeletedRefused(t *testing.T) {
 
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+daveAgent.ID+"/restore", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "the user it belongs to no longer exists")
+	assert.Contains(t, rec.Body.String(), "the user or agent it belongs to no longer exists")
 	got, err := s.GetAgent(ctx, daveAgent.ID)
 	require.NoError(t, err)
 	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
@@ -497,7 +497,7 @@ func TestRestoreAgent_OwnerUserDeletedRefused(t *testing.T) {
 	// The root user dave is gone: refused like dave's own agent.
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+child.ID+"/restore", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "the user it belongs to no longer exists")
+	assert.Contains(t, rec.Body.String(), "the user or agent it belongs to no longer exists")
 	got, err = s.GetAgent(ctx, child.ID)
 	require.NoError(t, err)
 	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
@@ -535,7 +535,7 @@ func TestRestoreAgent_ScheduledAgentOfDeletedUserRefused(t *testing.T) {
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
-	assert.Equal(t, "cannot restore the agent: the user it belongs to no longer exists", resp.Error.Message)
+	assert.Equal(t, "cannot restore the agent: the user or agent it belongs to no longer exists", resp.Error.Message)
 	got, err := s.GetAgent(ctx, daves.ID)
 	require.NoError(t, err)
 	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
@@ -927,7 +927,7 @@ func TestCreateAgent_DescendantRootUserMissingReturns409(t *testing.T) {
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
-	assert.Equal(t, "cannot create the agent: the user it belongs to no longer exists", resp.Error.Message)
+	assert.Equal(t, "cannot create the agent: the user or agent it belongs to no longer exists", resp.Error.Message)
 	require.GreaterOrEqual(t, r.index("lock:"+f.creator.ID+":false"), 0, "the create must lock the root user")
 
 	_, err := real.GetAgentBySlug(context.Background(), f.proj.ID, "root-gone-c")
@@ -973,7 +973,7 @@ func TestRestoreAgent_EmptyAncestryOwnerMissingRefused(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+gone.ID+"/restore", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "the user it belongs to no longer exists")
+	assert.Contains(t, rec.Body.String(), "the user or agent it belongs to no longer exists")
 	got, err := s.GetAgent(ctx, gone.ID)
 	require.NoError(t, err)
 	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
@@ -982,6 +982,39 @@ func TestRestoreAgent_EmptyAncestryOwnerMissingRefused(t *testing.T) {
 		rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restore", nil)
 		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", a.Slug, rec.Body.String())
 	}
+}
+
+// TestRestoreAgent_PurgedLegacyRootAgentRefused pins an accepted limit
+// (ptone/scion#2769). Legacy agent L has an empty ancestry. Its child B
+// records [L], and B's soft-deleted child C records [L, B]. Once L's row is
+// gone, C's guard candidate is L only, and a missing root cannot be told
+// apart from a deleted user, so the restore is refused with the neutral
+// text and C's row is left unchanged.
+func TestRestoreAgent_PurgedLegacyRootAgentRefused(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	legacy := &store.Agent{ID: tid("agent-legacy-root"), Slug: "legacy-root", Name: "legacy-root",
+		ProjectID: project.ID, Phase: "running"}
+	require.NoError(t, s.CreateAgent(ctx, legacy))
+	parent := &store.Agent{ID: tid("agent-legacy-mid"), Slug: "legacy-mid", Name: "legacy-mid",
+		ProjectID: project.ID, Phase: "running", OwnerID: legacy.ID, CreatedBy: legacy.ID,
+		Ancestry: []string{legacy.ID}}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+	grandchild := softDeletedAgent(t, s, "legacy-grandchild", project.ID, parent.ID,
+		[]string{legacy.ID, parent.ID})
+	require.NoError(t, s.DeleteAgent(ctx, legacy.ID))
+	before, err := s.GetAgent(ctx, grandchild.ID)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+grandchild.ID+"/restore", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
+	assert.Equal(t, "cannot restore the agent: the user or agent it belongs to no longer exists", resp.Error.Message)
+	after, err := s.GetAgent(ctx, grandchild.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a refused restore must not change the agent row")
 }
 
 // TestCreateAgent_OwnerUserMissingReturns409: when the owner user's row is
@@ -1000,7 +1033,7 @@ func TestCreateAgent_OwnerUserMissingReturns409(t *testing.T) {
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
-	assert.Equal(t, "cannot create the agent: the user it belongs to no longer exists", resp.Error.Message)
+	assert.Equal(t, "cannot create the agent: the user or agent it belongs to no longer exists", resp.Error.Message)
 	require.GreaterOrEqual(t, r.index("lock:"+f.creator.ID+":false"), 0, "the create must take the owner lock")
 
 	_, err := real.GetAgentBySlug(context.Background(), f.proj.ID, "owner-gone")

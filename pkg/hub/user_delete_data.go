@@ -145,7 +145,7 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 // (the user the delete guard counts it for: its owner, its ancestry root or
 // the creator of its schedule, see lockAgentGuardUserTx) no longer exists
 // (see lockUserPrincipalTx).
-var errAgentOwnerUserMissing = errors.New("the user this agent belongs to no longer exists")
+var errAgentOwnerUserMissing = errors.New("the user or agent this agent belongs to no longer exists")
 
 // lockUserPrincipalTx takes a shared lock on the row of principalID when it
 // names a user, and reports whether it did (ptone/scion#2769). It runs
@@ -206,6 +206,10 @@ func lockUserPrincipalTx(ctx context.Context, tx store.Store, principalID string
 // delete and then fails with errAgentOwnerUserMissing. A candidate that
 // names an existing agent is skipped; one that is neither a user nor an
 // agent fails closed with errAgentOwnerUserMissing (lockUserPrincipalTx).
+// So a descendant whose ancestry root was a legacy agent that has since been
+// purged is refused (create and restore), because a missing root cannot be
+// told apart from a deleted user; an owner-kind or root-kind column would
+// remove the inference.
 func lockAgentGuardUserTx(ctx context.Context, tx store.Store, a *store.Agent) error {
 	candidates := []string{a.OwnerID}
 	if len(a.Ancestry) > 0 && a.Ancestry[0] != a.OwnerID {

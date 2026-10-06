@@ -1601,7 +1601,7 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		}
 		if errors.Is(err, errAgentOwnerUserMissing) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
-				"cannot restore the agent: the user it belongs to no longer exists", nil)
+				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errRestoreEdgeConflict) {
