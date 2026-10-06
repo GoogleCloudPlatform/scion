@@ -67,6 +67,7 @@ async function deepBox(
   top: number;
   left: number;
   right: number;
+  width: number;
   height: number;
   paddingTop: number;
   paddingRight: number;
@@ -97,6 +98,7 @@ async function deepBox(
         top: rect.top,
         left: rect.left,
         right: rect.right,
+        width: rect.width,
         height: rect.height,
         paddingTop: parseFloat(cs.paddingTop),
         paddingRight: parseFloat(cs.paddingRight),
@@ -425,7 +427,17 @@ test.describe('side-by-side touch landscape (844x390)', () => {
     test.skip(testInfo.project.name !== 'chromium-390', 'the viewport is fixed by this test');
     await openChatRail(page);
     await openGeneralThread(page);
+    const before = await deepBoxRetrying(page, '.v2-panels .v2-content');
     await forceSafeAreaInsets(page, LANDSCAPE);
+
+    // The edge columns absorb the insets within their own width, so the
+    // conversation between them keeps its width.
+    await expect(async () => {
+      const rail = await deepBoxRetrying(page, '.v2-panels .v2-rail');
+      expect(rail.paddingLeft, 'rail carries the left inset').toBe(LANDSCAPE.left);
+      const content = await deepBoxRetrying(page, '.v2-panels .v2-content');
+      expect(content.width, 'conversation width with insets').toBeCloseTo(before.width, 0);
+    }).toPass({ timeout: 5_000 });
 
     await expect(async () => {
       const header = await deepBoxRetrying(page, 'scion-header');

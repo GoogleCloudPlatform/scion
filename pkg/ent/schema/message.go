@@ -64,7 +64,9 @@ func (Message) Fields() []ent.Field {
 			Optional(),
 		field.String("group_id").
 			Optional(),
-		// dispatch_state tracks cross-node delivery: pending|dispatched|failed.
+		// dispatch_state tracks cross-node delivery:
+		// pending|dispatched|failed|deferred|no_recipient (see the
+		// store.MessageDispatch* constants).
 		// After Phase 4 (no-queuing delivery), new rows are created as "dispatched";
 		// any pending rows indicate a bug — monitored by brokerMessageSweepHandler.
 		field.String("dispatch_state").
