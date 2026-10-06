@@ -150,6 +150,10 @@ func ceilingReadAllowance(resource Resource, action Action, permissionID string)
 // (see DenyCause) for the specific sub-cases callers need to distinguish.
 // It is left at its zero value ("") for every other outcome, including
 // allows and denials with no dedicated classification.
+//
+// note, when given and non-nil, is filled from an unrecorded-hop denial
+// (see unrecordedHopNote). Only the first value is used. The note is an
+// explicit out-parameter, so nothing is stored in the request context.
 func (a *AuthzService) checkDelegationCeiling(
 	ctx context.Context,
 	req AuthzRequest,
@@ -157,22 +161,7 @@ func (a *AuthzService) checkDelegationCeiling(
 	agentID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
-) (bool, string, error) {
-	return a.checkDelegationCeilingWithNote(ctx, req, permissionID, agentID, explain, cause, nil)
-}
-
-// checkDelegationCeilingWithNote is checkDelegationCeiling that also fills
-// note, when non-nil, from an unrecorded-hop denial (see
-// unrecordedHopNote). The note is an explicit out-parameter, so nothing is
-// stored in the request context.
-func (a *AuthzService) checkDelegationCeilingWithNote(
-	ctx context.Context,
-	req AuthzRequest,
-	permissionID string,
-	agentID string,
-	explain *[]DecisionStep,
-	cause *DenyCause,
-	note *unrecordedHopNote,
+	note ...*unrecordedHopNote,
 ) (bool, string, error) {
 	// A hubDeliveryIdentity principal (ptone/scion#2228 part 2) never takes
 	// the ordinary delegator-permission proof below: it is routed to its own
@@ -208,7 +197,7 @@ func (a *AuthzService) checkDelegationCeilingWithNote(
 	}
 
 	attested := req.Principal.Identity != nil && AncestryIsHubAttested(req.Principal.Identity)
-	return a.walkDelegationChainWithNote(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause, note)
+	return a.walkDelegationChainWithCause(ctx, req.Resource, req.Action, permissionID, agentID, attested, scopeType, scopeID, explain, cause, note...)
 }
 
 // maxDelegationDepth limits the delegation chain walk.
@@ -242,6 +231,9 @@ func (a *AuthzService) walkDelegationChain(
 // effect ceiling and records ceiling_source_not_allowed, ceiling_unrecorded
 // or ceiling_effect_exceeded. A lookup error is returned as an error and
 // classified by the caller. Every other deny leaves cause unchanged.
+//
+// note, when given and non-nil, is filled from a hop's ceiling_unrecorded
+// denial (see logUnrecordedHop). Only the first value is used.
 func (a *AuthzService) walkDelegationChainWithCause(
 	ctx context.Context,
 	resource Resource,
@@ -252,25 +244,13 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	scopeType, scopeID string,
 	explain *[]DecisionStep,
 	cause *DenyCause,
+	note ...*unrecordedHopNote,
 ) (bool, string, error) {
-	return a.walkDelegationChainWithNote(ctx, resource, action, permissionID, agentID, attested, scopeType, scopeID, explain, cause, nil)
-}
+	var hopNote *unrecordedHopNote
+	if len(note) > 0 {
+		hopNote = note[0]
+	}
 
-// walkDelegationChainWithNote is walkDelegationChainWithCause that also
-// fills note, when non-nil, from a hop's ceiling_unrecorded denial (see
-// logUnrecordedHop).
-func (a *AuthzService) walkDelegationChainWithNote(
-	ctx context.Context,
-	resource Resource,
-	action Action,
-	permissionID string,
-	agentID string,
-	attested bool,
-	scopeType, scopeID string,
-	explain *[]DecisionStep,
-	cause *DenyCause,
-	note *unrecordedHopNote,
-) (bool, string, error) {
 	// The delegator side is evaluated for principals other than the
 	// requester, so it must never read the requester's memoized principals
 	// or access constraints. Masking here covers every caller; only
@@ -403,7 +383,7 @@ func (a *AuthzService) walkDelegationChainWithNote(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
-				a.logUnrecordedHop(note, c, edge, permissionID)
+				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -431,7 +411,7 @@ func (a *AuthzService) walkDelegationChainWithNote(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
-				a.logUnrecordedHop(note, c, edge, permissionID)
+				a.logUnrecordedHop(hopNote, c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
