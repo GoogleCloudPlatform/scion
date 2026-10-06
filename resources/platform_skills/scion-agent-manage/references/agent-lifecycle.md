@@ -41,8 +41,8 @@ keeping its identity and its workspace (uncommitted work included). Check first 
 - **Failure:** the move runs in the background after the request is accepted, so a
   failure shows as the agent in the `error` phase with the reason in its status
   message. A failure after the agent is assigned to the target and before the new
-  generation runs rolls back: the agent is left stopped on the source, with its
-  workspace intact. Start it or retry. If the target's start may have left a container,
+  generation is running rolls the move back: the agent is left stopped on the source,
+  in the `error` phase, with its workspace intact. Start it or retry. If the target's start may have left a container,
   the agent stays on the target in the `error` phase instead.
 
 ## Default: delete when done
