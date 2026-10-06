@@ -372,10 +372,10 @@ func TestStartTracker_RunSelection(t *testing.T) {
 	}
 }
 
-// A stale start of run-a (its hub cancel lost)
-// and the current run-b start are both tracked. A stop for run-b with no
-// container yet cancels run-b's start and is accepted; run-a's start, of
-// another run, is left alone. Never a 404 that would lose the stop.
+// A stale start of run-a (its hub cancel lost) and the current run-b start
+// are both tracked. A stop for run-b with no container yet cancels run-b's
+// start and is accepted; run-a's start, of another run, is left alone. Never
+// a 404 that would lose the stop.
 func TestStopAgent_BothRunsTrackedStopCurrentRun(t *testing.T) {
 	srv, mgr, _, _ := newSyncStartTestServer(t)
 	relA, doneA := startInFlight(t, srv, mgr, "run-a", nil)
@@ -437,10 +437,10 @@ func TestStopAgent_OwnStartTrackedWhileOtherRunHoldsName(t *testing.T) {
 	}
 }
 
-// A stop for run-b whose only in-flight work is its
-// registered async launch, with run-a's container holding the name, wakes
-// that launch; waking it counts as cancelling its own run, so the stop is
-// accepted (202), and run-a's container is not stopped.
+// A stop for run-b whose only in-flight work is its registered async launch,
+// with run-a's container holding the name, wakes that launch; waking it
+// counts as cancelling its own run, so the stop is accepted (202), and
+// run-a's container is not stopped.
 func TestStopAgent_OwnLaunchWokenWhileOtherRunHoldsName(t *testing.T) {
 	srv, mgr, _, _ := newSyncStartTestServer(t)
 	setAgents(mgr, trackedRunEntry("c-a", "run-a"))

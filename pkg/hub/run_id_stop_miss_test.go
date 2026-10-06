@@ -31,8 +31,8 @@ import (
 
 // Every caller that records a stop leaves a row that moved to a newer run
 // untouched: no status write, the reservation held, nothing published
-// (ptone/scion#2550). The restart and suspend cases
-// assert final row and credential state.
+// (ptone/scion#2550). The restart and suspend cases assert final row and
+// credential state.
 
 // runSwapStopDispatcher answers a stop with success after moving the row to
 // run-new, running, as when a newer run is minted while the stop for the
