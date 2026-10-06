@@ -431,7 +431,7 @@ func TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack(t *testing.T) {
 
 	// A joiner of that delete answers the same 503 and Retry-After.
 	joined := httptest.NewRecorder()
-	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim))
+	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim, true))
 	require.Equal(t, http.StatusServiceUnavailable, joined.Code, joined.Body.String())
 	require.Equal(t, "7", joined.Header().Get("Retry-After"))
 	require.Contains(t, joined.Body.String(), brokerCodeRuntimeUnavailable)
@@ -444,7 +444,7 @@ func TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack(t *testing.T) {
 	// remembered value and sends the default.
 	deletionRetryAfter.Delete(agent.ID)
 	joined = httptest.NewRecorder()
-	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim))
+	require.True(t, srv.resolveJoinFromRow(joined, ctx, agent.ID, got.DeletionClaim, true))
 	require.Equal(t, http.StatusServiceUnavailable, joined.Code, joined.Body.String())
 	require.Equal(t, defaultBrokerRuntimeRetryAfter, joined.Header().Get("Retry-After"))
 

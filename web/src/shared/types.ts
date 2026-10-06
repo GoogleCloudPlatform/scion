@@ -674,13 +674,17 @@ export type DeletionCode =
  * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
  * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
  * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ *
+ * `code`, `error` and `claim` are sent to platform admins only
+ * (ptone/scion#3122). Every other caller, and every SSE delta, gets the
+ * generic view without them: same state, stage and timestamps.
  */
 export interface DeletionInfo {
   state: DeletionState;
   code?: DeletionCode;
   error?: string;
   soft: boolean;
-  claim: number;
+  claim?: number;
   startedAt: string;
   /** Set while `deleting`. */
   leaseExpiresAt?: string;

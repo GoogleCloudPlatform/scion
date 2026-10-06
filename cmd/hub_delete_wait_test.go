@@ -510,6 +510,25 @@ func TestDeleteAgentsViaHub_202AbandonedMayBlockStart(t *testing.T) {
 	assert.True(t, env.dirExists())
 }
 
+// A caller who is not a platform admin gets the generic failed view, with
+// no code, error or claim (ptone/scion#3122): the CLI still reports a
+// failure, keeps the worktree, and says start may be blocked, without a
+// made-up code.
+func TestDeleteAgentsViaHub_202GenericFailedView(t *testing.T) {
+	env := setupAsyncDelete(t, "bad-agent",
+		getReply{body: `{"id":"uuid-1","name":"%s","phase":"stopping","deletion":{"state":"deleting","soft":false,"startedAt":"2026-10-03T10:00:00Z"}}`},
+		getReply{body: `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","soft":false,"startedAt":"2026-10-03T10:00:00Z","expiresAt":"2026-10-03T10:15:00Z"}}`})
+	err := deleteAgentsViaHub(env.hubCtx, []string{"bad-agent"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "delete failed on the Hub; local worktree kept")
+	assert.Contains(t, err.Error(), "scion delete bad-agent")
+	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used.")
+	assert.NotContains(t, err.Error(), "unknown")
+	assert.NotContains(t, err.Error(), "()")
+	assert.True(t, env.dirExists())
+	assert.True(t, env.stillSynced(t))
+}
+
 // N2/nit 6: stop --rm prints "removal in progress" on 202 and, when the
 // outcome cannot be observed, its own pending notice (text and JSON).
 func TestStopAgentViaHub_RmPendingNotice(t *testing.T) {

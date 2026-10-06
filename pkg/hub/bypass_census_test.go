@@ -88,6 +88,9 @@ func TestBypassCensus(t *testing.T) {
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation helper"},
 		{file: "authz_candelegate.go", lineSubstr: "requireAdmin", description: "comment reference in CanDelegate"},
 
+		// ─── Deletion detail visibility (ptone/scion#3122) ───────────────
+		{file: "deletion_redact.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(user)", description: "callerSeesDeletionDetail: decides whether response bodies carry deletion code, error and claim (presentation only, grants no access)"},
+
 		// ─── Session revocation (admin-only endpoint) ────────────────────
 		{file: "handlers_users_core.go", lineSubstr: "requireAdmin(w, r)", description: "revokeUserSessions: admin-only endpoint for session invalidation"},
 	}
