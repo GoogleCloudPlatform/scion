@@ -57,3 +57,16 @@ func TestIsDirectChildOfAny(t *testing.T) {
 	assert.False(t, isDirectChildOfAny(filepath.Dir(root), roots))
 	assert.False(t, isDirectChildOfAny(filepath.Join(root, "p1"), nil), "no roots means nothing qualifies")
 }
+
+func TestIsDirectChildOfAny_RequiresAbsolutePaths(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "projects")
+
+	assert.False(t, isDirectChildOfAny("p1", []string{""}), "an empty root matches nothing")
+	assert.False(t, isDirectChildOfAny("projects/p1", []string{"projects"}), "a relative root matches nothing")
+	assert.False(t, isDirectChildOfAny(filepath.Join(abs, "p1"), []string{"", "projects"}), "empty and relative roots match nothing")
+	assert.False(t, isDirectChildOfAny("p1", []string{abs, "."}), "a relative target never matches")
+	assert.False(t, isDirectChildOfAny("", []string{abs, ""}), "an empty target never matches")
+
+	assert.True(t, isDirectChildOfAny(filepath.Join(abs, "p1"), []string{"", "projects", abs}),
+		"an absolute direct child of an absolute root still matches when other roots are skipped")
+}

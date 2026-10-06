@@ -3152,7 +3152,9 @@ func (s *Server) hubManagedProjectsRoots() []string {
 	}
 	switch {
 	case wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0:
-		roots = append(roots, filepath.Join(workspaceMountRoot(wsCfg), "hub-projects"))
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			roots = append(roots, filepath.Join(mountRoot, "hub-projects"))
+		}
 	case wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil:
 		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
 			subPathRoot := config.SubPathRootOrDefault(wsCfg.CloudRunVolume.SubPathRoot)
@@ -3169,10 +3171,17 @@ func (s *Server) hubManagedProjectsRoots() []string {
 
 // isDirectChildOfAny reports whether target, once cleaned, is a direct child
 // of one of roots: its parent is the cleaned root and it is not the root
-// itself.
+// itself. Only absolute paths qualify: a target that is not absolute never
+// matches, and a root that is empty or not absolute is never matched against.
 func isDirectChildOfAny(target string, roots []string) bool {
+	if !filepath.IsAbs(target) {
+		return false
+	}
 	cleaned := filepath.Clean(target)
 	for _, root := range roots {
+		if root == "" || !filepath.IsAbs(root) {
+			continue
+		}
 		cleanedRoot := filepath.Clean(root)
 		if cleaned != cleanedRoot && filepath.Dir(cleaned) == cleanedRoot {
 			return true

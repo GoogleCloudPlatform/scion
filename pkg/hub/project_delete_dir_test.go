@@ -289,3 +289,32 @@ func TestDeleteProject_BackendLocalFallback_RemovesExactlyOwnDirectory(t *testin
 		})
 	}
 }
+
+// TestRemoveProjectDirUnderProjectsRoot_EmptyNFSMountRootRemovesNothing checks
+// that an nfs configuration with an empty mount root contributes no projects
+// root, so a relative directory under the working directory is never removed.
+func TestRemoveProjectDirUnderProjectsRoot_EmptyNFSMountRootRemovesNothing(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	srv, _ := testServer(t)
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: "",
+			Shares:    []config.V1NFSShare{{ID: "", Server: "10.0.0.2", Export: "/scion"}},
+		},
+	}
+
+	for _, root := range srv.hubManagedProjectsRoots() {
+		assert.True(t, filepath.IsAbs(root), "every projects root is absolute")
+	}
+
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	kept := writeProjectDirFile(t, filepath.Join(workDir, "hub-projects", "own-project"))
+
+	srv.removeProjectDirUnderProjectsRoot("p", filepath.Join("hub-projects", "own-project"))
+
+	_, err := os.Stat(kept)
+	assert.NoError(t, err, "a relative directory is never removed")
+}
