@@ -25,14 +25,16 @@ package hub
 // relationship can only admit a permission that is listed here.
 //
 // The tests in this file evaluate every same-type registry permission through
-// Decide for a principal that has no role bindings, so the only possible grant
-// source is the relationship under test.
+// Decide for a principal whose only role binding, where a project-scoped
+// target needs one, grants no permissions (grantProjectAccessOnly), so the only
+// possible grant source is the relationship under test.
 
 import (
 	"context"
 	"sort"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -196,14 +198,41 @@ func createCharacterizationUser(t *testing.T, s store.Store, id string) UserIden
 	return NewAuthenticatedUser(id, id+"@relchar.test", id, "member", "api")
 }
 
+// grantProjectAccessOnly binds userID in projectID to a project-scoped role
+// with no permissions. The binding is project membership (active project
+// access, which owner and ancestor relationships on project targets
+// require; ptone/scion#2141) without granting any permission through the
+// role, so the relationship stays the only grant source under test.
+func grantProjectAccessOnly(t *testing.T, s store.Store, userID, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	name := "relchar-access-only"
+	rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+	if err != nil {
+		require.ErrorIs(t, err, store.ErrNotFound)
+		rd, err = s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			ID: api.NewUUID(), Name: name, Description: "project access, no permissions",
+			ScopeType: store.RoleScopeProject, Permissions: []string{},
+		})
+		require.NoError(t, err)
+	}
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+	})
+	require.NoError(t, err)
+}
+
 // TestRelationshipCharacterization_Owner pins the owner relationship for a
-// user with no role bindings across every resource type whose constructor
+// user whose only role binding is an access-only binding in the project of
+// the project-scoped targets, across every resource type whose constructor
 // sets OwnerID.
 func TestRelationshipCharacterization_Owner(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relchar-owner"))
 	other := createCharacterizationUser(t, s, tid("relchar-other"))
 	projectID := tid("relchar-project")
+	grantProjectAccessOnly(t, s, owner.ID(), projectID)
 
 	resources := []struct {
 		name     string
@@ -279,6 +308,7 @@ func TestRelationshipCharacterization_UserAncestor(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	root := createCharacterizationUser(t, s, tid("relchar-root"))
 	outsider := createCharacterizationUser(t, s, tid("relchar-outsider"))
+	grantProjectAccessOnly(t, s, root.ID(), tid("relchar-desc-project"))
 	descendant := agentResource(&store.Agent{
 		ID:        tid("relchar-desc"),
 		ProjectID: tid("relchar-desc-project"),
@@ -343,6 +373,8 @@ func TestRelationshipCharacterization_AgentFullHistory(t *testing.T) {
 	owner := createCharacterizationUser(t, s, tid("relchar-m-owner"))
 	root := createCharacterizationUser(t, s, tid("relchar-m-root"))
 	other := createCharacterizationUser(t, s, tid("relchar-m-other"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relchar-m-project"))
+	grantProjectAccessOnly(t, s, root.ID(), tid("relchar-m-project"))
 	ancestorID := tid("relchar-m-anc-agent")
 	ancestor := &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: ancestorID},
