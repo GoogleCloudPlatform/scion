@@ -441,9 +441,10 @@ export class ScionQuickPalette extends LitElement {
    * present, so a row arriving above it never takes its place. Otherwise
    * (a query edit, no pick, or a picked row that went away) the selection
    * follows the ranking: the best match for a typed query, and no row at
-   * all for an empty query. An empty query ranks by newest activity, which
-   * is not a choice the user made, so nothing is selected and Enter commits
-   * nothing until the user picks a row with the arrow keys or Tab.
+   * all for an empty query. An empty query ranks by the host's default
+   * order (newest activity in chat), which is not a choice the user made,
+   * so nothing is selected and Enter commits nothing until the user picks a
+   * row with the arrow keys or Tab.
    */
   private reconcileActiveId(
     ranked: Array<RankedCandidate<PaletteCandidate>>,

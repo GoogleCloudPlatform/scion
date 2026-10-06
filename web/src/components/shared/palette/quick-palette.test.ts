@@ -788,8 +788,8 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // exists. Sets `activeId` directly (bypassing the public API, since no
     // reachable sequence of public calls currently produces this state) to
     // exercise the guard in isolation.
-    // A typed query, so Enter reaches this guard rather than stopping at the
-    // empty-query one.
+    // A typed query selects a row, so the stale activeId set below is the
+    // only thing standing between Enter and a commit.
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
     await typeQuery(el, 'coder');
     (el as unknown as { activeId: string | null }).activeId = 'not-a-real-candidate-id';
@@ -832,7 +832,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // `repeat` is already true — the scenario where a user was already
     // holding Enter down when the palette opened via some other trigger.
     // Only `handlePaletteKeydown`'s own repeat check can reject this one; the
-    // typed query keeps the empty-query check from rejecting it first.
+    // typed query selects a row, so without that check Enter would commit it.
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
     await typeQuery(el, 'coder');
     let commits = 0;

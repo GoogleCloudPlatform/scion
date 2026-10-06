@@ -13,12 +13,12 @@
 // limitations under the License.
 
 /**
- * Real-Chromium coverage for the multi-group palette's keyboard model: one
- * global best is selected across Agents/Threads/People; Tab/Shift+Tab cycle
- * in reading order and skip empties without escaping the Shoelace modal;
- * Up/Down wrap within group, Left/Right edit the input; the active option is
- * visible after expanding past ten rows; asynchronous result refresh
- * preserves manual selection by ID.
+ * Real-Chromium coverage for the multi-group palette's keyboard model: no
+ * row is selected across Agents/Threads/People until the user picks one;
+ * Tab/Shift+Tab cycle in reading order and skip empties without escaping
+ * the Shoelace modal; Up/Down wrap within group, Left/Right edit the input;
+ * the active option is visible after expanding past ten rows; asynchronous
+ * result refresh preserves manual selection by ID.
  */
 
 import { test, expect, type Page } from '@playwright/test';
@@ -89,13 +89,12 @@ function groupOptions(page: Page, group: string) {
 
 /**
  * Open the palette and wait for *every* group's real async load to finish
- * (not just whichever one happens to produce the current global best) before
- * returning control to the test. Threads and People fetch independently of
- * Agents, so "Agents has an active row" (Agents is the fixture's only group
- * with a real DM activity timestamp, so it finishes first) says nothing
- * about whether Threads/People have rendered their rows yet — waiting for
- * each group's real row count is what actually makes Tab's destination
- * deterministic, rather than relying on incidental timing.
+ * before returning control to the test. Agents, Threads and People fetch
+ * independently, so one group's rows say nothing about whether the others
+ * have rendered theirs yet — and a key pressed before a group loads acts as
+ * if it had no rows. Waiting for each group's real row count is what
+ * actually makes Tab's destination deterministic, rather than relying on
+ * incidental timing.
  */
 async function openPaletteReady(
   page: Page,
