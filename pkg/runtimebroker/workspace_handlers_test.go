@@ -320,6 +320,8 @@ func TestWorkspaceUploadRejectsUnsafeWorkspacePath(t *testing.T) {
 		},
 	}
 	srv := New(cfg, mgr, rt)
+	logs := captureLifecycleJSONLog(srv)
+	installFailingWorkspaceTransfers(t, srv)
 
 	body := WorkspaceUploadRequest{
 		Slug:        "test-agent",
@@ -340,9 +342,12 @@ func TestWorkspaceUploadRejectsUnsafeWorkspacePath(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
 		t.Fatalf("failed to decode error response: %v", err)
 	}
-	if !strings.Contains(errResp.Error.Message, "is not an allowed workspace path") {
-		t.Errorf("expected the rejection to come from workspace source validation, got: %s", errResp.Error.Message)
+	// The client gets the fixed text only; the validation detail (which
+	// names the broker path) goes to the broker log (ptone/scion#3496).
+	if errResp.Error.Message != "Failed to resolve workspace path" {
+		t.Errorf("message = %q, want the fixed resolve failure text", errResp.Error.Message)
 	}
+	assertWorkspaceOpLogged(t, logs.String(), opResolveWorkspacePath, "agent_slug", "test-agent", "is not an allowed workspace path")
 }
 
 // TestGetAgentWorkspacePath_PrimaryBranchAcceptsLegitimateScionHomeWorkspace
@@ -403,6 +408,8 @@ func TestWorkspaceApplyRejectsUnsafeWorkspacePath(t *testing.T) {
 		},
 	}
 	srv := New(cfg, mgr, rt)
+	logs := captureLifecycleJSONLog(srv)
+	installFailingWorkspaceTransfers(t, srv)
 
 	body := WorkspaceApplyRequest{
 		Slug:        "test-agent",
@@ -423,9 +430,12 @@ func TestWorkspaceApplyRejectsUnsafeWorkspacePath(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
 		t.Fatalf("failed to decode error response: %v", err)
 	}
-	if !strings.Contains(errResp.Error.Message, "is not an allowed workspace path") {
-		t.Errorf("expected the rejection to come from workspace source validation, got: %s", errResp.Error.Message)
+	// The client gets the fixed text only; the validation detail (which
+	// names the broker path) goes to the broker log (ptone/scion#3496).
+	if errResp.Error.Message != "Failed to resolve workspace path" {
+		t.Errorf("message = %q, want the fixed resolve failure text", errResp.Error.Message)
 	}
+	assertWorkspaceOpLogged(t, logs.String(), opResolveWorkspacePath, "agent_slug", "test-agent", "is not an allowed workspace path")
 }
 
 // TestGetAgentWorkspacePath_WorktreeFallbackAcceptsInBoundsPath is the
