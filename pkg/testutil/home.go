@@ -13,7 +13,8 @@
 // limitations under the License.
 
 // Package testutil holds small helpers shared by test binaries across
-// packages. It must only be imported from _test.go files.
+// packages. It is intended to be imported only from _test.go files (its
+// helpers call os.Exit).
 package testutil
 
 import (
@@ -28,6 +29,11 @@ import (
 // directly); on Linux and macOS both read the same $HOME. os.UserHomeDir()
 // uses %USERPROFILE% on Windows instead, so this isolation is Linux/macOS
 // scoped.
+//
+// Only HOME is overridden. XDG_* variables and os.UserConfigDir /
+// os.UserCacheDir were considered, but no non-test code in pkg/ or cmd/
+// resolves scion state through them today, so isolating them would have
+// no effect.
 //
 // This does not reach package init code in dependencies that runs before
 // TestMain (e.g. rclone's fs/config creating its own config dir).
@@ -56,7 +62,10 @@ func IsolateHome(prefix string) (teardown func()) {
 	}
 
 	if got, err := os.UserHomeDir(); err != nil || got != tmpHome {
-		fmt.Fprintf(os.Stderr, "testutil.IsolateHome: os.UserHomeDir() = %q, err=%v; want %q — HOME override did not take effect in this process\n", got, err, tmpHome)
+		fmt.Fprintf(os.Stderr,
+			"testutil.IsolateHome: os.UserHomeDir() = %q, err=%v; want %q — "+
+				"HOME override did not take effect in this process\n",
+			got, err, tmpHome)
 		os.Exit(1)
 	}
 

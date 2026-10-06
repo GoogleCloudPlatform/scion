@@ -31,6 +31,10 @@ func TestIsolateHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.UserHomeDir: %v", err)
 	}
+	// Safety net: remove the scratch dir even if a t.Fatalf below fires
+	// before teardown(). RemoveAll on a missing path is a no-op, so the
+	// explicit teardown check still holds.
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	if home == orig {
 		t.Fatalf("HOME was not changed (still %q)", home)
 	}
