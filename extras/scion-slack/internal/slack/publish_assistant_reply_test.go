@@ -60,3 +60,16 @@ func TestPublish_DiscardsRetiredAssistantReply(t *testing.T) {
 	require.NoError(t, b.Publish(context.Background(), "scion.project.p1.agent.coder.messages", &ctrl))
 	assert.NotZero(t, posts.Load(), "control: an instruction is posted")
 }
+
+// A nil message is rejected by Publish's early nil check, before the
+// assistant-reply discard (or anything else) dereferences it.
+func TestPublish_NilMessageDoesNotPanic(t *testing.T) {
+	b := NewBroker(nil)
+	b.client = slackapi.New("xoxb-test", slackapi.OptionAPIURL("http://127.0.0.1:0/"))
+	var err error
+	require.NotPanics(t, func() {
+		err = b.Publish(context.Background(), "scion.project.p1.agent.coder.messages", nil)
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "message is nil")
+}
