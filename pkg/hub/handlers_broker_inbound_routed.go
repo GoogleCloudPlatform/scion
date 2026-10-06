@@ -578,12 +578,14 @@ func (s *Server) dispatchRoutedRecipient(
 	if effectiveConv != nil {
 		storeMsg.ConversationID = effectiveConv.ConversationID
 	}
+	persisted := false
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist routed inbound message",
 			"error", err, "message_id", msgID, "agent_slug", agent.Slug)
 		// Persistence failure after dispatch is nonfatal — dispatch succeeded.
 		result.PersistenceWarning = "message dispatched but persistence failed: " + err.Error()
 	} else {
+		persisted = true
 		s.events.PublishUserMessage(ctx, storeMsg, nil)
 	}
 
@@ -623,6 +625,12 @@ func (s *Server) dispatchRoutedRecipient(
 	// index only, best-effort, never fails this response — AC-12).
 	if effectiveConv != nil && effectiveConv.Kind == "group" {
 		s.ensureGroupParticipants(ctx, effectiveConv.ConversationID, []*store.Agent{agent})
+		// List the posting user as a participant too, mirroring the native
+		// group path, once their message is stored in the conversation.
+		// Idempotent across the recipients of one post.
+		if persisted {
+			s.ensureGroupUserParticipant(ctx, effectiveConv.ConversationID, senderUserID)
+		}
 	}
 
 	result.Status = "delivered"
