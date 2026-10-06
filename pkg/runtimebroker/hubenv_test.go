@@ -76,6 +76,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		resolved             map[string]string
 		projectPath          string
 		containerHubEndpoint string
+		colocatedPublic      string
 		runtimeName          string
 		want                 string
 		// wantTrusted is the trust bit resolveHubEndpointForCreate reports
@@ -164,6 +165,24 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			want:                 "https://hub1.example.com",
 			wantTrusted:          true,
 		},
+		{
+			name:                 "colocated IAP public endpoint from request is rewritten for docker",
+			req:                  "https://scion-hub-123.us-central1.run.app",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      "https://scion-hub-123.us-central1.run.app",
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+			wantTrusted:          true,
+		},
+		{
+			name:                 "colocated IAP public endpoint kept for kubernetes",
+			req:                  "https://scion-hub-123.us-central1.run.app",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      "https://scion-hub-123.us-central1.run.app",
+			runtimeName:          "kubernetes",
+			want:                 "https://scion-hub-123.us-central1.run.app",
+			wantTrusted:          true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -172,7 +191,7 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			if rn == "" {
 				rn = "docker"
 			}
-			got, gotTrusted := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, rn)
+			got, gotTrusted := resolveHubEndpointForCreate(tt.req, tt.connection, tt.broker, tt.resolved, tt.projectPath, tt.containerHubEndpoint, tt.colocatedPublic, rn)
 			if got != tt.want {
 				t.Fatalf("resolveHubEndpointForCreate() = %q, want %q", got, tt.want)
 			}
@@ -184,10 +203,12 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 }
 
 func TestApplyContainerBridgeOverride(t *testing.T) {
+	const iapURL = "https://scion-hub-123.us-central1.run.app"
 	tests := []struct {
 		name                 string
 		endpoint             string
 		containerHubEndpoint string
+		colocatedPublic      string
 		runtimeName          string
 		want                 string
 	}{
@@ -268,11 +289,59 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			runtimeName:          "docker",
 			want:                 "https://hub.example.com:8443",
 		},
+		{
+			name:                 "colocated public endpoint is rewritten for docker",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+		},
+		{
+			name:                 "colocated public endpoint match ignores trailing slash and case",
+			endpoint:             "https://SCION-HUB-123.us-central1.run.app/",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+		},
+		{
+			name:                 "colocated public endpoint kept for kubernetes",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "kubernetes",
+			want:                 iapURL,
+		},
+		{
+			name:                 "colocated public endpoint with host-network bridge falls back to pre-computed port",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://host.docker.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "docker",
+			want:                 "http://host.docker.internal:8080",
+		},
+		{
+			name:                 "other remote endpoint unchanged when colocated public is set",
+			endpoint:             "https://other.example.com",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "docker",
+			want:                 "https://other.example.com",
+		},
+		{
+			name:                 "localhost still rewritten when colocated public is set",
+			endpoint:             "http://localhost:8080",
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "docker",
+			want:                 "http://scion-hub.internal:8080",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := applyContainerBridgeOverride(tt.endpoint, tt.containerHubEndpoint, tt.runtimeName)
+			got := applyContainerBridgeOverride(tt.endpoint, tt.containerHubEndpoint, tt.colocatedPublic, tt.runtimeName)
 			if got != tt.want {
 				t.Fatalf("applyContainerBridgeOverride() = %q, want %q", got, tt.want)
 			}
@@ -296,6 +365,14 @@ func TestColocatedExtraHosts(t *testing.T) {
 			runtime:   "docker",
 			wantLen:   1,
 			wantFirst: "hub.example.com:host-gateway",
+		},
+		{
+			name:      "colocated docker with local hub alias",
+			endpoint:  "http://scion-hub.internal:8080",
+			colocated: true,
+			runtime:   "docker",
+			wantLen:   1,
+			wantFirst: "scion-hub.internal:host-gateway",
 		},
 		{
 			name:      "colocated docker with localhost",
@@ -534,6 +611,7 @@ func TestResolveEffectiveHubEndpoint_AnchorRows(t *testing.T) {
 		dispatchLocal   = "http://localhost:9090"
 		staleResolved   = "https://stale-in-resolved-env.example.com"
 		connPublic      = "https://hub.connection.example.com"
+		iapPublic       = "https://scion-hub-123.us-central1.run.app"
 	)
 
 	tests := []struct {
@@ -614,6 +692,22 @@ func TestResolveEffectiveHubEndpoint_AnchorRows(t *testing.T) {
 				ContainerHubEndpoint: "http://host.docker.internal:9090", RuntimeName: "kubernetes",
 			},
 			want: dispatchLocal,
+		},
+		{
+			name: "create on docker: a colocated IAP public endpoint gets the local hub alias",
+			in: hubEndpointInputs{
+				Op: opCreate, ReqHubEndpoint: iapPublic,
+				ContainerHubEndpoint: "http://scion-hub.internal:8080", ColocatedPublicHubEndpoint: iapPublic, RuntimeName: "docker",
+			},
+			want: "http://scion-hub.internal:8080",
+		},
+		{
+			name: "create on kubernetes: a colocated IAP public endpoint is kept",
+			in: hubEndpointInputs{
+				Op: opCreate, ReqHubEndpoint: iapPublic,
+				ContainerHubEndpoint: "http://scion-hub.internal:8080", ColocatedPublicHubEndpoint: iapPublic, RuntimeName: "kubernetes",
+			},
+			want: iapPublic,
 		},
 		{
 			name: "http-start on cloudrun-sandbox: the sandbox override replaces the resolved value",

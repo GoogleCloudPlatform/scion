@@ -321,7 +321,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 10. Resolve hub endpoint
-	hubEndpoint := resolveHubEndpoint(cfg, brokerSettings)
+	hubEndpoint, hubEndpointSrc := resolveHubEndpointWithSource(cfg, brokerSettings)
 
 	// Parse admin emails
 	adminEmailList := parseAdminEmails(cfg)
@@ -525,7 +525,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		if err := requireImageRegistryForBroker(); err != nil {
 			return err
 		}
-		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, devAuthToken, brokerSettings, brokerDefaultProfile, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
+		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, hubEndpointSrc, devAuthToken, brokerSettings, brokerDefaultProfile, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
 			return err
 		}
 	}
@@ -1561,10 +1561,37 @@ func loadServerSettings(path string) (*config.Settings, *string) {
 	return settings, brokerHeartbeatDefaultProfile(settings, loaded)
 }
 
+// hubEndpointSource identifies which input resolveHubEndpointWithSource
+// took the hub's public endpoint from. Callers that need to know whether
+// the URL is really served by this host (rather than derived from IAP
+// configuration) branch on it; the URL itself is the same either way.
+type hubEndpointSource string
+
+const (
+	hubEndpointSourceNone           hubEndpointSource = ""
+	hubEndpointSourceConfig         hubEndpointSource = "config"
+	hubEndpointSourceBrokerSettings hubEndpointSource = "broker-settings"
+	hubEndpointSourceBaseURLFlag    hubEndpointSource = "base-url-flag"
+	hubEndpointSourceBaseURLEnv     hubEndpointSource = "base-url-env"
+	hubEndpointSourceSettings       hubEndpointSource = "settings"
+	// hubEndpointSourceIAPAudience means the URL was derived from the IAP
+	// audience (a Cloud Run IAP front end). This host does not serve it,
+	// so colocated agents must not be routed to it.
+	hubEndpointSourceIAPAudience hubEndpointSource = "iap-audience"
+	hubEndpointSourceLocalhost   hubEndpointSource = "localhost"
+)
+
 // resolveHubEndpoint determines the Hub's public endpoint URL.
 func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Settings) string {
+	endpoint, _ := resolveHubEndpointWithSource(cfg, brokerSettings)
+	return endpoint
+}
+
+// resolveHubEndpointWithSource determines the Hub's public endpoint URL and
+// reports which input it came from.
+func resolveHubEndpointWithSource(cfg *config.GlobalConfig, brokerSettings *config.Settings) (string, hubEndpointSource) {
 	if cfg.Hub.Endpoint != "" {
-		return cfg.Hub.Endpoint
+		return cfg.Hub.Endpoint, hubEndpointSourceConfig
 	}
 
 	if !enableHub {
@@ -1572,7 +1599,10 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		if hubEndpoint != "" && enableDebug {
 			log.Printf("Hub endpoint resolved from project settings: %s", hubEndpoint)
 		}
-		return hubEndpoint
+		if hubEndpoint == "" {
+			return "", hubEndpointSourceNone
+		}
+		return hubEndpoint, hubEndpointSourceBrokerSettings
 	}
 
 	if webBaseURL != "" {
@@ -1580,7 +1610,7 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		if enableDebug {
 			log.Printf("Hub endpoint resolved from --base-url flag: %s", hubEndpoint)
 		}
-		return hubEndpoint
+		return hubEndpoint, hubEndpointSourceBaseURLFlag
 	}
 
 	if baseURL := os.Getenv("SCION_SERVER_BASE_URL"); baseURL != "" {
@@ -1588,7 +1618,7 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		if enableDebug {
 			log.Printf("Hub endpoint resolved from SCION_SERVER_BASE_URL: %s", hubEndpoint)
 		}
-		return hubEndpoint
+		return hubEndpoint, hubEndpointSourceBaseURLEnv
 	}
 
 	// Check settings (e.g. SCION_HUB_ENDPOINT env var) before falling back
@@ -1598,7 +1628,7 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 		if enableDebug {
 			log.Printf("Hub endpoint resolved from settings (SCION_HUB_ENDPOINT): %s", hubEndpoint)
 		}
-		return hubEndpoint
+		return hubEndpoint, hubEndpointSourceSettings
 	}
 
 	// In hosted mode with IAP authentication, derive the Cloud Run URL from
@@ -1609,7 +1639,7 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 	if hostedMode && cfg.Auth.Proxy != nil && cfg.Auth.Proxy.IAP != nil && cfg.Auth.Proxy.IAP.Audience != "" {
 		if cloudRunURL := iapAudienceToCloudRunURL(cfg.Auth.Proxy.IAP.Audience); cloudRunURL != "" {
 			log.Printf("Hub endpoint derived from IAP audience: %s", cloudRunURL)
-			return cloudRunURL
+			return cloudRunURL, hubEndpointSourceIAPAudience
 		}
 	}
 
@@ -1629,7 +1659,7 @@ func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Setting
 	if enableDebug {
 		log.Printf("Auto-computed hub endpoint for combo mode: %s", hubEndpoint)
 	}
-	return hubEndpoint
+	return hubEndpoint, hubEndpointSourceLocalhost
 }
 
 // iapAudienceToCloudRunURL converts a Cloud Run native IAP audience path
@@ -3010,7 +3040,7 @@ func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string
 	return rt, nil
 }
 
-func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
+func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint string, hubEndpointSrc hubEndpointSource, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
 	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
 	if err != nil {
 		return err
@@ -3130,49 +3160,30 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 	}
 
-	// Auto-compute ContainerHubEndpoint.
-	//
-	// For colocated Docker agents we prefer to route them at the public domain
-	// (served by Caddy) so each agent runs in its own network namespace under
-	// bridge networking. This avoids the host-global metadata-server (:18380)
-	// and telemetry (:4317) port collisions that --network=host causes for
-	// concurrent agents. We fall back to the legacy host.docker.internal (host
-	// networking) path when:
-	//   - the escape hatch SCION_FORCE_HOST_NETWORK is set,
-	//   - the Docker daemon lacks host-gateway support, or
-	//   - no public domain is configured (can't reach Caddy without one).
-	containerHubEndpoint := cfg.RuntimeBroker.ContainerHubEndpoint
-	if containerHubEndpoint == "" && enableHub && hubEndpointForRH != "" && rt != nil {
-		forceHost := os.Getenv(runtime.ForceHostNetworkEnvVar) != ""
-		isDocker := rt.Name() == "docker"
-		publicDomain := ""
-		if hubEndpoint != "" && !isLocalhostURL(hubEndpoint) {
-			publicDomain = strings.TrimRight(hubEndpoint, "/")
-		}
-
-		if isDocker && !forceHost && !runtime.DockerSupportsHostGateway(ctx, "") {
+	// Auto-compute ContainerHubEndpoint (see computeContainerHubEndpoint).
+	// We fall back to the legacy host.docker.internal (host networking) path
+	// when the escape hatch SCION_FORCE_HOST_NETWORK is set or the Docker
+	// daemon lacks host-gateway support.
+	chIn := containerHubEndpointInputs{
+		Configured:              cfg.RuntimeBroker.ContainerHubEndpoint,
+		HubEnabled:              enableHub,
+		BrokerHubEndpoint:       hubEndpointForRH,
+		PublicHubEndpoint:       hubEndpoint,
+		PublicHubEndpointSource: hubEndpointSrc,
+		HubListenPort:           resolveHubListenPort(cfg),
+	}
+	if rt != nil {
+		chIn.RuntimeName = rt.Name()
+	}
+	if chIn.Configured == "" && enableHub && hubEndpointForRH != "" && rt != nil {
+		chIn.ForceHostNetwork = os.Getenv(runtime.ForceHostNetworkEnvVar) != ""
+		if chIn.RuntimeName == "docker" && !chIn.ForceHostNetwork && !runtime.DockerSupportsHostGateway(ctx, "") {
 			log.Printf("WARNING: Docker daemon lacks host-gateway support; colocated agents will use host networking (re-introduces metadata-server port contention for concurrent agents). Upgrade Docker Engine to >= 20.10 to enable per-agent bridge networking.")
-			forceHost = true
-		}
-
-		switch {
-		case isDocker && !forceHost && publicDomain != "":
-			// Route agents to the public domain so they reach the hub via Caddy
-			// under bridge networking (colocatedExtraHosts maps the domain to
-			// host-gateway). applyContainerBridgeOverride returns it wholesale.
-			containerHubEndpoint = publicDomain
-			log.Printf("Colocated %s agents routed via public domain %s (bridge networking)", rt.Name(), containerHubEndpoint)
-		default:
-			if computed := containerBridgeEndpoint(hubEndpointForRH, rt.Name()); computed != "" {
-				containerHubEndpoint = computed
-				if isDocker && !forceHost {
-					// publicDomain == "" here: no domain configured to reach Caddy.
-					log.Printf("WARNING: no public domain configured for colocated Docker agents; falling back to host networking. Set SCION_SERVER_BASE_URL=https://<domain> to enable per-agent bridge networking.")
-				}
-				log.Printf("Auto-computed ContainerHubEndpoint for %s runtime: %s", rt.Name(), containerHubEndpoint)
-			}
+			chIn.ForceHostNetwork = true
 		}
 	}
+	chRes := computeContainerHubEndpoint(chIn, log.Printf)
+	containerHubEndpoint := chRes.Endpoint
 
 	if rt != nil && rt.Name() == "container" && containerHubEndpoint != "" {
 		exists, checkErr := runtime.AppleDNSRuleExists(ctx, runtime.AppleDNSHostname)
@@ -3217,6 +3228,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
 		HubEndpoint:                   hubEndpointForRH,
 		ContainerHubEndpoint:          containerHubEndpoint,
+		ColocatedPublicHubEndpoint:    chRes.ColocatedPublicHubEndpoint,
 		HubListenPort:                 resolveHubListenPort(cfg),
 		BrokerID:                      brokerID,
 		BrokerName:                    brokerName,

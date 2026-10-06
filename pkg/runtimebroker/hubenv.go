@@ -92,8 +92,12 @@ type hubEndpointInputs struct {
 	ResolvedEnv          map[string]string
 	ProjectPath          string
 	ContainerHubEndpoint string
-	RuntimeName          string
-	HubListenPort        int
+	// ColocatedPublicHubEndpoint is the hub's public URL when colocated
+	// containers cannot reach it (see ServerConfig.ColocatedPublicHubEndpoint).
+	// A resolved endpoint equal to it is replaced by ContainerHubEndpoint.
+	ColocatedPublicHubEndpoint string
+	RuntimeName                string
+	HubListenPort              int
 }
 
 // resolveEffectiveHubEndpoint resolves the hub endpoint to stamp into a
@@ -118,6 +122,7 @@ func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (end
 			in.ResolvedEnv,
 			in.ProjectPath,
 			in.ContainerHubEndpoint,
+			in.ColocatedPublicHubEndpoint,
 			in.RuntimeName,
 		)
 	default:
@@ -176,7 +181,7 @@ func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (end
 // another operator-derived value (the connection endpoint or a rewrite of
 // the broker's own bridge address), so neither one can turn a trusted
 // result into an untrusted one or vice versa.
-func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) (endpoint string, trusted bool) {
+func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, colocatedPublicHubEndpoint, runtimeName string) (endpoint string, trusted bool) {
 	hubEndpoint := reqHubEndpoint
 	trusted = hubEndpoint != ""
 	if hubEndpoint == "" {
@@ -213,7 +218,7 @@ func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHu
 		hubEndpoint = connectionHubEndpoint
 		trusted = true
 	}
-	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName), trusted
+	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, colocatedPublicHubEndpoint, runtimeName), trusted
 }
 
 func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
@@ -246,8 +251,16 @@ var bridgeHostnames = map[string]struct{}{
 	"host.containers.internal": {},
 }
 
-func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName string) string {
-	if containerHubEndpoint == "" || isKubernetesRuntimeName(runtimeName) || !isLocalhostEndpoint(endpoint) {
+// applyContainerBridgeOverride replaces endpoint with the container-reachable
+// containerHubEndpoint when a non-Kubernetes container cannot reach endpoint
+// itself: when endpoint is a loopback URL, or when it equals
+// colocatedPublicHubEndpoint, the colocated hub's public URL that this host
+// does not serve (e.g. an IAP-fronted Cloud Run URL).
+func applyContainerBridgeOverride(endpoint, containerHubEndpoint, colocatedPublicHubEndpoint, runtimeName string) string {
+	if containerHubEndpoint == "" || isKubernetesRuntimeName(runtimeName) {
+		return endpoint
+	}
+	if !isLocalhostEndpoint(endpoint) && !sameEndpoint(endpoint, colocatedPublicHubEndpoint) {
 		return endpoint
 	}
 	bridgeURL, err := url.Parse(containerHubEndpoint)
@@ -279,6 +292,15 @@ func applyContainerBridgeOverride(endpoint, containerHubEndpoint, runtimeName st
 	}
 	bridgeURL.Host = net.JoinHostPort(bridgeURL.Hostname(), port)
 	return bridgeURL.String()
+}
+
+// sameEndpoint reports whether a and b name the same URL, ignoring a
+// trailing slash and letter case. An empty b never matches.
+func sameEndpoint(a, b string) bool {
+	if b == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
 }
 
 // colocatedExtraHosts returns --add-host entries needed when the hub and
