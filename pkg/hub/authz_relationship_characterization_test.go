@@ -120,6 +120,11 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.notify", "agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 
+	// An agent reads the status of an agent it directly launched, in the
+	// same project, on the single-agent GET routes only
+	// (TestLauncherRead_OnlySingleAgentReadWidened).
+	{"launcher", "agent", "agent"}: {"agent.read"},
+
 	// Progeny read of an ancestor's opted-in user-scoped secret, plus the
 	// reviewed exact pairs (reviewedProgenyExactPairs): runtime use and launch
 	// delivery of opted-in user-scope secrets and env vars.

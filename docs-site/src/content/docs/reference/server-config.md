@@ -235,7 +235,7 @@ Brokers are long-lived originators that mint their own OIDC tokens (via GKE Work
 | `SCION_TRANSPORT_MODE` | Transport mode: `iap` or `cloudrun_invoker`. |
 | `SCION_TRANSPORT_AUDIENCE` | OIDC audience — the custom OAuth 2.0 Client ID (for `iap`) or Hub URL (for `cloudrun_invoker`). |
 
-**Credentials-file fields** (per hub connection, persisted by `scion hub brokers register`):
+**Credentials-file fields** (per hub connection, in `~/.scion/hub-credentials/<name>.json`, persisted by `scion runtime-broker register`):
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
