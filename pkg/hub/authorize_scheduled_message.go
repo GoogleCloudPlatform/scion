@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
@@ -151,8 +152,10 @@ func (s *Server) authorizeScheduledMessageAuthoring(
 	// admitting a scoped UAT here would silently discard its caveats.
 	// Credential provenance that cannot be reconstructed fails closed.
 	if scopedUATDeniedForFutureDispatchAuthoring(identity) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"scoped access tokens cannot author scheduled messages: credential caveats cannot be preserved at fire time", nil)
+		// Session-only with the GOV_PENDING reason (session_only_gate.go).
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			"scoped access tokens cannot author scheduled messages: credential caveats cannot be preserved at fire time",
+			authzop.ReasonGovernancePending)
 		return false
 	}
 

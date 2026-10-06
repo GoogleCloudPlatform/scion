@@ -125,8 +125,11 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	return id, nil
 }
 
-func (r *DockerRuntime) Stop(ctx context.Context, id string) error {
-	out, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// Stop stops the container ref.ID. As with Delete, the engine container ID
+// is already unique per run, so ref.RunID needs no further check here; run
+// targeting is enforced by the caller resolving the ID from List.
+func (r *DockerRuntime) Stop(ctx context.Context, ref RunRef) error {
+	out, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	if err != nil && out != "" {
 		// Include runtime's stderr output in the error so callers can match
 		// on messages like "not running" or "No such container".
@@ -227,26 +230,7 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 		}
 
 		// Filter by labels if requested
-		match := true
-		for k, v := range labelFilter {
-			actual := labels[k]
-			// Fallback for project labels
-			if actual == "" {
-				switch k {
-				case projectkeys.LabelProject:
-					actual = projectkeys.ProjectNameFromLabels(labels)
-				case projectkeys.LabelProjectID:
-					actual = projectkeys.ProjectIDFromLabels(labels)
-				case projectkeys.LabelProjectPath:
-					actual = projectkeys.ProjectPathFromLabels(labels)
-				}
-			}
-
-			if !projectkeys.LabelValuesMatch(k, actual, v) {
-				match = false
-				break
-			}
-		}
+		match := LabelsMatchFilter(labels, labelFilter)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Docker container name

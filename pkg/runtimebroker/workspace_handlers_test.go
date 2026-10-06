@@ -56,7 +56,11 @@ func (m *mockAgentManager) Start(ctx context.Context, opts api.StartOptions) (*a
 	return nil, nil
 }
 
-func (m *mockAgentManager) Stop(ctx context.Context, name string, projectPath string) error {
+func (m *mockAgentManager) Stop(ctx context.Context, name, projectPath, runID string) error {
+	return nil
+}
+
+func (m *mockAgentManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
 	return nil
 }
 

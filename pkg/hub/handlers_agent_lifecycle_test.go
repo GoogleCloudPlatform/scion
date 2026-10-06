@@ -300,10 +300,23 @@ func TestUpdateAgentStatus_DispatchReadyAndHarnessReadyTiming(t *testing.T) {
 // or reincarnation. Each field is set to a non-zero value in turn.
 func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{}), "the zero value is empty")
+	// IfRunID is a precondition on the write, not a field being written
+	// (ptone/scion#2550): an update carrying only IfRunID writes nothing.
+	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{IfRunID: "x"}), "an update with only IfRunID is empty")
+	// StartWrite only selects which delete guard applies to the write
+	// (GoogleCloudPlatform/scion#2679); on its own it writes nothing.
+	require.True(t, statusUpdateIsEmpty(store.AgentStatusUpdate{StartWrite: true}), "an update with only StartWrite is empty")
+
+	// statusUpdatePreconditionFields are AgentStatusUpdate fields that only
+	// condition the write and so do not make an update non-empty.
+	statusUpdatePreconditionFields := map[string]bool{"IfRunID": true, "StartWrite": true}
 
 	typ := reflect.TypeOf(store.AgentStatusUpdate{})
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
+		if statusUpdatePreconditionFields[field.Name] {
+			continue
+		}
 		t.Run(field.Name, func(t *testing.T) {
 			var su store.AgentStatusUpdate
 			v := reflect.ValueOf(&su).Elem().Field(i)

@@ -27,6 +27,12 @@ import (
 // ErrNoCommand is returned when no command is specified for the supervisor to run.
 var ErrNoCommand = errors.New("no command specified")
 
+// ErrAlreadyStarted is returned by Run when the Supervisor has already
+// started a child process, or another Run call on it is in progress. A
+// Supervisor runs at most one child; a Run that failed before starting the
+// child may be retried.
+var ErrAlreadyStarted = errors.New("supervisor already started")
+
 // ErrPrivilegeDropRequired is returned by Run when Config.RequirePrivilegeDrop
 // is set but Config.UID/GID do not both pass the same UID>0 && GID>0
 // predicate the credential drop itself uses (see Run's Credential-setting
@@ -117,11 +123,19 @@ type Supervisor struct {
 	execToken *procreap.Token
 
 	// mu protects the process state
-	mu        sync.Mutex
+	mu sync.Mutex
+	// running is set, under mu, by the Run call that owns this Supervisor,
+	// and cleared again if that Run fails before starting the child, so
+	// concurrent or repeated Run calls cannot both start a child.
+	running   bool
 	started   bool
 	exited    bool
 	exitCode  int
 	exitError error
+
+	// startedCh is closed once the child process has been started (and
+	// Signal can reach it). It is never closed if Run fails before Start.
+	startedCh chan struct{}
 
 	// done is closed when the child process exits
 	done chan struct{}
@@ -130,14 +144,36 @@ type Supervisor struct {
 // New creates a new Supervisor with the given configuration.
 func New(config Config) *Supervisor {
 	return &Supervisor{
-		config: config,
-		done:   make(chan struct{}),
+		config:    config,
+		startedCh: make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
 // Run starts and supervises the given command until it exits or the context
-// is cancelled. It returns the exit code of the child process.
+// is cancelled. It returns the exit code of the child process. A Supervisor
+// runs at most one child: once a Run has started its child, or while another
+// Run is in progress, Run returns ErrAlreadyStarted. A Run that fails before
+// starting the child may be retried.
 func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
+	s.mu.Lock()
+	// running stays set after a successful start, so it alone covers both cases.
+	if s.running {
+		s.mu.Unlock()
+		return 1, ErrAlreadyStarted
+	}
+	s.running = true
+	s.mu.Unlock()
+	// Release the claim if this Run returns before the child started, so a
+	// failed start can be retried. Once started is set it stays claimed.
+	defer func() {
+		s.mu.Lock()
+		if !s.started {
+			s.running = false
+		}
+		s.mu.Unlock()
+	}()
+
 	if len(args) == 0 {
 		return 1, ErrNoCommand
 	}
@@ -241,7 +277,9 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// the runtime-provided value is a placeholder (P3 writes empty values
 	// in SCION_SECRET_KEYS), so the fetched value must win. This is
 	// deliberately separate from mergeEnvOverlay, which is additive-only.
-	// (#127, P2d)
+	// (#127, P2d) The telemetry receiver never sees these values, so a
+	// secret named SCION_USAGE_SOURCE is unsupported: the child would get
+	// it while the receiver's usage gating would not.
 	if len(s.config.SecretOverrides) > 0 {
 		for k, v := range s.config.SecretOverrides {
 			s.cmd.Env = setEnvVar(s.cmd.Env, k, v)
@@ -283,6 +321,7 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
+	close(s.startedCh)
 
 	// Wait for the child in a goroutine
 	go s.waitForChild()
@@ -390,6 +429,16 @@ func (s *Supervisor) shutdown() (int, error) {
 		defer s.mu.Unlock()
 		return s.exitCode, s.exitError
 	}
+}
+
+// Started returns a channel that is closed once the child process has been
+// started, i.e. from the point at which Signal reaches it rather than being
+// a no-op. It is never closed if Run fails before starting the child, so
+// callers waiting on it should also select on Done or a deadline. It is
+// closed at most once: only the Run that starts the child closes it, and any
+// later Run returns ErrAlreadyStarted.
+func (s *Supervisor) Started() <-chan struct{} {
+	return s.startedCh
 }
 
 // Done returns a channel that is closed when the child process exits.

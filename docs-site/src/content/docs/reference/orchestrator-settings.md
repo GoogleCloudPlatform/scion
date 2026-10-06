@@ -40,7 +40,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | `default_max_turns` | int | Default maximum number of turns an agent can take before termination. |
 | `default_max_model_calls` | int | Default maximum number of LLM model calls an agent can make. |
 | `default_max_duration` | string | Default maximum execution time (e.g., `"2h"`, `"45m"`) for an agent. |
-| `default_resources` | object | Default resource constraints (CPU, memory, disk). See [Resource Specification](#resource-specification-resources) below. |
+| `default_resources` | object | Default resource requests and limits (`requests`, `limits`, `disk`). See [Resource Specification](#resource-specification-resources) below. |
 | `default_gcp_identity_mode` | string | Hub server only. Hub-wide fallback GCP metadata mode for new agents: `block`, `passthrough`, or `assign`. Applied when neither the create request nor the project's default GCP identity names one. See [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity). |
 | `default_gcp_identity_service_account_id` | string | Hub server only. ID of the verified, hub-scoped service account assigned when `default_gcp_identity_mode` is `assign`. |
 
@@ -159,26 +159,38 @@ harness_configs:
 | `volumes` | list | Volume mounts. |
 | `auth_selected_type` | string | Authentication method selection (harness-specific). |
 | `secrets` | list | Required secrets for this harness configuration (see below). |
-| `resources` | object | Resource limits (CPU, memory, disk) for this harness. |
 
 ### Resource Specification (`resources`)
 
-Defines the hardware constraints for an agent's execution environment.
+Defines the compute and disk constraints for an agent's container. The same shape is used by `default_resources`, `profiles.<name>.resources`, `profiles.<name>.harness_overrides.<harness-config>.resources`, and the template or agent `resources` field. Harness configs themselves (`harness_configs.<name>`) have no `resources` field.
 
 ```yaml
 resources:
-  cpu: "2"
-  memory: "4Gi"
-  disk: "20Gi"
-  gpu: 0
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "8Gi"
+  disk: "40Gi"
 ```
 
-| Field | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `cpu` | string | `"1"` | CPU cores (can be fractional, e.g., `"0.5"`). |
-| `memory` | string | `"2Gi"` | Memory limit (e.g., `"1Gi"`, `"512Mi"`). |
-| `disk` | string | `"10Gi"` | Ephemeral disk space request. |
-| `gpu` | int | `0` | Number of GPUs to request (requires compatible runtime). |
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `requests.cpu` | string | CPU request (for example `"500m"` or `"1"`). Kubernetes only. |
+| `requests.memory` | string | Memory request (for example `"1Gi"`). Docker/Podman: `--memory-reservation`. Kubernetes: memory request. |
+| `limits.cpu` | string | CPU limit. Docker/Podman: `--cpus`. Kubernetes: CPU limit. |
+| `limits.memory` | string | Memory limit. Docker/Podman: `--memory`. Kubernetes: memory limit. Exceeding it OOM-kills a process in the container. |
+| `disk` | string | Kubernetes only. Sets the pod's `ephemeral-storage` request **and** limit to this value. Ignored by Docker/Podman. |
+
+Tiers merge field by field: a field set at a higher tier wins, and fields it leaves empty come from lower tiers. See [Settings Precedence](/scion/reference/settings-precedence/).
+
+**Defaults.**
+
+- All runtimes: `limits.cpu: "2"` is applied when no tier sets a CPU limit, unless `runtime.enforce_resource_defaults` is `false` (default `true`). There is no default memory limit.
+- Kubernetes only: `cpu`, `memory` and `ephemeral-storage` each get a default **request** (`250m`, `512Mi` and `10Gi`) only when neither a request nor a limit is set for that resource, in `resources` or in `kubernetes.resources`. When a limit is set without a request, the request is left unset and Kubernetes sets it equal to the limit. So with the built-in CPU limit a pod requests and is limited to 2 CPU, and a profile that sets only `limits.memory` is scheduled at that limit.
+- Kubernetes never adds a default memory or ephemeral-storage limit. Those limits apply only when you set `limits.memory` or `disk` (or the same key in `kubernetes.resources.limits`). With `runtime.enforce_resource_defaults: false` and no resources set, a Kubernetes pod gets the three default requests and no limits.
+- The built-in CPU limit never ends up below a larger CPU request. If `requests.cpu` is above `2` and no tier sets `limits.cpu`, the built-in limit is raised to the request, on every runtime. If `kubernetes.resources.requests.cpu` is above the resulting limit and `kubernetes.resources.limits.cpu` is unset, `kubernetes.resources.limits.cpu` is set to that request; Docker and Podman keep `--cpus 2`. A CPU limit you set yourself is never changed, so keep it at or above your CPU request.
 
 ### Required Secrets
 
@@ -226,6 +238,7 @@ profiles:
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
+| `resources` | object | Resource requests and limits for agents created under this profile. See [Resource Specification](#resource-specification-resources). |
 | `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |

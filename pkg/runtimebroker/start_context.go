@@ -230,6 +230,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// directory; it is not a project root to initialize, so it skips this
 	// block (see ProjectPathFromContainer).
 	if in.ProjectPath != "" && !in.ProjectPathFromContainer && (in.ProjectSlug != "" || in.ProjectID != "") {
+		// A broker copy of a hub workspace (~/.scion/projects/<slug>)
+		// records the hub project ID as its identity; see
+		// recordHubProjectIdentity. Done before the checks below, which
+		// then find it matching.
+		s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
+
 		scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 		if config.IsProjectMarkerFile(scionPath) {
@@ -970,7 +976,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		isGitWorkspace = util.IsGitRepoDir(opts.Workspace)
 	}
 	if !isGitWorkspace {
-		isGitWorkspace = in.ResolvedEnv["SCION_WORKSPACE_GIT"] == "true"
+		// Parsed like sciontool init does (util.ParseBool), so both agree.
+		isGitWorkspace, _ = util.ParseBool(in.ResolvedEnv["SCION_WORKSPACE_GIT"])
 	}
 	if emptyPerAgent {
 		// Never git, whatever a stale resolvedEnv claims.

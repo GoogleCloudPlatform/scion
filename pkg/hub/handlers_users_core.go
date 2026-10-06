@@ -24,6 +24,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -167,7 +168,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 // revokeUserSessions increments the user's session generation, invalidating
 // all existing cookie-based sessions for that user.
 func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id string) {
-	admin, ok := s.requireAdmin(w, r)
+	admin, ok := s.requireAdminFor(w, r, authzop.ReasonSessionRecovery)
 	if !ok {
 		return
 	}
@@ -230,7 +231,8 @@ func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabili
 //
 // User mutation endpoints (PATCH, DELETE) require an interactive session JWT
 // or dev credential. Broker, agent, UAT, and federation credentials are
-// rejected at the boundary.
+// rejected at the boundary by requireSessionCredentialFor
+// (session_only_gate.go), which reports the session-only reason.
 // ---------------------------------------------------------------------------
 
 // allowedMutationCredentials is the closed set of credential kinds permitted
@@ -240,38 +242,15 @@ var allowedMutationCredentials = map[CredentialKind]bool{
 	CredentialKindDev:         true,
 }
 
-// requireSessionCredential verifies the request uses an interactive session
-// JWT or dev credential. Returns the actor UserIdentity on success, writes
-// an HTTP error and returns nil on failure.
-func (s *Server) requireSessionCredential(w http.ResponseWriter, ctx context.Context) (UserIdentity, bool) {
-	if s.authzService == nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"authorization service unavailable", nil)
-		return nil, false
+// updateUserSessionOnlyReason is the session-only reason of PATCH
+// /api/v1/users/{id}: INTERACTIVE_STATE when the path names the caller's
+// own record, GOV_PENDING for any other record. It depends only on the
+// path, so the credential check still runs before the body is read.
+func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.SessionOnlyReason {
+	if identity := GetIdentityFromContext(ctx); identity != nil && identity.ID() == id {
+		return authzop.ReasonInteractiveState
 	}
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return nil, false
-	}
-
-	actor, ok := identity.(UserIdentity)
-	if !ok {
-		Forbidden(w)
-		return nil, false
-	}
-
-	// Enforce credential boundary: only interactive session JWTs and dev
-	// tokens are allowed for user mutations.
-	cred := GetCredentialContextFromContext(ctx)
-	if !allowedMutationCredentials[cred.Kind] {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("user mutations require an interactive session; credential kind %q is not allowed", cred.Kind), nil)
-		return nil, false
-	}
-
-	return actor, true
+	return authzop.ReasonGovernancePending
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +324,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredential(w, ctx)
+	actor, ok := s.requireSessionCredentialFor(w, ctx, updateUserSessionOnlyReason(ctx, id))
 	if !ok {
 		return
 	}
@@ -1114,13 +1093,16 @@ func (s *Server) checkLastSuperAdminTx(
 // Guards: self-deletion and last-active-super-admin are prevented based on
 // bindings (not User.Role). All operations — last-admin check, skill cleanup,
 // user deletion, and audit — execute in a single atomic transaction (R4-C2).
+// A user who still owns agents is refused with 409 (ptone/scion#2769). The
+// user's user-scope secrets and env vars are removed after commit, best
+// effort.
 // ---------------------------------------------------------------------------
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredential(w, ctx)
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		return
 	}
@@ -1174,6 +1156,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return err
 		}
 
+		// Refuse while the user owns agents (ptone/scion#2769).
+		if err := checkUserOwnsNoAgentsTx(ctx, tx, user.ID); err != nil {
+			return err
+		}
+
 		// Last-project-owner guard plus role-binding cascade
 		// (ptone/scion#2598). Runs before the user row is deleted, in the
 		// same transaction; a concurrent grant or role change to the
@@ -1187,6 +1174,20 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		// Clean up user-scoped skill injections.
 		if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
 			return fmt.Errorf("delete skill injections: %w", err)
+		}
+
+		// Remove the user's group memberships before the user row: the
+		// FK is ON DELETE SET NULL, so afterwards they would be orphans
+		// that still count toward group roles (ptone/scion#2769). Residual
+		// race on PostgreSQL: a concurrent AddGroupMember for this user can
+		// insert a row this delete does not see, which the FK then nulls.
+		// It is harmless: orphaned rows are excluded from counts and
+		// listings, and the startup sweep removes them. On PostgreSQL the
+		// call first locks the groups this user owns, so the transaction
+		// takes owned group rows before membership rows, like a concurrent
+		// project delete's group cascade (no 40P01 between the two).
+		if _, err := tx.DeleteGroupMembershipsForUser(ctx, id); err != nil {
+			return fmt.Errorf("delete group memberships: %w", err)
 		}
 
 		// Delete the user record.
@@ -1212,11 +1213,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	if err != nil {
 		var lastOwnerErr *lastProjectOwnerDeleteError
+		var ownsAgentsErr *userOwnsAgentsDeleteError
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
 		} else if errors.As(err, &lastOwnerErr) {
 			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		} else if errors.As(err, &ownsAgentsErr) {
+			writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
 		} else if errors.Is(err, errUserRoleBindingsChanged) {
 			writeUserRoleBindingsChangedError(w)
 		} else {
@@ -1225,6 +1229,10 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		return
 	}
+
+	// Best effort, after commit: remove the user's user-scope secrets and
+	// env vars (ptone/scion#2769). Failures are logged, not returned.
+	s.removeUserScopedData(ctx, id)
 
 	w.WriteHeader(http.StatusNoContent)
 }

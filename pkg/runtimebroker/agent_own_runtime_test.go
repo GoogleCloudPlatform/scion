@@ -40,6 +40,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -357,6 +358,35 @@ func TestStopAgent_ProfileRuntimeListsAllNamespaces_StopsByPodNamespace(t *testi
 	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/stop?projectId="+ownRTProjectID+"&runtime=kubernetes")
 	if w.Code >= 300 {
 		t.Fatalf("stop status = %d, body %s; want success", w.Code, w.Body.String())
+	}
+	if f.podExists(t) {
+		t.Fatal("pod still present after stop")
+	}
+	if got := f.requests("default"); len(got) != 0 {
+		t.Fatalf("requests sent to the default namespace: %v", got)
+	}
+}
+
+// A run-scoped stop through the same all-namespaces profile runtime: the
+// pod's own run stops it in its namespace; another run
+// is refused with the run-mismatch 404 and the pod is kept. Neither sends
+// anything to the default namespace.
+func TestStopAgent_ProfileRuntimeListsAllNamespaces_RunScopedStopsByPodNamespace(t *testing.T) {
+	f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true, podRunID: "run-1"})
+	f.ownListAll = true
+	stopPath := "/api/v1/agents/" + ownRTAgent + "/stop?projectId=" + ownRTProjectID + "&runtime=kubernetes"
+
+	w := f.do(t, http.MethodPost, stopPath+"&runId=run-0")
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), api.BrokerErrorCodeRunMismatch) {
+		t.Fatalf("stop of another run: status = %d, body %s; want 404 %s", w.Code, w.Body.String(), api.BrokerErrorCodeRunMismatch)
+	}
+	if !f.podExists(t) {
+		t.Fatal("pod of run-1 removed by a run-0 stop")
+	}
+
+	w = f.do(t, http.MethodPost, stopPath+"&runId=run-1")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("stop of the pod's run: status = %d, body %s; want 202", w.Code, w.Body.String())
 	}
 	if f.podExists(t) {
 		t.Fatal("pod still present after stop")
@@ -1148,5 +1178,160 @@ func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 			t.Fatalf("delete status = %d, body %s; want an ambiguity failure", w.Code, w.Body.String())
 		}
 		bothRemain(t, f)
+	})
+}
+
+// addOwnRTPod creates a same-named agent pod of this project in namespace
+// ns, labelled with runID when it is not empty.
+func (f *ownRTFixture) addOwnRTPod(t *testing.T, ns, runID string) {
+	t.Helper()
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ownRTAgent, Namespace: ns, UID: k8stypes.UID("uid-" + ns),
+			Labels: map[string]string{
+				"scion.name":               ownRTAgent,
+				"scion.agent":              "true",
+				projectkeys.LabelProjectID: ownRTProjectID,
+			},
+			Annotations: map[string]string{projectkeys.LabelProjectPath: f.projectDir},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	if runID != "" {
+		pod.Labels[api.LabelRunID] = runID
+	}
+	if _, err := f.cs.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Same-named pods of the agent in two namespaces, listed by a profile
+// runtime that lists all namespaces, are two containers, never collapsed to
+// whichever was listed first (dedupeAgentEntries keys on the operation ID):
+//   - a legacy stop is ambiguous and fails closed, stopping neither pod;
+//   - a run-scoped stop finds its own run's pod and stops only that one.
+func TestStopAgent_SameNamedPodsInTwoNamespaces(t *testing.T) {
+	const nsB = "ns-b"
+	newFixture := func(t *testing.T) *ownRTFixture {
+		f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true, podRunID: "run-1"})
+		f.ownListAll = true
+		f.addOwnRTPod(t, nsB, "run-2")
+		return f
+	}
+	stopPath := "/api/v1/agents/" + ownRTAgent + "/stop?projectId=" + ownRTProjectID + "&runtime=kubernetes"
+
+	t.Run("legacy stop is ambiguous", func(t *testing.T) {
+		f := newFixture(t)
+		w := f.do(t, http.MethodPost, stopPath)
+		if w.Code < 400 {
+			t.Fatalf("legacy stop: status = %d, body %s; want a failure (ambiguous)", w.Code, w.Body.String())
+		}
+		if !f.podExistsIn(t, ownRTProfileNS) || !f.podExistsIn(t, nsB) {
+			t.Fatal("an ambiguous legacy stop removed a pod")
+		}
+	})
+	for _, tc := range []struct{ run, gone, kept string }{
+		{"run-1", ownRTProfileNS, nsB},
+		{"run-2", nsB, ownRTProfileNS},
+	} {
+		t.Run("run-scoped stop of "+tc.run, func(t *testing.T) {
+			f := newFixture(t)
+			w := f.do(t, http.MethodPost, stopPath+"&runId="+tc.run)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("stop: status = %d, body %s; want 202", w.Code, w.Body.String())
+			}
+			if f.podExistsIn(t, tc.gone) {
+				t.Errorf("%s's pod in %s still present", tc.run, tc.gone)
+			}
+			if !f.podExistsIn(t, tc.kept) {
+				t.Errorf("the other run's pod in %s was removed", tc.kept)
+			}
+			if got := f.requests("default"); len(got) != 0 {
+				t.Fatalf("requests sent to the default namespace: %v", got)
+			}
+		})
+	}
+	t.Run("run-scoped stop of a third run is the run-mismatch 404", func(t *testing.T) {
+		// Every listed pod belongs to another run: a mismatch, as for a
+		// run-scoped delete, not an ambiguity. The two pods hold different
+		// runs, so no single current run is reported.
+		f := newFixture(t)
+		w := f.do(t, http.MethodPost, stopPath+"&runId=run-3")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("stop: status = %d, body %s; want 404", w.Code, w.Body.String())
+		}
+		var body ErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Error.Code != api.BrokerErrorCodeRunMismatch {
+			t.Errorf("code = %q, want %q", body.Error.Code, api.BrokerErrorCodeRunMismatch)
+		}
+		if got, ok := body.Error.Details[api.BrokerErrorDetailCurrentRunID]; ok {
+			t.Errorf("details currentRunId = %v, want it omitted (two runs)", got)
+		}
+		if !f.podExistsIn(t, ownRTProfileNS) || !f.podExistsIn(t, nsB) {
+			t.Fatal("a stop of another run removed a pod")
+		}
+	})
+}
+
+// relabelOnStopRuntime models an unlabelled (legacy) pod being replaced by
+// another run's pod between the broker's lookup and its stop: Stop first
+// recreates the pod labelled with run-new under a new UID, then stops.
+type relabelOnStopRuntime struct {
+	*runtime.KubernetesRuntime
+	cs *k8sfake.Clientset
+	t  *testing.T
+}
+
+func (r *relabelOnStopRuntime) Stop(ctx context.Context, ref runtime.RunRef) error {
+	pods := r.cs.CoreV1().Pods(ownRTProfileNS)
+	if err := pods.Delete(ctx, ownRTAgent, metav1.DeleteOptions{}); err != nil {
+		r.t.Fatalf("replace pod: %v", err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: ownRTAgent, Namespace: ownRTProfileNS, UID: "uid-new",
+		Labels: map[string]string{"scion.name": ownRTAgent, "scion.agent": "true",
+			projectkeys.LabelProjectID: ownRTProjectID, api.LabelRunID: "run-new"},
+	}}
+	if _, err := pods.Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		r.t.Fatalf("replace pod: %v", err)
+	}
+	return r.KubernetesRuntime.Stop(ctx, ref)
+}
+
+// A run-scoped stop of an unlabelled (legacy) pod acts on it as a
+// run-scoped delete does: it matches by name, and the requested run goes
+// to the runtime (resolvedStopRef, like deleteRunRef), so the run check
+// still applies. When the pod is replaced by another run's pod before the
+// stop reaches it, the newer pod is left running and the stop is the
+// run-mismatch 404, not a stop by name. An unreplaced legacy pod is
+// stopped.
+func TestStopAgent_RunScopedLegacyPod_SameRuleAsDelete(t *testing.T) {
+	stopPath := "/api/v1/agents/" + ownRTAgent + "/stop?projectId=" + ownRTProjectID + "&runtime=kubernetes&runId=run-old"
+	t.Run("replaced before the stop", func(t *testing.T) {
+		f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true})
+		f.wrapOwn = func(k *runtime.KubernetesRuntime) runtime.Runtime {
+			return &relabelOnStopRuntime{KubernetesRuntime: k, cs: f.cs, t: t}
+		}
+		w := f.do(t, http.MethodPost, stopPath)
+		if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), api.BrokerErrorCodeRunMismatch) {
+			t.Fatalf("stop: status = %d, body %s; want 404 %s", w.Code, w.Body.String(), api.BrokerErrorCodeRunMismatch)
+		}
+		pod, err := f.cs.CoreV1().Pods(ownRTProfileNS).Get(context.Background(), ownRTAgent, metav1.GetOptions{})
+		if err != nil || pod.Labels[api.LabelRunID] != "run-new" {
+			t.Fatalf("run-new's pod was removed by a stop of run-old (err=%v)", err)
+		}
+	})
+	t.Run("legacy pod still there", func(t *testing.T) {
+		f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true})
+		w := f.do(t, http.MethodPost, stopPath)
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("stop: status = %d, body %s; want 202", w.Code, w.Body.String())
+		}
+		if f.podExists(t) {
+			t.Fatal("legacy pod still present after a run-scoped stop")
+		}
 	})
 }

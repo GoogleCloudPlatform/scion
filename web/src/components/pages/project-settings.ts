@@ -63,6 +63,7 @@ import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -1641,8 +1642,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
 
       // Navigate back to projects list
-      window.history.pushState({}, '', '/projects');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/projects');
     } catch (err) {
       console.error('Failed to delete project:', err);
       showToast(err instanceof Error ? err.message : 'Failed to delete project');

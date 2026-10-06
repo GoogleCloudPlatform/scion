@@ -54,6 +54,7 @@ import type { AuditPageRequestDetail } from '../shared/access-boundary-audit-tim
 import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting' | 'permission_denied';
 
@@ -783,19 +784,8 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   // Event handlers
   // ---------------------------------------------------------------------------
 
-  /**
-   * Dispatch SPA navigation via the document-level nav-click listener, so
-   * importing this page does not load (and initialise) the client entry
-   * module.
-   */
-  private navigate(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
-    );
-  }
-
   private handleEditClick(): void {
-    this.navigate(`/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}/edit`);
+    navigateTo(`/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}/edit`);
   }
 
   private handleDeleteClick(): void {
@@ -806,7 +796,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private handleDeleteSuccess(e: CustomEvent<PreviewCommitSuccessDetail>): void {
     void e;
     // After successful delete, navigate to inventory
-    this.navigate('/admin/access-boundaries');
+    navigateTo('/admin/access-boundaries');
   }
 
   private handleDeleteCancel(): void {
@@ -855,7 +845,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
           <sl-button
             variant="default"
             style="margin-top: 1rem;"
-            @click=${() => this.navigate('/admin/access-boundaries')}
+            @click=${() => navigateTo('/admin/access-boundaries')}
           >
             Back to inventory
           </sl-button>
@@ -902,7 +892,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
           <h1>Failed to Load Access Constraint</h1>
           <p>${this.errorMessage}</p>
           <div style="display: flex; gap: 0.5rem; justify-content: center;">
-            <sl-button variant="default" @click=${() => this.navigate('/admin/access-boundaries')}>
+            <sl-button variant="default" @click=${() => navigateTo('/admin/access-boundaries')}>
               Back to inventory
             </sl-button>
             <sl-button variant="primary" @click=${() => void this.loadBoundary()}>
@@ -925,7 +915,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             The access constraint "${this.boundaryId}" does not exist or you do not have permission
             to view it.
           </p>
-          <sl-button variant="primary" @click=${() => this.navigate('/admin/access-boundaries')}>
+          <sl-button variant="primary" @click=${() => navigateTo('/admin/access-boundaries')}>
             Back to inventory
           </sl-button>
         </div>
@@ -981,7 +971,7 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
             href="/admin/access-boundaries"
             @click=${(e: Event) => {
               e.preventDefault();
-              this.navigate('/admin/access-boundaries');
+              navigateTo('/admin/access-boundaries');
             }}
           >
             <sl-icon name="arrow-left"></sl-icon>

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -60,7 +61,14 @@ const (
 	ErrCodeRuntimeUnavailable = "runtime_unavailable"
 	ErrCodeHubUnreachable     = "hub_unreachable"
 	ErrCodeTemplateError      = "template_error"
-	ErrCodeSkillResolution    = "skill_resolution_failed"
+	ErrCodeSkillResolution    = api.BrokerErrCodeSkillResolution
+
+	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
+	// uploaded to bucket storage (workspaceStoragePath set) when neither the
+	// request nor this broker names the bucket to download it from. It is
+	// answered with 422 before anything is provisioned, and the hub relays
+	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
+	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
 	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
 	// verified as safe because a runtime process restart dropped the
@@ -200,6 +208,20 @@ func NotFound(w http.ResponseWriter, resource string) {
 	writeError(w, http.StatusNotFound, code, resource+" not found", nil)
 }
 
+// StopRunMismatch writes the 404 for a stop naming run runID when another
+// run holds the agent's name (ptone/scion#2550). The code
+// (api.BrokerErrorCodeRunMismatch) lets the hub tell it apart from any
+// other 404; the details name the requested run and the run that holds
+// the name (current, omitted when unknown), so a hub/broker run drift is
+// diagnosable.
+func StopRunMismatch(w http.ResponseWriter, runID, current string) {
+	details := map[string]interface{}{api.BrokerErrorDetailRunID: runID}
+	if current != "" {
+		details[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	writeError(w, http.StatusNotFound, api.BrokerErrorCodeRunMismatch, "Agent not found for the requested run", details)
+}
+
 // BadRequest writes a 400 Bad Request response.
 func BadRequest(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
@@ -321,8 +343,65 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // going through writeRuntimeOpError — raw err still always reaches the
 // log on every path, just not through this one function.
 func runtimeOpError(op string, err error) *OpaqueError {
-	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
+	return NewOpaqueError(failedOpText(op), err)
 }
+
+// failedOpText is the fixed "Failed to <op>" lead every runtime-op error
+// message starts with (runtimeOpError, notFoundMessage).
+func failedOpText(op string) string {
+	return "Failed to " + op
+}
+
+// notFoundMessage is the full client message for a template or
+// harness-config that did not resolve during op: "Failed to <op>: " plus
+// notFoundResourceText. Every not-found response and launch report builds
+// its text here, so the sync and async spellings cannot drift.
+func notFoundMessage(op string, err error, templateSlug string) string {
+	return failedOpText(op) + ": " + notFoundResourceText(err, templateSlug)
+}
+
+// notFoundResourceText is the client text for a template or harness-config
+// that did not resolve (config.ErrTemplateNotFound /
+// config.ErrHarnessConfigNotFound). It names the resource, as the 404
+// contract from ptone/scion#1316 requires, but never repeats err's own
+// text, which can name broker filesystem paths (the directories searched,
+// an absolute template path) or a content hash (ptone/scion#3113).
+//
+//   - harness-config: the typed error's Name, the name that was requested.
+//   - template: the typed error's Name (config.FriendlyTemplateName of the
+//     reference). When that is empty — the reference was a hydrated cache
+//     directory named by its content hash — templateSlug, the template name
+//     the caller sent (api.StartOptions.TemplateName), passed through
+//     config.FriendlyTemplateName too.
+//   - no name either way (the caller named no template): the sentinel's
+//     own fixed text.
+func notFoundResourceText(err error, templateSlug string) string {
+	if errors.Is(err, config.ErrTemplateNotFound) {
+		name := ""
+		var tplErr *config.TemplateNotFoundError
+		if errors.As(err, &tplErr) {
+			name = tplErr.Name
+		}
+		if name == "" {
+			name = config.FriendlyTemplateName(templateSlug)
+		}
+		if name == "" {
+			return config.ErrTemplateNotFound.Error()
+		}
+		return fmt.Sprintf("template %q not found", name)
+	}
+	var hcErr *config.HarnessConfigNotFoundError
+	if errors.As(err, &hcErr) && hcErr.Name != "" {
+		return fmt.Sprintf("harness-config %q not found", hcErr.Name)
+	}
+	return config.ErrHarnessConfigNotFound.Error()
+}
+
+// opCreateAgent is the runtimeOpError op for a create's Manager.Start
+// failure. createAgent's synchronous start and the async launch
+// (classifyStartError, run_launch.go) share it, so both report the same
+// text for the same failure (ptone/scion#3113).
+const opCreateAgent = "create agent"
 
 // writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
 // delete, exec, message, logs, list) make on failure: it logs err

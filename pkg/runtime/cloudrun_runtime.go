@@ -203,6 +203,17 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 	return cloudrun.NewInstancesClient(ctx)
 }
 
+// cloudRunMaxEnvValueBytes is Cloud Run's size cap for a single environment
+// variable value (32 KiB). The name has its own cap, so only the value counts.
+const cloudRunMaxEnvValueBytes = 32 * 1024
+
+// cloudRunEnvLimit applies cloudRunMaxEnvValueBytes to values only.
+var cloudRunEnvLimit = envSizeLimit{maxBytes: cloudRunMaxEnvValueBytes}
+
+// cloudRunRuntimeEnvKeys are set by buildCloudRunInstance after cfg.Env, so
+// an env-type secret must not also supply them (no duplicate EnvVar names).
+var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID"}
+
 // cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
 // as and owns its NFS workspace with: the broker's own ids for a
 // non-NFS backend, otherwise the configured NFS ids with 0 (unset)
@@ -220,6 +231,13 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// provisionCloudRunNFS), which would break empty-per-agent isolation.
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
 		return "", err
+	}
+	// Deliver resolved secrets through the instance env: env-type secrets as
+	// plain variables, file/variable secrets as the staged blob that
+	// sciontool init writes out. Done before any provisioning so an
+	// oversized secret fails fast.
+	if _, err := applyResolvedSecretsToEnv(&cfg, cloudRunEnvLimit, cloudRunRuntimeEnvKeys...); err != nil {
+		return "", fmt.Errorf("cloudrun: %w", err)
 	}
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
@@ -683,7 +701,11 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 	return nil
 }
 
-func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
+// Stop stops the Cloud Run instance ref.ID.
+// TODO(ptone/scion#2550 P2/P4): enforce ref.RunID. The instance ID is
+// deterministic per agent name, so this is still name-scoped today.
+func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
