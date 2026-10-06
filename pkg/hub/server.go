@@ -4764,7 +4764,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// Apply project-level defaults, hub operational defaults, and the
 		// template/harness-config derivation pipeline, exactly as on the
 		// agent-create path. See deriveAgentConfig.
-		s.deriveAgentConfig(ctx, agent, project, tmpl)
+		if err := s.deriveAgentConfig(ctx, agent, project, tmpl); err != nil {
+			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		}
 
 		// Scheduled creates have no waiting client, so they opt in to
 		// asynchronous launch server-side. It only takes effect when

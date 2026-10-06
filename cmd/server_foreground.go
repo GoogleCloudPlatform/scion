@@ -30,7 +30,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1745,34 +1744,23 @@ func resolveSessionSecret() string {
 }
 
 // parseBoolEnv reports whether the named environment variable is set to a
-// truthy value. Leading/trailing whitespace is stripped (file-mounted
-// secrets often include a trailing newline). It accepts every spelling
-// strconv.ParseBool understands (1, t, true, TRUE, True, etc.) plus the
-// operator-friendly yes/y/on (and their no/n/off counterparts), all
-// case-insensitively. Unset, empty, and
-// unparseable values are false, but an unparseable non-empty value also logs
-// a warning so a typo does not silently disable a feature the operator meant
-// to turn on.
+// truthy value, using util.LookupBoolEnv for the accepted spellings
+// (whitespace-trimmed, case-insensitive strconv.ParseBool plus yes/y/on and
+// no/n/off). Unset, empty, and unparseable values are false, but an
+// unparseable non-empty value also logs a warning so a typo does not silently
+// disable a feature the operator meant to turn on.
 //
 // The warning uses the stdlib logger because parseBoolEnv runs during
 // initServerLogging, before the slog loggers are wired.
 func parseBoolEnv(key string) bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if v == "" {
-		return false
+	if v, ok := util.LookupBoolEnv(key); ok {
+		return v
 	}
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
+	// ok is false for both unset/empty and garbage; warn only on garbage.
+	if raw := os.Getenv(key); strings.TrimSpace(raw) != "" {
+		log.Printf("WARNING: environment variable %s=%q is not a recognized boolean value; treating as false. "+
+			"Accepted truthy values: true, 1, t, yes, y, on (case-insensitive, whitespace-trimmed).", key, raw)
 	}
-	switch v {
-	case "yes", "y", "on":
-		return true
-	case "no", "n", "off":
-		// Recognized as an explicit "disabled" spelling: false, but no warning.
-		return false
-	}
-	log.Printf("WARNING: environment variable %s=%q is not a recognized boolean value; treating as false. "+
-		"Accepted truthy values: true, 1, t, yes, y, on (case-insensitive, whitespace-trimmed).", key, os.Getenv(key))
 	return false
 }
 
