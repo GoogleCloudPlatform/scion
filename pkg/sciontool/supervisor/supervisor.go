@@ -157,7 +157,8 @@ func New(config Config) *Supervisor {
 // starting the child may be retried.
 func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.mu.Lock()
-	if s.running || s.started {
+	// running stays set after a successful start, so it alone covers both cases.
+	if s.running {
 		s.mu.Unlock()
 		return 1, ErrAlreadyStarted
 	}

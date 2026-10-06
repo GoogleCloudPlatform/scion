@@ -365,6 +365,36 @@ func TestSupervisor_SecondRunAfterStartReturnsErrAlreadyStarted(t *testing.T) {
 	}
 }
 
+// TestSupervisor_RunRefusedWhileClaimed pins the running claim itself,
+// independently of s.started: while another Run holds the claim (here set
+// directly, as an in-progress Run that has not started its child yet would),
+// Run returns ErrAlreadyStarted, leaves the claim in place for its owner, and
+// does not close Started.
+func TestSupervisor_RunRefusedWhileClaimed(t *testing.T) {
+	sup := New(DefaultConfig())
+	sup.mu.Lock()
+	sup.running = true
+	sup.mu.Unlock()
+
+	if _, err := sup.Run(context.Background(), []string{"true"}); !errors.Is(err, ErrAlreadyStarted) {
+		t.Fatalf("Run while claimed: err=%v, want ErrAlreadyStarted", err)
+	}
+	sup.mu.Lock()
+	running, started := sup.running, sup.started
+	sup.mu.Unlock()
+	if !running {
+		t.Error("a refused Run must not release the claim held by another Run")
+	}
+	if started {
+		t.Error("a refused Run must not mark the Supervisor started")
+	}
+	select {
+	case <-sup.Started():
+		t.Fatal("Started closed by a refused Run")
+	default:
+	}
+}
+
 // TestSupervisor_RunRetryAfterFailedStart pins that a Run that fails before
 // starting the child does not use up the Supervisor: a later Run may still
 // start one.
