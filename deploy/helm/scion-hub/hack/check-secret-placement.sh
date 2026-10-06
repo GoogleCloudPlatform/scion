@@ -51,7 +51,12 @@ CHART_DIR="${CHART_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # nothing for the scan to find - a vacuous pass, and vacuous for a legitimate
 # reason. Naming them here means the vacuity is declared: if a fixture that
 # SHOULD carry material stops carrying it, it will not quietly join this set.
-NO_MATERIAL=(existing-secret session-existing)
+#
+# terraform-hub-gke is the same case: its session secret is the Secret
+# Terraform creates (auth.existingSecret). Its database.password does render,
+# inside the settings Secret's database url, which this scanner does not
+# track as a needle; hack/verify.sh covers where the password lands.
+NO_MATERIAL=(existing-secret session-existing terraform-hub-gke)
 
 # Fixtures that FAIL TO RENDER BY DESIGN (schema rejection, negative control).
 # These are skipped at the render step and not counted toward the analysed total.
@@ -89,6 +94,7 @@ declare -A EXPECTED_NEEDLES=(
   [session-existing]=0   # bring-your-own session Secret; nothing rendered
   [settings]=1           # session secret; settings.yaml carries no credential
   [settings-oauth]=2     # session secret + the OAuth web client_secret
+  [terraform-hub-gke]=0  # bring-your-own session Secret (Terraform's); see NO_MATERIAL
   [varied]=1             # session secret
 )
 

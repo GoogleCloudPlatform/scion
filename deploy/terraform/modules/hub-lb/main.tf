@@ -97,14 +97,17 @@ resource "google_compute_health_check" "this" {
 
 # Health checks and the ALB's proxies both reach the pods from these ranges.
 # No target tags: Autopilot nodes carry no tags Terraform controls, so the
-# rule is scoped by port and source range instead.
+# rule is scoped by port, source range and destination range instead. The
+# destination is the cluster's pod range, so the rule never opens the port
+# on other VMs or alias IPs in the shared VPC.
 resource "google_compute_firewall" "health_check" {
   project   = var.project_id
   name      = "${local.prefix}-allow-lb-hc"
   network   = var.network
   direction = "INGRESS"
 
-  source_ranges = local.health_check_source_ranges
+  source_ranges      = local.health_check_source_ranges
+  destination_ranges = [var.pod_cidr]
 
   allow {
     protocol = "tcp"

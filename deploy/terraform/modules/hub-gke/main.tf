@@ -150,6 +150,14 @@ resource "kubernetes_namespace_v1" "system" {
 # pods by the chart's selector labels. ClusterIP is all a standalone NEG
 # needs. The NEG controller adds a cloud.google.com/neg-status annotation
 # back onto this Service; the root's kubernetes provider ignores it.
+#
+# "zones" pre-provisions a NEG in every listed zone, with or without nodes
+# there. Without it the controller creates NEGs only in zones that have
+# nodes, and the front door's per-zone NEG reads fail for the others. Needs
+# GKE 1.36.2-gke.3104000 or later (the calling configuration checks); a
+# malformed value makes the controller silently fall back to nodes-only
+# zones, with only a Warning event on this Service.
+# https://docs.cloud.google.com/kubernetes-engine/docs/how-to/standalone-neg
 resource "kubernetes_service_v1" "neg" {
   metadata {
     name      = "${var.hub_name}-neg"
@@ -162,6 +170,7 @@ resource "kubernetes_service_v1" "neg" {
             name = local.neg_name
           }
         }
+        zones = var.neg_zones
       })
     }
   }

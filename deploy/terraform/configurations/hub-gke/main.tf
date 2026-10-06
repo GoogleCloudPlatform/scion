@@ -40,12 +40,42 @@ module "shared_lookup" {
   share_name    = var.shared_share_name
 }
 
-# The NEG controller creates one standalone NEG per cluster zone. Read the
-# zone list from the cluster itself rather than restating it.
+# The cluster's zones (the default NEG zone list), its pod range (the
+# firewall's destination) and its control-plane version, read from the
+# cluster itself rather than restated.
+#
+# By default the GKE NEG controller creates a standalone NEG only in zones
+# that have nodes, while node_locations lists every zone, so a small cluster
+# would fail hub-lb's per-zone NEG reads on every apply. hub-gke therefore
+# lists the zones in the NEG annotation ("zones"), which makes the controller
+# pre-provision a NEG in each of them, with or without nodes. That field
+# needs GKE 1.36.2-gke.3104000 or later; older control planes ignore it.
+# https://docs.cloud.google.com/kubernetes-engine/docs/how-to/standalone-neg
+# ("Pre-provisioning empty NEGs").
+#
+# A postcondition, not a precondition: master_version is an attribute of
+# this data source, known only once it has been read. The version is
+# compared field by field as numbers (major, minor, patch, gke build),
+# never as strings.
 data "google_container_cluster" "agents" {
   project  = var.project_id
   location = module.shared_lookup.shared.gke.location
   name     = module.shared_lookup.shared.gke.name
+
+  lifecycle {
+    postcondition {
+      # try(): an unparseable version fails the check instead of erroring.
+      condition = try(alltrue([
+        for v in [[for x in regex("^(\\d+)\\.(\\d+)\\.(\\d+)-gke\\.(\\d+)", self.master_version) : tonumber(x)]] : (
+          v[0] != local.neg_zones_min_gke_version[0] ? v[0] > local.neg_zones_min_gke_version[0] :
+          v[1] != local.neg_zones_min_gke_version[1] ? v[1] > local.neg_zones_min_gke_version[1] :
+          v[2] != local.neg_zones_min_gke_version[2] ? v[2] > local.neg_zones_min_gke_version[2] :
+          v[3] >= local.neg_zones_min_gke_version[3]
+        )
+      ]), false)
+      error_message = "cluster ${self.name} runs GKE ${self.master_version}, but the NEG annotation's \"zones\" field (which makes the NEG controller create a NEG in every zone hub-lb reads, with or without nodes) needs ${join(".", slice(local.neg_zones_min_gke_version, 0, 3))}-gke.${local.neg_zones_min_gke_version[3]} or later. Upgrade the control plane first; see this configuration's README, \"NEG zones\"."
+    }
+  }
 }
 
 locals {
@@ -62,7 +92,16 @@ locals {
     name      = "scion-hub"
   }
 
-  neg_zones = sort(tolist(data.google_container_cluster.agents.node_locations))
+  # Operator override, else every zone the cluster's nodes may run in.
+  neg_zones = sort(coalesce(var.neg_zones, tolist(data.google_container_cluster.agents.node_locations)))
+
+  # 1.36.2-gke.3104000 as [major, minor, patch, gke build]: the first GKE
+  # version whose NEG controller honours the annotation's "zones" field.
+  neg_zones_min_gke_version = [1, 36, 2, 3104000]
+
+  # The hub pod's container port: the NEG endpoints, the health check, the
+  # firewall rule and the chart's hub.webPort all use it.
+  hub_port = 8080
 }
 
 module "hub_identity" {
@@ -119,7 +158,11 @@ module "hub_lb" {
   name           = var.hub_name
   hostname       = var.hostname
   network        = module.shared_lookup.shared.network.name
-  port           = 8080
+  port           = local.hub_port
+
+  # The firewall rule reaches only pod IPs, not every VM and alias IP on the
+  # shared network.
+  pod_cidr = data.google_container_cluster.agents.ip_allocation_policy[0].cluster_ipv4_cidr_block
 
   # Unknown until hub-gke's NEG Service exists, which defers the NEG reads
   # to apply on a fresh hub (see the README's NEG race note).
@@ -153,7 +196,8 @@ module "hub_gke" {
 
   image_registry    = local.image_registry
   runtime_namespace = module.agent_runtime_k8s.namespace
-  port              = 8080
+  port              = local.hub_port
+  neg_zones         = local.neg_zones
 
   db_name              = module.cloudsql_database.db_name
   db_user              = module.cloudsql_database.db_user

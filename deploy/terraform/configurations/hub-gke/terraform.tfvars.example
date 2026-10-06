@@ -12,12 +12,17 @@ state_prefix = "tfha/hubs/tfha-gke-h3"
 
 # DNS is external. After the apply, create the A record from the dns_record
 # output; the managed certificate stays PROVISIONING until it resolves.
-hostname = "tfha-gke-h3.test.scion-ai.dev"
+hostname = "tfha-gke-h3.example.com"
 
-# The hub-gke image in the shared Artifact Registry repo, pinned by digest
-# (no tag, never latest). The variable defaults to the current build; set
-# it here to roll a different one.
-# hub_image_digest = "sha256:REPLACE_ME_WITH_64_HEX_CHARS"
+# Required. The digest of YOUR hub-gke build in the shared Artifact Registry
+# repo (image-build/cloudbuild-hub-gke.yaml), pinned by digest (no tag, never
+# latest). There is no default: a digest exists only in the registry it was
+# pushed to. Change it to roll a new build.
+hub_image_digest = "sha256:REPLACE_ME_WITH_64_LOWERCASE_HEX_CHARS"
+
+# Optional. Zones the hub's NEGs are created in and read from. Unset (null)
+# means the cluster's node_locations. See the README, "NEG zones".
+# neg_zones = ["us-central1-a", "us-central1-b"]
 
 # Leave unset (null) for a first install in a project with no known client
 # ID: the first apply then builds everything except the hub itself

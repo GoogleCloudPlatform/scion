@@ -38,6 +38,16 @@ variable "network" {
   type        = string
 }
 
+variable "pod_cidr" {
+  description = "The GKE cluster's pod IPv4 range (ip_allocation_policy[0].cluster_ipv4_cidr_block). The NEG endpoints are pod IPs, so the health-check firewall rule allows traffic only to this range."
+  type        = string
+
+  validation {
+    condition     = can(cidrhost(var.pod_cidr, 0)) && !startswith(var.pod_cidr, "0.0.0.0/")
+    error_message = "pod_cidr must be an IPv4 CIDR block (the cluster's pod range), not empty and not 0.0.0.0/N."
+  }
+}
+
 variable "port" {
   description = "The hub pod's container port. The NEG endpoints are pod IP:port, so the health check and the firewall rule both target this port directly, not a Service port."
   type        = number
@@ -50,7 +60,7 @@ variable "neg_name" {
 }
 
 variable "neg_zones" {
-  description = "Zones to read a NEG from, one data source each (the cluster's node_locations). Every zone listed must actually have the NEG, or the apply fails at the data read; see the README's NEG notes."
+  description = "Zones to read a NEG from, one data source each. Every zone listed must actually have the NEG, or the apply fails at the data read: pass the same list the NEG Service's annotation pre-provisions (hub-gke's neg_zones). See the README's NEG notes."
   type        = list(string)
 
   validation {

@@ -2,15 +2,16 @@
 # credentials, no API calls. Proves the load-bearing settings of the front
 # door are what the design says they are. It cannot prove the GCP APIs
 # accept them, the managed certificate provisions, or the NEG controller
-# creates the NEGs in time; those are vm-deploy's live checks.
+# creates the NEGs in time; those are the operator's live checks.
 mock_provider "google" {}
 
 variables {
   project_id         = "tfha-test-project"
   project_number     = "123456789012"
   name               = "tfha-gke-h3"
-  hostname           = "tfha-gke-h3.test.scion-ai.dev"
+  hostname           = "tfha-gke-h3.example.com"
   network            = "tfha-vpc"
+  pod_cidr           = "10.64.0.0/14"
   neg_name           = "tfha-gke-h3-hub-neg"
   neg_zones          = ["us-central1-a", "us-central1-b", "us-central1-c"]
   transport_sa_email = "tfha-gke-h3-transport@tfha-test-project.iam.gserviceaccount.com"
@@ -78,6 +79,11 @@ run "front_door_plan" {
   }
 
   assert {
+    condition     = google_compute_firewall.health_check.destination_ranges == toset(["10.64.0.0/14"])
+    error_message = "firewall must reach only the cluster's pod range, not every instance and alias IP on the shared VPC."
+  }
+
+  assert {
     condition     = google_compute_global_forwarding_rule.https.port_range == "443"
     error_message = "HTTPS forwarding rule must listen on 443."
   }
@@ -88,7 +94,7 @@ run "front_door_plan" {
   }
 
   assert {
-    condition     = google_compute_managed_ssl_certificate.this.managed[0].domains == tolist(["tfha-gke-h3.test.scion-ai.dev"])
+    condition     = google_compute_managed_ssl_certificate.this.managed[0].domains == tolist(["tfha-gke-h3.example.com"])
     error_message = "managed certificate must cover exactly the hostname."
   }
 
@@ -103,7 +109,7 @@ run "front_door_plan" {
   }
 
   assert {
-    condition     = output.public_url == "https://tfha-gke-h3.test.scion-ai.dev"
+    condition     = output.public_url == "https://tfha-gke-h3.example.com"
     error_message = "public_url must be https://<hostname>."
   }
 
@@ -111,7 +117,7 @@ run "front_door_plan" {
   # targeted run below for why the address cannot be applied here); the
   # record's name and type are known at plan.
   assert {
-    condition     = output.dns_record.name == "tfha-gke-h3.test.scion-ai.dev" && output.dns_record.type == "A"
+    condition     = output.dns_record.name == "tfha-gke-h3.example.com" && output.dns_record.type == "A"
     error_message = "dns_record must be an A record for the hostname."
   }
 }
@@ -151,8 +157,18 @@ run "bad_hostname_rejected" {
   command = plan
 
   variables {
-    hostname = "https://tfha-gke-h3.test.scion-ai.dev/"
+    hostname = "https://tfha-gke-h3.example.com/"
   }
 
   expect_failures = [var.hostname]
+}
+
+run "empty_pod_cidr_rejected" {
+  command = plan
+
+  variables {
+    pod_cidr = ""
+  }
+
+  expect_failures = [var.pod_cidr]
 }

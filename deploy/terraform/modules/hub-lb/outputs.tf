@@ -35,3 +35,13 @@ output "backend_service" {
     health_check_port = google_compute_health_check.this.http_health_check[0].port
   }
 }
+
+output "neg_zones_read" {
+  description = "Zones a NEG is read from and attached as a backend, one per data source. For operators and tests; must equal the zones the NEG Service pre-provisions."
+  value       = sort(keys(data.google_compute_network_endpoint_group.this))
+}
+
+output "firewall_destination_ranges" {
+  description = "Destination ranges of the health-check firewall rule (the cluster's pod range). For operators and tests."
+  value       = google_compute_firewall.health_check.destination_ranges
+}

@@ -1,0 +1,97 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# THE TERRAFORM HUB-GKE PERMUTATION: the values deploy/terraform/modules/hub-gke
+# hands this chart (its chart_values local, exposed as the chart_values output),
+# key for key, with placeholders for every environment-specific value. Without
+# this file nothing in CI renders the chart with the values Terraform actually
+# generates, so a schema or template change could break that shape unseen.
+#
+# KEPT IN STEP BY A TEST: modules/hub-gke's run
+# "chart_ci_fixture_matches_chart_values" plans with these placeholder inputs
+# and fails unless chart_values equals this file (minus database.password).
+# A key added or renamed in local.chart_values belongs here in the same change.
+#
+# Two values do not come from chart_values:
+#   - database.password: Terraform passes it through set_sensitive on the
+#     helm_release, never in the plain values. A placeholder stands in here so
+#     the auth=password branch renders.
+#   - hub.podAnnotations: present only when db_password_rotation is set. It is
+#     set here so that branch renders too.
+#
+# Placeholders are obviously non-real: example.com hosts, example-project,
+# an all-feedface digest. Nothing here is ever dialled.
+
+image:
+  repository: us-central1-docker.pkg.dev/example-project/example-repo/scion-hub-gke
+  digest: sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface
+
+hub:
+  hubId: tfha-gke-h3
+  baseUrl: https://tfha-gke-h3.example.com
+  adminEmails:
+    - admin@example.com
+  webPort: 8080
+  podAnnotations:
+    scion.io/db-password-rotation: "2026-10-06"
+
+serviceAccount:
+  create: true
+  name: scion-hub
+  gcpServiceAccount: tfha-gke-h3-hub@example-project.iam.gserviceaccount.com
+
+rbac:
+  create: true
+
+runtime:
+  namespace: tfha-gke-h3
+
+agents:
+  imageRegistry: us-central1-docker.pkg.dev/example-project/example-repo
+
+database:
+  driver: postgres
+  auth: password
+  name: tfha_gke_h3
+  user: tfha-gke-h3
+  password: placeholder-not-a-real-password
+
+cloudsql:
+  enabled: true
+  instanceConnectionName: example-project:us-central1:tfha-pg
+
+storage:
+  provider: gcs
+  bucket: example-project-tfha-gke-h3-artifacts
+
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: example-project
+
+auth:
+  mode: proxy
+  proxy:
+    provider: iap
+    iap:
+      # The global external ALB audience form hub-lb produces.
+      audience: /projects/123456789012/global/backendServices/4242424242
+  transport:
+    mode: iap
+    oidcAudience: 123456789-placeholder.apps.googleusercontent.com
+    platformAuthSa: tfha-gke-h3-transport@example-project.iam.gserviceaccount.com
+  # Terraform creates this Secret (kubernetes_secret_v1.session) in the
+  # release namespace; the chart only references it.
+  existingSecret: tfha-gke-h3-session

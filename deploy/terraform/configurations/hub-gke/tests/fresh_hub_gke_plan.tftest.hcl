@@ -7,8 +7,8 @@
 # NEG controller creates the NEGs before the apply reads them (a mocked data
 # source always "exists"), that the chart renders with these values (the
 # chart's own helm-template checks, plus a manual render recorded in the
-# change, cover that), or that the hub boots. Those are vm-deploy's live
-# checks.
+# change, cover that), or that the hub boots. Those are the operator's
+# live checks.
 
 mock_provider "google" {}
 mock_provider "kubernetes" {}
@@ -24,7 +24,10 @@ variables {
 
   hub_name     = "tfha-gke-h3"
   state_prefix = "tfha/hubs/tfha-gke-h3"
-  hostname     = "tfha-gke-h3.test.scion-ai.dev"
+  hostname     = "tfha-gke-h3.example.com"
+
+  # Obviously fake: the variable has no default, and no registry has this digest.
+  hub_image_digest = "sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
 
   iap_oauth_client_id = "123456789-abc.apps.googleusercontent.com"
   iap_members         = ["group:team@example.com"]
@@ -122,7 +125,15 @@ override_data {
 override_data {
   target = data.google_container_cluster.agents
   values = {
+    name           = "tfha-agents"
     node_locations = ["us-central1-c", "us-central1-a", "us-central1-b"]
+    # Exactly the minimum for the NEG annotation's "zones" field.
+    master_version = "1.36.2-gke.3104000"
+    ip_allocation_policy = [
+      {
+        cluster_ipv4_cidr_block = "10.64.0.0/14"
+      }
+    ]
   }
 }
 
@@ -131,7 +142,7 @@ run "fresh_gke_hub_plans_clean" {
 
   # Front-door contract outputs.
   assert {
-    condition     = output.public_url == "https://tfha-gke-h3.test.scion-ai.dev"
+    condition     = output.public_url == "https://tfha-gke-h3.example.com"
     error_message = "public_url must be https://<hostname>."
   }
 
@@ -141,7 +152,7 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
-    condition     = output.dns_record.name == "tfha-gke-h3.test.scion-ai.dev" && output.dns_record.type == "A"
+    condition     = output.dns_record.name == "tfha-gke-h3.example.com" && output.dns_record.type == "A"
     error_message = "dns_record must be an A record for the hostname."
   }
 
@@ -158,7 +169,25 @@ run "fresh_gke_hub_plans_clean" {
 
   assert {
     condition     = output.neg_zones == tolist(["us-central1-a", "us-central1-b", "us-central1-c"])
-    error_message = "NEG zones must come from the cluster's node_locations."
+    error_message = "with neg_zones unset, NEG zones must come from the cluster's node_locations."
+  }
+
+  # The zones the front door reads are exactly the zones the NEG Service
+  # asks the controller to pre-provision.
+  assert {
+    condition     = tolist(jsondecode(module.hub_gke.neg_annotation).zones) == output.neg_zones
+    error_message = "the NEG annotation's zones must be the zones hub-lb reads NEGs from."
+  }
+
+  assert {
+    condition     = module.hub_lb.neg_zones_read == output.neg_zones
+    error_message = "hub-lb must read one NEG per neg_zones zone."
+  }
+
+  # O1: the health-check firewall reaches only the cluster's pod range.
+  assert {
+    condition     = module.hub_lb.firewall_destination_ranges == toset(["10.64.0.0/14"])
+    error_message = "the health-check firewall's destination must be the cluster's pod range."
   }
 
   # The hub release.
@@ -168,8 +197,8 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
-    condition     = output.hub_image == "us-central1-docker.pkg.dev/tfha-test-project/tfha-scion/scion-hub-gke@sha256:538ffc64d7e9cd15a24136bf1493c0154bc386aec0b700c2a5c805092d3c2f96"
-    error_message = "hub image must be <AR repo>/scion-hub-gke pinned by the default digest."
+    condition     = output.hub_image == "us-central1-docker.pkg.dev/tfha-test-project/tfha-scion/scion-hub-gke@sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+    error_message = "hub image must be <AR repo>/scion-hub-gke pinned by hub_image_digest."
   }
 
   assert {
@@ -249,7 +278,7 @@ run "no_client_id_skips_only_the_hub" {
 
   # The LB, IAP and NEG path are still built on the first apply.
   assert {
-    condition     = output.public_url == "https://tfha-gke-h3.test.scion-ai.dev" && output.backend_service.timeout_sec == 86400
+    condition     = output.public_url == "https://tfha-gke-h3.example.com" && output.backend_service.timeout_sec == 86400
     error_message = "the front door must still be planned without a client ID."
   }
 }
@@ -262,4 +291,137 @@ run "hub_name_must_match_state_prefix" {
   }
 
   expect_failures = [var.hub_name]
+}
+
+# Operator override: neg_zones replaces node_locations everywhere, in the
+# annotation and in hub-lb's reads alike.
+run "neg_zones_override" {
+  command = plan
+
+  variables {
+    neg_zones = ["us-central1-f", "us-central1-b"]
+  }
+
+  assert {
+    condition     = output.neg_zones == tolist(["us-central1-b", "us-central1-f"])
+    error_message = "neg_zones must override the cluster's node_locations (sorted)."
+  }
+
+  assert {
+    condition     = tolist(jsondecode(module.hub_gke.neg_annotation).zones) == output.neg_zones
+    error_message = "the NEG annotation's zones must follow the override."
+  }
+
+  assert {
+    condition     = module.hub_lb.neg_zones_read == tolist(["us-central1-b", "us-central1-f"])
+    error_message = "hub-lb must read NEGs from the override zones only."
+  }
+}
+
+run "neg_zone_outside_region_rejected" {
+  command = plan
+
+  variables {
+    neg_zones = ["europe-west1-b"]
+  }
+
+  expect_failures = [var.neg_zones]
+}
+
+run "empty_neg_zones_rejected" {
+  command = plan
+
+  variables {
+    neg_zones = []
+  }
+
+  expect_failures = [var.neg_zones]
+}
+
+# Older than 1.36.2-gke.3104000 in the last field only. A string comparison
+# would pass "1.36.2-gke.999999" (it sorts after "...3104000"); the numeric
+# compare must not.
+run "old_gke_build_fails_plan" {
+  command = plan
+
+  override_data {
+    target = data.google_container_cluster.agents
+    values = {
+      name           = "tfha-agents"
+      node_locations = ["us-central1-a"]
+      master_version = "1.36.2-gke.999999"
+      ip_allocation_policy = [
+        {
+          cluster_ipv4_cidr_block = "10.64.0.0/14"
+        }
+      ]
+    }
+  }
+
+  expect_failures = [data.google_container_cluster.agents]
+}
+
+# Minor 9 < 36 numerically, though "9" sorts after "3" as a string.
+run "old_gke_minor_fails_plan" {
+  command = plan
+
+  override_data {
+    target = data.google_container_cluster.agents
+    values = {
+      name           = "tfha-agents"
+      node_locations = ["us-central1-a"]
+      master_version = "1.9.10-gke.9999999"
+      ip_allocation_policy = [
+        {
+          cluster_ipv4_cidr_block = "10.64.0.0/14"
+        }
+      ]
+    }
+  }
+
+  expect_failures = [data.google_container_cluster.agents]
+}
+
+run "unparseable_gke_version_fails_plan" {
+  command = plan
+
+  override_data {
+    target = data.google_container_cluster.agents
+    values = {
+      name           = "tfha-agents"
+      node_locations = ["us-central1-a"]
+      master_version = "latest"
+      ip_allocation_policy = [
+        {
+          cluster_ipv4_cidr_block = "10.64.0.0/14"
+        }
+      ]
+    }
+  }
+
+  expect_failures = [data.google_container_cluster.agents]
+}
+
+# Newer in an earlier field with a smaller later field: 1.37.0-gke.1 passes.
+run "newer_gke_minor_passes" {
+  command = plan
+
+  override_data {
+    target = data.google_container_cluster.agents
+    values = {
+      name           = "tfha-agents"
+      node_locations = ["us-central1-a"]
+      master_version = "1.37.0-gke.1"
+      ip_allocation_policy = [
+        {
+          cluster_ipv4_cidr_block = "10.64.0.0/14"
+        }
+      ]
+    }
+  }
+
+  assert {
+    condition     = output.neg_zones == tolist(["us-central1-a"])
+    error_message = "a newer control plane must plan cleanly."
+  }
 }

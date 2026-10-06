@@ -2,7 +2,7 @@
 # no credentials. Proves which resources exist in each first-install state
 # and that the values handed to the chart are the ones the design pins. It
 # cannot prove the chart renders with them (the chart's own helm-template
-# checks do that) or that the hub boots; those are vm-deploy's live checks.
+# checks do that) or that the hub boots; those are the operator's live checks.
 mock_provider "google" {}
 mock_provider "kubernetes" {}
 mock_provider "helm" {}
@@ -12,10 +12,10 @@ variables {
   project_id          = "tfha-test-project"
   region              = "us-central1"
   hub_name            = "tfha-gke-h3"
-  public_url          = "https://tfha-gke-h3.test.scion-ai.dev"
+  public_url          = "https://tfha-gke-h3.example.com"
   iap_audience        = "/projects/123456789012/global/backendServices/4242424242"
   image_repository    = "us-central1-docker.pkg.dev/tfha-test-project/tfha-scion/scion-hub-gke"
-  image_digest        = "sha256:538ffc64d7e9cd15a24136bf1493c0154bc386aec0b700c2a5c805092d3c2f96"
+  image_digest        = "sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
   hub_sa_email        = "tfha-gke-h3-hub@tfha-test-project.iam.gserviceaccount.com"
   transport_sa_email  = "tfha-gke-h3-transport@tfha-test-project.iam.gserviceaccount.com"
   image_registry      = "us-central1-docker.pkg.dev/tfha-test-project/tfha-scion"
@@ -25,6 +25,7 @@ variables {
   db_password         = "not-a-real-password"
   sql_connection_name = "tfha-test-project:us-central1:tfha-pg"
   iap_oauth_client_id = "123456789-abc.apps.googleusercontent.com"
+  neg_zones           = ["us-central1-a", "us-central1-b", "us-central1-c"]
 }
 
 run "client_id_set_installs_the_hub" {
@@ -46,7 +47,7 @@ run "client_id_set_installs_the_hub" {
   }
 
   assert {
-    condition     = output.chart_values.image.digest == "sha256:538ffc64d7e9cd15a24136bf1493c0154bc386aec0b700c2a5c805092d3c2f96" && !contains(keys(output.chart_values.image), "tag")
+    condition     = output.chart_values.image.digest == "sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface" && !contains(keys(output.chart_values.image), "tag")
     error_message = "the hub image must be pinned by digest, with no tag."
   }
 
@@ -71,7 +72,7 @@ run "client_id_set_installs_the_hub" {
   }
 
   assert {
-    condition     = output.chart_values.hub.baseUrl == "https://tfha-gke-h3.test.scion-ai.dev" && output.chart_values.hub.hubId == "tfha-gke-h3"
+    condition     = output.chart_values.hub.baseUrl == "https://tfha-gke-h3.example.com" && output.chart_values.hub.hubId == "tfha-gke-h3"
     error_message = "hub.baseUrl must be the front's public_url and hub.hubId the hub name."
   }
 
@@ -110,8 +111,9 @@ run "client_id_set_installs_the_hub" {
   assert {
     condition = jsondecode(kubernetes_service_v1.neg.metadata[0].annotations["cloud.google.com/neg"]) == {
       exposed_ports = { "8080" = { name = "tfha-gke-h3-hub-neg" } }
+      zones         = ["us-central1-a", "us-central1-b", "us-central1-c"]
     }
-    error_message = "the NEG Service must expose port 8080 as a standalone NEG named <hub>-hub-neg."
+    error_message = "the NEG Service must expose port 8080 as a standalone NEG named <hub>-hub-neg, pre-provisioned in every neg_zones zone."
   }
 
   assert {
@@ -184,4 +186,50 @@ run "non_digest_rejected" {
   }
 
   expect_failures = [var.image_digest]
+}
+
+run "wildcard_neg_zone_rejected" {
+  command = plan
+
+  variables {
+    neg_zones = ["*"]
+  }
+
+  expect_failures = [var.neg_zones]
+}
+
+# The chart's CI renders deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml
+# as "the values Terraform generates". This run plans with that fixture's
+# placeholder inputs and requires chart_values to equal the fixture exactly
+# (minus database.password, which goes through set_sensitive), so the fixture
+# cannot silently drift from what this module hands Helm.
+run "chart_ci_fixture_matches_chart_values" {
+  command = plan
+
+  variables {
+    project_id           = "example-project"
+    public_url           = "https://tfha-gke-h3.example.com"
+    image_repository     = "us-central1-docker.pkg.dev/example-project/example-repo/scion-hub-gke"
+    image_digest         = "sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+    hub_sa_email         = "tfha-gke-h3-hub@example-project.iam.gserviceaccount.com"
+    transport_sa_email   = "tfha-gke-h3-transport@example-project.iam.gserviceaccount.com"
+    image_registry       = "us-central1-docker.pkg.dev/example-project/example-repo"
+    sql_connection_name  = "example-project:us-central1:tfha-pg"
+    iap_oauth_client_id  = "123456789-placeholder.apps.googleusercontent.com"
+    admin_emails         = ["admin@example.com"]
+    db_password_rotation = "2026-10-06"
+  }
+
+  assert {
+    condition = jsonencode(output.chart_values) == jsonencode(merge(
+      yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke.yaml")),
+      {
+        database = {
+          for k, v in yamldecode(file("${path.module}/../../../helm/scion-hub/ci/values-terraform-hub-gke.yaml")).database :
+          k => v if k != "password"
+        }
+      },
+    ))
+    error_message = "deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml no longer matches chart_values; update the fixture with the module."
+  }
 }

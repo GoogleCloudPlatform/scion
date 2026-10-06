@@ -163,3 +163,13 @@ variable "boot_prerequisites" {
   type        = map(string)
   default     = {}
 }
+
+variable "neg_zones" {
+  description = "Zones written into the NEG Service's cloud.google.com/neg annotation (\"zones\"), so the GKE NEG controller creates a standalone NEG in each one even when it has no nodes. Must be the same list the front door reads NEGs from. Needs GKE 1.36.2-gke.3104000 or later."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.neg_zones) > 0 && !contains(var.neg_zones, "*")
+    error_message = "neg_zones must list at least one explicit zone (no \"*\" wildcard: the front door reads one NEG per listed zone)."
+  }
+}

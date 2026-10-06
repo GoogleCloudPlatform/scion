@@ -32,10 +32,14 @@ on:
     branches: [ main ]
     paths:
       - 'deploy/terraform/**'
+      # modules/hub-gke's terraform test compares chart_values with this fixture.
+      - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml'
       - '.github/workflows/terraform-ci.yml'
   pull_request:
     paths:
       - 'deploy/terraform/**'
+      # modules/hub-gke's terraform test compares chart_values with this fixture.
+      - 'deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml'
       - '.github/workflows/terraform-ci.yml'
 
 permissions:
@@ -151,7 +155,7 @@ jobs:
         with:
           tflint_version: v0.64.0
 
-      - name: tflint (both roots and every module)
+      - name: tflint (all three roots and every module)
         run: |
           set -euo pipefail
           checked=0

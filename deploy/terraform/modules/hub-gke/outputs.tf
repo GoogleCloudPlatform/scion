@@ -3,6 +3,11 @@ output "neg_name" {
   value       = kubernetes_service_v1.neg.metadata[0].uid == null ? local.neg_name : local.neg_name
 }
 
+output "neg_annotation" {
+  description = "The NEG Service's cloud.google.com/neg annotation (JSON), including the \"zones\" the NEG controller pre-provisions. For operators and tests."
+  value       = kubernetes_service_v1.neg.metadata[0].annotations["cloud.google.com/neg"]
+}
+
 output "namespace" {
   description = "The hub's own namespace (<hub_name>-system), where the release, the NEG Service and the session secret live."
   value       = kubernetes_namespace_v1.system.metadata[0].name
