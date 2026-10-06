@@ -1920,17 +1920,25 @@ describe('chat page — startup after the page is removed', () => {
    * initV2 resumes only once the test runner has answered its imports,
    * which may take any number of macrotask turns under load.
    */
-  function trackStartups(page: unknown): () => Promise<void> {
+  function trackStartups(page: unknown): {
+    count: () => number;
+    settled: () => Promise<void>;
+  } {
     const el = page as { initV2: () => Promise<void> };
     const startups: Promise<void>[] = [];
     const initV2 = el.initV2;
+    // Deliberately shadows the private initV2 on this instance only; if the
+    // method is renamed, initV2 is undefined here and the call fails loudly.
     el.initV2 = function (this: unknown): Promise<void> {
       const startup = initV2.call(this);
       startups.push(startup);
       return startup;
     };
-    return async () => {
-      await Promise.all(startups);
+    return {
+      count: () => startups.length,
+      settled: async () => {
+        await Promise.all(startups);
+      },
     };
   }
 
@@ -1963,13 +1971,15 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
-    const startupsSettled = trackStartups(el);
+    const startups = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     document.body.appendChild(el);
     // The router replaces the page before initV2's imports come back.
     el.remove();
 
-    await startupsSettled();
+    // Startup really ran, so the assertions below cannot pass vacuously.
+    expect(startups.count()).toBe(1);
+    await startups.settled();
 
     expect(dmListLoads()).toBe(0);
     expect(el._fallbackPollInterval).toBeNull();
@@ -1982,7 +1992,7 @@ describe('chat page — startup after the page is removed', () => {
     const intervals = trackIntervals();
     await loadLazyModules();
     const el = createUnrenderedPage();
-    const startupsSettled = trackStartups(el);
+    const startups = trackStartups(el);
     window.history.replaceState({}, '', '/chat');
     try {
       document.body.appendChild(el);
@@ -1991,7 +2001,7 @@ describe('chat page — startup after the page is removed', () => {
 
       // Both startups: the superseded one must have given up, not just
       // not yet arrived.
-      await startupsSettled();
+      await startups.settled();
 
       expect(el.v2SpaceRailLoaded).toBe(true);
       expect(dmListLoads()).toBe(1);
@@ -2028,16 +2038,6 @@ describe('chat page — startup after the page is removed', () => {
       );
     }
 
-    /**
-     * Import the members module and ignore the result. Vitest applies a
-     * vi.doMock or vi.doUnmock at the next import, and drops any queued
-     * while that import is still being resolved; importing here applies
-     * each one before the next step, so none leaks into another test.
-     */
-    async function applyMembersMock(): Promise<void> {
-      await import('../shared/chat/chat-members.js').catch(() => undefined);
-    }
-
     beforeEach(async () => {
       // Load the real modules first, so these tests time the same whether
       // or not an earlier test already did: only the mocked import differs.
@@ -2048,12 +2048,19 @@ describe('chat page — startup after the page is removed', () => {
       vi.doMock('../shared/chat/chat-members.js', () => {
         throw chunkError;
       });
-      await applyMembersMock();
+      // Vitest applies a vi.doMock or vi.doUnmock at the next import, and
+      // drops any queued while that import is still being resolved. Importing
+      // here applies the mock before the test starts, and proves it is active.
+      await expect(import('../shared/chat/chat-members.js')).rejects.toMatchObject({
+        cause: chunkError,
+      });
     });
 
     afterEach(async () => {
       vi.doUnmock('../shared/chat/chat-members.js');
-      await applyMembersMock();
+      // Apply the unmock now, so the throwing mock cannot leak into the next
+      // test; a failure here means the real module did not load back.
+      await import('../shared/chat/chat-members.js');
       process.off('unhandledRejection', onUnhandled);
     });
 
