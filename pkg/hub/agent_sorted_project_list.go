@@ -35,24 +35,41 @@ const sortedProjectDecisionCeiling = 4005
 // effectivePagedPageSize keeps the paged branch inside
 // sortedProjectDecisionCeiling at every legal (limit, n) pair even with no
 // race involved: the sorted project endpoint's paged branch costs
-// 5 + n + 7*pageSize decisions, which breaches the ceiling on its own at
-// legal (limit, n) pairs -- e.g. limit=500 at n=2,000 costs 5,505 unraced.
-// P_eff = min(limit, floor((4000-n)/7)) keeps every paged request within
-// 4,005 unraced (4,504 raced) for every n up to the 2,000 candidate
-// ceiling, where n is the member-read count (len(members), already
-// capped at authorizedListMaxCandidates by the time this is called), not
-// the ceiling pre-check COUNT. At n<=500, P_eff==limit (up to 500, the
-// size before this page-size clamp was added); at n=2,000, P_eff<=285.
+// 5 + n + perRow*pageSize decisions, which breaches the ceiling on its own
+// at legal (limit, n) pairs -- e.g. limit=500 at n=2,000 costs 5,505
+// unraced at perRow=7.
+//
+// perRow is the unraced decision cost of one page row: 7 (the remaining
+// actions; the row's read decision is reused from the list read pass), or
+// 8 for a scoped token without agent.read, whose page rows also get a
+// plain read decision for their read capability (scopedPageRowDecisions).
+// P_eff = min(limit, floor((4000-n)/perRow)) keeps every paged request
+// within 4,005 unraced for every n up to the 2,000 candidate ceiling,
+// where n is the member-read count (len(members), already capped at
+// authorizedListMaxCandidates by the time this is called), not the
+// ceiling pre-check COUNT. A raced row costs 8 at perRow=7 and up to 10
+// at perRow=8 (its plain read, the 8-action re-decision and one list
+// read), so a raced request stays within the race allowance (4,505). At
+// perRow=7, P_eff==limit for n<=500 and P_eff<=285 at n=2,000; at
+// perRow=8, P_eff<=250 at n=2,000.
 // P_eff is NOT part of the cursor binding, so a later page computing a
-// different P_eff (n having changed) does not invalidate the cursor --
-// only the position within the walk is bound, never the page size.
-func effectivePagedPageSize(limit, n int) int {
-	maxP := (sortedProjectDecisionCeiling - 5 - n) / 7
+// different P_eff (n or perRow having changed) does not invalidate the
+// cursor -- only the position within the walk is bound, never the page
+// size.
+func effectivePagedPageSize(limit, n, perRow int) int {
+	maxP := (sortedProjectDecisionCeiling - 5 - n) / perRow
 	if maxP < limit {
 		return maxP
 	}
 	return limit
 }
+
+// Unraced decision cost of one paged-branch page row (see
+// effectivePagedPageSize).
+const (
+	pageRowDecisions       = 7
+	scopedPageRowDecisions = 8
+)
 
 // This file implements sorted mode on the project agents endpoint: both
 // sort keys and both directions, fit/complete,
@@ -376,13 +393,19 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		}
 		// The paged branch's page size is bounded by n (this request's
 		// member-read count, i.e. len(members) above -- not the ceiling
-		// pre-check COUNT, which can be lower if the pool grew in between),
-		// not just the request's limit, so the per-request decision cost
-		// 5+n+7*pageSize never exceeds the decision ceiling. pEff deliberately
-		// does not enter the cursor binding (binding, above, is built before
+		// pre-check COUNT, which can be lower if the pool grew in between)
+		// and by the per-row cost, not just the request's limit, so the
+		// per-request decision cost 5+n+perRow*pageSize never exceeds the
+		// decision ceiling. A scoped token's page rows cost one more
+		// decision each (the plain read below). pEff deliberately does
+		// not enter the cursor binding (binding, above, is built before
 		// pEff exists): n can differ from one page to the next without
 		// invalidating a cursor.
-		pEff := effectivePagedPageSize(p.limit, n)
+		perRow := pageRowDecisions
+		if scopedToken {
+			perRow = scopedPageRowDecisions
+		}
+		pEff := effectivePagedPageSize(p.limit, n, perRow)
 		end := start + pEff
 		if end > len(r) {
 			end = len(r)
