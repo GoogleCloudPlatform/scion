@@ -182,13 +182,16 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	}
 }
 
+// connectedBrokerPageSize is the page size countOnlineRuntimeBrokers uses
+// when listing brokers. It is a variable so tests can force multiple pages.
+var connectedBrokerPageSize = 200
+
 // countOnlineRuntimeBrokers counts online runtime brokers. Message broker
 // plugin records (Discord, Telegram, ...) carry the "scion.io/plugin" label
 // and are always marked online, so they are not counted.
 func (s *Server) countOnlineRuntimeBrokers(ctx context.Context) (int, error) {
-	const pageSize = 200
 	filter := store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}
-	opts := store.ListOptions{Limit: pageSize, SkipTotalCount: true}
+	opts := store.ListOptions{Limit: connectedBrokerPageSize}
 	count := 0
 	for {
 		result, err := s.store.ListRuntimeBrokers(ctx, filter, opts)

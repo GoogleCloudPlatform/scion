@@ -397,3 +397,52 @@ func TestHealthStats_ConnectedBrokersExcludesPlugins(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &summary))
 	assert.Equal(t, 1, summary.Hub.ConnectedBrokers, "health summary")
 }
+
+// pageCountingStore counts ListRuntimeBrokers calls so a test can confirm
+// that a listing spanned more than one page.
+type pageCountingStore struct {
+	store.Store
+	calls int
+}
+
+func (p *pageCountingStore) ListRuntimeBrokers(ctx context.Context, filter store.RuntimeBrokerFilter, opts store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	p.calls++
+	return p.Store.ListRuntimeBrokers(ctx, filter, opts)
+}
+
+// The connected broker count must follow the cursor across pages and still
+// skip plugin records.
+func TestHealthStats_ConnectedBrokersMultiPage(t *testing.T) {
+	orig := connectedBrokerPageSize
+	connectedBrokerPageSize = 1
+	t.Cleanup(func() { connectedBrokerPageSize = orig })
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	for _, name := range []string{"page-broker-a", "page-broker-b"} {
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:            tid(name),
+			Name:          name,
+			Slug:          name,
+			Status:        store.BrokerStatusOnline,
+			LastHeartbeat: time.Now(),
+		}))
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:            tid("page-plugin-broker"),
+		Name:          "plugin-broker-discord",
+		Slug:          "plugin-broker-discord",
+		Status:        store.BrokerStatusOnline,
+		Labels:        map[string]string{"scion.io/plugin": "discord"},
+		LastHeartbeat: time.Now(),
+	}))
+
+	counting := &pageCountingStore{Store: srv.store}
+	srv.store = counting
+
+	count, err := srv.countOnlineRuntimeBrokers(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+	assert.Greater(t, counting.calls, 1, "count should span more than one page")
+}
