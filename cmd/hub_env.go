@@ -462,7 +462,11 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if wantJSON(envOutputJSON) {
-		return outputJSON(newEnvListOutput(scope, resp.ScopeID, resp.EnvVars))
+		listScope := resp.Scope
+		if listScope == "" {
+			listScope = scope
+		}
+		return outputJSON(newEnvListOutput(listScope, resp.ScopeID, resp.EnvVars))
 	}
 
 	if len(resp.EnvVars) == 0 {
@@ -504,7 +508,8 @@ type envVarOutput struct {
 }
 
 // envListOutput is the JSON shape of "scion hub env list". It keeps the
-// top-level fields of the Hub list response.
+// top-level fields of the Hub list response. Scope is taken from the
+// response and falls back to the scope the command asked for.
 type envListOutput struct {
 	EnvVars []envVarOutput `json:"envVars"`
 	Scope   string         `json:"scope"`

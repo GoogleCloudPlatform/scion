@@ -272,6 +272,25 @@ func TestRunEnvList_JSONModesEmpty(t *testing.T) {
 	}
 }
 
+func TestRunEnvList_JSONScopeFromResponse(t *testing.T) {
+	for _, mode := range jsonModes {
+		t.Run(mode.name, func(t *testing.T) {
+			setupJSONCmdTest(t, map[string]interface{}{
+				"/api/v1/env": map[string]interface{}{"envVars": []interface{}{}, "scope": "hub", "scopeId": "h1"},
+			})
+			outputFormat = mode.format
+			envOutputJSON = mode.jsonFlag
+
+			out := captureStdout(t, func() {
+				require.NoError(t, runEnvList(hubEnvListCmd, nil))
+			})
+			got := decodeJSONObject(t, out)
+			assert.Equal(t, "hub", got["scope"], "the scope in the Hub response wins over the command scope")
+			assert.Equal(t, "h1", got["scopeId"])
+		})
+	}
+}
+
 func TestRunEnvGet_NoKeyEmptyJSON(t *testing.T) {
 	for _, mode := range jsonModes {
 		t.Run(mode.name, func(t *testing.T) {
