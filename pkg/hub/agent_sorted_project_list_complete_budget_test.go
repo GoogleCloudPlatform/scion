@@ -32,44 +32,42 @@ import (
 // is served by the paged branch, keeping every branch within
 // sortedProjectDecisionCeiling.
 
-// TestCompleteBranchMaxCandidates_BoundaryWithinCeiling checks, for both
-// per-row costs (a normal caller and a scoped token without agent:read),
-// that the complete branch at the boundary n stays within the decision
-// ceiling and one more candidate would not. The boundaries are hard-coded
-// so an over-strict threshold is caught too.
-func TestCompleteBranchMaxCandidates_BoundaryWithinCeiling(t *testing.T) {
+// TestCompleteBranchMaxCandidates_StaysWithinPageCeiling checks, for both
+// per-row costs (the default and the higher per-row cost), that the
+// complete branch at the boundary n stays within the decision ceiling and
+// one more candidate would not. Both sides are asserted, so an over-strict
+// threshold is caught too.
+func TestCompleteBranchMaxCandidates_StaysWithinPageCeiling(t *testing.T) {
 	cases := []struct {
 		name   string
 		perRow int
-		want   int
 	}{
-		{"normal", pageRowDecisions, 500},       // floor(4000/8)
-		{"scoped", scopedPageRowDecisions, 444}, // floor(4000/9)
+		{"default per-row cost", pageRowDecisions},
+		{"higher per-row cost", scopedPageRowDecisions},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := completeBranchMaxCandidates(tc.perRow)
-			require.Equal(t, tc.want, b)
-			assert.LessOrEqual(t, 5+b*(1+tc.perRow), sortedProjectDecisionCeiling,
+			n := completeBranchMaxCandidates(tc.perRow)
+			assert.LessOrEqual(t, 5+n*(1+tc.perRow), sortedProjectDecisionCeiling,
 				"the complete branch at the boundary stays within the decision ceiling")
-			assert.Greater(t, 5+(b+1)*(1+tc.perRow), sortedProjectDecisionCeiling,
+			assert.Greater(t, 5+(n+1)*(1+tc.perRow), sortedProjectDecisionCeiling,
 				"one candidate past the boundary would exceed the decision ceiling")
 		})
 	}
-	// The largest legal fit is 500, so a normal caller's complete branch
-	// is never narrowed by the threshold.
+	// The largest legal fit is 500, so at the default per-row cost the
+	// complete branch is never narrowed by the threshold.
 	assert.GreaterOrEqual(t, completeBranchMaxCandidates(pageRowDecisions), 500)
 }
 
-// TestListProjectAgentsSorted_CompleteBudget_ScopedAtBoundary_StaysComplete
-// checks that a scoped token at exactly the boundary candidate count still
-// gets the complete response, within the decision ceiling.
-func TestListProjectAgentsSorted_CompleteBudget_ScopedAtBoundary_StaysComplete(t *testing.T) {
-	const n = 444
-	require.Equal(t, n, completeBranchMaxCandidates(scopedPageRowDecisions))
+// TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_AtBoundary_StaysComplete
+// checks that a caller with the higher per-row cost at exactly the boundary
+// candidate count still gets the complete response, within the decision
+// ceiling.
+func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_AtBoundary_StaysComplete(t *testing.T) {
+	n := completeBranchMaxCandidates(scopedPageRowDecisions)
 
 	f := sortedListSetup(t)
-	f.createAgentsBulk(t, n, "cbscoped-at", string(state.PhaseStopped), nil)
+	f.createAgentsBulk(t, n, "cbhighcost-at", string(state.PhaseStopped), nil)
 	key := mintScopedUAT(t, f.srv, f.owner.ID, f.project.ID, []string{"agent:list"})
 
 	emitter := &recordingDecisionAuditEmitter{}
@@ -85,29 +83,32 @@ func TestListProjectAgentsSorted_CompleteBudget_ScopedAtBoundary_StaysComplete(t
 	assert.Equal(t, n, resp.TotalCount)
 	assert.Empty(t, resp.NextCursor)
 
-	const want = 5 + n*9 // 4,001
+	want := 5 + n*9
 	assert.Len(t, emitter.records, want)
 	assert.LessOrEqual(t, len(emitter.records), sortedProjectDecisionCeiling)
 }
 
-// TestListProjectAgentsSorted_CompleteBudget_ScopedOverBoundary_GoesPaged
-// checks that a scoped token one candidate past the boundary, and at
-// n=500, gets a paged response within the decision ceiling, and that the
-// paged walk still returns every listed agent.
-func TestListProjectAgentsSorted_CompleteBudget_ScopedOverBoundary_GoesPaged(t *testing.T) {
+// TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_OverBoundary_GoesPaged
+// checks that a caller with the higher per-row cost, one candidate past the
+// boundary, and at n=500, gets a paged response within the decision
+// ceiling, and that the paged walk still returns every listed agent.
+func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_OverBoundary_GoesPaged(t *testing.T) {
+	onePast := completeBranchMaxCandidates(scopedPageRowDecisions) + 1
 	cases := []struct {
+		name     string
 		n        int
 		wantPEff int
 	}{
-		{445, 444}, // floor((4000-445)/8) = 444
-		{500, 437}, // floor((4000-500)/8) = 437
+		// The paged branch serves floor((ceiling-5-n)/perRow) rows.
+		{"one candidate past the boundary", onePast, (sortedProjectDecisionCeiling - 5 - onePast) / 8},
+		{"n=500", 500, 437}, // floor((4000-500)/8) = 437
 	}
 	for _, tc := range cases {
-		t.Run(fmt.Sprintf("n=%d", tc.n), func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			require.Greater(t, tc.n, completeBranchMaxCandidates(scopedPageRowDecisions))
 
 			f := sortedListSetup(t)
-			f.createAgentsBulk(t, tc.n, fmt.Sprintf("cbscoped-%d", tc.n), string(state.PhaseStopped), nil)
+			f.createAgentsBulk(t, tc.n, fmt.Sprintf("cbhighcost-%d", tc.n), string(state.PhaseStopped), nil)
 			key := mintScopedUAT(t, f.srv, f.owner.ID, f.project.ID, []string{"agent:list"})
 
 			emitter := &recordingDecisionAuditEmitter{}
@@ -149,8 +150,8 @@ func TestListProjectAgentsSorted_CompleteBudget_ScopedOverBoundary_GoesPaged(t *
 }
 
 // TestListProjectAgentsSorted_CompleteBudget_NormalAt500_Unchanged checks
-// that a normal caller at n=500 with fit=500 still gets the complete
-// response, at exactly the decision ceiling.
+// that a caller with the default per-row cost at n=500 with fit=500 still
+// gets the complete response, at exactly the decision ceiling.
 func TestListProjectAgentsSorted_CompleteBudget_NormalAt500_Unchanged(t *testing.T) {
 	const n = 500
 	f := sortedListSetup(t)
