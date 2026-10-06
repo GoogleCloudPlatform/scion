@@ -775,9 +775,9 @@ func TestBridgeLateAcceptCleanedUp(t *testing.T) {
 	if n := p.a.Relay.ActiveBridges(); n != 0 {
 		t.Fatalf("%d active bridges", n)
 	}
-	if n := p.target.Stats().OpenStreams; n != 0 {
-		t.Fatalf("target has %d open streams after late accept", n)
-	}
+	// remoteClose wakes the target's readers before it removes the stream
+	// from the session table, so ReadAll can return before the removal.
+	settle(t, "target stream removal after late accept", func() bool { return p.target.Stats().OpenStreams == 0 })
 }
 
 // TestBridgeNoLeakAfterManyStreams (T8): streams that end normally, by
