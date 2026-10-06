@@ -1920,9 +1920,10 @@ describe('chat page — startup after the page is removed', () => {
    * initV2 resumes only once the test runner has answered its imports,
    * which may take any number of macrotask turns under load.
    */
-  function trackStartups(el: any): () => Promise<void> {
+  function trackStartups(page: unknown): () => Promise<void> {
+    const el = page as { initV2: () => Promise<void> };
     const startups: Promise<void>[] = [];
-    const initV2 = el.initV2 as () => Promise<void>;
+    const initV2 = el.initV2;
     el.initV2 = function (this: unknown): Promise<void> {
       const startup = initV2.call(this);
       startups.push(startup);
