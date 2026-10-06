@@ -179,6 +179,46 @@ func TestPullFromHub_StaysInsideDestThroughSymlinkedDir(t *testing.T) {
 	}
 }
 
+func TestPullFromHub_CreatesDirsOnlyInsideDest(t *testing.T) {
+	for _, consumer := range pullConsumers {
+		t.Run(consumer.name, func(t *testing.T) {
+			base, dest, sibling := pullDestLayout(t)
+			require.NoError(t, os.MkdirAll(dest, 0755))
+			if err := os.Symlink(sibling, filepath.Join(dest, "link")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			server := newPullDestServer(t, consumer.collection, consumer.id, []string{"link/sub/file.txt"})
+			err := consumer.pull(t, newPullHubCtx(t, server), dest)
+			require.Error(t, err)
+			requireOnlyDestAndSibling(t, base, dest, sibling)
+		})
+	}
+}
+
+func TestPullFromHub_WritesOnlyInsideDestThroughSymlinkedFile(t *testing.T) {
+	for _, consumer := range pullConsumers {
+		t.Run(consumer.name, func(t *testing.T) {
+			_, dest, sibling := pullDestLayout(t)
+			require.NoError(t, os.MkdirAll(dest, 0755))
+			target := filepath.Join(sibling, "target.txt")
+			require.NoError(t, os.WriteFile(target, []byte("original"), 0644))
+			if err := os.Symlink(target, filepath.Join(dest, "file.txt")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			server := newPullDestServer(t, consumer.collection, consumer.id, []string{"file.txt"})
+			err := consumer.pull(t, newPullHubCtx(t, server), dest)
+			require.Error(t, err)
+
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, "original", string(got))
+			siblingEntries, err := os.ReadDir(sibling)
+			require.NoError(t, err)
+			require.Len(t, siblingEntries, 1)
+		})
+	}
+}
+
 func TestPullFromHub_WritesNestedEntries(t *testing.T) {
 	for _, consumer := range pullConsumers {
 		t.Run(consumer.name, func(t *testing.T) {

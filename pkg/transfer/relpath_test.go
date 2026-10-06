@@ -275,3 +275,44 @@ func TestClient_DownloadFiles_NetworkErrorUnchanged(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestClient_DownloadFiles_CreatesDirsOnlyInsideDest(t *testing.T) {
+	server := newContentServer(t)
+	client := NewClient(server.Client())
+	base, dest, sibling := newRootTestLayout(t)
+	if err := os.Symlink(sibling, filepath.Join(dest, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	urls := []DownloadURLInfo{{Path: "link/sub/file.txt", URL: server.URL + "/x"}}
+	if err := client.DownloadFiles(context.Background(), urls, dest, nil); err == nil {
+		t.Fatal("expected an error creating a directory through a symlink that leaves the destination")
+	}
+	assertOnlyDestAndSibling(t, base, sibling)
+}
+
+func TestClient_DownloadFiles_WritesOnlyInsideDestThroughSymlinkedFile(t *testing.T) {
+	server := newContentServer(t)
+	client := NewClient(server.Client())
+	_, dest, sibling := newRootTestLayout(t)
+	target := filepath.Join(sibling, "target.txt")
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dest, "file.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	urls := []DownloadURLInfo{{Path: "file.txt", URL: server.URL + "/x"}}
+	if err := client.DownloadFiles(context.Background(), urls, dest, nil); err == nil {
+		t.Fatal("expected an error writing through a symlinked file that leaves the destination")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil || string(got) != "original" {
+		t.Errorf("file outside the destination = %q, %v; want unchanged", got, err)
+	}
+	entries, err := os.ReadDir(sibling)
+	if err != nil || len(entries) != 1 {
+		t.Errorf("sibling directory should hold only the original file, has %d entries (%v)", len(entries), err)
+	}
+}
