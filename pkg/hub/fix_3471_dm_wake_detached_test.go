@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"errors"
-	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -387,36 +386,73 @@ func (g *gateHookStore) HasOutstandingBrokerDispatch(ctx context.Context, agentI
 	return blocked, err
 }
 
-// A sender that already left (request cancelled, or deadline passed) before
-// the resume gets no wake: nothing is claimed, dispatched or written, the
-// agent stays suspended and holds no slot. Leaving during the start gate
-// reaches the wake's own check; leaving before the call is refused earlier
-// on the request.
+// flipDeadlineCtx is a context whose deadline passes when flip is called,
+// not on a timer, so a test can expire it at an exact point.
+type flipDeadlineCtx struct {
+	context.Context
+	mu       sync.Mutex
+	deadline time.Time
+	expired  bool
+	done     chan struct{}
+}
+
+func newFlipDeadlineCtx() *flipDeadlineCtx {
+	return &flipDeadlineCtx{Context: context.Background(), deadline: time.Now().Add(time.Hour), done: make(chan struct{})}
+}
+
+func (c *flipDeadlineCtx) Deadline() (time.Time, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.deadline, true
+}
+
+func (c *flipDeadlineCtx) Done() <-chan struct{} { return c.done }
+
+func (c *flipDeadlineCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.expired {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func (c *flipDeadlineCtx) flip() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.expired {
+		c.expired, c.deadline = true, time.Now()
+		close(c.done)
+	}
+}
+
+// A sender that already left (request cancelled, or its time budget ran
+// out) before the resume gets no wake: nothing is claimed, dispatched or
+// written, the agent stays suspended and holds no slot, and the answer is
+// the request-ended refusal. Leaving during the start gate reaches the
+// wake's own check; leaving before the call is answered by the gate.
 func TestDMWake_SenderGoneBeforeResume_NoWake(t *testing.T) {
 	cases := []struct {
-		name string
-		// duringGate: the sender leaves while the start gate runs, so the
-		// gate itself passes and the wake's check must stop the resume.
-		duringGate bool
-		setup      func(g *gateHookStore) (context.Context, context.CancelFunc)
+		name  string
+		setup func(g *gateHookStore) (context.Context, context.CancelFunc)
 	}{
-		{"cancelled before the call", false, func(_ *gateHookStore) (context.Context, context.CancelFunc) {
+		{"cancelled before the call", func(_ *gateHookStore) (context.Context, context.CancelFunc) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			return ctx, cancel
 		}},
-		{"deadline passed before the call", false, func(_ *gateHookStore) (context.Context, context.CancelFunc) {
+		{"deadline passed before the call", func(_ *gateHookStore) (context.Context, context.CancelFunc) {
 			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 		}},
-		{"cancelled during the start gate", true, func(g *gateHookStore) (context.Context, context.CancelFunc) {
+		{"cancelled during the start gate", func(g *gateHookStore) (context.Context, context.CancelFunc) {
 			ctx, cancel := context.WithCancel(context.Background())
 			g.hook = cancel
 			return ctx, cancel
 		}},
-		{"deadline passed during the start gate", true, func(g *gateHookStore) (context.Context, context.CancelFunc) {
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			g.hook = func() { <-ctx.Done() }
-			return ctx, cancel
+		{"deadline passed during the start gate", func(g *gateHookStore) (context.Context, context.CancelFunc) {
+			ctx := newFlipDeadlineCtx()
+			g.hook = ctx.flip
+			return ctx, func() {}
 		}},
 	}
 	for _, tc := range cases {
@@ -433,10 +469,10 @@ func TestDMWake_SenderGoneBeforeResume_NoWake(t *testing.T) {
 				require.Error(t, reqCtx.Err())
 				assert.Nil(t, res)
 				require.NotNil(t, dmErr, "the wake does not start for a gone sender")
-				if tc.duringGate {
-					assert.Equal(t, ErrCodeRuntimeError, dmErr.Code)
-					assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
-				}
+				want := requestEndedRefusal()
+				assert.Equal(t, want.Code, dmErr.Code)
+				assert.Equal(t, want.HTTPStatus, dmErr.HTTPStatus)
+				assert.Equal(t, want.Message, dmErr.Message)
 				assert.EqualValues(t, 0, disp.startCount.Load(), "nothing was dispatched")
 				got, err := s.GetAgent(context.Background(), a.ID)
 				require.NoError(t, err)
