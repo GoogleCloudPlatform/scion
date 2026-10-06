@@ -1874,10 +1874,25 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// explicit memory-only configuration still gains a CPU limit here.
 	// Gated by runtime.enforce_resource_defaults (default true) so an operator
 	// can restore the previous unlimited behaviour without a rollback.
+	//
+	// ApplyBuiltinDefaultResources also keeps the built-in limit from
+	// conflicting with a larger CPU request (ptone/scion#3407): a larger
+	// resources.requests.cpu raises the built-in limit, and a larger
+	// kubernetes.resources.requests.cpu sets kubernetes.resources.limits.cpu,
+	// which only the Kubernetes runtime reads.
 	if finalScionCfg != nil && config.ShouldEnforceResourceDefaults(settings) {
-		if finalScionCfg.Resources == nil || finalScionCfg.Resources.Limits.CPU == "" {
-			finalScionCfg.Resources = config.MergeResourceSpec(
-				config.BuiltinDefaultResources(), finalScionCfg.Resources)
+		var k8sRes *api.K8sResources
+		if finalScionCfg.Kubernetes != nil {
+			k8sRes = finalScionCfg.Kubernetes.Resources
+		}
+		resources, newK8sRes := config.ApplyBuiltinDefaultResources(finalScionCfg.Resources, k8sRes)
+		finalScionCfg.Resources = resources
+		if newK8sRes != k8sRes {
+			// Copy rather than mutate: the Kubernetes block may be shared with
+			// the template or harness config it was resolved from.
+			kc := *finalScionCfg.Kubernetes
+			kc.Resources = newK8sRes
+			finalScionCfg.Kubernetes = &kc
 		}
 	}
 

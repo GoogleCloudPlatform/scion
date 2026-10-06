@@ -15,9 +15,11 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -208,5 +210,42 @@ func TestK8sResources_SpecNotMutated(t *testing.T) {
 	_ = buildPodResources(t, spec, nil)
 	if spec.Requests.CPU != "" || spec.Requests.Memory != "" || spec.Disk != "" || spec.Limits.Memory != "" {
 		t.Errorf("spec was mutated: %+v", *spec)
+	}
+}
+
+// ptone/scion#3407: after provisioning applies the built-in CPU limit, a larger
+// requests.cpu must give a valid pod (request <= limit) and Docker/Podman must
+// stay CPU-bounded.
+func TestK8sResources_BuiltinCPULimitRaisedForLargerRequest(t *testing.T) {
+	spec, k8s := config.ApplyBuiltinDefaultResources(&api.ResourceSpec{Requests: api.ResourceList{CPU: "4"}}, nil)
+	res := buildPodResources(t, spec, k8s)
+
+	assertQuantity(t, res.Requests, corev1.ResourceCPU, "4", "request")
+	assertQuantity(t, res.Limits, corev1.ResourceCPU, "4", "limit")
+
+	args, err := appendContainerResourceArgs([]string{"run"}, spec)
+	if err != nil {
+		t.Fatalf("appendContainerResourceArgs: %v", err)
+	}
+	if strings.Join(args, " ") != "run --cpus 4" {
+		t.Errorf("docker/podman args = %v, want [run --cpus 4]", args)
+	}
+}
+
+// A Kubernetes-only CPU request raises the pod CPU limit through
+// kubernetes.resources, while Docker/Podman keep the built-in --cpus 2.
+func TestK8sResources_BuiltinCPULimitK8sOnlyRequest(t *testing.T) {
+	spec, k8s := config.ApplyBuiltinDefaultResources(nil, &api.K8sResources{Requests: map[string]string{"cpu": "6"}})
+	res := buildPodResources(t, spec, k8s)
+
+	assertQuantity(t, res.Requests, corev1.ResourceCPU, "6", "request")
+	assertQuantity(t, res.Limits, corev1.ResourceCPU, "6", "limit")
+
+	args, err := appendContainerResourceArgs([]string{"run"}, spec)
+	if err != nil {
+		t.Fatalf("appendContainerResourceArgs: %v", err)
+	}
+	if strings.Join(args, " ") != "run --cpus 2" {
+		t.Errorf("docker/podman args = %v, want [run --cpus 2]", args)
 	}
 }
