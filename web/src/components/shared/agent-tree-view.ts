@@ -115,6 +115,20 @@ const MIN_SCALE = 0.25;
 const MAX_SCALE = 2.5;
 /** How long {@link ScionAgentTreeView.revealAgent} highlights the node it brought into view. */
 const HIGHLIGHT_MS = 2000;
+/** Rendered size, in CSS px, a jump to an agent zooms the agent's name to. */
+const JUMP_NAME_PX = 16;
+
+/**
+ * The zoom at which a name label whose font size is `fontSize` (a computed
+ * CSS value such as `"15.2px"`) renders at about {@link JUMP_NAME_PX},
+ * within the zoom limits. Returns `fallback` for a size that is not a
+ * positive px value.
+ */
+export function jumpScale(fontSize: string, fallback: number): number {
+  const px = fontSize.trim().endsWith('px') ? parseFloat(fontSize) : NaN;
+  if (!Number.isFinite(px) || px <= 0) return fallback;
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, JUMP_NAME_PX / px));
+}
 /**
  * How long {@link ScionAgentTreeView.revealAgent} waits for the canvas to
  * have a size before it gives up, so a much later render cannot move the
@@ -739,8 +753,8 @@ export class ScionAgentTreeView extends LitElement {
 
   /**
    * Brings one agent into view: expands any collapsed ancestors so its node
-   * is laid out, centers the viewport on it at the current zoom and
-   * highlights it briefly. Keyboard focus is left alone (see
+   * is laid out, centers the viewport on it at the zoom that renders its
+   * name at about 16px (see {@link jumpScale}) and highlights it briefly. Keyboard focus is left alone (see
    * {@link focusAgentNode}).
    *
    * The centering waits for the canvas to have a size, for a short while
@@ -795,13 +809,25 @@ export class ScionAgentTreeView extends LitElement {
     }
     // Keep the request pending while the canvas has no size (hidden or
     // mid-transition); the next render retries it.
-    if (!this.centerOn(node, this.scale)) return;
+    if (!this.centerOn(node, this.jumpScaleFor(id))) return;
     this.dropPendingReveal();
     this.highlightId = id;
     clearTimeout(this.highlightTimer);
     this.highlightTimer = setTimeout(() => {
       this.highlightId = null;
     }, HIGHLIGHT_MS);
+  }
+
+  /**
+   * The zoom a jump to `agentId` uses, from its rendered name label's font
+   * size; the current zoom while the label is not rendered.
+   */
+  private jumpScaleFor(agentId: string): number {
+    const name = this.renderRoot.querySelector<HTMLElement>(
+      `a.node[data-agent-id="${CSS.escape(agentId)}"] .name`
+    );
+    if (!name) return this.scale;
+    return jumpScale(getComputedStyle(name).fontSize, this.scale);
   }
 
   private dropPendingReveal(): void {
