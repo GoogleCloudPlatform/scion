@@ -352,4 +352,15 @@ func TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty(t *testing.T) {
 		"a refused removal still returns the resolved path")
 	_, err = os.Stat(kept)
 	assert.NoError(t, err, "the refused directory remains")
+
+	t.Run("unresolved path returns no path", func(t *testing.T) {
+		f := newHungPathFixture(t, "unresolved-project")
+		mountRoot := filepath.Join(f.tmpHome, "nfs-mount")
+		hangReadDirFor(t, mountRoot)
+		srv, _ := testServer(t)
+		srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+
+		assert.Equal(t, "", srv.removeHubManagedProjectDir("p", f.slug), "a path that cannot be resolved returns no path")
+		assert.DirExists(t, f.localDir, "nothing is removed when the path cannot be resolved")
+	})
 }
