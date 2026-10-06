@@ -59,6 +59,12 @@ func TestCompleteBranchMaxCandidates_StaysWithinPageCeiling(t *testing.T) {
 	assert.GreaterOrEqual(t, completeBranchMaxCandidates(pageRowDecisions), 500)
 }
 
+// The page size stays positive at the candidate cap for both row costs.
+func TestEffectivePagedPageSize_PositiveAtCandidateCap(t *testing.T) {
+	assert.GreaterOrEqual(t, effectivePagedPageSize(1, authorizedListMaxCandidates, scopedPageRowDecisions), 1)
+	assert.GreaterOrEqual(t, effectivePagedPageSize(1, authorizedListMaxCandidates, pageRowDecisions), 1)
+}
+
 // TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_AtBoundary_StaysComplete
 // checks that a caller with the higher per-row cost at exactly the boundary
 // candidate count still gets the complete response, within the decision
