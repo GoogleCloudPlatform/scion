@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -454,6 +455,9 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if !s.authorize(w, r, groupResource(group), ActionUpdate) {
 		return
 	}
+	if !s.requireSessionForRoleBoundGroup(w, r, group) {
+		return
+	}
 
 	var req UpdateGroupRequest
 	if err := readJSON(r, &req); err != nil {
@@ -551,6 +555,9 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 
 	// Enforce authorization: only group owner or admins can delete
 	if !s.authorize(w, r, groupResource(group), ActionDelete) {
+		return
+	}
+	if !s.requireSessionForRoleBoundGroup(w, r, group) {
 		return
 	}
 
@@ -690,6 +697,9 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	// delegation check (see authorizeGroupMemberGrant).
 	canDelegateResult, canDelegateReason, ok := s.authorizeGroupMemberGrant(w, r, group, req.Role)
 	if !ok {
+		return
+	}
+	if !s.requireSessionForRoleBoundGroup(w, r, group) {
 		return
 	}
 
@@ -1042,6 +1052,9 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 	if !s.authorize(w, r, groupResource(group), ActionRemoveMember) {
 		return
 	}
+	if !s.requireSessionForRoleBoundGroup(w, r, group) {
+		return
+	}
 
 	// Constraint-coverage gate (R5): if this group participates in any
 	// AccessConstraint, removing a member silently relaxes that constraint.
@@ -1091,6 +1104,52 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		"member_id", memberID)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// groupClosureHasRoleBinding reports whether the group, or any group that
+// transitively contains it, is the principal of a role binding of any
+// scope. A member of the group holds the authority of every such binding.
+func (s *Server) groupClosureHasRoleBinding(ctx context.Context, groupID string) (bool, error) {
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalGroup, ID: groupID}}
+	parents, err := s.store.GetParentGroups(ctx, groupID)
+	if err != nil {
+		return false, err
+	}
+	for _, pid := range parents {
+		principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: pid})
+	}
+	bindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+	if err != nil {
+		return false, err
+	}
+	return len(bindings) > 0, nil
+}
+
+// requireSessionForRoleBoundGroup refuses a user access token on a change
+// to a group whose closure carries a role binding: updating or deleting the
+// group, or adding or removing a member. Such a change moves role-binding
+// authority, so it is session-only with the GOV_PENDING reason
+// (session_only_gate.go). A group with no role binding in its closure, and
+// every other credential, proceed. It runs after the group authorization
+// check. Returns false when the response has been written.
+func (s *Server) requireSessionForRoleBoundGroup(w http.ResponseWriter, r *http.Request, group *store.Group) bool {
+	if !IsScopedUserIdentity(GetIdentityFromContext(r.Context())) {
+		return true
+	}
+	bound, err := s.groupClosureHasRoleBinding(r.Context(), group.ID)
+	if err != nil {
+		// Fail closed: the closure cannot be resolved.
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+			"failed to check role bindings for group", nil)
+		return false
+	}
+	if bound {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			"changing a group that carries a role binding requires an interactive session",
+			authzop.ReasonGovernancePending)
+		return false
+	}
+	return true
 }
 
 // isConstraintBearingGroup checks whether the given group ID appears as a
