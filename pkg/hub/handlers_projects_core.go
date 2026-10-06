@@ -3291,7 +3291,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 			projectConfigDir := filepath.Dir(configPath)
 			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
-					"project_id", projectID, "slug", project.Slug, "path", projectConfigDir, "error", err)
+					"project_id", projectID, "error_class", fsErrorClass(err))
 			}
 		}
 	}

@@ -27,6 +27,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -118,4 +120,34 @@ func TestRemoveProjectDirUnderProjectsRoot_FailureLogsProjectIDAndErrorClass(t *
 	assertSingleLogLine(t, logs, "failed to remove hub-managed project directory",
 		map[string]string{"project_id": projectID, "error_class": fsErrorClassPermission},
 		slug, tmpHome, ".scion", "permission denied", "path=", "error=")
+}
+
+// When the external project config directory cannot be removed after a
+// project delete, the warning carries the project ID and a fixed error class,
+// and no slug, path or error text.
+func TestExecutePostDeletionEffects_ConfigDirFailureLogsProjectIDAndErrorClass(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	srv, _ := testServer(t)
+	logs := captureProjectsLog(t, srv)
+
+	project := &store.Project{
+		ID:        "cccccccc-0000-4000-8000-000000000003",
+		Slug:      "config-remove-fails",
+		GitRemote: "https://example.com/org/config-remove-fails.git",
+	}
+	configPath, err := config.ProjectMarker{ProjectID: project.ID, ProjectSlug: project.Slug}.ExternalProjectPath()
+	require.NoError(t, err)
+	projectConfigDir := filepath.Dir(configPath)
+	writeProjectDirFile(t, configPath)
+	// The project-configs directory is read-only, so the project's entry in
+	// it cannot be unlinked.
+	makeReadOnlyDir(t, filepath.Dir(projectConfigDir))
+
+	srv.executePostDeletionEffects(context.Background(), project.ID, project, deletionEffectInputs{})
+
+	assert.DirExists(t, projectConfigDir, "the directory is left in place when removal fails")
+	assertSingleLogLine(t, logs, "failed to remove project config directory",
+		map[string]string{"project_id": project.ID, "error_class": fsErrorClassPermission},
+		project.Slug, tmpHome, ".scion", "project-configs", "permission denied", "slug=", "path=", "error=")
 }
