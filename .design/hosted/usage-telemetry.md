@@ -158,6 +158,8 @@ See §5's copilot row for the concrete counters, key formula and edge-case handl
 
 **Rules are enabled only when `SCION_USAGE_SOURCE=native`** (D4) and filtered to `SCION_HARNESS`. A deriver with no matching rules is a no-op.
 
+**Late activation from the provisioner overlay.** `Pipeline.Start` is not the only decision point. `sciontool init` starts the pipeline before the pre-start provisioner runs, so a `SCION_USAGE_SOURCE=native` that only the generated env overlay declares is invisible to Start. Init's overlay step therefore hands that single value to `Pipeline.ActivateUsageSource`, which builds the native deriver on the running pipeline (ptone/scion#3391). It activates only for `native`, never when the native telemetry policy is `disabled`, and never replaces a deriver that already has rules. If `SCION_USAGE_SOURCE` is present in init's own environment, even with an empty value, that runtime key wins and the overlay value is ignored: the supervisor's additive overlay merge keeps the existing key for the harness child, so the receiver and the child agree.
+
 **Dedupe (idempotence under retries).** An OTLP client may retry a request that sciontool partly processed; for example, a log export fails and the pipeline returns an error. So each derived event is keyed by `sha256(resource-identity ‖ scope ‖ time_unix_nano ‖ event.name ‖ request_id-or-canonical-attrs)`, and a repeat within the LRU window is ignored. Metric-rule dedupe uses the same interval-fingerprint idea as `metricStreams.remember`.
 
 **Consume semantics for metric-sourced rules** (Copilot only in this project):

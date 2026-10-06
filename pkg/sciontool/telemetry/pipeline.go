@@ -139,6 +139,98 @@ func NewWithConfig(config *Config) *Pipeline {
 	}
 }
 
+// UsageActivation is the outcome of Pipeline.ActivateUsageSource. Every
+// value other than UsageActivated names the reason activation was skipped,
+// so callers can explain to operators why native usage stayed off.
+type UsageActivation string
+
+const (
+	// UsageActivated means a native deriver was built and stored.
+	UsageActivated UsageActivation = "activated"
+	// UsageActivationNotNative means the requested source is not
+	// UsageSourceNative, so there is nothing for the receiver to do.
+	UsageActivationNotNative UsageActivation = "source is not native"
+	// UsageActivationRuntimeEnvPrecedence means SCION_USAGE_SOURCE is
+	// present in this process's environment (even if empty), and so wins.
+	UsageActivationRuntimeEnvPrecedence UsageActivation = "runtime SCION_USAGE_SOURCE takes precedence"
+	// UsageActivationNotRunning means the pipeline is nil, not started, or
+	// has no bound loopback config (which cannot happen once Start has
+	// succeeded, so in practice it means nil or not started).
+	UsageActivationNotRunning UsageActivation = "telemetry pipeline is not running"
+	// UsageActivationAlreadyActive means a deriver with rules is already in
+	// place and is left untouched.
+	UsageActivationAlreadyActive UsageActivation = "native usage derivation is already active"
+	// UsageActivationNoHarnessRule means SCION_HARNESS has no native rule.
+	UsageActivationNoHarnessRule UsageActivation = "harness has no native usage rule"
+)
+
+// ActivateUsageSource enables native usage derivation on an already-running
+// pipeline when the usage source is selected after Start, e.g. by a
+// container-script provisioner's env overlay, which sciontool init loads only
+// after the receiver is up (ptone/scion#3391). Without this, Start's
+// environment-only check sees the source unset and the deriver stays a no-op
+// for the lifetime of the process.
+//
+// It is deliberately narrow:
+//   - only UsageSourceNative activates anything; every other value
+//     (including "hooks", which the hook subprocess handles on its own) is
+//     ignored;
+//   - if SCION_USAGE_SOURCE is present in this process's environment, even
+//     with an empty value, it wins. This matches the additive overlay merge,
+//     which keeps any existing key for the harness child, so Start has
+//     already made the authoritative choice;
+//   - an already-active deriver is left untouched, so usage is never counted
+//     twice;
+//   - SCION_HARNESS gating still applies: a harness with no native rule stays
+//     a no-op.
+//
+// It returns UsageActivated when a new deriver was stored, and otherwise the
+// reason it was skipped.
+func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (UsageActivation, error) {
+	if source != UsageSourceNative {
+		return UsageActivationNotNative, nil
+	}
+	// Known limitation (predates ptone/scion#3391): the supervisor applies
+	// fetched hub secret overrides after the overlay merge, replacing the
+	// empty runtime placeholders. A secret named SCION_USAGE_SOURCE would
+	// therefore reach the child while this check sees only the empty
+	// placeholder and keeps native usage off. Usage sources are not secrets,
+	// so this is not supported.
+	if _, ok := os.LookupEnv("SCION_USAGE_SOURCE"); ok {
+		return UsageActivationRuntimeEnvPrecedence, nil
+	}
+	if p == nil {
+		return UsageActivationNotRunning, nil
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.running {
+		return UsageActivationNotRunning, nil
+	}
+	if current := p.usageDeriver.Load(); current != nil && len(current.rules) > 0 {
+		return UsageActivationAlreadyActive, nil
+	}
+	loopbackConfig := p.loopbackConfig.Load()
+	if loopbackConfig == nil {
+		return UsageActivationNotRunning, nil
+	}
+	deriver, err := newUsageDeriverForSource(ctx, loopbackConfig, source)
+	if err != nil {
+		return "", fmt.Errorf("creating usage deriver: %w", err)
+	}
+	if len(deriver.rules) == 0 {
+		return UsageActivationNoHarnessRule, nil
+	}
+	// p.mu serializes this with Start and Stop, the only other writers, so
+	// a plain Store cannot overwrite a deriver activated concurrently.
+	// handleLogs and handleMetrics Load the pointer per request; an
+	// in-flight request that loaded the old no-op deriver derives nothing.
+	p.usageDeriver.Store(deriver)
+	return UsageActivated, nil
+}
+
 // Start starts the telemetry pipeline.
 func (p *Pipeline) Start(ctx context.Context) error {
 	if p == nil {
@@ -247,6 +339,10 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// exports over loopback back into this same receiver (design §3.3). A
 	// harness with no matching rule, or SCION_USAGE_SOURCE unset, yields a
 	// cheap no-op deriver (D4/D10); only a construction failure is logged.
+	// Start is not the only decision point: when SCION_USAGE_SOURCE is absent
+	// from this process's environment (a present key wins even when empty),
+	// init can later activate native usage from the provisioner's env overlay
+	// via ActivateUsageSource (ptone/scion#3391).
 	// p.usageDeriver is an atomic.Pointer: a log request can arrive
 	// concurrently with this Store, between receiver.Start returning above
 	// and this assignment running, and handleLogs's Load must never race it.
