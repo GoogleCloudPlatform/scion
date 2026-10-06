@@ -272,17 +272,14 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// not on the error the download returned.
 			return
 		}
-		// A runtime failure reports the synchronous path's fixed client
-		// text (dlMessage), never dlErr's own text, which names the
-		// workspace path or GCS detail; the download step has logged the
-		// cause (ptone/scion#3496). The invalid-directory and
-		// unconfigured-bucket refusals are normally answered at admission
-		// (beginAsyncLaunch); if one is only found here, it still reports
-		// dlErr's text, as before.
+		// Report the synchronous path's client text (dlMessage), never
+		// dlErr's own text, which names the workspace path or GCS detail;
+		// the download step has logged the cause (ptone/scion#3496). This
+		// holds for the invalid-directory and unconfigured-bucket refusals
+		// too: admission (beginAsyncLaunch) normally answers those with the
+		// sync 400/422, and one only found here reports the same text,
+		// under runtime_error.
 		msg := dlMessage
-		if errors.Is(dlErr, errInvalidWorkspaceDir) || errors.Is(dlErr, errWorkspaceStorageUnconfigured) {
-			msg = dlErr.Error()
-		}
 		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", msg)
 		return
 	}

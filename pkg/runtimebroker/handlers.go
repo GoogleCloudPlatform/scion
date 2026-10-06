@@ -881,7 +881,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
 			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to get global dir: "+err.Error())
+			// Fixed text only; the cause stays in the broker log
+			// (ptone/scion#3496).
+			s.agentLifecycleLog.Error("Create failed to resolve the global dir", "op", opGetGlobalDir,
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "error", err)
+			RuntimeError(w, failedOpText(opGetGlobalDir))
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
@@ -1619,8 +1623,8 @@ func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
 // a GCS sync error can carry bucket, object or credential detail
 // (ptone/scion#3496). The cause is logged here, with the agent, project and
 // run, so it reaches the broker log on both the synchronous and the async
-// path. Both paths send httpMessage to the client for these failures, so
-// their texts are identical.
+// path. Both paths send httpMessage to the client for every failure
+// (the async path under runtime_error), so their texts are identical.
 func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (updated api.StartOptions, attemptMsg string, httpMessage string, err error) {
 	if req.WorkspaceStoragePath == "" {
 		return opts, "", "", nil
@@ -5826,7 +5830,7 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug string) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		RuntimeError(w, "Failed to get global dir: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opGetGlobalDir, err, "project_slug", slug)
 		return
 	}
 

@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -580,4 +581,125 @@ func (m *listErrManager) List(ctx context.Context, filter map[string]string) ([]
 		return nil, m.err
 	}
 	return m.mockAgentManager.List(ctx, filter)
+}
+
+// runLaunchTerminal runs lc's launch to completion and returns its single
+// terminal report.
+func runLaunchTerminal(t *testing.T, srv *Server, rtb *mockRuntimeBrokerService, lc launchCtx) *hubclient.AgentLaunchReport {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newLaunchRecord("L-"+lc.key.Slug, lc.key.Slug, store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	done := make(chan struct{})
+	go func() {
+		srv.runLaunch(ctx, rec, lc)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runLaunch did not return")
+	}
+	var terminals []*hubclient.AgentLaunchReport
+	for _, r := range rtb.getLaunchReports() {
+		if r.Report.State == hubclient.AgentLaunchReportStateSucceeded || r.Report.State == hubclient.AgentLaunchReportStateFailed {
+			terminals = append(terminals, r.Report)
+		}
+	}
+	if len(terminals) != 1 {
+		t.Fatalf("expected exactly one terminal, got %d: %+v", len(terminals), terminals)
+	}
+	return terminals[0]
+}
+
+// TestRunLaunch_NoBucketReportsSyncText covers runLaunch's own download
+// finding no bucket for the upload (admission normally refuses first): the
+// failed report carries the synchronous 422's text, under runtime_error,
+// not the sentinel error's text (ptone/scion#3496).
+func TestRunLaunch_NoBucketReportsSyncText(t *testing.T) {
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+	srv.config.WorktreeBase = t.TempDir()
+	srv.config.StorageBucket = ""
+	installFakeWorkspaceSync(t, nil)
+	const name = "agent-3496-runlaunch-nobucket"
+
+	got := runLaunchTerminal(t, srv, rtb, launchCtx{
+		req:  CreateAgentRequest{Name: name, WorkspaceStoragePath: "some/path"},
+		opts: api.StartOptions{Name: name, ProjectPath: t.TempDir()},
+		mgr:  mgr,
+		key:  launchKey{Slug: name},
+	})
+	if got.State != hubclient.AgentLaunchReportStateFailed || got.ErrorCode != "runtime_error" {
+		t.Fatalf("terminal = %+v, want failed with runtime_error", got)
+	}
+	if got.Message != pinnedWorkspaceStorageUnconfiguredText {
+		t.Fatalf("terminal message = %q, want the synchronous 422 text %q", got.Message, pinnedWorkspaceStorageUnconfiguredText)
+	}
+	if n := mgr.StartCallCount(); n != 0 {
+		t.Fatalf("Start must never be called without a workspace bucket, got %d calls", n)
+	}
+}
+
+// homeUnsetDetail is os.UserHomeDir's error text with HOME unset, the
+// cause the global-dir failures below must log and not send.
+const homeUnsetDetail = "$HOME is not defined"
+
+// TestCreateAgent_GlobalDirError_FixedText covers createAgent failing to
+// resolve the global dir for a hub-managed project: fixed text at the
+// client, cause in the broker log with the agent, project and run.
+func TestCreateAgent_GlobalDirError_FixedText(t *testing.T) {
+	srv, _ := newAsyncTestServer(t, newAsyncManager())
+	logs := captureLifecycleJSONLog(srv)
+	t.Setenv("HOME", "")
+	const name = "agent-3496-create-gd"
+
+	w := postCreate(t, srv, map[string]any{
+		"id": name, "name": name, "projectId": bootstrapProjectID, "runId": bootstrapRunID,
+		"projectSlug": "notes", "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	code, msg := decodeErrorMessage(t, w)
+	if code != ErrCodeRuntimeError || msg != "Failed to get global dir" {
+		t.Fatalf("error = %q %q, want runtime_error with the fixed text", code, msg)
+	}
+	rec := findLogRecord(logs.String(), "Create failed to resolve the global dir", map[string]string{"op": opGetGlobalDir})
+	if rec == nil {
+		t.Fatalf("no global dir failure record; logs: %s", logs.String())
+	}
+	if got, _ := rec["error"].(string); !strings.Contains(got, homeUnsetDetail) {
+		t.Errorf("log record error = %q, want it to carry %q", got, homeUnsetDetail)
+	}
+	for key, want := range map[string]string{"agent_id": name, "project_id": bootstrapProjectID, "run_id": bootstrapRunID} {
+		if rec[key] != want {
+			t.Errorf("log record %s = %v, want %q", key, rec[key], want)
+		}
+	}
+}
+
+// TestDeleteProject_GlobalDirError_FixedText covers deleteProject failing
+// to resolve the global dir: fixed text at the client, cause in the broker
+// log with the project slug.
+func TestDeleteProject_GlobalDirError_FixedText(t *testing.T) {
+	cfg := DefaultServerConfig()
+	srv := New(cfg, &mockAgentManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	logs := captureLifecycleJSONLog(srv)
+	t.Setenv("HOME", "")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/notes", nil)
+	w := httptest.NewRecorder()
+	srv.handleProjectBySlug(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	code, msg := decodeErrorMessage(t, w)
+	if code != ErrCodeRuntimeError || msg != "Failed to get global dir" {
+		t.Fatalf("error = %q %q, want runtime_error with the fixed text", code, msg)
+	}
+	assertWorkspaceOpLogged(t, logs.String(), opGetGlobalDir, "project_slug", "notes", homeUnsetDetail)
 }
