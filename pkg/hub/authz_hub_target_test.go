@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -327,4 +329,99 @@ func TestHubSARelationshipRule_AcceptsSystemParentShape(t *testing.T) {
 		})
 	}
 	assert.False(t, isHubScopedServiceAccount(Resource{Type: "gcp_service_account", ID: "sa-p", ParentType: "project", ParentID: f.project.ID}))
+}
+
+// TestCheckAccessWithEvidence_EvidenceClassifiesWithoutWidening pins that
+// CheckAccessWithEvidence passes server-built evidence to the bearer gate:
+// with matching evidence a hub token is decided by its ceiling and the
+// holder's live authority, and evidence never admits a request that the
+// ceiling, live authority or the token boundary denies.
+func TestCheckAccessWithEvidence_EvidenceClassifiesWithoutWidening(t *testing.T) {
+	f := newBearerFixture(t, "evidcheck")
+	ctx := context.Background()
+	authz := f.srv.authzService
+	admin := seedRoleUser(t, f.store, tid("evidcheck-super"), store.SystemRoleSuperAdmin, true)
+	norole := seedRoleUser(t, f.store, tid("evidcheck-none"), "", false)
+	groups := Resource{Type: "group"}
+	evidence := hubCollectionEvidence("group.list")
+
+	adminToken := NewScopedUserIdentityWithBoundaryAndDecoration(admin, hubBoundary(), []string{"group:list"}, tid("evidcheck-admin-cred"), bearerCeiling(t, "group:list"), nil)
+
+	t.Run("live authority and the selector allow", func(t *testing.T) {
+		d := authz.CheckAccessWithEvidence(ctx, adminToken, groups, ActionList, evidence)
+		assert.True(t, d.Allowed, d.Reason)
+	})
+
+	t.Run("the evidence reaches the gate", func(t *testing.T) {
+		d := authz.CheckAccessWithEvidence(ctx, adminToken, groups, ActionList, TargetScopeEvidence{})
+		assert.False(t, d.Allowed)
+		assert.Equal(t, bearerReasonTargetUnknown, d.Reason)
+	})
+
+	t.Run("no live authority denies", func(t *testing.T) {
+		token := NewScopedUserIdentityWithBoundaryAndDecoration(norole, hubBoundary(), []string{"group:list"}, tid("evidcheck-none-cred"), bearerCeiling(t, "group:list"), nil)
+		d := authz.CheckAccessWithEvidence(ctx, token, groups, ActionList, evidence)
+		assert.False(t, d.Allowed)
+		eval := authz.EvaluateBearerCeiling(ctx, principalContextForIdentity(norole), hubBoundary(), token.Ceiling(), "group.list", groups, BearerOptions{Evidence: evidence})
+		assert.Equal(t, BearerStageAuthority, eval.Stage, eval.Decision.Reason)
+	})
+
+	t.Run("a ceiling without the permission denies", func(t *testing.T) {
+		token := NewScopedUserIdentityWithBoundaryAndDecoration(admin, hubBoundary(), []string{"group:read"}, tid("evidcheck-read-cred"), bearerCeiling(t, "group:read"), nil)
+		d := authz.CheckAccessWithEvidence(ctx, token, groups, ActionList, evidence)
+		assert.False(t, d.Allowed)
+		eval := authz.EvaluateBearerCeiling(ctx, principalContextForIdentity(admin), hubBoundary(), token.Ceiling(), "group.list", groups, BearerOptions{Evidence: evidence})
+		assert.Equal(t, BearerStageCeiling, eval.Stage, eval.Decision.Reason)
+	})
+
+	t.Run("evidence does not widen a session decision", func(t *testing.T) {
+		withEvidence := authz.CheckAccessWithEvidence(ctx, norole, groups, ActionList, evidence)
+		without := authz.CheckAccess(ctx, norole, groups, ActionList)
+		assert.False(t, withEvidence.Allowed)
+		assert.Equal(t, without.Allowed, withEvidence.Allowed)
+	})
+
+	t.Run("evidence naming another project does not widen the boundary", func(t *testing.T) {
+		owner := bearerUser(f.ownerA)
+		token := NewScopedUserIdentityWithBoundaryAndDecoration(owner, projectBoundary(f.projectA), []string{"agent:list"}, tid("evidcheck-owner-cred"), bearerCeiling(t, "agent:list"), nil)
+		agents := Resource{Type: "agent"}
+		own := authz.CheckAccessWithEvidence(ctx, token, agents, ActionList, projectCollectionEvidence("agent.list", f.projectA))
+		assert.True(t, own.Allowed, own.Reason)
+		other := authz.CheckAccessWithEvidence(ctx, token, agents, ActionList, projectCollectionEvidence("agent.list", f.projectB))
+		assert.False(t, other.Allowed)
+		assert.Equal(t, bearerReasonOutsideProject, other.Reason)
+	})
+}
+
+// TestAuthorizeWithEvidence_WritesStatusForDecision pins that
+// authorizeWithEvidence admits an allowed request, writes 401 when the
+// request carries no identity, and writes 403 when the decision denies.
+func TestAuthorizeWithEvidence_WritesStatusForDecision(t *testing.T) {
+	f := newBearerFixture(t, "evidauthz")
+	admin := seedRoleUser(t, f.store, tid("evidauthz-super"), store.SystemRoleSuperAdmin, true)
+	evidence := hubCollectionEvidence("group.list")
+
+	run := func(identity Identity) (int, bool) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/groups", nil)
+		if identity != nil {
+			req = req.WithContext(contextWithIdentity(req.Context(), identity))
+		}
+		rec := httptest.NewRecorder()
+		ok := f.srv.authorizeWithEvidence(rec, req, Resource{Type: "group"}, ActionList, evidence)
+		return rec.Code, ok
+	}
+
+	allowed := NewScopedUserIdentityWithBoundaryAndDecoration(admin, hubBoundary(), []string{"group:list"}, tid("evidauthz-list-cred"), bearerCeiling(t, "group:list"), nil)
+	code, ok := run(allowed)
+	assert.True(t, ok)
+	assert.Equal(t, http.StatusOK, code, "nothing is written on allow")
+
+	code, ok = run(nil)
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusUnauthorized, code)
+
+	denied := NewScopedUserIdentityWithBoundaryAndDecoration(admin, hubBoundary(), []string{"group:read"}, tid("evidauthz-read-cred"), bearerCeiling(t, "group:read"), nil)
+	code, ok = run(denied)
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusForbidden, code)
 }

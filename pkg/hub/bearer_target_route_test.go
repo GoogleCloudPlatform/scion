@@ -237,3 +237,31 @@ func TestRouteGuard_BearerTargetRequiresSelector(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, code, "an unknown BearerTarget is a misconfigured route")
 	assert.False(t, called)
 }
+
+// TestRouteGuard_BearerTargetAdmitsHubTokenWithSelector pins that an
+// opted-in route guard admits a hub token that carries the route
+// permission's selector when its holder has the authority.
+func TestRouteGuard_BearerTargetAdmitsHubTokenWithSelector(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	admin := seedRoleUser(t, s, tid("routeadmit-super"), store.SystemRoleSuperAdmin, true)
+	token := NewScopedUserIdentityWithBoundaryAndDecoration(admin, hubBoundary(), []string{"group:list"}, tid("routeadmit-cred"), bearerCeiling(t, "group:list"), nil)
+	meta := RouteMetadata{Pattern: "/api/v1/test/route", RouteID: "test.route", Classification: RouteHubAdmin, Permission: "group.list", Resource: "group", Action: "list", BearerTarget: "hub_collection"}
+
+	called := false
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test/route", nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), token))
+	rec := httptest.NewRecorder()
+	srv.routeGuard(meta, func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called, "the handler runs")
+
+	target, evidence, ok := routeGuardTarget(meta)
+	require.True(t, ok)
+	eval := srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(admin), hubBoundary(), token.Ceiling(), meta.Permission, target, BearerOptions{Evidence: evidence})
+	assert.True(t, eval.Decision.Allowed, "stage %q reason %q", eval.Stage, eval.Decision.Reason)
+	assert.Equal(t, TargetScope{Kind: TargetScopeHub}, eval.TargetScope)
+}
