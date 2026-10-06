@@ -325,11 +325,11 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // LockProjectAgents) locks the project's agent rows FOR UPDATE, in ascending
 // ID order, before their memberships are deleted. Every agent hard-delete
 // path (and the project delete) takes locks agent -> membership -> agent
-// delete, with the agent locks in ascending ID order: DeleteAgent and finalize-hard (one
-// agent), PurgeDeletedAgents (ascending across all batches), this method, and
-// ProjectDeletionService, which calls LockProjectAgents before its
-// project-group cascade deletes any membership. So none of them can deadlock
-// (40P01) against another on overlapping agents.
+// delete, with the agent locks in ascending ID order: DeleteAgent and
+// finalize-hard (one agent), PurgeDeletedAgents (ascending across all
+// batches), this method, and ProjectDeletionService, which calls
+// LockProjectAgents before its project-group cascade deletes any membership.
+// So none of them can deadlock (40P01) against another on overlapping agents.
 //
 // The user-delete path (deleteUser and the admin allow-list delete in
 // pkg/hub) also overlaps ProjectDeletionService's group cascade, which
