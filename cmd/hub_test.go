@@ -605,14 +605,18 @@ wait
 		}
 	})
 
+	// Long enough that a slow /bin/sh start on a loaded machine still spawns
+	// the child before the timeout kills git; the FileExists check below
+	// fails the test if it did not, rather than passing without a stall.
 	orig := defaultBranchProbeTimeout
-	defaultBranchProbeTimeout = 200 * time.Millisecond
+	defaultBranchProbeTimeout = 1 * time.Second
 	t.Cleanup(func() { defaultBranchProbeTimeout = orig })
 
 	start := time.Now()
 	got := detectDefaultBranch("https://example.com/org/repo.git")
 	elapsed := time.Since(start)
 
+	require.FileExists(t, pidFile, "fake git must spawn the pipe-holding child before the timeout, or the stall is not exercised")
 	assert.Equal(t, "", got)
 	assert.Less(t, elapsed, 10*time.Second, "probe must not wait for the stalled child to exit")
 }
