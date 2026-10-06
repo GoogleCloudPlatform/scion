@@ -204,6 +204,42 @@ func (s *Server) managedAgentDelete(ctx context.Context, agent *store.Agent) err
 	return nil
 }
 
+// Warnings a managed create that lost to a delete reports in the 409's
+// details.warnings (compensateManagedCreate).
+const (
+	managedCreateCompensatedWarning      = "agent was deleted while it was being created; its managed-agent interaction was stopped"
+	managedCreateCompensateFailedWarning = "agent was deleted while it was being created; stopping its managed-agent interaction failed: "
+)
+
+// compensateManagedCreate cleans up the cloud side of a managed (hub-direct)
+// create whose delete won the race (ptone/scion#3454), and returns the
+// warnings for the 409.
+//
+// The delete engine already calls managedAgentDelete on the row it read
+// right after its claim. Whether that row names the interaction this create
+// started depends on whether the create's post-create write landed first:
+//
+//   - recorded (the write succeeded): it landed before the claim, since a
+//     claim bumps state_version and a later write would have conflicted. The
+//     engine's row carries the interaction ID and the engine stops it, so
+//     nothing is done here; this avoids a second delete.
+//   - not recorded: the claim may have come first, so the engine's row has no
+//     interaction ID and the engine cannot stop it. This create holds the
+//     only copy of the ID, so it stops the interaction itself.
+//
+// A create with no task started no interaction: nothing to clean up.
+func (s *Server) compensateManagedCreate(ctx context.Context, agent *store.Agent, recorded bool) []string {
+	if recorded || agent.Annotations[annotationInteractionID] == "" {
+		return nil
+	}
+	if err := s.managedAgentDelete(ctx, agent); err != nil {
+		s.agentLifecycleLog.Warn("Failed to stop the managed agent interaction of a create that lost to a delete",
+			"agent_id", agent.ID, "error", err)
+		return []string{managedCreateCompensateFailedWarning + err.Error()}
+	}
+	return []string{managedCreateCompensatedWarning}
+}
+
 // handleManagedAgentLifecycle handles lifecycle actions (start, stop, restart) for managed agents.
 func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Request, agent *store.Agent, action string) {
 	ctx := r.Context()
