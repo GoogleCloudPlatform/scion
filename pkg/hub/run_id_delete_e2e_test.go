@@ -51,6 +51,7 @@ type runLabelManager struct {
 	mu      sync.Mutex
 	entries []api.AgentInfo
 	deletes []runtime.RunRef
+	stops   []runtime.RunRef
 }
 
 func (m *runLabelManager) List(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
