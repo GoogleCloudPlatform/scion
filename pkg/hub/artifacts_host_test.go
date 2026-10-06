@@ -198,6 +198,7 @@ func TestArtifactHostMissingScope(t *testing.T) {
 		"unknown permission":     {agentCtx(), "agent.read", ""},
 		"no identity":            {context.Background(), artifacts.PermissionCreate, ""},
 		"user":                   {contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")), artifacts.PermissionCreate, ""},
+		"user access token":      {contextWithIdentity(context.Background(), NewScopedUserIdentityWithCeiling(NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"), "proj-1", []string{"agent:read"}, "uat-1", permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read"}})), artifacts.PermissionCreate, ""},
 		"synthetic agent, no id": {contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}, ProjectID: "proj-1"}}), artifacts.PermissionCreate, ""},
 	} {
 		assert.Equal(t, tc.want, host.MissingScope(tc.ctx, tc.permission), name)

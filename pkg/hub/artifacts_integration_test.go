@@ -711,3 +711,36 @@ func TestArtifactsAgentChainCheckedAtUse(t *testing.T) {
 	require.NoError(t, err)
 	expect("owner without an edge", ownerTok, http.StatusNotFound)
 }
+
+// TestArtifactsPublishRefusedWithBothScopesIsPlainForbidden: an agent whose
+// token carries both artifact scopes but is refused for another reason (a
+// project it does not belong to, or a delegation chain that no longer
+// allows publishing) gets the plain 403 forbidden, never missing_scope.
+func TestArtifactsPublishRefusedWithBothScopesIsPlainForbidden(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "plain403-p1")
+	p2 := artifactProject(t, s, "plain403-p2")
+	_, tok := artifactAgent(t, srv, s, p1.ID, "plain403-agent", AgentRoleBaseline)
+	claims, err := srv.GetAgentTokenService().ValidateAgentToken(tok)
+	require.NoError(t, err)
+	require.Contains(t, claims.Scopes, ScopeProjectArtifactRead)
+	require.Contains(t, claims.Scopes, ScopeProjectArtifactWrite)
+
+	assertPlainForbidden := func(name, target string) {
+		t.Helper()
+		rec := doRawAgentRequest(t, srv, http.MethodPost, target, []byte("x"), tok)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", name, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"code":"forbidden"`, name)
+		assert.NotContains(t, rec.Body.String(), artifacts.CodeMissingScope, name)
+	}
+	assertPlainForbidden("another project", "/api/v1/artifacts?name=a.txt&scope="+p2.ID)
+
+	// Its own project works until the delegator loses its role there.
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=a.txt", []byte("x"), tok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	_, err = s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, tid("art-delegator-"+p1.ID))
+	require.NoError(t, err)
+	assertPlainForbidden("narrowed delegation chain", "/api/v1/artifacts?name=b.txt")
+}

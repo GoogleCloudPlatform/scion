@@ -279,10 +279,16 @@ type explainingHost struct {
 	*fakeHost
 	scope string
 	calls int
+	// forbid fails the test on any call: set while exercising paths that
+	// must never reach the explainer.
+	forbid *testing.T
 }
 
 func (h *explainingHost) MissingScope(_ context.Context, permission string) string {
 	h.calls++
+	if h.forbid != nil {
+		h.forbid.Errorf("MissingScope(%q) called on a path that must not consult it", permission)
+	}
 	if permission != PermissionCreate {
 		return ""
 	}
@@ -325,12 +331,21 @@ func TestPublishMissingScope(t *testing.T) {
 		t.Errorf("credential refused for another reason: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// Reads never consult the explainer and keep their uniform 404.
-	host.scope, host.calls = "project:artifact:read", 0
+	// Reads never consult the explainer and keep their uniform 404: the
+	// spy fails the test on any call.
+	host.scope, host.calls, host.forbid = "project:artifact:read", 0, t
 	id := existing.Artifact.ID
 	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/a.txt", "/api/v1/artifacts/" + id + "/versions/1/files/a.txt"} {
 		if rec := f.do(nil, http.MethodGet, p, nil, nil); rec.Code != http.StatusNotFound {
 			t.Errorf("GET %s: %d, want 404", p, rec.Code)
+		}
+	}
+	// The same holds for a served caller whose credential does not
+	// permit reading.
+	f.host.deny(agentB, "project-1", PermissionRead)
+	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/a.txt", "/api/v1/artifacts/" + id + "/versions/1/files/a.txt"} {
+		if rec := f.do(&agentB, http.MethodGet, p, nil, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s as a caller without read: %d, want 404", p, rec.Code)
 		}
 	}
 	if host.calls != 0 {
