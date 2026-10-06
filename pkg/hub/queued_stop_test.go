@@ -569,7 +569,7 @@ type claimAfterRereadStore struct {
 func (s claimAfterRereadStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	a, err := s.Store.GetAgent(ctx, id)
 	if err == nil && id == s.agentID && s.fired.CompareAndSwap(false, true) {
-		if _, cerr := s.Store.ClaimAgentStart(ctx, id, "user-hub", store.StartClaimUser, "", time.Minute); cerr != nil {
+		if _, cerr := s.ClaimAgentStart(ctx, id, "user-hub", store.StartClaimUser, "", time.Minute); cerr != nil {
 			return nil, cerr
 		}
 	}
