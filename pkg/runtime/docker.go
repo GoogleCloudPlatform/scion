@@ -61,6 +61,7 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}
+	config.RuntimeName = r.Name()
 
 	args, err := buildCommonRunArgs(config)
 	if err != nil {
@@ -92,6 +93,8 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err != nil {
 		return "", err
 	}
+
+	newArgs = appendSharedDirGroupArgs(newArgs, config, "docker", true)
 
 	newArgs = append(newArgs, args[1:]...)
 

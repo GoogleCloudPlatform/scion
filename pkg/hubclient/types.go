@@ -193,7 +193,11 @@ type ProjectProvider struct {
 
 // ProjectSettings represents project configuration settings.
 type ProjectSettings struct {
-	ActiveProfile          string                 `json:"activeProfile,omitempty"`
+	// ActiveProfile names the broker profile new agents in the project run
+	// under when the request names none. On PUT, an absent (null) field
+	// keeps the stored value and an empty string clears it, so a client that
+	// does not manage the profile (the web settings page) cannot wipe it.
+	ActiveProfile          *string                `json:"activeProfile,omitempty"`
 	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
 	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`

@@ -58,9 +58,8 @@ roles/iam.serviceAccountTokenCreator on the target SA.
 Examples:
   scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --gcp-project my-project
   scion project service-accounts add agent-worker@my-project.iam.gserviceaccount.com --gcp-project my-project --name "Worker SA"`,
-	Args:    cobra.ExactArgs(1),
-	PreRunE: checkGCPProjectFlag,
-	RunE:    runSAAdd,
+	Args: gcpProjectArgs(cobra.ExactArgs(1)),
+	RunE: runSAAdd,
 }
 
 var saListCmd = &cobra.Command{
