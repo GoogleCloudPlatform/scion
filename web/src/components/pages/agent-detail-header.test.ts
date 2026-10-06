@@ -240,7 +240,7 @@ describe('agent detail status badges', () => {
   function headerBadge(agent: Agent): Element {
     const page = makePage(agent);
     const tpl = (page as unknown as { renderHeader(): TemplateResult }).renderHeader();
-    const badge = renderTo(tpl).querySelector('.header-title > scion-status-badge');
+    const badge = renderTo(tpl).querySelector('.header-title-text > scion-status-badge');
     expect(badge).not.toBeNull();
     return badge!;
   }

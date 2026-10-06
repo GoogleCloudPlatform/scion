@@ -434,10 +434,19 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 	now := time.Now()
 	row := *agent
 	hooks := s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.reincarnate)
+	claimedAt := now
+	if row.ReincarnationUpdatedAt != nil {
+		claimedAt = *row.ReincarnationUpdatedAt
+	}
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.UpdateAgent(ctx, &row); err != nil {
+		// The claim: the state_version compare-and-set, refused while a
+		// start claim is held or a reincarnation is already in flight.
+		newVersion, err := tx.ClaimAgentReincarnation(ctx, row.ID, row.StateVersion, claimedAt)
+		if err != nil {
 			return err
 		}
+		row.StateVersion = newVersion
+		row.ReincarnationState = store.ReincarnationStatePending
 		if err := tx.CreateAgentReincarnation(ctx, rec); err != nil {
 			return err
 		}

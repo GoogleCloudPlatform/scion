@@ -112,6 +112,7 @@ export function relationshipBadgeText(scope: string): string {
  */
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
   agent: 'Agent',
+  artifact: 'Artifact',
   broker: 'Broker',
   gcp_service_account: 'GCP Service Account',
   group: 'Group',
@@ -203,6 +204,41 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'agent:read',
     description: 'Read agent status/metadata',
     resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:create',
+    label: 'artifact:create',
+    description: 'Publish artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:delete',
+    label: 'artifact:delete',
+    description: 'Delete artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:manage',
+    label: 'artifact:manage',
+    description: 'Manage artifact grants and share links',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:read',
+    label: 'artifact:read',
+    description: 'Read artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
+    value: 'artifact:update',
+    label: 'artifact:update',
+    description: 'Publish new versions of artifacts',
+    resource: 'artifact',
     isAlias: false,
   },
   {

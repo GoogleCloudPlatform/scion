@@ -1999,8 +1999,9 @@ export class ScionPageProjectDetail extends LitElement {
     ></sl-tooltip>`;
   }
 
-  private formatDate(dateString: string): string {
-    return formatInstantWithZone(dateString) || dateString;
+  /** Formats a timestamp for the header stats; "—" when missing or invalid. */
+  private formatDate(dateString: string | undefined): string {
+    return (dateString && formatInstantWithZone(dateString)) || '—';
   }
 
   private getTabDataSource(tabName: string): FileBrowserDataSource {
@@ -2702,13 +2703,13 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="stat">
           <span class="stat-label">Created</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.project.createdAt)}
+            ${this.formatDate(this.project.created || this.project.createdAt)}
           </span>
         </div>
         <div class="stat">
           <span class="stat-label">Updated</span>
           <span class="stat-value" style="font-size: 1rem; font-weight: 500;">
-            ${this.formatDate(this.project.updatedAt)}
+            ${this.formatDate(this.project.updated || this.project.updatedAt)}
           </span>
         </div>
       </div>

@@ -241,6 +241,14 @@ func init() {
 			KoanfPaths: nil,
 			New:        func() any { return &ExperimentsSettings{} },
 		},
+		{
+			// artifacts is durable via DB but has no settings.yaml
+			// representation. Absent DB row = compiled defaults (see
+			// ArtifactsSettings). Seeding skips this section (KoanfPaths nil).
+			Name:       "artifacts",
+			KoanfPaths: nil,
+			New:        func() any { return &ArtifactsSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -430,6 +438,24 @@ func compileSchemas() {
 					},
 					"additionalProperties": false,
 				},
+			},
+			"additionalProperties": false,
+		},
+		// artifacts schema is hand-written -- it is runtime/API-owned state
+		// with no $defs in settings-v1.schema.json. The per-field minimums
+		// match ArtifactsSettings.Resolve; the cross-field rules (file limit
+		// <= bundle limit, default TTL <= max TTL) are not expressible here
+		// and are enforced by Resolve, which fails closed.
+		"artifacts": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enabled":                map[string]interface{}{"type": "boolean"},
+				"max_file_bytes":         map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_bundle_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_files":              map[string]interface{}{"type": "integer", "minimum": 1},
+				"default_retention_days": map[string]interface{}{"type": "integer", "minimum": 0},
+				"link_default_ttl_hours": map[string]interface{}{"type": "integer", "minimum": 1},
+				"link_max_ttl_hours":     map[string]interface{}{"type": "integer", "minimum": 1},
 			},
 			"additionalProperties": false,
 		},

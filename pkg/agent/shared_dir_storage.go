@@ -201,6 +201,7 @@ func resolveSharedDirs(
 	// subPath itself, under the export's SQUASHED anonymous identity on an
 	// all_squash export — exactly the identity the leaf's upper-directory
 	// hardening (mode + ACL) defends against.
+	var leafGIDs []observedLeafGID
 	if _, statErr := os.Stat(res.HostBase); statErr == nil {
 		// mkdir and chmod are done via shareddirs.EnsureLeaf, which walks
 		// every component of `rel` with openat(O_NOFOLLOW|O_DIRECTORY) and
@@ -232,6 +233,10 @@ func resolveSharedDirs(
 			if walkErr != nil {
 				return nil, nil, fmt.Errorf("server.shared_dir_storage: shared dir %q: %w", name, walkErr)
 			}
+			// Read the leaf's group from the fd the walk opened (never a
+			// path), at every start, so it follows the leaf as it is now.
+			gid, gidErr := fdGID(leafFd)
+			leafGIDs = append(leafGIDs, observedLeafGID{name: name, gid: gid, err: gidErr})
 			_ = shareddirs.CloseFd(leafFd)
 
 			// Defense in depth, even though the component walk above should
@@ -281,10 +286,72 @@ func resolveSharedDirs(
 	}
 
 	return volumes, &runtime.SharedDirRealization{
-		Backend:     "nfs",
-		PVClaimName: pvClaimName,
-		SubPaths:    subPaths,
+		Backend:            "nfs",
+		PVClaimName:        pvClaimName,
+		SubPaths:           subPaths,
+		SupplementalGroups: sharedDirLeafGroups(leafGIDs, sdCfg.NFS.GID),
 	}, nil
+}
+
+// fdGID is shareddirs.FdGID, replaceable in tests to simulate a failed stat.
+var fdGID = shareddirs.FdGID
+
+// observedLeafGID is the result of reading one shared-dir leaf's group.
+type observedLeafGID struct {
+	name string
+	gid  uint32
+	err  error
+}
+
+// minLeafGroupID is the lowest leaf group id an agent may be given as a
+// supplemental group. Ids below it are system groups (root, adm, disk,
+// docker, ...) on common distributions; a leaf made outside scion could
+// carry one, and the agent would then get that group's access to
+// everything else visible in its container.
+const minLeafGroupID = 1000
+
+// sharedDirLeafGroups returns the distinct leaf group ids, in first-seen
+// order, that agents mounting these nfs shared dirs get as supplemental
+// groups, so files written by other agent kinds in the leaf's group stay
+// writable (ptone/scion#3155). The guard skips, with a warning naming the
+// shared dir, any gid that:
+//   - could not be read (the agent starts unchanged, without it),
+//   - is below minLeafGroupID (system groups, including 0),
+//   - is an overflow/"nobody" id (65534, 4294967294) that NFSv4 idmapping
+//     reports when it cannot map the real group,
+//   - differs from allowGID, when shared_dir_storage.nfs.gid is set.
+func sharedDirLeafGroups(observed []observedLeafGID, allowGID int) []int64 {
+	var out []int64
+	seen := make(map[int64]bool)
+	for _, o := range observed {
+		if o.err != nil {
+			slog.Warn("Start: could not read the group of a shared dir; the agent starts without that group, "+
+				"so it may be unable to modify files other agents create there",
+				"shared_dir", o.name, "error", o.err)
+			continue
+		}
+		gid := int64(o.gid)
+		reason := ""
+		switch {
+		case gid < minLeafGroupID:
+			reason = "group id is below 1000 (system group)"
+		case gid == 65534 || gid == 4294967294:
+			reason = "group id is an overflow (nobody) id"
+		case allowGID != 0 && gid != int64(allowGID):
+			reason = "group id does not match server.shared_dir_storage.nfs.gid"
+		}
+		if reason != "" {
+			slog.Warn("Start: not adding a shared dir's group to the agent; "+
+				"the agent may be unable to modify files other agents create there",
+				"shared_dir", o.name, "gid", gid, "allowed_gid", allowGID, "reason", reason)
+			continue
+		}
+		if !seen[gid] {
+			seen[gid] = true
+			out = append(out, gid)
+		}
+	}
+	return out
 }
 
 // isLocalContainerRuntime reports whether name identifies a runtime that
