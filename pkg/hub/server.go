@@ -1371,7 +1371,7 @@ type Server struct {
 	// probed on the GitHub webhook endpoint does not fill its log.
 	githubWebhookNoSecretWarnOnce sync.Once
 
-	logQueryService  *LogQueryService         // Cloud Logging query service (nil = disabled)
+	logQueryService  logQuerier               // Cloud Logging query service (nil = disabled)
 	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
 
 	// Telegram link service for code-based account linking (nil = disabled)
@@ -6135,7 +6135,7 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			)
 		}
 
-		next.ServeHTTP(wrapped, r)
+		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
 		duration := time.Since(start)
 		level := slog.LevelInfo
@@ -6162,20 +6162,32 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			)
 		}
 
-		slog.LogAttrs(r.Context(), level, "Request completed",
-			append(attrs,
-				slog.Int("status", wrapped.statusCode),
-				slog.Duration("duration", duration),
-			)...,
+		attrs = append(attrs,
+			slog.Int("status", wrapped.statusCode),
+			slog.Duration("duration", duration),
 		)
+		if aborted {
+			attrs = append(attrs, slog.Bool(logging.AttrAborted, true))
+		}
+		slog.LogAttrs(r.Context(), level, "Request completed", attrs...)
+		if aborted {
+			panic(http.ErrAbortHandler)
+		}
 	})
 }
 
-// recoveryMiddleware recovers from panics.
+// recoveryMiddleware recovers from panics. http.ErrAbortHandler is passed
+// on, not recovered: it is how a handler (the port proxy, mid-stream)
+// tells net/http to cut the connection instead of completing a response
+// whose headers are already out, and writing an error body after them
+// would end the stream as if it had completed.
 func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
+				if err == http.ErrAbortHandler { //nolint:errorlint // net/http compares the sentinel by identity
+					panic(err)
+				}
 				slog.Error("Panic recovered",
 					slog.Any("error", err),
 					slog.String("path", r.URL.Path),
