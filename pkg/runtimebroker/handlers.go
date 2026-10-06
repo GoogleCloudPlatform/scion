@@ -1791,6 +1791,22 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A delete the hub fenced with a deadline is refused once that deadline
+	// has passed, before anything below (the recorded-runtime check
+	// included) can act on it (ptone/scion#2906).
+	var fence deleteFence
+	if isBareDelete {
+		var err error
+		fence, err = parseDeleteNotAfter(r.URL.Query())
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		if s.refuseStaleDelete(w, fence, "arrival", id, projectID, r.URL.Query().Get("runId")) {
+			return
+		}
+	}
+
 	// Every request below except start acts on an existing agent: target the
 	// runtime that holds it, checking the runtime type the hub recorded for
 	// it first, and answer 503 only when no runtime lists the agent and this
@@ -1822,7 +1838,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.getAgent(w, r, id, projectID)
 	case http.MethodDelete:
-		s.deleteAgent(w, r, id, projectID)
+		s.deleteAgentFenced(w, r, id, projectID, fence)
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
@@ -1850,7 +1866,21 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 	NotFound(w, "Agent")
 }
 
+// deleteAgent deletes the agent, parsing the delete's deadline itself. For
+// callers that bypass handleAgentByID (tests); the route uses
+// deleteAgentFenced with the deadline it already parsed and checked.
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	fence, err := parseDeleteNotAfter(r.URL.Query())
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	s.deleteAgentFenced(w, r, id, projectID, fence)
+}
+
+// deleteAgentFenced deletes the agent. fence is the delete's deadline,
+// already parsed and checked on arrival by handleAgentByID.
+func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, projectID string, fence deleteFence) {
 	ctx := r.Context()
 
 	ctx, span := tracer.Start(ctx, "broker.agent.delete")
@@ -1891,6 +1921,10 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		return
 	}
 
+	// fence (notAfter, ptone/scion#2906) was checked on arrival by
+	// handleAgentByID; it is checked again below once the target is
+	// resolved.
+
 	// Cancel any in-flight start of this agent on this broker first, before
 	// resolving the delete target: a start still blocked in provisioning
 	// (for example, skill resolution) may have no container or listable
@@ -1904,6 +1938,16 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
 		"agent_id", id, "project_id", projectID, "run_id", runID)
 	target, err := s.resolveDeleteTarget(ctx, id, projectID, runID, query.Get("projectPath"), deleteFiles || softDelete)
+	// Resolution can be slow (it lists every runtime), so check the deadline
+	// again before the first side effect after it: the leftover cleanup of
+	// a not-found, the launch cancel, the soft-delete marking and
+	// DeleteTarget. Only a small marker-file read (agentFilesRunOwner) and
+	// in-memory launch-registry checks (otherRunInFlight) run between here
+	// and DeleteTarget.
+	if s.refuseStaleDelete(w, fence, "resolved", id, projectID, runID) {
+		span.SetStatus(codes.Error, "stale delete dispatch")
+		return
+	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetRunMismatch) {
