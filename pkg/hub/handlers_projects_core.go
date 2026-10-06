@@ -368,6 +368,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	} else if isReservedProjectSlug(baseSlug) {
 		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
 		return
+	} else if !requireProjectSlugFormat(w, baseSlug) {
+		return
 	}
 
 	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
@@ -2752,13 +2754,12 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		project.Name = updates.Name
 	}
 	if updates.Slug != "" {
-		newSlug := api.Slugify(updates.Slug)
-		if newSlug == "" {
-			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
-			return
-		}
+		newSlug := updates.Slug
 		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
 			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+			return
+		}
+		if newSlug != oldSlug && !requireProjectSlugFormat(w, newSlug) {
 			return
 		}
 		if newSlug != oldSlug {
