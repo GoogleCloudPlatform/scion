@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
@@ -432,6 +433,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.TemplateName != "" {
+		ctx = api.ContextWithTemplateName(ctx, opts.TemplateName)
+	}
 	inlineCfg := opts.InlineConfig
 	if opts.HarnessAuth != "" {
 		// Copy rather than mutate opts.InlineConfig in place: it is a
@@ -795,12 +799,12 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		// Load scion-agent config from this template and merge it
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
-			return nil, fmt.Errorf("failed to load config from template %s: %w", tpl.Name, err)
+			return nil, fmt.Errorf("failed to load config from template %s: %w", templateRef(tpl), err)
 		}
 
 		// Validate: reject legacy templates that still have a 'harness' field
 		if err := config.ValidateAgnosticTemplate(tplCfg); err != nil {
-			return nil, fmt.Errorf("template %s: %w", tpl.Name, err)
+			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
 		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
@@ -1397,7 +1401,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		templateHome := filepath.Join(tpl.Path, "home")
 		if info, err := os.Stat(templateHome); err == nil && info.IsDir() {
 			if err := util.CopyDir(templateHome, agentHome); err != nil {
-				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", tpl.Name, err)
+				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
 			}
 			templateHomeCopied = true
 		}
@@ -1485,7 +1489,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
 				}
 				if err := util.CopyDir(tplSkills, skillsDest); err != nil {
-					return "", "", nil, fmt.Errorf("failed to copy template skills %s: %w", tpl.Name, err)
+					return "", "", nil, fmt.Errorf("failed to copy template skills %s: %w", templateRef(tpl), err)
 				}
 			}
 		}
@@ -1899,11 +1903,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Create the Info object which will go into agent-info.json.
 	// Use the resolved template name from the chain (human-friendly) rather
-	// than the raw templateName which may be a cache path or remote URI.
-	displayTemplateName := templateName
-	if len(chain) > 0 {
-		displayTemplateName = chain[len(chain)-1].Name
-	}
+	// than the raw templateName which may be a cache path or remote URI. A
+	// content-hash cache directory is never recorded as the name; the slug
+	// carried in ctx is used instead when known.
+	displayTemplateName, templateHash := infoTemplateFields(ctx, templateName, chain)
 	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
 		Project:               projectName,
@@ -1911,6 +1914,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		ProjectPath:           projectDir,
 		Name:                  agentName,
 		Template:              displayTemplateName,
+		TemplateHash:          templateHash,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: config.ComputeHarnessConfigRevision(hcDir.Path),
 		Profile:               profileName,
@@ -2589,8 +2593,15 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
 
+	// A template recorded as loaded from a content-addressed cache (a
+	// TemplateHash, or a content hash stored as the name by older versions)
+	// is not available by name on this broker, so it is not looked up by
+	// name: the agent loads from its persisted config alone, as it did when
+	// the stored name was the cache directory's hash.
+	hydratedTemplate := false
 	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
 		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
+			hydratedTemplate = normalizeHydratedTemplateInfo(agentInfo, api.TemplateNameFromContext(ctx))
 			if agentInfo.Template != "" {
 				effectiveTemplate = agentInfo.Template
 			}
@@ -2605,7 +2616,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, nil, fmt.Errorf("failed to load agent config: %w", err)
 	}
 
-	chain, err := config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+	var chain []*config.Template
+	if hydratedTemplate {
+		err = fmt.Errorf("template %q was loaded from a content-addressed cache (%s): %w", effectiveTemplate, agentInfo.TemplateHash, config.ErrTemplateNotFound)
+	} else {
+		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+	}
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
@@ -2628,7 +2644,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", tpl.Name, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
 		mergedCfg = config.MergeScionConfig(mergedCfg, tplCfg)
@@ -2712,4 +2728,73 @@ func isWorkspaceEmptyDir(path string) bool {
 		}
 	}
 	return true
+}
+
+// infoTemplateFields returns the template name and content hash to record in
+// agent-info.json for a template resolved to chain from templateName. When
+// the template was loaded from a content-addressed cache directory, the
+// directory's content hash is returned as hash and is never used as the
+// name; the name is the slug carried by api.ContextWithTemplateName, or
+// empty when no slug is known.
+func infoTemplateFields(ctx context.Context, templateName string, chain []*config.Template) (name, hash string) {
+	name = templateName
+	dir := ""
+	if len(chain) > 0 {
+		last := chain[len(chain)-1]
+		name = last.Name
+		dir = last.Path
+	} else if filepath.IsAbs(templateName) {
+		dir = templateName
+		name = filepath.Base(templateName)
+	}
+	if dir != "" && transfer.IsContentHash(filepath.Base(dir)) {
+		hash = filepath.Base(dir)
+	}
+	if transfer.IsContentHash(name) {
+		if hash == "" {
+			hash = name
+		}
+		name = ""
+	}
+	if hash != "" {
+		name = ""
+		if slug := api.TemplateNameFromContext(ctx); slug != "" && !transfer.IsContentHash(slug) {
+			name = slug
+		}
+	}
+	return name, hash
+}
+
+// normalizeHydratedTemplateInfo reports whether info records a template
+// loaded from a content-addressed cache, and in that case makes sure
+// info.Template is a display name, never a content hash. Older versions
+// stored the cache directory's hash as the template name; such a value is
+// moved to TemplateHash. The name becomes slug when one is known, otherwise
+// it is left empty. info is changed in memory only.
+func normalizeHydratedTemplateInfo(info *api.AgentInfo, slug string) bool {
+	if info == nil {
+		return false
+	}
+	if transfer.IsContentHash(info.Template) {
+		if info.TemplateHash == "" {
+			info.TemplateHash = info.Template
+		}
+		info.Template = ""
+	}
+	if info.TemplateHash == "" {
+		return false
+	}
+	if slug != "" && !transfer.IsContentHash(slug) {
+		info.Template = slug
+	}
+	return true
+}
+
+// templateRef names tpl in messages: its name, or its path when it has no
+// name (a template in a content-hash cache directory).
+func templateRef(tpl *config.Template) string {
+	if tpl.Name != "" {
+		return tpl.Name
+	}
+	return tpl.Path
 }

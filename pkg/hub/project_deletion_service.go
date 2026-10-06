@@ -23,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
@@ -110,6 +111,10 @@ type CascadeSummary struct {
 	PreStartHooks     int `json:"pre_start_hooks_deleted"`
 	ProjectProviders  int `json:"project_providers_deleted"`
 	ProjectSyncStates int `json:"project_sync_states_deleted"`
+	DelegationEdges   int `json:"delegation_edges_deactivated"`
+	// DelegationEdgeOpID is the operation ID stamped on every edge
+	// deactivated by the delete; empty when no edge was deactivated.
+	DelegationEdgeOpID string `json:"delegation_edge_op_id,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -701,6 +706,21 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		cs.ProjectSyncStates = n
 	}
 
+	// 16. Delegation edges — every active edge where an agent of the project
+	// (soft-deleted ones included) is the delegate or the delegator. The edge
+	// rows have no foreign key to the agent and survive the agent delete in
+	// CompositeStore.DeleteProject, so they are deactivated here, as a hard
+	// delete of each agent would, under one operation ID. The audit summary
+	// records that ID so each edge can be traced to this delete.
+	if n, opID, err := deactivateProjectAgentEdges(ctx, tx, projectID, svc.nowFunc()); err != nil {
+		return cs, err
+	} else {
+		cs.DelegationEdges = n
+		if n > 0 {
+			cs.DelegationEdgeOpID = opID
+		}
+	}
+
 	// ---------------------------------------------------------------------------
 	// Cascade inventory disposition — complete project-linked table audit
 	//
@@ -722,7 +742,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | project_providers      | Transactional: DeleteProjectProvidersByProject (step 14) | Data     |
 	// |   (DB: project_contributors — store layer uses "provider" vocabulary)              |          |
 	// | project_sync_state     | Transactional: DeleteProjectSyncStatesByProject (step 15)| Data     |
-	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 16)  | Runtime  |
+	// | delegation_edges       | Transactional: deactivated, rows kept (step 16)          | Auth     |
+	// | agents                 | Explicit code in CompositeStore.DeleteProject (step 17)  | Runtime  |
 	// | notifications          | Explicit code in CompositeStore.DeleteProject            | Data     |
 	// | notification_subs      | Explicit code in CompositeStore.DeleteProject            | Data     |
 	// | conversations          | Retained — historical audit/chat data; no auth grants    | None     |
@@ -732,6 +753,44 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// ---------------------------------------------------------------------------
 
 	return cs, nil
+}
+
+// deactivateProjectAgentEdges deactivates every active delegation edge where
+// an agent of projectID, soft-deleted or not, is the delegate or the
+// delegator, with cause agent_hard_delete under one operation ID. It returns
+// the number of edges deactivated and the operation ID.
+func deactivateProjectAgentEdges(ctx context.Context, tx store.Store, projectID string, now time.Time) (int, string, error) {
+	d := store.Deactivation{Cause: store.EdgeDeactivationAgentHardDelete, At: &now, OpID: api.NewUUID()}
+	total := 0
+	cursor := ""
+	for {
+		page, err := tx.ListAgents(ctx, store.AgentFilter{ProjectID: projectID, IncludeDeleted: true},
+			store.ListOptions{Limit: 100, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return total, d.OpID, fmt.Errorf("list project agents for edge deactivation: %w", err)
+		}
+		if page == nil {
+			// Items holds values, so a page is the only nil the walk can
+			// meet. Fail rather than treat it as empty and leave edges active.
+			return total, d.OpID, fmt.Errorf("%w: nil agent page in deactivateProjectAgentEdges", store.ErrInvalidInput)
+		}
+		for _, a := range page.Items {
+			n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
+			if err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate edges delegated to agent %s: %w", a.ID, err)
+			}
+			total += n
+			n, err = tx.DeactivateDelegationEdgesForDelegator(ctx, store.DelegationPrincipalAgent, a.ID, d)
+			if err != nil {
+				return total, d.OpID, fmt.Errorf("deactivate edges delegated by agent %s: %w", a.ID, err)
+			}
+			total += n
+		}
+		if page.NextCursor == "" {
+			return total, d.OpID, nil
+		}
+		cursor = page.NextCursor
+	}
 }
 
 // ---------------------------------------------------------------------------

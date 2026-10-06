@@ -62,7 +62,7 @@ You can also set it from **Admin > Server Config**, or seed it with `SCION_SEED_
 
 ### Deleting users
 
-Deleting a user on **Admin > Users** (`DELETE /api/v1/users/{id}`) fails with `409 last_owner` if the user is the only active owner of any project, including a project where their owner binding has expired. The error's `details.projects` lists those projects. Transfer ownership or add another owner on each one, then delete the user again. If someone grants the user a role or changes one of their roles while the delete runs (for example, transfers a project to them) and that change commits first, the delete is aborted with `409 conflict` and nothing is changed; retry it. A concurrent revoke of one of the user's roles does not abort the delete. A grant that commits in the last moments before the delete itself commits is not detected and can leave a stale binding on the deleted user ([ptone/scion#2769](https://github.com/ptone/scion/issues/2769)). The deprecated allow-list delete (`DELETE /api/v1/admin/allow-list/{email}`) applies the same rules.
+Deleting a user on **Admin > Users** (`DELETE /api/v1/users/{id}`) fails with `409 last_owner` if the user is the only usable owner of any project (an owner is usable when their owner binding is in effect and their account exists and is active; suspended, invited and deleted owners do not count), or holds the last owner binding of any project, even an expired one. The error's `details.projects` lists those projects. Transfer ownership or add another owner on each one, then delete the user again. If someone grants the user a role or changes one of their roles while the delete runs (for example, transfers a project to them) and that change commits first, the delete is aborted with `409 conflict` and nothing is changed; retry it. A concurrent revoke of one of the user's roles does not abort the delete. A grant that commits in the last moments before the delete itself commits is not detected and can leave a stale binding on the deleted user ([ptone/scion#2769](https://github.com/ptone/scion/issues/2769)). The deprecated allow-list delete (`DELETE /api/v1/admin/allow-list/{email}`) applies the same rules.
 
 When the deletion succeeds, Scion also removes all of the user's role bindings (project, hub and system). Bindings left behind by deletions made before this change are not cleaned up. To clear such a binding when it is a project's only owner, add a real owner first, then remove the old binding from the project's members.
 
@@ -115,25 +115,20 @@ Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the valu
 
 #### Configuration
 
-To enable the external OIDC login provider, add the `oidc_login` section to your Hub's static `settings.yaml` bootstrap file:
+To enable the external OIDC login provider, add the `oidc_login` section under `server` in your Hub's static `settings.yaml` bootstrap file:
 
 ```yaml
-oidc_login:
-  enabled: true
-  display_name: "Corporate SSO"                         # Text shown on the login button
-  issuer_url: "https://sso.example.com/auth/realms/main" # Base OIDC issuer URL
-  client_id: "scion-client"                              # Client ID registered with the provider
-  client_secret: "secret-value"                          # Client secret (can be empty for public clients)
-  scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
+server:
+  oidc_login:
+    enabled: true
+    display_name: "Corporate SSO"                         # Text shown on the login button
+    issuer_url: "https://sso.example.com/auth/realms/main" # Base OIDC issuer URL
+    client_id: "scion-client"                              # Client ID registered with the provider
+    client_secret: "secret-value"                          # Client secret (can be empty for public clients)
+    scopes: ["openid", "email", "profile"]                 # Custom scopes (defaults to openid, email, profile)
 ```
 
-Alternatively, you can configure these settings via environment variables at startup:
-- `SCION_SERVER_OIDC_LOGIN_ENABLED="true"`
-- `SCION_SERVER_OIDC_LOGIN_DISPLAY_NAME="Corporate SSO"`
-- `SCION_SERVER_OIDC_LOGIN_ISSUER_URL="https://sso.example.com/auth/realms/main"`
-- `SCION_SERVER_OIDC_LOGIN_CLIENT_ID="scion-client"`
-- `SCION_SERVER_OIDC_LOGIN_CLIENT_SECRET="secret-value"`
-- `SCION_SERVER_OIDC_LOGIN_SCOPES="openid,email,profile"`
+Prefer `settings.yaml` for these keys. Underscored environment variables such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, `SCION_SERVER_OIDCLOGIN_CLIENTID`, and so on) take effect only when `settings.yaml` has a `server:` section, as above. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
 If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.
@@ -425,7 +420,7 @@ Scion provides a native mechanism to assign Google Cloud Platform (GCP) identiti
 
 When creating an agent, you can configure its **GCP Identity Mode**:
 
-- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with Block is rejected, including an agent with no GCP identity mode configured, which is dispatched as Block. On Kubernetes, set Passthrough or Assign explicitly. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
+- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with an explicit Block is rejected. An agent with no GCP identity mode configured gets Passthrough on Kubernetes instead. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
 - **Assign**: Assigns a specific Google Service Account to the agent.
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
   - Token requests are proxied to the Scion Hub, which uses its own broad permissions to generate a short-lived access token for the requested Service Account (via the `iam.serviceAccounts.getAccessToken` permission).

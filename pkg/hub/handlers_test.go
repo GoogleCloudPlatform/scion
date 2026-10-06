@@ -80,41 +80,13 @@ func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	}
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
+		// Shutdown runs CleanupResources even though Start was never
+		// called, which stops every background goroutine New() starts
+		// (see TestTestServerCleanupStopsBackgroundGoroutines).
 		_ = srv.Shutdown(context.Background())
-		closeTestServerBackground(srv)
 		_ = s.Close() // Release in-memory SQLite database to avoid OOM across many tests.
 	})
 	return srv, s
-}
-
-// closeTestServerBackground stops the background goroutines New() starts on
-// every Server: three chatLinkService.cleanupLoop (telegram/discord/teams),
-// NonceCache.cleanup, and PreviewService.cleanupNonces. srv.Shutdown() never
-// closes these when srv.httpServer is nil, i.e. without Start(), which unit
-// tests never call. Also cancels srv.ctxCancel, which Shutdown skips for the
-// same reason, in case any handler-triggered work is keyed on srv.ctx. Each
-// Close/Stop is idempotent, and these calls run sequentially, so
-// NonceCache.Stop's plain select/close (not sync.Once) is safe here. Refs
-// ptone/scion#2418 (possible contributor; not proven).
-func closeTestServerBackground(srv *Server) {
-	if srv.ctxCancel != nil {
-		srv.ctxCancel()
-	}
-	if srv.telegramLinkService != nil {
-		srv.telegramLinkService.Close()
-	}
-	if srv.discordLinkService != nil {
-		srv.discordLinkService.Close()
-	}
-	if srv.teamsLinkService != nil {
-		srv.teamsLinkService.Close()
-	}
-	if srv.brokerAuthService != nil {
-		srv.brokerAuthService.Close()
-	}
-	if srv.previewService != nil {
-		srv.previewService.Close()
-	}
 }
 
 // doRequest performs an HTTP request against the test server.
@@ -2167,8 +2139,8 @@ func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	}
 	srv.SetHubID("test-hub-id")
 	t.Cleanup(func() {
+		// Shutdown runs CleanupResources; see testServerWithStore.
 		_ = srv.Shutdown(context.Background())
-		closeTestServerBackground(srv)
 		_ = s.Close()
 	})
 	return srv, s

@@ -21,6 +21,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -740,6 +743,12 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		ValidationError(w, "manifest with files is required", nil)
 		return
 	}
+	for _, f := range req.Manifest.Files {
+		if !isCanonicalHarnessConfigFilePath(f.Path) {
+			ValidationError(w, "invalid manifest file path: "+strconv.Quote(f.Path), map[string]interface{}{"path": f.Path})
+			return
+		}
+	}
 
 	contentHash, err := verifyAndFinalizeFiles(ctx, stor, hc.StoragePath, req.Manifest.Files)
 	if err != nil {
@@ -747,6 +756,7 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	previousFiles := hc.Files
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
@@ -766,7 +776,77 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The manifest is the complete file list, so files the previous record
+	// listed but the manifest does not (deleted locally before a sync) are
+	// removed from storage. Brokers with local storage hydrate the whole
+	// storage directory, so a stale object would otherwise still reach agents.
+	s.deleteRemovedHarnessConfigFiles(ctx, stor, hc, previousFiles)
+
 	writeJSON(w, http.StatusOK, hc)
+}
+
+// deleteRemovedHarnessConfigFiles deletes the storage objects of files listed
+// in previousFiles but no longer in hc.Files. Only those exact paths are
+// deleted, never a prefix sweep: other harness-configs (clones, or a config
+// whose slug was renamed) can live under hc.StoragePath. Failures are logged
+// and do not fail the request, because the record is already updated.
+func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, previousFiles []store.TemplateFile) {
+	if hc.StoragePath == "" {
+		return
+	}
+	current := make(map[string]struct{}, len(hc.Files))
+	for _, f := range hc.Files {
+		current[f.Path] = struct{}{}
+	}
+	var failed, skipped []string
+	for _, f := range previousFiles {
+		if _, ok := current[f.Path]; ok {
+			continue
+		}
+		// Records written before manifest paths were validated may hold
+		// paths that resolve outside this config or alias a kept file.
+		if !isCanonicalHarnessConfigFilePath(f.Path) {
+			skipped = append(skipped, f.Path)
+			continue
+		}
+		if err := stor.Delete(ctx, hc.StoragePath+"/"+f.Path); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			failed = append(failed, f.Path)
+		}
+	}
+	if len(skipped) > 0 {
+		s.resourceLog.Warn("harness-config finalize: skipped deleting removed files with invalid paths",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", skipped)
+	}
+	if len(failed) > 0 {
+		s.resourceLog.Warn("harness-config finalize: failed to delete removed files from storage",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", failed)
+	}
+}
+
+// isCanonicalHarnessConfigFilePath reports whether p is a relative,
+// slash-separated, already-clean file path inside a harness-config: not empty
+// or ".", not absolute, no ".." element, no "./", repeated or trailing
+// slashes, backslashes or NUL bytes. Only such paths map one-to-one onto a
+// storage object below the config's storage path.
+//
+// Manifest paths are logical slash-separated paths, so the checks use the
+// path package and give the same result on every platform. The local storage
+// backend joins object paths with OS paths, so filepath.IsLocal on the
+// OS-form path is kept as an extra guard; on Windows it also rejects drive
+// letters and reserved names, which is stricter and safe.
+func isCanonicalHarnessConfigFilePath(p string) bool {
+	if p == "" || p == "." || path.IsAbs(p) || path.Clean(p) != p {
+		return false
+	}
+	if strings.ContainsAny(p, "\\\x00") {
+		return false
+	}
+	for _, elem := range strings.Split(p, "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return filepath.IsLocal(filepath.FromSlash(p))
 }
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.

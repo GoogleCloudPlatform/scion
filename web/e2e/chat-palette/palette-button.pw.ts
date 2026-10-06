@@ -32,6 +32,7 @@ import {
   type TrackedRequest,
 } from './mock-api.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../src/client/chat-palette-events.js';
+import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
 
 const DM_KEY = `dm:agent:${AGENT_WITH_DM.id}:user:${SELF_USER_ID}`;
 
@@ -185,6 +186,20 @@ test('clicking the button opens the palette with the query input focused', async
     'placeholder',
     'Search agents, threads, people, documents…'
   );
+});
+
+test('typing straight after a button click becomes the query, even while the module loads', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  await gotoShell(page);
+  await paletteButton(page).click();
+  await page.keyboard.type('coder');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('coder');
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/Coder One/]);
 });
 
 test('at desktop width, the multi-group palette lays its groups out in two columns', async ({

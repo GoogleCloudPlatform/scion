@@ -18,6 +18,33 @@ These flags are available on all commands:
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output.
 
+**Project resolution order.** The CLI picks the project in this order:
+
+1. The `-g` / `--project` or `--global` flag.
+2. Inside a Hub-connected agent container only: the agent's own project (`SCION_PROJECT_ID`).
+3. The project `.scion` directory found from the current directory.
+4. The global project (`~/.scion`).
+
+A context is Hub-connected when `SCION_HUB_ENDPOINT`, `SCION_HUB_URL` or `SCION_PROJECT_ID` is set
+in the environment, as in an agent container. Enabling the Hub in a workstation's settings does not
+make it a Hub-connected context: there, `--global` uses the local global directory.
+
+An explicit flag wins over `SCION_PROJECT_ID`. This applies to commands that go through the Hub
+pre-flight check, and to the `conversation`, `notifications` and `messages` commands.
+`SCION_PROJECT` does not select a project; it is used only to detect a send within the same
+project.
+
+In a Hub-connected context, `--global` (or `-g global`) targets the Hub's Global project (slug
+`global`) when the local global directory is not linked to a Hub project. If the Hub has no Global
+project, or you do not have access to it, the command fails with an error that names
+`--project <slug|id>` as the alternative.
+
+:::note[Agents creating agents in other projects]
+Inside an agent container, `-g` / `--project` changes which project the CLI addresses, but the Hub
+refuses an agent-created agent outside the calling agent's own project. This is intended: an
+agent can only start agents in its own project.
+:::
+
 The legacy hidden `--grove` flag has been removed from every command; passing it fails with
 `unknown flag: --grove`. Use `--project`.
 
