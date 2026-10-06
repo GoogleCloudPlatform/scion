@@ -916,7 +916,7 @@ func (s *GroupStore) GetDirectParentGroupIDs(ctx context.Context, groupID string
 		Where(group.HasChildGroupsWith(group.IDEQ(uid))).
 		IDs(ctx)
 	if err != nil {
-		return nil, err
+		return nil, mapError(err)
 	}
 
 	result := make([]string, len(ids))

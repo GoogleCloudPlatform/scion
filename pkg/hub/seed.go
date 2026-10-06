@@ -1064,6 +1064,9 @@ func removeProjectMembersGroupRoleBindings(ctx context.Context, s store.Store, g
 
 	removed := 0
 	for _, rb := range bindings {
+		if rb == nil {
+			continue
+		}
 		role := rb.RoleDefinitionID
 		if rd, err := s.GetRoleDefinition(ctx, rb.RoleDefinitionID); err == nil {
 			role = rd.Name
@@ -1164,6 +1167,9 @@ func countAccessConstraintsByGroup(ctx context.Context, s store.Store) map[strin
 			return counts
 		}
 		for _, c := range page {
+			if c == nil {
+				continue
+			}
 			switch c.SubjectKind {
 			case store.ConstraintSubjectGroupClosure:
 				if c.SubjectGroupID != nil {
