@@ -164,7 +164,8 @@ func (s *Server) updateReincarnationStep(ctx context.Context, agentID string, up
 
 // copyBrokerEcho copies the fields a broker answer writes onto the
 // dispatched agent's AppliedConfig from src to dst: HarnessConfig,
-// HarnessAuth, Profile and, when includeImage is set, Image.
+// HarnessAuth, HarnessConfigSource, Profile and, when includeImage is set,
+// Image.
 // applyBrokerAgentConfig (httpdispatcher.go) is the source of truth for that
 // field list; TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig fails if it
 // starts writing an AppliedConfig field this helper does not copy.
@@ -180,6 +181,9 @@ func copyBrokerEcho(dst, src *store.AgentAppliedConfig, includeImage bool) {
 	}
 	if src.HarnessAuth != "" {
 		dst.HarnessAuth = src.HarnessAuth
+	}
+	if src.HarnessConfigSource != "" {
+		dst.HarnessConfigSource = src.HarnessConfigSource
 	}
 	if src.Profile != "" {
 		dst.Profile = src.Profile
