@@ -49,7 +49,7 @@ import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-ut
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import '../shared/env-editor.js';
 import '../shared/status-badge.js';
