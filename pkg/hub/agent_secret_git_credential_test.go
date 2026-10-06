@@ -240,3 +240,27 @@ func TestGitCredentialKeyDenied(t *testing.T) {
 		}
 	}
 }
+
+// TestSelectRuntimeMaterial_NilFactsRefused pins that selectRuntimeMaterial
+// refuses every key, on both scopes, when it has no target facts, without
+// reading secret metadata or values.
+func TestSelectRuntimeMaterial_NilFactsRefused(t *testing.T) {
+	f := gitCredentialSecretFixture(t, "nil-facts", &store.AgentAppliedConfig{AllowGitCredentials: true})
+	seedSecret(t, f.Server.secretBackend, "GITHUB_TOKEN", "fake-token", "", "", f.ProjectID)
+	seedSecret(t, f.Server.secretBackend, "OTHER_SETTING", "fake-other", "", "", f.ProjectID)
+	counting := &countingSecretBackend{SecretBackend: f.Server.secretBackend}
+	f.Server.SetSecretBackend(counting)
+
+	for _, scope := range []string{store.ScopeProject, store.ScopeUser} {
+		for _, key := range []string{"GITHUB_TOKEN", "OTHER_SETTING"} {
+			var cache projectDecisionCache
+			item, sv, _, _ := f.Server.selectRuntimeMaterial(context.Background(), nil, nil, scope, key, &cache)
+			require.False(t, item.Allowed, "%s %s", scope, key)
+			require.False(t, item.Selected, "%s %s", scope, key)
+			require.Nil(t, sv, "%s %s", scope, key)
+			require.Equal(t, ReasonTargetUnresolved, item.Reason, "%s %s", scope, key)
+		}
+	}
+	require.Zero(t, counting.getMetaCalls)
+	require.Zero(t, counting.getCalls)
+}

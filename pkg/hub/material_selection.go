@@ -148,6 +148,12 @@ const (
 // check-7 Detail string (Decision.Reason verbatim; "" for user scope, which
 // makes no such decision).
 func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity, facts *TargetFacts, scope, key string, decisionCache *projectDecisionCache) (item ItemResult, value *secret.SecretWithValue, permission, detail string) {
+	if facts == nil {
+		// Callers pass the precheck's facts, which are never nil on success.
+		// Without them nothing is known about the agent, so every key is
+		// refused before any read.
+		return ItemResult{Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: scope}, Reason: ReasonTargetUnresolved}, nil, "", ""
+	}
 	switch scope {
 	case store.ScopeProject:
 		permission = "project.secret_read"
