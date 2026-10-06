@@ -810,3 +810,30 @@ func TestReincarnateMove_RollbackAssignmentRestoreFailureKeepsReservation(t *tes
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "the reservation stays with the agent")
 	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.src.ID))
 }
+
+// N3-1: a definitive start failure leaves the target's run on the row; when
+// the rollback then cannot restore the assignment, the row keeps the
+// target's run with the target (the source's run is restored only after the
+// assignment), so later deletes address the run that exists there.
+func TestReincarnateMove_RollbackAssignmentRestoreFailureKeepsTargetRun(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	f.disp.startErr = fmt.Errorf("start refused by broker: %w", errStartRequestNotSent)
+	f.srv.store = &moveFaultStore{Store: f.s, failUpdate: func(a *store.Agent) error {
+		// The rollback's write: back to the source while still starting.
+		if a.RuntimeBrokerID == f.src.ID && a.ReincarnationState == store.ReincarnationStateStarting {
+			return errors.New("injected failure")
+		}
+		return nil
+	}}
+	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	waitForMoveSourceCleanup(t, f.s, r.ID)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the assignment could not be restored")
+	assert.NotEqual(t, "run-src", a.RunID, "the target's run stays with the target")
+	assert.NotEmpty(t, a.RunID)
+}

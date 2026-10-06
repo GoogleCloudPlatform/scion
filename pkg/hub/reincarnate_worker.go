@@ -1019,11 +1019,6 @@ func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID
 	s.finishFailReincarnation(ctx, agentID, reincarnationID, errMsg, restoreConfig, failNow, ok, err)
 }
 
-// failReincarnationUnknownState is failReincarnation's fallback for panic
-// recovery, the one caller that cannot know fromState (design §3.4
-// Amendment A8.1): it goes through tryAdvanceReincarnationUnknownState
-// instead, which rejects an already-terminal record up front rather than
-// trust a fresh read as expectState.
 // failMoveAndRollBack fails a move after the agent was assigned to the
 // target: it CASes the record to failed first, and only the CAS winner
 // rolls the agent back to the source and writes the failed agent row (with
@@ -1045,6 +1040,11 @@ func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher
 	s.reconcileFailedMove(ctx, reincarnationID)
 }
 
+// failReincarnationUnknownState is failReincarnation's fallback for panic
+// recovery, the one caller that cannot know fromState (design §3.4
+// Amendment A8.1): it goes through tryAdvanceReincarnationUnknownState
+// instead, which rejects an already-terminal record up front rather than
+// trust a fresh read as expectState.
 func (s *Server) failReincarnationUnknownState(ctx context.Context, agentID, reincarnationID, errMsg string, restoreConfig *store.AgentAppliedConfig) {
 	s.agentLifecycleLog.Error("reincarnation failed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)
