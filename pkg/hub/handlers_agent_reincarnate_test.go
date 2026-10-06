@@ -713,12 +713,18 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			wantRejected:  false,
 		},
 		{
-			// Design #2703 D4: explicit refusal, not the generic message.
-			name:          "empty-per-agent (non-git per-agent): unsupported",
+			// miller79/scion#167: same-broker empty-per-agent is
+			// eligible only on a local-disk runtime. This fixture agent
+			// has no recorded runtime and its broker reports no
+			// profiles, so resolveAgentRuntime yields "" and the
+			// allow-list refuses it (fail closed). The positive cases
+			// are TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible
+			// and ..._UnrecordedRuntime.
+			name:          "empty-per-agent (non-git per-agent), no recorded or resolvable runtime: refused",
 			workspaceMode: store.WorkspaceModePerAgent,
 			nonGit:        true,
 			wantRejected:  true,
-			wantBodyText:  `reincarnate does not yet support \"Empty directory per agent\" (empty-per-agent) workspaces`,
+			wantBodyText:  "empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)",
 		},
 	}
 
@@ -860,6 +866,243 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 			realRec := httptest.NewRecorder()
 			srv.handleReincarnateAgent(realRec, realReq, agent.ID)
 			assert.Equal(t, http.StatusAccepted, realRec.Code, "real request: body: %s", realRec.Body.String())
+		})
+	}
+}
+
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible pins
+// miller79/scion#167: an empty-per-agent agent on a local-disk runtime,
+// whose broker advertises ReprovisionEmptyPerAgent, is eligible for a
+// same-broker reincarnation. The dry run reports it eligible (200, no move
+// verdict) and a real request is accepted and reprovisions on the agent's
+// own broker with no workspace source in the dispatched config (the broker
+// reuses the private workspace in place).
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", "container"} {
+		t.Run(rt, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+			require.True(t, project.IsEmptyPerAgent(), "fixture check: project must be empty-per-agent")
+
+			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
+			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: empty-per-agent has no GitClone")
+			require.Empty(t, probe.AppliedConfig.Workspace, "fixture check: empty-per-agent has no Workspace")
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = rt
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, req := range []ReincarnateAgentRequest{
+				{Handoff: "h", DryRun: true},
+				{Handoff: "h", DryRun: true, TargetBroker: broker.ID}, // --broker <current>
+			} {
+				dryRec := httptest.NewRecorder()
+				srv.handleReincarnateAgent(dryRec, reincarnateRequest(t, agent.ID, self, req), agent.ID)
+				require.Equal(t, http.StatusOK, dryRec.Code, "dry run (target %q): body: %s", req.TargetBroker, dryRec.Body.String())
+				var dryResp ReincarnateAgentResponse
+				require.NoError(t, json.Unmarshal(dryRec.Body.Bytes(), &dryResp))
+				assert.Equal(t, agent.ID, dryResp.AgentID)
+				assert.Equal(t, 2, dryResp.Generation)
+				assert.Nil(t, dryResp.MoveVerdict, "a same-broker reincarnation is not a move")
+			}
+			n, _ := disp.reprovisionSnapshot()
+			require.Equal(t, 0, n, "a dry run must not dispatch anything")
+
+			realRec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(realRec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+			require.Equal(t, http.StatusAccepted, realRec.Code, "real request: body: %s", realRec.Body.String())
+
+			r := waitForReincarnationSettled(t, s, agent.ID)
+			require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+			n, cfgs := disp.reprovisionSnapshot()
+			require.Equal(t, 1, n, "exactly one reprovision dispatch")
+			assert.Nil(t, cfgs[0].GitClone, "empty-per-agent reprovision carries no git clone")
+			assert.Empty(t, cfgs[0].Workspace, "empty-per-agent reprovision carries no workspace path")
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, broker.ID, after.RuntimeBrokerID, "the agent stays on its broker")
+		})
+	}
+}
+
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_UnrecordedRuntime pins the
+// runtime fallback of the miller79/scion#167 gate: an agent with no recorded
+// Runtime is judged by resolveAgentRuntime over its broker's profiles. A
+// single docker profile resolves to docker and is accepted; mixed profile
+// types resolve to "" and are refused with 400 before anything is touched,
+// on the dry run and the real request alike.
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_UnrecordedRuntime(t *testing.T) {
+	cases := []struct {
+		name     string
+		profiles []store.BrokerProfile
+		wantOK   bool
+	}{
+		{
+			name:     "single docker profile: accepted",
+			profiles: []store.BrokerProfile{{Name: "default", Type: "docker", Available: true}},
+			wantOK:   true,
+		},
+		{
+			name: "mixed profile types: refused",
+			profiles: []store.BrokerProfile{
+				{Name: "default", Type: "docker", Available: true},
+				{Name: "k8s", Type: "kubernetes", Available: true},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+			broker.Profiles = tc.profiles
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = ""
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				a.AppliedConfig.Profile = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			require.Equal(t, "", agent.Runtime, "fixture check: no recorded runtime")
+			beforeVersion := agent.StateVersion
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, dryRun := range []bool{true, false} {
+				wantCode := http.StatusBadRequest
+				if tc.wantOK {
+					wantCode = http.StatusOK
+					if !dryRun {
+						wantCode = http.StatusAccepted
+					}
+				}
+				rec := httptest.NewRecorder()
+				srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun}), agent.ID)
+				require.Equal(t, wantCode, rec.Code, "dryRun=%v: body: %s", dryRun, rec.Body.String())
+				if !tc.wantOK {
+					assert.Contains(t, rec.Body.String(), "supported only on local-disk runtimes", "dryRun=%v", dryRun)
+				}
+			}
+
+			if tc.wantOK {
+				r := waitForReincarnationSettled(t, s, agent.ID)
+				require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+				return
+			}
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched on a 400")
+			assert.Equal(t, "", after.ReincarnationState)
+			list, err := s.ListAgentReincarnations(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "no reincarnation record on a 400")
+			n, _ := disp.reprovisionSnapshot()
+			assert.Equal(t, 0, n, "nothing dispatched on a 400")
+		})
+	}
+}
+
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_Refused pins the refusals of
+// the miller79/scion#167 gate. A runtime outside the local-disk allow-list
+// gets 400; a broker without ReprovisionEmptyPerAgent gets 412 (an older
+// broker would refuse the reprovision only after the worker had stopped the
+// agent). Each holds on the dry run and the real request, with and without
+// `--broker <current>`, and the agent is never stopped: no stop dispatch,
+// no reincarnation record, no state change.
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_Refused(t *testing.T) {
+	const runtimeMsg = "empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)"
+	const capMsg = "runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker"
+	fullCaps := &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+	cases := []struct {
+		name     string
+		runtime  string
+		caps     *store.BrokerCapabilities
+		wantCode int
+		wantMsg  string
+	}{
+		{name: "kubernetes runtime", runtime: "kubernetes", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{name: "cloudrun runtime", runtime: "cloudrun", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{name: "unknown runtime", runtime: "some-future-runtime", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{
+			name:     "broker without ReprovisionEmptyPerAgent",
+			runtime:  "docker",
+			caps:     &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, AgentMove: true},
+			wantCode: http.StatusPreconditionFailed,
+			wantMsg:  capMsg,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = tc.caps
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = tc.runtime
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			beforeVersion := agent.StateVersion
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, target := range []string{"", broker.ID} {
+				for _, dryRun := range []bool{true, false} {
+					rec := httptest.NewRecorder()
+					req := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun, TargetBroker: target}
+					srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, req), agent.ID)
+					assert.Equal(t, tc.wantCode, rec.Code, "target=%q dryRun=%v: body: %s", target, dryRun, rec.Body.String())
+					assert.Contains(t, rec.Body.String(), tc.wantMsg, "target=%q dryRun=%v", target, dryRun)
+					if tc.wantCode == http.StatusPreconditionFailed {
+						assert.Contains(t, rec.Body.String(), ErrCodeUnsupportedCapability, "target=%q dryRun=%v", target, dryRun)
+					}
+				}
+			}
+
+			disp.mu.Lock()
+			stops := disp.stopCalls
+			disp.mu.Unlock()
+			assert.Zero(t, stops, "the agent must never be stopped for a request the gate refuses up front")
+			n, _ := disp.reprovisionSnapshot()
+			assert.Zero(t, n, "nothing may be dispatched")
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
+			assert.Equal(t, 1, after.Generation)
+			assert.Equal(t, "", after.ReincarnationState)
+			list, err := s.ListAgentReincarnations(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "no reincarnation record may be created")
 		})
 	}
 }

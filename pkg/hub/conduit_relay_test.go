@@ -281,7 +281,7 @@ func TestConduitRelay_ReconnectWindowWired(t *testing.T) {
 	defer cancel()
 	_, _, ok := rt.relay.Local(ctx, ps.Sessions[0].Session.SessionID)
 	require.True(t, ok)
-	require.NoError(t, rt.relay.GoAway(ps.Sessions[0].Session.SessionID, conduit.GoAwayOptions{Reason: relay.ReasonDraining, ReconnectAfter: 1500 * time.Millisecond}))
+	require.NoError(t, rt.relay.GoAway(ctx, ps.Sessions[0].Session.SessionID, conduit.GoAwayOptions{Reason: relay.ReasonDraining, ReconnectAfter: 1500 * time.Millisecond}))
 	select {
 	case <-sess.GoAwayReceived():
 	case <-time.After(10 * time.Second): // safety net

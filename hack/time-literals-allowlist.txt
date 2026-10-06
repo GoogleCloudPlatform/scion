@@ -14,4 +14,4 @@
 # time.Time) over adding an entry. An entry that matches nothing fails the
 # gate, so delete entries together with the code they cover.
 #
-# There are currently no exceptions.
+pkg/hub/metrics_dashboard.go | dayKey | t.In(loc).Format(dayKeyLayout) | calendar-day key in the viewer's resolved IANA zone (tz-refactor task 24, design §2.3); never stored or sent as an instant
