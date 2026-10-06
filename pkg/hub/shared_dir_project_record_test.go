@@ -251,13 +251,13 @@ func TestProjectRecordSharedDirPath_RequiresValidRecord(t *testing.T) {
 		project store.Project
 		dirName string
 	}{
-		{"empty slug", store.Project{ID: validID, Slug: ""}, "data"},
-		{"empty project ID", store.Project{ID: "", Slug: "proj"}, "data"},
-		{"project ID with parent segment", store.Project{ID: "../x", Slug: "proj"}, "data"},
-		{"project ID with separator", store.Project{ID: "a/b", Slug: "proj"}, "data"},
-		{"empty dir name", store.Project{ID: validID, Slug: "proj"}, ""},
-		{"dir name with parent segment", store.Project{ID: validID, Slug: "proj"}, "../x"},
-		{"dir name with separator", store.Project{ID: validID, Slug: "proj"}, "a/b"},
+		{"rejects an empty slug", store.Project{ID: validID, Slug: ""}, "data"},
+		{"rejects an empty project ID", store.Project{ID: "", Slug: "proj"}, "data"},
+		{"rejects project IDs outside the ID format (parent segment)", store.Project{ID: "../x", Slug: "proj"}, "data"},
+		{"rejects project IDs outside the ID format (separator)", store.Project{ID: "a/b", Slug: "proj"}, "data"},
+		{"rejects an empty dir name", store.Project{ID: validID, Slug: "proj"}, ""},
+		{"rejects dir names outside the name format (parent segment)", store.Project{ID: validID, Slug: "proj"}, "../x"},
+		{"rejects dir names outside the name format (separator)", store.Project{ID: validID, Slug: "proj"}, "a/b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,7 +268,7 @@ func TestProjectRecordSharedDirPath_RequiresValidRecord(t *testing.T) {
 		})
 	}
 
-	t.Run("valid record", func(t *testing.T) {
+	t.Run("accepts a valid record", func(t *testing.T) {
 		project := store.Project{ID: validID, Slug: "proj"}
 		got, err := projectRecordSharedDirPath(&project, "data")
 		require.NoError(t, err)
