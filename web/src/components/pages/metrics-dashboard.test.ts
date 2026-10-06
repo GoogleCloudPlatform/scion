@@ -459,6 +459,33 @@ describe('scion-page-metrics — day-bucket zone', () => {
     expect(errorAlert(element)).toContain('stale failure');
   });
 
+  it('switching tabs through the tab event clears and shows errors for the new tab', async () => {
+    element = await mountOnTab('sessions');
+    failNextResponse = true;
+    await element.loadView('sessions');
+    await settle(element);
+    expect(errorAlert(element)).toContain('stale failure');
+
+    const tabGroup = element.shadowRoot?.querySelector('sl-tab-group');
+    expect(tabGroup).toBeTruthy();
+    const showTab = (name: string): void => {
+      tabGroup!.dispatchEvent(new CustomEvent('sl-tab-show', { detail: { name } }));
+    };
+
+    // A successful switch clears the error the previous tab was showing.
+    showTab('model-calls');
+    await settle(element);
+    expect(element.activeTab).toBe('model-calls');
+    expect(errorAlert(element)).toBeNull();
+
+    // A failing switch shows the new tab's error.
+    failNextResponse = true;
+    showTab('tokens');
+    await settle(element);
+    expect(element.activeTab).toBe('tokens');
+    expect(errorAlert(element)).toContain('stale failure');
+  });
+
   it('stops listening for zone changes once disconnected', async () => {
     element = await mountOnTab('sessions');
     element.remove();
