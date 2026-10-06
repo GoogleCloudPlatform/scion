@@ -94,6 +94,13 @@ describe('scion-page-health-dashboard cards', () => {
 
   it('never reads or writes the server config', async () => {
     await rendered();
+    // One manual refresh cycle, as the Refresh button and the poll timer run it.
+    await (el as unknown as { fetchData(): Promise<void> }).fetchData();
+    await el.updateComplete;
+    const summaryCalls = vi
+      .mocked(apiFetch)
+      .mock.calls.filter(([url]) => url === '/api/v1/admin/health/summary');
+    expect(summaryCalls.length).toBeGreaterThanOrEqual(2);
     const urls = vi.mocked(apiFetch).mock.calls.map(([url]) => url);
     expect(urls).not.toContain('/api/v1/admin/server-config');
   });
