@@ -127,13 +127,30 @@ func TestFlatHeartbeat_LegacyHeartbeatUnchanged(t *testing.T) {
 
 // TestFlatHubConnection_RunsOnlyUnderOwnIdentity: a flat instance starts no
 // heartbeat or control channel for a hub connection that carries another
-// Runtime Broker ID; its own connection starts normally.
+// Runtime Broker ID; its own connection, with the same credentials and hub
+// client, starts a flat-mode heartbeat sent under the instance's ID.
 func TestFlatHubConnection_RunsOnlyUnderOwnIdentity(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	cfg := f.srv.config
+	cfg.HeartbeatEnabled = true
+	cfg.ControlChannelEnabled = false
+	f.srv.config = cfg
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	other := &HubConnection{Name: "other", BrokerID: legacyBrokerID}
+	// Both connections have valid credentials and a hub client, so only the
+	// Runtime Broker ID decides whether a heartbeat starts.
+	conn := func(name, brokerID string) (*HubConnection, *mockRuntimeBrokerService) {
+		brokers := &mockRuntimeBrokerService{}
+		return &HubConnection{
+			Name:        name,
+			BrokerID:    brokerID,
+			HubClient:   &stubBrokerHubClient{brokers: brokers},
+			Credentials: makeTestCreds(name, brokerID, f.srv.config.HubEndpoint),
+		}, brokers
+	}
+
+	other, otherBrokers := conn("other", legacyBrokerID)
 	err := other.Start(ctx, f.srv)
 	if err == nil || !strings.Contains(err.Error(), f.identity.RuntimeBrokerID) {
 		t.Fatalf("Start with another Runtime Broker ID: err = %v, want a refusal naming the instance's ID", err)
@@ -142,11 +159,31 @@ func TestFlatHubConnection_RunsOnlyUnderOwnIdentity(t *testing.T) {
 		t.Fatal("a heartbeat was started under another Runtime Broker ID")
 	}
 
-	own := &HubConnection{Name: "own", BrokerID: f.identity.RuntimeBrokerID}
+	own, ownBrokers := conn("own", f.identity.RuntimeBrokerID)
 	if err := own.Start(ctx, f.srv); err != nil {
 		t.Fatalf("Start under the instance's own ID: %v", err)
 	}
-	own.Stop()
+	defer own.Stop()
+	if own.Heartbeat == nil {
+		t.Fatal("no heartbeat started under the instance's own ID")
+	}
+	if own.Heartbeat.brokerID != f.identity.RuntimeBrokerID || !own.Heartbeat.flat {
+		t.Fatalf("heartbeat brokerID=%q flat=%v, want flat mode under %q", own.Heartbeat.brokerID, own.Heartbeat.flat, f.identity.RuntimeBrokerID)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(ownBrokers.getHeartbeatCalls()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	calls := ownBrokers.getHeartbeatCalls()
+	if len(calls) == 0 {
+		t.Fatal("the own connection sent no heartbeat")
+	}
+	if calls[0].BrokerID != f.identity.RuntimeBrokerID || calls[0].Heartbeat.DefaultProfile != nil {
+		t.Fatalf("first heartbeat sent under %q with DefaultProfile %v, want the instance's ID and no profile", calls[0].BrokerID, calls[0].Heartbeat.DefaultProfile)
+	}
+	if n := len(otherBrokers.getHeartbeatCalls()); n != 0 {
+		t.Fatalf("the refused connection sent %d heartbeats", n)
+	}
 }
 
 // TestFlatHubConnection_HeartbeatServiceMode: the heartbeat service a flat

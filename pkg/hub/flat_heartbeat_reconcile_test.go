@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -264,4 +265,36 @@ func TestFlatHeartbeat_NoProfileBackfillOnFlatRuntimeBroker(t *testing.T) {
 	}
 	assert.Equal(t, f.flat.ID, got.RuntimeBrokerID)
 	assert.False(t, got.IsPinned(), "a heartbeat never pins")
+}
+
+// TestFlatHeartbeat_ProfileSAMappingsDroppedForFlatRow: a heartbeat that
+// reports only profile SA mappings is refused for a flat row with the
+// warning (the mappings are dropped before any broker write), and the row
+// keeps no profiles. A legacy row with that profile still records them, with
+// no warning.
+func TestFlatHeartbeat_ProfileSAMappingsDroppedForFlatRow(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	grantDevUserRuntimeBrokerAccess(t, f.s)
+	logs := &lockedBuffer{}
+	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	const warning = "ignoring Runtime Broker Profile fields reported for a flat Runtime Broker"
+	saOnly := brokerHeartbeatRequest{Status: store.BrokerStatusOnline, ProfileSAMappings: []brokerProfileSAMappings{{
+		Name: "local", ServiceAccountMappings: []store.BrokerProfileSAMapping{{GSA: "gsa@example.iam"}},
+	}}}
+
+	sendFlatHeartbeat(t, f, f.flat.ID, saOnly)
+	assert.Contains(t, logs.String(), warning, "SA mappings for a flat row are dropped with the warning")
+	assert.Contains(t, logs.String(), f.flat.ID)
+	requireFlatRowUnchanged(t, f.s, f.flat)
+
+	// Legacy control: the same report for a legacy row that has the profile
+	// is applied, with no warning.
+	before := logs.String()
+	sendFlatHeartbeat(t, f, f.legacy.ID, saOnly)
+	assert.Equal(t, before, logs.String(), "no flat-row warning for a legacy row")
+	legacy, err := f.s.GetRuntimeBroker(ctx, f.legacy.ID)
+	require.NoError(t, err)
+	require.Len(t, legacy.Profiles, 1)
+	assert.Equal(t, []store.BrokerProfileSAMapping{{GSA: "gsa@example.iam"}}, legacy.Profiles[0].ServiceAccountMappings)
 }
