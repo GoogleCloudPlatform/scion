@@ -83,6 +83,21 @@ type reincarnateTestDispatcher struct {
 	// rerenderErr is returned by every reprovision call after the first:
 	// the worker's best-effort re-render of the previous config
 	// (ptone/scion#1935). reprovisionErr applies to the first call only.
+	// Move dispatch (agentMoveDispatcher): calls record the broker each
+	// went to; errors make that call fail.
+	moveProvisionCalls   []string // "<brokerID>|<expected workspace>"
+	moveProvisionErr     error
+	localOnlyDeleteCalls []string // "<brokerID>|<runID>"
+	localOnlyDeleteErr   map[string]error
+	startBrokers         []string
+	// runStore, when set, makes DispatchAgentStart mint and record a run
+	// on the row first, like the real dispatcher's beginRun, and record
+	// startPlacement (when set), like a target's start report.
+	runStore       store.Store
+	startPlacement string
+	// stopHook, when set, runs inside DispatchAgentStop.
+	stopHook func()
+
 	rerenderErr error
 	// rerenderEcho, when set, runs on a successful re-render against the
 	// dispatched AppliedConfig, simulating the broker's echo.
@@ -137,8 +152,35 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, 
 	}
 	return err
 }
-func (d *reincarnateTestDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, task string, resume bool) error {
+func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect string) error {
 	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
+	return d.moveProvisionErr
+}
+func (d *reincarnateTestDispatcher) DispatchAgentDeleteLocalOnly(_ context.Context, agent *store.Agent) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.localOnlyDeleteCalls = append(d.localOnlyDeleteCalls, agent.RuntimeBrokerID+"|"+agent.RunID)
+	return d.localOnlyDeleteErr[agent.RuntimeBrokerID]
+}
+func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, startBrokers []string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.moveProvisionCalls...), append([]string(nil), d.localOnlyDeleteCalls...), append([]string(nil), d.startBrokers...)
+}
+func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	d.mu.Lock()
+	if d.runStore != nil {
+		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
+		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID); err == nil {
+			agent.RunID = runID
+		}
+		if d.startPlacement != "" {
+			_ = d.runStore.SetAgentWorkspacePlacement(ctx, agent.ID, d.startPlacement)
+		}
+	}
+	d.startBrokers = append(d.startBrokers, agent.RuntimeBrokerID)
 	d.startCalls++
 	d.lastStartTask = task
 	d.lastStartResume = &resume
@@ -158,7 +200,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentStop(_ context.Context, _ *stor
 	d.mu.Lock()
 	d.stopCalls++
 	err := d.stopErr
+	hook := d.stopHook
 	d.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return err
 }
 func (d *reincarnateTestDispatcher) DispatchAgentRestart(context.Context, *store.Agent) error {

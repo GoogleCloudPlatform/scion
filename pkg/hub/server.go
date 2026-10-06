@@ -772,6 +772,10 @@ type DeleteAgentOptions struct {
 	DeletedAt    time.Time
 	RunID        string
 	NotAfter     time.Time
+	// LocalOnly removes only the broker's own state for the agent, never
+	// its files on the NFS export or its branch (runtimebroker deleteAgent,
+	// ?localOnly). Send it only to a broker advertising AgentMove.
+	LocalOnly bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -791,6 +795,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.SoftDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(opts.DeletedAt.UTC().Format(time.RFC3339)))
+	}
+	if opts.LocalOnly {
+		query += "&localOnly=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -991,6 +998,11 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// ExpectExistingNFSWorkspace mirrors
+	// runtimebroker.CreateAgentRequest.ExpectExistingNFSWorkspace: on a
+	// ProvisionOnly request for an agent moved from another broker, the
+	// broker confirms the workspace on its mount of the export first.
+	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
