@@ -124,13 +124,13 @@ seconds. If an agent launcher still cannot read the new agent's status after
 that, the wait reports that the launch was accepted and its status is not
 readable with this credential's scope, and exits 1; the launch continues on the
 Hub. The agent is reported as deleted only on a 404 after its status was read,
-or, for a user's login, on a 404 that lasts past those 5 seconds. If the agent's create did not
-complete (for example the image could not be pulled), the error shows the
-stored template and task. Delete the agent and create it again
-(`scion delete <agent-name>`, then `scion start` with the same template and
-task). If soft-delete retention is enabled on the Hub, the name stays reserved
-until the agent is deleted with force=true or purged; until then, use a new
-name. With `--format json`, `--attach` after a workspace upload attaches
+or, for a user's login, on a 404 that lasts past those 5 seconds. If the
+agent's create did not complete (for example the image could not be pulled),
+the error shows the stored template and task. Delete the agent and create it
+again (`scion delete <agent-name>`, then `scion start` with the same template
+and task). If soft-delete retention is enabled on the Hub, the name stays
+reserved until the agent is deleted with force=true or purged; until then, use
+a new name. With `--format json`, `--attach` after a workspace upload attaches
 without printing the JSON result.
 
 ### `scion create`

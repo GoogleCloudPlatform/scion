@@ -142,7 +142,9 @@ type launchWaitOptions struct {
 	// dispatched the start. Then a status read that is refused or answered
 	// not-found before any read has succeeded is retried briefly and, for
 	// an agent caller, reported as not readable
-	// (*launchStatusUnreadableError) rather than as a deletion.
+	// (*launchStatusUnreadableError) rather than as a deletion. An agent
+	// caller's not-found before any read is reported as not readable even
+	// when Accepted is false, only without the retry.
 	Accepted bool
 	// LaunchID is the accepted launch's ID, when the client holds one; it
 	// only names the launch in the not-readable message.
@@ -163,10 +165,9 @@ type launchWaitOptions struct {
 // (*launchWaitTimeoutError), or ctx is cancelled (*launchWaitInterruptedError).
 // Transient fetch errors (network, 5xx, 408, 429) are retried; other 4xx
 // answers end the wait with the Hub's error. The agent is reported deleted
-// only on a not-found after it has been read in this wait, or, for a user
-// caller, on a not-found that outlasts launchUnreadableGrace; see Accepted
-// for an accepted launch whose status is not readable. It never changes
-// the agent.
+// only on a not-found after it has been read in this wait, or on a user
+// caller's not-found (after launchUnreadableGrace when Accepted); see
+// Accepted for a status that is not readable. It never changes the agent.
 func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Agent, error) {
 	interval := o.PollInterval
 	if interval <= 0 {
@@ -185,21 +186,22 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		getCancel()
 		if err != nil && last == nil && o.Accepted && isUnreadableStatusError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
-			if err != nil && isUnreadableStatusError(err) {
-				if fetchCtx.Err() != nil {
-					return false, nil // the wait loop reports the timeout or interrupt
-				}
-				// An agent caller gets the same 404 for an agent it may not
-				// read as for a missing one, so neither answer means the
-				// agent is gone. A user caller is refused with 403, so a
-				// user's 404 is a definite not-found and a user's 403 keeps
-				// the login hint below. This follows the Hub's read check:
-				// authorizeSingleAgentRead and writeAgentNotFound in
-				// pkg/hub/handlers_agents_core.go.
-				if config.IsHubManagedAgent() {
-					return true, &launchStatusUnreadableError{Agent: o.AgentName, LaunchID: o.LaunchID, Err: err}
-				}
+			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil {
+				return false, nil // the wait loop reports the timeout or interrupt
 			}
+		}
+		// An agent caller gets the same 404 for an agent it may not read as
+		// for a missing one, so before any read has succeeded a 404 does not
+		// mean the agent is gone, whether or not the start shows an accepted
+		// launch (Accepted only decides the retry above). After an accepted
+		// launch, an agent caller's 403 is reported the same way. A user
+		// caller is refused with 403, so a user's 404 is a definite
+		// not-found and a user's 403 keeps the login hint below. This
+		// follows the Hub's read check: authorizeSingleAgentRead and
+		// writeAgentNotFound in pkg/hub/handlers_agents_core.go.
+		if err != nil && last == nil && config.IsHubManagedAgent() &&
+			(apiclient.IsNotFoundError(err) || (o.Accepted && apiclient.IsForbiddenError(err))) {
+			return true, &launchStatusUnreadableError{Agent: o.AgentName, LaunchID: o.LaunchID, Err: err}
 		}
 		if err != nil {
 			if apiclient.IsNotFoundError(err) {
@@ -222,7 +224,9 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		waitCtx, cancel = context.WithTimeout(ctx, launchWaitBudget(o.Timeout, budgetAgent))
 	}
 
-	if o.BudgetFrom != nil && (o.Timeout > 0 || (o.BudgetFrom.Launch != nil && o.BudgetFrom.Launch.RemainingSeconds != nil)) {
+	// An explicit --wait-timeout starts before the first fetch, so it also
+	// bounds the unreadable-status retry.
+	if o.Timeout > 0 || (o.BudgetFrom != nil && o.BudgetFrom.Launch != nil && o.BudgetFrom.Launch.RemainingSeconds != nil) {
 		start(o.BudgetFrom)
 		defer cancel()
 		if done, err := check(waitCtx); done {

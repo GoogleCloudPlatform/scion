@@ -439,9 +439,9 @@ func (c *fakeLaunchClock) recorded() []time.Duration {
 // shortenLaunchWaitTimings makes polling immediate and the derived wait
 // budgets short: slack 20ms, fallback 5s, unreadable-status grace 200ms on
 // a fake clock, so its retries take no real time.
-func shortenLaunchWaitTimings(t *testing.T) {
+func shortenLaunchWaitTimings(t *testing.T) *fakeLaunchClock {
 	t.Helper()
-	installFakeLaunchClock(t)
+	clock := installFakeLaunchClock(t)
 	origPoll, origSlack, origFallback := launchPollInterval, launchWaitSlack, launchWaitFallback
 	origGrace, origBackoff, origBackoffMax := launchUnreadableGrace, launchUnreadableBackoff, launchUnreadableBackoffMax
 	t.Cleanup(func() {
@@ -454,6 +454,7 @@ func shortenLaunchWaitTimings(t *testing.T) {
 	launchUnreadableGrace = 200 * time.Millisecond
 	launchUnreadableBackoff = 5 * time.Millisecond
 	launchUnreadableBackoffMax = 40 * time.Millisecond
+	return clock
 }
 
 func setupLaunchStartTest(t *testing.T, hub *launchMockHub) *HubContext {
@@ -1036,6 +1037,9 @@ func TestWaitForAgentLaunch_AcceptedLaunchStatusNotReadable(t *testing.T) {
 			shortenLaunchWaitTimings(t)
 			t.Setenv("SCION_AGENT_ID", "agent-launcher")
 			apiErr := &apiclient.APIError{StatusCode: status, Code: "not_found", Message: "agent not found"}
+			if status == http.StatusForbidden {
+				apiErr.Code, apiErr.Message = "forbidden", "access denied"
+			}
 			seq := &agentSequence{results: []func() (*hubclient.Agent, error){errResult(apiErr)}}
 			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
 				AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
@@ -1212,11 +1216,10 @@ func runLaunchWaitGuarded(t *testing.T, ctx context.Context, o launchWaitOptions
 func TestWaitForAgentLaunch_InterruptDuringUnreadableRetry(t *testing.T) {
 	// Ctrl-C while the retry is waiting ends the wait at once as an
 	// interrupt, not as a not-readable status.
-	shortenLaunchWaitTimings(t)
+	clock := shortenLaunchWaitTimings(t)
 	t.Setenv("SCION_AGENT_ID", "agent-launcher")
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	clock := installFakeLaunchClock(t)
 	clock.blocked = true
 	clock.onBlock = func() { cancel(waitSignalCause{sig: syscall.SIGTERM}) }
 	launchUnreadableGrace = time.Hour
@@ -1236,22 +1239,27 @@ func TestWaitForAgentLaunch_InterruptDuringUnreadableRetry(t *testing.T) {
 func TestWaitForAgentLaunch_TimeoutDuringUnreadableRetry(t *testing.T) {
 	// A --wait-timeout that ends while the retry is waiting is reported as
 	// a timeout, not as a not-readable status.
-	shortenLaunchWaitTimings(t)
-	t.Setenv("SCION_AGENT_ID", "agent-launcher")
-	clock := installFakeLaunchClock(t)
-	clock.blocked = true
-	launchUnreadableGrace = time.Hour
-	seq := &agentSequence{results: []func() (*hubclient.Agent, error){
-		errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "agent not found"}),
-	}}
-	elapsed, err := runLaunchWaitGuarded(t, context.Background(), launchWaitOptions{
-		AgentName: "a1", Accepted: true, LaunchID: "launch-1", BudgetFrom: &hubclient.Agent{Phase: "provisioning"},
-		Get: seq.get, PollInterval: time.Millisecond, Timeout: 50 * time.Millisecond,
-	})
-	var timeout *launchWaitTimeoutError
-	require.ErrorAs(t, err, &timeout)
-	assert.Equal(t, 1, exitCodeFor(err))
-	assert.Less(t, elapsed, 2*time.Second)
+	// Without BudgetFrom (as after a workspace finalize) the timeout must
+	// still bound the retry on the first fetch.
+	for name, budgetFrom := range map[string]*hubclient.Agent{"budgetFrom": {Phase: "provisioning"}, "noBudgetFrom": nil} {
+		t.Run(name, func(t *testing.T) {
+			clock := shortenLaunchWaitTimings(t)
+			t.Setenv("SCION_AGENT_ID", "agent-launcher")
+			clock.blocked = true
+			launchUnreadableGrace = time.Hour
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "agent not found"}),
+			}}
+			elapsed, err := runLaunchWaitGuarded(t, context.Background(), launchWaitOptions{
+				AgentName: "a1", Accepted: true, LaunchID: "launch-1", BudgetFrom: budgetFrom,
+				Get: seq.get, PollInterval: time.Millisecond, Timeout: 50 * time.Millisecond,
+			})
+			var timeout *launchWaitTimeoutError
+			require.ErrorAs(t, err, &timeout)
+			assert.Equal(t, 1, exitCodeFor(err))
+			assert.Less(t, elapsed, 2*time.Second)
+		})
+	}
 }
 
 func TestFinishHubStart_FinalizeAgentLauncherCannotReadStatus(t *testing.T) {
@@ -1279,13 +1287,39 @@ func TestFinishHubStart_FinalizeAgentLauncherCannotReadStatus(t *testing.T) {
 }
 
 func TestStartAgentViaHub_AttachEndedLaunchIsNotAnAcceptedLaunch(t *testing.T) {
-	// A synchronous answer carries the agent's last, ended launch. Waiting
-	// for --attach does not treat it as a launch just accepted: no retry,
-	// and the old launch is not named.
-	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+	// A synchronous answer carries no launch or the agent's last, ended
+	// launch. Waiting for --attach does not treat it as a launch just
+	// accepted: no retry, and the old launch is not named. An agent caller's
+	// 404 still does not mean the agent was deleted: the create answer just
+	// returned it.
+	ended := &hubclient.AgentLaunch{ID: "launch-old", State: "ended", Kind: "create", EndReason: "not_launched"}
+	for name, launch := range map[string]*hubclient.AgentLaunch{"none": nil, "ended": ended} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", "agent-launcher")
+			hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Launch: launch},
+			}, afterCreate: []interface{}{http.StatusNotFound}}
+			hubCtx := setupLaunchStartTest(t, hub)
+			attach = true
+			var err error
+			_ = captureStderr(t, func() {
+				_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+			})
+			var unreadable *launchStatusUnreadableError
+			require.ErrorAs(t, err, &unreadable)
+			assert.Equal(t, "agent 'a1': launch accepted; status not readable with this credential's scope; the launch continues on the Hub", err.Error())
+			assert.Equal(t, 1, exitCodeFor(err))
+			assert.Equal(t, 1, hub.getsAfterCR, "not retried")
+		})
+	}
+}
+
+func TestStartAgentViaHub_AttachUserCallerNotFoundIsDeleted(t *testing.T) {
+	// A user caller is refused with 403, so its 404 on the --attach wait is
+	// a definite not-found, reported at once.
+	t.Setenv("SCION_AGENT_ID", "")
 	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: hubclient.CreateAgentResponse{
-		Agent: &hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running",
-			Launch: &hubclient.AgentLaunch{ID: "launch-old", State: "ended", Kind: "create", EndReason: "not_launched"}},
+		Agent: &hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running"},
 	}, afterCreate: []interface{}{http.StatusNotFound}}
 	hubCtx := setupLaunchStartTest(t, hub)
 	attach = true
@@ -1294,7 +1328,22 @@ func TestStartAgentViaHub_AttachEndedLaunchIsNotAnAcceptedLaunch(t *testing.T) {
 		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
 	require.Error(t, err)
-	assert.NotContains(t, err.Error(), "launch-old")
-	assert.NotContains(t, err.Error(), "status not readable")
+	assert.Equal(t, "agent 'a1' no longer exists; it was deleted while launching", err.Error())
 	assert.Equal(t, 1, hub.getsAfterCR, "not retried")
+}
+
+func TestWaitForAgentLaunch_AgentCallerForbiddenWithoutAcceptedLaunch(t *testing.T) {
+	// Without an accepted launch, an agent caller's 403 keeps the Hub's
+	// refusal; only its 404 is ambiguous.
+	shortenLaunchWaitTimings(t)
+	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+	seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+		errResult(&apiclient.APIError{StatusCode: http.StatusForbidden, Code: "forbidden", Message: "access denied"}),
+	}}
+	_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+		AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the Hub refused the status request")
+	assert.Equal(t, 1, seq.calls)
 }
