@@ -53,7 +53,7 @@ Agents running inside containers must report status back to the Hub without poss
 
 Runtime Brokers represent high-trust infrastructure. They use HMAC-based request signing for bidirectional authentication with the Hub.
 
-- **Shared Secret**: Established during initial registration via a short-lived `joinToken`.
+- **Shared Secret**: Established during initial registration via a short-lived, single-use `joinToken`. The token can be redeemed on the same machine (`scion runtime-broker register`) or created on one machine and redeemed on another (`scion hub brokers join-token create`, then `scion runtime-broker join`), so the broker host needs no Hub user credential.
 - **Signing & Verification**: Every request includes headers for `X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, and `X-Scion-Signature`. The Hub strictly verifies that the authenticated caller identity matches any target broker paths to prevent cross-tenant escalation.
 - **Replay Protection**: Nonce-based tracking and timestamp validation (5-minute clock skew tolerance) prevent replay attacks.
 - **NAT Traversal**: Brokers establish a persistent WebSocket control channel. The initial upgrade request is HMAC-authenticated, establishing a trusted session for subsequent commands.
@@ -232,7 +232,7 @@ JWT signing keys used for agent and user token issuance are stored through the s
 
 The following broker-related secrets are stored in the Hub database and are not managed through the secrets backend:
 
-- **Join tokens**: SHA-256 hashed before storage; single-use with 1-hour expiry.
+- **Join tokens**: SHA-256 hashed before storage and single-use. Each token has its own lifetime, from 5 minutes to 24 hours (default 1 hour). A broker has at most one token: issuing a new one replaces the unused earlier one. Redeeming a token deletes it in the same transaction that stores the broker's shared secret, so only one of several concurrent redemptions succeeds, and a failed redemption leaves the token usable. Expired tokens are removed by a scheduled job. The audit log records who created each token, when it expires, and whether it replaced an earlier one; the token itself is never logged.
 - **Shared secrets**: Stored as binary BLOBs in the `broker_secrets` table; used for HMAC-SHA256 request signing.
 
 These are infrastructure-level secrets established during broker registration and are managed by the broker authentication subsystem rather than the user-facing secrets API.
