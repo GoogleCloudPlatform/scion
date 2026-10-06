@@ -152,6 +152,8 @@ In Hub-connected setups, the same recovery is available in the web UI as a **Res
 
 To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces; agents in worktree-per-agent projects are not yet supported.
 
+In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
+
 ## Auto-Suspend of Stalled Agents
 
 To reclaim resources from agents that are no longer making progress, the Hub can
@@ -210,6 +212,8 @@ Always start by running `scion look <agent-name>` to inspect the active screen s
 ## Deletion Authority & Hierarchical Teardown
 
 `scion delete <agent-name> --non-interactive` immediately reclaims container resources. Since an agent's true deliverable is its **artifact** (pushed commits, opened PRs, files written to a shared volume), **deleting a completed agent is the default, recommended clean-up path.**
+
+In Hub mode, teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. If the Runtime Broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
 
 However, to prevent premature deletion of agents with active or pending tasks, strict teardown guidelines must be followed.
 

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 115
+**Operations:** 119
 
 ## Table of Contents
 
@@ -55,6 +55,7 @@
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary)
 - [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary)
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary)
+- [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
@@ -71,11 +72,14 @@
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
 - [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
+- [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
+- [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
+- [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
@@ -153,7 +157,7 @@
 - **Kind:** `non_amplification`
 - Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 
@@ -266,7 +270,7 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 
@@ -2031,6 +2035,44 @@
 
 ---
 
+## credential.token.read
+
+**Domain:** credential
+
+**Description:** List or read the caller's own user access tokens
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/auth/tokens` |
+| http_route | GET | `/api/v1/auth/tokens/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `user.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`, `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+### Exemptions
+
+- **authentication_only:** Token reads are authenticated-only (user reads own tokens); no per-resource permission required beyond session validity (scope: self-token management only) — waives: `base_permission`
+
+---
+
 ## credential.token.create
 
 **Domain:** credential
@@ -2617,6 +2659,82 @@
 
 ---
 
+## user.session.revoke
+
+**Domain:** user
+
+**Description:** Revoke every cookie session of a user (platform admin only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/{id}/revoke-sessions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `SESSION_RECOVERY`)
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** peer_superior
+- Only an unscoped local platform admin may revoke another user's sessions
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+### Exemptions
+
+- **hub_admin:** Platform-admin role check (requireAdminFor); the session generation increment is logged, not audited (scope: user session revocation) — waives: `base_permission`, `audit_obligation`
+
+---
+
+## user.terminalworkspace
+
+**Domain:** user
+
+**Description:** Read or replace the caller's own terminal workspace
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/terminal-workspace` |
+| http_route | PUT | `/api/v1/users/me/terminal-workspace` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+### Exemptions
+
+- **authentication_only:** The path names no user; the subject is always the caller, so no resource permission applies (scope: caller's own terminal workspace) — waives: `base_permission`
+
+---
+
 ## hub.authreset
 
 **Domain:** hub
@@ -2781,6 +2899,38 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.conduitgrantkeys.rotate
+
+**Domain:** hub
+
+**Description:** Rotate the conduit grant signing key (kids and timestamps only in the response)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/conduit/grant-keys/rotate` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `hub.conduit_grant_keys.execute`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminConduitGrantKeyRotate`
 
 ---
 

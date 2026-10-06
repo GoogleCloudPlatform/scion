@@ -8,6 +8,42 @@ If a long-lived agent (lead, coordinator, architect) needs a newer template, ima
 harness config but should keep its identity, conversations, and lineage, use
 `scion reincarnate <agent>` (or `scion reincarnate` from inside the agent, to migrate
 itself) instead of delete-and-recreate; see its `--help` for the contract.
+Patch flags (`--model`, `--image`, `--role`, `--service-account`, `--thinking-level`,
+`--harness-auth`) change that setting on the new generation.
+
+### Moving to another Runtime Broker
+
+`scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker,
+keeping its identity and its workspace (uncommitted work included). Check first with
+`--dry-run`; it changes nothing and prints every eligibility check.
+
+- **Requirement:** both brokers mount the **same NFS export** and the agent's workspace
+  is on it. The workspace is never copied or re-cloned; a move that does not meet this
+  is refused before anything changes. Both brokers must support agent move and be
+  online (an offline source is refused).
+- **What carries over:** the workspace on the export, the agent ID, slug and lineage.
+  The agent home is regenerated on the target and harness session history is not
+  carried, so write a full handoff (`--handoff-file`), as for any reincarnation.
+- **Moving yourself:** allowed only to a broker that already serves your project
+  (otherwise `409`); an agent with a GCP passthrough identity cannot move itself
+  (`403`: ask a user). Follow the five-line contract in `--help`. The CLI does not set
+  your status; it only prints that the container will be stopped shortly, so do nothing
+  after the call.
+- **Moving another agent (as an agent):** for example, a coordinator moving its child.
+  You need lifecycle permission on that agent. The target must already serve the
+  project, and must auto-provide unless your scopes include `project:agent:create`.
+  An agent never links a new broker to the project; a broker you cannot see returns
+  `404`.
+- **Moving another agent (as a user):** reaching a broker that does not serve the
+  project yet needs a signed-in user with project update, plus broker read and broker
+  dispatch unless the broker auto-provides. A user access token can only reach brokers
+  that auto-provide.
+- **Failure:** the move runs in the background after the request is accepted, so a
+  failure shows as the agent in the `error` phase with the reason in its status
+  message. A failure after the agent is assigned to the target and before the new
+  generation is running rolls the move back: the agent is left stopped on the source,
+  in the `error` phase, with its workspace intact. Start it or retry. If the target's start may have left a container,
+  the agent stays on the target in the `error` phase instead.
 
 ## Default: delete when done
 

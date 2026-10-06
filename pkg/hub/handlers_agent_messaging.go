@@ -1332,9 +1332,28 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			if err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg); err != nil {
+			// Ensure the persisting user-message subscription first, as the
+			// notification path does: it is otherwise only created on agent
+			// lifecycle events.
+			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
+			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
+			if err != nil && persisting && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
+				// The inprocess spoke queued the persisting deliverToUser, so
+				// the message is stored; only channel spoke delivery failed (a
+				// non-observer spoke returned an error, or no spoke is
+				// registered for the channel). Reporting failure would make
+				// the sender retry and duplicate the row and the plugin card
+				// (ptone/scion#2757). Without the persisting subscription
+				// nothing was stored, so the error is still returned.
+				s.messageLog.Warn("Outbound message stored; channel spoke delivery failed",
+					"agent_id", agent.ID, "recipient_id", result.RecipientID,
+					"project_id", agent.ProjectID, "error", err)
+				err = nil
+			}
+			if err != nil {
 				s.messageLog.Error("Failed to dispatch outbound message through broker",
-					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
+					"agent_id", agent.ID, "recipient_id", result.RecipientID,
+					"project_id", agent.ProjectID, "persisting", persisting, "error", err)
 				if errors.Is(err, eventbus.ErrSubscriberBufferFull) {
 					// The in-process bus could not queue this delivery for at
 					// least one matching subscriber, normally the per-project
@@ -1590,10 +1609,19 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// The same transaction checks that every delegator of the edges the soft
 	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
 	// fails), reactivates those edges (a conflicting active edge is a 409)
-	// and writes the agent_restore audit record.
+	// and writes the agent_restore audit record. It also refuses an agent
+	// whose guard user (its owner, ancestry root or schedule creator) no
+	// longer exists, normally a deleted user but possibly a purged legacy
+	// root agent (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errRestoreEdgeConflict) {
