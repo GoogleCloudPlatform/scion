@@ -1002,6 +1002,17 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 	return nil
 }
 
+// isTemplateNoFilesError reports whether err is the Hub's download-URL
+// rejection for a template record that has no files. The Hub embeds the
+// template name and ID in the message ("template NAME (ID) has no files ..."),
+// so only the fixed suffix is matched.
+func isTemplateNoFilesError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "has no files")
+}
+
 // syncTemplateToHub creates or updates a template in the Hub.
 // If a template with the same name already exists, only changed files are uploaded.
 func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType string) error {
@@ -1080,9 +1091,9 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		// In this case, treat it like a new template that needs all files uploaded
 		templateNeedsFullUpload := false
 		if err != nil {
-			// Check for "template has no files" error - this means the template record exists
-			// but was never finalized (e.g., storage was misconfigured during initial sync)
-			if strings.Contains(err.Error(), "template has no files") {
+			// A "has no files" error means the template record exists but was
+			// never finalized (e.g., storage was misconfigured during initial sync)
+			if isTemplateNoFilesError(err) {
 				fmt.Printf("Template '%s' exists but has no files (possibly from incomplete previous sync).\n", name)
 				fmt.Printf("Uploading all files...\n")
 				templateNeedsFullUpload = true
