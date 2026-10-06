@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
@@ -1235,5 +1237,94 @@ func drainLoop(ch <-chan StreamEvent, out *[]StreamEvent) {
 		default:
 			return
 		}
+	}
+}
+
+// --- Explicit agent replies form the task response ---
+
+// TestExplicitReplyBecomesTaskResponse covers the harness-independent
+// response path: the agent runs `scion message user:<caller> ...`, and the
+// hub publishes it on the caller's user topic as an "instruction" message
+// with Sender agent:<slug> and no a2aTaskId. That reply must become the A2A
+// task artifact and the response returned to the caller.
+func TestExplicitReplyBecomesTaskResponse(t *testing.T) {
+	b, store := newLifecycleTestBridge(t)
+	taskID := "explicit-reply-1"
+	seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
+
+	reply := &messages.StructuredMessage{
+		Version:     1,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Sender:      "agent:agent-a",
+		Recipient:   "user:test-user",
+		Msg:         "Here is the answer",
+		Type:        messages.TypeInstruction,
+		Attachments: []string{"https://example.com/answer.txt"},
+	}
+	if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", reply); err != nil {
+		t.Fatalf("HandleBrokerMessage: %v", err)
+	}
+
+	var artifacts []Artifact
+	var replyMessages int
+	for _, ev := range readStreamEvents(t, store, taskID) {
+		if ev.ArtifactUpdate != nil {
+			artifacts = append(artifacts, ev.ArtifactUpdate.Artifact)
+		}
+		if ev.StatusUpdate != nil && ev.StatusUpdate.Status.Message != nil {
+			replyMessages++
+		}
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts = %d, want 1 from the explicit reply", len(artifacts))
+	}
+	parts := artifacts[0].Parts
+	if len(parts) != 2 || parts[0].Text != "Here is the answer" || parts[1].URL != "https://example.com/answer.txt" {
+		t.Errorf("artifact parts = %+v, want reply text and attachment", parts)
+	}
+	if replyMessages != 1 {
+		t.Errorf("status messages = %d, want 1 carrying the reply", replyMessages)
+	}
+
+	// The blocking caller is answered by the explicit reply.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ev, err := b.waitForTaskEvent(ctx, taskID, 2*time.Second)
+	if err != nil {
+		t.Fatalf("waitForTaskEvent: %v", err)
+	}
+	if ev.Kind != "artifact" {
+		t.Fatalf("first response event kind = %q, want artifact", ev.Kind)
+	}
+	result, err := b.taskEventToTaskResult(taskID, "ctx-1", ev)
+	if err != nil {
+		t.Fatalf("taskEventToTaskResult: %v", err)
+	}
+	if len(result.Artifacts) != 1 {
+		t.Fatalf("result artifacts = %d, want 1 from the explicit reply", len(result.Artifacts))
+	}
+	if len(result.Artifacts[0].Parts) == 0 {
+		t.Fatalf("result artifact has no parts: %+v", result.Artifacts[0])
+	}
+	if result.Artifacts[0].Parts[0].Text != "Here is the answer" {
+		t.Errorf("result artifacts = %+v, want the explicit reply", result.Artifacts)
+	}
+
+	// The SDK executor maps the artifact event to COMPLETED with the reply
+	// as its status message (taskEventToSDKEvent, "artifact" case).
+	sdkEv, err := taskEventToSDKEvent(&a2asrv.ExecutorContext{TaskID: a2a.TaskID(taskID)}, ev)
+	if err != nil {
+		t.Fatalf("taskEventToSDKEvent: %v", err)
+	}
+	statusEv, ok := sdkEv.(*a2a.TaskStatusUpdateEvent)
+	if !ok {
+		t.Fatalf("SDK event = %T, want *a2a.TaskStatusUpdateEvent", sdkEv)
+	}
+	if statusEv.Status.State != a2a.TaskStateCompleted {
+		t.Errorf("SDK state = %v, want %v", statusEv.Status.State, a2a.TaskStateCompleted)
+	}
+	if statusEv.Status.Message == nil || len(statusEv.Status.Message.Parts) == 0 ||
+		statusEv.Status.Message.Parts[0].Text() != "Here is the answer" {
+		t.Errorf("SDK status message = %+v, want the explicit reply", statusEv.Status.Message)
 	}
 }

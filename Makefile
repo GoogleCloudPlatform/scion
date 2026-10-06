@@ -72,18 +72,21 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub (and perf/bench/seed) tests with SQLite
+## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit and pkg/store/entadapter tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus
-# perf/bench/seed's own SQLite-backed tests, which carry the same
-# `//go:build !no_sqlite` constraint for the same reason (ptone/scion#2393).
+# perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests,
+# which carry the same `//go:build !no_sqlite` constraint for the same
+# reason (ptone/scion#2393, ptone/scion#2851), and pkg/conduit's
+# relay/router tests, which run against the SQLite-backed conduit
+# registry store.
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 40m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/...
+		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/...
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
@@ -181,7 +184,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestPreviousRunIDs_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

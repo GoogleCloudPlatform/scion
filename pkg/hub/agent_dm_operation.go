@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -364,6 +365,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// dispatched (AC-4).
 	if !deferred {
 		if input.Wake {
+			if denial := s.wakeResumeDenial(ctx, input.SenderIdentity, input.TargetAgent); denial != nil {
+				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
+				return nil, denial
+			}
 			_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
 				return nil, wakeErr
@@ -685,6 +690,25 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		Recipient:   storeMsg.Recipient,
 		RecipientID: storeMsg.RecipientID,
 	}, nil
+}
+
+// wakeResumeDenial applies the rule that resuming a suspended agent to
+// deliver a message requires the lifecycle permission that starting the
+// agent requires (agentLifecycleAllowed). It returns a 403 error when target
+// is suspended and identity lacks that permission, and nil otherwise. A
+// target in any other phase needs no resume, so the rule does not apply.
+func (s *Server) wakeResumeDenial(ctx context.Context, identity Identity, target *store.Agent) *AgentDMError {
+	if state.Phase(target.Phase) != state.PhaseSuspended {
+		return nil
+	}
+	if s.agentLifecycleAllowed(ctx, identity, target) {
+		return nil
+	}
+	return &AgentDMError{
+		Code:       ErrCodeForbidden,
+		Message:    fmt.Sprintf("not permitted to resume agent %s", target.Slug),
+		HTTPStatus: http.StatusForbidden,
+	}
 }
 
 // WriteAgentDMError writes an AgentDMError as an HTTP response. Adapters

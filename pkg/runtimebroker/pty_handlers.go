@@ -599,6 +599,9 @@ func (s *Server) handleAgentAttach(w http.ResponseWriter, r *http.Request) {
 
 	// Look up agent using LookupAgent for runtime-aware info
 	projectID := r.URL.Query().Get("projectId")
+	// projectPath is the hub's hint for a linked project's local path, used
+	// to find the agent's saved profile (see ensureAgentOwnRuntime).
+	ctx = withProjectPathHint(ctx, r.URL.Query().Get("projectPath"))
 	result, err := s.LookupAgent(ctx, agentID, projectID)
 	if err != nil {
 		if errors.Is(err, ErrAgentListUnavailable) {
@@ -1144,7 +1147,7 @@ func (s *LocalPTYSession) startDockerExec() error {
 		}
 	}
 
-	args := []string{"exec", "-it"}
+	args := append([]string{"exec", "-it"}, runtime.ExecDetachKeysArgs(s.runtimeCmd)...)
 	if s.attachNonce != "" {
 		args = append(args, "-e", "SCION_ATTACH_NONCE="+s.attachNonce)
 	}
@@ -1718,7 +1721,7 @@ func (h *StreamPTYHandler) startDockerExec() error {
 		}
 	}
 
-	args := []string{"exec", "-it"}
+	args := append([]string{"exec", "-it"}, runtime.ExecDetachKeysArgs(runtimeCmd)...)
 	if h.attachNonce != "" {
 		args = append(args, "-e", "SCION_ATTACH_NONCE="+h.attachNonce)
 	}
