@@ -18,12 +18,14 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // P1.3 part 2 (ptone/scion#3269): a flat Runtime Broker instance's
@@ -200,4 +202,115 @@ func TestFlatHubConnection_HeartbeatServiceMode(t *testing.T) {
 	if lhb := legacy.newHeartbeatService(&mockRuntimeBrokerService{}, "legacy", "", time.Hour); lhb.flat {
 		t.Fatal("a legacy Runtime Broker's heartbeat is in flat mode")
 	}
+}
+
+// countingAuxResolver records every auxiliary-runtime resolution and answers
+// with a Kubernetes-named runtime distinct from the default.
+type countingAuxResolver struct {
+	mu       sync.Mutex
+	profiles []string
+}
+
+func (r *countingAuxResolver) resolve(projectPath, agentName, profile string) scionrt.Runtime {
+	r.mu.Lock()
+	r.profiles = append(r.profiles, profile)
+	r.mu.Unlock()
+	return &scionrt.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+}
+
+func (r *countingAuxResolver) calls() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.profiles...)
+}
+
+func auxRuntimeCount(s *Server) int {
+	s.auxiliaryRuntimesMu.RLock()
+	defer s.auxiliaryRuntimesMu.RUnlock()
+	return len(s.auxiliaryRuntimes)
+}
+
+// TestFlatServerStart_NeverResolvesAuxiliaryProfiles (ptone/scion#3605
+// assessment): a flat instance's Start never resolves auxiliary profiles,
+// even when the project settings carry a remote-style Kubernetes profile;
+// its auxiliary runtimes stay empty. A legacy server started from the same
+// settings does discover it (control).
+func TestFlatServerStart_NeverResolvesAuxiliaryProfiles(t *testing.T) {
+	// The fixture writes a "remote" profile on a kubernetes runtime into the
+	// global and project settings.
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, activeProfile: "remote"})
+
+	start := func(t *testing.T, srv *Server) (context.CancelFunc, chan error) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- srv.Start(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			_ = srv.Shutdown(context.Background())
+		})
+		return cancel, errCh
+	}
+
+	t.Run("flat", func(t *testing.T) {
+		cfg := f.srv.config
+		cfg.HeartbeatEnabled = true // readiness: hub connections start after the discovery step
+		cfg.ControlChannelEnabled = false
+		srv := New(cfg, f.mgr, f.srv.runtime)
+		res := &countingAuxResolver{}
+		srv.resolveAuxiliaryRuntime = res.resolve
+		_, errCh := start(t, srv)
+
+		deadline := time.Now().Add(10 * time.Second)
+		started := false
+		for !started && time.Now().Before(deadline) {
+			select {
+			case err := <-errCh:
+				t.Fatalf("Start returned early: %v", err)
+			default:
+			}
+			srv.hubMu.RLock()
+			for _, c := range srv.hubConnections {
+				c.mu.RLock()
+				started = started || c.Heartbeat != nil
+				c.mu.RUnlock()
+			}
+			srv.hubMu.RUnlock()
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !started {
+			t.Fatal("the flat server did not reach its hub-connection start (after the discovery step)")
+		}
+		if got := res.calls(); len(got) != 0 {
+			t.Fatalf("a flat instance resolved auxiliary profiles %v; it must resolve none", got)
+		}
+		if n := auxRuntimeCount(srv); n != 0 {
+			t.Fatalf("a flat instance registered %d auxiliary runtimes, want 0", n)
+		}
+	})
+
+	t.Run("legacy control", func(t *testing.T) {
+		cfg := f.srv.config
+		cfg.FlatInstance = nil
+		cfg.HubEnabled = false
+		srv := New(cfg, f.mgr, f.srv.runtime)
+		res := &countingAuxResolver{}
+		srv.resolveAuxiliaryRuntime = res.resolve
+		start(t, srv)
+
+		deadline := time.Now().Add(10 * time.Second)
+		for auxRuntimeCount(srv) == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if n := auxRuntimeCount(srv); n == 0 {
+			t.Fatalf("control: a legacy server must discover the remote profile's runtime (resolver calls %v)", res.calls())
+		}
+		found := false
+		for _, p := range res.calls() {
+			found = found || p == "remote"
+		}
+		if !found {
+			t.Fatalf("control: resolver calls %v, want the remote profile", res.calls())
+		}
+	})
 }
