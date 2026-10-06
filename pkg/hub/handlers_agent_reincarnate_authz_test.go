@@ -85,6 +85,15 @@ func grantAgentLifecycleAtProject(t *testing.T, s store.Store, userID, projectID
 	grantPermissionViaRoleBinding(t, s, userID, "agent.lifecycle", store.RoleScopeProject, projectID)
 }
 
+// grantAgentDelegationAtProject grants userID agent.create at project scope.
+// A reincarnation requested by another principal re-records the agent's
+// authority under the requester, which requires delegation authority
+// (CanDelegate) in addition to agent.lifecycle.
+func grantAgentDelegationAtProject(t *testing.T, s store.Store, userID, projectID string) {
+	t.Helper()
+	grantPermissionViaRoleBinding(t, s, userID, "agent.create", store.RoleScopeProject, projectID)
+}
+
 // grantProjectRole binds userID to a real, named, seeded project-scoped role
 // (e.g. store.ProjectRoleAdmin), for the "a session user with the role" case
 // -- as distinct from the PAT tests, which grant the bare permission
@@ -121,8 +130,11 @@ func TestReincarnateAgent_PATWithLifecycleScope_Allowed(t *testing.T) {
 	srv, s, project, agent := reincarnateAuthzFixture(t)
 	user := newReincarnateAuthzUser(t, s, "lifecycle-pat")
 	grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
+	grantAgentDelegationAtProject(t, s, user.ID, project.ID)
 
-	identity := scopedIdentityFor(user, project.ID, []string{"agent:lifecycle"})
+	// minimalSelectors (agent:create and the read selectors) covers the
+	// target's baseline role, which the delegation check requires.
+	identity := scopedIdentityFor(user, project.ID, append(minimalSelectors(t), "agent:lifecycle"))
 	req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: true})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, req, agent.ID)
@@ -138,8 +150,9 @@ func TestReincarnateAgent_PATWithManageScope_Allowed(t *testing.T) {
 	srv, s, project, agent := reincarnateAuthzFixture(t)
 	user := newReincarnateAuthzUser(t, s, "manage-pat")
 	grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
+	grantAgentDelegationAtProject(t, s, user.ID, project.ID)
 
-	identity := scopedIdentityFor(user, project.ID, permissions.UATManageScopes())
+	identity := scopedIdentityFor(user, project.ID, append(permissions.UATManageScopes(), minimalSelectors(t)...))
 	req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: true})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, req, agent.ID)
@@ -177,6 +190,36 @@ func TestReincarnateAgent_PATWithoutLifecycleScope_Denied(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched by a denied request")
 	assert.Equal(t, "", after.ReincarnationState)
+}
+
+// TestReincarnateAgent_LifecycleOnlyPATDenied: a PAT scoped to
+// agent:lifecycle, for a user who holds agent.lifecycle but not agent.create
+// on the project, passes the lifecycle gate and is refused at the delegation
+// check, because a reincarnation by another principal re-records the agent's
+// authority under the requester. A dry run gets the same answer as the real
+// request, and nothing is claimed.
+func TestReincarnateAgent_LifecycleOnlyPATDenied(t *testing.T) {
+	srv, s, project, agent := reincarnateAuthzFixture(t)
+	user := newReincarnateAuthzUser(t, s, "lifecycle-only-pat")
+	grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
+	beforeVersion := agent.StateVersion
+
+	identity := scopedIdentityFor(user, project.ID, []string{"agent:lifecycle"})
+	for _, dryRun := range []bool{true, false} {
+		req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "dryRun=%v body: %s", dryRun, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "Cannot delegate agent authority")
+	}
+
+	after, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeVersion, after.StateVersion, "nothing is claimed")
+	assert.Equal(t, "", after.ReincarnationState)
+	list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, list)
 }
 
 // TestReincarnateAgent_SessionUserWithRole_Allowed is the non-PAT companion:

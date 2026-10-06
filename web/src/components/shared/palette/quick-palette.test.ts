@@ -26,7 +26,7 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi, type Mock } from 'vitest';
 
 await import('./quick-palette.js');
 type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
@@ -37,6 +37,7 @@ import type {
 } from '../../../client/chat-palette-types.js';
 import { dmCandidateId } from '../../../client/chat-palette-types.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { PALETTE_TYPEAHEAD_MAX_MS, PaletteTypeahead } from './palette-typeahead.js';
 
 function agentsGroup(
   candidates: Array<{
@@ -73,6 +74,14 @@ async function mountPalette(
   document.body.appendChild(el);
   await el.updateComplete;
   return el;
+}
+
+/** Types `text` as the query, as the user would. */
+async function typeQuery(el: ScionQuickPalette, text: string): Promise<void> {
+  const input = el.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+  input.value = text;
+  input.dispatchEvent(new InputEvent('input'));
+  await el.updateComplete;
 }
 
 describe('scion-quick-palette: renders a grouped Agents list', () => {
@@ -217,15 +226,46 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     expect(el.shadowRoot?.querySelector('.palette-secondary')).toBeNull();
   });
 
-  it('the global best (first ranked candidate) is auto-selected on open', async () => {
+  it('no row is active on an untouched empty query, and a typed query selects its best match', async () => {
+    // An empty query ranks by newest activity, which is not a choice the
+    // user made: nothing is selected until the user picks a row.
     const el = await mountPalette(
       agentsGroup([
         { peerId: 'old', label: 'Old Bot', activityMs: 1 },
         { peerId: 'new', label: 'New Bot', activityMs: 1000 },
       ])
     );
-    const active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('New Bot');
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    expect(el.shadowRoot?.querySelector('.palette-option.active')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[role="option"][aria-selected="true"]')).toBeNull();
+    expect(input.hasAttribute('aria-activedescendant')).toBe(false);
+
+    await typeQuery(el, 'bot');
+    expect(el.shadowRoot?.querySelector('.palette-option.active')?.textContent).toContain(
+      'New Bot'
+    );
+  });
+
+  it('on an untouched empty query, ArrowDown picks the first row, ArrowUp the last, and Tab the first group', async () => {
+    const candidates = agentsGroup([
+      { peerId: 'a1', label: 'Alpha', activityMs: 2 },
+      { peerId: 'a2', label: 'Beta', activityMs: 1 },
+      { peerId: 'a3', label: 'Gamma', activityMs: 0 },
+    ]);
+    for (const [key, expected] of [
+      ['ArrowDown', 'Alpha'],
+      ['ArrowUp', 'Gamma'],
+      ['Tab', 'Alpha'],
+    ] as const) {
+      const el = await mountPalette(candidates);
+      const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      await el.updateComplete;
+      expect(el.shadowRoot?.querySelector('.palette-option.active')?.textContent, key).toContain(
+        expected
+      );
+      el.remove();
+    }
   });
 
   it("aria-activedescendant matches the active option's own id, and each option keeps a stable id across re-renders", async () => {
@@ -246,8 +286,12 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
       ])
     );
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
-    const activeOption = () => el.shadowRoot?.querySelector('.palette-option.active');
+    const activeOption = (): Element | null | undefined =>
+      el.shadowRoot?.querySelector('.palette-option.active');
 
+    // Pick Alpha, the first row.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
     const idBefore = activeOption()?.id;
     expect(idBefore).toBeTruthy();
     expect(input.getAttribute('aria-activedescendant')).toBe(idBefore);
@@ -265,12 +309,9 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
   });
 
   it('editing the query resets the selection to the new global best, discarding a prior manual pick', async () => {
-    // reconcileActiveId's `if (queryChanged) { manualSelection = false;
-    // activeId = ranked[0]...; return; }` branch resets to the new global
-    // best on every query edit, even one that still matches the
-    // manually-picked candidate — without this branch, the other branch's
-    // `ranked.some(...)` check alone would keep the stale manual pick
-    // instead.
+    // reconcileActiveId resets to the new global best on every query edit,
+    // even one that still matches the manually-picked candidate — a group
+    // refresh preserves a pick that is still present, a query edit does not.
     const el = await mountPalette(
       agentsGroup([
         { peerId: 'a1', label: 'Coder One', activityMs: 1 },
@@ -278,13 +319,13 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
       ])
     );
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
-    let active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('Reviewer Bot'); // global best (higher activityMs) on open
 
-    // Manually select Coder One.
+    // Manually select Coder One, the second row (the first ArrowDown picks
+    // Reviewer Bot, the top row by activity).
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     await el.updateComplete;
-    active = el.shadowRoot?.querySelector('.palette-option.active');
+    let active = el.shadowRoot?.querySelector('.palette-option.active');
     expect(active?.textContent).toContain('Coder One');
 
     // Both labels still match "o" (same tier), but Reviewer Bot outranks
@@ -298,27 +339,25 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
   });
 
   it('a group refresh (not a query edit) updates the auto-selection to track the new global best', async () => {
-    // Isolates the `this.manualSelection` half of reconcileActiveId's
-    // `if (this.manualSelection && ranked.some(...)) return;` from the
-    // `ranked.some(...)` half (next test): with manualSelection still
-    // false (user never pressed an arrow key),
-    // a *non*-query-edit ranked-list change (e.g. a group finishing a
-    // background refresh) must still track the new global best, not freeze
-    // on whichever candidate happened to be active before the refresh.
+    // With no pick (the user never pressed an arrow key), a *non*-query-edit
+    // ranked-list change (e.g. a group finishing a background refresh) must
+    // track the new best match for the typed query, not freeze on whichever
+    // candidate happened to be active before the refresh.
     const el = await mountPalette(
       agentsGroup([
-        { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+        { peerId: 'a1', label: 'Coder Bot', activityMs: 100 },
         { peerId: 'a2', label: 'Reviewer Bot', activityMs: 1 },
       ])
     );
+    await typeQuery(el, 'bot');
     let active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('Coder One'); // global best
+    expect(active?.textContent).toContain('Coder Bot'); // best match
 
     // A group refresh that keeps both candidates but changes their
-    // recency, so Reviewer Bot becomes the new global best. This is a
+    // recency, so Reviewer Bot becomes the new best match. This is a
     // `groups` change, not a `queryText` change.
     el.groups = agentsGroup([
-      { peerId: 'a1', label: 'Coder One', activityMs: 1 },
+      { peerId: 'a1', label: 'Coder Bot', activityMs: 1 },
       { peerId: 'a2', label: 'Reviewer Bot', activityMs: 100 },
     ]);
     await el.updateComplete;
@@ -327,15 +366,59 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     expect(active?.textContent).toContain('Reviewer Bot');
   });
 
-  it('a group refresh that removes the manually-selected candidate falls back to the new global best', async () => {
-    // Isolates the `ranked.some(...)` half: with manualSelection true (the
-    // other branch alone would otherwise "preserve" this selection
-    // unconditionally), but the manually-picked candidate no longer exists
-    // in the refreshed ranked list (e.g. the agent became non-viable), the
-    // guard must fall through to the new global best rather than leave
-    // `activeId` pointing at a candidate that no longer exists — which
-    // would also make a subsequent Enter silently no-op via
-    // commitActivePaletteCandidate's own `if (!active) return;`.
+  it('a group refresh on an untouched empty query selects nothing, even when a newer row arrives', async () => {
+    const el = await mountPalette(
+      agentsGroup([{ peerId: 'a1', label: 'Coder One', activityMs: 100 }])
+    );
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+      { peerId: 'a3', label: 'Newest Agent', activityMs: 1000 },
+    ]);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.palette-option.active')).toBeNull();
+  });
+
+  it('a group refresh that removes the manually-selected candidate falls back to the best match for a typed query, which then follows the ranking', async () => {
+    // The pick no longer exists in the refreshed ranked list (e.g. the agent
+    // became non-viable), so the selection must fall through to the ranking
+    // rather than leave `activeId` pointing at a candidate that no longer
+    // exists.
+    const el = await mountPalette(
+      agentsGroup([
+        { peerId: 'a1', label: 'Coder Bot', activityMs: 100 },
+        { peerId: 'a2', label: 'Reviewer Bot', activityMs: 1 },
+      ])
+    );
+    await typeQuery(el, 'bot');
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+
+    // Manually select Reviewer Bot.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
+    let active = el.shadowRoot?.querySelector('.palette-option.active');
+    expect(active?.textContent).toContain('Reviewer Bot');
+
+    // Refresh removes Reviewer Bot entirely.
+    el.groups = agentsGroup([{ peerId: 'a1', label: 'Coder Bot', activityMs: 100 }]);
+    await el.updateComplete;
+
+    active = el.shadowRoot?.querySelector('.palette-option.active');
+    expect(active?.textContent).toContain('Coder Bot');
+
+    // The fallback is not a pick: a later refresh that ranks a new row first
+    // moves the selection to it.
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Coder Bot', activityMs: 100 },
+      { peerId: 'a3', label: 'Newest Bot', activityMs: 1000 },
+    ]);
+    await el.updateComplete;
+
+    active = el.shadowRoot?.querySelector('.palette-option.active');
+    expect(active?.textContent).toContain('Newest Bot');
+  });
+
+  it('a row arriving above a manually-selected candidate does not replace it', async () => {
     const el = await mountPalette(
       agentsGroup([
         { peerId: 'a1', label: 'Coder One', activityMs: 100 },
@@ -343,21 +426,70 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
       ])
     );
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
-    let active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('Coder One');
-
-    // Manually select Reviewer Bot.
+    // Pick Reviewer Bot, the second row.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     await el.updateComplete;
-    active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('Reviewer Bot');
+    let committed: PaletteTarget | undefined;
+    el.addEventListener('palette-select', (e) => {
+      committed = (e as CustomEvent<{ target: PaletteTarget }>).detail.target;
+    });
 
-    // Refresh removes Reviewer Bot entirely.
-    el.groups = agentsGroup([{ peerId: 'a1', label: 'Coder One', activityMs: 100 }]);
+    // A group finishing its load adds a conversation with newer activity.
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+      { peerId: 'a2', label: 'Reviewer Bot', activityMs: 1 },
+      { peerId: 'a3', label: 'Newest Agent', activityMs: 1000 },
+    ]);
     await el.updateComplete;
 
-    active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('Coder One');
+    expect(el.shadowRoot?.querySelector('.palette-option.active')?.textContent).toContain(
+      'Reviewer Bot'
+    );
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(committed).toEqual({
+      kind: 'dm',
+      peerKind: 'agent',
+      peerId: 'a2',
+      displayName: 'Reviewer Bot',
+    });
+  });
+
+  it('when the picked row goes away on an empty query, nothing is selected and Enter commits nothing, even as newer rows arrive', async () => {
+    const el = await mountPalette(
+      agentsGroup([
+        { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+        { peerId: 'a2', label: 'Reviewer Bot', activityMs: 1 },
+      ])
+    );
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    const active = (): Element | null | undefined =>
+      el.shadowRoot?.querySelector('.palette-option.active');
+    let commits = 0;
+    el.addEventListener('palette-select', () => {
+      commits++;
+    });
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
+    expect(active()?.textContent).toContain('Reviewer Bot');
+
+    // The picked row goes away.
+    el.groups = agentsGroup([{ peerId: 'a1', label: 'Coder One', activityMs: 100 }]);
+    await el.updateComplete;
+    expect(active()).toBeNull();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(commits).toBe(0);
+
+    // A newer row arriving is not selected either.
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+      { peerId: 'a3', label: 'Newest Agent', activityMs: 1000 },
+    ]);
+    await el.updateComplete;
+    expect(active()).toBeNull();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(commits).toBe(0);
   });
 
   it('typing narrows the list and highlights the match', async () => {
@@ -497,11 +629,11 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     );
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
 
-    // Beta is the global best (higher activityMs) and starts active; move
-    // away from it first so this test can actually distinguish "Tab did
-    // something" from "nothing changed" (a fixed active candidate that
-    // happens to equal ranked[0] both before and after Tab would pass even
-    // if Tab were a no-op).
+    // Beta is the global best (higher activityMs); pick Alpha first so this
+    // test can actually distinguish "Tab did something" from "nothing
+    // changed" (a fixed active candidate that happens to equal ranked[0]
+    // both before and after Tab would pass even if Tab were a no-op).
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     await el.updateComplete;
     let active = el.shadowRoot?.querySelector('.palette-option.active');
@@ -553,6 +685,8 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
       ])
     );
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
     let active = el.shadowRoot?.querySelector('.palette-option.active');
     expect(active?.textContent).toContain('Alpha');
 
@@ -576,7 +710,14 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
       ])
     );
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    // With nothing active, ArrowUp picks the last row; then it moves back.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    await el.updateComplete;
     let active = el.shadowRoot?.querySelector('.palette-option.active');
+    expect(active?.textContent).toContain('Beta');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    await el.updateComplete;
+    active = el.shadowRoot?.querySelector('.palette-option.active');
     expect(active?.textContent).toContain('Alpha');
 
     // Wraps backward from the first candidate to the last.
@@ -619,6 +760,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
 
   it('Enter commits the active candidate as palette-select with its target', async () => {
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     let detailTarget: PaletteTarget | undefined;
     el.addEventListener('palette-select', (e) => {
       detailTarget = (e as CustomEvent<{ target: PaletteTarget }>).detail.target;
@@ -646,7 +788,10 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // exists. Sets `activeId` directly (bypassing the public API, since no
     // reachable sequence of public calls currently produces this state) to
     // exercise the guard in isolation.
+    // A typed query selects a row, so the stale activeId set below is the
+    // only thing standing between Enter and a commit.
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     (el as unknown as { activeId: string | null }).activeId = 'not-a-real-candidate-id';
     let commits = 0;
     el.addEventListener('palette-select', () => {
@@ -661,6 +806,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
 
   it('a repeated Enter (key repeat) does not double-commit', async () => {
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     let commits = 0;
     el.addEventListener('palette-select', () => {
       commits++;
@@ -685,8 +831,10 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // committed yet this open) and sends only a single Enter whose
     // `repeat` is already true — the scenario where a user was already
     // holding Enter down when the palette opened via some other trigger.
-    // Only `handlePaletteKeydown`'s own repeat check can reject this one.
+    // Only `handlePaletteKeydown`'s own repeat check can reject this one; the
+    // typed query selects a row, so without that check Enter would commit it.
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     let commits = 0;
     el.addEventListener('palette-select', () => {
       commits++;
@@ -708,6 +856,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // animation finishes) delivers two perfectly ordinary, non-repeat
     // keydowns, which only `committed` can reject.
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     let commits = 0;
     el.addEventListener('palette-select', () => {
       commits++;
@@ -718,8 +867,129 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     expect(commits).toBe(1);
   });
 
+  describe('Enter on an empty query', () => {
+    function twoAgents(): Record<'agents', GroupState> {
+      // Beta has the newest activity, so the empty-query ranking puts it first.
+      return agentsGroup([
+        { peerId: 'a1', label: 'Alpha', activityMs: 1 },
+        { peerId: 'b1', label: 'Beta', activityMs: 2 },
+      ]);
+    }
+
+    function enter(el: ScionQuickPalette): KeyboardEvent {
+      const input = el.shadowRoot!.querySelector('#palette-query-input')!;
+      const e = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      input.dispatchEvent(e);
+      return e;
+    }
+
+    function committedTargets(el: ScionQuickPalette): PaletteTarget[] {
+      const targets: PaletteTarget[] = [];
+      el.addEventListener('palette-select', (e) => {
+        targets.push((e as CustomEvent<{ target: PaletteTarget }>).detail.target);
+      });
+      return targets;
+    }
+
+    it('commits nothing and leaves the palette open while the user has picked no row', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      const dismiss = vi.fn();
+      el.addEventListener('palette-dismiss', dismiss);
+      expect(el.shadowRoot?.querySelector('.palette-option.active')).toBeNull();
+
+      const e = enter(el);
+
+      expect(targets).toEqual([]);
+      expect(dismiss).not.toHaveBeenCalled();
+      expect(e.defaultPrevented).toBe(true);
+      expect(el.open).toBe(true);
+    });
+
+    it('commits the top row once the user picks it with ArrowDown', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      const input = el.shadowRoot!.querySelector('#palette-query-input')!;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await el.updateComplete;
+
+      enter(el);
+
+      expect(targets).toEqual([
+        { kind: 'dm', peerKind: 'agent', peerId: 'b1', displayName: 'Beta' },
+      ]);
+    });
+
+    it('commits the last row once the user picks it with ArrowUp', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      const input = el.shadowRoot!.querySelector('#palette-query-input')!;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      await el.updateComplete;
+
+      enter(el);
+
+      expect(targets).toEqual([
+        { kind: 'dm', peerKind: 'agent', peerId: 'a1', displayName: 'Alpha' },
+      ]);
+    });
+
+    it('commits the first row of the group the user moved to with Tab', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      const input = el.shadowRoot!.querySelector('#palette-query-input')!;
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+      );
+      await el.updateComplete;
+
+      enter(el);
+
+      expect(targets).toEqual([
+        { kind: 'dm', peerKind: 'agent', peerId: 'b1', displayName: 'Beta' },
+      ]);
+    });
+
+    it('commits the top row once the user has typed a query', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      await typeQuery(el, 'a');
+
+      enter(el);
+
+      expect(targets).toHaveLength(1);
+    });
+
+    it('commits nothing once a query is cleared, even after the user picked a row for it', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      await typeQuery(el, 'a');
+      const input = el.shadowRoot!.querySelector('#palette-query-input')!;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await el.updateComplete;
+      await typeQuery(el, '');
+
+      enter(el);
+
+      expect(targets).toEqual([]);
+    });
+
+    it('commits nothing once a typed query is cleared, or is only spaces', async () => {
+      const el = await mountPalette(twoAgents());
+      const targets = committedTargets(el);
+      await typeQuery(el, 'al');
+      await typeQuery(el, '');
+      enter(el);
+      await typeQuery(el, '   ');
+      enter(el);
+
+      expect(targets).toEqual([]);
+    });
+  });
+
   it('Enter during IME composition does not commit', async () => {
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     let commits = 0;
     el.addEventListener('palette-select', () => {
       commits++;
@@ -742,6 +1012,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // the confirming Enter's keydown fires, even though compositionend
     // hasn't been dispatched yet.
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     let commits = 0;
     el.addEventListener('palette-select', () => {
       commits++;
@@ -761,6 +1032,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     // compositionstart event, but the browser still reports the keydown as
     // mid-composition).
     const el = await mountPalette(agentsGroup([{ peerId: 'a1', label: 'Coder One' }]));
+    await typeQuery(el, 'coder');
     let commits = 0;
     el.addEventListener('palette-select', () => {
       commits++;
@@ -959,7 +1231,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     );
   });
 
-  it('exactly one [role=option][aria-selected=true] exists at a time and it follows ArrowDown', async () => {
+  it('at most one [role=option][aria-selected=true] exists at a time and it follows ArrowDown', async () => {
     const el = await mountPalette(
       agentsGroup([
         { peerId: 'a1', label: 'Alpha' },
@@ -973,6 +1245,11 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
         (o) => o.getAttribute('aria-selected') === 'true'
       );
 
+    // None before the user picks a row on an empty query.
+    expect(selected()).toHaveLength(0);
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
     let sel = selected();
     expect(sel).toHaveLength(1);
     expect(sel[0].textContent).toContain('Alpha');
@@ -984,7 +1261,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     expect(sel[0].textContent).toContain('Beta');
   });
 
-  it('reopening with the same groups reference (no groups/query change) resets the active row to the new global best', async () => {
+  it('reopening with the same groups reference (no groups/query change) clears the previous pick', async () => {
     // willUpdate's `changedKeys.has('queryText') || changed.has('groups') ||
     // changed.has('open')` (quick-palette.ts) needs the `|| changed.has(
     // 'open')` half: the earlier "fresh open" block always resets
@@ -999,13 +1276,12 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
       ])
     );
     const groups = el.groups; // capture the exact reference; never reassigned below
-    let active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('Beta'); // global best on open
 
     const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     await el.updateComplete;
-    active = el.shadowRoot?.querySelector('.palette-option.active');
+    let active = el.shadowRoot?.querySelector('.palette-option.active');
     expect(active?.textContent).toContain('Alpha'); // manual pick
 
     el.open = false;
@@ -1015,7 +1291,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
 
     expect(el.groups).toBe(groups); // still the identical reference — no groups change occurred
     active = el.shadowRoot?.querySelector('.palette-option.active');
-    expect(active?.textContent).toContain('Beta'); // reset to the global best, not stuck on Alpha
+    expect(active).toBeNull(); // no row picked on the fresh open, not stuck on Alpha
   });
 
   it('shows the default "Failed to load." text when the group state carries no error message', async () => {
@@ -1187,5 +1463,296 @@ describe('scion-quick-palette: --palette-vvh tracks window.visualViewport while 
     await el.updateComplete;
 
     expect(vv.listenerCount).toBe(1);
+  });
+});
+
+describe('scion-quick-palette: keys typed before the query input has focus', () => {
+  let outside: HTMLTextAreaElement;
+  let onOutsideKeydown: Mock<(e: Event) => void>;
+
+  beforeEach(() => {
+    // Stands in for whatever had focus when the palette opened: the chat
+    // composer, a terminal pane, the button that opened it.
+    outside = document.createElement('textarea');
+    document.body.appendChild(outside);
+    onOutsideKeydown = vi.fn<(e: Event) => void>();
+    outside.addEventListener('keydown', onOutsideKeydown);
+    outside.focus();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function typeOutside(key: string, init: KeyboardEventInit = {}): KeyboardEvent {
+    const e = new KeyboardEvent('keydown', {
+      key,
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      ...init,
+    });
+    outside.dispatchEvent(e);
+    return e;
+  }
+
+  /** Mounts the palette closed, as every host does, so `open` really changes. */
+  async function mountClosed(typeahead?: PaletteTypeahead): Promise<ScionQuickPalette> {
+    const el = document.createElement('scion-quick-palette');
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Alpha' },
+      { peerId: 'b1', label: 'Bravo' },
+    ]);
+    if (typeahead) el.typeahead = typeahead;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    return el;
+  }
+
+  async function show(el: ScionQuickPalette): Promise<void> {
+    el.open = true;
+    await el.updateComplete;
+  }
+
+  function input(el: ScionQuickPalette): HTMLInputElement {
+    return el.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+  }
+
+  /** Fires the dialog's own sl-initial-focus, as Shoelace does once the shown dialog can take focus. */
+  async function fireInitialFocus(el: ScionQuickPalette): Promise<void> {
+    el.shadowRoot!.querySelector('sl-dialog')!.dispatchEvent(
+      new CustomEvent('sl-initial-focus', { cancelable: true })
+    );
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+  }
+
+  function optionLabels(el: ScionQuickPalette): string[] {
+    return [...el.shadowRoot!.querySelectorAll('.palette-option')].map(
+      (o) => o.textContent?.trim() ?? ''
+    );
+  }
+
+  it('keys typed between the open and the initial focus reach nothing else, and filter once it lands', async () => {
+    const el = await mountClosed();
+    await show(el);
+    const typed = ['b', 'r', 'a'].map((key) => typeOutside(key));
+
+    expect(typed.every((e) => e.defaultPrevented)).toBe(true);
+    expect(onOutsideKeydown).not.toHaveBeenCalled();
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('bra');
+    expect(input(el).selectionStart).toBe(3);
+    expect(optionLabels(el)).toHaveLength(1);
+    expect(optionLabels(el)[0]).toContain('Bravo');
+    // Capture ended with the focus.
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+  });
+
+  it("applies what the host's type-ahead captured before it timed out", async () => {
+    const typeahead = new PaletteTypeahead();
+    vi.useFakeTimers();
+    try {
+      typeahead.start();
+      typeOutside('c');
+      typeOutside('o');
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(typeahead.isCapturing).toBe(false);
+    const el = await mountClosed(typeahead);
+    await show(el);
+    // Past the time limit, keys reach the old focus again.
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('co');
+  });
+
+  it("a focus on the input while closed leaves the host's capture running", async () => {
+    const typeahead = new PaletteTypeahead();
+    const el = await mountClosed(typeahead);
+    typeahead.start();
+    typeOutside('c');
+    input(el).focus();
+    await el.updateComplete;
+
+    expect(typeahead.isCapturing).toBe(true);
+    expect(typeahead.pending).toBe('c');
+    outside.focus();
+    expect(typeOutside('o').defaultPrevented).toBe(true);
+    await show(el);
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('co');
+  });
+
+  it("removing the element stops the host's type-ahead too", async () => {
+    const typeahead = new PaletteTypeahead();
+    typeahead.start();
+    const el = await mountClosed(typeahead);
+    await show(el);
+    el.remove();
+
+    expect(typeahead.isCapturing).toBe(false);
+    expect(typeOutside('a').defaultPrevented).toBe(false);
+  });
+
+  it('a close between the initial focus and its update does not focus the closing input', async () => {
+    const el = await mountClosed();
+    await show(el);
+    el.shadowRoot!.querySelector('sl-dialog')!.dispatchEvent(
+      new CustomEvent('sl-initial-focus', { cancelable: true })
+    );
+    el.open = false;
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(el.shadowRoot!.activeElement).not.toBe(input(el));
+    expect(document.activeElement).toBe(outside);
+  });
+
+  it('nothing is captured while the palette is closed', async () => {
+    await mountClosed();
+    expect(typeOutside('a').defaultPrevented).toBe(false);
+    expect(onOutsideKeydown).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the host's type-ahead, keeping what it captured before the element mounted", async () => {
+    const typeahead = new PaletteTypeahead();
+    typeahead.start();
+    typeOutside('b');
+    const el = await mountClosed(typeahead);
+    expect(typeahead.isCapturing).toBe(true);
+    await show(el);
+    typeOutside('r');
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('br');
+    expect(typeahead.isCapturing).toBe(false);
+  });
+
+  it('Enter commits the top match for a query captured while the palette opened', async () => {
+    const typeahead = new PaletteTypeahead();
+    typeahead.start();
+    typeOutside('b');
+    const el = await mountClosed(typeahead);
+    await show(el);
+    await fireInitialFocus(el);
+    let target: PaletteTarget | undefined;
+    el.addEventListener('palette-select', (e) => {
+      target = (e as CustomEvent<{ target: PaletteTarget }>).detail.target;
+    });
+
+    input(el).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+    expect(target).toEqual({ kind: 'dm', peerKind: 'agent', peerId: 'b1', displayName: 'Bravo' });
+  });
+
+  it('a close before the input has focus stops capturing and discards the keys', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    el.open = false;
+    await el.updateComplete;
+
+    expect(typeOutside('b').defaultPrevented).toBe(false);
+    await show(el);
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('');
+  });
+
+  it('removing the element stops capturing', async () => {
+    const el = await mountClosed();
+    await show(el);
+    el.remove();
+    expect(typeOutside('a').defaultPrevented).toBe(false);
+  });
+
+  it('focusing the input any other way, such as a click, also applies the keys', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    typeOutside('l');
+    input(el).focus();
+    await el.updateComplete;
+
+    expect(input(el).value).toBe('al');
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+  });
+
+  it('the initial focus applies the keys once, with no repeat', async () => {
+    const typeahead = new PaletteTypeahead();
+    typeahead.start();
+    const el = await mountClosed(typeahead);
+    await show(el);
+    typeOutside('a');
+    typeOutside('b');
+    const onFocus = vi.fn();
+    input(el).addEventListener('focus', onFocus);
+    await fireInitialFocus(el);
+
+    expect(onFocus).toHaveBeenCalledTimes(1);
+    expect(input(el).value).toBe('ab');
+    expect(typeahead.pending).toBe('');
+  });
+
+  it('the initial focus applies the keys when focusing fires no focus event', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    vi.spyOn(input(el), 'focus').mockImplementation(() => {});
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('a');
+    expect(typeOutside('x').defaultPrevented).toBe(false);
+  });
+
+  it("the initial focus applies a host's keys captured while the input kept focus", async () => {
+    const typeahead = new PaletteTypeahead();
+    const el = await mountClosed(typeahead);
+    typeahead.start();
+    await show(el);
+    await fireInitialFocus(el);
+    typeahead.stop();
+    el.open = false;
+    await el.updateComplete;
+    // A host reopen during the close animation, with focus still in the input.
+    input(el).focus();
+    expect(el.shadowRoot!.activeElement).toBe(input(el));
+    typeahead.start();
+    typeOutside('z');
+    await show(el);
+    await fireInitialFocus(el);
+
+    expect(input(el).value).toBe('z');
+    expect(typeahead.isCapturing).toBe(false);
+  });
+
+  it('Escape and modifier chords between the open and the initial focus pass through', async () => {
+    const el = await mountClosed();
+    await show(el);
+    expect(typeOutside('Escape').defaultPrevented).toBe(false);
+    expect(typeOutside('k', { metaKey: true }).defaultPrevented).toBe(false);
+    expect(typeOutside('k', { ctrlKey: true }).defaultPrevented).toBe(false);
+    expect(onOutsideKeydown).toHaveBeenCalledTimes(3);
+  });
+
+  it('every open captures afresh: a reopen focuses with only its own keys', async () => {
+    const el = await mountClosed();
+    await show(el);
+    typeOutside('a');
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('a');
+    el.open = false;
+    await el.updateComplete;
+
+    outside.focus();
+    await show(el);
+    typeOutside('b');
+    await fireInitialFocus(el);
+    expect(input(el).value).toBe('b');
   });
 });

@@ -15,6 +15,8 @@
 package store
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -120,5 +122,18 @@ func TestComputeAgentLaunch_NotActiveWhenDeleted(t *testing.T) {
 	got := ComputeAgentLaunch(a, now)
 	if got.Active {
 		t.Fatal("a deleted agent's launch must not report Active")
+	}
+}
+
+// Agent is the hub's REST agent shape: provisionedOnly is always sent,
+// even when false, so the web's partial seed merge clears a previously
+// merged true (ptone/scion#2929).
+func TestAgent_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
+	data, err := json.Marshal(Agent{ID: "a1", Phase: "running"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"provisionedOnly":false`) {
+		t.Errorf("expected explicit provisionedOnly false, got %s", data)
 	}
 }
