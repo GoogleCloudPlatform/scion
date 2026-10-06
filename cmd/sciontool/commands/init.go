@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -459,6 +460,19 @@ func RunInit(args []string, opts InitRunOptions) int {
 		log.Info("Operating mode: hub-connected (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
 	case hub.ModeHosted:
 		log.Info("Operating mode: hosted (endpoint: %s)", os.Getenv(hub.EnvHubEndpoint))
+	}
+
+	// nfs shared-dir writers: clear the umask's group bits (022 -> 002) when
+	// the runtime granted shared-dir groups (SCION_SUPPLEMENTAL_GIDS checked
+	// against this process's own groups), so new files stay group-writable
+	// where the export cannot hold the leaf's default ACL (ptone/scion#3155).
+	// Every child started below inherits it: harness, services, lifecycle
+	// hooks, the provision wrapper and the substrate exec endpoint. This
+	// must run BEFORE setupHostUser: its rootless keep-id early drop calls
+	// setgroups([scion]), after which the granted groups (and so this
+	// decision) are no longer visible.
+	if applied, previous, current := suppgroups.ApplySharedDirUmask(); applied {
+		log.Info("nfs shared-dir groups granted: umask %04o (was %04o)", current, previous)
 	}
 
 	// Set up scion user UID/GID to match host user

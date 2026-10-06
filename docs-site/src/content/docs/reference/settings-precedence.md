@@ -745,7 +745,11 @@ lower tier.
 The floor, `BuiltinDefaultResources()`, fills in a CPU limit only when nothing else supplied one —
 an agent that reached the container with no CPU limit would otherwise be able to saturate every
 core on the host. It is gated by `runtime.enforce_resource_defaults` (default `true`) if an
-operator needs the previous unlimited behaviour.
+operator needs the previous unlimited behaviour. The floor never sits below a larger CPU request:
+a larger `requests.cpu` raises it to the request, and a larger `kubernetes.resources.requests.cpu`
+sets `kubernetes.resources.limits.cpu` instead when `kubernetes.resources.limits.cpu` is unset,
+leaving the limit Docker and Podman use at `2`. A CPU limit set at any tier is never changed, so
+keep it at or above the CPU request.
 
 ### `Known gap` — `ScionConfig.Secrets` is inert
 
