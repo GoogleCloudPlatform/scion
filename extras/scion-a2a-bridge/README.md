@@ -386,7 +386,7 @@ SSE streams read from the durable `a2a_task_events` log using a monotonic cursor
 ## Known Limitations
 
 - **No gRPC or REST transport.** The bridge only supports JSON-RPC 2.0 over HTTP. gRPC and HTTP+JSON/REST transports are not implemented.
-- **Blocking-mode `input-required` flows.** In blocking mode, state-change messages are skipped for waiters so the actual content reply is delivered. When the agent asks for input, the Hub's input-needed notification is delivered as content, so a blocking `message/send` returns `input-required` with the question as an artifact. A blocking `message/send` against an agent that reaches `input-required` only through a state-change message, with no content, will time out (default 120s). Use non-blocking mode with push notifications or SSE for `input-required` flows.
+- **Blocking-mode `input-required` responses may lack the question.** A blocking `message/send` returns `input-required` when the agent asks for input. With the Hub's input-needed notification, the question is returned as an artifact. If `input-required` arrives only as a content-less state change (non-Hub senders), the response carries no question; use push notifications or SSE to receive follow-up content.
 
 ## Security considerations
 
