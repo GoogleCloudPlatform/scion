@@ -464,7 +464,7 @@ func projectAccessRelationshipRule(rule RelationshipRuleID) bool {
 //
 // Covered principals: user principals (isUserPrincipal). That is local
 // users (PrincipalKindUser and PrincipalKindDev), which includes
-// interactive session users and UAT holders (a *ScopedUserIdentity is
+// session users and UAT holders (a *ScopedUserIdentity is
 // PrincipalKindUser), and federated users (PrincipalKindFederatedUser,
 // ptone/scion#3427), whose access comes only from hub-recorded bindings
 // keyed to user:<issuer>:<sub>. Agents, federated agents, federated

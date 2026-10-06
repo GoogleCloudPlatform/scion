@@ -763,7 +763,7 @@ func TestRelationshipProjectAccess_Federated(t *testing.T) {
 			assert.Empty(t, kind, "the stage does not apply to %s", p.Kind)
 		}
 
-		// A federated user with project access is still not mint-eligible.
+		// A federated user with project access is not mint-eligible.
 		fed := fedIdentity("r11")
 		f.grantFed(t, fed.ID(), f.projectID, nil)
 		f.grantFedSuperAdmin(t, fed.ID())
@@ -793,7 +793,7 @@ func TestRelationshipProjectAccess_Federated(t *testing.T) {
 		allowed, reason, _ = f.srv.authorizeAgentMessage(ctx, fed, agent, false)
 		assert.False(t, allowed, "owner after removal: %s", reason)
 
-		// The ancestry admission still reports not admitted for a
+		// The ancestry admission reports not admitted for a
 		// federated sender.
 		admitted, fault := f.srv.authzService.messageAncestorProjectAccess(ctx, fed, f.projectID, agentResource(agent))
 		assert.False(t, admitted)
