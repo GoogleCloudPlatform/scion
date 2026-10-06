@@ -197,3 +197,48 @@ func TestReincarnateMove_HandshakeWithoutVerdictStops(t *testing.T) {
 	assert.Equal(t, "this hub does not support --broker; upgrade the hub", err.Error())
 	assert.Equal(t, []bool{true}, *dryRuns)
 }
+
+// A patched --broker move makes one dry run of the whole request (patch and
+// target broker), checks both the patch and the move on it, then sends the
+// real request.
+func TestReincarnateMove_PatchedMoveSingleDryRun(t *testing.T) {
+	setReincarnatePatchFlags(t, "", "", "", -1, "", "img:v2")
+	withBrokerFlags(t, "b2", false)
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if body["dryRun"] == true {
+			_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"planned","plan":{"patched":["image"]},"sourceBrokerId":"b1","targetBrokerId":"b2","moveVerdict":{"eligible":true,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"checks":[]}}`))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"pending","plan":{"patched":["image"]},"sourceBrokerId":"b1","targetBrokerId":"b2"}`))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	require.NoError(t, reincarnateAgentViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}, "agent-1", "handoff", false))
+	require.Len(t, bodies, 2, "one dry run, then the real request")
+	for i, b := range bodies {
+		assert.Equal(t, "b2", b["targetBroker"], "request %d carries the target broker", i)
+		assert.Equal(t, "img:v2", b["image"], "request %d carries the patch", i)
+	}
+	assert.Equal(t, true, bodies[0]["dryRun"])
+	assert.Nil(t, bodies[1]["dryRun"])
+}
+
+// A patched --broker move whose dry run does not show the patch applied
+// stops before the real request, like a patched in-place reincarnation.
+func TestReincarnateMove_PatchedMoveIgnoredPatchStops(t *testing.T) {
+	setReincarnatePatchFlags(t, "", "", "", -1, "", "img:v2")
+	withBrokerFlags(t, "b2", false)
+	hubCtx, dryRuns := moveHub(t, http.StatusOK,
+		`{"agentId":"agent-1","generation":2,"state":"planned","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2","moveVerdict":{"eligible":true,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"checks":[]}}`,
+		`{}`)
+	require.Error(t, reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false))
+	assert.Equal(t, []bool{true}, *dryRuns)
+}
