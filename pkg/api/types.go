@@ -1323,6 +1323,13 @@ const (
 	BrokerErrorDetailCurrentRunID = "currentRunId"
 )
 
+// BrokerErrorCodeRunMismatch is the broker error code of the 404 a stop
+// naming a run gets when another run holds the agent's name
+// (ptone/scion#2550). Its details carry BrokerErrorDetailRunID (the run the
+// stop named) and, when known, BrokerErrorDetailCurrentRunID (the run that
+// holds the name: the runtime entry's, or an in-flight launch's).
+const BrokerErrorCodeRunMismatch = "run_mismatch"
+
 // ResourceHandle.Kind values.
 const (
 	ResourceKindSecret              = "secret"

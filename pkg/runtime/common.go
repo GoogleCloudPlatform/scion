@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -464,13 +465,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// continues to use the broker's host UID/GID (today's behavior, unchanged).
 	uid, gid := os.Getuid(), os.Getgid()
 	if config.WorkspaceBackendName == "nfs" {
-		uid, gid = config.NFSUID, config.NFSGID
-		if uid == 0 {
-			uid = 1000 // default stable NFS UID
-		}
-		if gid == 0 {
-			gid = 1000 // default stable NFS GID
-		}
+		uid, gid = nfsOwnerIDs(config.NFSUID, config.NFSGID)
 	}
 	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", uid))
 	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", gid))
@@ -1491,6 +1486,12 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 		return 0, false
 	}
 	return code, true
+}
+
+// nfsOwnerIDs returns the stable uid and gid for an NFS workspace: each
+// id as configured, or the default 1000 when it is 0 (unset).
+func nfsOwnerIDs(uid, gid int) (int, int) {
+	return provision.DefaultOwnerID(uid), provision.DefaultOwnerID(gid)
 }
 
 // SupplementalGIDsEnvVar tells sciontool init which supplementary groups to

@@ -333,11 +333,12 @@ func (r *SharedDirRealization) Serves(name string) bool {
 	return !r.LocalDirs[name]
 }
 
-// RunRef identifies the runtime entry a Delete targets. ID is the backend
-// handle returned by Run or reported by List (a container ID on Docker,
-// Podman and Apple; a pod or instance name on k8s, Cloud Run and Sandbox).
-// RunID is the scion.run_id label of the run the caller intends to remove;
-// it is empty for legacy entries created before run IDs existed.
+// RunRef identifies the runtime entry a Stop or Delete targets. ID is the
+// backend handle returned by Run or reported by List (a container ID on
+// Docker, Podman and Apple; a pod or instance name on k8s, Cloud Run and
+// Sandbox). RunID is the scion.run_id label of the run the caller intends
+// to stop or remove; it is empty for legacy entries created before run IDs
+// existed.
 //
 // The signature change is deliberate (ptone/scion#2550): every backend must
 // decide how it honours RunID, rather than silently falling back to name
@@ -364,7 +365,7 @@ var ErrRunConflict = errors.New("agent name is held by another live run")
 type Runtime interface {
 	Name() string
 	Run(ctx context.Context, config RunConfig) (string, error)
-	Stop(ctx context.Context, id string) error
+	Stop(ctx context.Context, ref RunRef) error
 	Delete(ctx context.Context, ref RunRef) error
 	List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 	GetLogs(ctx context.Context, id string) (string, error)

@@ -50,6 +50,11 @@ type TaskStatusUpdate struct {
 type TaskArtifactUpdate struct {
 	TaskID   string   `json:"taskId"`
 	Artifact Artifact `json:"artifact"`
+	// State is the task state the artifact was delivered in. It is set to
+	// input-required for artifacts from input-needed messages so consumers
+	// report the task as input-required instead of treating the artifact as
+	// the final answer. Empty means no state was recorded.
+	State string `json:"state,omitempty"`
 }
 
 // StreamManager tracks active SSE stream sessions per task, each polling the

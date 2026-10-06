@@ -64,6 +64,17 @@ import (
 // legacy-fallback notice), and an error only for a genuine failure (missing
 // AppliedConfig).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
+	return s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, nil)
+}
+
+// buildPatchedAppliedConfig is buildFreshAppliedConfig with an optional,
+// already-authorized reincarnate patch (ptone/scion#3302). The patch's
+// Image/Model/ThinkingLevel/HarnessAuth are recorded into a copy of
+// CreateInputs (recordReincarnatePatchEdits) before the pipeline runs, so
+// they take the explicit-input slot and the new generation keeps them; its
+// Role and GCPIdentity replace the kept values. A nil patch is exactly
+// buildFreshAppliedConfig. agent.AppliedConfig is never mutated.
+func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
 	old := agent.AppliedConfig
 	if old == nil {
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
@@ -97,6 +108,12 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	var warnings []string
 	if createInputs == nil {
 		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old, templateEnv)
+	}
+	if patch != nil {
+		// A copy: createInputs may be the outgoing generation's own record
+		// (old.CreateInputs, also saved as PreviousAppliedConfig).
+		createInputs = cloneCreateInputs(createInputs)
+		recordReincarnatePatchEdits(createInputs, patch)
 	}
 
 	fresh := &store.AgentAppliedConfig{
@@ -145,6 +162,21 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		// safe to feed back into mergeInjectedSkills as "template-scope"
 		// input (see resolveDerivedConfig's doc comment).
 		CreateInputs: createInputs,
+	}
+
+	// Kept fields a reincarnate patch replaces. Set before NoAuth is
+	// derived below (role=none implies NoAuth) and before deriveAgentConfig
+	// (GCPIdentity feeds its auto-no-auth check).
+	if patch != nil {
+		if patch.Role != "" {
+			fresh.AgentRole = string(patch.Role)
+			// An explicitly patched role is not a backfilled one.
+			fresh.AgentRoleGrandfathered = false
+		}
+		if patch.GCPIdentity != nil {
+			g := *patch.GCPIdentity
+			fresh.GCPIdentity = &g
+		}
 	}
 
 	// Design §3.5: make an empty (implicit-default) branch explicit, so a
