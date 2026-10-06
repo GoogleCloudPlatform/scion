@@ -85,6 +85,7 @@ async function openPaletteWithLongDocument(page: Page): Promise<void> {
 
 interface Layout {
   panelWidth: number;
+  groupsWithError: string[];
   results: { left: number; right: number; scrollWidth: number; clientWidth: number };
   cells: Record<string, { left: number; width: number }>;
   overflowingRows: string[];
@@ -112,6 +113,9 @@ async function measure(page: Page): Promise<Layout> {
       const b = cell.getBoundingClientRect();
       cells[cell.dataset.paletteGroup!] = { left: b.left, width: b.width };
     }
+    const groupsWithError = [...root.querySelectorAll<HTMLElement>('.palette-group-cell')]
+      .filter((cell) => cell.querySelector('.palette-group-error'))
+      .map((cell) => cell.dataset.paletteGroup!);
     const overflowingRows: string[] = [];
     for (const row of root.querySelectorAll<HTMLElement>('.palette-option')) {
       const b = row.getBoundingClientRect();
@@ -121,6 +125,7 @@ async function measure(page: Page): Promise<Layout> {
     }
     return {
       panelWidth: panel.getBoundingClientRect().width,
+      groupsWithError,
       results: {
         left: r.left,
         right: r.right,
@@ -159,6 +164,16 @@ test('a long unbreakable group error keeps both columns the same width', async (
   // The palette shows a group's error text as the host passes it, so a
   // host error naming a URL or an ID can carry one long unbreakable token.
   const error = `request failed: https://hub.example.test/api/${'x'.repeat(120)}`;
+  // Inject only once the host has published every group, so a late host
+  // update cannot replace the injected error group.
+  await expect
+    .poll(() =>
+      page.locator('scion-quick-palette').evaluate((el) => {
+        const groups = (el as HTMLElement & { groups: Record<string, { status: string }> }).groups;
+        return Object.values(groups).some((g) => g.status === 'loading');
+      })
+    )
+    .toBe(false);
   await page.locator('scion-quick-palette').evaluate((el, message) => {
     const palette = el as HTMLElement & { groups: Record<string, unknown> };
     palette.groups = {
@@ -170,6 +185,8 @@ test('a long unbreakable group error keeps both columns the same width', async (
     page.locator('scion-quick-palette [data-palette-group="threads"] .palette-group-error')
   ).toContainText(error);
   const layout = await measure(page);
+  // The measured layout is the one with the injected error in place.
+  expect(layout.groupsWithError).toEqual(['threads']);
 
   const { agents, threads, documents } = layout.cells;
   expect(Math.abs(agents.width - threads.width)).toBeLessThanOrEqual(TOLERANCE_PX);
