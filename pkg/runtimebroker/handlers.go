@@ -2502,9 +2502,6 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// undone, since agent-info.json now describes the newer run.
 		span.SetStatus(codes.Error, err.Error())
 		s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
-		// Re-list to name the run that now holds the name for the hub
-		// (ptone/scion#3080); "" (several runs, nothing listed, a list
-		// failure) leaves the hub's handling as for any delete 404.
 		// A delete naming no run answers the plain 404, as before.
 		if runID == "" {
 			s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
@@ -2512,9 +2509,27 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			NotFound(w, "Agent")
 			return
 		}
-		current, _ := s.currentRunID(ctx, target.mgr, id, projectID)
-		if current == runID {
-			current = ""
+		// Re-list and apply the resolution's own selection
+		// (selectDeleteCandidates, ptone/scion#3080), so the hub gets the
+		// answer the same runtime state gives a fresh delete:
+		//   - only entries of other runs hold the name: the run-mismatch
+		//     404 naming their run ("" for several runs), as from
+		//     resolveDeleteTarget;
+		//   - a container this delete may target is listed (a legacy
+		//     container with no run label, or one of the requested run)
+		//     beside another run's container: a retryable 409. This delete already did nothing, so
+		//     the hub rolls back, and its retry resolves the target afresh
+		//     and deletes it, as a fresh delete of this state would;
+		//   - nothing listed, only files, a listing with no other run's
+		//     container (stale: it contradicts the runtime), or a List
+		//     failure: the run-mismatch 404 with no current run, which
+		//     the hub treats as any delete 404.
+		current, retarget := s.deleteRaceSelection(ctx, target.mgr, id, projectID, runID)
+		if retarget {
+			s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run, and a container this delete may target appeared; nothing deleted, asking the hub to retry",
+				"agent_id", id, "project_id", projectID, "run_id", runID, "error", err)
+			Conflict(w, "Agent delete: a container this delete may target (such as a legacy container with no run label) appeared during the delete; nothing was deleted; retry the delete")
+			return
 		}
 		s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
 			"agent_id", id, "project_id", projectID, "run_id", runID, "current_run_id", current, "error", err)
@@ -6366,6 +6381,50 @@ type deleteRunMismatchError struct {
 func (e *deleteRunMismatchError) Error() string { return errDeleteTargetRunMismatch.Error() }
 func (e *deleteRunMismatchError) Unwrap() error { return errDeleteTargetRunMismatch }
 
+// selectDeleteCandidates is a run-scoped delete's selection over the
+// entries listed for the name, shared by resolveDeleteTarget and the
+// DeleteTarget race path (deleteRaceSelection) so both answer the same
+// runtime state the same way: filterDeleteCandidatesByRun picks the
+// candidates that may be targets; when none is left and entries of other
+// runs were dropped, mismatch is true and current is their run
+// (otherRunContainerID, "" for several runs).
+func selectDeleteCandidates(cands []agentCandidate, runID string) (targets []agentCandidate, mismatch bool, current string) {
+	targets, otherRun := filterDeleteCandidatesByRun(cands, runID, func(c agentCandidate) api.AgentInfo { return c.entry })
+	if len(targets) == 0 && otherRun {
+		return nil, true, otherRunContainerID(cands, runID)
+	}
+	return targets, false, ""
+}
+
+// deleteRaceSelection re-lists the agent's entries after the runtime
+// refused a run-scoped delete because another run took the name
+// (scionrt.ErrRunMismatch) and applies selectDeleteCandidates to them. It
+// lists allManagers(ctx) plus mgr (the runtime the delete went to), as
+// currentRunID does. current is the run holding the name when only other
+// runs' entries are left. retarget is true when a container the delete may
+// target is left (a legacy unlabelled container, or one of runID) beside a
+// container of another run, which confirms the runtime's refusal. Without
+// such a container the listing contradicts the runtime (it is stale): a
+// retry would resolve the same entry and be refused again, so retarget is
+// false and the answer is the run-mismatch 404 with no current run, as
+// before. A List failure gives neither.
+func (s *Server) deleteRaceSelection(ctx context.Context, mgr agent.Manager, id, projectID, runID string) (current string, retarget bool) {
+	managers := s.allManagers(ctx)
+	if mgr != nil && !slices.Contains(managers, mgr) {
+		managers = append(managers, mgr)
+	}
+	cands, err := s.collectAgentCandidates(ctx, managers, id, projectID,
+		"Agent delete: could not re-list the agent to report its current run")
+	if err != nil {
+		return "", false
+	}
+	targets, _, current := selectDeleteCandidates(cands, runID)
+	otherRunListed := slices.ContainsFunc(cands, func(c agentCandidate) bool {
+		return c.entry.ContainerID != "" && c.entry.RunID != "" && c.entry.RunID != runID
+	})
+	return current, otherRunListed && candidatesHaveContainer(targets)
+}
+
 // otherRunContainerID returns the run of the container entries in cands
 // labelled with a run other than runID, when they all carry the same one;
 // "" when there are none or they carry more than one run. File-only entries
@@ -6721,17 +6780,17 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 	}
 
 	if runID != "" {
-		all := matches
-		var otherRun bool
-		matches, otherRun = filterDeleteCandidatesByRun(matches, runID, func(c agentCandidate) api.AgentInfo { return c.entry })
-		if len(matches) == 0 && otherRun {
+		var mismatch bool
+		var current string
+		matches, mismatch, current = selectDeleteCandidates(matches, runID)
+		if mismatch {
 			// A runtime that could not be listed may hold the requested
 			// run's entry. Fail closed (see the listErr case below) rather
 			// than answer 404, which the hub treats as a completed delete.
 			if listErr != nil {
 				return nil, errDeleteTargetUnknown
 			}
-			return nil, &deleteRunMismatchError{current: otherRunContainerID(all, runID)}
+			return nil, &deleteRunMismatchError{current: current}
 		}
 	}
 

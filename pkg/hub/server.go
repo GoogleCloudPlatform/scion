@@ -740,6 +740,10 @@ type RuntimeBrokerClient interface {
 	// brokerID is used for HMAC authentication lookup.
 	// projectID scopes the lookup to a specific project (required for uniqueness).
 	// opts carries the query params (see DeleteAgentOptions).
+	// A broker 404 returns nil (an idempotent success), except the broker's
+	// refusal of a run-scoped delete because another run holds the name,
+	// returned as *DeleteRunMismatchError (see deleteAgentError,
+	// ptone/scion#3080).
 	DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error
 
 	// MessageAgent sends a message to an agent on a remote runtime broker.
@@ -903,7 +907,7 @@ func brokerRunMismatch(err error) (current string, ok bool) {
 	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound || se.brokerErrorCode() != api.BrokerErrorCodeRunMismatch {
 		return "", false
 	}
-	current, _ = se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string)
+	current, _ = brokerCurrentRunID(err)
 	return current, true
 }
 

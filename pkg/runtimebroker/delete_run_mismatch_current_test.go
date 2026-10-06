@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,16 +149,24 @@ func TestDeleteAgent_FilesOfOtherRunOnly_NoCurrentRun(t *testing.T) {
 	assertDeleteRunMismatch(t, doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old"), "")
 }
 
-// relistingManager lists run-old's entry for resolution, then, once
-// DeleteTarget is called (the runtime found the name taken by run-new and
-// refused), lists run-new's entry, as the runtime holds it now.
+// relistingManager lists run-old's entry for resolution, then, on the
+// first DeleteTarget (the runtime found the name taken by another run and
+// refused), lists after, as the runtime holds it now. Later DeleteTarget
+// calls (a retry) delete as filteringMockManager does.
 type relistingManager struct {
 	filteringMockManager
-	after []api.AgentInfo
+	after   []api.AgentInfo
+	refused bool
 }
 
 func (m *relistingManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	_, _ = m.filteringMockManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+	m.mu.Lock()
+	first := !m.refused
+	m.refused = true
+	m.mu.Unlock()
+	if !first {
+		return m.filteringMockManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+	}
 	m.mu.Lock()
 	m.agents = m.after
 	m.mu.Unlock()
@@ -198,6 +207,7 @@ func TestOtherRunContainerID(t *testing.T) {
 		{"two other runs", []agentCandidate{c("a", "run-b"), c("b", "run-c")}, ""},
 		{"file-only entry does not count", []agentCandidate{c("", "run-b")}, ""},
 		{"unlabelled container does not count", []agentCandidate{c("a", ""), c("b", "run-b")}, "run-b"},
+		{"unlabelled container does not count, listed last", []agentCandidate{c("b", "run-b"), c("a", "")}, "run-b"},
 		{"the requested run does not count", []agentCandidate{c("a", "run-a"), c("b", "run-b")}, "run-b"},
 		{"none", nil, ""},
 	} {
@@ -205,6 +215,93 @@ func TestOtherRunContainerID(t *testing.T) {
 			if got := otherRunContainerID(tc.cands, "run-a"); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
+		})
+	}
+}
+
+// Finding 6 (review round 1): the main path and the DeleteTarget race path
+// apply one selection (selectDeleteCandidates) to the same runtime state,
+// so the hub gets the same outcome either way. The main path lists state
+// at resolution; the race path resolves run-old's entry, is refused by the
+// runtime, then re-lists state. A container the delete may target on the
+// race path (a legacy unlabelled one) gets a retryable 409, and the retry,
+// resolving state afresh, deletes it as the main path does.
+func TestDeleteAgent_MainAndRacePathsAgree(t *testing.T) {
+	type outcome struct {
+		code    int
+		current string // run_mismatch currentRunId; "" omitted
+		deleted string // container the final delete removed; "" none
+	}
+	for _, tc := range []struct {
+		name  string
+		state func(scionB string) []api.AgentInfo
+		main  outcome
+		race  outcome // first answer
+		retry outcome // the hub's retry after the race answer
+	}{
+		{
+			name: "other run alone",
+			state: func(scionB string) []api.AgentInfo {
+				return []api.AgentInfo{withRun(labelled("dev", "cid-b", scopeProjB, scionB), "run-b")}
+			},
+			main:  outcome{code: http.StatusNotFound, current: "run-b"},
+			race:  outcome{code: http.StatusNotFound, current: "run-b"},
+			retry: outcome{code: http.StatusNotFound, current: "run-b"},
+		},
+		{
+			name: "unlabelled legacy container beside the other run",
+			state: func(scionB string) []api.AgentInfo {
+				return []api.AgentInfo{
+					labelled("dev", "cid-legacy", scopeProjB, scionB),
+					withRun(labelled("dev", "cid-b", scopeProjB, scionB), "run-b"),
+				}
+			},
+			main:  outcome{code: http.StatusNoContent, deleted: "cid-legacy"},
+			race:  outcome{code: http.StatusConflict},
+			retry: outcome{code: http.StatusNoContent, deleted: "cid-legacy"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			check := func(t *testing.T, step string, rec *httptest.ResponseRecorder, want outcome, deletedID string) {
+				t.Helper()
+				if rec.Code != want.code {
+					t.Fatalf("%s: status %d, want %d: %s", step, rec.Code, want.code, rec.Body.String())
+				}
+				switch rec.Code {
+				case http.StatusNotFound:
+					assertDeleteRunMismatch(t, rec, want.current)
+				case http.StatusConflict:
+					e := deleteErrBody(t, rec)
+					if e.Code != ErrCodeConflict {
+						t.Errorf("%s: code = %q, want %q", step, e.Code, ErrCodeConflict)
+					}
+					if strings.Contains(rec.Body.String(), "run-b") {
+						t.Errorf("%s: the retry 409 names the other run: %s", step, rec.Body.String())
+					}
+				}
+				if want.deleted != "" && deletedID != want.deleted {
+					t.Errorf("%s: deleted %q, want %q", step, deletedID, want.deleted)
+				}
+			}
+			t.Run("main", func(t *testing.T) {
+				mgr := &filteringMockManager{}
+				srv, home := newScopeTestServer(t, mgr)
+				scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+				mgr.agents = tc.state(scionB)
+				rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old")
+				check(t, "main", rec, tc.main, mgr.LastDeleteContainerID())
+			})
+			t.Run("race", func(t *testing.T) {
+				mgr := &relistingManager{}
+				srv, home := newCleanupTestServer(t, mgr)
+				scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+				mgr.agents = []api.AgentInfo{withRun(labelled("dev", "cid-old", scopeProjB, scionB), "run-old")}
+				mgr.after = tc.state(scionB)
+				rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old")
+				check(t, "race", rec, tc.race, "")
+				rec = doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old")
+				check(t, "retry", rec, tc.retry, mgr.LastDeleteContainerID())
+			})
 		})
 	}
 }

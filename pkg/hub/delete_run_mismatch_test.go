@@ -161,25 +161,25 @@ type runMismatchFixture struct {
 }
 
 // newRunMismatchFixture is an agent in phase on a broker answering through
-// client, with the row's run run-a and, when prev is set, the previous
-// run run-p (ptone/scion#3097).
-func newRunMismatchFixture(t *testing.T, suffix string, phase state.Phase, prev bool) *runMismatchFixture {
+// client, with the row's run run-a and the previous runs prev, oldest
+// first (ptone/scion#3097).
+func newRunMismatchFixture(t *testing.T, suffix string, phase state.Phase, prev ...string) *runMismatchFixture {
 	t.Helper()
 	srv, s := testServer(t)
 	client := &runMismatchDeleteClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, answer: func(string) error { return nil }}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 	agent := setupBrokerAgentInPhase(t, s, suffix, phase)
 	ctx := context.Background()
-	if prev {
-		_, err := s.SetAgentRunID(ctx, agent.ID, "run-p")
+	for _, p := range prev {
+		_, err := s.SetAgentRunID(ctx, agent.ID, p)
 		require.NoError(t, err)
 	}
 	_, err := s.SetAgentRunID(ctx, agent.ID, "run-a")
 	require.NoError(t, err)
 	got := mustGetAgent(t, s, agent.ID)
 	require.Equal(t, "run-a", got.RunID)
-	if prev {
-		require.Equal(t, []string{"run-p"}, got.PreviousRunIDs)
+	if len(prev) > 0 {
+		require.Equal(t, prev, got.PreviousRunIDs)
 	}
 	return &runMismatchFixture{srv: srv, store: s, client: client, agent: got}
 }
@@ -214,7 +214,7 @@ func TestAgentDelete_CurrentRunMismatch_NotFinalized(t *testing.T) {
 		{"force", "?force=true"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newRunMismatchFixture(t, "rm-cur-"+tc.name, state.PhaseRunning, true)
+			f := newRunMismatchFixture(t, "rm-cur-"+tc.name, state.PhaseRunning, "run-p")
 			f.client.answer = func(runID string) error {
 				return runMismatchEnvelope(t, runID, "run-b", true)
 			}
@@ -227,7 +227,7 @@ func TestAgentDelete_CurrentRunMismatch_NotFinalized(t *testing.T) {
 // A created row with no launch (the best-effort dispatch, ptone/scion#2635)
 // is refused too.
 func TestAgentDelete_CurrentRunMismatch_BestEffortNotFinalized(t *testing.T) {
-	f := newRunMismatchFixture(t, "rm-created", state.PhaseCreated, false)
+	f := newRunMismatchFixture(t, "rm-created", state.PhaseCreated)
 	f.client.answer = func(runID string) error { return runMismatchEnvelope(t, runID, "run-b", true) }
 	requireNotFinalized(t, f.store, f.agent.ID, f.del(t, ""), state.PhaseCreated)
 }
@@ -235,7 +235,7 @@ func TestAgentDelete_CurrentRunMismatch_BestEffortNotFinalized(t *testing.T) {
 // A retry is refused again while the broker holds run-b, and finalizes
 // once it does not.
 func TestAgentDelete_CurrentRunMismatch_RetryAfterDriftResolved(t *testing.T) {
-	f := newRunMismatchFixture(t, "rm-retry", state.PhaseRunning, false)
+	f := newRunMismatchFixture(t, "rm-retry", state.PhaseRunning)
 	f.client.answer = func(runID string) error { return runMismatchEnvelope(t, runID, "run-b", true) }
 	requireNotFinalized(t, f.store, f.agent.ID, f.del(t, ""), state.PhaseRunning)
 	requireNotFinalized(t, f.store, f.agent.ID, f.del(t, ""), state.PhaseRunning)
@@ -261,7 +261,7 @@ func TestAgentDelete_RunMismatchWithoutDifferentCurrent_Finalizes(t *testing.T) 
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newRunMismatchFixture(t, fmt.Sprintf("rm-fin-%d", i), state.PhaseRunning, false)
+			f := newRunMismatchFixture(t, fmt.Sprintf("rm-fin-%d", i), state.PhaseRunning)
 			f.client.answer = func(runID string) error { return tc.answer(t, runID) }
 			r := f.del(t, "")
 			require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
@@ -271,12 +271,13 @@ func TestAgentDelete_RunMismatchWithoutDifferentCurrent_Finalizes(t *testing.T) 
 }
 
 // A previous run's delete answered with the refusal is expected (the
-// current run may hold the name) and counts as success: the row is
-// finalized after both runs were sent.
+// current run may hold the name) and counts as success: the loop goes on
+// to the older previous runs, and the row is finalized after every run was
+// sent.
 func TestAgentDelete_PreviousRunMismatch_Finalizes(t *testing.T) {
-	f := newRunMismatchFixture(t, "rm-prev", state.PhaseRunning, true)
+	f := newRunMismatchFixture(t, "rm-prev", state.PhaseRunning, "run-p", "run-p2")
 	f.client.answer = func(runID string) error {
-		if runID == "run-p" {
+		if runID == "run-p2" {
 			return runMismatchEnvelope(t, runID, "run-a", true)
 		}
 		return nil
@@ -284,7 +285,8 @@ func TestAgentDelete_PreviousRunMismatch_Finalizes(t *testing.T) {
 	r := f.del(t, "")
 	require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
 	assert.True(t, agentGone(t, f.store, f.agent.ID))
-	assert.Equal(t, []string{"run-a", "run-p"}, f.client.deleted())
+	assert.Equal(t, []string{"run-a", "run-p2", "run-p"}, f.client.deleted(),
+		"the refused newer previous run does not stop the older one's delete")
 }
 
 // A refusal recorded on a failed cross-node delete intent reaches the
