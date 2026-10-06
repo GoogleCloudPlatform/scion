@@ -907,7 +907,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 		profiles, defaultProfile := b.Profiles, b.DefaultProfile
 		if cur.RuntimeTargetID != nil && *cur.RuntimeTargetID != "" {
 			if len(profiles) > 0 || defaultProfile != "" {
-				slog.Warn("dropping Runtime Broker Profiles written to a flat Runtime Broker",
+				slog.Warn(store.FlatRuntimeBrokerProfilesDroppedMessage,
 					"broker_id", b.ID, "profiles", len(profiles), "default_profile", defaultProfile)
 			}
 			profiles, defaultProfile = nil, ""

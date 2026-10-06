@@ -380,9 +380,10 @@ func (f *flatHubFixture) noAgentWritten(t *testing.T, slug string) {
 	assert.False(t, f.client.startCalled, "nothing may be dispatched")
 }
 
-// flatOwnerUser is a project owner (holds project update and agent create)
-// who did not create the fixture Runtime Brokers and so is not admitted to
-// dispatch to the non-auto-provide flat row by canDispatchToBroker.
+// flatOwnerUser is a project owner, admitted to project update and agent
+// create. Dispatch admission on the non-auto-provide flat row comes only from
+// canDispatchToBroker, which admits that row's creator; this user is not its
+// creator.
 func flatOwnerUser(t *testing.T, s store.Store, projectID, name string) *store.User {
 	t.Helper()
 	u := &store.User{ID: tid(name), Email: name + "@example.com", DisplayName: name, Role: store.UserRoleMember, Status: "active", Created: time.Now()}
@@ -762,11 +763,14 @@ func TestFlatCreate_RuntimeBrokerRejectionRelayed(t *testing.T) {
 func TestFlatCreate_AccessCheckBeforeLink(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
-	// The caller is a project owner holding project update and agent create
-	// but not Runtime Broker dispatch on the non-auto-provide flat row
-	// (dispatch is authorized only by canDispatchToBroker). Dispatch
-	// authorization runs before any link: today's authorization response,
-	// and no provider row.
+	// The caller is a project owner admitted to project update and agent
+	// create; dispatch admission on the non-auto-provide flat row comes only
+	// from canDispatchToBroker. Dispatch authorization runs before any link:
+	// today's authorization response, no provider row and no project default
+	// written. This deliberately overlaps
+	// TestFlatCreate_UnlinkedFlatRowAuthorizationWins (both are section 15
+	// names): this test pins the no-write side effects, that one the
+	// precedence over runtime_broker_not_linked with an admitted control.
 	owner := flatOwnerUser(t, f.s, f.project.ID, "flat-access-owner")
 	before := f.providerIDs(t, f.project.ID)
 	rec := doRequestAsUser(t, f.srv, owner, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
@@ -1078,43 +1082,84 @@ func TestFlatStart_RuntimeBrokerMismatchOnStartRelayed(t *testing.T) {
 
 func TestFlatStart_RefusalIsTerminalForIntent(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
-	ctx := context.Background()
-	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	a := f.stalePinnedAgent(t, "terminal", string(state.PhaseStopped))
-	// The requesting node recorded a running intent and queued the start;
-	// the executing node reaches the refusal only in the dispatcher backstop.
-	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
-	require.NoError(t, err)
-	args, err := MarshalDispatchArgs(&StartDispatchArgs{Task: "t"})
-	require.NoError(t, err)
-	row := &store.BrokerDispatch{ID: tid("dispatch-terminal-" + t.Name()), BrokerID: a.RuntimeBrokerID, AgentID: a.ID, Op: "start", Args: args}
-	require.NoError(t, f.s.InsertBrokerDispatch(ctx, row))
 
-	f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
-	failed, err := f.s.GetBrokerDispatch(ctx, row.ID)
-	require.NoError(t, err)
-	require.Equal(t, store.DispatchStateFailed, failed.State, "the refused start is recorded as failed")
-	var refusal *RuntimeTargetRefusal
-	require.True(t, errors.As(dispatchFailureError(failed), &refusal), "the failure envelope carries the typed refusal")
-	assert.Equal(t, ErrCodeRuntimeTargetPinStale, refusal.Code)
-	require.NotEmpty(t, refusal.Message)
-	assert.False(t, f.client.startCalled)
+	// Executor leg: a queued start reaches the refusal only in the executing
+	// node's dispatcher backstop. The row ends failed with the typed refusal
+	// in its envelope, nothing is dispatched, and the row is never
+	// re-executed. (Section 7: the executor is not a retry loop and does not
+	// settle the intent itself.)
+	t.Run("executor", func(t *testing.T) {
+		ctx := context.Background()
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.stalePinnedAgent(t, "terminal", string(state.PhaseStopped))
+		_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+		require.NoError(t, err)
+		args, err := MarshalDispatchArgs(&StartDispatchArgs{Task: "t"})
+		require.NoError(t, err)
+		row := &store.BrokerDispatch{ID: tid("dispatch-terminal-" + t.Name()), BrokerID: a.RuntimeBrokerID, AgentID: a.ID, Op: "start", Args: args}
+		require.NoError(t, f.s.InsertBrokerDispatch(ctx, row))
 
-	// The recorded intent is settled as a definite start failure: the agent
-	// message is the refusal message.
-	got, err := f.s.GetAgent(ctx, a.ID)
-	require.NoError(t, err)
-	assert.Equal(t, refusal.Message, got.Message)
+		f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
+		failed, err := f.s.GetBrokerDispatch(ctx, row.ID)
+		require.NoError(t, err)
+		require.Equal(t, store.DispatchStateFailed, failed.State, "the refused start is recorded as failed")
+		var refusal *RuntimeTargetRefusal
+		require.True(t, errors.As(dispatchFailureError(failed), &refusal), "the failure envelope carries the typed refusal")
+		assert.Equal(t, ErrCodeRuntimeTargetPinStale, refusal.Code)
+		require.NotEmpty(t, refusal.Message)
+		assert.False(t, f.client.startCalled, "nothing is dispatched")
 
-	// No hot retry: draining the queue again does not re-execute the failed
-	// row.
-	attempts := failed.Attempts
-	f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
-	again, err := f.s.GetBrokerDispatch(ctx, row.ID)
-	require.NoError(t, err)
-	assert.Equal(t, store.DispatchStateFailed, again.State)
-	assert.Equal(t, attempts, again.Attempts, "the same intent is never re-dispatched")
-	assert.False(t, f.client.startCalled)
+		attempts := failed.Attempts
+		f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
+		again, err := f.s.GetBrokerDispatch(ctx, row.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStateFailed, again.State)
+		assert.Equal(t, attempts, again.Attempts, "the same intent is never re-dispatched")
+		assert.False(t, f.client.startCalled)
+	})
+
+	// Requester leg: the requesting node's handler recorded the intent and
+	// deferred the start to the node holding the broker's control channel.
+	// The owner's backstop refuses (state changed after the requester's own
+	// backstop passed); the requester rebuilds the typed refusal from the
+	// row's envelope and settles the intent as a definite start failure,
+	// setting the agent message to the refusal message (section 7).
+	t.Run("requester", func(t *testing.T) {
+		ctx := context.Background()
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.pinnedAgent(t, "terminal-requester", string(state.PhaseStopped))
+		refusal := &RuntimeTargetRefusal{
+			Code:    ErrCodeRuntimeTargetPinStale,
+			Status:  http.StatusConflict,
+			Message: "agent placement is stale (owner-side refusal)",
+			Details: map[string]interface{}{"agentId": a.ID, "pinnedRuntimeBrokerId": a.PinnedRuntimeBrokerID, "runtimeBrokerId": a.RuntimeBrokerID},
+		}
+
+		events := NewChannelEventPublisher()
+		t.Cleanup(events.Close)
+		ownerDisp := &ownerErrDispatcher{err: refusal}
+		owner := &Server{store: f.s, instanceID: "hub-owner-" + t.Name(), agentLifecycleLog: slog.Default(), events: events}
+		owner.SetDispatcher(ownerDisp)
+		owner.execDispatch = owner.executeDispatch
+		owner.deliverMsg = owner.deliverMessage
+
+		requester := NewHTTPAgentDispatcherWithClient(f.s, &deferredTestClient{localBroker: "some-other-broker"}, false, slog.Default())
+		requester.SetCrossNodeDeps(events, ownerSignalBus{owner: owner})
+		f.srv.SetDispatcher(requester)
+
+		reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil).WithContext(reqCtx)
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+
+		d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
+		assert.Equal(t, a.ID, d["agentId"])
+		got, err := f.s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, refusal.Message, got.Message, "the requesting node settles the intent with the refusal message")
+	})
 }
 
 func TestFlatStart_CrossNodeRefusalRebuiltFromEnvelope(t *testing.T) {
@@ -1441,7 +1486,7 @@ func TestHeartbeat_DropsProfilesForFlatRow(t *testing.T) {
 	// The heartbeat handler drops DefaultProfile/ProfileAttach for a flat
 	// row before writing (section 6), so the store's own last-resort strip
 	// never has a profile to drop.
-	assert.NotContains(t, logs.messages(), "dropping Runtime Broker Profiles written to a flat Runtime Broker",
+	assert.NotContains(t, logs.messages(), store.FlatRuntimeBrokerProfilesDroppedMessage,
 		"the heartbeat handler drops the profile before the store write")
 }
 
@@ -1636,9 +1681,6 @@ func TestFlatRegistration_NameChangeInConfigNotApplied(t *testing.T) {
 	assert.Equal(t, "flat-original", got.Name, "name is set only at creation")
 }
 
-// TestFlatRegistration_EmbeddedPathUsesSharedRules is F-arrange: its act
-// step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
-
 func TestFlatRegistration_ReRegistrationRequiresOwner(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
@@ -1717,6 +1759,8 @@ func embeddedRegCode(err error) string {
 	return msg
 }
 
+// TestFlatRegistration_EmbeddedPathUsesSharedRules is F-arrange: its act
+// step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 func TestFlatRegistration_EmbeddedPathUsesSharedRules(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, false)
@@ -1733,10 +1777,11 @@ func TestFlatRegistration_EmbeddedPathUsesSharedRules(t *testing.T) {
 }
 
 // TestFlatRegistration_EmbeddedSideDuties is F-arrange: its act step goes
-// through registerEmbeddedFlatForTest, whose body P1.2 replaces. Reporting a
-// refusal through EmbeddedBrokerRegistrationFailed is the cmd startup's duty
-// and is asserted in cmd/flat_runtime_broker_contract_test.go.
-
+// through registerEmbeddedFlatForTest, whose body P1.2 replaces. R7 places
+// reporting on the embedded flat path itself, so after a refusal the helper
+// must leave the Hub exactly as the startup path leaves it: the refusal
+// reported through EmbeddedBrokerRegistrationFailed (asserted here on the Hub
+// side), not embedded, and no legacy fallback.
 func TestFlatRegistration_EmbeddedSideDuties(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
@@ -1770,7 +1815,6 @@ func TestFlatRegistration_EmbeddedSideDuties(t *testing.T) {
 
 // TestFlatRegistration_EmbeddedBoundResultRequired is F-arrange: its act
 // step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
-
 func TestFlatRegistration_EmbeddedBoundResultRequired(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
@@ -1787,7 +1831,6 @@ func TestFlatRegistration_EmbeddedBoundResultRequired(t *testing.T) {
 // TestFlatRegistration_EmbeddedConflictingRowNotActivated is F-arrange: its
 // act step goes through registerEmbeddedFlatForTest, whose body P1.2
 // replaces.
-
 func TestFlatRegistration_EmbeddedConflictingRowNotActivated(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
@@ -1809,7 +1852,6 @@ func TestFlatRegistration_EmbeddedConflictingRowNotActivated(t *testing.T) {
 
 // TestFlatRegistration_EmbeddedLegacyRowNotActivated is F-arrange: its act
 // step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
-
 func TestFlatRegistration_EmbeddedLegacyRowNotActivated(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
@@ -1827,7 +1869,6 @@ func TestFlatRegistration_EmbeddedLegacyRowNotActivated(t *testing.T) {
 
 // TestFlatRegistration_EmbeddedNameCollisionNotAdopted is F-arrange: its act
 // step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
-
 func TestFlatRegistration_EmbeddedNameCollisionNotAdopted(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)

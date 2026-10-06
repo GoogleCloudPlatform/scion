@@ -37,6 +37,11 @@ var (
 	ErrFlatRuntimeBrokerReassign = errors.New("refusing to reassign agents to a flat runtime broker")
 )
 
+// FlatRuntimeBrokerProfilesDroppedMessage is the warning UpdateRuntimeBroker
+// logs when it strips Runtime Broker Profiles written to a flat Runtime
+// Broker row. Shared so tests asserting on it cannot drift from the store.
+const FlatRuntimeBrokerProfilesDroppedMessage = "dropping Runtime Broker Profiles written to a flat Runtime Broker"
+
 // PinnedPlacement is an agent's Runtime Broker plus pinned runtime target.
 // An empty RuntimeTargetID means a NULL pin (and a NULL
 // pinned_runtime_broker_id); RuntimeBrokerID then still names the agent's

@@ -244,9 +244,6 @@ func expectNoCreateSideEffects(t *testing.T, f *flatInstanceFixture, requestID s
 	if _, err := os.Stat(filepath.Join(f.globalDir, "projects", "flat-project")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("project directory created (stat err %v)", err)
 	}
-	if _, err := os.Stat(filepath.Join(f.globalDir, "projects", "flat-project", ".scion")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("project marker written (stat err %v)", err)
-	}
 	f.mgr.mu.Lock()
 	starts, preflights := f.mgr.startCalls, f.mgr.preflightCalls
 	f.mgr.mu.Unlock()
@@ -501,17 +498,20 @@ func TestFlatInstanceServer_LoadsNoLegacyCredentials(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	// Settle, then require the complete set of connection identities to be
+	// exactly the instance's own: a legacy connection set up after the first
+	// one must not be missed.
+	time.Sleep(500 * time.Millisecond)
 	f.srv.mu.Lock()
-	if len(f.srv.hubConnections) == 0 {
-		t.Error("the co-located flat instance must hold a Hub connection for its own identity")
-	}
-	for name, conn := range f.srv.hubConnections {
-		if conn.BrokerID != f.identity.RuntimeBrokerID {
-			t.Errorf("Hub connection %q uses identity %q, want only %s (legacy %s must never be loaded)",
-				name, conn.BrokerID, f.identity.RuntimeBrokerID, legacyBrokerID)
-		}
+	ids := map[string]bool{}
+	for _, conn := range f.srv.hubConnections {
+		ids[conn.BrokerID] = true
 	}
 	f.srv.mu.Unlock()
+	if len(ids) != 1 || !ids[f.identity.RuntimeBrokerID] {
+		t.Errorf("Hub connection identities = %v, want exactly {%s} (legacy %s must never be loaded)",
+			ids, f.identity.RuntimeBrokerID, legacyBrokerID)
+	}
 
 	cancel()
 	_ = f.srv.Shutdown(context.Background())
