@@ -401,9 +401,11 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	}
 	// Conduit first (hub.conduit on and this node runs the relay): an agent
 	// with a conduit session is proxied over it. An agent without one may
-	// be an older sciontool on the port-forward tunnel below.
+	// be an older sciontool on the port-forward tunnel below. Any loopback
+	// registration (127.0.0.1, localhost, ::1) qualifies; the stream always
+	// targets conduitProxyHost inside the agent.
 	conduitOn := s.conduitServing()
-	if conduitOn && exposed.Host == conduitProxyHost {
+	if conduitOn && isLoopbackHost(exposed.Host) {
 		conn, err := s.openConduitPort(r.Context(), GetIdentityFromContext(r.Context()), agent, exposed.Port)
 		switch {
 		case err == nil:

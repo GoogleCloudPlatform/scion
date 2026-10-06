@@ -296,6 +296,109 @@ func TestConduitProxyThroughSession(t *testing.T) {
 	}
 }
 
+// TestConduitProxyLoopbackHosts: an exposed port registered with any
+// loopback host goes over the agent's conduit session to 127.0.0.1:port;
+// a non-loopback host never takes the conduit route.
+func TestConduitProxyLoopbackHosts(t *testing.T) {
+	for _, tc := range []struct {
+		host    string
+		conduit bool
+	}{
+		{host: "127.0.0.1", conduit: true},
+		{host: "localhost", conduit: true},
+		{host: "LocalHost", conduit: true},
+		{host: "::1", conduit: true},
+		{host: "10.0.0.1", conduit: false},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			f := newConduitProxyFixture(t, nil)
+			f.setExposedHost(t, tc.host)
+			if !tc.conduit {
+				require.Error(t, validateExposedPort(f.app.port, tc.host), "registration accepts a non-loopback host")
+			}
+			f.startAgent(t)
+			require.False(t, f.srv.portTunnels.has(f.launched.ID), "no legacy tunnel")
+
+			resp := f.get(t, "/hello", nil)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			if !tc.conduit {
+				// Not proxied over conduit: with no tunnel either, the
+				// agent is offline, and nothing reached the app.
+				require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, string(body))
+				select {
+				case got := <-f.app.got:
+					t.Fatalf("request reached the app at %s", got.Host)
+				default:
+				}
+				return
+			}
+			require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+			assert.Equal(t, "hello /hello?", string(body))
+			got := <-f.app.got
+			assert.Equal(t, "127.0.0.1:"+strconv.Itoa(f.app.port), got.Host)
+		})
+	}
+}
+
+// TestConduitProxyIPv6OnlyListener: a ::1 registration still targets
+// 127.0.0.1 inside the agent, so a service listening only on ::1 answers
+// 502 (nothing listening) over conduit, not the tunnel path's 501.
+func TestConduitProxyIPv6OnlyListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+	if v4, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err != nil {
+		t.Skipf("127.0.0.1:%d is in use: %v", port, err)
+	} else {
+		_ = v4.Close()
+	}
+	f := newConduitProxyFixture(t, nil)
+	f.app.port = port
+	f.setExposedHost(t, "::1")
+	f.startAgent(t)
+
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+	}{
+		{name: "http"},
+		{name: "websocket", header: http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"},
+			"Sec-Websocket-Version": {"13"}, "Sec-Websocket-Key": {"dGhlIHNhbXBsZSBub25jZQ=="}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := f.get(t, "/", tc.header)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadGateway, resp.StatusCode, string(body))
+			var e struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(body, &e), string(body))
+			assert.Equal(t, ErrCodeRuntimeError, e.Error.Code)
+			assert.Equal(t, "Nothing is listening on the agent port", e.Error.Message)
+		})
+	}
+}
+
+// setExposedHost re-registers the fixture's exposed port (f.app.port)
+// with host.
+func (f *conduitProxyFixture) setExposedHost(t *testing.T, host string) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, f.launched.ID,
+		[]store.ExposedPort{{Port: f.app.port, Host: host, Mode: "rw"}}))
+	got, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	f.launched = got
+}
+
 // TestConduitProxyAgentOffline: with hub.conduit on and neither a conduit
 // session nor a tunnel, the proxy answers 503 agent_offline (an HTML page
 // for browsers), for plain requests and WebSocket upgrades alike.
