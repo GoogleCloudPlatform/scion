@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/spf13/cobra"
 )
 
@@ -274,7 +275,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 				printMoveVerdict(os.Stderr, v)
 			}
-			if perr := patchNeedsUpdateError(err, wantPatched); perr != nil {
+			if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 				return wrapHubError(perr)
 			}
 			return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
@@ -300,7 +301,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		if apiclient.IsConflictError(err) && moveVerdictFromError(err) == nil {
 			return wrapHubError(fmt.Errorf("a reincarnation is already pending for '%s': %w", agentName, err))
 		}
-		if perr := patchNeedsUpdateError(err, wantPatched); perr != nil {
+		if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 			return wrapHubError(perr)
 		}
 		return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
@@ -399,15 +400,21 @@ func requestedPatchFields(req *hubclient.ReincarnateAgentRequest) []string {
 
 // patchNeedsUpdateError explains a 403 from the hub's patch-flag gate
 // (decision D4): the flags need agent update permission on top of
-// lifecycle, which a user access token can never carry. Returns nil for any
-// other error.
-func patchNeedsUpdateError(err error, wantPatched []string) error {
+// lifecycle. A user access token (UAT, sent as SCION_HUB_TOKEN) can never
+// carry that permission, so only a UAT caller is told to sign in instead;
+// any other caller is told it needs agent.update on the agent. Returns nil
+// for any other error.
+func patchNeedsUpdateError(err error, wantPatched []string, cred hubsync.CredentialKind) error {
 	if len(wantPatched) == 0 || !apiclient.IsForbiddenError(err) || !strings.Contains(err.Error(), "agent.update") {
 		return nil
 	}
-	return fmt.Errorf("reincarnate patch flags need permission to update the agent, not just to reincarnate it. "+
-		"A user access token (UAT) cannot use patch flags: sign in with 'scion hub auth login' and retry, "+
-		"or reincarnate without the flags: %w", err)
+	if cred == hubsync.CredentialKindHubToken {
+		return fmt.Errorf("reincarnate patch flags need permission to update the agent, not just to reincarnate it. "+
+			"A user access token (UAT) cannot use patch flags: sign in with 'scion hub auth login' and retry, "+
+			"or reincarnate without the flags: %w", err)
+	}
+	return fmt.Errorf("reincarnate patch flags need permission to update the agent (agent.update), not just to reincarnate it. "+
+		"Ask a project admin to grant you agent.update on this agent, or reincarnate without the flags: %w", err)
 }
 
 // checkHubAppliedPatch fails when the response's plan does not list every

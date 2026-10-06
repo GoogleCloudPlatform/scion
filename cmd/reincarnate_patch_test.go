@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -245,10 +247,9 @@ func TestReincarnatePatch_SkewedHubAfter202_SaysStartedWithoutPatch(t *testing.T
 	require.Len(t, hub.requests, 2)
 }
 
-// TestReincarnatePatch_ForbiddenPatchExplainsUAT: the hub's D4 refusal
-// (agent.update needed for patch flags) becomes a plain CLI error naming
-// the UAT limitation, and no real request follows the refused probe.
-func TestReincarnatePatch_ForbiddenPatchExplainsUAT(t *testing.T) {
+// forbiddenPatchHub answers every request with the hub's D4 refusal.
+func forbiddenPatchHub(t *testing.T, cred hubsync.CredentialKind) (*HubContext, *int) {
+	t.Helper()
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -259,15 +260,43 @@ func TestReincarnatePatch_ForbiddenPatchExplainsUAT(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
-	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}
+	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1", CredentialKind: cred}, &calls
+}
+
+// TestReincarnatePatch_ForbiddenPatchExplainsUAT: with a UAT
+// (SCION_HUB_TOKEN) credential, the hub's D4 refusal becomes a plain error
+// naming the UAT limitation, and no real request follows the refused probe.
+func TestReincarnatePatch_ForbiddenPatchExplainsUAT(t *testing.T) {
+	hubCtx, calls := forbiddenPatchHub(t, hubsync.CredentialKindHubToken)
 	setReincarnatePatchFlags(t, "", "", "m1", -1, "", "")
 	reincarnateBroker, reincarnateDryRun = "", false
 
-	err = reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "A user access token (UAT) cannot use patch flags")
-	assert.Equal(t, 1, calls, "the refused probe is the only request")
+	assert.Contains(t, err.Error(), "scion hub auth login")
+	assert.Equal(t, 1, *calls, "the refused probe is the only request")
+}
+
+// TestReincarnatePatch_ForbiddenPatchSessionNeedsUpdate: a signed-in
+// session (or any non-UAT credential) lacking agent.update is told it needs
+// that permission, not to sign in again.
+func TestReincarnatePatch_ForbiddenPatchSessionNeedsUpdate(t *testing.T) {
+	for _, cred := range []hubsync.CredentialKind{hubsync.CredentialKindOAuth, hubsync.CredentialKindDevAuto, hubsync.CredentialKindUnknown} {
+		t.Run(string(cred), func(t *testing.T) {
+			hubCtx, calls := forbiddenPatchHub(t, cred)
+			setReincarnatePatchFlags(t, "", "readonly", "", -1, "", "")
+			reincarnateBroker, reincarnateDryRun = "", true
+
+			err := reincarnateAgentViaHub(hubCtx, "agent-1", "", false)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "grant you agent.update on this agent")
+			assert.NotContains(t, err.Error(), "A user access token (UAT) cannot use patch flags")
+			assert.NotContains(t, err.Error(), "scion hub auth login")
+			assert.Equal(t, 1, *calls)
+		})
+	}
 
 	// A 403 without patch flags is not rewritten.
-	assert.Nil(t, patchNeedsUpdateError(err, nil))
+	assert.Nil(t, patchNeedsUpdateError(fmt.Errorf("x"), nil, hubsync.CredentialKindOAuth))
 }
