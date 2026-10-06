@@ -28,6 +28,7 @@ type nilEntryListStore struct {
 	store.Store
 	bindings    []*store.RoleBinding
 	constraints []*store.AccessConstraint
+	deletedIDs  []string
 }
 
 func (s *nilEntryListStore) ListRoleBindingsForPrincipal(_ context.Context, _, _ string) ([]*store.RoleBinding, error) {
@@ -38,10 +39,32 @@ func (s *nilEntryListStore) ListAccessConstraintsFiltered(_ context.Context, _ s
 	return s.constraints, "", len(s.constraints), nil
 }
 
+func (s *nilEntryListStore) GetRoleDefinition(_ context.Context, _ string) (*store.RoleDefinition, error) {
+	return nil, store.ErrNotFound
+}
+
+func (s *nilEntryListStore) WithTx(_ context.Context, fn func(tx store.Store) error) error {
+	return fn(s)
+}
+
+func (s *nilEntryListStore) DeleteRoleBinding(_ context.Context, id string) error {
+	s.deletedIDs = append(s.deletedIDs, id)
+	return nil
+}
+
+func (s *nilEntryListStore) CreateMutationAudit(_ context.Context, _ *store.MutationAuditRecord) error {
+	return nil
+}
+
 func TestRemoveProjectMembersGroupRoleBindings_SkipsNilEntries(t *testing.T) {
-	s := &nilEntryListStore{bindings: []*store.RoleBinding{nil, nil}}
+	s := &nilEntryListStore{bindings: []*store.RoleBinding{
+		nil,
+		{ID: "rb-1", RoleDefinitionID: "rd-1"},
+		nil,
+	}}
 	removed := removeProjectMembersGroupRoleBindings(context.Background(), s, "group-1")
-	assert.Equal(t, 0, removed)
+	assert.Equal(t, 1, removed)
+	assert.Equal(t, []string{"rb-1"}, s.deletedIDs)
 }
 
 func TestCountAccessConstraintsByGroup_SkipsNilEntries(t *testing.T) {
