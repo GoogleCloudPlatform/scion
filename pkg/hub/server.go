@@ -4781,6 +4781,9 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		// materialized event then keeps this snapshot unchanged even if the
 		// schedule is later re-attributed.
 		InitiatorAttribution: sched.InitiatorAttribution,
+		// The revision's frozen ceiling travels with its attribution: the
+		// event keeps this snapshot for its whole life.
+		AuthorityCeiling: sched.AuthorityCeiling,
 	}
 
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {

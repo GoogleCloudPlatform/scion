@@ -327,6 +327,12 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		payload = string(payloadBytes)
 	}
 
+	// The revision's frozen ceiling is computed before any write.
+	ceiling, ok := s.revisionAuthorityCeiling(w, r, projectID, req.EventType)
+	if !ok {
+		return
+	}
+
 	// Determine creator identity
 	createdBy := ""
 	if identity := GetIdentityFromContext(r.Context()); identity != nil {
@@ -343,8 +349,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		CreatedBy: createdBy,
 		// E.2b: record the authoring request's initiator attribution in the
 		// same write as the event row (design check (a): atomic by
-		// construction, since ScheduleEvent below issues a single insert).
+		// construction, since ScheduleEvent below issues a single insert),
+		// together with the credential's frozen ceiling.
 		InitiatorAttribution: newInitiatorAttribution(r.Context()),
+		AuthorityCeiling:     ceiling,
 	}
 
 	if err := s.scheduler.ScheduleEvent(r.Context(), evt); err != nil {

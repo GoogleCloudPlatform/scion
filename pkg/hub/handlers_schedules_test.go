@@ -51,6 +51,7 @@ func initScheduleTest(t *testing.T, srv *Server, s store.Store) (*Server, store.
 		Slug: "schedule-test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	seedScheduleAuthorAgent(t, s, project.ID)
 
 	return srv, s, project.ID
 }
@@ -259,7 +260,7 @@ func TestSchedule_UpdateDispatchAgentScopedUATDenied(t *testing.T) {
 // TestSchedule_ResumeDispatchAgentScopedUATDenied covers resume: resuming a
 // paused dispatch_agent schedule re-arms future dispatches, so it requires a
 // credential whose scope can be applied at execution time. A paused
-// "message" schedule is outside this gate.
+// "message" schedule is held to the scheduled-message authoring rule.
 func TestSchedule_ResumeDispatchAgentScopedUATDenied(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ownerUser := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-resume-dispatch-owner"))
@@ -289,9 +290,12 @@ func TestSchedule_ResumeDispatchAgentScopedUATDenied(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
 
-	// A paused "message" schedule is outside this gate, which covers only
-	// dispatch_agent schedules.
-	t.Run("scoped UAT can resume a paused message schedule (outside dispatch_agent gate)", func(t *testing.T) {
+	// Resume re-authorizes the resumer for every schedule type, so a paused
+	// "message" schedule is held to the scheduled-message authoring rule.
+	// That rule allows a target that does not resolve yet (the fire-time
+	// check is definitive), as here; TestResumeScopedUATDenied_Message
+	// covers a resolvable target.
+	t.Run("scoped UAT resume of a message schedule follows the message rule", func(t *testing.T) {
 		msgCreateRec := doScheduleAgentRequest(t, srv, ownerUser, projectID, "", http.MethodPost,
 			CreateScheduleRequest{
 				Name: "resume-message-scoped", CronExpr: "0 * * * *",

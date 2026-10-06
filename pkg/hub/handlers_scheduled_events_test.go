@@ -46,6 +46,7 @@ func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
 		Slug: "sched-test-project",
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
+	seedScheduleAuthorAgent(t, s, project.ID)
 
 	return srv, s, project.ID
 }
