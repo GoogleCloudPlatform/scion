@@ -141,6 +141,9 @@ func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
 		// A dot element is not a template name.
 		{"https://example.com/a/b/..", "remote"},
 		{"https://example.com/a/b/.", "remote"},
+		// Only the exact dot elements are rejected; dot-prefixed names stay.
+		{"https://example.com/a/..x", "..x"},
+		{"https://example.com/a/.tpl", ".tpl"},
 	}
 	for _, c := range cases {
 		got := FriendlyTemplateName(c.ref)
