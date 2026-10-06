@@ -5080,12 +5080,19 @@ func unresolvedMentionNames(results []messages.MentionResult) []string {
 	return names
 }
 
+// mentionNotifyBudget bounds one notifyHumanMentions call. Callers run it
+// in a background goroutine on context.Background() so it outlives the
+// request; the budget keeps a stalled dispatcher from leaking it.
+const mentionNotifyBudget = 15 * time.Second
+
 // notifyHumanMentions fires a mention notification to each user in userIDs.
 func (s *Server) notifyHumanMentions(ctx context.Context, userIDs []string, projectID, conversationKey, senderUserID, senderName, messageContent string) {
 	cn := s.getChatNotifier()
 	if cn == nil || len(userIDs) == 0 {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, mentionNotifyBudget)
+	defer cancel()
 
 	// Resolve the conversation name for the notification message.
 	conversationName := ""
