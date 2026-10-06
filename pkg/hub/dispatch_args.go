@@ -44,11 +44,20 @@ type StopDispatchArgs struct {
 }
 
 // DeleteDispatchArgs carries the parameters for a cross-node agent delete.
+// PreviousRunIDs are the agent's previous runs the delete also names
+// (ptone/scion#3097), from the requesting node's copy of the agent (the
+// delete engine's claim snapshot); the owning node uses them instead of
+// its own read of the row.
+// Claim, when non-zero, is the delete engine's deletion claim: the executing
+// node sends the delete (the current run's and each previous run's) only
+// while that claim is still the row's current, live one (ptone/scion#2906).
 type DeleteDispatchArgs struct {
-	DeleteFiles  bool      `json:"deleteFiles,omitempty"`
-	RemoveBranch bool      `json:"removeBranch,omitempty"`
-	SoftDelete   bool      `json:"softDelete,omitempty"`
-	DeletedAt    time.Time `json:"deletedAt,omitempty"`
+	DeleteFiles    bool      `json:"deleteFiles,omitempty"`
+	RemoveBranch   bool      `json:"removeBranch,omitempty"`
+	SoftDelete     bool      `json:"softDelete,omitempty"`
+	DeletedAt      time.Time `json:"deletedAt,omitempty"`
+	PreviousRunIDs []string  `json:"previousRunIds,omitempty"`
+	Claim          int64     `json:"claim,omitempty"`
 }
 
 // CheckPromptDispatchArgs is intentionally empty — the agent slug/ID in the

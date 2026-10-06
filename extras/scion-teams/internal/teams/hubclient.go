@@ -21,7 +21,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -96,48 +95,7 @@ func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messa
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("hub returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	return nil
-}
-
-// callbackPayload is the JSON body POSTed to the hub's callback endpoint.
-type callbackPayload struct {
-	Data map[string]interface{} `json:"data"`
-}
-
-// DeliverCallback sends callback data to the hub's callback endpoint.
-func (c *HubClient) DeliverCallback(ctx context.Context, data map[string]interface{}) error {
-	payload := callbackPayload{Data: data}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal callback payload: %w", err)
-	}
-
-	url := c.hubURL + "/api/v1/broker/callback"
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create callback request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	if err := c.signRequest(req); err != nil {
-		return fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("callback delivery failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("hub callback returned status %d: %s", resp.StatusCode, string(respBody))
+		return readHubError("hub", resp)
 	}
 
 	return nil
@@ -185,15 +143,17 @@ type hubAgent struct {
 
 // --- Hub API query methods ---
 
-// ListAgents returns the agents for a given project.
+// ListAgents returns the agents for a given project, read as the linked
+// user identified by onBehalfOf ("user:<email>").
 // GET /api/v1/projects/{projectID}/agents
-func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+func (c *HubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, url.PathEscape(projectID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -205,8 +165,7 @@ func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentIn
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("list agents returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, readHubError("list agents", resp)
 	}
 
 	var result hubAgentsResponse
@@ -221,51 +180,21 @@ func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentIn
 	return agents, nil
 }
 
-// ListProjects returns all projects visible to the broker.
-// GET /api/v1/broker/projects
-func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
-	u := c.hubURL + "/api/v1/broker/projects"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list projects request: %w", err)
+// ListUserProjects returns the projects the linked user identified by
+// onBehalfOf ("user:<email>") is a member of. A non-empty slug narrows the
+// result to that project slug.
+// GET /api/v1/projects[?slug=<slug>]
+func (c *HubClient) ListUserProjects(ctx context.Context, onBehalfOf, slug string) ([]ProjectOption, error) {
+	u := c.hubURL + "/api/v1/projects"
+	if slug != "" {
+		u += "?slug=" + url.QueryEscape(slug)
 	}
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("list projects returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list projects response: %w", err)
-	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
-}
-
-// ListProjectsForUser returns projects owned by or associated with a specific user.
-// GET /api/v1/projects?ownerId=<ownerID>
-func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	u := c.hubURL + "/api/v1/projects?ownerId=" + url.QueryEscape(ownerID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -277,8 +206,7 @@ func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("list user projects returned status %d: %s", resp.StatusCode, string(respBody))
+		return nil, readHubError("list user projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -291,38 +219,6 @@ func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]
 		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
 	}
 	return projects, nil
-}
-
-// GetProjectStatus returns the details of a single project.
-// GET /api/v1/projects/{projectID}
-func (c *HubClient) GetProjectStatus(ctx context.Context, projectID string) (*ProjectOption, error) {
-	u := fmt.Sprintf("%s/api/v1/projects/%s", c.hubURL, url.PathEscape(projectID))
-
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create get project request: %w", err)
-	}
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("get project request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("get project returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var p hubProject
-	if err := json.NewDecoder(resp.Body).Decode(&p); err != nil {
-		return nil, fmt.Errorf("decode get project response: %w", err)
-	}
-
-	return &ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}, nil
 }
 
 // --- Hub API identity linking methods ---
@@ -364,8 +260,7 @@ func (c *HubClient) RegisterTeamsLink(ctx context.Context, teamsUserID string) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return "", fmt.Errorf("hub link returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", readHubError("hub link", resp)
 	}
 
 	return code, nil
@@ -393,8 +288,7 @@ func (c *HubClient) CheckTeamsLinkStatus(ctx context.Context, teamsUserID string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return "", "", "", fmt.Errorf("link status returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", "", "", readHubError("link status", resp)
 	}
 
 	var result struct {
@@ -433,6 +327,28 @@ func generateLinkCode() string {
 		b[i] = chars[n.Int64()]
 	}
 	return string(b)
+}
+
+// onBehalfOfHeader names the linked user a request is made for.
+const onBehalfOfHeader = "X-Scion-On-Behalf-Of"
+
+// setOnBehalfOf attaches the linked user ("user:<email>") to req. An empty
+// onBehalfOf leaves req unchanged.
+func setOnBehalfOf(req *http.Request, onBehalfOf string) {
+	if onBehalfOf == "" {
+		return
+	}
+	req.Header.Set(onBehalfOfHeader, onBehalfOf)
+	req.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
+}
+
+// onBehalfOfUser returns the "user:<email>" principal for a linked user, or
+// "" when the mapping has no Scion email.
+func onBehalfOfUser(mapping *TeamsUserMapping) string {
+	if mapping == nil || mapping.ScionEmail == "" {
+		return ""
+	}
+	return "user:" + mapping.ScionEmail
 }
 
 // signRequest adds HMAC authentication headers to the request.

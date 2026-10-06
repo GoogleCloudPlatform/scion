@@ -63,7 +63,7 @@ With `SCION_LOG_GCP=true`, logs use GCP's expected format:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SCION_LOG_GCP` | Enable GCP Cloud Logging JSON format on stdout | `false` |
-| `SCION_LOG_LEVEL` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
+| `SCION_LOG_LEVEL` | Set to `debug` to log at DEBUG level from startup. Any other value leaves the level at `info`. | `info` |
 | `K_SERVICE` | Auto-enables GCP logging format (set by Cloud Run) | - |
 | `SCION_CLOUD_LOGGING` | Send logs directly to Cloud Logging via client library | `false` |
 | `SCION_CLOUD_LOGGING_LOG_ID` | Log name in Cloud Logging | `scion` |

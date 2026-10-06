@@ -209,9 +209,9 @@ type AgentK8sMetadata struct {
 
 // SharedDir defines a project-level shared directory available to all agents.
 type SharedDir struct {
-	Name        string `json:"name" yaml:"name"`
-	ReadOnly    bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
-	InWorkspace bool   `json:"in_workspace,omitempty" yaml:"in_workspace,omitempty"`
+	Name        string `json:"name" yaml:"name" koanf:"name"`
+	ReadOnly    bool   `json:"read_only,omitempty" yaml:"read_only,omitempty" koanf:"read_only"`
+	InWorkspace bool   `json:"in_workspace,omitempty" yaml:"in_workspace,omitempty" koanf:"in_workspace"`
 }
 
 // ValidateSharedDirs validates a slice of SharedDir entries.
@@ -251,21 +251,21 @@ func isValidSlug(s string) bool {
 }
 
 type VolumeMount struct {
-	Source   string `json:"source" yaml:"source"`
-	Target   string `json:"target" yaml:"target"`
-	ReadOnly bool   `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	Source   string `json:"source" yaml:"source" koanf:"source"`
+	Target   string `json:"target" yaml:"target" koanf:"target"`
+	ReadOnly bool   `json:"read_only,omitempty" yaml:"read_only,omitempty" koanf:"read_only"`
 	// Type discriminates the volume kind:
 	//   "local" (default) — host bind mount; requires Source.
 	//   "gcs"             — GCS FUSE mount; requires Bucket.
 	//   "nfs"             — literal NFS protocol mount; requires Server, Source.
 	//   "cloudrun-volume" — Cloud Run managed volume; requires VolumeName.
 	//   "gke-shared-volume" — GKE-provided shared volume (e.g. Filestore CSI PVC); requires VolumeName.
-	Type       string `json:"type,omitempty" yaml:"type,omitempty"`
-	Bucket     string `json:"bucket,omitempty" yaml:"bucket,omitempty"`           // GCS bucket name
-	Prefix     string `json:"prefix,omitempty" yaml:"prefix,omitempty"`           // GCS object prefix
-	Mode       string `json:"mode,omitempty" yaml:"mode,omitempty"`               // Mount options
-	Server     string `json:"server,omitempty" yaml:"server,omitempty"`           // NFS: server host/IP
-	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty"` // Cloud Run / GKE volume name
+	Type       string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
+	Bucket     string `json:"bucket,omitempty" yaml:"bucket,omitempty" koanf:"bucket"`                // GCS bucket name
+	Prefix     string `json:"prefix,omitempty" yaml:"prefix,omitempty" koanf:"prefix"`                // GCS object prefix
+	Mode       string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`                      // Mount options
+	Server     string `json:"server,omitempty" yaml:"server,omitempty" koanf:"server"`                // NFS: server host/IP
+	VolumeName string `json:"volume_name,omitempty" yaml:"volume_name,omitempty" koanf:"volume_name"` // Cloud Run / GKE volume name
 }
 
 // Validate checks that a VolumeMount has the required fields and valid values.
@@ -362,15 +362,15 @@ type K8sResources struct {
 // ResourceSpec defines compute resource requirements for an agent container.
 // It follows Kubernetes resource model conventions.
 type ResourceSpec struct {
-	Requests ResourceList `json:"requests,omitempty" yaml:"requests,omitempty"`
-	Limits   ResourceList `json:"limits,omitempty" yaml:"limits,omitempty"`
-	Disk     string       `json:"disk,omitempty" yaml:"disk,omitempty"`
+	Requests ResourceList `json:"requests,omitempty" yaml:"requests,omitempty" koanf:"requests"`
+	Limits   ResourceList `json:"limits,omitempty" yaml:"limits,omitempty" koanf:"limits"`
+	Disk     string       `json:"disk,omitempty" yaml:"disk,omitempty" koanf:"disk"`
 }
 
 // ResourceList is a set of resource name/quantity pairs.
 type ResourceList struct {
-	CPU    string `json:"cpu,omitempty" yaml:"cpu,omitempty"`
-	Memory string `json:"memory,omitempty" yaml:"memory,omitempty"`
+	CPU    string `json:"cpu,omitempty" yaml:"cpu,omitempty" koanf:"cpu"`
+	Memory string `json:"memory,omitempty" yaml:"memory,omitempty" koanf:"memory"`
 }
 
 // AgentHubConfig holds hub connection settings that can be specified per-agent
@@ -503,6 +503,17 @@ type ScionConfig struct {
 	// ExplicitWorkspace records that /workspace is a user-provided --workspace
 	// path, bind-mounted directly with no git worktree/branch, even when inside a
 	// repo. Persisted so resume/restart honors the same contract as first start.
+	//
+	// Also true for a broker-provisioned worktree-per-agent workspace
+	// (tryProvisionWorktree sets opts.Workspace too, so it takes the same
+	// branch in ProvisionAgent): both cases mount from a Volumes-derived path
+	// rather than GetAgent's managed <agentDir>/workspace recovery. RepoRoot
+	// resolution, not this flag, is what tells the two cases apart — see
+	// pkg/agent's readProvisionedWorktreeRepoRoot. That value is deliberately
+	// not a field on ScionConfig (populated by unmarshaling templates, hub
+	// inline config, and --config files) nor on AgentInfo (persisted in
+	// agentHome, which the container can write) — see
+	// ContextWithProvisionedWorktreeRepoRoot below.
 	ExplicitWorkspace bool `json:"explicit_workspace,omitempty" yaml:"explicit_workspace,omitempty"`
 
 	// EmptyPerAgentWorkspace records that the agent's workspace is its
@@ -583,9 +594,10 @@ type AgentInfo struct {
 	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
 	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per project)
 	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
-	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550)
+	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). In agent-info.json: the run that owns the agent's files (ptone/scion#2675); List never fills RunID from agent-info.json, so on the wire it is always the label
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
+	TemplateHash  string `json:"templateHash,omitempty"`  // Content hash of a template loaded from a content-addressed cache dir; when set, Template is a display name only and is never looked up by name
 	HarnessConfig string `json:"harnessConfig,omitempty"` // Resolved harness-config name
 	// HarnessConfigRevision records the harness-config bundle revision (e.g.
 	// the Hub artifact's ContentHash) that this agent was provisioned from.
@@ -619,7 +631,13 @@ type AgentInfo struct {
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
-	Warnings   []string          `json:"warnings,omitempty"`
+	// WorkspacePlacement is where the start that produced this info placed
+	// the agent's workspace: WorkspacePlacementExport or
+	// WorkspacePlacementLocal. Empty when this info did not come from a
+	// start that resolved the workspace (a listing, or an agent found
+	// already running).
+	WorkspacePlacement string   `json:"workspacePlacement,omitempty"`
+	Warnings           []string `json:"warnings,omitempty"`
 	// HubOnlyEnvWarnings carries only the warnings for broker-local values
 	// of hub-only env keys (TZ) that the broker dropped for a hub-dispatched
 	// agent. They are also included in Warnings; this field lets the broker
@@ -661,6 +679,10 @@ type AgentInfo struct {
 	HubEndpoint       string `json:"hubEndpoint,omitempty"`       // Scion Hub URL if connected
 	WebPTYEnabled     bool   `json:"webPtyEnabled,omitempty"`     // Whether web terminal access is available
 	TaskSummary       string `json:"taskSummary,omitempty"`       // Current task description (for dashboard)
+	// ProvisionedOnly: the Hub reports the agent provisioned but not
+	// started (ptone/scion#2929). No omitempty: an explicit false lets a
+	// client that merges responses clear a previously seen true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
@@ -676,15 +698,15 @@ type AgentDetail struct {
 // RequiredSecret declares a secret that must be available for an agent to start.
 // Declared in templates (scion-agent.yaml), settings harness configs, or settings profiles.
 type RequiredSecret struct {
-	Key         string `json:"key" yaml:"key"`
-	Description string `json:"description,omitempty" yaml:"description,omitempty"`
-	Type        string `json:"type,omitempty" yaml:"type,omitempty"`     // "environment" (default), "variable", "file"
-	Target      string `json:"target,omitempty" yaml:"target,omitempty"` // Projection target (defaults to Key for env type)
+	Key         string `json:"key" yaml:"key" koanf:"key"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty" koanf:"description"`
+	Type        string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`       // "environment" (default), "variable", "file"
+	Target      string `json:"target,omitempty" yaml:"target,omitempty" koanf:"target"` // Projection target (defaults to Key for env type)
 	// AlternativeEnvKeys lists env var names that can satisfy this secret
 	// requirement as an alternative. If any of these env vars are present,
 	// the file secret is not required. For example, GOOGLE_APPLICATION_CREDENTIALS
 	// can substitute for a gcloud-adc file secret.
-	AlternativeEnvKeys []string `json:"alternative_env_keys,omitempty" yaml:"alternative_env_keys,omitempty"`
+	AlternativeEnvKeys []string `json:"alternative_env_keys,omitempty" yaml:"alternative_env_keys,omitempty" koanf:"alternative_env_keys"`
 }
 
 // SkillReference declares a skill dependency in a template's scion-agent.yaml.
@@ -854,6 +876,25 @@ func IsFreshProvisionFromContext(ctx context.Context) bool {
 	return v
 }
 
+type runIDContextKey struct{}
+
+// ContextWithRunID returns a new context carrying the run ID of the start
+// that is provisioning the agent (ptone/scion#2550), so provisioning can
+// record it in agent-info.json as the run that owns the agent's files
+// (ptone/scion#2675). An empty runID returns ctx unchanged.
+func ContextWithRunID(ctx context.Context, runID string) context.Context {
+	if runID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, runIDContextKey{}, runID)
+}
+
+// RunIDFromContext returns the run ID set by ContextWithRunID, or "".
+func RunIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(runIDContextKey{}).(string)
+	return v
+}
+
 type sharedWorkspaceContextKey struct{}
 
 // ContextWithSharedWorkspace returns a new context with the shared workspace flag attached.
@@ -948,6 +989,46 @@ func ReincarnateEligible(hasGitClone bool, workspace string) bool {
 	return hasGitClone || workspace != ""
 }
 
+type provisionedWorktreeRepoRootContextKey struct{}
+
+// ContextWithProvisionedWorktreeRepoRoot records that the workspace at hand
+// (opts.Workspace) is a broker-provisioned worktree-per-agent checkout —
+// created by runtimebroker's tryProvisionWorktree, not by a user's
+// --workspace override — whose git repo root is repoRoot. Modelled on
+// ContextWithGitClone / ContextWithSharedWorkspace: broker-local, never on
+// the wire.
+//
+// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext)
+// to set RunConfig.RepoRoot directly, skipping detectRepoRoot's "an explicit
+// workspace skips git detection" rule — that rule exists for a user's own
+// --workspace override and must not swallow the broker's own
+// provisioning. This doc is the canonical statement of that rationale; other
+// call sites point back here.
+//
+// The value is never a ScionConfig field (populated by unmarshaling
+// templates, hub inline config, and --config files) or an AgentInfo field
+// (agent-info.json lives in agentHome, which the container can write). The
+// broker persists it in a broker-owned file under agentDir instead — see
+// pkg/agent's writeProvisionedWorktreeRepoRoot/readProvisionedWorktreeRepoRoot
+// — and run.go independently validates it against the real filesystem
+// (provision.ValidateWorktreeForBase) before trusting it either way.
+func ContextWithProvisionedWorktreeRepoRoot(ctx context.Context, repoRoot string) context.Context {
+	return context.WithValue(ctx, provisionedWorktreeRepoRootContextKey{}, repoRoot)
+}
+
+// ProvisionedWorktreeRepoRootFromContext returns the repo root recorded by
+// ContextWithProvisionedWorktreeRepoRoot, or "" if none was set (including
+// every non-broker dispatch and every broker dispatch that is not a
+// provisioned worktree — e.g. clone-per-agent or a user --workspace
+// override).
+func ProvisionedWorktreeRepoRootFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(provisionedWorktreeRepoRootContextKey{}).(string)
+	return v
+}
+
 type harnessConfigPathContextKey struct{}
 
 // ContextWithHarnessConfigPath records a pre-resolved local directory for the
@@ -961,6 +1042,22 @@ func ContextWithHarnessConfigPath(ctx context.Context, path string) context.Cont
 // from the context, or "" if none was set.
 func HarnessConfigPathFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(harnessConfigPathContextKey{}).(string)
+	return v
+}
+
+type templateNameContextKey struct{}
+
+// ContextWithTemplateName records the human-friendly template slug for the
+// agent being provisioned. It is used for naming only (agent-info.json and
+// labels) and never to locate or load a template.
+func ContextWithTemplateName(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, templateNameContextKey{}, name)
+}
+
+// TemplateNameFromContext returns the template slug recorded by
+// ContextWithTemplateName, or "" if none was set.
+func TemplateNameFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(templateNameContextKey{}).(string)
 	return v
 }
 
@@ -1090,6 +1187,13 @@ type StartOptions struct {
 	Workspace          string
 	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// SharedWorkspaceClone holds the clone settings of a shared-plain git
+	// project's workspace. Set only with SharedWorkspace and without
+	// GitClone. It does not change how the workspace is mounted or created:
+	// only the Kubernetes runtime uses it, through RunConfig.GitCloneForInit,
+	// so the workspace-provision init container clones into an NFS-backed
+	// shared workspace that has not been cloned yet.
+	SharedWorkspaceClone *GitCloneConfig
 	// FreshProvision marks this dispatch as a create, not a start or restart:
 	// GetAgent wipes and re-clones an existing populated workspace only when
 	// this is set, so a same-named leftover agent directory is not confused

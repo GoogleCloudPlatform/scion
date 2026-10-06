@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // These tests drive Manager.Start end to end, so the runtime name and the
@@ -112,17 +113,24 @@ func TestStartHomeStorage_ExperimentOffIsLocal(t *testing.T) {
 	assert.Equal(t, &homeStorageRecord{Backend: "local"}, startHomeRecord(t, f, "gke-agent"))
 }
 
-// A Kubernetes dispatch with the experiment on resolves to an NFS home,
-// which this version refuses before any pod is started or record written.
-func TestStartHomeStorage_NFSRefusedInThisVersion(t *testing.T) {
+// A Kubernetes dispatch with the experiment on gets an NFS home: the
+// runtime receives the home description and the choice is recorded.
+func TestStartHomeStorage_NFSHome(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	f.writeRawGlobalSettings(t, homeStorageStartSettings(f.tmpDir))
 	var c sdsCapture
 	_, err := NewManager(newSDSMockRuntime("kubernetes", &c)).Start(withNFSHomeExperiment(context.Background()), homeStorageStartOpts(f, "gke-agent", "gke"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not available in this version")
-	assert.Equal(t, 0, c.ran)
-	assert.Equal(t, &homeStorageRecord{Backend: homeStoragePending}, startHomeRecord(t, f, "gke-agent"))
+	require.NoError(t, err)
+	require.Equal(t, 1, c.ran)
+	assert.Equal(t, runtime.HomeStorageNFS, c.cfg.HomeStorageBackend)
+	require.NotNil(t, c.cfg.HomeStorage)
+	assert.Equal(t, runtime.HomeStorageRealization{
+		PVClaimName: "pv-1", SubPathRoot: "projects", ProjectID: hsTestProjectID, AgentSlug: "gke-agent",
+		AgentID: hsTestAgentID, Leaf: "pod", GID: 1000,
+		StopGraceSeconds: 30, TerminationWaitSeconds: 15, SkeletonMaxBytes: 256 << 20,
+	}, *c.cfg.HomeStorage)
+	assert.Equal(t, &homeStorageRecord{Backend: "nfs", Leaf: "pod", ShareID: "share-1", PVClaimName: "pv-1", SubPathRoot: "projects"},
+		startHomeRecord(t, f, "gke-agent"))
 }
 
 // A settings file without schema_version that sets server.home_storage is

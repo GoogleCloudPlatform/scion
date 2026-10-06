@@ -325,8 +325,19 @@ func TestAgentCreateDeliverIDs_MissingParentEdge(t *testing.T) {
 		_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-missing-c")
 		assert.ErrorIs(t, err, store.ErrNotFound, "no agent row")
 
+		assert.Empty(t, agentDelegatorEdges(t, f.store, parent.ID), "the child's edge is deactivated")
+		failed, _, err := f.store.ListMutationAudits(context.Background(),
+			store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+		require.NoError(t, err)
+		require.Len(t, failed, 1, "the failed create is compensated")
+		sum := assertCompensated(t, f.store, failed[0].TargetID)
+
+		// Reactivate the compensated edge to inspect the ceiling it carried.
+		_, err = f.store.ReactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent,
+			failed[0].TargetID, store.EdgeDeactivationCreateCompensation, sum.OpID)
+		require.NoError(t, err)
 		edges := agentDelegatorEdges(t, f.store, parent.ID)
-		require.Len(t, edges, 1, "the edge written for the child is left in place")
+		require.Len(t, edges, 1)
 		left := edges[0]
 		assert.Equal(t, store.EffectCeilingBounded, left.Kind)
 		assert.Empty(t, deliverOf(left.PermissionIDs), "no delivery permission")
@@ -507,45 +518,6 @@ func TestDevAuthGrandchildBoundedByParent(t *testing.T) {
 	assert.Equal(t, rowFiveIDs(t, mf.srv, parent), withoutDeliver(edges[0].PermissionIDs))
 }
 
-// A create whose broker dispatch fails leaves the child's edge in place but
-// no usable authority: the token sent to the broker creates nothing and
-// refreshes nothing, and the child is not a valid ceiling source.
-func TestDispatchFailureLeavesNoUsableAuthority(t *testing.T) {
-	f := newChainFixture(t, "chain-dispatch")
-	parent, _ := f.sessionParent(t, "chain-dispatch-p")
-	f.client.returnErr = errors.New("broker unavailable")
-
-	rec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "chain-dispatch-c"})
-	require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-	_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-dispatch-c")
-	require.ErrorIs(t, err, store.ErrNotFound, "no agent row")
-
-	edges := agentDelegatorEdges(t, f.store, parent.ID)
-	require.Len(t, edges, 1)
-	assert.True(t, edges[0].Active, "the edge is left in place")
-	childID := edges[0].DelegateID
-
-	require.NotNil(t, f.client.lastCreateReq)
-	childToken := f.client.lastCreateReq.AgentToken
-	require.NotEmpty(t, childToken)
-	f.client.returnErr = nil
-
-	rec = f.createAsParent(t, childToken, CreateAgentRequest{Name: "chain-dispatch-gc"})
-	assert.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-	_, err = f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-dispatch-gc")
-	assert.ErrorIs(t, err, store.ErrNotFound, "no grandchild row")
-
-	mf := f.mint()
-	claims := mf.tokenClaims(t, childToken)
-	refresh := httptest.NewRecorder()
-	f.srv.handleAgentTokenRefresh(refresh, buildAgentRefreshRequest(childID, claims, "", false), childID)
-	assert.NotEqual(t, http.StatusOK, refresh.Code, refresh.Body.String())
-
-	_, _, err = f.srv.authzService.sourceEffectCeiling(context.Background(), &agentIdentityWrapper{AgentTokenClaims: claims})
-	assert.ErrorIs(t, err, ErrProvenanceChain)
-	assert.Contains(t, err.Error(), "not found")
-}
-
 // Authority from a relationship is checked at use, not frozen: a child of
 // an access token holding agent:attach carries exactly the token's ceiling,
 // and the walk allows attach only on agents the owner descends to.
@@ -612,11 +584,12 @@ func (f *legacyFixture) assignBody(slug string) map[string]interface{} {
 	}
 }
 
-// assertSAGateDenied asserts the SA gate's generic 403.
-func assertSAGateDenied(t *testing.T, rec *httptest.ResponseRecorder) {
+// assertSAGateUnrecordedDenied asserts the SA gate's 403 for a delegation
+// chain with an unrecorded hop.
+func assertSAGateUnrecordedDenied(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, saAssignGenericForbiddenMsg, decodeTargetAPIError(t, rec).Message)
+	assert.Equal(t, scaUnrecordedDenyMsg, decodeTargetAPIError(t, rec).Message)
 }
 
 // agentIdentityFor returns the request identity for a production token.
@@ -628,7 +601,7 @@ func (f *chainFixture) agentIdentityFor(t *testing.T, token string) *agentIdenti
 }
 
 // assertGateUnrecorded asserts that the SA gate denies the token's agent at
-// surface with the generic SA-assign message, and that the gate's
+// surface with the unrecorded-provenance message, and that the gate's
 // CheckAccess denies with ceiling_unrecorded.
 func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string) {
 	t.Helper()
@@ -639,7 +612,7 @@ func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+identity.ID(), nil).WithContext(ctx)
 	require.False(t, f.srv.authorizeSAAssignment(rec, r, f.sa, surface))
-	assertSAGateDenied(t, rec)
+	assertSAGateUnrecordedDenied(t, rec)
 }
 
 // An agent whose only edge is unrecorded: a create that takes the project
@@ -650,7 +623,7 @@ func TestLegacyAgentChildWithDefaultSADenied(t *testing.T) {
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	token := f.agentToken(t, f.legacy.ID)
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-dsa-c"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-dsa-c"}))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-dsa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -661,7 +634,7 @@ func TestLegacyAgentChildWithExplicitSADenied(t *testing.T) {
 	f := newLegacyFixture(t, "legacy-esa")
 	token := f.agentToken(t, f.legacy.ID)
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-esa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -692,7 +665,7 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 	token := f.agentToken(t, child.ID)
 
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-desc-esa")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("legacy-desc-esa")))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-esa", child.ID, 0, writesBefore)
 
 	grand, _ := f.createdAgent(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-gc"}), "legacy-desc-gc")
@@ -704,7 +677,7 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	writesBefore = countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-dsa"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-dsa"}))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-dsa", child.ID, 1, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -790,4 +763,43 @@ func TestLegacyAgentCreatedChildLaunchOmitsSecrets(t *testing.T) {
 
 	child, _ := f.childOf(t, f.legacy, "legacy-launch-c")
 	assert.False(t, launched(child), "an unrecorded chain launches without it")
+}
+
+// The remedy the unrecorded-provenance message names: a user recreates the
+// denied agent directly, and the replacement passes the SA gate's chain
+// check. Both denied shapes are covered: the agent whose own edge is
+// unrecorded, and a child of it whose unrecorded link is an ancestor. Agents
+// created from a replacement pass as well.
+func TestLegacyAgentRecreatedByUserClearsUnrecordedDenial(t *testing.T) {
+	f := newLegacyFixture(t, "legacy-fix")
+	ctx := t.Context()
+
+	legacyChild, _ := f.childOf(t, f.legacy, "legacy-fix-lc")
+	denied := []*store.Agent{f.legacy, legacyChild}
+	for _, a := range denied {
+		f.assertGateUnrecorded(t, f.agentToken(t, a.ID), SurfaceAgentCreate)
+	}
+
+	assertAssignAllowed := func(a *store.Agent) {
+		t.Helper()
+		identity := f.agentIdentityFor(t, f.agentToken(t, a.ID))
+		d := f.srv.authzService.CheckAccess(contextWithIdentity(ctx, identity), identity, gcpServiceAccountResource(f.sa), ActionAssign)
+		assert.NotEqual(t, DenyCauseCeilingUnrecorded, d.DenyCause, "agent %s: reason %q", a.Name, d.Reason)
+		assert.True(t, d.Allowed, "agent %s: reason %q", a.Name, d.Reason)
+	}
+
+	for _, old := range denied {
+		require.NoError(t, f.store.DeleteAgent(ctx, old.ID))
+		replacement, edge := f.createdAgent(t, f.create(t, authUser(f.owner), CreateAgentRequest{Name: old.Name}), old.Name)
+		require.NotEqual(t, old.ID, replacement.ID, "%s is a new agent", old.Name)
+		require.Equal(t, store.DelegationPrincipalUser, edge.DelegatorType, "%s is created by a user", old.Name)
+		require.Equal(t, f.owner.ID, edge.DelegatorID)
+		require.NotZero(t, edge.ProvenanceVersion, "a user create records provenance")
+		assertAssignAllowed(replacement)
+
+		child, childEdge := f.childOf(t, replacement, old.Name+"-c")
+		require.Equal(t, replacement.ID, childEdge.DelegatorID)
+		require.NotZero(t, childEdge.ProvenanceVersion, "an agent create records provenance")
+		assertAssignAllowed(child)
+	}
 }

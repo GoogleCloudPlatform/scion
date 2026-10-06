@@ -30,6 +30,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 import './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
 import type { Agent } from '../../shared/types.js';
+import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
   layoutForest,
@@ -309,6 +310,17 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
 
     expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
     expect(statusLabel('k1')).toBe('stopped');
+  });
+
+  it('shows a provision-only agent as created (not started) with a start hint (ptone/scion#2929)', async () => {
+    el.agents = el.agents.map((a) =>
+      a.id === 'k1' ? { ...a, phase: 'created', provisionedOnly: true } : a
+    );
+    await el.updateComplete;
+
+    const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
+    expect(badge?.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
+    expect(badge?.getAttribute('title')).toContain('scion start kid');
   });
 
   /** Edges whose title indicates non-messageable ("mismatch") styling. */

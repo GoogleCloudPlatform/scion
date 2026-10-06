@@ -120,6 +120,16 @@ func TestStreamLogsPropagatesListingErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StreamLogs returned error: %v", err)
 	}
+	// The StreamLogs goroutine reads logPollInterval/logPollBackoff and
+	// appends to client.requests. Wait for it to exit (it closes ch) before
+	// reading requests and before the cleanup above restores the globals.
+	// Cleanups run LIFO, so this one runs before the restore.
+	stopStream := func() {
+		cancel()
+		for range ch {
+		}
+	}
+	t.Cleanup(stopStream)
 
 	select {
 	case entry := <-ch:
@@ -132,6 +142,7 @@ func TestStreamLogsPropagatesListingErrors(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for stream error")
 	}
+	stopStream()
 
 	if got := client.requests[0].Filter; got != cloudRunInstanceLogFilter("agent", "project", time.Time{}) {
 		t.Fatalf("filter = %q", got)
