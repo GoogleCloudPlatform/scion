@@ -27,7 +27,7 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError, type ApiErrorInfo } from '../../client/api.js';
 import {
   displayGitRemote,
   normalizeGitRemote,
@@ -54,6 +54,11 @@ const MAX_TEMPLATE_PAGES = 20;
 
 /** Maximum project slug length; matches api.MaxSlugLength on the hub. */
 const MAX_SLUG_LENGTH = 63;
+
+/** Whether a failed response is a 400 the hub raised about the slug field. */
+function isSlugFieldError(response: Response, info: ApiErrorInfo): boolean {
+  return response.status === 400 && info.details?.field === 'slug';
+}
 
 /** A project template as returned by GET /api/v1/projects?isTemplate=true. */
 interface ProjectTemplate {
@@ -287,7 +292,7 @@ export class ScionPageProjectCreate extends LitElement {
   @state()
   private templateGitRemoteError: string | null = null;
 
-  /** Inline error on the Slug field (clone 409 for a colliding explicit slug). */
+  /** Inline error on the Slug field (clone 409 for a colliding explicit slug, or a slug 400). */
   @state()
   private slugError: string | null = null;
 
@@ -1036,6 +1041,7 @@ export class ScionPageProjectCreate extends LitElement {
 
     this.submitting = true;
     this.error = null;
+    this.slugError = null;
 
     try {
       const body: Record<string, unknown> = {
@@ -1101,7 +1107,16 @@ export class ScionPageProjectCreate extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+        const info = await parseApiError(response, `HTTP ${response.status}`);
+        // A 400 about the slug belongs on the Slug field.
+        if (isSlugFieldError(response, info)) {
+          this.slugError = info.message;
+          return;
+        }
+        const guidance = info.details?.guidance;
+        throw new Error(
+          typeof guidance === 'string' && guidance ? `${info.message} — ${guidance}` : info.message
+        );
       }
 
       const result = (await response.json()) as { project?: { id: string }; id?: string };
@@ -1191,9 +1206,14 @@ export class ScionPageProjectCreate extends LitElement {
       }
       if (!response.ok) {
         const info = await parseApiError(response, 'Failed to create project from template');
-        // A 400 about the override belongs on its field, like a slug 409.
+        // A 400 about the override or the slug belongs on its field, like a
+        // slug 409.
         if (response.status === 400 && info.details?.field === 'gitRemote') {
           this.templateGitRemoteError = info.message;
+          return;
+        }
+        if (isSlugFieldError(response, info)) {
+          this.slugError = info.message;
           return;
         }
         throw new Error(info.message);
