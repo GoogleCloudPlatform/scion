@@ -146,7 +146,8 @@ type ServerConfig struct {
 
 	// Workspace sync settings
 	// StorageBucket is the GCS bucket name for workspace storage.
-	// Used when workspace sync requests don't specify a bucket.
+	// Used when workspace sync requests, or a create request carrying a
+	// workspace upload, don't specify a bucket.
 	StorageBucket string
 	// WorktreeBase is the base directory for agent worktrees.
 	// Used as a fallback when resolving workspace paths.
