@@ -163,9 +163,17 @@ value of each patched setting. An agent that patches itself needs the
 agent lifecycle permission, and can lower its own role but not raise it.
 
 Use --broker <name|id> to move the agent to another runtime broker. Both
-brokers must mount the same NFS export, so the workspace moves without being
-copied. Only --dry-run is supported with --broker for now: it reports each
-eligibility check and changes nothing.
+brokers must mount the same NFS export, the agent's workspace must be on
+that export, and both brokers must support agent move and be online. The
+workspace stays where it is; the agent home is regenerated on the target,
+and the handoff carries continuity. The CLI runs a dry run first: an
+ineligible move is refused before anything changes, and the CLI prints the
+failing check (a broker you cannot see is reported as not found). Add
+--dry-run to see every check. Targeting a broker that does not serve the
+project yet needs project update, plus broker read and dispatch unless the
+broker auto-provides; an agent can move itself only to a broker that
+already serves its project. Patch flags combine with --broker. See "Moving
+an Agent to Another Runtime Broker" in the multi-broker docs.
 
 Use --shared-dir-backend NAME=nfs to move a shared dir's recorded storage
 backend from local to nfs. Only this agent's record changes, while the
@@ -176,7 +184,8 @@ nfs directory with getfacl), then reincarnate each of those agents with the
 flag. The local directory is never moved or deleted. The start
 refuses an empty nfs directory while the previous local directory is not
 empty (on Kubernetes, whenever the nfs directory is empty); add
---allow-empty-shared-dir to start anyway.
+--allow-empty-shared-dir to start anyway. The shared dir flags cannot be
+combined with --broker.
 
 The broker checks the change (the dir is one of the agent's shared dirs,
 the nfs settings are complete, the broker supports it) after the hub has
