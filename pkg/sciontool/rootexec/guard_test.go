@@ -111,7 +111,7 @@ var execSiteAllowlist = map[string]string{
 	// happens in the (root) parent using its inherited PATH, and the
 	// resulting process runs as the workload's own uid whenever that
 	// happens.
-	"pkg/sciontool/supervisor/supervisor.go:153": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	"pkg/sciontool/supervisor/supervisor.go:181": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
 
 	// services.Manager.start: svc.spec.Command[0] comes from a workload-
 	// supplied services.yaml. start() itself requires uid/gid>0 (or fails
