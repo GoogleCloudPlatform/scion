@@ -731,3 +731,36 @@ func TestV2_NotificationDrops_LogLevelByReason(t *testing.T) {
 		})
 	}
 }
+
+func TestNotifications_WithoutHubClient(t *testing.T) {
+	t.Run("command", func(t *testing.T) {
+		h, tgSrv, _, store := newTestCommandHandler(t)
+		linkTestUser(t, store, 42, "alice@example.com")
+		saveTestGroupLink(t, store, -101, "proj-1", "alpha", "")
+		h.hubClient = nil
+
+		h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
+
+		sent := tgSrv.getSentMessages()
+		require.Len(t, sent, 1)
+		assert.Equal(t, setupProjectsFailedText, sent[0].Text)
+	})
+
+	t.Run("toggle button", func(t *testing.T) {
+		h, tgSrv, _, _ := setupToggleScope(t)
+		h.hubClient = nil
+
+		_, err := h.HandleCallback(context.Background(), notifyCallback("proj-1", "coder", 42))
+		require.NoError(t, err)
+
+		answered := tgSrv.getAnsweredCallbacks()
+		require.Len(t, answered, 1)
+		assert.Equal(t, setupProjectsFailedText, answered[0].Text)
+	})
+
+	t.Run("builder", func(t *testing.T) {
+		store := newTestStore(t)
+		_, err := buildNotificationEntries(context.Background(), store, nil, slog.Default(), &TelegramUserMapping{TelegramUserID: "42", ScionEmail: "alice@example.com"})
+		assert.ErrorIs(t, err, errHubNotConfigured)
+	})
+}

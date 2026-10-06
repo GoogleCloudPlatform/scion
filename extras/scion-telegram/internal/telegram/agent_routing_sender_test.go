@@ -673,3 +673,40 @@ func deniedSenderRepeatGetsOneReply(t *testing.T) {
 		})
 	}
 }
+
+func TestV2_AgentList_WithoutHubClient(t *testing.T) {
+	t.Run("same user's stale list is served", func(t *testing.T) {
+		b, _, _ := newRoutingTestBroker(t)
+		principal := linkTestUser(t, b.store, 456, "alice@example.com")
+		saveStaleAgentCache(t, b.store, principal, "proj-1", "coder")
+		b.hubClient = nil
+
+		slugs, err := b.getProjectAgents(context.Background(), "proj-1", b.lookupSender(context.Background(), &TGUser{ID: 456}))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"coder"}, slugs)
+	})
+
+	t.Run("another user's list is not served", func(t *testing.T) {
+		b, _, _ := newRoutingTestBroker(t)
+		linkTestUser(t, b.store, 456, "alice@example.com")
+		saveStaleAgentCache(t, b.store, "user:bob@example.com", "proj-1", "coder")
+		b.hubClient = nil
+
+		slugs, err := b.getProjectAgents(context.Background(), "proj-1", b.lookupSender(context.Background(), &TGUser{ID: 456}))
+		assert.ErrorIs(t, err, errHubNotConfigured)
+		assert.Empty(t, slugs)
+	})
+
+	t.Run("message is answered instead of routed", func(t *testing.T) {
+		b, tgSrv, _ := newRoutingTestBroker(t)
+		linkTestUser(t, b.store, 456, "alice@example.com")
+		b.hubClient = nil
+		delivered := false
+		b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+		b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+		assert.False(t, delivered)
+		assert.Equal(t, []string{"Couldn't fetch the agent list for this project. Please try again later."}, sentTexts(tgSrv))
+	})
+}

@@ -2827,6 +2827,9 @@ func (b *TelegramBrokerV2) fetchUserProjects(ctx context.Context, principal stri
 
 // --- Agent cache ---
 
+// errHubNotConfigured reports that no hub client is configured.
+var errHubNotConfigured = errors.New("hub client not configured")
+
 // errSenderNotLinked reports that the message sender is unknown or has no
 // linked Scion account.
 var errSenderNotLinked = errors.New("sender has no linked Scion account")
@@ -2892,6 +2895,13 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < b.agentCacheTTL {
 		return agentSlugs(cached.Agents), nil
+	}
+
+	if b.hubClient == nil {
+		if cached != nil {
+			return agentSlugs(cached.Agents), nil
+		}
+		return nil, errHubNotConfigured
 	}
 
 	agents, err := b.hubClient.ListAgents(ctx, projectID, link.principal)

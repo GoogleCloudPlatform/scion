@@ -59,6 +59,9 @@ func (n *notificationEntries) set(projectID, agentSlug string, enabled bool) {
 // that user) are included; their agents come from projectAgentsForUser.
 // The error is a hub error (including a stale link) or a store error.
 func buildNotificationEntries(ctx context.Context, store Store, hub HubClient, log *slog.Logger, mapping *TelegramUserMapping) (*notificationEntries, error) {
+	if hub == nil {
+		return nil, errHubNotConfigured
+	}
 	principal := linkedUserPrincipal(mapping)
 
 	userProjects, err := hub.ListProjectsForUser(ctx, principal)
