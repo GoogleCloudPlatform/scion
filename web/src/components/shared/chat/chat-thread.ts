@@ -109,6 +109,25 @@ const SCROLL_TOP_THRESHOLD = 100;
 /** Threshold in pixels from bottom to consider "pinned to bottom". */
 const SCROLL_BOTTOM_THRESHOLD = 80;
 
+/**
+ * Whether the reader is pinned to the bottom after a scroll event. Near
+ * the bottom always pins. Further up, the pin drops only when the reader
+ * scrolled up or another scroll owner (the unread anchor, a jump to a
+ * message, a view around an older message) is steering. A scroll event
+ * that merely trails the list growing beneath a pinned reader, such as the
+ * one queued by the previous pin write landing after an image box renders,
+ * keeps the pin, so the resize catch-up still brings the reader down.
+ */
+export function pinnedAfterScroll(
+  wasPinned: boolean,
+  distFromBottom: number,
+  movedUp: boolean,
+  steered: boolean
+): boolean {
+  if (distFromBottom < SCROLL_BOTTOM_THRESHOLD) return true;
+  return wasPinned && !movedUp && !steered;
+}
+
 /** How long a restored scroll position is held against late layout shifts. */
 const RESTORE_SETTLE_MS = 500;
 
@@ -660,6 +679,24 @@ export class ScionChatThread extends LitElement {
    */
   private _jumpScrollCleanup: (() => void) | null = null;
 
+  /**
+   * Watches `.messages-list` for as long as the thread is open, so content
+   * that grows after render (an image finishing loading, a code preview)
+   * does not leave a reader who was at the bottom stranded above the newest
+   * message.
+   */
+  private _bottomPinObserver: ResizeObserver | null = null;
+  private _bottomPinTarget: Element | null = null;
+
+  /**
+   * The scroller and the furthest-down offset seen since the reader was last
+   * at the very bottom, to tell whether they have moved up since. Kept as a
+   * high-water mark rather than the previous event's offset, so a slow drag
+   * of under a pixel per frame still adds up.
+   */
+  private _lastScrollEl: Element | null = null;
+  private _lastScrollTop = 0;
+
   /** Bound listener for v2 SSE chat-message events via stateManager. */
   private _v2MessageHandler = this.handleV2ChatMessage.bind(this);
 
@@ -969,11 +1006,22 @@ export class ScionChatThread extends LitElement {
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
         padding: 3rem 2rem;
         color: var(--scion-text-muted, #64748b);
         gap: 0.75rem;
         flex: 1;
+        /* Give way to the composer: in a short frame (a landscape phone) a
+           tall draft would otherwise push the composer and Send below the
+           frame, since the empty state has no list to shrink. */
+        min-height: 0;
+        overflow-y: auto;
+        justify-content: safe center;
+      }
+
+      @media (max-height: 480px) {
+        .state-msg {
+          padding: 1rem 2rem;
+        }
       }
 
       .state-msg sl-spinner {
@@ -1284,6 +1332,39 @@ export class ScionChatThread extends LitElement {
     if (changedProperties.has('messages')) {
       this.resolveUnknownProjectSlugs();
     }
+
+    this.observeBottomPin();
+  }
+
+  /** Point the bottom-pin watch at the current `.messages-list`, if it changed. */
+  private observeBottomPin(): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    const list = this.shadowRoot?.querySelector('.messages-list') ?? null;
+    if (list === this._bottomPinTarget) return;
+    this._bottomPinObserver?.disconnect();
+    this._bottomPinTarget = list;
+    if (!list) return;
+    this._bottomPinObserver ??= new ResizeObserver(() => this.keepPinnedToBottom());
+    this._bottomPinObserver.observe(list);
+  }
+
+  /**
+   * After the message list changes size, stay at the bottom if the reader
+   * was there. Steps aside for the other scroll owners: the open-time
+   * unread anchor, a jump to a message and its settle check, and a view
+   * around an older message.
+   */
+  keepPinnedToBottom(): void {
+    if (!this.pinnedToBottom || this._unreadAnchorActive) return;
+    if (this._jumpScrollCleanup || this.viewingAroundMessage) return;
+    const scrollEl = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+    if (!scrollEl) return;
+    scrollEl.scrollTop = scrollEl.scrollHeight;
+    // Record where this leaves the scroller, so the scroll event the change
+    // queued compares against it: when the list shrank, the browser has
+    // already pulled the offset up, which is not the reader scrolling away.
+    this._lastScrollEl = scrollEl;
+    this._lastScrollTop = scrollEl.scrollTop;
   }
 
   /** Tear down v2 state so a fresh load can happen. */
@@ -1338,6 +1419,7 @@ export class ScionChatThread extends LitElement {
     this.error = null;
     this.sendError = null;
     this.pinnedToBottom = true;
+    this._lastScrollEl = null;
     this.loadingOlder = false;
 
     // Clear inter-agent state
@@ -1368,6 +1450,9 @@ export class ScionChatThread extends LitElement {
     this._observedSendError = null;
     this.stopStream();
     this.deactivateUnreadAnchor();
+    this._bottomPinObserver?.disconnect();
+    this._bottomPinObserver = null;
+    this._bottomPinTarget = null;
     // Keep `_scrollAnchor` itself: the page reads it after we detach.
     this.cancelScrollAnchorCapture();
     this.cancelRestoreSettleWatch();
@@ -2892,7 +2977,25 @@ export class ScionChatThread extends LitElement {
     }
 
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    this.pinnedToBottom = distFromBottom < SCROLL_BOTTOM_THRESHOLD;
+    // With no earlier position to compare against, any distance counts as
+    // the reader having moved away, as before.
+    const sameScroller = this._lastScrollEl === el;
+    const movedUp = !sameScroller || el.scrollTop < this._lastScrollTop - 1;
+    // At the very bottom, or while not pinned, the offset is the new
+    // reference, including when the list shrank and pulled it up. Otherwise
+    // it only ever rises, so small upward steps accumulate against where the
+    // pinned reader started.
+    this._lastScrollTop =
+      !sameScroller || distFromBottom <= 1 || !this.pinnedToBottom
+        ? el.scrollTop
+        : Math.max(this._lastScrollTop, el.scrollTop);
+    this._lastScrollEl = el;
+    this.pinnedToBottom = pinnedAfterScroll(
+      this.pinnedToBottom,
+      distFromBottom,
+      movedUp,
+      this._unreadAnchorActive || this._jumpScrollCleanup !== null || this.viewingAroundMessage
+    );
     this.scheduleScrollAnchorCapture();
 
     // A tap-opened (or right-clicked) context menu is positioned at a fixed

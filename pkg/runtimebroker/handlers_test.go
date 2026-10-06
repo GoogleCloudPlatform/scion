@@ -3306,6 +3306,10 @@ type gitCloneCapturingManager struct {
 	lastProjectPath    string
 	lastBranch         string
 	lastFreshProvision bool
+	// lastSharedWorkspace and lastSharedWorkspaceClone capture the shared
+	// workspace inputs (shared_workspace_clone_test.go).
+	lastSharedWorkspace      bool
+	lastSharedWorkspaceClone *api.GitCloneConfig
 }
 
 func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
@@ -3315,6 +3319,8 @@ func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOpti
 	m.lastProjectPath = opts.ProjectPath
 	m.lastBranch = opts.Branch
 	m.lastFreshProvision = opts.FreshProvision
+	m.lastSharedWorkspace = opts.SharedWorkspace
+	m.lastSharedWorkspaceClone = opts.SharedWorkspaceClone
 	return m.mockManager.Start(ctx, opts)
 }
 

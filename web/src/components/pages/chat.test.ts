@@ -30,7 +30,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
-import { nothing, render, type TemplateResult } from 'lit';
+import { html, nothing, render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
 import {
@@ -1953,6 +1953,101 @@ describe('chat page — startup after the page is removed', () => {
         errorSpy.mockRestore();
       }
     });
+  });
+});
+
+describe('conversation header More menu', () => {
+  it('folds the actions only when the full row would squeeze the title', async () => {
+    const { isCompactHeaderWidth, HEADER_ACTION_PX, HEADER_TITLE_MIN_PX } =
+      await import('./chat.js');
+    const fits = 9 * HEADER_ACTION_PX + HEADER_TITLE_MIN_PX;
+    expect(isCompactHeaderWidth(fits, 9, true)).toBe(false);
+    expect(isCompactHeaderWidth(fits - 1, 9, false)).toBe(true);
+    // Fewer actions fit in the same width.
+    expect(isCompactHeaderWidth(fits - 1, 5, false)).toBe(false);
+    // Before the header is measured, the layout decides.
+    expect(isCompactHeaderWidth(null, 9, true)).toBe(true);
+    expect(isCompactHeaderWidth(null, 9, false)).toBe(false);
+  });
+
+  it('offers every folded action of an agent DM, and runs the chosen one', () => {
+    const page = createPage();
+    page.isMobileLayout = true;
+    page.projectChimeOn = true;
+    const conv = {
+      conversationKey: 'dm:agent:a:user:u',
+      projectId: 'p1',
+      isDM: true,
+      peerKind: 'agent',
+      peerId: 'a',
+      peerName: 'Coder',
+      muted: false,
+    };
+    page.v2Conversation = conv;
+    const actions = page.headerMoreActions(conv);
+    expect(actions.map((a: { id: string }) => a.id)).toEqual([
+      'terminal',
+      'graph',
+      'promote',
+      'mute',
+      'chime',
+      'export-md',
+      'export-print',
+      'export-clipboard',
+    ]);
+    // The mobile row trades the density toggle for the back button.
+    expect(page.fullHeaderActionCount(conv)).toBe(9);
+    // Density does nothing in the mobile layout; the desktop menu offers it.
+    page.isMobileLayout = false;
+    expect(page.headerMoreActions(conv).map((a: { id: string }) => a.id)).toContain('density');
+    expect(page.fullHeaderActionCount(conv)).toBe(9);
+
+    const exportMarkdown = vi.spyOn(page, 'exportMarkdown').mockImplementation(() => {});
+    page.headerSheetOpen = true;
+    page.runHeaderMoreAction('export-md');
+    expect(exportMarkdown).toHaveBeenCalledOnce();
+    expect(page.headerSheetOpen).toBe(false);
+  });
+
+  it('stops watching the header width once the page is removed', async () => {
+    const instances: { targets: Element[]; disconnects: number }[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly record = { targets: [] as Element[], disconnects: 0 };
+      constructor() {
+        instances.push(this.record);
+      }
+      observe(target: Element): void {
+        this.record.targets.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {
+        this.record.disconnects++;
+      }
+    } as unknown as typeof ResizeObserver;
+    try {
+      const page = createPage();
+      // Only the header watch is under test: skip the lazy imports and the
+      // full render a mount would start.
+      page.initV2 = vi.fn(() => Promise.resolve());
+      page.render = () => html`<div class="v2-thread-header"></div>`;
+      document.body.appendChild(page);
+      await page.updateComplete;
+      const watch = instances.find((r) =>
+        r.targets.some((t) => t.classList.contains('v2-thread-header'))
+      );
+      expect(watch, 'the header is watched while mounted').toBeDefined();
+      const before = watch!.disconnects;
+
+      page.remove();
+
+      expect(watch!.disconnects).toBe(before + 1);
+      expect(page._headerResizeObserver).toBeNull();
+      expect(page._observedHeader).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = original;
+      document.body.innerHTML = '';
+    }
   });
 });
 

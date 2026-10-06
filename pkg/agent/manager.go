@@ -350,7 +350,7 @@ func (m *AgentManager) Stop(ctx context.Context, agentID string, projectPath str
 			return selErr
 		}
 		if found {
-			return m.Runtime.Stop(ctx, target.ContainerID)
+			return m.Runtime.Stop(ctx, runtime.AgentOperationID(target))
 		}
 	}
 	// Fallback: agentID may already be a container ID, or the list
@@ -375,7 +375,7 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 			return false, selErr
 		}
 		if found {
-			target = runtime.RunRef{ID: entry.ContainerID, RunID: entry.RunID}
+			target = runtime.RunRef{ID: runtime.AgentOperationID(entry), RunID: entry.RunID}
 		}
 	}
 	return m.deleteResolved(ctx, agentID, target, deleteFiles, projectPath, removeBranch)

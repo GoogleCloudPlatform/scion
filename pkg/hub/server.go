@@ -584,6 +584,9 @@ type WorkspaceDispatchSpec struct {
 	// "worktree-per-agent"), the same value create sends as
 	// RemoteCreateAgentRequest.WorkspaceMode.
 	WorkspaceMode string
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings (RemoteAgentConfig.SharedWorkspaceClone); nil otherwise.
+	SharedWorkspaceClone *api.GitCloneConfig
 }
 
 // StartExtras carries the dispatch-time metadata that the create path already
@@ -645,6 +648,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
+	if extras.Workspace.SharedWorkspaceClone != nil {
+		payload["sharedWorkspaceClone"] = extras.Workspace.SharedWorkspaceClone
 	}
 	if extras.RunID != "" {
 		payload["runId"] = extras.RunID
@@ -940,6 +946,14 @@ type RemoteAgentConfig struct {
 	// workspace (git-workspace hybrid mode). When true, the broker skips
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+
+	// SharedWorkspaceClone carries a shared-plain git project's workspace
+	// clone settings (URL, default branch, full depth). Unlike GitClone it
+	// never makes the broker clone into a per-agent workspace: only the
+	// Kubernetes runtime uses it, to clone into an NFS-backed shared
+	// workspace from the workspace-provision init container. A broker that
+	// does not know the field ignores it.
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
 
 	// GCPIdentity holds the GCP identity assignment for the agent.
 	GCPIdentity *RemoteGCPIdentityConfig `json:"gcpIdentity,omitempty"`

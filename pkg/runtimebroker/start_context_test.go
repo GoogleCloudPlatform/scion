@@ -5416,7 +5416,7 @@ func TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemoves
 // provision.ProvisionShared's own self-heal expects for a first-time
 // provision), but this agent's worktree already exists on disk with
 // un-pushed work, the start must fail with a clear error instead of letting
-// ProvisionShared's gitCloneWorkspace -> removeDirContents wipe the shared
+// ProvisionShared re-clone over the shared
 // base — and everything under it, including this worktree — while still
 // returning success.
 func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSelfHeal(t *testing.T) {
@@ -5478,7 +5478,7 @@ func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSel
 	}
 
 	// The worktree and its un-pushed file must survive: ProvisionShared's
-	// self-heal (removeDirContents on the shared base) must never have run.
+	// clone step on the shared base must never have run.
 	if _, statErr := os.Stat(worktreePath); statErr != nil {
 		t.Errorf("expected the existing worktree to survive, stat error: %v", statErr)
 	}
