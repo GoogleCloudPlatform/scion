@@ -153,6 +153,10 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# It also includes the child-group edge removal tests
+# (TestRemoveChildGroupEdge_*, ptone/scion#2723): on Postgres a second
+# transaction deleting the same edge waits on the first one's row lock and
+# must then report ErrNotFound, so only one caller writes an audit record.
 # It also includes the orphaned group-membership tests and the composite
 # purge tests (ptone/scion#2769): PurgeDeletedAgents re-reads its batch with
 # FOR UPDATE on Postgres only, and the restore-during-purge cases exercise

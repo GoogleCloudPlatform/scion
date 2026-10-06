@@ -154,13 +154,14 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
 			Capabilities: &store.BrokerCapabilities{
-				WebPTY:                 false,
-				Sync:                   true,
-				Attach:                 runtime.HasAttachSupport(rt),
-				Reprovision:            true,
-				AsyncLaunch:            true,
-				EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
-				AgentMove:              true,
+				WebPTY:                   false,
+				Sync:                     true,
+				Attach:                   runtime.HasAttachSupport(rt),
+				Reprovision:              true,
+				AsyncLaunch:              true,
+				EmptyPerAgentWorkspace:   runtime.HasEmptyPerAgentSupport(rt),
+				AgentMove:                true,
+				ReprovisionEmptyPerAgent: true,
 			},
 			Profiles:         profiles,
 			DefaultProfile:   defaultProfile,
@@ -199,13 +200,14 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		// permanent false 412 on `scion reincarnate` for every embedded
 		// deployment.
 		broker.Capabilities = &store.BrokerCapabilities{
-			WebPTY:                 false,
-			Sync:                   true,
-			Attach:                 runtime.HasAttachSupport(rt),
-			Reprovision:            true,
-			AsyncLaunch:            true,
-			EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
-			AgentMove:              true,
+			WebPTY:                   false,
+			Sync:                     true,
+			Attach:                   runtime.HasAttachSupport(rt),
+			Reprovision:              true,
+			AsyncLaunch:              true,
+			EmptyPerAgentWorkspace:   runtime.HasEmptyPerAgentSupport(rt),
+			AgentMove:                true,
+			ReprovisionEmptyPerAgent: true,
 		}
 		// A nil descriptor (not reported) keeps the stored one; the
 		// broker's heartbeats refresh it either way.

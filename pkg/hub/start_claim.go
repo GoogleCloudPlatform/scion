@@ -603,7 +603,9 @@ func (s *Server) writeStartedStatus(ctx context.Context, agent *store.Agent, cle
 	case "", state.PhaseCreated, state.PhaseProvisioning, state.PhaseStopped, state.PhaseSuspended, state.PhaseError, state.PhaseStarting:
 		phase = string(state.PhaseRunning)
 	}
-	upd := store.AgentStatusUpdate{Phase: phase, ClearExit: true, ClearTerminalRemnants: clearRemnants}
+	// StartWrite: a finalizing delete holds the row even with its lease
+	// expired, so a start that landed after it does not paint it running.
+	upd := store.AgentStatusUpdate{Phase: phase, ClearExit: true, ClearTerminalRemnants: clearRemnants, StartWrite: true}
 	if agent.ContainerStatus != "" {
 		upd.ContainerStatus = agent.ContainerStatus
 	}

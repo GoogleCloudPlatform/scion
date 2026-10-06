@@ -712,9 +712,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		req.CreatorName = agent.AppliedConfig.CreatorName
 	}
 
-	// Pass workspace storage path for GCS bootstrap (non-git workspaces)
+	// Pass workspace storage path for GCS bootstrap (non-git workspaces),
+	// with the bucket it was uploaded to so the broker needs no bucket
+	// setting of its own (ptone/scion#3422).
 	if agent.AppliedConfig != nil && agent.AppliedConfig.WorkspaceStoragePath != "" {
 		req.WorkspaceStoragePath = agent.AppliedConfig.WorkspaceStoragePath
+		req.WorkspaceStorageBucket = agent.AppliedConfig.WorkspaceStorageBucket
 	}
 
 	if d.debug {

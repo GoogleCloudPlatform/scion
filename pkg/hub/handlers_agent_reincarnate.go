@@ -332,15 +332,19 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// touch a workspace it did not find already on disk): this is what
 	// makes --dry-run report the restriction too, instead of a dry run
 	// showing a plan that a real request could not safely execute.
-	// Empty-per-agent workspaces are broker-local, unsynced state: the only
-	// possible reincarnation would be a fresh empty directory, silently
-	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	// Empty-per-agent workspaces are broker-local, unsynced state.
 	// A4 (ptone/scion#2727): an empty-per-agent workspace can move when it
 	// is on the shared export (placement export) and both brokers see the
 	// same export (equal identity markers): the target finds it in place.
+	// miller79/scion#167: on the same broker (no move target, including
+	// `--broker <current>`) the broker reuses the private workspace in
+	// place, gated below on a local-disk runtime and the broker's
+	// ReprovisionEmptyPerAgent capability. Any other empty-per-agent
+	// request (a move whose workspace is not movable) is still refused.
 	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() && s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget)
+	sameBrokerEmptyPerAgent := project.IsEmptyPerAgent() && moveTarget == nil
 	workspaceModeErr := ""
-	if project.IsEmptyPerAgent() && !emptyPerAgentMove {
+	if project.IsEmptyPerAgent() && !emptyPerAgentMove && !sameBrokerEmptyPerAgent {
 		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
 	}
 
@@ -356,7 +360,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
 		(hasGitClone && project.IsSharedWorkspace()) ||
 		switchedToCloneOnly ||
-		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)))) {
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace, project.IsEmptyPerAgent())))) {
 		// FYI-6 (review p1b-r1): the generic message now covers every
 		// eligible mode, not just clone-per-agent.
 		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
@@ -414,6 +418,25 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"runtime broker does not support agent reincarnation; upgrade the broker", nil)
 		return
 	}
+	// miller79/scion#167: in-place reuse is safe only where the private
+	// workspace is a directory on the broker's own disk. Checked, like the
+	// capability below, before anything is planned or stopped, so a dry
+	// run reports the same verdict. An unrecorded runtime falls back to
+	// resolveAgentRuntime (the value enrichAgents displays), which returns
+	// "" when the broker's profiles are ambiguous: still refused.
+	if sameBrokerEmptyPerAgent && !api.IsLocalDiskRuntime(effectiveAgentRuntime(agent, broker)) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)", nil)
+		return
+	}
+	if sameBrokerEmptyPerAgent && !broker.Capabilities.ReprovisionEmptyPerAgent {
+		// An older broker advertises Reprovision and EmptyPerAgentWorkspace
+		// but its reprovision refuses empty-per-agent, which would only
+		// surface after the worker had stopped the agent. Refuse up front.
+		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
+			"runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker", nil)
+		return
+	}
 
 	// AC-8 / design §3.4 Amendment A3, moved ahead of the plan computation
 	// (design §3.4 Amendment A11 item 3): a reincarnation already in flight
@@ -443,6 +466,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	// Fail fast, as start and restart do, when the GCP identity the fresh
+	// config will run with is no longer allowed for this agent. Checked
+	// before the claim and the worker's stop, so a refused request leaves
+	// the agent as it was, and a dry run reports the same refusal.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
+
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	targetGeneration := agent.Generation + 1
@@ -665,6 +698,13 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	// A dry-run move reports the same GCP identity refusal as start and
+	// as an in-place reincarnate, so every dry-run variant agrees.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
@@ -797,6 +837,16 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 	}
 
 	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// effectiveAgentRuntime is the agent's recorded runtime, or, when none is
+// recorded yet, the one resolveAgentRuntime derives from the broker's
+// profiles ("" when ambiguous).
+func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) string {
+	if agent.Runtime != "" {
+		return agent.Runtime
+	}
+	return resolveAgentRuntime(agent, broker)
 }
 
 // reincarnateAuthorityFor decides what authority a reincarnation of agent

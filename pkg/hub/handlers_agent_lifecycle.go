@@ -940,6 +940,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			statusUpdate.ContainerStatus = agent.ContainerStatus
 		}
 		statusUpdate.ClearExit = true
+		statusUpdate.StartWrite = true
 		// A new generation: clear the prior one's message and stalled
 		// marker too, whatever the row reads now (beginStartDispatch wrote
 		// starting, or a restart's stop leg ran, and a heartbeat guarded

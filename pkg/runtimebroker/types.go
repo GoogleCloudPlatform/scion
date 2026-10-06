@@ -103,6 +103,11 @@ type BrokerCapabilities struct {
 	// reincarnate --broker`). The hub refuses a move unless both brokers
 	// report it (412).
 	AgentMove bool `json:"agentMove"`
+	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
+	// empty-per-agent agent's private workspace in place (same-broker
+	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
+	// hub checks runtime suitability separately.
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -287,6 +292,10 @@ type CreateAgentRequest struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath,
+	// sent by the hub that uploaded it. When empty the broker falls back to
+	// its own StorageBucket setting (older hubs do not send it).
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/

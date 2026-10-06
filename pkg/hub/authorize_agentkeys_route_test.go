@@ -106,6 +106,10 @@ func newAgentKeysRouteFixture(t *testing.T) *agentKeysRouteFixture {
 	require.NoError(t, s.CreateProject(ctx, projA))
 	projB := &store.Project{ID: tid("agentkeys-route-proj-b"), Name: "Route B", Slug: "agentkeys-route-proj-b", OwnerID: owner.ID}
 	require.NoError(t, s.CreateProject(ctx, projB))
+	// The owner relationship on a project agent requires active project
+	// access (ptone/scion#2141); the binding grants no permissions itself.
+	grantProjectAccessOnly(t, s, owner.ID, projA.ID)
+	grantProjectAccessOnly(t, s, owner.ID, projB.ID)
 
 	// A real store.RuntimeBroker row, assigned to both fixture agents below,
 	// so RuntimeBrokerID resolves to something real -- required for the
