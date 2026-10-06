@@ -300,9 +300,8 @@ func TestGroupCreate_ChildOfRoleBoundParentRefusesToken(t *testing.T) {
 }
 
 // TestGroupDelete_SystemManagedRefusalPrecedesGroupRule pins that deleting
-// a project_agents group answers every credential with the system-managed
-// 400, including a user access token on a group that carries a role
-// binding.
+// a role-bound project_agents group with a scoped user access token answers
+// with the system-managed 400 and leaves the group in place.
 func TestGroupDelete_SystemManagedRefusalPrecedesGroupRule(t *testing.T) {
 	f := newGroupRuleFixture(t, "gpa")
 	g := f.group(t, "gpa-agents", store.GroupTypeProjectAgents)
