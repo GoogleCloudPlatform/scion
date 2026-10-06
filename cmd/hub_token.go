@@ -213,14 +213,14 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 
 	scopes := splitCommaList(tokenCreateScopes)
 	if len(scopes) == 0 {
-		return fmt.Errorf("--scopes must specify at least one scope")
+		return newUsageError("--scopes must specify at least one scope")
 	}
 
 	var expiresAt *time.Time
 	if tokenCreateExpires != "" {
 		t, err := parseExpiry(tokenCreateExpires)
 		if err != nil {
-			return fmt.Errorf("invalid --expires value: %w", err)
+			return newUsageError("invalid --expires value: %w", err)
 		}
 		expiresAt = &t
 	}
@@ -477,10 +477,10 @@ func parseLabelFlags(labels []string) (map[string]string, error) {
 	for _, l := range labels {
 		key, value, ok := strings.Cut(l, "=")
 		if !ok {
-			return nil, fmt.Errorf("invalid --label %q: expected key=value", l)
+			return nil, newUsageError("invalid --label %q: expected key=value", l)
 		}
 		if _, exists := result[key]; exists {
-			return nil, fmt.Errorf("duplicate --label key %q", key)
+			return nil, newUsageError("duplicate --label key %q", key)
 		}
 		result[key] = value
 	}

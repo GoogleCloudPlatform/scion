@@ -15,6 +15,8 @@
 package util
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,7 +123,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Remove
-		if _, err := RemoveWorktree(worktreePath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, worktreePath, false); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 		// Wait/Check? git worktree remove deletes the directory usually.
@@ -148,7 +150,7 @@ func TestGitUtils(t *testing.T) {
 			t.Errorf("Failed to recreate worktree after prune: %v", err)
 		}
 		// Clean up
-		_, _ = RemoveWorktree(prunePath, true)
+		_, _ = RemoveWorktree(repoDir, prunePath, true)
 	})
 
 	t.Run("PruneWorktreesIn", func(t *testing.T) {
@@ -182,7 +184,7 @@ func TestGitUtils(t *testing.T) {
 			t.Errorf("Failed to recreate worktree after PruneWorktreesIn: %v", err)
 		}
 		// Clean up
-		_, _ = RemoveWorktree(prunePath, true)
+		_, _ = RemoveWorktree(repoDir, prunePath, true)
 	})
 
 	t.Run("DeleteBranchIn", func(t *testing.T) {
@@ -192,7 +194,7 @@ func TestGitUtils(t *testing.T) {
 		if err := CreateWorktree(wtPath, branch); err != nil {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
-		if _, err := RemoveWorktree(wtPath, false); err != nil {
+		if _, err := RemoveWorktree(repoDir, wtPath, false); err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
 
@@ -239,7 +241,7 @@ func TestGitUtils(t *testing.T) {
 		}
 
 		// Clean up
-		_, _ = RemoveWorktree(wtPath, true)
+		_, _ = RemoveWorktree(repoDir, wtPath, true)
 	})
 
 	t.Run("RemoveWorktreeWithBranch", func(t *testing.T) {
@@ -250,7 +252,7 @@ func TestGitUtils(t *testing.T) {
 			t.Fatalf("CreateWorktree failed: %v", err)
 		}
 
-		deleted, err := RemoveWorktree(wtPath, true)
+		deleted, err := RemoveWorktree(repoDir, wtPath, true)
 		if err != nil {
 			t.Fatalf("RemoveWorktree failed: %v", err)
 		}
@@ -345,8 +347,8 @@ func TestCreateWorktree_FromWorktreeSucceeds(t *testing.T) {
 	}
 
 	// Clean up
-	_, _ = RemoveWorktree(siblingPath, true)
-	_, _ = RemoveWorktree(wtPath, true)
+	_, _ = RemoveWorktree(mainRepo, siblingPath, true)
+	_, _ = RemoveWorktree(mainRepo, wtPath, true)
 }
 
 func TestCreateWorktree_RejectsInsideContainer(t *testing.T) {
@@ -442,7 +444,7 @@ func TestIsRegisteredWorktree_MainWorktreeAcceptedWhenRepoRootIsLinkedWorktree(t
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-feature")
 	addWorktreeDirect(t, mainRepo, linkedPath, "feature")
-	defer func() { _, _ = RemoveWorktree(linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
 
 	// repoRoot is the LINKED worktree here, simulating a project that lives
 	// there; path is the MAIN worktree, which must still be recognized as
@@ -464,7 +466,7 @@ func TestIsRegisteredWorktree_SiblingWorktreeAccepted(t *testing.T) {
 	// `git worktree add` accepts any destination.
 	siblingPath := filepath.Join(filepath.Dir(mainRepo), "sibling-repo-feature")
 	addWorktreeDirect(t, mainRepo, siblingPath, "feature")
-	defer func() { _, _ = RemoveWorktree(siblingPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, siblingPath, true) }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, siblingPath)
 	if err != nil {
@@ -484,7 +486,7 @@ func TestIsRegisteredWorktree_ScionWorktreesConventionAccepted(t *testing.T) {
 	// -- it needs no special-case handling, only real git registration.
 	wtPath := filepath.Join(filepath.Dir(mainRepo), ".scion_worktrees", "proj", "agent")
 	addWorktreeDirect(t, mainRepo, wtPath, "agent-branch")
-	defer func() { _, _ = RemoveWorktree(wtPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, wtPath, true) }()
 
 	ok, err := IsRegisteredWorktree(mainRepo, wtPath)
 	if err != nil {
@@ -524,7 +526,7 @@ func TestIsRegisteredWorktree_DifferentRepoWorktreeRejected(t *testing.T) {
 	// be accepted as a worktree of repoA.
 	wtOfB := filepath.Join(filepath.Dir(repoB), "repoB-feature")
 	addWorktreeDirect(t, repoB, wtOfB, "feature")
-	defer func() { _, _ = RemoveWorktree(wtOfB, true) }()
+	defer func() { _, _ = RemoveWorktree(repoB, wtOfB, true) }()
 
 	ok, err := IsRegisteredWorktree(repoA, wtOfB)
 	if err != nil {
@@ -625,7 +627,7 @@ func TestIsRegisteredWorktree_RecreatedWithForeignGitDirRefused(t *testing.T) {
 
 	linkedPath := filepath.Join(filepath.Dir(mainRepo), "linked-repo-for-foreign-gitdir-test")
 	addWorktreeDirect(t, mainRepo, linkedPath, "linked-branch")
-	defer func() { _, _ = RemoveWorktree(linkedPath, true) }()
+	defer func() { _, _ = RemoveWorktree(mainRepo, linkedPath, true) }()
 
 	recreatedWt := filepath.Join(filepath.Dir(mainRepo), "recreated-wt")
 	addWorktreeDirect(t, mainRepo, recreatedWt, "recreated-branch")
@@ -727,6 +729,214 @@ func TestPruneWorktrees_SkipsInsideContainer(t *testing.T) {
 	if err := PruneWorktreesIn("/nonexistent/path"); err != nil {
 		t.Errorf("PruneWorktreesIn should no-op inside container, got: %v", err)
 	}
+}
+
+// TestRemoveWorktree_RefusesOutOfTreePath covers acceptance criterion
+// 8: RemoveWorktree must refuse to remove a path whose resolved (symlink-free)
+// location does not lie under base, and must not touch anything under the
+// real external target while refusing.
+func TestRemoveWorktree_RefusesOutOfTreePath(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	t.Run("path directly outside base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		outside := t.TempDir()
+		marker := filepath.Join(outside, "keep-me")
+		if err := os.WriteFile(marker, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := RemoveWorktree(base, outside, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained, got: %v", err)
+		}
+		if _, statErr := os.Stat(marker); statErr != nil {
+			t.Errorf("external content must survive a refused removal: %v", statErr)
+		}
+	})
+
+	t.Run("candidate equals base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		_, err := RemoveWorktree(base, base, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for candidate==base, got: %v", err)
+		}
+		if _, statErr := os.Stat(base); statErr != nil {
+			t.Errorf("base must survive a refused removal: %v", statErr)
+		}
+	})
+
+	t.Run("symlinked leaf pointing outside base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		outside := t.TempDir()
+		target := filepath.Join(outside, "real-content")
+		if err := os.MkdirAll(filepath.Join(target, "keep"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(target, "keep", "important.txt")
+		if err := os.WriteFile(marker, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		worktreesDir := filepath.Join(base, "worktrees")
+		if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		leaf := filepath.Join(worktreesDir, "out-of-tree-name")
+		if err := os.Symlink(target, leaf); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := RemoveWorktree(base, leaf, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained, got: %v", err)
+		}
+		if _, statErr := os.Stat(marker); statErr != nil {
+			t.Errorf("symlink target content must survive a refused removal: %v", statErr)
+		}
+		if _, statErr := os.Lstat(leaf); statErr != nil {
+			t.Errorf("the symlink itself must be left alone by a refused removal: %v", statErr)
+		}
+	})
+
+	t.Run("symlinked intermediate directory pointing outside base", func(t *testing.T) {
+		base := setupGitRepo(t)
+		outside := t.TempDir()
+		target := filepath.Join(outside, "external-worktrees")
+		named := filepath.Join(target, "name")
+		if err := os.MkdirAll(named, 0755); err != nil {
+			t.Fatal(err)
+		}
+		marker := filepath.Join(named, "important.txt")
+		if err := os.WriteFile(marker, []byte("data"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// base/worktrees itself is a symlink to the external directory, so
+		// base/worktrees/name is lexically inside base but resolves outside it.
+		worktreesLink := filepath.Join(base, "worktrees")
+		if err := os.Symlink(target, worktreesLink); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(base, "worktrees", "name")
+
+		_, err := RemoveWorktree(base, candidate, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained, got: %v", err)
+		}
+		if _, statErr := os.Stat(marker); statErr != nil {
+			t.Errorf("content behind the symlinked intermediate dir must survive: %v", statErr)
+		}
+	})
+
+	t.Run("legitimate in-tree worktree is unaffected", func(t *testing.T) {
+		base := setupGitRepo(t)
+		originalWd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chdir(originalWd) }()
+		if err := os.Chdir(base); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.MkdirAll(filepath.Join(base, "worktrees"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		wtPath := filepath.Join(base, "worktrees", "good")
+		if err := CreateWorktree(wtPath, "good-branch"); err != nil {
+			t.Fatalf("CreateWorktree failed: %v", err)
+		}
+
+		if _, err := RemoveWorktree(base, wtPath, false); err != nil {
+			t.Fatalf("RemoveWorktree of a legitimate in-tree worktree should succeed, got: %v", err)
+		}
+		if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
+			t.Errorf("legitimate in-tree worktree should have been removed, stat err=%v", statErr)
+		}
+	})
+
+	t.Run("non-existent path is a no-op, not an error", func(t *testing.T) {
+		base := setupGitRepo(t)
+		deleted, err := RemoveWorktree(base, filepath.Join(base, "worktrees", "never-existed"), false)
+		if err != nil {
+			t.Errorf("removing a non-existent path should be a no-op, got: %v", err)
+		}
+		if deleted {
+			t.Error("expected deleted=false for a non-existent path")
+		}
+	})
+}
+
+// TestRemoveWorktree_PreRemovalValidationFailures_NoFallback covers a
+// required fix: every pre-removal validation failure — not just the explicit
+// not-contained case — must wrap ErrPathNotContained, so a caller checking
+// errors.Is(err, ErrPathNotContained) correctly treats ALL of them as
+// no-fallback-eligible. Previously, empty/relative input, a non-ENOENT
+// Lstat error, and an EvalSymlinks failure (symlink loop, unresolvable
+// component) returned plain errors that a caller would NOT recognize as
+// containment failures, and would therefore incorrectly fall back to a raw,
+// unvalidated RemoveAllSafe(path) — exactly what this whole check exists to
+// prevent.
+func TestRemoveWorktree_PreRemovalValidationFailures_NoFallback(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	t.Run("empty base", func(t *testing.T) {
+		_, err := RemoveWorktree("", "/some/path", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for empty base, got: %v", err)
+		}
+	})
+
+	t.Run("empty path", func(t *testing.T) {
+		_, err := RemoveWorktree("/some/base", "", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for empty path, got: %v", err)
+		}
+	})
+
+	t.Run("relative base", func(t *testing.T) {
+		_, err := RemoveWorktree("relative/base", "/some/path", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for relative base, got: %v", err)
+		}
+	})
+
+	t.Run("relative path", func(t *testing.T) {
+		_, err := RemoveWorktree("/some/base", "relative/path", false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for relative path, got: %v", err)
+		}
+	})
+
+	t.Run("non-ENOENT Lstat error (path under a regular file, not a directory)", func(t *testing.T) {
+		base := t.TempDir()
+		notADir := filepath.Join(base, "not-a-dir")
+		if err := os.WriteFile(notADir, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(notADir, "child")
+		_, err := RemoveWorktree(base, candidate, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for a non-ENOENT Lstat error, got: %v", err)
+		}
+	})
+
+	t.Run("EvalSymlinks failure (symlink loop)", func(t *testing.T) {
+		base := t.TempDir()
+		loopA := filepath.Join(base, "loop-a")
+		loopB := filepath.Join(base, "loop-b")
+		if err := os.Symlink(loopB, loopA); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(loopA, loopB); err != nil {
+			t.Fatal(err)
+		}
+		_, err := RemoveWorktree(base, loopA, false)
+		if !errors.Is(err, ErrPathNotContained) {
+			t.Fatalf("expected ErrPathNotContained for a symlink loop, got: %v", err)
+		}
+	})
 }
 
 func TestIsGitURL(t *testing.T) {
@@ -1326,6 +1536,53 @@ func TestAuthenticatedCloneURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeGitBinary writes a shell script that reports the given `git --version`
+// output and returns its path, for pointing SCION_GIT_BINARY at a specific
+// version without depending on whatever git happens to be installed on the
+// host running the test.
+func fakeGitBinary(t *testing.T, version string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "git")
+	script := fmt.Sprintf("#!/bin/sh\necho 'git version %s'\n", version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write fake git binary: %v", err)
+	}
+	return path
+}
+
+// TestCheckGitVersion_Gate is the required regression guard for the
+// worktree-per-agent git-version bump (2.47 -> 2.48): `git worktree add
+// --relative-paths` did not exist until 2.48, so a 2.47.x host must be
+// rejected by CheckGitVersion rather than silently falling back to
+// clone-per-agent later. 2.48.0 must still be accepted.
+func TestCheckGitVersion_Gate(t *testing.T) {
+	t.Run("2.47.x is rejected", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.47.2"))
+		err := CheckGitVersion()
+		if err == nil {
+			t.Fatal("CheckGitVersion() = nil, want an error for git 2.47.2")
+		}
+		if !strings.Contains(err.Error(), "2.48.0") {
+			t.Errorf("error %q should name the 2.48.0 requirement", err.Error())
+		}
+	})
+
+	t.Run("2.48.0 is accepted", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.48.0"))
+		if err := CheckGitVersion(); err != nil {
+			t.Errorf("CheckGitVersion() = %v, want nil for git 2.48.0", err)
+		}
+	})
+
+	t.Run("2.49.0 (above minimum) is accepted", func(t *testing.T) {
+		t.Setenv("SCION_GIT_BINARY", fakeGitBinary(t, "2.49.0"))
+		if err := CheckGitVersion(); err != nil {
+			t.Errorf("CheckGitVersion() = %v, want nil for git 2.49.0", err)
+		}
+	})
 }
 
 func TestStripGitURLCredentials(t *testing.T) {
