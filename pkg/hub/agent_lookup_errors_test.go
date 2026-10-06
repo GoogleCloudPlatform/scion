@@ -46,6 +46,8 @@ var errLookupOutage = errors.New("simulated agent store outage: secret-detail")
 // lookups. All other calls delegate to the embedded store.
 type failingAgentLookupStore struct {
 	store.Store
+	// fault gates every injected failure; nil means always active.
+	fault *storeFaultSwitch
 	// listProjectID, when set, fails every ListAgents call for that project
 	// after the first page (i.e. any call carrying a cursor).
 	listProjectID string
@@ -56,21 +58,21 @@ type failingAgentLookupStore struct {
 }
 
 func (f *failingAgentLookupStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	if f.listProjectID != "" && filter.ProjectID == f.listProjectID && opts.Cursor != "" {
+	if f.fault.Active() && f.listProjectID != "" && filter.ProjectID == f.listProjectID && opts.Cursor != "" {
 		return nil, errLookupOutage
 	}
 	return f.Store.ListAgents(ctx, filter, opts)
 }
 
 func (f *failingAgentLookupStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
-	if f.slugRef != "" && slug == f.slugRef {
+	if f.fault.Active() && f.slugRef != "" && slug == f.slugRef {
 		return nil, errLookupOutage
 	}
 	return f.Store.GetAgentBySlug(ctx, projectID, slug)
 }
 
 func (f *failingAgentLookupStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if f.idRef != "" && id == f.idRef {
+	if f.fault.Active() && f.idRef != "" && id == f.idRef {
 		return nil, errLookupOutage
 	}
 	return f.Store.GetAgent(ctx, id)
@@ -188,32 +190,40 @@ func conversationResolveAsAgentA(srv *Server, query string) *httptest.ResponseRe
 	return rr
 }
 
+// failingAgentLookupWrap returns an installStoreFault wrap func for a
+// failingAgentLookupStore that fails lookups of slugRef and idRef.
+func failingAgentLookupWrap(slugRef, idRef string) func(store.Store, *storeFaultSwitch) *failingAgentLookupStore {
+	return func(inner store.Store, fault *storeFaultSwitch) *failingAgentLookupStore {
+		return &failingAgentLookupStore{Store: inner, fault: fault, slugRef: slugRef, idRef: idRef}
+	}
+}
+
 func TestMessagingTargetsLookup_SlugLookupError_Returns500(t *testing.T) {
-	srv, s, _, _, _, _, _, _ := cpmSetup(t)
-	srv.store = &failingAgentLookupStore{Store: s, slugRef: "agent-beta"}
+	srv, _, _, fault := cpmSetupWithFault(t, failingAgentLookupWrap("agent-beta", ""))
+	fault.Arm()
 
 	requireInternalError(t, targetsResolveAsAgentA(srv, "project=project-b&agent=agent-beta"))
 }
 
 func TestMessagingTargetsLookup_IDLookupError_Returns500(t *testing.T) {
-	srv, s, _, _, _, _, _, _ := cpmSetup(t)
 	ref := tid("cpm-unknown-agent")
-	srv.store = &failingAgentLookupStore{Store: s, idRef: ref}
+	srv, _, _, fault := cpmSetupWithFault(t, failingAgentLookupWrap("", ref))
+	fault.Arm()
 
 	requireInternalError(t, targetsResolveAsAgentA(srv, "project=project-b&agent="+ref))
 }
 
 func TestConversationResolveLookup_SlugLookupError_Returns500(t *testing.T) {
-	srv, s, _, projectB, _, _, _, _ := cpmSetup(t)
-	srv.store = &failingAgentLookupStore{Store: s, slugRef: "agent-beta"}
+	srv, projectB, _, fault := cpmSetupWithFault(t, failingAgentLookupWrap("agent-beta", ""))
+	fault.Arm()
 
 	requireInternalError(t, conversationResolveAsAgentA(srv, "reference=@agent-beta&project_id="+projectB))
 }
 
 func TestConversationResolveLookup_IDLookupError_Returns500(t *testing.T) {
-	srv, s, _, projectB, _, _, _, _ := cpmSetup(t)
 	ref := tid("cpm-unknown-agent")
-	srv.store = &failingAgentLookupStore{Store: s, idRef: ref}
+	srv, projectB, _, fault := cpmSetupWithFault(t, failingAgentLookupWrap("", ref))
+	fault.Arm()
 
 	requireInternalError(t, conversationResolveAsAgentA(srv, "reference=@"+ref+"&project_id="+projectB))
 }
@@ -321,11 +331,18 @@ func markAgentSoftDeleted(t *testing.T, s store.Store, agentID string) {
 // simulating a store that reports "no row" without ErrNotFound.
 type nilAgentLookupStore struct {
 	store.Store
+	fault   *storeFaultSwitch // nil: always active
 	slugRef string
 }
 
+func newNilAgentLookupStore(slugRef string) func(store.Store, *storeFaultSwitch) *nilAgentLookupStore {
+	return func(inner store.Store, fault *storeFaultSwitch) *nilAgentLookupStore {
+		return &nilAgentLookupStore{Store: inner, fault: fault, slugRef: slugRef}
+	}
+}
+
 func (n *nilAgentLookupStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
-	if slug == n.slugRef {
+	if n.fault.Active() && slug == n.slugRef {
 		return nil, nil
 	}
 	return n.Store.GetAgentBySlug(ctx, projectID, slug)
@@ -333,16 +350,16 @@ func (n *nilAgentLookupStore) GetAgentBySlug(ctx context.Context, projectID, slu
 
 // A (nil, nil) lookup result must be treated as not found, not dereferenced.
 func TestMessagingTargetsLookup_NilAgentResult_Returns404(t *testing.T) {
-	srv, s, _, _, _, _, _, _ := cpmSetup(t)
-	srv.store = &nilAgentLookupStore{Store: s, slugRef: "agent-beta"}
+	srv, _, _, fault := cpmSetupWithFault(t, newNilAgentLookupStore("agent-beta"))
+	fault.Arm()
 
 	rr := targetsResolveAsAgentA(srv, "project=project-b&agent=agent-beta")
 	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
 }
 
 func TestConversationResolveLookup_NilAgentResult_NotExists(t *testing.T) {
-	srv, s, _, projectB, _, _, _, _ := cpmSetup(t)
-	srv.store = &nilAgentLookupStore{Store: s, slugRef: "agent-beta"}
+	srv, projectB, _, fault := cpmSetupWithFault(t, newNilAgentLookupStore("agent-beta"))
+	fault.Arm()
 
 	rr := conversationResolveAsAgentA(srv, "reference=@agent-beta&project_id="+projectB)
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
