@@ -2486,9 +2486,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
-	// Apply resource requests/limits. Kubernetes request defaults are merged
-	// field by field under the resolved spec (see buildK8sResourceRequirements),
-	// then kubernetes.resources is applied on top.
+	// Apply resource requests/limits from the resolved spec and
+	// kubernetes.resources. Default requests fill only resources with neither a
+	// request nor a limit (see buildK8sResourceRequirements).
 	var k8sResources *api.K8sResources
 	if config.Kubernetes != nil {
 		k8sResources = config.Kubernetes.Resources

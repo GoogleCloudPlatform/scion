@@ -158,7 +158,9 @@ resources:
   disk: "20Gi"    # maps to ephemeral-storage (both requests and limits)
 ```
 
-Fields merge one by one. Any request you leave empty gets a default **request**: `cpu: 250m`, `memory: 512Mi` and `ephemeral-storage: 10Gi`. These defaults are requests only, for scheduling. Scion does not add a default memory or ephemeral-storage limit. A memory limit applies only when you set `limits.memory`, and an ephemeral-storage limit only when you set `disk`. The CPU limit comes from your settings, or from the built-in `limits.cpu: "2"` when nothing sets one. If you set a limit lower than a default request, the default request is lowered to the limit. Values you set are never changed.
+Fields merge one by one across tiers. Scion then adds a default **request** for `cpu` (`250m`), `memory` (`512Mi`) and `ephemeral-storage` (`10Gi`), but only for a resource that has neither a request nor a limit set, in `resources` or in `kubernetes.resources`. If a resource has a limit but no request, Kubernetes sets the request equal to the limit. The defaults are requests only: Scion never adds a default memory or ephemeral-storage limit. A memory limit applies only when you set `limits.memory`, and an ephemeral-storage limit only when you set `disk`.
+
+The CPU limit comes from your settings, or from the built-in `limits.cpu: "2"` when nothing sets one, unless `runtime.enforce_resource_defaults` is `false`. With the built-in limit, a pod requests 2 CPU. With the flag set to `false` and no resources set, a pod gets only the three default requests and no limits. A `requests.cpu` above `2` needs an explicit `limits.cpu`, or the pod is rejected for a request above its limit.
 
 To give every agent on a Kubernetes profile a fixed disk and memory budget, set them in the profile:
 

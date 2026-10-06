@@ -158,11 +158,10 @@ harness_configs:
 | `volumes` | list | Volume mounts. |
 | `auth_selected_type` | string | Authentication method selection (harness-specific). |
 | `secrets` | list | Required secrets for this harness configuration (see below). |
-| `resources` | object | Resource requests and limits (`requests`, `limits`, `disk`) for this harness. See [Resource Specification](#resource-specification-resources). |
 
 ### Resource Specification (`resources`)
 
-Defines the compute and disk constraints for an agent's container. The same shape is used by `default_resources`, `profiles.<name>.resources`, `harness_configs.<name>.resources`, and the template or agent `resources` field.
+Defines the compute and disk constraints for an agent's container. The same shape is used by `default_resources`, `profiles.<name>.resources`, `profiles.<name>.harness_overrides.<harness-config>.resources`, and the template or agent `resources` field. Harness configs themselves (`harness_configs.<name>`) have no `resources` field.
 
 ```yaml
 resources:
@@ -187,8 +186,10 @@ Tiers merge field by field: a field set at a higher tier wins, and fields it lea
 
 **Defaults.**
 
-- All runtimes: `limits.cpu: "2"` is applied when no tier sets a CPU limit (controlled by `runtime.enforce_resource_defaults`, default `true`). There is no default memory limit.
-- Kubernetes only: every request left empty is filled in with a default **request**: `cpu: 250m`, `memory: 512Mi` and `ephemeral-storage: 10Gi`. These defaults are requests only. Kubernetes never adds a default memory or ephemeral-storage limit; those limits apply only when you set `limits.memory` or `disk`. If you set a limit lower than a default request (for example `limits.memory: 256Mi`), the default request is lowered to match the limit. Values you set yourself are never changed.
+- All runtimes: `limits.cpu: "2"` is applied when no tier sets a CPU limit, unless `runtime.enforce_resource_defaults` is `false` (default `true`). There is no default memory limit.
+- Kubernetes only: `cpu`, `memory` and `ephemeral-storage` each get a default **request** (`250m`, `512Mi` and `10Gi`) only when neither a request nor a limit is set for that resource, in `resources` or in `kubernetes.resources`. When a limit is set without a request, the request is left unset and Kubernetes sets it equal to the limit. So with the built-in CPU limit a pod requests and is limited to 2 CPU, and a profile that sets only `limits.memory` is scheduled at that limit.
+- Kubernetes never adds a default memory or ephemeral-storage limit. Those limits apply only when you set `limits.memory` or `disk`. With `runtime.enforce_resource_defaults: false` and no resources set, a Kubernetes pod gets the three default requests and no limits.
+- A `requests.cpu` above `2` needs an explicit `limits.cpu`; otherwise it exceeds the built-in CPU limit and the pod is rejected.
 
 ### Required Secrets
 
