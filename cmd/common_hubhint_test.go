@@ -154,7 +154,10 @@ func TestShowUsageForError_HubFailuresSuppressUsage(t *testing.T) {
 		{"launch wait timeout", &launchWaitTimeoutError{Agent: "a1"}, false},
 		{"launch wait interrupted", &launchWaitInterruptedError{Agent: "a1"}, false},
 		{"fmt-wrapped launch wait timeout", fmt.Errorf("start: %w", &launchWaitTimeoutError{Agent: "a1"}), false},
-		{"non-hub runtime error keeps usage", errors.New("some local failure"), true},
+		// Non-hub errors defer to the command's SilenceUsage (unset on this
+		// bare test command; set centrally by root's PersistentPreRunE in real
+		// dispatch, see TestExecuteUsageOnError_CentralSilence).
+		{"non-hub error defers to SilenceUsage", errors.New("some local failure"), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

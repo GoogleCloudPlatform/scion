@@ -25,6 +25,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -106,6 +107,25 @@ func validateAgentRole(role string) error {
 	default:
 		return fmt.Errorf("invalid role %q: must be one of none, readonly, baseline, full", role)
 	}
+}
+
+// validateHarnessAuthFlag checks a --harness-auth value. Empty is valid
+// (no override).
+func validateHarnessAuthFlag(v string) error {
+	switch v {
+	case "", "api-key", "oauth-token", "auth-file", "vertex-ai":
+		return nil
+	default:
+		return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", v)
+	}
+}
+
+// validateThinkingLevelFlag checks a --thinking-level value; -1 means unset.
+func validateThinkingLevelFlag(v int) error {
+	if v != -1 && (v < 0 || v > 100) {
+		return fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100", v)
+	}
+	return nil
 }
 
 func parseLabels(raw []string) (map[string]string, error) {
@@ -621,7 +641,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
-		return fmt.Errorf("--format json and --attach are mutually exclusive")
+		return newUsageError("--format json and --attach are mutually exclusive")
 	}
 	// Fail before creating or starting anything when --attach has no
 	// terminal to attach (same check as scion attach).
@@ -633,21 +653,22 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	// Reject --enable-telemetry with --disable-telemetry (mutually exclusive)
 	if enableTelemetry && disableTelemetry {
-		return fmt.Errorf("--enable-telemetry and --disable-telemetry are mutually exclusive")
+		return newUsageError("--enable-telemetry and --disable-telemetry are mutually exclusive")
 	}
 
 	if err := validateLaunchWaitFlags(); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
-	// Validate --harness-auth value
-	if harnessAuthFlag != "" {
-		switch harnessAuthFlag {
-		case "api-key", "oauth-token", "auth-file", "vertex-ai":
-			// valid
-		default:
-			return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
-		}
+	// Validate --template-scope here with the other flag checks, so a bad
+	// value is reported as a usage error before any hub work.
+	// ResolveTemplateForHub keeps its own check as a guard.
+	if err := validateTemplateScope(templateScope); err != nil {
+		return asUsageError(err)
+	}
+
+	if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
+		return asUsageError(err)
 	}
 
 	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
@@ -1151,17 +1172,17 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 
 	parsedLabels, err := parseLabels(labelFlags)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --role flag if provided
 	if err := validateAgentRole(agentRoleFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --message-mode flag if provided
 	if err := validateMessageMode(messageModeFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Build create request (Hub creates and starts in one operation)
@@ -1670,7 +1691,7 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 
 		// Only prompt if interactive and not auto-confirm
 		if autoConfirm || !util.IsTerminal() {
-			return nil, fmt.Errorf("multiple runtime brokers available, specify a broker with --broker <id>")
+			return nil, &hubError{msg: nonInteractiveBrokerMessage(apiErr.Message, availableBrokers), err: apiErr}
 		}
 
 		reader := bufio.NewReader(os.Stdin)
@@ -1738,6 +1759,78 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 		// Loop and retry with selected broker
 	}
 }
+
+// nonInteractiveBrokerMessage renders the error for a no_runtime_broker 422
+// when the CLI cannot prompt for a broker (--yes/--non-interactive or no
+// TTY). hubMessage is the hub's own explanation (e.g. "Default runtime
+// broker is unavailable; specify an alternative"); brokers is the hub's
+// non-empty availableBrokers detail, the brokers the caller may use.
+//
+// The "multiple runtime brokers available" wording is used only when there
+// really are several candidates (ptone/scion#2861). With exactly one, the
+// hub's reason is kept and that broker is named as the --broker to retry
+// with. Broker names are quoted, since a name may contain spaces.
+func nonInteractiveBrokerMessage(hubMessage string, brokers []interface{}) string {
+	names := make([]string, 0, len(brokers))
+	for _, b := range brokers {
+		m, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := m["name"].(string)
+		if name == "" {
+			name, _ = m["id"].(string)
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	hubMessage = strings.TrimSpace(hubMessage)
+	// The CLI appends its own --broker hint, so drop the hub's API-level
+	// "specify an alternative" tail (pkg/hub resolveRuntimeBroker, "Default
+	// runtime broker is unavailable; specify an alternative") rather than
+	// stack two instructions.
+	if strings.HasSuffix(strings.ToLower(hubMessage), hubSpecifyAlternativeSuffix) {
+		hubMessage = strings.TrimSpace(hubMessage[:len(hubMessage)-len(hubSpecifyAlternativeSuffix)])
+	}
+	if hubMessage == "" {
+		hubMessage = "no runtime broker selected"
+	}
+
+	if len(brokers) == 1 {
+		if len(names) == 1 {
+			return fmt.Sprintf("%s: runtime broker %q is available, retry with --broker %q", hubMessage, names[0], names[0])
+		}
+		return hubMessage + ": specify a broker with --broker <name>"
+	}
+
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = strconv.Quote(n)
+	}
+	hint := "multiple runtime brokers available"
+	if len(quoted) > 1 {
+		hint += " (" + strings.Join(quoted, ", ") + ")"
+	}
+	hint += ", specify a broker with --broker <name>"
+	// hubMultipleBrokersReason matches the hub's generic reason for this
+	// case (pkg/hub resolveRuntimeBroker, "Multiple runtime brokers
+	// available for this project; specify runtimeBrokerId to select one"),
+	// which says the same thing as the hint in API terms; any other reason
+	// (e.g. the default broker is unavailable) is kept in front of the hint.
+	if strings.HasPrefix(strings.ToLower(hubMessage), hubMultipleBrokersReason) {
+		return hint
+	}
+	return hubMessage + ": " + hint
+}
+
+// Lower-cased fragments of pkg/hub resolveRuntimeBroker's no_runtime_broker
+// messages that nonInteractiveBrokerMessage recognises. If the hub wording
+// changes, the CLI degrades to printing the hub's message plus its own hint.
+const (
+	hubMultipleBrokersReason    = "multiple runtime brokers available"
+	hubSpecifyAlternativeSuffix = "; specify an alternative"
+)
 
 // gatherAndSubmitEnv handles the env-gather flow: checks the local environment
 // for missing keys and submits gathered values back to the Hub.

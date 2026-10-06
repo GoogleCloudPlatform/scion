@@ -87,7 +87,7 @@ var stopCmd = &cobra.Command{
 		mgr := agent.NewManager(rt)
 
 		statusf("Stopping agent '%s'...\n", agentName)
-		if err := mgr.Stop(context.Background(), agentName, projectPath); err != nil {
+		if err := mgr.Stop(context.Background(), agentName, projectPath, ""); err != nil {
 			return err
 		}
 
@@ -210,7 +210,7 @@ func stopAllAgents() error {
 			agentRt := runtime.GetRuntime(projectPath, profile)
 			agentMgr := agent.NewManager(agentRt)
 
-			if err := agentMgr.Stop(context.Background(), name, projectPath); err != nil {
+			if err := agentMgr.Stop(context.Background(), name, projectPath, ""); err != nil {
 				res.Status = "error"
 				res.Error = err.Error()
 				mu.Lock()
