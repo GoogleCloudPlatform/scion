@@ -154,10 +154,15 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			// container status. Clearing them now, before the readiness
 			// wait, leaves alone anything the new container posts later
 			// (its first status, which is the readiness signal).
+			// StartWrite: a start's own write keeps the phase of a row a
+			// delete holds, a finalizing row with an expired lease included
+			// (ptone/scion#3528). The store neutralises such a write and
+			// returns nil, so the delete-won check below is what notices.
 			statusUpdate := store.AgentStatusUpdate{
 				Phase:                 string(state.PhaseStarting),
 				ClearTerminalRemnants: true,
 				ContainerStatus:       agent.ContainerStatus,
+				StartWrite:            true,
 			}
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 				s.messageLog.Error("wake: failed to update agent phase to starting",
@@ -167,6 +172,16 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					Message:    "failed to update agent status after resume",
 					HTTPStatus: http.StatusInternalServerError,
 				}
+				return nil
+			}
+			// A delete that won after the resume landed (the dispatch has
+			// already removed the landed run, compensateLandedRun): answer
+			// 409 delete_in_progress, as start and restart do, rather than
+			// waiting for readiness and delivering the message.
+			if s.deleteWonAfterLanding(ctx, agent.ID) {
+				s.messageLog.Info("wake: agent was deleted while it was resuming; message not delivered",
+					"agent_id", agent.ID)
+				statusErr = deleteInProgressRefusal(agent.ID).dmError()
 				return nil
 			}
 			agent.Phase = string(state.PhaseStarting)
@@ -197,7 +212,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			// claim, so a stop or start recorded meanwhile is never painted
 			// over. A plain phase write: the message, stalled marker and
 			// exit fields on the row now belong to the new generation.
-			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}); err != nil {
+			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning), StartWrite: true}); err != nil {
 				s.messageLog.Error("wake: failed to update agent phase to running",
 					"agent_id", agent.ID, "error", err)
 				statusErr = &AgentDMError{
@@ -205,6 +220,15 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					Message:    "failed to update agent status after readiness",
 					HTTPStatus: http.StatusInternalServerError,
 				}
+				return nil
+			}
+			// A delete can also win during the readiness wait: the running
+			// write above then kept the delete's phase. Answer 409 rather
+			// than WakeResumed.
+			if s.deleteWonAfterLanding(ctx, agent.ID) {
+				s.messageLog.Info("wake: agent was deleted while it was becoming ready; message not delivered",
+					"agent_id", agent.ID)
+				statusErr = deleteInProgressRefusal(agent.ID).dmError()
 				return nil
 			}
 			agent.Phase = string(state.PhaseRunning)
