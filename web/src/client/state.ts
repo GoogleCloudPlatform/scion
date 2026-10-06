@@ -514,6 +514,9 @@ export class StateManager extends EventTarget {
   /** IDs that received a `created` event since the last flush (§7). */
   private pendingCreatedIds = new Set<string>();
 
+  /** IDs among {@link pendingCreatedIds} whose `created` marked a restore. */
+  private pendingRestoredIds = new Set<string>();
+
   private flushScheduled = false;
   private flushRafHandle: number | null = null;
   private flushTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -708,6 +711,7 @@ export class StateManager extends EventTarget {
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.seedEpochs.clear();
     this.completeFlag = null;
     this.generation++;
@@ -941,6 +945,7 @@ export class StateManager extends EventTarget {
       this.dirty.upserted.delete(agentId);
       this.dirty.unknown.delete(agentId);
       this.pendingCreatedIds.delete(agentId);
+      this.pendingRestoredIds.delete(agentId);
       this.dirty.deleted.add(agentId);
       this.scheduleFlush();
       return;
@@ -993,7 +998,10 @@ export class StateManager extends EventTarget {
       this.state.deletedAgentIds.delete(agentId);
       this.dirty.deleted.delete(agentId);
     }
+    let restored = false;
     if (eventType === 'created' && data && typeof data === 'object' && 'restoredAt' in data) {
+      const restoredAt = (data as { restoredAt?: unknown }).restoredAt;
+      restored = typeof restoredAt === 'string' && restoredAt !== '';
       // Event metadata, not an agent field.
       const rest = { ...(data as Record<string, unknown>) };
       delete rest.restoredAt;
@@ -1076,6 +1084,7 @@ export class StateManager extends EventTarget {
       // server-omitted agent (see chat.ts loop guard) know the suppression
       // no longer applies to this ID.
       this.pendingCreatedIds.add(agentId);
+      if (restored) this.pendingRestoredIds.add(agentId);
     }
     if (changed || eventType === 'created') {
       this.scheduleFlush();
@@ -1285,24 +1294,31 @@ export class StateManager extends EventTarget {
   /**
    * Emit the coalesced notifications for everything dirtied since the last
    * flush, in order: `agent-created` per created ID, `agents-changed`, then
-   * the legacy `agents-updated` once for the whole flush (§7).
+   * the legacy `agents-updated` once for the whole flush (§7). The
+   * `agent-created` of an agent restored with its old ID carries
+   * `restored: true`.
    */
   private flush(): void {
     if (!this.flushScheduled) return;
     this.cancelScheduledFlush();
 
     const createdIds = Array.from(this.pendingCreatedIds);
+    const restoredIds = new Set(this.pendingRestoredIds);
     const upserted = Array.from(this.dirty.upserted);
     const deleted = Array.from(this.dirty.deleted);
     const unknown = new Map(this.dirty.unknown);
 
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.dirty.upserted.clear();
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
 
     for (const agentId of createdIds) {
-      this.notifyWithData('agent-created', { agentId });
+      this.notifyWithData(
+        'agent-created',
+        restoredIds.has(agentId) ? { agentId, restored: true } : { agentId }
+      );
     }
 
     const changed: AgentsChangedDetail = {
