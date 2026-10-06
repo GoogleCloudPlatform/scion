@@ -564,3 +564,18 @@ func TestAgentInfo_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
 		t.Errorf("expected explicit provisionedOnly false, got %s", data)
 	}
 }
+
+// TestIsLocalDiskRuntime pins the shared local-disk runtime allow-list
+// (miller79/scion#167) used by the Hub's reincarnate gate and the broker's
+// Reprovision guard: everything not listed fails closed.
+func TestIsLocalDiskRuntime(t *testing.T) {
+	for name, want := range map[string]bool{
+		"docker": true, "podman": true, "container": true, "apple": true, " Docker ": true,
+		"kubernetes": false, "k8s": false, "cloudrun": false, "cloudrun-sandbox": false,
+		"substrate": false, "mock": false, "": false,
+	} {
+		if got := IsLocalDiskRuntime(name); got != want {
+			t.Errorf("IsLocalDiskRuntime(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

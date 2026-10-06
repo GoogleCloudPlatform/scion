@@ -983,6 +983,23 @@ func ReincarnateEligible(hasGitClone bool, workspace string, emptyPerAgent bool)
 	return hasGitClone || workspace != "" || emptyPerAgent
 }
 
+// IsLocalDiskRuntime reports whether a runtime keeps an empty-per-agent
+// workspace as a directory on the broker's own disk, so same-broker
+// reincarnation can reuse it in place (miller79/scion#167). It is the one
+// allow-list behind both the Hub's reincarnate gate and the broker's
+// Manager.Reprovision guard. The values are runtime Name()s ("docker",
+// "podman", "container"), plus "apple", which some brokers record as a
+// profile Type for the Apple container runtime. Kubernetes, cloud runtimes,
+// and empty or unknown values are refused (fail closed).
+func IsLocalDiskRuntime(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "docker", "podman", "container", "apple":
+		return true
+	default:
+		return false
+	}
+}
+
 type harnessConfigPathContextKey struct{}
 
 // ContextWithHarnessConfigPath records a pre-resolved local directory for the

@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -345,7 +344,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// run reports the same verdict. An unrecorded runtime falls back to
 	// resolveAgentRuntime (the value enrichAgents displays), which returns
 	// "" when the broker's profiles are ambiguous: still refused.
-	if sameBrokerEmptyPerAgent && !localDiskRuntime(effectiveAgentRuntime(agent, broker)) {
+	if sameBrokerEmptyPerAgent && !api.IsLocalDiskRuntime(effectiveAgentRuntime(agent, broker)) {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)", nil)
 		return
@@ -730,19 +729,4 @@ func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) stri
 		return agent.Runtime
 	}
 	return resolveAgentRuntime(agent, broker)
-}
-
-// localDiskRuntime reports whether an agent's recorded runtime
-// (store.Agent.Runtime: the broker's runtime name, or a profile type) keeps
-// an empty-per-agent workspace as a directory on the broker's own disk, so
-// same-broker reincarnation can reuse it in place (miller79/scion#167). An
-// allow-list: kubernetes, cloud runtimes, and empty or unknown values are
-// refused (fail closed).
-func localDiskRuntime(rt string) bool {
-	switch strings.ToLower(strings.TrimSpace(rt)) {
-	case "docker", "podman", "container", "apple":
-		return true
-	default:
-		return false
-	}
 }
