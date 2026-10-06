@@ -694,6 +694,23 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(q(el, '#templateGitRemote')?.getAttribute('aria-invalid')).toBe('false');
   });
 
+  it('flags an override whose ? or # falls inside the userinfo as invalid, without showing it', async () => {
+    const { el, requests } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'userinfo-query', 'sl-input');
+    await setValue(el, '#templateGitRemote', 'https://user:PSECRET?W@github.com/acme/payments.git', 'sl-input');
+    q(el, '#templateGitRemote')!.dispatchEvent(new Event('sl-blur'));
+    await el.updateComplete;
+
+    expect(text(q(el, '.git-remote-error'))).toContain('must be a remote git URL');
+    expect(q(el, '#templateGitRemote')?.getAttribute('aria-invalid')).toBe('true');
+    expect(text(q(el, '.summary-repository'))).not.toContain('PSECRET');
+    await submit(el);
+    expect(posts(requests)).toEqual([]);
+  });
+
   it('shows a hub 400 on gitRemote inline on the override field', async () => {
     const { el } = await createForm({
       templates: [GIT_TEMPLATE],
@@ -1078,5 +1095,88 @@ describe('scion-page-project-create — linked create and existing projects', ()
 
     expect(q(el, 'sl-dialog[label="Project Already Exists"]')?.hasAttribute('open')).toBe(true);
     expect(window.history.pushState).not.toHaveBeenCalled();
+  });
+});
+
+describe('cloneUrlCredentialHint', () => {
+  let hint: (remote: string) => string | null;
+  beforeAll(async () => {
+    ({ cloneUrlCredentialHint: hint } = await import('./project-create.js'));
+  });
+
+  it.each([
+    'https://user:pass@github.com/org/repo',
+    'https://TOKEN@github.com/org/repo',
+    'http://user@internal.host/repo',
+    'user:pass@github.com/org/repo',
+    'TOKEN@github.com/org/repo',
+    'ssh://git:secret@github.com/org/repo',
+    'https://user:8443/x@host/repo',
+    'https://github.com/org/repo@v1',
+    'user:PW@host/org/repo://',
+    'https:/user:PW@host/r',
+    'git@host:repo@v1',
+    'git@PW@host:org/repo',
+    'git@a@b@host:x',
+    'git@user:PW@host:org/repo',
+    '//user:PW@host/repo',
+  ])('flags userinfo in %s', (url) => {
+    expect(hint(url)).toMatch(/username, password or token/);
+  });
+
+  it.each(['https://github.com/org/repo?access_token=x', 'https://github.com/org/repo#frag'])(
+    'flags query or fragment in %s',
+    (url) => {
+      expect(hint(url)).toMatch(/query string or fragment/);
+    },
+  );
+
+  it.each([
+    'https://github.com/org/repo',
+    'github.com/org/repo',
+    'git@github.com:org/repo.git',
+    'ssh://git@github.com/org/repo.git',
+    'https://github.com:8443/org/repo',
+    'deploy@host:team/proj',
+    '/tmp/repo#1',
+  ])('accepts %s', (url) => {
+    expect(hint(url)).toBeNull();
+  });
+
+  it('flags control characters', () => {
+    expect(hint('https://host/r\nhttps://u:PW@h/x')).toMatch(/control or non-ASCII/);
+  });
+});
+
+describe('deriveCloneUrl', () => {
+  let derive: (remote: string) => string;
+  beforeAll(async () => {
+    ({ deriveCloneUrl: derive } = await import('./project-create.js'));
+  });
+
+  it.each(['https://user:PSECRET?W@github.com/org/repo', ''])('returns empty for %j', (input) => {
+    expect(derive(input)).toBe('');
+  });
+
+  it.each([
+    ['https://github.com/org/repo', 'https://github.com/org/repo.git'],
+    ['github.com/org/repo.git', 'https://github.com/org/repo.git'],
+    ['git@github.com:org/repo.git', 'https://github.com/org/repo.git'],
+    ['ssh://git@github.com/org/repo', 'https://github.com/org/repo.git'],
+    ['deploy@host:team/proj', 'https://host/team/proj.git'],
+    ['https://user:pass@github.com/org/repo', 'https://github.com/org/repo.git'],
+    ['https://github.com/org/repo?ref=main#x', 'https://github.com/org/repo.git'],
+    ['https://dev.azure.com/org/proj/_git/repo.git', 'https://dev.azure.com/org/proj/_git/repo'],
+    ['ssh://git@host:22/org/repo', 'https://host/org/repo.git'],
+    ['SSH://git@host:2222/org/repo.git', 'https://host/org/repo.git'],
+    ['git+ssh://git@host:22/org/repo', 'https://host/org/repo.git'],
+    ['ssh+git://git@host:2222/org/repo.git', 'https://host/org/repo.git'],
+    ['GIT+SSH://deploy@host:22/org/repo', 'https://host/org/repo.git'],
+    ['git+ssh://git@host/org/repo', 'https://host/org/repo.git'],
+    ['https://host:8443/org/repo', 'https://host:8443/org/repo.git'],
+  ])('derives %s', (input, want) => {
+    const got = derive(input);
+    expect(got).toBe(want);
+    expect(got).not.toContain('@');
   });
 });

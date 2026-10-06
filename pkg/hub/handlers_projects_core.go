@@ -315,7 +315,17 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateCloneURLLabelValue(req.Labels); msg != "" {
+		ValidationError(w, msg, cloneURLLabelErrorDetails())
+		return
+	}
+	sanitizeSourceURLLabel(req.Labels)
+
+	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
+	if msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// Workspace mode is create-only and server-owned: validate the requested
 	// mode against the project's git-ness and set the label only from the
@@ -1373,7 +1383,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateCloneURLLabelValue(req.Labels); msg != "" {
+		ValidationError(w, msg, cloneURLLabelErrorDetails())
+		return
+	}
+	sanitizeSourceURLLabel(req.Labels)
+
+	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
+	if msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// The workspace-mode label is server-owned (design #2703 §2.4): reject
 	// values register cannot honour before any lookup or mutation.
@@ -2936,6 +2956,17 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	if updates.Labels != nil {
+		// Validate the clone-url only when this request adds or changes it:
+		// the full map is resent on every PATCH, and an unchanged legacy
+		// value must not block unrelated label edits (NormalizeCloneURL
+		// strips it on read).
+		if v, ok := updates.Labels[store.LabelCloneURL]; ok && v != project.Labels[store.LabelCloneURL] {
+			if msg := validateCloneURLLabelValue(updates.Labels); msg != "" {
+				ValidationError(w, msg, cloneURLLabelErrorDetails())
+				return
+			}
+		}
+		sanitizeSourceURLLabel(updates.Labels)
 		// PATCH replaces the labels map wholesale; keep the server-owned
 		// workspace-mode label and refuse attempts to change it (design
 		// #2703 §2.4 / D6).
