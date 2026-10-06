@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // ErrTokenRefreshUnauthorized indicates the hub rejected the token refresh
@@ -1457,8 +1458,10 @@ func GitHubTokenPath() string {
 }
 
 // IsGitHubAppEnabled returns true if GitHub App token refresh is active.
+// The hub sets SCION_GITHUB_APP_ENABLED=true; util.ParseBoolEnv also accepts
+// the other boolean spellings so every reader of the variable agrees.
 func IsGitHubAppEnabled() bool {
-	return os.Getenv(EnvGitHubAppEnabled) == "true"
+	return util.ParseBoolEnv(EnvGitHubAppEnabled, false)
 }
 
 // ParseTokenExpiry extracts the expiry time from a JWT token without

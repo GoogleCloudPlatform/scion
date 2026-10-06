@@ -6316,9 +6316,9 @@ func projectIDAtPath(path string) string {
 // or path is the project's external config dir
 // ~/.scion/project-configs/<slug>__<short-id>/.scion, whose name encodes the
 // project ID (non-git linked projects record that dir as the agent's project
-// path).
+// path). A projectID outside the project ID format never matches.
 func pathIdentifiesAs(path, projectID string) bool {
-	if path == "" || projectID == "" {
+	if path == "" || config.ValidateProjectID(projectID) != nil {
 		return false
 	}
 	if projectIDAtPath(path) == projectID {

@@ -153,39 +153,6 @@ func TestIsCloudConfigured(t *testing.T) {
 	}
 }
 
-func TestParseBoolEnv(t *testing.T) {
-	tests := []struct {
-		value      string
-		defaultVal bool
-		expected   bool
-	}{
-		{"", true, true},
-		{"", false, false},
-		{"true", false, true},
-		{"True", false, true},
-		{"TRUE", false, true},
-		{"1", false, true},
-		{"yes", false, true},
-		{"on", false, true},
-		{"false", true, false},
-		{"False", true, false},
-		{"0", true, false},
-		{"no", true, false},
-		{"off", true, false},
-		{"invalid", true, true},
-		{"invalid", false, false},
-	}
-
-	for _, tt := range tests {
-		_ = os.Setenv("TEST_BOOL", tt.value)
-		got := parseBoolEnv("TEST_BOOL", tt.defaultVal)
-		if got != tt.expected {
-			t.Errorf("parseBoolEnv(%q, %v) = %v, want %v", tt.value, tt.defaultVal, got, tt.expected)
-		}
-	}
-	_ = os.Unsetenv("TEST_BOOL")
-}
-
 func TestParseCSVEnv(t *testing.T) {
 	tests := []struct {
 		value    string

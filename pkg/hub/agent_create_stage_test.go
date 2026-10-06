@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -96,6 +97,22 @@ func createRollbackSites() []createRollbackSite {
 			},
 			req:       CreateAgentRequest{WorkspaceFiles: workspaceFiles},
 			wantStage: createStageUploadURL,
+		},
+		{
+			// Hub-managed workspace upload for a remote broker, with the
+			// workspace storage mount hung.
+			name: "workspace storage",
+			disp: &createAgentDispatcher{},
+			setup: func(t *testing.T, srv *Server) {
+				tmpHome := t.TempDir()
+				t.Setenv("HOME", tmpHome)
+				mountRoot := filepath.Join(tmpHome, "nfs-mount")
+				hangReadDirFor(t, mountRoot)
+				srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+				srv.SetStorage(newMockStorage("test-bucket"))
+			},
+			req:       CreateAgentRequest{Workspace: "subdir"},
+			wantStage: createStageWorkspaceStorage,
 		},
 		{
 			name:      "managed",
