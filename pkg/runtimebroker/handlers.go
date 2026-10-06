@@ -277,6 +277,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// agent's NFS workspace before provisioning it (agent move).
 			AgentMove:      true,
 			StartsInFlight: s.startsInFlight != nil,
+			// This broker's reprovision reuses an empty-per-agent
+			// workspace in place (miller79/scion#167).
+			ReprovisionEmptyPerAgent: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
