@@ -267,8 +267,8 @@ export async function extractApiError(res: Response, fallback: string): Promise<
 /**
  * The human-readable message in a parsed API error body, or undefined when
  * it has none. Accepts the shapes the hub sends: `{error: {message}}` (with
- * `error.details.guidance` appended when present, e.g. clone/pull errors),
- * `{message}` and `{error: "..."}`.
+ * a string `error.details.guidance` appended when present, e.g. clone/pull
+ * errors), `{message}` and `{error: "..."}`. Empty strings are not messages.
  */
 export function apiErrorMessageFromBody(data: unknown): string | undefined {
   if (data === null || typeof data !== 'object') return undefined;
@@ -277,11 +277,13 @@ export function apiErrorMessageFromBody(data: unknown): string | undefined {
     const error = body.error as { message?: unknown; details?: { guidance?: unknown } };
     if (typeof error.message === 'string' && error.message) {
       const guidance = error.details?.guidance;
-      return guidance ? `${error.message} — ${String(guidance)}` : error.message;
+      return typeof guidance === 'string' && guidance
+        ? `${error.message} — ${guidance}`
+        : error.message;
     }
   }
-  if (typeof body.message === 'string') return body.message;
-  if (typeof body.error === 'string') return body.error;
+  if (typeof body.message === 'string' && body.message) return body.message;
+  if (typeof body.error === 'string' && body.error) return body.error;
   return undefined;
 }
 

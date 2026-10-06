@@ -129,21 +129,29 @@ export class PaginationError extends Error {
 const MAX_ERROR_TEXT = 500;
 
 function capErrorText(text: string): string {
-  return text.length > MAX_ERROR_TEXT ? `${text.slice(0, MAX_ERROR_TEXT)}…` : text;
+  if (text.length <= MAX_ERROR_TEXT) return text;
+  // Do not split a surrogate pair (e.g. an emoji) at the cut.
+  const code = text.charCodeAt(MAX_ERROR_TEXT - 1);
+  const end = code >= 0xd800 && code <= 0xdbff ? MAX_ERROR_TEXT - 1 : MAX_ERROR_TEXT;
+  return `${text.slice(0, end)}…`;
 }
 
 /**
  * Read a failed response's body for error reporting: parsed JSON if it is
- * JSON, else its text, capped at {@link MAX_ERROR_TEXT} characters.
+ * JSON, else its text. Text (including a JSON string body) is capped at
+ * {@link MAX_ERROR_TEXT} characters.
  */
 async function readErrorBody(res: Response): Promise<unknown> {
   const text = await res.text();
   if (!text) return undefined;
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as unknown;
+    parsed = JSON.parse(text) as unknown;
   } catch {
     return capErrorText(text);
   }
+  // A JSON string body is text too; cap it the same way.
+  return typeof parsed === 'string' ? capErrorText(parsed) : parsed;
 }
 
 /**

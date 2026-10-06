@@ -595,12 +595,25 @@ describe('apiErrorMessageFromBody / extractApiError', () => {
     }
   });
 
+  it('treats empty strings as no message and ignores non-string guidance', () => {
+    expect(apiErrorMessageFromBody({ message: '' })).toBeUndefined();
+    expect(apiErrorMessageFromBody({ message: '', error: 'x' })).toBe('x');
+    expect(apiErrorMessageFromBody({ error: '' })).toBeUndefined();
+    expect(
+      apiErrorMessageFromBody({ error: { message: 'm', details: { guidance: { a: 1 } } } })
+    ).toBe('m');
+    expect(apiErrorMessageFromBody({ error: { message: 'm', details: { guidance: '' } } })).toBe(
+      'm'
+    );
+  });
+
   it('extractApiError uses it and falls back for non-JSON or message-less bodies', async () => {
     const json = (b: unknown) => new Response(JSON.stringify(b), { status: 400 });
     expect(
       await extractApiError(json({ error: { message: 'm', details: { guidance: 'g' } } }), 'fb')
     ).toBe('m — g');
     expect(await extractApiError(json({ error: { code: 'x' } }), 'fb')).toBe('fb');
+    expect(await extractApiError(json({ message: '' }), 'fb')).toBe('fb');
     expect(await extractApiError(new Response('<html>', { status: 502 }), 'fb')).toBe('fb');
   });
 });

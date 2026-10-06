@@ -521,6 +521,28 @@ describe('paginateAll failed-response body (ptone/scion#2949)', () => {
     expect((err.body as string).endsWith('…')).toBe(true);
   });
 
+  it('caps a JSON body that parses to a string', async () => {
+    const err = await failWith(jsonResponse('s'.repeat(2000), 500));
+    expect(err.body).toBe(`${'s'.repeat(500)}…`);
+    expect(err.hubMessage).toBeUndefined();
+  });
+
+  it('does not split a surrogate pair at the cap', async () => {
+    // 499 ASCII chars, then an emoji whose high surrogate is char 500.
+    const text = `${'a'.repeat(499)}😀${'b'.repeat(100)}`;
+    const err = await failWith(new Response(text, { status: 502 }));
+    expect(err.body).toBe(`${'a'.repeat(499)}…`);
+    const atCut = await failWith(
+      new Response(`${'a'.repeat(498)}😀${'b'.repeat(100)}`, { status: 502 })
+    );
+    expect(atCut.body).toBe(`${'a'.repeat(498)}😀…`);
+  });
+
+  it('takes the next field when message is an empty string', async () => {
+    const err = await failWith(jsonResponse({ message: '', error: 'bad cursor' }, 400));
+    expect(err.hubMessage).toBe('bad cursor');
+  });
+
   it('caps a long hub message and appends error.details.guidance', async () => {
     const long = await failWith(jsonResponse({ error: { message: 'm'.repeat(800) } }, 400));
     expect(long.hubMessage).toBe(`${'m'.repeat(500)}…`);
