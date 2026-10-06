@@ -64,6 +64,11 @@ type WakeResult struct {
 	Outcome WakeOutcome
 }
 
+// wakeReadyTimeout bounds a wake's wait for the resumed agent's first
+// activity (its readiness signal); a caller deadline that ends sooner
+// shortens it.
+const wakeReadyTimeout = 30 * time.Second
+
 // wakeAgentForDM resumes a suspended target agent before DM delivery.
 // It validates the agent's lifecycle phase and runtime, dispatches a resume
 // command, and waits for the agent to become ready.
@@ -135,6 +140,12 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// releases the claim like a success: the start itself was accepted.
 		var statusErr *AgentDMError
 		var readyErr error
+		// The caller's deadline, when it has one, bounds the resume
+		// dispatch and the readiness wait (KeepCallerDeadline, and the wait
+		// below); the post-start writes are not bounded by it. This path is
+		// shared by the user and agent direct messages and the chat wake;
+		// only the chat wake carries a deadline today.
+		callerDeadline, hasCallerDeadline := ctx.Deadline()
 		err := s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimWake, Resume: true, KeepCallerDeadline: true, AfterStart: func(ctx context.Context, st startedState) error {
 			// Re-assert 'starting' (beginStartDispatch already wrote it) and
 			// clear the previous generation's leftovers while the lifecycle
@@ -172,7 +183,13 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			// must not be painted over (design ptone/scion#2483 note F).
 			s.publishAgentStatusFresh(ctx, agent)
 			// Wait for the agent to report its first activity (readiness signal).
-			readyErr = s.waitForAgentReady(ctx, agent.ID, 30*time.Second)
+			wait := wakeReadyTimeout
+			if hasCallerDeadline {
+				if left := time.Until(callerDeadline); left < wait {
+					wait = left
+				}
+			}
+			readyErr = s.waitForAgentReady(ctx, agent.ID, wait)
 			if readyErr != nil {
 				return nil
 			}

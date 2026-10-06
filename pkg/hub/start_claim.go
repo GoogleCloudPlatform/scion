@@ -382,10 +382,16 @@ type StartOpts struct {
 	// it instead of taking one. startAgentCore settles it on success and
 	// rolls it back on any failure.
 	Dispatch *startDispatch
-	// KeepCallerDeadline bounds the dispatch by the caller's context
-	// deadline too, when it has one and it is earlier than the claim run's
-	// (a direct-message wake bounds its resume this way). Cancellation of
-	// the caller's context still does not reach the start.
+	// KeepCallerDeadline bounds the DispatchAgentStart call by the caller's
+	// context deadline too, when it has one and it is earlier than the
+	// claim run's. The claim run's context is detached from the caller: it
+	// drops the caller's cancellation and its deadline, and is bounded by
+	// start_max_duration instead; this option puts the deadline back for
+	// the dispatch only (not for the post-start writes). The shared
+	// direct-message wake path sets it; only the chat wake carries a
+	// deadline today. With start claims off (a Server not built by New, as
+	// in some tests), the dispatch runs on the caller's context itself, so
+	// its cancellation and deadline both reach it.
 	KeepCallerDeadline bool
 	// NewGeneration clears the previous run's message, stalled marker and
 	// exit fields in the post-start write even when the agent was already

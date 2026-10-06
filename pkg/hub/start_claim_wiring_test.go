@@ -743,3 +743,100 @@ func TestStartClaimWiring_CreateClaimRefusalKeepsTheRecord(t *testing.T) {
 		})
 	}
 }
+
+// KeepCallerDeadline bounds only the dispatch call by the caller's deadline;
+// the caller's cancellation never reaches the start, and the post-start
+// writes run on the claim's context.
+func TestStartClaimWiring_KeepCallerDeadline(t *testing.T) {
+	t.Run("caller cancellation does not stop the start", func(t *testing.T) {
+		f, d, a := newClaimFixture(t)
+		parent, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var errAfterCancel error
+		d.start = func(ctx context.Context, cur *store.Agent) error {
+			cancel()
+			time.Sleep(20 * time.Millisecond)
+			errAfterCancel = ctx.Err()
+			return nil
+		}
+		require.NoError(t, f.srv.startAgentCore(parent, a, StartOpts{Kind: store.StartClaimUser, KeepCallerDeadline: true}))
+		assert.NoError(t, errAfterCancel, "the caller's cancellation does not reach the dispatch")
+	})
+
+	t.Run("a later caller deadline is ignored", func(t *testing.T) {
+		f, d, a := newClaimFixture(t)
+		callerDeadline := time.Now().Add(24 * time.Hour)
+		parent, cancel := context.WithDeadline(context.Background(), callerDeadline)
+		defer cancel()
+		var got time.Time
+		var has bool
+		d.start = func(ctx context.Context, cur *store.Agent) error {
+			got, has = ctx.Deadline()
+			return nil
+		}
+		require.NoError(t, f.srv.startAgentCore(parent, a, StartOpts{Kind: store.StartClaimUser, KeepCallerDeadline: true}))
+		require.True(t, has, "the claim run's own deadline applies")
+		assert.True(t, got.Before(callerDeadline), "the earlier claim deadline wins")
+		assert.False(t, got.After(time.Now().Add(f.srv.startClaimSettings().MaxDuration)))
+	})
+
+	t.Run("without the option a caller deadline is ignored", func(t *testing.T) {
+		f, d, a := newClaimFixture(t)
+		parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		var errAfterDeadline error
+		d.start = func(ctx context.Context, cur *store.Agent) error {
+			time.Sleep(250 * time.Millisecond)
+			errAfterDeadline = ctx.Err()
+			return nil
+		}
+		require.NoError(t, f.srv.startAgentCore(parent, a, StartOpts{Kind: store.StartClaimUser}))
+		assert.NoError(t, errAfterDeadline, "the caller's deadline does not bound the dispatch by default")
+	})
+
+	t.Run("a timeout mid-dispatch leaves the claim in doubt and rolls back", func(t *testing.T) {
+		f, d, a := newClaimFixture(t)
+		setBrokerAgentCeiling(t, f.s, 5)
+		parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		d.start = func(ctx context.Context, cur *store.Agent) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		err := f.srv.startAgentCore(parent, a, StartOpts{Kind: store.StartClaimUser, KeepCallerDeadline: true})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		got := getAgent(t, f.s, a.ID)
+		assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState, "the start may have reached the broker")
+		assert.Equal(t, string(state.PhaseStopped), got.Phase, "the starting phase is restored")
+		assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the reservation this start made is released")
+	})
+
+	t.Run("the caller deadline does not reach the post-start writes", func(t *testing.T) {
+		f, _, a := newClaimFixture(t)
+		parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		var errInAfterStart error
+		err := f.srv.startAgentCore(parent, a, StartOpts{Kind: store.StartClaimUser, KeepCallerDeadline: true, AfterStart: func(ctx context.Context, _ startedState) error {
+			time.Sleep(250 * time.Millisecond)
+			errInAfterStart = ctx.Err()
+			return f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)})
+		}})
+		require.NoError(t, err)
+		assert.NoError(t, errInAfterStart, "the post-start writes run on the claim's context")
+		assert.Equal(t, string(state.PhaseRunning), getAgent(t, f.s, a.ID).Phase)
+	})
+}
+
+// A wake's readiness wait ends at the caller's deadline when that is
+// sooner than its own 30s bound.
+func TestStartClaimWiring_WakeReadinessWaitBoundedByCallerDeadline(t *testing.T) {
+	f, _, _ := newClaimFixture(t)
+	a := f.addAgent("wake-deadline", "suspended", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	res, dmErr := f.srv.wakeAgentForDM(ctx, getAgent(t, f.s, a.ID))
+	require.Nil(t, res)
+	require.NotNil(t, dmErr, "the agent never became ready")
+	assert.Less(t, time.Since(started), 5*time.Second, "the wait ended at the caller's deadline, not after %s", wakeReadyTimeout)
+}
