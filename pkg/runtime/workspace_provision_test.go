@@ -298,7 +298,12 @@ func TestNFSProvision_SentinelShortCircuits(t *testing.T) {
 	}
 
 	// Pre-create workspace dir and sentinel (simulating prior provisioning).
+	// The workspace has content: a marked workspace that is completely
+	// empty is cloned into instead (see provision.ProvisionShared).
 	if err := os.MkdirAll(res.HostPath, 0770); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(res.HostPath, "README.md"), []byte("existing"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	projectRoot := filepath.Dir(res.HostPath)

@@ -43,7 +43,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
@@ -245,6 +244,32 @@ func getHubAccessToken(endpoint string) string {
 	return apiclient.ResolveDevToken()
 }
 
+// explicitProjectTarget reports whether the user named the project with the
+// --project / -g or --global flag. It reads the flag variables, not the
+// path a caller passes on, so a caller that resolved the cwd project itself
+// is not treated as explicit (ptone/scion#3123).
+func explicitProjectTarget() bool {
+	return projectPath != "" || globalMode
+}
+
+// explicitProjectTargetFor reports whether path is a project the user named
+// with a flag. An empty path is never explicit: a caller that clears the
+// path (a cross-project message send) resolves its own project from the
+// environment.
+func explicitProjectTargetFor(path string) bool {
+	return path != "" && explicitProjectTarget()
+}
+
+// loadSettingsForTarget loads settings for resolvedPath. When the user named
+// the project with a flag, SCION_PROJECT_ID in the environment does not
+// override that project's own ID (ptone/scion#3123).
+func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
+	if explicitProjectTarget() {
+		return config.LoadSettingsIgnoringEnvProjectID(resolvedPath)
+	}
+	return config.LoadSettings(resolvedPath)
+}
+
 // CheckHubAvailability checks if Hub integration is enabled and returns a ready-to-use
 // Hub context if available. Returns nil if Hub should not be used (not enabled or --no-hub flag is set).
 //
@@ -288,6 +313,7 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		SkipSync:         skipSync,
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
+		ExplicitProject:  explicitProjectTargetFor(projectPath),
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
@@ -500,6 +526,10 @@ func getProjectIDForKeys(hubCtx *HubContext) (string, error) {
 // git remote. Every other branch (context/settings short-circuit, missing
 // remote, zero matches) is identical for both callers.
 func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bool) (string, error) {
+	if hubCtx == nil {
+		return "", errors.New("no hub context available to resolve the project ID")
+	}
+
 	// First, check if ProjectID is already set in the context
 	if hubCtx.ProjectID != "" {
 		return hubCtx.ProjectID, nil
@@ -517,6 +547,13 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 
 	// Fall back to git remote lookup
 	gitRemote := util.GetGitRemote()
+	if gitRemote == "" && hubCtx.IsGlobal {
+		// Falling back to the local global directory with no project ID
+		// (ptone/scion#3124): say how to reach a hub project instead of
+		// pointing at a git remote the global directory never has.
+		return "", errors.New("the local global project is not linked to a hub project.\n\n" +
+			"Link it with 'scion hub link', or pass --project <slug|id> to target a hub project")
+	}
 	if gitRemote == "" {
 		msg := "no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub"
 		if !config.IsHubManagedAgent() {
@@ -585,6 +622,13 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
 		return fmt.Errorf("--format json and --attach are mutually exclusive")
+	}
+	// Fail before creating or starting anything when --attach has no
+	// terminal to attach (same check as scion attach).
+	if attach {
+		if err := requireAttachTerminal(); err != nil {
+			return err
+		}
 	}
 
 	// Reject --enable-telemetry with --disable-telemetry (mutually exclusive)
@@ -1573,27 +1617,13 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 
 	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
 	defer attachCancel()
-	if err := attachUnsupportedErr(attachCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
-		return err
-	}
-
-	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
-	// there is no application-level token by design, so transport auth must be
-	// determined before deciding whether an app token is required.
-	attachOpts, transportSrc, err := resolveAttachOptions()
-	if err != nil {
-		return err
-	}
-
-	// Get access token for WebSocket authentication.
-	// Only require an application token when no transport source is configured.
-	token := getHubAccessToken(hubCtx.Endpoint)
-	if token == "" && transportSrc == nil {
-		return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
-	}
-
-	statusf("Attaching to agent '%s' via Hub...\n", agentName)
-	return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
+	return attachHubSession(attachCtx, hubCtx, hubAttachTarget{
+		Name:     agentName,
+		ID:       agentID,
+		Runtime:  agentRuntime,
+		BrokerID: agentBrokerID,
+		Profile:  agentProfile,
+	})
 }
 
 func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, projectID string, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {

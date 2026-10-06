@@ -38,15 +38,34 @@ import (
 )
 
 // erroringCredentialStore wraps a store.Store but makes
-// GetAgentCredentialByJTIHash always fail with a fixed error, simulating a
-// credential-store outage. All other methods delegate to the embedded store.
+// GetAgentCredentialByJTIHash fail with a fixed error while fault is active
+// (always, when fault is nil), simulating a credential-store outage. All
+// other methods delegate to the embedded store.
 type erroringCredentialStore struct {
 	store.Store
-	err error
+	err   error
+	fault *storeFaultSwitch
 }
 
 func (e *erroringCredentialStore) GetAgentCredentialByJTIHash(ctx context.Context, jtiHash string) (*store.AgentCredential, error) {
+	if !e.fault.Active() {
+		return e.Store.GetAgentCredentialByJTIHash(ctx, jtiHash)
+	}
 	return nil, e.err
+}
+
+// setupCredentialTestServerWithCredFault is setupCredentialTestServer with
+// the server's store wrapped in an erroringCredentialStore (returning err)
+// before setup. The wrapper delegates until the returned switch is
+// armed; arm it instead of reassigning srv.store after setup, which races
+// the setup's emitMutationAudit goroutines (ptone/scion#2577).
+func setupCredentialTestServerWithCredFault(t *testing.T, err error) (*Server, store.Store, *store.User, *store.Project, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *erroringCredentialStore {
+		return &erroringCredentialStore{Store: inner, err: err, fault: fault}
+	})
+	srv, s, user, project := setupCredentialTestServerOn(t, srv, s)
+	return srv, s, user, project, fault
 }
 
 // apiErrorBody mirrors the JSON shape written by writeError, for assertions
@@ -202,7 +221,7 @@ func buildAgentRefreshRequest(agentID string, claims *AgentTokenClaims, credenti
 }
 
 func TestAgentRefresh_MarkerPresent_StoreErrorReturns503(t *testing.T) {
-	srv, s, _, project := setupCredentialTestServer(t)
+	srv, s, _, project, credFault := setupCredentialTestServerWithCredFault(t, errors.New("boom"))
 
 	agentID := tid("agent-refresh-marker-store-err")
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
@@ -216,7 +235,7 @@ func TestAgentRefresh_MarkerPresent_StoreErrorReturns503(t *testing.T) {
 
 	// The refresh handler must re-check the credential-ID marker's lookup
 	// result itself; a store error there must 503, not proceed.
-	srv.store = &erroringCredentialStore{Store: s, err: errors.New("boom")}
+	credFault.Arm()
 
 	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
 	rec := httptest.NewRecorder()
@@ -259,7 +278,7 @@ func TestAgentRefresh_MarkerPresent_RevokedDenied(t *testing.T) {
 // exercise the handler in isolation with no marker set.
 
 func TestAgentRefresh_MarkerAbsent_StoreErrorReturns503(t *testing.T) {
-	srv, s, _, project := setupCredentialTestServer(t)
+	srv, s, _, project, credFault := setupCredentialTestServerWithCredFault(t, errors.New("boom"))
 
 	agentID := tid("agent-refresh-nomarker-store-err")
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
@@ -269,7 +288,7 @@ func TestAgentRefresh_MarkerAbsent_StoreErrorReturns503(t *testing.T) {
 	claims, err := srv.agentTokenService.ValidateAgentToken(token)
 	require.NoError(t, err)
 
-	srv.store = &erroringCredentialStore{Store: s, err: errors.New("boom")}
+	credFault.Arm()
 
 	req := buildAgentRefreshRequest(agentID, claims, "", false)
 	rec := httptest.NewRecorder()
@@ -443,7 +462,7 @@ func TestAgentAuthNilCredentialNilErrorReturns503(t *testing.T) {
 }
 
 func TestAgentRefresh_MarkerPresent_NilCredentialNilErrorReturns503(t *testing.T) {
-	srv, s, _, project := setupCredentialTestServer(t)
+	srv, s, _, project, credFault := setupCredentialTestServerWithCredFault(t, nil)
 
 	agentID := tid("agent-refresh-marker-nil-cred")
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
@@ -455,7 +474,7 @@ func TestAgentRefresh_MarkerPresent_NilCredentialNilErrorReturns503(t *testing.T
 	cred, err := s.GetAgentCredentialByJTIHash(context.Background(), hashJTI(claims.ID))
 	require.NoError(t, err)
 
-	srv.store = &erroringCredentialStore{Store: s}
+	credFault.Arm()
 
 	req := buildAgentRefreshRequest(agentID, claims, cred.ID, false)
 	rec := httptest.NewRecorder()
@@ -473,7 +492,7 @@ func TestAgentRefresh_MarkerPresent_NilCredentialNilErrorReturns503(t *testing.T
 }
 
 func TestAgentRefresh_MarkerAbsent_NilCredentialNilErrorReturns503(t *testing.T) {
-	srv, s, _, project := setupCredentialTestServer(t)
+	srv, s, _, project, credFault := setupCredentialTestServerWithCredFault(t, nil)
 
 	agentID := tid("agent-refresh-nomarker-nil-cred")
 	createCredTestAgent(t, s, agentID, project.ID, tid("user-cred-test"))
@@ -483,7 +502,7 @@ func TestAgentRefresh_MarkerAbsent_NilCredentialNilErrorReturns503(t *testing.T)
 	claims, err := srv.agentTokenService.ValidateAgentToken(token)
 	require.NoError(t, err)
 
-	srv.store = &erroringCredentialStore{Store: s}
+	credFault.Arm()
 
 	req := buildAgentRefreshRequest(agentID, claims, "", false)
 	rec := httptest.NewRecorder()
