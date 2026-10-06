@@ -151,7 +151,7 @@ func (s *Server) resolveReincarnateServiceAccount(w http.ResponseWriter, r *http
 		ValidationError(w, msgSANotAvailableInProject, nil)
 		return nil, false
 	}
-	if !sa.Verified {
+	if !gcpServiceAccountVerified(sa) {
 		ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
 		return nil, false
 	}

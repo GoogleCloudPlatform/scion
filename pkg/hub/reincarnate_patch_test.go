@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -744,8 +745,10 @@ func TestReincarnatePatch_SelfRoleChangeDoesNotReRecordEdge(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil) // baseline
 	ctx := context.Background()
+	parent := seedAgentEdge(t, s, tid("user-creator"), agent)
 	edgesBefore, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID)
 	require.NoError(t, err)
+	require.Len(t, edgesBefore, 1, "fixture: the parent edge")
 
 	self := agentIdentityFor(agent.ID, project.ID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
 	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", Role: "readonly"})
@@ -761,9 +764,10 @@ func TestReincarnatePatch_SelfRoleChangeDoesNotReRecordEdge(t *testing.T) {
 	edgesAfter, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, len(edgesBefore), len(edgesAfter), "a self request must not add or replace delegation edges")
-	for _, e := range edgesAfter {
-		assert.NotEqual(t, agent.ID, e.DelegatorID, "the agent must never become its own delegator")
-	}
+	require.Len(t, edgesAfter, 1)
+	assert.Equal(t, parent.ID, edgesAfter[0].ID, "the parent edge stays the active edge")
+	assert.Equal(t, tid("user-creator"), edgesAfter[0].DelegatorID, "the delegator is unchanged")
+	assert.Equal(t, store.DelegationPrincipalUser, edgesAfter[0].DelegatorType)
 }
 
 // TestReincarnatePatch_UserNeedsUpdateForPatch pins decision D4: with a
@@ -846,4 +850,75 @@ func TestReincarnatePatch_UserNeedsUpdateForPatch(t *testing.T) {
 		srv.handleReincarnateAgent(rec, req, agent.ID)
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
+}
+
+// TestReincarnatePatch_RollbackKeepsSeededCreateInputs: the patch is
+// recorded into a deep copy of CreateInputs. With a seeded InlineConfig
+// (scalars and an env map), a failed reincarnation restores CreateInputs
+// exactly as it was, and the record's previous config is clean too; a
+// shallow copy would write the patch through into both.
+func TestReincarnatePatch_RollbackKeepsSeededCreateInputs(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.reprovisionErr = fmt.Errorf("broker refused: reprovision refused: container is still running")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.Image = "seed-image:v1"
+		a.AppliedConfig.Model = "seed-model"
+		a.AppliedConfig.HarnessAuth = "api-key"
+		a.AppliedConfig.ThinkingLevel = intPtr(3)
+		a.AppliedConfig.CreateInputs.HarnessAuth = "api-key"
+		a.AppliedConfig.CreateInputs.ThinkingLevel = intPtr(3)
+		a.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{
+			Image:            "seed-image:v1",
+			Model:            "seed-model",
+			AuthSelectedType: "api-key",
+			ThinkingLevel:    intPtr(3),
+			Env:              map[string]string{"SEED_KEY": "seed-value"},
+		}
+	})
+	seeded, err := json.Marshal(agent.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{
+		Image: "patched-image:v2", Model: "patched-model", ThinkingLevel: intPtr(90), HarnessAuth: "vertex-ai",
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	got, err := json.Marshal(final.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(seeded), string(got), "rollback must restore the seeded CreateInputs unchanged")
+	assert.Equal(t, "seed-model", final.AppliedConfig.Model)
+
+	require.NotNil(t, r.PreviousAppliedConfig)
+	prev, err := json.Marshal(r.PreviousAppliedConfig.CreateInputs)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(seeded), string(prev), "the record's previous CreateInputs must not carry the patch")
+}
+
+// TestReincarnatePatch_UnsupportedHarnessAuthRefused: a harness-auth value
+// the agent's harness does not support is refused with 400 before any side
+// effect, the same validation PATCH applies.
+func TestReincarnatePatch_UnsupportedHarnessAuthRefused(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		// codex declares vertex_ai unsupported.
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "codex"}
+	})
+	before := snapshotAgent(t, s, agent.ID)
+
+	for _, dryRun := range []bool{true, false} {
+		rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{DryRun: dryRun, HarnessAuth: "vertex-ai"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "harnessAuth is not supported by harness codex")
+	}
+	assertAgentUntouched(t, s, disp, agent.ID, before)
+
+	// A value the harness supports is accepted.
+	rec := reincarnateAsDev(t, srv, agent.ID, ReincarnateAgentRequest{DryRun: true, HarnessAuth: "api-key"})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
