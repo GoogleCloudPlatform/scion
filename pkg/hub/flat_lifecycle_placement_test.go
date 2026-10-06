@@ -18,14 +18,18 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // P1.3 part 1 (ptone/scion#3269): placement stays on the saved Runtime Broker
@@ -122,4 +126,45 @@ func TestFlatPlacement_StaysOnSavedInstanceAcrossDefaultChangeAndRestart(t *test
 	require.NoError(t, err)
 	require.NotNil(t, row.RuntimeTarget)
 	assert.Equal(t, *f.flat.RuntimeTarget, *row.RuntimeTarget)
+}
+
+// TestFlatReincarnate_PlanImageSkipsProfileTier: the reincarnate plan's image
+// steps read the Hub's settings without the Runtime Broker Profile tier for a
+// pinned (flat) agent: no profile harness_overrides image and no
+// active_profile fallback. A legacy agent still takes the active profile's
+// override image (control).
+func TestFlatReincarnate_PlanImageSkipsProfileTier(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	hcSlug := "flat-plan-hc-" + tidSlugSafe(t.Name())
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(`schema_version: "1"
+active_profile: batch
+profiles:
+  batch:
+    runtime: docker
+    harness_overrides:
+      `+hcSlug+`:
+        image: profile-image:v4
+`), 0o644))
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	withHC := func(a *store.Agent) {
+		reincarnationEligible(a)
+		a.AppliedConfig.HarnessConfig = hcSlug
+		a.AppliedConfig.CreateInputs.HarnessConfig = hcSlug
+	}
+	planImage := func(t *testing.T, a *store.Agent) string {
+		t.Helper()
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ReincarnateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.Plan.Image.New
+	}
+
+	legacy := f.unpinnedAgentOnWith(t, "plan-legacy", f.legacy.ID, string(state.PhaseStopped), withHC)
+	assert.Equal(t, "profile-image:v4", planImage(t, legacy), "control: a legacy agent takes the active profile's override image")
+
+	pinned := f.pinnedAgentWith(t, "plan-pinned", string(state.PhaseStopped), withHC)
+	assert.NotEqual(t, "profile-image:v4", planImage(t, pinned), "a pinned agent takes no profile-tier image")
 }

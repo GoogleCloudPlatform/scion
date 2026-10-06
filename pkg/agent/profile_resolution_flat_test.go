@@ -187,3 +187,24 @@ func TestForProfileResolution_DoesNotMutateSettings(t *testing.T) {
 	assert.Equal(t, "registry.example/profile", vs.ResolveImageRegistry(""), "legacy resolution still uses the active profile")
 	assert.Same(t, vs, vs.ForProfileResolution(config.ProfileResolutionLegacy))
 }
+
+// TestFlatProfileResolution_ProvisionedImageSkipsProfileTier: the image the
+// manager reports for a freshly provisioned agent (withProvisionedImage)
+// reads settings in the request's profile-resolution mode: a flat instance
+// takes no active-profile harness override image; legacy still does.
+func TestFlatProfileResolution_ProvisionedImageSkipsProfileTier(t *testing.T) {
+	r := newFlatResolutionRun(t)
+	opts := func(name string) api.StartOptions {
+		return api.StartOptions{Name: name, ProjectPath: r.fixture.projectScionDir, NoAuth: true, HarnessConfig: "test-harness"}
+	}
+	flatCfg, err := r.mgr.Provision(flatCtx(), opts("flat-provimg"))
+	require.NoError(t, err)
+	require.NotNil(t, flatCfg)
+	assert.NotContains(t, flatCfg.Image, "profile-only-image", "a flat agent's provisioned image takes no active-profile override")
+	assert.Equal(t, "test-image:latest", flatCfg.Image, "the harness config's own image applies")
+
+	legacyCfg, err := r.mgr.Provision(context.Background(), opts("legacy-provimg"))
+	require.NoError(t, err)
+	require.NotNil(t, legacyCfg)
+	assert.Equal(t, "profile-only-image:batch", legacyCfg.Image, "control: legacy provisioning applies the active profile's override image")
+}
