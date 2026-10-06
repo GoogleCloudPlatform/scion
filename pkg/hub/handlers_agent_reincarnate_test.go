@@ -1009,6 +1009,89 @@ func TestReincarnateAgent_SameBrokerEmptyPerAgent_UnrecordedRuntime(t *testing.T
 	}
 }
 
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_Refused pins the refusals of
+// the miller79/scion#167 gate. A runtime outside the local-disk allow-list
+// gets 400; a broker without ReprovisionEmptyPerAgent gets 412 (an older
+// broker would refuse the reprovision only after the worker had stopped the
+// agent). Each holds on the dry run and the real request, with and without
+// `--broker <current>`, and the agent is never stopped: no stop dispatch,
+// no reincarnation record, no state change.
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_Refused(t *testing.T) {
+	const runtimeMsg = "empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)"
+	const capMsg = "runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker"
+	fullCaps := &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+	cases := []struct {
+		name     string
+		runtime  string
+		caps     *store.BrokerCapabilities
+		wantCode int
+		wantMsg  string
+	}{
+		{name: "kubernetes runtime", runtime: "kubernetes", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{name: "cloudrun runtime", runtime: "cloudrun", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{name: "unknown runtime", runtime: "some-future-runtime", caps: fullCaps, wantCode: http.StatusBadRequest, wantMsg: runtimeMsg},
+		{
+			name:     "broker without ReprovisionEmptyPerAgent",
+			runtime:  "docker",
+			caps:     &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, AgentMove: true},
+			wantCode: http.StatusPreconditionFailed,
+			wantMsg:  capMsg,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = tc.caps
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = tc.runtime
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			beforeVersion := agent.StateVersion
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, target := range []string{"", broker.ID} {
+				for _, dryRun := range []bool{true, false} {
+					rec := httptest.NewRecorder()
+					req := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun, TargetBroker: target}
+					srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, req), agent.ID)
+					assert.Equal(t, tc.wantCode, rec.Code, "target=%q dryRun=%v: body: %s", target, dryRun, rec.Body.String())
+					assert.Contains(t, rec.Body.String(), tc.wantMsg, "target=%q dryRun=%v", target, dryRun)
+					if tc.wantCode == http.StatusPreconditionFailed {
+						assert.Contains(t, rec.Body.String(), ErrCodeUnsupportedCapability, "target=%q dryRun=%v", target, dryRun)
+					}
+				}
+			}
+
+			disp.mu.Lock()
+			stops := disp.stopCalls
+			disp.mu.Unlock()
+			assert.Zero(t, stops, "the agent must never be stopped for a request the gate refuses up front")
+			n, _ := disp.reprovisionSnapshot()
+			assert.Zero(t, n, "nothing may be dispatched")
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, beforeVersion, after.StateVersion, "agent must be untouched")
+			assert.Equal(t, 1, after.Generation)
+			assert.Equal(t, "", after.ReincarnationState)
+			list, err := s.ListAgentReincarnations(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "no reincarnation record may be created")
+		})
+	}
+}
+
 // TestReincarnateAgent_ModeSwitchedToShared_Returns400 is the design §3.4
 // Amendment A23.1 (review p1b-r1) R3 regression test: A23 contract (a) keeps
 // "not shared" as a condition for the clone-per-agent case, unchanged from
