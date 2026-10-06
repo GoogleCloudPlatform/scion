@@ -158,7 +158,27 @@ resources:
   disk: "20Gi"    # maps to ephemeral-storage (both requests and limits)
 ```
 
-Extended resources (GPUs, custom devices) use `kubernetes.resources`.
+Fields merge one by one. Any request you leave empty gets a default **request**: `cpu: 250m`, `memory: 512Mi` and `ephemeral-storage: 10Gi`. These defaults are requests only, for scheduling. Scion does not add a default memory or ephemeral-storage limit. A memory limit applies only when you set `limits.memory`, and an ephemeral-storage limit only when you set `disk`. The CPU limit comes from your settings, or from the built-in `limits.cpu: "2"` when nothing sets one. If you set a limit lower than a default request, the default request is lowered to the limit. Values you set are never changed.
+
+To give every agent on a Kubernetes profile a fixed disk and memory budget, set them in the profile:
+
+```yaml
+profiles:
+  k8s:
+    runtime: k8s
+    resources:
+      requests:
+        memory: "2Gi"
+      limits:
+        memory: "12Gi"
+      disk: "40Gi"   # ephemeral-storage request and limit
+```
+
+:::note[What counts against ephemeral storage]
+Unless they are on a PVC or NFS volume, the agent's `/workspace`, its `HOME` directory, and build caches under it (for example the Go module and build caches in `~/go/pkg/mod` and `~/.cache/go-build`) are stored in the pod's ephemeral storage. With a `disk` limit set, a pod that writes more than that limit is evicted. Size `disk` for the repository, its dependencies and its build output, not just the source tree.
+:::
+
+Extended resources (GPUs, custom devices) use `kubernetes.resources`. Keys set there (including `memory` or `ephemeral-storage`) override the common `resources` field and the defaults.
 
 ### GKE Workload Identity
 
