@@ -121,9 +121,21 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
     .header-title {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 0.75rem;
       margin-bottom: 0.25rem;
+    }
+
+    /* A long name wraps on its own line; the badge then follows on the next
+       line. The min-height matches .group-icon so a one-line name stays
+       centred on the icon. */
+    .header-title-text {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
+      min-height: 2.5rem;
     }
 
     .header h1 {
@@ -131,6 +143,8 @@ export class ScionPageAdminGroupDetail extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     .header-slug {
@@ -442,10 +456,12 @@ export class ScionPageAdminGroupDetail extends LitElement {
             <div class="group-icon ${this.group.groupType}" aria-hidden="true">
               <sl-icon name="${isProjectAgents ? 'cpu' : 'people'}"></sl-icon>
             </div>
-            <h1>${this.group.name}</h1>
-            <span class="type-badge ${this.group.groupType}">
-              ${isProjectAgents ? 'project agents' : 'explicit'}
-            </span>
+            <div class="header-title-text">
+              <h1>${this.group.name}</h1>
+              <span class="type-badge ${this.group.groupType}">
+                ${isProjectAgents ? 'project agents' : 'explicit'}
+              </span>
+            </div>
           </div>
           <span class="header-slug">${this.group.slug}</span>
         </div>

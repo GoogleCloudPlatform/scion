@@ -397,6 +397,50 @@ tracked as [issue #624](https://github.com/ptone/scion/issues/624).
 it lowest. The ladder above is taken from the resolver implementation, not from those comments.
 :::
 
+### A6. `SCION_AUTO_EXPOSE_PORTS` has its own four-tier order
+
+`SCION_AUTO_EXPOSE_PORTS`, which turns on the in-container
+[auto-expose scanner](/scion/hosted/user/port-forwarding/#auto-expose-ports), is the one
+environment variable that the hub also sets from a project annotation and a hub-wide default. It
+resolves in the same order as [B1](#b1-harness-configuration-model-thinking-level-and-scalar-limits),
+not the storage-scope ladder above. Higher tiers win; a lower tier applies only when every tier
+above it left the key unset:
+
+| Priority | Source | Where it is recorded |
+| --- | --- | --- |
+| Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's configure page | the agent's explicit config, so it survives reincarnate |
+| | the project annotation `scion.io/auto-expose-ports-enabled` | written by the hub at create and re-derived at reincarnate, never recorded as explicit |
+| | template env and harness-config env (in broker mode harness-config env wins between the two; see [harness-config env now outranks template env](#changed-in-this-release--harness-config-env-now-outranks-template-env-in-broker-mode)) | the template and harness config |
+| Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it last |
+
+Because the hub default is read at each dispatch, changing it changes what an agent that inherits
+it gets at its next start. Reincarnate re-reads the project annotation, so an annotation changed
+since the agent was created takes effect there; a value the user set explicitly carries over
+unchanged.
+
+Agents created by an older hub may still carry a project or hub value stamped into their inline
+config, where it looks explicit. The rerunnable maintenance migration `auto-expose-env-normalize` (run it
+from the hub admin maintenance page, or with
+`POST /api/v1/admin/maintenance/migrations/auto-expose-env-normalize/run`) removes such a stamp and re-derives the value from the project and
+template exactly as reincarnate would. A running agent keeps the old value in its container until
+it is next provisioned or reincarnated. A run that had to skip agents (its log reports
+`skipped N agent(s)`) still shows as completed, and the maintenance page does not offer completed
+migrations again, so re-run it with the `POST` call above.
+
+The other auto-expose variables (`SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PORTS_LIST`,
+`SCION_AUTO_EXPOSE_INTERVAL`, `SCION_AUTO_EXPOSE_MIN_PORT`) have no project or hub tier and follow
+the ordinary env rules on this page.
+
+:::caution[Two edges of this order]
+- **A storage-scope value outranks template and harness-config env.** A
+  `SCION_AUTO_EXPOSE_PORTS` set with `scion hub env set` (any scope) fills the key before the
+  broker applies the template and harness-config tiers, so it beats both. It still loses to an
+  explicit value and to the project annotation, and it beats the hub default.
+- **A local CLI start on the broker host gets no hub default.** The hub default reaches the broker
+  only with a hub dispatch. An agent started from the `scion` CLI on the broker machine itself
+  does not receive it; with no higher tier set, auto-expose stays off.
+:::
+
 ### `Changed in this release` — harness-config env now outranks template env in broker mode
 
 **Before:** for hub-dispatched (broker-mode) agents, template env won over harness-config env.

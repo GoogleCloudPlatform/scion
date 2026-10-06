@@ -1959,7 +1959,14 @@ func (s *Server) createAgentInProject(
 
 	// Apply project-level defaults, hub operational defaults, and the
 	// template/harness-config derivation pipeline. See deriveAgentConfig.
-	s.deriveAgentConfig(ctx, agent, project, resolvedTemplate)
+	// It fails only when workspace storage did not respond; that is answered
+	// with 503 here, before any quota reservation or agent row exists.
+	if err := s.deriveAgentConfig(ctx, agent, project, resolvedTemplate); err != nil {
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
+		return
+	}
 
 	// Quota enforcement, in order:
 	//  1. Per-broker agent ceiling (ptone/scion#1303). Exceeding the ceiling
@@ -2145,7 +2152,22 @@ func (s *Server) createAgentInProject(
 			stor := s.GetStorage()
 			if stor != nil {
 				resolvedWorkspace, workspaceErr := s.resolveHubManagedWorkspaceForUpload(agent.AppliedConfig.Workspace, project.Slug)
-				if workspaceErr != nil {
+				if errors.Is(workspaceErr, errWorkspaceContentTimeout) {
+					// Workspace storage did not respond. Dispatching without
+					// the upload would leave the remote broker resolving the
+					// workspace against its own stale or empty project copy,
+					// so the create fails here and answers 503 without the
+					// path. As with the workspace-bootstrap failures above,
+					// the agent row and quotas exist, nothing has been
+					// dispatched (nil DeleteRuntime) and no credential has
+					// been minted (no revoke). A failed compensation answers
+					// 500 with its correlation ID instead (writeCreateFailure).
+					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
+						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
+					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
+					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
+					return
+				} else if workspaceErr != nil {
 					s.agentLifecycleLog.Warn("Skipping GCS upload of invalid hub-managed project workspace",
 						"agent_id", agent.ID,
 						"project_id", project.ID, "error", workspaceErr)
@@ -3184,26 +3206,61 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 	isSelf := false
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agent.ProjectID != agentIdent.ProjectID() {
-			NotFound(w, "Agent")
+			writeAgentNotFound(w)
 			return
 		}
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
-	// denied reading any *other* agent here. An agent reading its own record
-	// is exempt, matching getProjectAgent's self-read contract (see
+	// denied reading any *other* agent here, except an agent it directly
+	// launched in its project (authz_launcher_read.go). An agent reading its
+	// own record is exempt, matching getProjectAgent's self-read contract (see
 	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): this is the
 	// route the in-container CLI uses for `scion whoami --full` (GetSelf), and
 	// both routes return the same writeAgentGetResponse body, so the exemption
 	// exposes nothing the project route doesn't already. The project:read
 	// scope check above still applies to self-reads.
 	if !isSelf {
-		if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		if !s.authorizeSingleAgentRead(w, r, agent) {
 			return
 		}
 	}
 
 	s.writeAgentGetResponse(w, r, agent)
+}
+
+// writeAgentNotFound is the single-agent GET answer for an agent that
+// does not exist. An agent caller gets the same answer for an agent it
+// may not read, so the two cannot be told apart.
+func writeAgentNotFound(w http.ResponseWriter) {
+	writeErrorFromErr(w, store.ErrNotFound, "")
+}
+
+// authorizeSingleAgentRead is the agent.read gate shared by the
+// single-agent GET routes (getAgent, getProjectAgent). The resource
+// carries the agent record read from the store above, which the launcher
+// status-read rule decides from (authz_launcher_read.go). A user caller's
+// denial is the usual 403; an agent caller's denial is writeAgentNotFound.
+func (s *Server) authorizeSingleAgentRead(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
+	ctx := r.Context()
+	resource := agentStatusReadResource(agent)
+	if GetAgentIdentityFromContext(ctx) == nil {
+		return s.authorize(w, r, resource, ActionRead)
+	}
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, identity, resource, ActionRead)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionRead, decision.Reason)
+		// Existence timing may differ; accepted for agent-ID existence,
+		// revisit if IDs become higher-value.
+		writeAgentNotFound(w)
+		return false
+	}
+	return true
 }
 
 // writeAgentGetResponse builds and writes the standard single-agent response

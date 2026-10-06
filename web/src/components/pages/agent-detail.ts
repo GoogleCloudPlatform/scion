@@ -278,8 +278,9 @@ export class ScionPageAgentDetail extends LitElement {
     }
     .header-meta {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 1rem;
+      gap: 0.5rem 1rem;
       margin-top: 0.5rem;
     }
     .template-badge {
@@ -291,6 +292,9 @@ export class ScionPageAgentDetail extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
+      /* One long template name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .project-link,
     .broker-link {
@@ -300,6 +304,15 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-text-muted, #64748b);
       text-decoration: none;
       font-size: 0.875rem;
+      /* One long project or broker name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    /* The icon keeps its size when a long name wraps beside it. */
+    .template-badge sl-icon,
+    .project-link sl-icon,
+    .broker-link sl-icon {
+      flex-shrink: 0;
     }
     .project-link:hover,
     .broker-link:hover {
