@@ -3324,14 +3324,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// for a given agent is the same whether the creator, an admin, or a
 	// project owner starts it.
 	extras := StartExtras{
-		HubEndpoint:             d.effectiveAgentHubEndpoint(),
-		UserID:                  agent.OwnerID,
-		ProvisionCredentials:    d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
-		Workspace:               startEnv.workspace,
-		HubAgentDefaults:        startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
-		TemplateName:            agent.Template,
-		ExpectedRuntimeTargetID: validPinnedTarget(agent),
+		HubEndpoint:          d.effectiveAgentHubEndpoint(),
+		UserID:               agent.OwnerID,
+		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
+		Workspace:            startEnv.workspace,
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
+	// A flat Runtime Broker receives the agent's valid pinned target.
+	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
@@ -3463,13 +3464,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// exactly as create does (#1960), always as the agent's creator
 	// regardless of who is dispatching this restart (ptone/scion#1994).
 	extras := StartExtras{
-		HubEndpoint:             d.effectiveAgentHubEndpoint(),
-		UserID:                  agent.OwnerID,
-		ProvisionCredentials:    d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
-		HubAgentDefaults:        startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
-		TemplateName:            agent.Template,
-		ExpectedRuntimeTargetID: validPinnedTarget(agent),
+		HubEndpoint:          d.effectiveAgentHubEndpoint(),
+		UserID:               agent.OwnerID,
+		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
+	// A flat Runtime Broker receives the agent's valid pinned target.
+	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
