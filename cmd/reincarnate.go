@@ -201,9 +201,6 @@ broker checks.`,
 			return err
 		}
 
-		if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
-			return err
-		}
 		if err := validateReincarnatePatchFlags(); err != nil {
 			return err
 		}
@@ -261,9 +258,6 @@ func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dr
 }
 
 func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSelf bool) error {
-	if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
-		return err
-	}
 	// The shared dir flags are checked before any agent request.
 	sharedDirBackends, err := parseSharedDirBackendFlags(reincarnateSharedDirs, reincarnateAllowEmptySD)
 	if err != nil {
@@ -294,15 +288,23 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	applyReincarnatePatchFlags(req)
 	wantPatched := requestedPatchFields(req)
 
-	// A hub that predates the patch fields ignores serviceAccount, role and
-	// thinkingLevel, and would run an unpatched reincarnation; one that
-	// predates sharedDirBackends ignores those too. Before a real patched
-	// or shared dir request, ask for the plan first and stop if the hub did
-	// not apply it.
+	// A real patched, --broker or shared dir request is preceded by a dry
+	// run of the same request (patch, target broker and shared dir change
+	// included). A hub that predates the patch fields ignores
+	// serviceAccount, role and thinkingLevel and would run an unpatched
+	// reincarnation; one that predates sharedDirBackends ignores those too;
+	// a hub that does not know --broker would ignore it and run a real
+	// in-place reincarnation. So the dry run must show the patch and the
+	// shared dir change applied, and for --broker come back as a move (a
+	// target broker, and a verdict when the target is another broker); a
+	// refused move prints its verdict.
 	wantSharedDirs := len(req.SharedDirBackends) > 0
-	if (len(wantPatched) > 0 || wantSharedDirs) && !reincarnateDryRun {
+	if !reincarnateDryRun && (len(wantPatched) > 0 || reincarnateBroker != "" || wantSharedDirs) {
 		probe := *req
 		probe.DryRun = true
+		if reincarnateBroker != "" {
+			statusf("Checking that '%s' can move to broker '%s'...\n", agentName, reincarnateBroker)
+		}
 		probeResp, err := agentSvc.Reincarnate(ctx, agentName, &probe)
 		if err != nil {
 			if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
@@ -311,12 +313,18 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			if perr := patchNeedsUpdateError(err, wantPatched, hubCtx.CredentialKind); perr != nil {
 				return wrapHubError(perr)
 			}
+			if reincarnateBroker != "" {
+				return wrapHubError(fmt.Errorf("the move to broker '%s' is not possible: %w", reincarnateBroker, err))
+			}
 			return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
 		}
 		if err := checkHubAppliedPatch(wantPatched, probeResp); err != nil {
 			return err
 		}
 		if err := checkHubAppliedSharedDirs(req, probeResp); err != nil {
+			return err
+		}
+		if err := checkMoveHandshakeResponse(reincarnateBroker, probeResp); err != nil {
 			return err
 		}
 	}
@@ -414,16 +422,6 @@ func parseSharedDirBackendFlags(values []string, allowEmpty bool) (map[string]st
 		out[name] = backend
 	}
 	return out, nil
-}
-
-// validateReincarnateBrokerFlags refuses --broker without --dry-run before
-// any hub call: a hub that does not know --broker would ignore it and run a
-// real in-place reincarnation.
-func validateReincarnateBrokerFlags(broker string, dryRun bool) error {
-	if broker != "" && !dryRun {
-		return newUsageError("--broker requires --dry-run: moving an agent between brokers is not supported yet")
-	}
-	return nil
 }
 
 // validateReincarnatePatchFlags checks the patch flag values locally, with
@@ -543,6 +541,23 @@ func checkHubAppliedSharedDirs(req *hubclient.ReincarnateAgentRequest, resp *hub
 	if resp == nil || !maps.Equal(resp.Plan.SharedDirBackends, req.SharedDirBackends) ||
 		resp.Plan.AllowEmptySharedDir != req.AllowEmptySharedDir {
 		return fmt.Errorf("this hub does not support --shared-dir-backend; upgrade the hub")
+	}
+	return nil
+}
+
+// checkMoveHandshakeResponse checks the dry run that precedes a real
+// --broker request: the hub must support --broker (a target broker in the
+// answer, and a verdict for a target other than the agent's current
+// broker). It does nothing without --broker.
+func checkMoveHandshakeResponse(broker string, resp *hubclient.ReincarnateAgentResponse) error {
+	if broker == "" {
+		return nil
+	}
+	if err := checkHubSupportsMove(broker, resp); err != nil {
+		return err
+	}
+	if resp.SourceBrokerID != resp.TargetBrokerID && resp.MoveVerdict == nil {
+		return fmt.Errorf("this hub does not support --broker; upgrade the hub")
 	}
 	return nil
 }
@@ -673,7 +688,7 @@ func isReincarnateHandoffTemplateInvocation(cmd *cobra.Command) bool {
 func init() {
 	reincarnateCmd.Flags().StringVar(&reincarnateHandoffFile, "handoff-file", "", "File whose content becomes the new generation's first task (required for self-migration)")
 	reincarnateCmd.Flags().BoolVar(&reincarnateDryRun, "dry-run", false, "Print the resolved reincarnation plan without migrating anything")
-	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. Requires --dry-run for now")
+	reincarnateCmd.Flags().StringVar(&reincarnateBroker, "broker", "", "Move the agent to this runtime broker (name or ID); both brokers must mount the same NFS export. The move is dry-run first and refused if not eligible")
 	reincarnateCmd.Flags().BoolVar(&reincarnateHandoffTemplate, "handoff-template", false, "Print the handoff template and exit")
 	reincarnateCmd.Flags().StringArrayVar(&reincarnateSharedDirs, "shared-dir-backend", nil, "Change a shared dir's recorded storage backend, as NAME=nfs (repeatable). Only the record changes; copy the data to the nfs directory first")
 	reincarnateCmd.Flags().BoolVar(&reincarnateAllowEmptySD, "allow-empty-shared-dir", false, "With --shared-dir-backend, start even if the nfs directory is empty while the previous local directory is not")
