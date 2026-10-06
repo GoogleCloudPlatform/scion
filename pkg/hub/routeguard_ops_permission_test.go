@@ -139,8 +139,11 @@ func TestRouteGuardOpsPermissions(t *testing.T) {
 			meta := routeMetadataTable[route.pattern]
 			handler := srv.routeGuard(meta, okHandler)
 
+			// An interactive session, as the auth middleware records it:
+			// session-only routes refuse any other credential.
 			req := httptest.NewRequest(http.MethodGet, route.pattern, nil)
-			req = req.WithContext(contextWithIdentity(ctx, superAdmin))
+			req = req.WithContext(contextWithCredentialContext(contextWithIdentity(ctx, superAdmin),
+				CredentialContext{Kind: CredentialKindInteractive}))
 			rr := httptest.NewRecorder()
 			handler(rr, req)
 
