@@ -279,9 +279,8 @@ func TestParityAC2_RateLimitSharedAcrossAdapters(t *testing.T) {
 	// Configure a very tight rate limit (1 per minute).
 	srv.chatSendLimiter = newChatSendLimiterWithRates(
 		map[chatSenderClass]float64{
-			chatSenderHuman:       60,
-			chatSenderAgent:       1,
-			chatSenderAgentMirror: 1,
+			chatSenderHuman: 60,
+			chatSenderAgent: 1,
 		}, time.Now)
 
 	// First send via outbound: should succeed.
@@ -547,9 +546,8 @@ func TestParityAC2_TypeSwitchCannotBypassBudget(t *testing.T) {
 	// Configure a very tight rate limit.
 	srv.chatSendLimiter = newChatSendLimiterWithRates(
 		map[chatSenderClass]float64{
-			chatSenderHuman:       60,
-			chatSenderAgent:       1,
-			chatSenderAgentMirror: 1,
+			chatSenderHuman: 60,
+			chatSenderAgent: 1,
 		}, time.Now)
 
 	// First send with type "instruction" via outbound.

@@ -1876,9 +1876,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// Record "web" reply-channel affinity so untagged agent replies
-	// (e.g. `scion message user:...` or sciontool Stop-hook assistant-reply
-	// mirror) route back to web chat rather than a stale external bridge
-	// channel (Discord/Telegram). See #2448.
+	// (e.g. `scion message user:...`) route back to web chat rather than a
+	// stale external bridge channel (Discord/Telegram). See #2448.
 	s.mu.RLock()
 	affinityWcs := s.webChatStore
 	s.mu.RUnlock()
@@ -2891,6 +2890,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		var err error
 		result, err = s.store.ListMessages(ctx, filter, opts)
 		if err != nil {
+			// Caller error such as a malformed ?cursor (store.ErrInvalidInput)
+			// is a 400, not a server failure (ptone/scion#1957).
+			if errors.Is(err, store.ErrInvalidInput) {
+				writeErrorFromErr(w, err, "")
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 			return
 		}

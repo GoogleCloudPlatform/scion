@@ -349,3 +349,22 @@ func TestSubjectMatchesPattern(t *testing.T) {
 		})
 	}
 }
+
+func TestInProcessEventBus_SubscribeNilHandler(t *testing.T) {
+	b := newTestEventBus()
+	defer func() { _ = b.Close() }()
+
+	sub, err := b.Subscribe("test.>", nil)
+	if !errors.Is(err, ErrNilHandler) {
+		t.Fatalf("Subscribe(nil) error = %v, want ErrNilHandler", err)
+	}
+	if sub != nil {
+		t.Fatalf("Subscribe(nil) returned a non-nil subscription")
+	}
+
+	// The rejected subscription must not have been registered: a publish to a
+	// matching topic must neither panic nor report a delivery problem.
+	if err := b.Publish(context.Background(), "test.topic", &messages.StructuredMessage{}); err != nil {
+		t.Fatalf("Publish after rejected Subscribe: %v", err)
+	}
+}
