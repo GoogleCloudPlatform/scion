@@ -1017,6 +1017,9 @@ type RemoteCreateAgentRequest struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// When set, the broker downloads the workspace from GCS instead of using ProjectPath.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath.
+	// Brokers that predate it ignore it and use their own bucket setting.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with env requirements.
@@ -1332,6 +1335,14 @@ type Server struct {
 	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
+
+	// decisionAuditWriter is the buffered decision audit writer wired into
+	// authzService. CleanupResources does not close it: it runs before
+	// the HTTP drain, and requests still being served then emit records.
+	// Shutdown closes it after the HTTP drain, unless
+	// DeferDecisionAuditClose moved that to the caller.
+	decisionAuditWriter        *StoreDecisionAuditEmitter
+	decisionAuditCloseDeferred atomic.Bool
 
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
@@ -2064,6 +2075,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
+	srv.decisionAuditWriter = auditEmitter
 	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
 
 	// Initialize B3-B6 boundary services (preview, governance, capabilities).
@@ -3427,6 +3439,44 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.gcpTokenMetrics = m
 }
 
+// SetDecisionAuditMetrics wires metrics into the decision audit writer. A
+// nil recorder disables them. Queue depth is read separately through
+// DecisionAuditQueueDepth.
+func (s *Server) SetDecisionAuditMetrics(m DecisionAuditMetricsRecorder) {
+	if s.decisionAuditWriter != nil {
+		s.decisionAuditWriter.SetMetrics(m)
+	}
+}
+
+// DecisionAuditQueueDepth reports the number of decision audit records
+// queued to be written (not in-flight: records a worker is writing or
+// retrying are not counted). It is the source for the queue depth gauge.
+func (s *Server) DecisionAuditQueueDepth() int64 {
+	if s.decisionAuditWriter == nil {
+		return 0
+	}
+	return int64(s.decisionAuditWriter.QueueDepth())
+}
+
+// DeferDecisionAuditClose tells the Server that the caller will call
+// CloseDecisionAudit itself, after every HTTP server that serves this
+// Server's handler has drained. Shutdown then leaves the writer open. Use
+// it when the handler is also mounted on another listener (for example
+// the WebServer), so records from requests that the other listener is
+// still draining are written rather than dropped.
+func (s *Server) DeferDecisionAuditClose() {
+	s.decisionAuditCloseDeferred.Store(true)
+}
+
+// CloseDecisionAudit drains and closes the decision audit writer. Call it
+// after the HTTP servers that serve this Server have drained and before
+// the store is closed. Safe to call more than once.
+func (s *Server) CloseDecisionAudit(ctx context.Context) {
+	if s.decisionAuditWriter != nil {
+		s.decisionAuditWriter.Close(ctx)
+	}
+}
+
 // SetExternalBearerMetrics wires the external-bearer authentication outcome
 // counter. Unlike SetMetrics/SetDBMetrics/SetDispatchMetrics/
 // SetGCPTokenMetrics above, this recorder is read from AuthConfig by the
@@ -4140,6 +4190,11 @@ type MessageEventPayload struct {
 	Plain     bool   `json:"plain,omitempty"`
 }
 
+// errScheduledMessageRefused is the one public refusal a scheduled message
+// records when its target cannot be resolved or fire-time authorization
+// refuses it. The specific cause is logged, never stored on the event.
+var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
+
 // messageEventHandler returns an EventHandler that dispatches scheduled messages
 // to agents via the AgentDispatcher.
 //
@@ -4186,20 +4241,26 @@ func (s *Server) messageEventHandler() EventHandler {
 			return fmt.Errorf("message payload must include agentId or agentName")
 		}
 		if err != nil {
+			// The returned error is persisted as ScheduledEvent.Error, which
+			// project readers can see. A missing target, a lookup failure
+			// and an authorization refusal below all return the same
+			// constant (errScheduledMessageRefused); the specific cause is
+			// logged here.
 			if errors.Is(err, store.ErrNotFound) {
 				slog.Warn("Scheduler: target agent no longer exists",
 					"eventID", evt.ID,
 					"agentName", payload.AgentName,
 					"agent_id", payload.AgentID,
 					"projectID", evt.ProjectID,
-					"message", payload.Message)
-				// Return the error — the enclosing scheduler wrapper
-				// (fireEvent / executeSchedule) owns status recording and
-				// will persist the error message on the event.
-				return fmt.Errorf("target agent deleted: agent %q not found in project %q",
-					targetName, evt.ProjectID)
+					"cause", "target agent deleted")
+			} else {
+				slog.Warn("Scheduler: target agent lookup failed",
+					"eventID", evt.ID,
+					"agentName", targetName,
+					"projectID", evt.ProjectID,
+					"error", err)
 			}
-			return fmt.Errorf("failed to resolve agent %q: %w", targetName, err)
+			return errScheduledMessageRefused
 		}
 
 		// ---- C1 containment: fire-time authorization ----
@@ -4209,7 +4270,13 @@ func (s *Server) messageEventHandler() EventHandler {
 		// status recording. No external effect occurs on denial.
 		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
 		if authErr != nil {
-			return authErr
+			slog.Warn("Scheduler: scheduled message refused at fire time",
+				"eventID", evt.ID,
+				"agent_id", agent.ID,
+				"projectID", evt.ProjectID,
+				"creator", evt.CreatedBy,
+				"error", authErr)
+			return errScheduledMessageRefused
 		}
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
@@ -5319,7 +5386,9 @@ func (s *Server) Start(ctx context.Context) error {
 // and only the final HTTP listener shutdown is skipped when there is no
 // listener to shut down. It is also safe to call more than once, or
 // together with CleanupResources, since CleanupResources is idempotent and
-// http.Server.Shutdown tolerates repeated calls.
+// http.Server.Shutdown tolerates repeated calls. The order is:
+// CleanupResources, then the HTTP drain, then the decision audit writer
+// drain (skipped if DeferDecisionAuditClose was called).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
@@ -5333,14 +5402,19 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// so this is a no-op if it already ran.
 	_ = s.CleanupResources(ctx)
 
-	if srv == nil {
-		return nil
+	var err error
+	if srv != nil {
+		shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err = srv.Shutdown(shutdownCtx)
+		cancel()
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	return srv.Shutdown(shutdownCtx)
+	// Close the decision audit writer only after the HTTP drain, so
+	// records from requests that finish during the drain are written.
+	if !s.decisionAuditCloseDeferred.Load() {
+		s.CloseDecisionAudit(ctx)
+	}
+	return err
 }
 
 // CleanupResources shuts down Hub-owned resources (control channel, broker auth,
@@ -5348,6 +5422,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // where the Hub API is mounted on the WebServer and has no listener of its own.
 // It is also called internally by Shutdown, and is safe to call more than
 // once, including after Shutdown: the teardown below runs at most once.
+// It does not close the decision audit writer; in combined mode, call
+// CloseDecisionAudit after the WebServer's HTTP drain.
 func (s *Server) CleanupResources(ctx context.Context) error {
 	s.cleanupOnce.Do(func() {
 		s.mu.RLock()
