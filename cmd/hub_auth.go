@@ -21,7 +21,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auth"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -84,9 +83,18 @@ In headless environments (no display server), or when --no-browser is specified,
 the device authorization flow is used instead. This displays a URL and code
 that you can enter on any device with a browser.
 
+` + hubAuthURLPrecedence + `
+
+After a successful login, when no hub.endpoint is set in settings for the
+current scope (the project's own settings, else global), the hub URL is saved
+there so 'scion hub status' and other hub commands use it. An existing
+hub.endpoint is never overwritten. If hub mode is off, an interactive login
+offers to enable it; otherwise run 'scion hub enable'.
+
 Example:
   scion hub auth login
   scion hub auth login --hub-url https://hub.example.com
+  scion --hub https://hub.example.com hub auth login
   scion hub auth login --no-browser
   scion hub auth login --provider github`,
 	RunE: runHubAuthLogin,
@@ -106,19 +114,16 @@ func init() {
 	hubAuthCmd.AddCommand(hubAuthLogoutCmd)
 
 	// Flags for login command
-	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub server URL (defaults to configured endpoint)")
+	hubAuthLoginCmd.Flags().StringVar(&hubAuthHubURL, "hub-url", "", "Hub server URL; takes precedence over --hub, SCION_HUB_ENDPOINT and hub.endpoint in settings")
 	hubAuthLoginCmd.Flags().BoolVar(&hubAuthNoBrowser, "no-browser", false, "Use device flow instead of opening a browser")
 	hubAuthLoginCmd.Flags().String("provider", "", "OAuth provider to use (google or github)")
 }
 
 func runHubAuthLogin(cmd *cobra.Command, args []string) error {
-	// Resolve hub URL
-	hubURL := hubAuthHubURL
+	// Resolve hub URL: --hub-url, --hub, SCION_HUB_ENDPOINT, settings.
+	hubURL, _ := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
 	if hubURL == "" {
-		hubURL = getDefaultHubURL()
-	}
-	if hubURL == "" {
-		return fmt.Errorf("hub URL not specified, use --hub-url or configure hub.endpoint in settings")
+		return fmt.Errorf("hub URL not specified, use --hub-url, --hub, SCION_HUB_ENDPOINT or hub.endpoint in settings")
 	}
 
 	fmt.Printf("Authenticating with Hub at %s\n", hubURL)
@@ -154,7 +159,11 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	return storeTokenAndPrintResult(hubURL, tokenResp)
+	if err := storeTokenAndPrintResult(hubURL, tokenResp); err != nil {
+		return err
+	}
+	persistLoginEndpointForInvocation(hubURL)
+	return nil
 }
 
 func newDeviceFlowAuth(authSvc hubclient.AuthService, provider string) *auth.DeviceFlowAuth {
@@ -263,25 +272,11 @@ func runHubAuthLogout(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// getDefaultHubURL returns the default Hub URL from settings or environment.
+// getDefaultHubURL returns the hub URL logout uses: the root --hub flag,
+// then SCION_HUB_ENDPOINT, then settings (see resolveHubAuthURL).
 func getDefaultHubURL() string {
-	// Check environment first
-	if env := os.Getenv("SCION_HUB_ENDPOINT"); env != "" {
-		return env
-	}
-
-	// Try to load from settings
-	projectPath, _, err := config.ResolveProjectPath("")
-	if err != nil {
-		return ""
-	}
-
-	settings, err := config.LoadSettings(projectPath)
-	if err != nil {
-		return ""
-	}
-
-	return settings.GetHubEndpoint()
+	hubURL, _ := resolveHubAuthURL("", hubEndpoint, os.Getenv, settingsHubEndpoint)
+	return hubURL
 }
 
 func resolveHubAuthProvider(ctx context.Context, authSvc hubclient.AuthService, clientType hubclient.OAuthClientType, requestedProvider string) (string, error) {
