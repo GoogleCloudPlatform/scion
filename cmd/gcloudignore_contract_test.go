@@ -340,6 +340,9 @@ func expandGcloudIgnoreDepth(name, content string, readFile func(string) (string
 // the index into lines of the pattern that decided it.
 func gitIgnoredBy(t *testing.T, lines []ignoreLine, paths []string) map[string]int {
 	t.Helper()
+	if len(paths) == 0 {
+		return nil
+	}
 	dir := t.TempDir()
 	repo := filepath.Join(dir, "repo")
 	excludes := filepath.Join(dir, "excludes")
