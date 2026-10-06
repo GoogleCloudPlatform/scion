@@ -375,6 +375,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	// Fail fast, as start and restart do, when the GCP identity the fresh
+	// config will run with is no longer allowed for this agent. Checked
+	// before the claim and the worker's stop, so a refused request leaves
+	// the agent as it was, and a dry run reports the same refusal.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
+
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	targetGeneration := agent.Generation + 1
 
