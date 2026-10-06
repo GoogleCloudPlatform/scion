@@ -376,18 +376,20 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 				Remediation: "Verify the Hub is running and the endpoint is correct",
 			}
 		}
-		if healthResp.Status == "degraded" {
-			return scionruntime.CheckResult{
-				Name:    "hub-connectivity",
-				Status:  "warn",
-				Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
+		probe := healthProbeResponse{Status: healthResp.Status, Checks: healthResp.Checks}
+		if len(healthResp.Hub) > 0 {
+			var hub healthProbeComponent
+			if json.Unmarshal(healthResp.Hub, &hub) == nil {
+				probe.Hub = &hub
 			}
 		}
-		return scionruntime.CheckResult{
-			Name:    "hub-connectivity",
-			Status:  "pass",
-			Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
+		if len(healthResp.Broker) > 0 {
+			var broker healthProbeComponent
+			if json.Unmarshal(healthResp.Broker, &broker) == nil {
+				probe.Broker = &broker
+			}
 		}
+		return doctorHubHealthResult(hubEP, probe)
 	}
 
 	cleanEP := strings.TrimRight(hubEP, "/")
@@ -421,9 +423,7 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 		}
 	}
 
-	var healthResp struct {
-		Status string `json:"status"`
-	}
+	var healthResp healthProbeResponse
 	if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
 		return scionruntime.CheckResult{
 			Name:    "hub-connectivity",
@@ -432,19 +432,37 @@ func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionrunt
 		}
 	}
 
-	if healthResp.Status == "degraded" {
-		return scionruntime.CheckResult{
-			Name:    "hub-connectivity",
-			Status:  "warn",
-			Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
-		}
-	}
+	return doctorHubHealthResult(hubEP, healthResp)
+}
 
-	return scionruntime.CheckResult{
-		Name:    "hub-connectivity",
-		Status:  "pass",
-		Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
+// doctorHubHealthResult maps a parsed /healthz response to the D1 check
+// result, using the same severity semantics as the hub (ptone/scion#1094):
+// healthy passes; degraded (up, a non-critical check failing) warns; unhealthy
+// (a critical check such as the database failing) fails; any other status
+// warns with the status verbatim. Non-healthy checks are named in the message.
+func doctorHubHealthResult(hubEP string, health healthProbeResponse) scionruntime.CheckResult {
+	res := scionruntime.CheckResult{Name: "hub-connectivity"}
+	checks := ""
+	if names := nonHealthyChecks(health); len(names) > 0 {
+		checks = " (" + strings.Join(names, "; ") + ")"
 	}
+	switch health.Status {
+	case probeStatusHealthy:
+		res.Status = "pass"
+		res.Message = fmt.Sprintf("Hub at %s is healthy", hubEP)
+	case probeStatusDegraded:
+		res.Status = "warn"
+		res.Message = fmt.Sprintf("Hub at %s is degraded%s", hubEP, checks)
+		res.Remediation = "Check Hub server logs (non-critical check failing)"
+	case probeStatusUnhealthy:
+		res.Status = "fail"
+		res.Message = fmt.Sprintf("Hub at %s is unhealthy%s", hubEP, checks)
+		res.Remediation = "Check Hub server logs (critical check failing)"
+	default:
+		res.Status = "warn"
+		res.Message = fmt.Sprintf("Hub at %s reported status %q%s", hubEP, health.Status, checks)
+	}
+	return res
 }
 
 // checkDoctorHubAuth performs D2: Hub authentication check.

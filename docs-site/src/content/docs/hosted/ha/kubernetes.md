@@ -158,7 +158,34 @@ resources:
   disk: "20Gi"    # maps to ephemeral-storage (both requests and limits)
 ```
 
-Extended resources (GPUs, custom devices) use `kubernetes.resources`.
+Fields merge one by one across tiers. Scion then adds a default **request** for `cpu` (`250m`), `memory` (`512Mi`) and `ephemeral-storage` (`10Gi`), but only for a resource that has neither a request nor a limit set, in `resources` or in `kubernetes.resources`. If a resource has a limit but no request, Kubernetes sets the request equal to the limit. The defaults are requests only: Scion never adds a default memory or ephemeral-storage limit. A memory limit applies only when you set `limits.memory`, and an ephemeral-storage limit only when you set `disk` (or the same key in `kubernetes.resources.limits`).
+
+The CPU limit comes from your settings, or from the built-in `limits.cpu: "2"` when nothing sets one, unless `runtime.enforce_resource_defaults` is `false`. With the built-in limit and no CPU request, a pod requests 2 CPU. With the flag set to `false` and no resources set, a pod gets only the three default requests and no limits. If you set a CPU request above `2` but no CPU limit, the built-in limit is raised to match, so the pod is not rejected for a request above its limit: a larger `requests.cpu` raises `limits.cpu` (on every runtime), and a larger `kubernetes.resources.requests.cpu` sets `kubernetes.resources.limits.cpu` when that is unset (Kubernetes only). A CPU limit you set yourself is never changed, so keep it at or above your CPU request.
+
+To give every agent on a Kubernetes profile a fixed disk and memory budget, set them in the profile:
+
+```yaml
+profiles:
+  k8s:
+    runtime: k8s
+    resources:
+      requests:
+        memory: "2Gi"
+      limits:
+        memory: "12Gi"
+      disk: "40Gi"   # ephemeral-storage request and limit
+```
+
+:::note[What counts against ephemeral storage]
+Where the agent's files live depends on the storage backends:
+
+- `/workspace`: with the default local [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend it is an `emptyDir` volume, which counts against the pod's ephemeral storage. With the `nfs` backend it is on the NFS export and does not.
+- `HOME`, including build caches under it (for example the Go module and build caches in `~/go/pkg/mod` and `~/.cache/go-build`): without NFS [`server.home_storage`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) it is in the container's writable layer, which counts against ephemeral storage. With the `nfs` home backend it is on the NFS export and does not.
+
+With a `disk` limit set, a pod whose ephemeral storage use goes over that limit is evicted. Size `disk` for the repository, its dependencies, caches and build output, not just the source tree.
+:::
+
+Extended resources (GPUs, custom devices) use `kubernetes.resources`. Keys set there (including `memory` or `ephemeral-storage`) override the common `resources` field and the defaults.
 
 ### GKE Workload Identity
 
@@ -339,7 +366,7 @@ Windows and exclusions don't stop Compute Engine maintenance, and most control p
 
 ### GCP Identity Modes on Kubernetes
 
-An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime the three modes behave as follows:
+An agent's GCP identity mode decides which Google identity, if any, GCP client libraries in the agent pod use. The mode is resolved by the Hub (the create request, then the project's per-profile default service account, then the project default, then the hub default; see [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity)) and applied by the Runtime Broker for the runtime the agent is dispatched to. On the Kubernetes runtime the three modes behave as follows:
 
 | Mode | On the Kubernetes runtime |
 | :--- | :--- |
@@ -355,7 +382,7 @@ An agent's GCP identity mode decides which Google identity, if any, GCP client l
 GCP identity mode "block" is not supported on the Kubernetes runtime; edit this agent's GCP identity mode to "assign" or "passthrough", or change the project or hub default GCP identity mode for agents created after this
 ```
 
-- **No identity configured.** When neither the request, the project default, nor the hub default names a mode, the Hub sends no mode and the broker applies its runtime default, which is `passthrough` on Kubernetes (and `block` on every other runtime). A hub-default `passthrough` is denied for Kubernetes profiles and is treated the same way, so the agent also gets `passthrough`. Hubs older than this behaviour still send `block` in this case, so the agent fails with the error above until the Hub is upgraded.
+- **No identity configured.** When neither the request, a project per-profile default service account for the agent's profile, the project default, nor the hub default names a mode, the Hub sends no mode and the broker applies its runtime default, which is `passthrough` on Kubernetes (and `block` on every other runtime). A hub-default `passthrough` is denied for Kubernetes profiles and is treated the same way, so the agent also gets `passthrough`. Hubs older than this behaviour still send `block` in this case, so the agent fails with the error above until the Hub is upgraded.
 - **Explicit `block` defaults.** A project default or hub default that is explicitly `block` is stored on each new agent as an explicit `block`, so new agents dispatched to Kubernetes under that default fail with the error above. Change it to a project default of `assign` or `passthrough`, or a hub default of `assign`. A hub default of `passthrough` is denied for Kubernetes. A project or hub default of `assign` with no service account selected is also stored as `block`.
 - **Stored `block` on existing agents.** An agent whose own stored identity is `block`, including agents created by earlier versions that wrote `block` when nothing was chosen, is not migrated. Starting, restarting, or resuming it on Kubernetes fails with the same error. Edit that agent's own GCP identity mode; changing a project or hub default affects only agents created afterwards.
 
@@ -408,6 +435,8 @@ The mapping is read only from the broker's global settings: `~/.scion/settings.y
 | On start or restart, the agent now resolves to another runtime, profile, or runtime entry than its identity was resolved for | 409 | `GCP identity mode "assign" was resolved for ...` |
 
 There is no fallback: a failed mapping never runs the pod with the emulator or with the pod's default identity.
+
+**Per-profile default service account.** A project that runs agents on both Kubernetes and other profiles can set a default service account for each Kubernetes profile (`defaultGCPIdentityServiceAccountIDByProfile` in the project settings API). Pick a GSA that has a mapping on that profile. Agents created on that profile with no explicit identity then default to it, instead of a broader project default that has no Workload Identity binding. See [Per-Profile Default Service Accounts](/scion/hosted/ha/permissions/#per-profile-default-service-accounts).
 
 **Early warning for unmapped service accounts.** The Hub warns, before any dispatch, about a GSA registered in a project that no Kubernetes broker profile of the project maps. The warning appears on:
 
