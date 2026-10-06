@@ -338,6 +338,12 @@ func runtimeOpError(op string, err error) *OpaqueError {
 	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
 }
 
+// opCreateAgent is the runtimeOpError op for a create's Manager.Start
+// failure. createAgent's synchronous start and the async launch
+// (classifyStartError, run_launch.go) share it, so both report the same
+// text for the same failure (ptone/scion#3113).
+const opCreateAgent = "create agent"
+
 // writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
 // delete, exec, message, logs, list) make on failure: it logs err
 // at scope op (plus any extra key/value pairs the caller has on hand — an

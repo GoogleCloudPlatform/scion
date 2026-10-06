@@ -1373,7 +1373,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, err.Error())
 		switch {
 		case errors.Is(err, agent.ErrContainerNameInUse):
-			Conflict(w, err.Error())
+			// Fixed text, as restart and the async launch give: a wrapped
+			// error can carry runtime detail. The full error is logged above.
+			Conflict(w, agent.ErrContainerNameInUse.Error())
 		case errors.Is(err, scionrt.ErrRunConflict):
 			// Fixed text: the wrapped error names the namespace, object and
 			// the other run's ID, which must not reach clients (see
@@ -1384,7 +1386,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr)
 		default:
-			RuntimeError(w, runtimeOpError("create agent", err).Error())
+			RuntimeError(w, runtimeOpError(opCreateAgent, err).Error())
 		}
 		return
 	}
@@ -2508,7 +2510,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		var skillErr *agent.SkillResolutionError
 		switch {
 		case errors.Is(err, agent.ErrContainerNameInUse):
-			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
+			// Fixed text, as restart and the async launch give: a wrapped
+			// error can carry runtime detail. The full error is logged above.
+			writeError(w, http.StatusConflict, ErrCodeConflict, agent.ErrContainerNameInUse.Error(), details)
 		case errors.Is(err, scionrt.ErrRunConflict):
 			// Another live run holds the agent name, and the runtime
 			// deleted nothing of it (ptone/scion#2550). Fixed text: the
