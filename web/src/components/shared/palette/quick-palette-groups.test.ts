@@ -145,7 +145,7 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
     expect(activeText(el)).toContain('Agent One');
   });
 
-  it('Shift+Tab cycles backward: People -> Threads -> Agents', async () => {
+  it('Shift+Tab cycles backward: Agents -> People -> Threads -> Agents', async () => {
     const el = await mountPalette({
       agents: ready([agentCandidate('a1', 'Agent One')]),
       threads: ready([threadCandidate('t1', 'Thread One')]),
@@ -165,6 +165,11 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
     press(el, 'Tab', { shiftKey: true });
     await el.updateComplete;
     expect(activeText(el)).toContain('Agent One');
+
+    // Wraps backward from the first group to the last.
+    press(el, 'Tab', { shiftKey: true });
+    await el.updateComplete;
+    expect(activeText(el)).toContain('Person One');
   });
 
   it('Tab skips an empty group (no ranked matches) rather than landing on it', async () => {
