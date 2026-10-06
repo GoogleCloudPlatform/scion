@@ -175,6 +175,35 @@ func TestArtifactHostAgentWithoutReadScopeIsNotServed(t *testing.T) {
 	}
 }
 
+// TestArtifactHostMissingScope: only an agent that presented a real token
+// is told which artifact scope it lacks; users, synthetic in-process
+// identities and unauthenticated callers are told nothing, and an agent
+// holding the scopes is told nothing either.
+func TestArtifactHostMissingScope(t *testing.T) {
+	host := newArtifactHost(&Server{})
+	agentCtx := func(scopes ...AgentTokenScope) context.Context {
+		return contextWithIdentity(context.Background(), artifactTestAgent("agent-1", "proj-1", scopes...))
+	}
+	for name, tc := range map[string]struct {
+		ctx        context.Context
+		permission string
+		want       string
+	}{
+		"no scopes":              {agentCtx(), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
+		"project:read only":      {agentCtx(ScopeProjectRead), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
+		"write without read":     {agentCtx(ScopeProjectArtifactWrite), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
+		"read without write":     {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionCreate, string(ScopeProjectArtifactWrite)},
+		"both scopes":            {agentCtx(ScopeProjectArtifactRead, ScopeProjectArtifactWrite), artifacts.PermissionCreate, ""},
+		"read for read":          {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionRead, ""},
+		"unknown permission":     {agentCtx(), "agent.read", ""},
+		"no identity":            {context.Background(), artifacts.PermissionCreate, ""},
+		"user":                   {contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")), artifacts.PermissionCreate, ""},
+		"synthetic agent, no id": {contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}, ProjectID: "proj-1"}}), artifacts.PermissionCreate, ""},
+	} {
+		assert.Equal(t, tc.want, host.MissingScope(tc.ctx, tc.permission), name)
+	}
+}
+
 // TestArtifactHostAuthorizeUsers checks that user decisions come from the
 // authz engine against the artifact's home project.
 func TestArtifactHostAuthorizeUsers(t *testing.T) {

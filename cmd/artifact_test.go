@@ -229,8 +229,22 @@ func TestArtifactErrorHints(t *testing.T) {
 	c401, err := hubclient.New(unauthorized.URL)
 	require.NoError(t, err)
 	err = publishArtifact(context.Background(), c401.Artifacts(), &stdout, "", file, "", "")
-	assert.ErrorContains(t, err, "project:artifact:read")
+	assert.ErrorContains(t, err, "invalid or expired")
+	assert.NotContains(t, err.Error(), "scope", "a 401 on publish is about the credential, not a scope")
 	err = getArtifact(context.Background(), c401.Artifacts(), &stdout, &stderr, testArtifactID, "")
 	assert.ErrorContains(t, err, "invalid or expired")
 	assert.NotContains(t, err.Error(), "project:artifact:read", "a 401 on get is about the credential, not the read scope")
+
+	missing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"code":"missing_scope","message":"m","details":{"scope":"project:artifact:read"}}}`)
+	}))
+	t.Cleanup(missing.Close)
+	c403, err := hubclient.New(missing.URL)
+	require.NoError(t, err)
+	err = publishArtifact(context.Background(), c403.Artifacts(), &stdout, "", file, "", "")
+	assert.ErrorContains(t, err, "does not carry the project:artifact:read scope")
+	assert.ErrorContains(t, err, "Recreate the agent")
+	assert.NotContains(t, err.Error(), "may not publish artifacts in this project", "missing_scope has its own hint")
 }

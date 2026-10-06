@@ -93,6 +93,9 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 
 	kind, ref, home, ok := s.host.Principal(ctx)
 	if !ok {
+		if s.writeMissingScope(w, r) {
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 		return
 	}
@@ -102,6 +105,9 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 	if scope == "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
+		return
+	}
+	if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
 		return
 	}
 	if !s.host.Permits(ctx, scope, PermissionCreate) || !s.host.Authorize(ctx, scope, PermissionCreate) {
@@ -166,6 +172,33 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, []File{f})})
+}
+
+// CodeMissingScope is the error code of a 403 answered to a publish whose
+// credential lacks a scope publishing needs. The error's details carry the
+// scope's name under "scope".
+const CodeMissingScope = "missing_scope"
+
+// writeMissingScope answers 403 missing_scope when the host reports that
+// the caller's credential lacks a scope for publishing. It reports whether
+// it wrote the response. Only the publish path calls it: publishing names
+// no existing artifact, so the answer describes the caller's own
+// credential and nothing else.
+func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool {
+	ex, ok := s.host.(ScopeExplainer)
+	if !ok {
+		return false
+	}
+	scope := ex.MissingScope(r.Context(), PermissionCreate)
+	if scope == "" {
+		return false
+	}
+	writeJSON(w, http.StatusForbidden, errorResponse{Error: errorBody{
+		Code:    CodeMissingScope,
+		Message: "the credential does not carry the " + scope + " scope needed to publish artifacts",
+		Details: map[string]string{"scope": scope},
+	}})
+	return true
 }
 
 // putBlob stores the spooled body at its content address unless a blob

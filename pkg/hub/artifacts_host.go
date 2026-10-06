@@ -164,6 +164,30 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 
 // artifactPermission returns the registry row for id when it is an artifact
 // permission.
+var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
+
+// MissingScope implements artifacts.ScopeExplainer. Only an agent that
+// presented a real token (one with a token id) gets an answer: the scope
+// that Principal requires before serving it, then the token scopes the
+// permission maps to. Users and unauthenticated callers get "".
+func (h *artifactHost) MissingScope(ctx context.Context, permission string) string {
+	perm, ok := artifactPermission(permission)
+	if !ok {
+		return ""
+	}
+	agent, ok := GetIdentityFromContext(ctx).(*agentIdentityWrapper)
+	if !ok || agent == nil || agent.AgentTokenClaims == nil || agent.ID() == "" || agent.TokenID() == "" {
+		return ""
+	}
+	if !agentHasAnyScope(agent, []string{string(ScopeProjectArtifactRead)}) {
+		return string(ScopeProjectArtifactRead)
+	}
+	if len(perm.AgentScopes) > 0 && !agentHasAnyScope(agent, perm.AgentScopes) {
+		return perm.AgentScopes[0]
+	}
+	return ""
+}
+
 func artifactPermission(id string) (permissions.Permission, bool) {
 	for _, p := range permissions.Registry {
 		if p.ID == id {

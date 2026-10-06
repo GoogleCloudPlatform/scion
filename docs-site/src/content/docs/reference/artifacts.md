@@ -65,7 +65,7 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 | `GET /api/v1/artifacts/{id}/files/{path}` | A file of the current version. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | A file of version `seq`. |
 
-Status codes: `400` for a malformed request, `401` unauthenticated (also returned on publish to an agent token without `project:artifact:read`; reads answer `404`), `403` when the caller may not publish in the scope, `404` for an absent or unreadable artifact, `413` when the file exceeds `artifacts.max_file_bytes` (rejected before anything is stored), `503` when the hub has no artifact storage configured.
+Status codes: `400` for a malformed request, `401` unauthenticated, `403` when the caller may not publish in the scope (with code `missing_scope` and `details.scope` naming the scope when an agent token lacks `project:artifact:read` or `project:artifact:write`; reads by such a token answer `404`), `404` for an absent or unreadable artifact, `413` when the file exceeds `artifacts.max_file_bytes` (rejected before anything is stored), `503` when the hub has no artifact storage configured.
 
 **File delivery.** On a hub with local storage the hub streams the bytes. On a hub with object storage (GCS) it answers `302` to a short-lived signed URL; add `?stream=1` to have the hub serve the bytes itself (the web page does this for text). Either way the response carries `Content-Disposition` (`inline` only for plain text, Markdown, CSV, TSV, JSON, YAML, TOML and raster images; `attachment` otherwise) and `X-Content-Type-Options: nosniff`; streamed responses also carry a sandboxing `Content-Security-Policy` and an `ETag`.
 

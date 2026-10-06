@@ -301,8 +301,13 @@ func artifactErrorHint(err error, publishing bool) string {
 		return ""
 	}
 	switch {
-	case apiErr.StatusCode == http.StatusUnauthorized && publishing:
-		return "\nThe hub did not accept the caller for publishing: sign in again, or (for an agent) the token may lack the project:artifact:read scope."
+	case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == artifacts.CodeMissingScope:
+		scope := "a required"
+		if v, ok := apiErr.Details["scope"].(string); ok && v != "" {
+			scope = "the " + v
+		}
+		return "\nThis agent's credential does not carry " + scope + " scope, usually because the agent was created " +
+			"before artifacts were available to it. Recreate the agent so it is issued a current credential."
 	case apiErr.StatusCode == http.StatusUnauthorized:
 		return "\nThe hub did not accept the credential: sign in again; an agent token may be invalid or expired."
 	case apiErr.StatusCode == http.StatusNotFound && !publishing:

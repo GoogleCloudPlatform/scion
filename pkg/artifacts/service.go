@@ -285,8 +285,9 @@ type errorResponse struct {
 }
 
 type errorBody struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string            `json:"code"`
+	Message string            `json:"message"`
+	Details map[string]string `json:"details,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

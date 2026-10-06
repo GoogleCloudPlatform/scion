@@ -19,6 +19,7 @@ package artifacts
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -270,5 +271,69 @@ func TestBackendProvider(t *testing.T) {
 	svc.ServeHTTP(rec, withPrincipal(httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=p.txt", strings.NewReader("p")), agentA))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("empty provider: %d, want 503", rec.Code)
+	}
+}
+
+// explainingHost is a fakeHost that reports a missing credential scope.
+type explainingHost struct {
+	*fakeHost
+	scope string
+	calls int
+}
+
+func (h *explainingHost) MissingScope(_ context.Context, permission string) string {
+	h.calls++
+	if permission != PermissionCreate {
+		return ""
+	}
+	return h.scope
+}
+
+func TestPublishMissingScope(t *testing.T) {
+	f := newFixture(t, false)
+	host := &explainingHost{fakeHost: f.host, scope: "project:artifact:read"}
+	f.svc.host = host
+	existing := f.publish(agentA, "a.txt", []byte("x"), "")
+
+	// A caller the host does not serve, whose credential lacks a scope,
+	// gets a 403 naming it rather than a 401.
+	rec := f.do(nil, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil)
+	if rec.Code != http.StatusForbidden || errCode(t, rec) != CodeMissingScope {
+		t.Fatalf("unserved caller: %d %s", rec.Code, rec.Body.String())
+	}
+	var e errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil || e.Error.Details["scope"] != "project:artifact:read" {
+		t.Errorf("details = %+v (%v)", e.Error.Details, err)
+	}
+
+	// A served caller whose credential does not permit publishing gets the
+	// same answer.
+	host.scope = "project:artifact:write"
+	f.host.deny(agentB, "project-1", PermissionCreate)
+	rec = f.do(&agentB, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil)
+	if rec.Code != http.StatusForbidden || errCode(t, rec) != CodeMissingScope ||
+		!strings.Contains(rec.Body.String(), "project:artifact:write") {
+		t.Errorf("served caller without the scope: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Without a missing scope the answers are unchanged.
+	host.scope = ""
+	if rec := f.do(nil, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated: %d, want 401", rec.Code)
+	}
+	if rec := f.do(&agentB, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil); rec.Code != http.StatusForbidden || errCode(t, rec) != "forbidden" {
+		t.Errorf("credential refused for another reason: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Reads never consult the explainer and keep their uniform 404.
+	host.scope, host.calls = "project:artifact:read", 0
+	id := existing.Artifact.ID
+	for _, p := range []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/files/a.txt", "/api/v1/artifacts/" + id + "/versions/1/files/a.txt"} {
+		if rec := f.do(nil, http.MethodGet, p, nil, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: %d, want 404", p, rec.Code)
+		}
+	}
+	if host.calls != 0 {
+		t.Errorf("reads consulted the explainer %d times", host.calls)
 	}
 }

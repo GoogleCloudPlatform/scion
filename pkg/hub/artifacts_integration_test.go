@@ -510,7 +510,9 @@ func TestArtifactsPreArtifactCeilingTokenOnRoutes(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, doRawAgentRequest(t, srv, http.MethodGet, p, nil, childTok).Code, p)
 	}
 	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("b"), childTok)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code, "an agent without the artifact read scope is not served: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "an agent without the artifact scopes is told which one it lacks: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"`+artifacts.CodeMissingScope+`"`)
+	assert.Contains(t, rec.Body.String(), string(ScopeProjectArtifactRead))
 }
 
 // doRawAgentRequest sends a raw-body request with an agent token through the
