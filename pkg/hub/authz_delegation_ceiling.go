@@ -748,7 +748,7 @@ func (a *AuthzService) userRelationshipAuthority(
 		Ancestry:     resource.Ancestry,
 	})
 
-	out := a.evaluateRelationshipCandidates(ctx, principal, resource, action, permissionID, restrictions, true)
+	out := a.evaluateRelationshipCandidates(ctx, principal, resource, action, permissionID, restrictions, true, nil)
 	if out.accepted != nil {
 		return true, "relationship grant: " + out.accepted.MatchedGrant, nil
 	}
