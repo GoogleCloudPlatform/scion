@@ -354,3 +354,25 @@ func TestFlatRuntimeBrokersExperimentRegistered(t *testing.T) {
 		t.Fatalf("incomplete registration: %+v", e)
 	}
 }
+
+// TestArtifactsExperiment_Registered pins the hub.artifacts entry: it gates
+// both the web surfaces and the hub routes, so it needs both layers, and it
+// ships off.
+func TestArtifactsExperiment_Registered(t *testing.T) {
+	exp, ok := Default().Lookup(Artifacts)
+	if !ok {
+		t.Fatalf("%s is not registered", Artifacts)
+	}
+	if exp.Name != "hub.artifacts" {
+		t.Errorf("Name = %q, want hub.artifacts", exp.Name)
+	}
+	if exp.Default {
+		t.Error("Default = true, want false")
+	}
+	if !exp.HasLayer(LayerWeb) || !exp.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want LayerWeb and LayerServer", exp.Layers)
+	}
+	if exp.Stage != StageAlpha {
+		t.Errorf("Stage = %q, want %q", exp.Stage, StageAlpha)
+	}
+}

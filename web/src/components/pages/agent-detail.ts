@@ -246,19 +246,35 @@ export class ScionPageAgentDetail extends LitElement {
     }
     .header-title {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 0.75rem;
       margin-bottom: 0.5rem;
     }
-    .header-title sl-icon {
+    .header-title > sl-icon {
+      flex-shrink: 0;
       color: var(--scion-primary, #3b82f6);
       font-size: 1.5rem;
+      /* Centre the icon on the first line of the name: (1.95rem h1 line box
+         - 1.5rem icon) / 2. */
+      margin-top: 0.225rem;
+    }
+    /* A long name wraps on its own line; the badges then follow on the next
+       line instead of floating beside a multi-line name. */
+    .header-title-text {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
     }
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
+      line-height: 1.3;
       color: var(--scion-text, #1e293b);
       margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .header-meta {
       display: flex;
@@ -404,6 +420,28 @@ export class ScionPageAgentDetail extends LitElement {
     .info-value.mono {
       font-family: var(--scion-font-mono, monospace);
       font-size: 0.875rem;
+    }
+    /* Messaging: the mode select needs more room than an info-grid column
+       gives it, so this card wraps instead of letting the select overlap the
+       reachability column. */
+    .messaging-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+    }
+    .messaging-grid .messaging-mode {
+      flex: 1 1 280px;
+      min-width: 0;
+    }
+    .messaging-grid .messaging-reach {
+      flex: 1 1 200px;
+      min-width: 0;
+    }
+    /* Cap the select, not its column, so a read-only mode description can
+       use the full column width. */
+    .messaging-mode sl-select {
+      width: 100%;
+      max-width: 360px;
     }
 
     /* ---- Task summary ---- */
@@ -1204,6 +1242,7 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-quick-message-dialog
         agentId=${this.agentId}
         agentName=${this.agent.name || ''}
+        userId=${this.currentUserId}
         ?open=${this.quickMessageOpen}
         @sl-request-close=${() => {
           this.quickMessageOpen = false;
@@ -1334,13 +1373,18 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             <sl-icon name="cpu"></sl-icon>
-            <h1>${agent.name}</h1>
-            ${agentStatusBadge(agent)}
-            <scion-deletion-badge .deletion=${this.deletingView(agent)} live></scion-deletion-badge>
-            <scion-message-mode-badge
-              mode=${agent.messageMode || 'project'}
-              size="medium"
-            ></scion-message-mode-badge>
+            <div class="header-title-text">
+              <h1>${agent.name}</h1>
+              ${agentStatusBadge(agent)}
+              <scion-deletion-badge
+                .deletion=${this.deletingView(agent)}
+                live
+              ></scion-deletion-badge>
+              <scion-message-mode-badge
+                mode=${agent.messageMode || 'project'}
+                size="medium"
+              ></scion-message-mode-badge>
+            </div>
           </div>
           <div class="header-meta">
             <span class="template-badge">
@@ -1935,8 +1979,8 @@ export class ScionPageAgentDetail extends LitElement {
     return html`
       <div class="card">
         <h3 class="card-title">Messaging</h3>
-        <div class="info-grid">
-          <div class="info-item">
+        <div class="messaging-grid">
+          <div class="info-item messaging-mode">
             <span class="info-label">Message Mode</span>
             <span class="info-value">
               ${canSetMode
@@ -1948,7 +1992,6 @@ export class ScionPageAgentDetail extends LitElement {
                         const newMode = (e.target as HTMLSelectElement).value as MessageMode;
                         void this.handleModeChange(newMode, e.target as HTMLElement);
                       }}
-                      style="min-width: 280px; max-width: 360px;"
                     >
                       ${(Object.keys(MESSAGE_MODE_DISPLAY) as MessageMode[]).map(
                         (mode) => html`
@@ -1993,7 +2036,7 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
           ${messageability && 'reachableAgentCount' in messageability
             ? html`
-                <div class="info-item">
+                <div class="info-item messaging-reach">
                   <span class="info-label">Reachability</span>
                   <span class="info-value">
                     Can reach ${messageability.reachableAgentCount} agents,

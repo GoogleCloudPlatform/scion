@@ -84,6 +84,9 @@ const (
 	ErrCodeDeliveryFailed  = "delivery_failed"
 	ErrCodeAgentNotRunning = "agent_not_running"
 	ErrCodeBrokerTimeout   = "broker_timeout"
+	// ErrCodeSendInProgress is returned (409) for a chat send whose
+	// idempotency key belongs to a send that is still running.
+	ErrCodeSendInProgress = "send_in_progress"
 
 	// Broker authentication error codes
 	ErrCodeInvalidJoinToken = "invalid_join_token"

@@ -329,13 +329,29 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // test can drive every DenyCause value, including one no constant names,
 // without going through the full evaluateSAAssignment call chain.
 //
-// The two ceiling messages name "a principal in its delegation chain" rather
-// than "the principal that created it": cause is set (and propagated) at
+// The orphaned and lacks-permission messages name "a principal in its
+// delegation chain" rather than "the principal that created it": cause is
+// set (and propagated) at
 // every depth of walkDelegationChain's recursion (authz_delegation_ceiling.go),
 // so the failing link can be the agent's own creator or any creator further
 // up the chain. Saying "the principal that created it" would be false
 // whenever the failure is a grandparent or higher — see the DenyCause doc
 // comment on authz.go, which already says "directly or transitively".
+//
+// DenyCauseCeilingUnrecorded names the usual origin of the cause, an agent
+// created without recorded provenance, and the remedy that clears it. The
+// unrecorded hop can be this agent's own edge or any edge further up the
+// chain. A user's create writes the new agent's edge with recorded provenance
+// (commitAgentCreate), and because a user is the root of a chain, a
+// user-created agent's chain contains only that one recorded edge. So having
+// a user recreate this agent directly always clears the cause, whether the
+// unrecorded link was this agent or an ancestor; the message does not need to
+// identify which hop failed. Recreating the agent from an agent whose chain
+// includes the unrecorded hop (for example the same parent) keeps that hop,
+// and reincarnating an agent keeps its existing edge, so neither clears the
+// cause. The same cause also covers a hop whose provenance version this
+// binary does not interpret (hopEffectCeilingDeny); the remedy is the same
+// for both.
 //
 // DenyCauseCeilingError and any unrecognised cause (including "", the zero
 // value) fall through to the generic message: a store fault is
@@ -351,6 +367,10 @@ func saAssignForbiddenMessage(cause DenyCause) string {
 		return "This agent cannot assign service accounts: a principal in its delegation chain " +
 			"(the user or agent that created it, or one of their creators) does not hold permission " +
 			"to assign this service account."
+	case DenyCauseCeilingUnrecorded:
+		return "This agent cannot assign service accounts: its delegation chain includes an agent " +
+			"created without recorded provenance (this agent or one of the agents that created it). " +
+			"Have an authorized user recreate this agent directly (not from another agent)."
 	default:
 		return saAssignGenericForbiddenMsg
 	}

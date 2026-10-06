@@ -60,6 +60,22 @@ func resetDetectLocalRuntimeCache() {
 // 4. External project config settings (for git projects with split storage)
 // 5. Environment variables (SCION_ prefix, top-level only)
 func LoadSettingsKoanf(projectPath string) (*Settings, error) {
+	return loadSettingsKoanf(projectPath, false)
+}
+
+// LoadSettingsIgnoringEnvProjectID is LoadSettingsKoanf without the
+// SCION_PROJECT_ID / SCION_HUB_PROJECT_ID environment overlay on project_id.
+// All other environment variables still apply.
+//
+// It is for callers that resolve an explicitly named project (the --project
+// or --global flag): the project ID must come from that project's own
+// settings, not from the environment of the agent container the CLI runs
+// in (ptone/scion#3123).
+func LoadSettingsIgnoringEnvProjectID(projectPath string) (*Settings, error) {
+	return loadSettingsKoanf(projectPath, true)
+}
+
+func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults (YAML with fallback to JSON)
@@ -147,6 +163,9 @@ func LoadSettingsKoanf(projectPath string) (*Settings, error) {
 	//       SCION_HUB_BROKER_TOKEN -> hub.brokerToken
 	_ = k.Load(env.Provider("SCION_", ".", func(s string) string {
 		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
+			if ignoreEnvProjectID {
+				return ""
+			}
 			return mapped
 		}
 		if isSettingsExcludedEnv(s) {

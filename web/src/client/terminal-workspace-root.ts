@@ -30,7 +30,8 @@ import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
 } from '../components/shared/palette/quick-palette-host.js';
-import { isMacPlatform } from '../components/shared/header.js';
+import '../components/shared/header.js';
+import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import '../components/terminal/terminal-pane.js';
 
