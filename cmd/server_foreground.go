@@ -2998,9 +2998,33 @@ func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string
 }
 
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
-	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+	// Flat Runtime Broker instances (server.broker.instances): strictly
+	// loaded, and refused before any registration, credential load or
+	// connection unless the Hub runs in this process.
+	flatInstances, err := loadServerRuntimeBrokerInstances(cfg, serverConfigPath)
 	if err != nil {
 		return err
+	}
+	if err := config.CheckRuntimeBrokerInstanceHosting(flatInstances, colocatedBrokerRegisters(cfg, s)); err != nil {
+		return err
+	}
+	flatMode := len(flatInstances) > 0
+
+	var rt runtime.Runtime
+	var flatRuntime *runtime.DockerRuntime
+	if flatMode {
+		// The instance's manager is built from its explicit configuration,
+		// never from Runtime Broker Profile resolution.
+		flatRuntime = runtime.NewDockerRuntime()
+		rt = flatRuntime
+		log.Printf("Runtime broker hosting flat instance %q (runtime target %s); the legacy Runtime Broker identity is not hosted by this process",
+			flatInstances[0].Key, flatInstances[0].RuntimeTarget.Type)
+	} else {
+		warnUnhostedFlatIdentities(globalDir)
+		rt, err = resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+		if err != nil {
+			return err
+		}
 	}
 	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 
@@ -3023,21 +3047,30 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			return fmt.Errorf("stateless Cloud Run broker requires a derivable broker ID: %w", deriveErr)
 		}
 	}
-	brokerID := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
-
-	// Resolve broker name
-	brokerName := resolveBrokerName(cfg, settings, vsBroker)
+	var brokerID, brokerName string
+	if flatMode {
+		// The flat instance's identity comes from its identity file and its
+		// configured name; legacy ID sources are only collision checks.
+		brokerName = flatInstances[0].Name
+	} else {
+		brokerID = resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+		// Resolve broker name
+		brokerName = resolveBrokerName(cfg, settings, vsBroker)
+	}
 
 	// If no explicit name was configured and this is a co-located broker,
 	// use a stable human-readable name instead of the hostname fallback.
-	if enableHub && !simulateRemoteBroker {
+	if enableHub && !simulateRemoteBroker && !flatMode {
 		if hostname, err := os.Hostname(); err == nil && brokerName == hostname {
 			brokerName = "Hosted Broker"
 		}
 	}
 
-	// Enrich logger with broker_id
-	slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
+	// Enrich logger with broker_id (a flat instance's ID is known only after
+	// its identity is loaded, below).
+	if !flatMode {
+		slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
+	}
 
 	// Resolve hub endpoint for the runtime broker
 	hubEndpointForRH := resolveHubEndpointForBroker(cfg, settings)
@@ -3054,7 +3087,51 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// Co-located registration and credential generation
 	var inMemoryCreds *brokercredentials.BrokerCredentials
 	var colocatedBrokerRegistered bool
-	if colocatedBrokerRegisters(cfg, s) {
+	var flatStartup *flatInstanceStartup
+	if flatMode {
+		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+		if cfg.RuntimeBroker.Host == "0.0.0.0" {
+			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
+		}
+		prep, prepErr := prepareFlatInstance(ctx, hubSrv, flatRuntime, flatInstances[0],
+			legacyRuntimeBrokerIDs(cfg, settings, vsBroker, globalDir), globalDir,
+			hub.EmbeddedFlatRegistrationOptions{
+				Endpoint:         rhEndpoint,
+				AutoProvide:      serverAutoProvide,
+				Capabilities:     flatInstanceCapabilities(rt),
+				WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+			}, nil)
+		if prepErr != nil {
+			// Not activated: no Runtime Broker server, control channel,
+			// heartbeat or dispatch, and no fallback to the legacy identity.
+			// The refusal is reported through EmbeddedBrokerRegistrationFailed
+			// (health and admin summary). The Hub keeps serving.
+			slog.Error("Flat Runtime Broker instance not activated; fix its configuration or registration and restart the server",
+				"instance", flatInstances[0].Key, "error", prepErr)
+			return nil
+		}
+		flatStartup = prep
+		brokerID = prep.identity.RuntimeBrokerID
+		slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
+		colocatedBrokerRegistered = true
+		hubSrv.SetLocalImageChecker(rt)
+		log.Printf("Registered flat Runtime Broker %s (%s, runtime target %s, endpoint: %s)", brokerName, brokerID, prep.identity.RuntimeTarget.ID, rhEndpoint)
+		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
+			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+			if secretErr != nil {
+				log.Printf("Warning: failed to generate/retrieve secret for the flat Runtime Broker instance: %v", secretErr)
+			} else {
+				inMemoryCreds = &brokercredentials.BrokerCredentials{
+					BrokerID:     brokerID,
+					SecretKey:    secretKeyB64,
+					HubEndpoint:  hubEndpointForRH,
+					RegisteredAt: time.Now(),
+				}
+			}
+		} else {
+			log.Printf("Warning: BrokerAuthService not available, skipping flat Runtime Broker credentials")
+		}
+	} else if colocatedBrokerRegisters(cfg, s) {
 		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 		if cfg.RuntimeBroker.Host == "0.0.0.0" {
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
@@ -3231,6 +3308,15 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		BrokerAuthEnabled:    true,
 		BrokerAuthStrictMode: true,
 	}
+	if flatStartup != nil {
+		rhCfg.FlatInstance = &runtimebroker.FlatInstanceConfig{
+			Identity:     flatStartup.identity,
+			Instance:     flatStartup.instance,
+			HubInProcess: colocatedBrokerRegisters(cfg, s),
+		}
+		// A flat instance reports no Runtime Broker Profile.
+		rhCfg.DefaultProfile = nil
+	}
 
 	// In co-located mode, hand the broker the Hub's storage backend so that a
 	// local filesystem backend is read directly (zero-copy) instead of being
@@ -3268,7 +3354,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 	// Wire runtime reload so reloadSettings can swap the broker's container
 	// engine without a full server restart (fixes onboarding wizard flow).
-	if hubSrv != nil && colocatedBrokerRegistered {
+	if hubSrv != nil && colocatedBrokerRegistered && !flatMode {
 		hubSrv.SetRuntimeReloadFunc(func() bool {
 			newRT := runtime.GetRuntime("", "")
 			if newRT.Name() == rhSrv.RuntimeName() {
