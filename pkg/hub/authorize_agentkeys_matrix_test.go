@@ -111,8 +111,8 @@ func TestAuthorizeAgentKeys_IdentityKinds(t *testing.T) {
 			// configured), so it is allowed here for the same reason
 			// authzHelperAdmin() is above -- this case exists to confirm
 			// "dev" reaches the same shared-evaluator path as "user"
-			// (contract: UAT identity stays human; "dev" is one of the two
-			// Type() values authorizeAgentKeys routes to that branch), not
+			// (contract: UAT identity stays human; authorizeAgentKeys hands
+			// "dev" to the shared evaluator exactly as it hands "user"), not
 			// to claim dev identities are unprivileged.
 			name:        "dev identity follows the user branch",
 			identity:    NewDevUser(DevUserConfig{}),
@@ -574,22 +574,23 @@ func TestAuthorizeAgentKeysCrossProject(t *testing.T) {
 	// authorize_agentkeys.go's authorizeAgentKeysCrossProject). Without it,
 	// a FederatedAgentIdentity would satisfy the AgentIdentity type
 	// assertion alone and get a 422 cross-project verdict here, diverging
-	// from the top-level route's default-branch keys_denied for the same
-	// caller (AC4) -- reverting to an interface-only check would pass every
-	// other test in this file but must fail these two.
+	// from the top-level route, where the shared evaluator denies the same
+	// caller with keys_denied (AC4) -- reverting to an interface-only
+	// check would pass every other test in this file but must fail these
+	// two.
 	t.Run("federated agent identity: no verdict (nil) -- not one of the two caller kinds this pre-check gates on", func(t *testing.T) {
 		identity := NewFederatedAgentIdentity("https://issuer.example", "fed-agent",
 			authzHelperProjectA, "fed", "", nil, []AgentTokenScope{ScopeAgentLifecycle})
 		got := srv.authorizeAgentKeysCrossProject(authzKeysHelperRequest(identity), authzHelperProjectB)
 		if got != nil {
-			t.Fatalf("expected nil for a federated agent identity (denied by the main gate's default branch instead), got %+v", got)
+			t.Fatalf("expected nil for a federated agent identity (denied by the shared evaluator in the main gate instead), got %+v", got)
 		}
 	})
 
 	t.Run("broker identity: no verdict (nil)", func(t *testing.T) {
 		got := srv.authorizeAgentKeysCrossProject(authzKeysHelperRequest(NewBrokerIdentity("authz-broker")), authzHelperProjectB)
 		if got != nil {
-			t.Fatalf("expected nil for a broker identity (denied by the main gate's default branch instead), got %+v", got)
+			t.Fatalf("expected nil for a broker identity (denied by the shared evaluator in the main gate instead), got %+v", got)
 		}
 	})
 }

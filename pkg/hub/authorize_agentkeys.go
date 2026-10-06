@@ -72,8 +72,11 @@ type KeysAuthzDecision struct {
 //     delegation ceiling of every live ancestor (ptone/scion#2460). The one
 //     keys-specific mapping lives here, ahead of the shared evaluator: a
 //     caller that holds the scope but is outside the target's project gets
-//     agentkeys.OutcomeCrossProjectKeysUnsupported (422). A caller without
-//     the scope gets keys_denied whatever its project, as before.
+//     agentkeys.OutcomeCrossProjectKeysUnsupported (422). Here, a caller
+//     without the scope gets keys_denied whatever its project. On the
+//     project-scoped route, authorizeAgentKeysCrossProject runs first and
+//     compares projects only, so a cross-project agent caller gets the 422
+//     there with or without the scope (pinned by the route parity table).
 //   - Broker credential and every other principal kind (including a
 //     cross-Hub federated agent identity): denied by the shared evaluator.
 //     A broker credential authenticates Hub-to-broker execution under the
@@ -169,14 +172,14 @@ func keysAgentCrossProject(identity Identity, targetProjectID string) bool {
 // implements AgentIdentity (Type() == "federated_agent", ProjectID() ==
 // "") but is not one of the two caller kinds contract §3's table gives a
 // project-boundary rule to. Gating on the interface alone would give a
-// federated caller 422 cross_project_keys_unsupported here while the main
-// authorizeAgentKeys gate's default branch denies that same caller with
-// generic keys_denied on the top-level route (which never calls this
-// pre-check and instead folds the equivalent comparison into one call) —
-// two route shapes disagreeing on the outcome for an identical caller and
-// target (AC4). Every principal kind other than "agent" returns nil here,
-// so the caller falls through to the full authorizeAgentKeys gate, whose
-// default branch is the single place that denies them.
+// federated caller 422 cross_project_keys_unsupported here while, on the
+// top-level route (which never calls this pre-check and instead folds the
+// equivalent comparison into one call), authorizeAgentKeys hands that same
+// caller to the shared evaluator, which denies it with generic keys_denied
+// — two route shapes disagreeing on the outcome for an identical caller
+// and target (AC4). Every principal kind other than "agent" returns nil
+// here, so the caller falls through to the full authorizeAgentKeys gate,
+// where the shared evaluator is the single place that denies them.
 func (s *Server) authorizeAgentKeysCrossProject(r *http.Request, targetProjectID string) *KeysAuthzDecision {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil || identity.Type() != "agent" {
