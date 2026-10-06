@@ -337,6 +337,13 @@ type AgentAppliedConfig struct {
 	// Hub access scopes granted to the agent (from template HubAccess config)
 	HubAccessScopes []string `json:"hubAccessScopes,omitempty"`
 
+	// AllowGitCredentials is resolved from the agent's hub template
+	// (TemplateConfig.AllowGitCredentials) at create and reincarnate, and
+	// sent to the broker on every create, start and restart. It is never
+	// taken from the create request. False means the broker removes GitHub
+	// credential env keys from the container env.
+	AllowGitCredentials bool `json:"allowGitCredentials,omitempty"`
+
 	// AgentRole is the effective authorization role resolved at creation time.
 	// Determines which JWT scopes the agent receives. Immutable after creation.
 	AgentRole string `json:"agentRole,omitempty"`
@@ -1196,6 +1203,11 @@ type TemplateConfig struct {
 	Secrets     []api.RequiredSecret `json:"secrets,omitempty"`
 	Telemetry   *api.TelemetryConfig `json:"telemetry,omitempty"`
 	MessageMode string               `json:"messageMode,omitempty"` // none, lineage, branch, project, hub
+	// AllowGitCredentials lets agents created from this template receive
+	// GitHub credential env keys in their container. The zero value (false)
+	// means a broker removes them. Resolved into
+	// AgentAppliedConfig.AllowGitCredentials at agent create.
+	AllowGitCredentials bool `json:"allowGitCredentials,omitempty"`
 }
 
 // HubAccessConfig defines what Hub API scopes an agent created from this template receives.

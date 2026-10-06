@@ -620,6 +620,8 @@ type StartExtras struct {
 	// agent-info.json), never to locate or load a template. A content hash
 	// is not a template name and is not sent.
 	TemplateName string
+	// AllowGitCredentials carries AgentAppliedConfig.AllowGitCredentials.
+	AllowGitCredentials bool
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -660,6 +662,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.TemplateName != "" && !transfer.IsContentHash(extras.TemplateName) {
 		payload["templateName"] = extras.TemplateName
+	}
+	if extras.AllowGitCredentials {
+		payload["allowGitCredentials"] = true
 	}
 }
 
@@ -812,6 +817,9 @@ type RemoteCreateAgentRequest struct {
 	CreatorName string `json:"creatorName,omitempty"`
 	// NoAuth indicates the agent should start without any injected credentials.
 	NoAuth bool `json:"noAuth,omitempty"`
+	// AllowGitCredentials carries AgentAppliedConfig.AllowGitCredentials.
+	// See runtimebroker.CreateAgentRequest.AllowGitCredentials.
+	AllowGitCredentials bool `json:"allowGitCredentials,omitempty"`
 	// Attach indicates the agent should start in interactive attach mode (not detached).
 	Attach bool `json:"attach,omitempty"`
 	// RunID is the run identity the hub minted for this create; the broker

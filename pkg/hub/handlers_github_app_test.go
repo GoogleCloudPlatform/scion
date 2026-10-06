@@ -561,10 +561,11 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 	}
 
 	agent := &store.Agent{
-		ID:        tid("agent_gh_refresh4"),
-		Name:      "test-agent-4",
-		Slug:      "test-agent-4",
-		ProjectID: project.ID,
+		ID:            tid("agent_gh_refresh4"),
+		Name:          "test-agent-4",
+		Slug:          "test-agent-4",
+		ProjectID:     project.ID,
+		AppliedConfig: &store.AgentAppliedConfig{AllowGitCredentials: true},
 	}
 	if err := srv.store.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("failed to create agent: %v", err)
@@ -586,5 +587,63 @@ func TestHandleAgentGitHubTokenRefresh_NoInstallation(t *testing.T) {
 		fmt.Sprintf("/api/v1/agents/%s/refresh-token", agent.ID), nil, agentToken)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 (no installation), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleAgentGitHubTokenRefresh_RequiresTemplateAllowance pins that the
+// refresh is refused unless the agent's resolved config allows GitHub
+// credentials, before any project or installation check: a missing
+// AppliedConfig, an unset field and false are all refused.
+func TestHandleAgentGitHubTokenRefresh_RequiresTemplateAllowance(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+	if srv.agentTokenService == nil {
+		t.Skip("agent token service not available")
+	}
+
+	installationID := int64(4242)
+	project := &store.Project{
+		ID:                   tid("project_gh_allow"),
+		Name:                 "Allowance Project",
+		Slug:                 "allowance-project",
+		GitHubInstallationID: &installationID,
+	}
+	if err := srv.store.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		applied *store.AgentAppliedConfig
+		refused bool
+	}{
+		{"nil applied config", nil, true},
+		{"field unset", &store.AgentAppliedConfig{}, true},
+		{"allowed", &store.AgentAppliedConfig{AllowGitCredentials: true}, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &store.Agent{
+				ID:            tid(fmt.Sprintf("agent_gh_allow_%d", i)),
+				Name:          fmt.Sprintf("allow-agent-%d", i),
+				Slug:          fmt.Sprintf("allow-agent-%d", i),
+				ProjectID:     project.ID,
+				AppliedConfig: tc.applied,
+			}
+			if err := srv.store.CreateAgent(ctx, agent); err != nil {
+				t.Fatalf("failed to create agent: %v", err)
+			}
+			agentToken, err := srv.agentTokenService.GenerateAgentToken(
+				agent.ID, project.ID, []AgentTokenScope{ScopeAgentTokenRefresh}, nil)
+			if err != nil {
+				t.Fatalf("failed to generate agent token: %v", err)
+			}
+			rec := doRequestWithAgentTokenGH(t, srv, http.MethodPost,
+				fmt.Sprintf("/api/v1/agents/%s/refresh-token", agent.ID), nil, agentToken)
+			gotRefused := rec.Code == http.StatusForbidden && bytes.Contains(rec.Body.Bytes(), []byte("not enabled for this agent's template"))
+			if gotRefused != tc.refused {
+				t.Errorf("refused = %v (status %d: %s), want %v", gotRefused, rec.Code, rec.Body.String(), tc.refused)
+			}
+		})
 	}
 }

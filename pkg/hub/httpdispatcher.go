@@ -663,6 +663,12 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 	return creds
 }
 
+// agentAllowsGitCredentials reports the agent's resolved
+// AppliedConfig.AllowGitCredentials; a nil AppliedConfig means false.
+func agentAllowsGitCredentials(agent *store.Agent) bool {
+	return agent != nil && agent.AppliedConfig != nil && agent.AppliedConfig.AllowGitCredentials
+}
+
 // buildCreateRequest builds a RemoteCreateAgentRequest from the agent's store record.
 // This is shared between DispatchAgentCreate and DispatchAgentProvision.
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
@@ -700,6 +706,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	if agent.AppliedConfig != nil {
 		req.Attach = agent.AppliedConfig.Attach
 	}
+	req.AllowGitCredentials = agentAllowsGitCredentials(agent)
 
 	// Propagate creator name for SCION_CREATOR env var
 	if agent.AppliedConfig != nil && agent.AppliedConfig.CreatorName != "" {
@@ -3315,6 +3322,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
 		TemplateName:         agent.Template,
+		AllowGitCredentials:  agentAllowsGitCredentials(agent),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3448,6 +3456,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
 		TemplateName:         agent.Template,
+		AllowGitCredentials:  agentAllowsGitCredentials(agent),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)

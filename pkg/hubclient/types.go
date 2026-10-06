@@ -421,6 +421,9 @@ type TemplateConfig struct {
 	CommandArgs []string          `json:"commandArgs,omitempty"`
 	Model       string            `json:"model,omitempty"`
 	Kubernetes  *KubernetesConfig `json:"kubernetes,omitempty"`
+	// AllowGitCredentials mirrors the hub's TemplateConfig field, so a
+	// read-modify-write of a template keeps it.
+	AllowGitCredentials bool `json:"allowGitCredentials,omitempty"`
 }
 
 // KubernetesConfig holds Kubernetes-specific configuration.

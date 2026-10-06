@@ -1498,6 +1498,15 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Only an agent whose template allows GitHub credentials
+	// (AppliedConfig.AllowGitCredentials) may obtain a token here. A missing
+	// AppliedConfig or an unset field means no.
+	if !agentAllowsGitCredentials(agent) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"GitHub credentials are not enabled for this agent's template", nil)
+		return
+	}
+
 	if agent.ProjectID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"agent has no project associated", nil)

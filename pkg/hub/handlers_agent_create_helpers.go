@@ -295,6 +295,12 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
 }
 
+// templateAllowsGitCredentials reports whether t sets AllowGitCredentials.
+// A nil template or config means false.
+func templateAllowsGitCredentials(t *store.Template) bool {
+	return t != nil && t.Config != nil && t.Config.AllowGitCredentials
+}
+
 // projectCloneSource returns the URL and branch to clone a git-anchored
 // project from: the clone-url label (or the git remote), and the
 // default-branch label (or "main").
@@ -494,6 +500,11 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // design §3.3) — those are populated by populateAgentConfig above this call,
 // before AppliedConfig is handed here.
 func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+	// Always recomputed from the template, never fill-if-empty: an agent
+	// without a resolved template, or whose template does not set it, gets
+	// false.
+	agent.AppliedConfig.AllowGitCredentials = templateAllowsGitCredentials(resolvedTemplate)
+
 	// Populate template ID, hash, and hub access scopes if template was resolved.
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
