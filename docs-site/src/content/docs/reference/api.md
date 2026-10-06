@@ -147,7 +147,7 @@ It never deletes the old bindings — they are shadowed by the new setting per t
 Because of this, creating a **new** broker-scoped binding on `max_agents_per_broker`, or editing an existing one while keeping it broker-scoped (`POST` on `/limits/:id/entitlements`, or `PUT` on `/entitlements/:id` with `scopeType: "broker"`), now returns `400` with the message `per-broker agent caps are set via PUT /api/v1/runtime-brokers/{id}/settings`. System-scoped bindings for this limit are unaffected and continue to work as the hub-wide override.
 
 #### Artifacts (`/api/v1/artifacts`)
-Published files with stable `scion://artifact/<id>` references: single-file publish (`POST /?name=<file>`), metadata (`GET /:id`) and file bytes (`GET /:id/files/:path`, `GET /:id/versions/:seq/files/:path`). Behind the `hub.artifacts` experiment (off by default): while it is off every route answers `404`. See [Artifacts](/scion/reference/artifacts/) for access rules, status codes and delivery headers.
+Published files with stable `scion://artifact/<id>` references: single-file publish (`POST /?name=<file>`), the caller's list (`GET /?mine=1`), metadata (`GET /:id`) and file bytes (`GET /:id/files/:path`, `GET /:id/versions/:seq/files/:path`). Behind the `hub.artifacts` experiment (off by default): while it is off every route answers `404`. See [Artifacts](/scion/reference/artifacts/) for access rules, status codes and delivery headers.
 
 #### Chat Attachments (`/api/v1/chat/attachments`)
 - `POST /`: Upload one or more files (`multipart/form-data`, field `files`, optional `project_id`). Max 10 files, 10 MB each. Text files containing unusual control characters (e.g., vertical tab `0x0B`) are supported and correctly identified as text.

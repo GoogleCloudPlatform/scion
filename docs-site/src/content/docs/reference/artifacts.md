@@ -61,11 +61,34 @@ All routes are under `/api/v1/artifacts` and use the hub's usual authentication 
 | Method and path | Purpose |
 | :--- | :--- |
 | `POST /api/v1/artifacts?name=<file>[&title=<title>][&scope=<project-id>]` | Publish the raw request body as a new single-file artifact. `scope` defaults to the caller's project (agents); users must set it. Optional header `X-Content-SHA256` (hex) is verified. Returns `201` with the artifact and its first version. |
+| `GET /api/v1/artifacts?mine=1[&q=<text>][&review_pending=1][&owner=me][&limit=<n>][&cursor=<c>]` | The artifacts the caller can read among those it owns, those shared with it directly, and those homed in projects it is a member of, newest first. See [Listing](#listing). |
 | `GET /api/v1/artifacts/{id}` | The artifact and its current version, including the file manifest (`path`, `size`, `sha256`, `mediaType`). |
 | `GET /api/v1/artifacts/{id}/files/{path}` | A file of the current version. |
 | `GET /api/v1/artifacts/{id}/versions/{seq}/files/{path}` | A file of version `seq`. |
 
-Status codes: `400` for a malformed request, `401` unauthenticated (also returned on publish to an agent token without `project:artifact:read`; reads answer `404`), `403` when the caller may not publish in the scope, `404` for an absent or unreadable artifact, `413` when the file exceeds `artifacts.max_file_bytes` (rejected before anything is stored), `503` when the hub has no artifact storage configured.
+Status codes: `400` for a malformed request (including a list request without `mine=1` or with an invalid cursor), `401` unauthenticated (also returned on publish to an agent token without `project:artifact:read`; reads answer `404`), `403` when the caller may not publish in the scope, `404` for an absent or unreadable artifact, `413` when the file exceeds `artifacts.max_file_bytes` (rejected before anything is stored), `503` when the hub has no artifact storage configured.
+
+### Listing
+
+`GET /api/v1/artifacts?mine=1` lists, newest update first:
+
+- artifacts the caller owns;
+- artifacts shared with the caller directly;
+- artifacts homed in a project the caller is a member of (for an agent, its own project), or shared with such a project.
+
+Every listed artifact passes the same check as `GET /api/v1/artifacts/{id}` for the same caller, so the list never shows an artifact the caller could not open. A caller that may read nothing gets `200` with an empty list. That includes a user access token without `artifact:read` and an agent token without `project:artifact:read`. Membership is read on every request, so after a user leaves a project, that project's artifacts drop out of the list unless the user owns them or they were shared with the user directly. A hub-wide role does not add artifacts: an admin sees the same kinds of rows as anyone else.
+
+`mine=1` is required: without it the request is rejected with `400`, because there is no hub-wide listing. Optional parameters:
+
+| Parameter | Effect |
+| :--- | :--- |
+| `q` | Keep artifacts whose title or key contains this text, case-insensitively (at most 200 characters). |
+| `review_pending=1` | Keep artifacts whose current version is a review awaiting the owner. |
+| `owner=me` | Keep only artifacts the caller owns. |
+| `limit` | Page size, 1-100 (default 50). |
+| `cursor` | The `nextCursor` of the previous page. |
+
+The response is `{"artifacts": [...], "nextCursor": "..."}`. Each entry has the same fields as `artifact` in the single-artifact response, plus `reviewPending`. `nextCursor` is absent on the last page. Cursors are opaque and only work for the same caller and the same `q`, `review_pending` and `owner` values. A page may hold fewer than `limit` entries and still have a `nextCursor`, because one request examines a bounded number of rows. Keep following the cursor until it is absent.
 
 **File delivery.** On a hub with local storage the hub streams the bytes. On a hub with object storage (GCS) it answers `302` to a short-lived signed URL; add `?stream=1` to have the hub serve the bytes itself (the web page does this for text). Either way the response carries `Content-Disposition` (`inline` only for plain text, Markdown, CSV, TSV, JSON, YAML, TOML and raster images; `attachment` otherwise) and `X-Content-Type-Options: nosniff`; streamed responses also carry a sandboxing `Content-Security-Policy` and an `ETag`.
 
