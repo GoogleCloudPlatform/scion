@@ -14,10 +14,10 @@
 
 //go:build !no_sqlite
 
-// Tests for the note appended to unmentioned thread replies: it is
-// addressed to the default agent (delivery unchanged) when another agent
-// posted last, or to the most recent other human poster when no agent
-// receives the reply. Explicitly addressed replies are never noted.
+// Tests for the note appended to unmentioned thread replies that reach no
+// agent: it is addressed to the most recent other human poster. Replies
+// that reach a live default agent, and explicitly addressed replies, are
+// never noted.
 package hub
 
 import (
@@ -86,8 +86,8 @@ func TestUnmentionedReplyNote_MemberMentionToken(t *testing.T) {
 }
 
 // Default agent, another agent posted last: delivery to the default agent
-// only, and both the stored body and the dispatched body carry the note.
-func TestUnmentionedReplyNote_DefaultAgentOtherPoster(t *testing.T) {
+// only, with the body unchanged in storage and in the dispatch.
+func TestUnmentionedReplyNote_DefaultAgentOtherPosterUnchanged(t *testing.T) {
 	d := &brokerMockDispatcher{}
 	srv, s, topicID, def := unreachableTestSetup(t, "running", false, d)
 	poster := otherAgent(t, s, def.ProjectID, "note-poster")
@@ -99,22 +99,18 @@ func TestUnmentionedReplyNote_DefaultAgentOtherPoster(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", code)
 	}
-	want := "looks good\n\n" + unmentionedReplyNote(def.Slug, poster.Slug)
-	if m == nil || m.Msg != want {
-		t.Fatalf("stored body: got %+v, want %q", m, want)
+	if m == nil || m.Msg != "looks good" || m.DispatchState != store.MessageDispatchDispatched {
+		t.Fatalf("expected unchanged dispatched row, got %+v", m)
 	}
-	if m.DispatchState != store.MessageDispatchDispatched {
-		t.Fatalf("expected dispatched, got %q", m.DispatchState)
-	}
-	if resp["content"] != want {
+	if resp["content"] != "looks good" {
 		t.Fatalf("response content: got %v", resp["content"])
 	}
 	msgs := d.getMessages()
 	if len(msgs) != 1 || msgs[0].agentSlug != def.Slug {
 		t.Fatalf("expected one dispatch to %s, got %+v", def.Slug, msgs)
 	}
-	if msgs[0].structured == nil || msgs[0].structured.Msg != want {
-		t.Fatalf("dispatched body: got %+v, want %q", msgs[0].structured, want)
+	if msgs[0].structured == nil || msgs[0].structured.Msg != "looks good" {
+		t.Fatalf("dispatched body changed: %+v", msgs[0].structured)
 	}
 }
 

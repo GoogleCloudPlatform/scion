@@ -26,20 +26,16 @@ import (
 // Unmentioned thread replies.
 //
 // A thread reply with no @mention and no reply-to target may have been
-// meant for the agent that last posted in the thread. It is never silently
-// routed to that agent. Instead the hub appends a note to the stored body
-// (and to what any recipient agent receives) that @mentions someone who
-// can act on it:
-//
-//   - the thread's default agent, when the reply routes to it and the most
-//     recent agent poster is a different agent; delivery is unchanged;
-//   - otherwise, when no agent receives the reply, the most recent human
-//     poster other than the sender, who gets the ordinary human mention
-//     notification. No agent is invoked.
+// meant for the agent that last posted in the thread. When no agent
+// receives it, it is never silently routed to that agent. Instead the hub
+// appends a note to the stored body that @mentions the most recent human
+// poster other than the sender, who gets the ordinary human mention
+// notification, and names the most recent agent poster. No agent is
+// invoked. A reply that reaches a live default agent is left untouched.
 //
 // The note is a suffix on the message body rather than a separate message
-// so it reuses the existing persist, publish, dispatch and mention
-// notification paths with no new message kind or schema change.
+// so it reuses the existing persist, publish and mention notification
+// paths with no new message kind or schema change.
 
 // unmentionedNoteScanLimit bounds how many recent thread messages are read
 // to find the most recent agent and human posters.
@@ -129,19 +125,6 @@ func memberMentionToken(m chatMemberEntry) string {
 		}
 	}
 	return ""
-}
-
-// unmentionedDefaultAgentNote returns content with a note to the default
-// agent when an unaddressed thread reply routes to it but the most recent
-// agent poster is a different agent. Otherwise, or on any lookup error, it
-// returns content unchanged.
-func (s *Server) unmentionedDefaultAgentNote(ctx context.Context, key, senderUserID, content string, defaultAgent *store.Agent) string {
-	poster, _, err := s.recentThreadPosters(ctx, key, senderUserID, nil)
-	if err != nil || poster == "" || strings.EqualFold(poster, defaultAgent.Slug) {
-		return content
-	}
-	out, _ := appendUnmentionedNote(content, defaultAgent.Slug, poster)
-	return out
 }
 
 // unmentionedHumanNote returns content with a note to the most recent

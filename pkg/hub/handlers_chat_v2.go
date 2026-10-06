@@ -1165,11 +1165,9 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// doc comment for the full rationale. unresolvedDefaultAgent is reused
 	// here (see its declaration above) so the existing "Agent unreachable"
 	// reporting path below also covers a deleted reply-to sender.
-	replyTargeted := false
 	if replyAgent, replyUnresolved, ok := s.resolveReplyTarget(ctx, key, projectID, body.ReplyToID); ok {
 		defaultAgent = replyAgent
 		unresolvedDefaultAgent = replyUnresolved
-		replyTargeted = true
 	}
 
 	// --- Resolve routing via shared planner ---
@@ -1203,18 +1201,6 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 			s.chatIdempotency.Record(user.ID(), body.IdempotencyKey, messageID)
 			idempotencyRecorded = true
 		}
-	}
-
-	// --- Unmentioned thread reply to the default agent ---
-	// A thread reply with no @mention and no reply-to target that routes
-	// to the topic default agent, while a different agent posted last,
-	// keeps its delivery but carries a note naming that poster. See
-	// chat_v2_unmentioned_note.go.
-	if !isDM && !replyTargeted && planErr == nil && defaultAgent != nil &&
-		len(plan.MentionNames) == 0 && len(plan.Agents) == 1 &&
-		plan.Agents[0].ID == defaultAgent.ID &&
-		s.threadMessageUnaddressed(ctx, projectID, nil, body.ReplyToID, user.ID()) {
-		content = s.unmentionedDefaultAgentNote(ctx, key, user.ID(), content, defaultAgent)
 	}
 
 	// --- Agent routing ---
