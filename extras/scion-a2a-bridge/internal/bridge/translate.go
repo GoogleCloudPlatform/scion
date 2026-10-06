@@ -187,7 +187,7 @@ func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) 
 
 	var artifacts []Artifact
 	switch msg.Type {
-	case "", messages.TypeInstruction, messages.TypeAssistantReply, messages.TypeInputNeeded:
+	case "", messages.TypeInstruction, messages.TypeInputNeeded:
 		artifacts = append(artifacts, Artifact{
 			ArtifactID: deterministicID(msg, "art"),
 			Parts:      parts,
@@ -262,7 +262,7 @@ func TranslateScionToA2AParts(msg *messages.StructuredMessage) (*a2a.Message, []
 
 	var artifacts []*a2a.Artifact
 	switch msg.Type {
-	case "", messages.TypeInstruction, messages.TypeAssistantReply, messages.TypeInputNeeded:
+	case "", messages.TypeInstruction, messages.TypeInputNeeded:
 		artifacts = append(artifacts, &a2a.Artifact{
 			ID:    a2a.NewArtifactID(),
 			Parts: sdkParts,

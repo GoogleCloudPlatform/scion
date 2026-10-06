@@ -239,3 +239,15 @@ func TestTranslateInputNeededProducesArtifact(t *testing.T) {
 		t.Errorf("TranslateScionToA2AParts artifacts = %+v, want one with the question", sdkArtifacts)
 	}
 }
+
+// The retired end-of-turn assistant-reply mirror no longer becomes an
+// artifact on either translation path.
+func TestTranslateRetiredAssistantReplyProducesNoArtifact(t *testing.T) {
+	mirror := &messages.StructuredMessage{Version: 1, Msg: "turn text", Type: messages.TypeAssistantReply}
+	if _, arts := TranslateScionToA2A(mirror); len(arts) != 0 {
+		t.Errorf("assistant-reply: artifacts = %d, want 0", len(arts))
+	}
+	if _, arts := TranslateScionToA2AParts(mirror); len(arts) != 0 {
+		t.Errorf("assistant-reply (SDK): artifacts = %d, want 0", len(arts))
+	}
+}
