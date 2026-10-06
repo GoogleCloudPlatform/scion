@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 118
+**Operations:** 119
 
 ## Table of Contents
 
@@ -79,6 +79,7 @@
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
+- [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
@@ -2898,6 +2899,38 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## hub.conduitgrantkeys.rotate
+
+**Domain:** hub
+
+**Description:** Rotate the conduit grant signing key (kids and timestamps only in the response)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/conduit/grant-keys/rotate` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `hub.conduit_grant_keys.execute`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminConduitGrantKeyRotate`
 
 ---
 
