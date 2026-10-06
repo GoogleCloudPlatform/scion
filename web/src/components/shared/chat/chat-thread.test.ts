@@ -826,6 +826,76 @@ describe('scion-chat-thread dispatch state from send response', () => {
   });
 });
 
+describe('scion-chat-thread stale send and the sending state', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('releases sending on switch and keeps a stale send off the new one', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      sending: boolean;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    const pending: Array<(value: unknown) => void> = [];
+    const send = (text: string) =>
+      internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text,
+            plain: false,
+            interrupt: false,
+            onSuccess: vi.fn(),
+            onError: vi.fn(),
+            mentions: [],
+            attachmentIds: [],
+          },
+        })
+      );
+    const holdNextPost = () =>
+      apiFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            pending.push(resolve);
+          })
+      );
+
+    holdNextPost();
+    const staleSend = send('first');
+    expect(internals.sending).toBe(true);
+
+    // Switch conversations while the first POST is still in flight: the
+    // composer must not stay stuck in sending on the new conversation.
+    el.conversationKey = 'other-thread';
+    await el.updateComplete;
+    expect(internals.sending).toBe(false);
+
+    // Start a send on the new conversation, then let the stale one finish.
+    holdNextPost();
+    const freshSend = send('second');
+    expect(internals.sending).toBe(true);
+    expect(pending).toHaveLength(2);
+
+    pending[0]({ ok: false, status: 500, text: () => Promise.resolve('') });
+    await staleSend;
+    expect(internals.sending).toBe(true);
+
+    pending[1]({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'server-fresh', attachments: [] }),
+    });
+    await freshSend;
+    expect(internals.sending).toBe(false);
+  });
+});
+
 describe('scion-chat-thread read watermark', () => {
   beforeEach(() => {
     apiFetch.mockReset();
