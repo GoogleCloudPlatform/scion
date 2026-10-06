@@ -1172,9 +1172,8 @@ func (l envSizeLimit) unit() string {
 // prepareContainerSecretEnv, which sciontool init writes out in the
 // container.
 //
-// A secret that does not fit limit fails the call with an error naming it,
-// so no secret is ever dropped silently. Values are never included in the
-// error.
+// A secret that does not fit limit fails the call with an error naming it
+// rather than being dropped. Values are never included in the error.
 //
 // It returns the env-type secret keys it added, in order. config.Env is
 // clipped before appending, so a caller's backing array is never written.

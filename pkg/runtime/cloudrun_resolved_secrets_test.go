@@ -325,6 +325,27 @@ func TestCloudRunSandboxRun_OversizedSecretFailsWithName(t *testing.T) {
 	}
 }
 
+// The staged-blob error names the largest file/variable secret, not the
+// first or the smallest.
+func TestApplyResolvedSecretsToEnv_StagedErrorNamesLargestSecret(t *testing.T) {
+	big := strings.Repeat("x", sandboxMaxEnvArgBytes+1)
+	cfg := RunConfig{
+		UnixUsername: "scion",
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "small-file", Type: "file", Target: "/home/scion/small.txt", Value: "tiny"},
+			{Name: "large-file", Type: "file", Target: "/home/scion/large.bin", Value: big},
+			{Name: "small-var", Type: "variable", Target: "SMALL_VAR", Value: "also-tiny"},
+		},
+	}
+	_, err := applyResolvedSecretsToEnv(&cfg, sandboxEnvLimit, sandboxRuntimeEnvKeys...)
+	checkSizeError(t, err, `"large-file"`, "xxxxxxxx")
+	for _, small := range []string{`"small-file"`, `"small-var"`} {
+		if strings.Contains(err.Error(), small) {
+			t.Errorf("error names %s; want only the largest secret", small)
+		}
+	}
+}
+
 // The sandbox limit covers the whole KEY=VALUE argv string plus its NUL.
 func TestApplyResolvedSecretsToEnv_SandboxLimitCountsKey(t *testing.T) {
 	const key = "LONG_SECRET_TARGET"

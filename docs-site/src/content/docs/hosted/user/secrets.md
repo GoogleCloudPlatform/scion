@@ -144,7 +144,7 @@ Secrets can be projected into the agent container in three ways:
 2.  **File**: Written to a specific path on the agent's filesystem.
 3.  **Variable**: Added to a JSON file at `~/.scion/secrets.json` for programmatic access by the harness.
 
-On the Cloud Run Instances runtime, file and variable secrets are sent together in one 32 KiB environment value, so after base64 encoding they get about 18 KiB in total; on `cloudrun-sandbox` the same entry is capped at 128 KiB, about 72 KiB in total. A larger set fails agent start with an error naming the largest secret. On `cloudrun-sandbox`, environment secrets cannot override `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_WORKSPACE_PATH`, `HOME`, `USER` or `LOGNAME`, which the runtime sets itself.
+On the Cloud Run Instances runtime, file and variable secrets are sent together in one 32 KiB environment value, so after base64 encoding they get about 18 KiB in total; on `cloudrun-sandbox` the same entry is capped at 128 KiB, about 72 KiB in total. A larger set fails agent start with an error naming the largest secret. A single environment secret is limited to a 32 KiB value on Cloud Run Instances and a 128 KiB `KEY=VALUE` entry on `cloudrun-sandbox`; a larger one fails agent start with an error naming it. On Cloud Run Instances, environment secrets cannot override `SCION_HOST_UID` or `SCION_HOST_GID`; on `cloudrun-sandbox`, they cannot override `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_WORKSPACE_PATH`, `HOME`, `USER` or `LOGNAME`. The runtime sets these itself.
 
 ### Updating Secret Metadata
 
