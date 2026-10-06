@@ -28,7 +28,8 @@ package hub
 //     user's live admission to the agent's project;
 //     2c. project_access — a local user's owner or ancestor relationship on
 //     a project-scoped target requires the user's active access to that
-//     project (interactive Decide only; see relationshipProjectAccessStage);
+//     project (Decide only, for interactive and UAT requests; not the
+//     delegation-ceiling walk; see relationshipProjectAccessStage);
 //  3. relationship_fact    — the rule's store fact holds (hub membership, a
 //     progeny sharing source); a lookup failure rejects the candidate;
 //  4. source_inactive      — the sharing source's owner is still active;
@@ -460,7 +461,7 @@ func projectAccessRelationshipRule(rule RelationshipRuleID) bool {
 //
 // Covered targets: any target whose structural project scope is set
 // (resourceProjectScope: a project-parented resource, or the project
-// itself), for every permission the owner and ancestor policies list on
+// itself; a project-parented target with no project ID is rejected), for every permission the owner and ancestor policies list on
 // that resource type — agent create, read, list, update, delete,
 // lifecycle, attach, message, port access and the remaining agent
 // permissions; project-scoped template, harness config, skill and GCP
@@ -490,6 +491,11 @@ func (a *AuthzService) relationshipProjectAccessStage(
 	}
 	projectID := resourceProjectScope(resource)
 	if projectID == "" {
+		// A project-parented target whose project ID is missing cannot be
+		// admitted; it is not treated as a non-project target.
+		if resource.ParentType == "project" {
+			return RelationshipRejectProjectAccess, "target project is not resolved"
+		}
 		return "", ""
 	}
 	res, err := a.ProjectTargetAdmission(ctx, principal, projectID, permissionID, resource, memo)
