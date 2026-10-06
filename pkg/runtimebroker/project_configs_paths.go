@@ -30,10 +30,12 @@ import (
 // read from a project's .scion entry are checked against the path computed
 // from those inputs, never used to build it.
 
-// hubProjectSlugPattern is the grammar of a hub project slug as produced by
-// api.Slugify: lowercase letters, digits and inner dashes, at most
-// api.MaxSlugLength characters. Only a slug matching it is used as a path
-// component.
+// hubProjectSlugPattern is the grammar api.Slugify produces: lowercase
+// letters, digits and inner dashes, at most api.MaxSlugLength characters.
+// Only a slug matching it is used as a path component. A project whose slug
+// is outside it (the hub accepts a client-supplied slug as is) is not
+// handled: its marker-project agents are not found and its shared-dir
+// storage is not removed.
 var hubProjectSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // projectShortIDPattern is the grammar of config.ProjectMarker.ShortUUID for
@@ -120,6 +122,8 @@ func hubMarkerProjectScionDir(globalDir, slug, projectID, markerPath string) str
 	}
 	want := filepath.Join(dir, config.DotScion)
 	resolved, err := marker.ExternalProjectPath()
+	// Cannot differ today (both paths derive from the same home dir); kept
+	// as a cross-check in case either derivation changes.
 	if err != nil || filepath.Clean(resolved) != want {
 		return ""
 	}

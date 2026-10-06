@@ -104,6 +104,21 @@ func TestFindAgentInHubManagedProjects_CraftedMarkers(t *testing.T) {
 			},
 		},
 		{
+			name: "project-configs entry symlinked to a sibling entry with the same short ID",
+			setup: func(t *testing.T, home string) string {
+				writeHubMarker(t, home, "proj-a", config.ProjectMarker{ProjectID: scopeProjA, ProjectSlug: "proj-a"})
+				configs := filepath.Join(home, ".scion", "project-configs")
+				sibling := filepath.Join(configs, "other__"+shortA())
+				if err := os.MkdirAll(sibling, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(sibling, filepath.Join(configs, "proj-a__"+shortA())); err != nil {
+					t.Fatal(err)
+				}
+				return filepath.Join(sibling, ".scion")
+			},
+		},
+		{
 			name: "trailing-dot slug",
 			setup: func(t *testing.T, home string) string {
 				writeHubMarker(t, home, "proj-a.", config.ProjectMarker{ProjectID: scopeProjA, ProjectSlug: "proj-a."})
@@ -132,6 +147,19 @@ func TestFindAgentInHubManagedProjects_CraftedMarkers(t *testing.T) {
 			target := tc.setup(t, home)
 			agentDir := mkAgentDir(t, target, "dev")
 
+			// The resolver itself refuses every crafted project, not just
+			// the later agent-dir check in findAgentInHubManagedProjects.
+			globalDir := filepath.Join(home, ".scion")
+			projects, err := os.ReadDir(filepath.Join(globalDir, "projects"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range projects {
+				markerPath := filepath.Join(globalDir, "projects", p.Name(), config.DotScion)
+				if got := hubMarkerProjectScionDir(globalDir, p.Name(), scopeProjA, markerPath); got != "" {
+					t.Errorf("hubMarkerProjectScionDir(%q) = %q; want empty", p.Name(), got)
+				}
+			}
 			if got, err := findAgentInHubManagedProjects("dev", scopeProjA); err != nil || got != "" {
 				t.Fatalf("crafted marker resolved to %q (err %v); want nothing", got, err)
 			}
