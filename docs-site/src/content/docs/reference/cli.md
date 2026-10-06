@@ -263,6 +263,22 @@ Sends a message to a running agent or user.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
+- **Group sends and exit codes:**
+  A `group[...]` send reports each recipient's outcome: `delivered`, `deferred` (saved while the agent reincarnates), `failed` (with the reason), or `unknown` (the Hub gave no answer, for example a timeout, so the message may have been delivered). When not every recipient was reached, the output lists the delivered and failed recipients and a `group[...]` recipient naming only the failed ones. With `--format json` the output is an object:
+  ```json
+  {
+    "group_id": "…",
+    "total": 3, "delivered": 1, "deferred": 0, "failed": 1, "unknown": 1,
+    "results": [
+      {"recipient": "agent:a", "status": "delivered"},
+      {"recipient": "agent:b", "status": "failed", "error": "…"},
+      {"recipient": "agent:c", "status": "unknown", "error": "…"}
+    ],
+    "retry_recipient": "group[agent:b]"
+  }
+  ```
+  `scion message` exits `0` when the message was sent (for a group, every recipient was delivered or deferred), `1` when it was not sent (for a group, no recipient received it, so the whole send can be retried), and `3` when a group send partly succeeded. On exit `3`, do not resend to the whole group: retry only `retry_recipient`, and check `unknown` recipients before you resend to them. An interrupt (Ctrl-C or `SIGTERM`) during a group send cancels the in-flight sends and still prints the results.
+
 - **Message Body Formatting:**
   The command delivers the `<message>` argument **verbatim** — it performs no escape expansion, no markdown rendering, and no character substitution. Whatever bytes you pass are exactly what the recipient receives.
   
