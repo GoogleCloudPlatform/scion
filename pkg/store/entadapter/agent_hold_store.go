@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -77,43 +78,48 @@ func entAgentHoldToStore(h *ent.AgentHold) *store.AgentHold {
 	return out
 }
 
-// agentHoldCreate validates h and builds its insert. It fills in an empty ID
-// and a zero CreatedAt on h, and stores the root principal ID in canonical
-// form.
-func (s *AgentHoldStore) agentHoldCreate(h *store.AgentHold) (*ent.AgentHoldCreate, uuid.UUID, error) {
+// agentHoldRow is one validated hold insert with the parsed IDs it names.
+type agentHoldRow struct {
+	create    *ent.AgentHoldCreate
+	id        uuid.UUID
+	agentID   uuid.UUID
+	projectID uuid.UUID
+}
+
+// agentHoldCreate validates h and builds its insert under a fresh ID. Any ID
+// already set on h is ignored. It fills in a zero CreatedAt on h, and stores
+// the root principal ID in canonical form.
+func (s *AgentHoldStore) agentHoldCreate(h *store.AgentHold) (agentHoldRow, error) {
 	if h == nil {
-		return nil, uuid.Nil, fmt.Errorf("%w: nil agent hold", store.ErrInvalidInput)
+		return agentHoldRow{}, fmt.Errorf("%w: nil agent hold", store.ErrInvalidInput)
 	}
 	if !store.ValidAgentHoldCause(h.Cause) {
-		return nil, uuid.Nil, fmt.Errorf("%w: unknown agent hold cause %q", store.ErrInvalidInput, h.Cause)
+		return agentHoldRow{}, fmt.Errorf("%w: unknown agent hold cause %q", store.ErrInvalidInput, h.Cause)
 	}
 	if !store.ValidMembershipLossTrigger(h.Trigger) {
-		return nil, uuid.Nil, fmt.Errorf("%w: unknown agent hold trigger %q", store.ErrInvalidInput, h.Trigger)
+		return agentHoldRow{}, fmt.Errorf("%w: unknown agent hold trigger %q", store.ErrInvalidInput, h.Trigger)
 	}
 	if h.RootPrincipalType != store.AgentHoldRootUser {
-		return nil, uuid.Nil, fmt.Errorf("%w: agent hold root principal type must be %q", store.ErrInvalidInput, store.AgentHoldRootUser)
+		return agentHoldRow{}, fmt.Errorf("%w: agent hold root principal type must be %q", store.ErrInvalidInput, store.AgentHoldRootUser)
 	}
 	rootID, err := parseUUID(h.RootPrincipalID)
 	if err != nil {
-		return nil, uuid.Nil, fmt.Errorf("%w: agent hold requires a root principal UUID", store.ErrInvalidInput)
+		return agentHoldRow{}, fmt.Errorf("%w: agent hold requires a root principal UUID", store.ErrInvalidInput)
 	}
 	if h.ClearedAt != nil || h.ClearedByKind != "" || h.ClearedByID != "" || h.ClearReason != "" {
-		return nil, uuid.Nil, fmt.Errorf("%w: a new agent hold cannot be cleared", store.ErrInvalidInput)
+		return agentHoldRow{}, fmt.Errorf("%w: a new agent hold cannot be cleared", store.ErrInvalidInput)
 	}
 	agentID, err := parseUUID(h.AgentID)
 	if err != nil {
-		return nil, uuid.Nil, err
+		return agentHoldRow{}, err
 	}
 	projectID, err := parseUUID(h.ProjectID)
 	if err != nil {
-		return nil, uuid.Nil, err
+		return agentHoldRow{}, err
 	}
+	// ID is output-only: every call assigns a fresh one, so the IDs it
+	// counts name only rows this call inserted.
 	id := uuid.New()
-	if h.ID != "" {
-		if id, err = parseUUID(h.ID); err != nil {
-			return nil, uuid.Nil, err
-		}
-	}
 	if h.CreatedAt.IsZero() {
 		h.CreatedAt = time.Now()
 	}
@@ -132,36 +138,49 @@ func (s *AgentHoldStore) agentHoldCreate(h *store.AgentHold) (*ent.AgentHoldCrea
 	if h.ViaAgentID != "" {
 		via, err := parseUUID(h.ViaAgentID)
 		if err != nil {
-			return nil, uuid.Nil, err
+			return agentHoldRow{}, err
 		}
 		b.SetViaAgentID(via)
 	}
-	return b, id, nil
+	return agentHoldRow{create: b, id: id, agentID: agentID, projectID: projectID}, nil
 }
 
 // CreateAgentHolds inserts holds with INSERT ... ON CONFLICT (agent_id,
 // root_principal_id) WHERE cleared_at IS NULL DO NOTHING, so a hold whose
 // (agent, root principal) already has an active row is skipped, including
-// one inserted concurrently by another hub instance. The rows this call
-// inserted are then counted by the IDs it assigned.
+// one inserted concurrently by another hub instance. Every hold gets a fresh
+// ID on every call, and the rows this call inserted are counted by those IDs.
+// Before any insert, each hold's agent row must exist with project_id equal
+// to the hold's ProjectID.
 func (s *AgentHoldStore) CreateAgentHolds(ctx context.Context, holds []*store.AgentHold) (int, error) {
-	builders := make([]*ent.AgentHoldCreate, 0, len(holds))
-	ids := make([]uuid.UUID, 0, len(holds))
+	rows := make([]agentHoldRow, 0, len(holds))
 	for _, h := range holds {
-		b, id, err := s.agentHoldCreate(h)
+		r, err := s.agentHoldCreate(h)
 		if err != nil {
 			return 0, err
 		}
-		h.ID = id.String()
-		builders = append(builders, b)
-		ids = append(ids, id)
+		rows = append(rows, r)
+	}
+	for start := 0; start < len(rows); start += agentHoldInsertBatch {
+		if err := s.checkAgentHoldProjects(ctx, rows[start:min(start+agentHoldInsertBatch, len(rows))]); err != nil {
+			return 0, err
+		}
+	}
+	for i, h := range holds {
+		h.ID = rows[i].id.String()
 	}
 	inserted := 0
-	for start := 0; start < len(builders); start += agentHoldInsertBatch {
-		end := min(start+agentHoldInsertBatch, len(builders))
+	for start := 0; start < len(rows); start += agentHoldInsertBatch {
+		batch := rows[start:min(start+agentHoldInsertBatch, len(rows))]
+		builders := make([]*ent.AgentHoldCreate, len(batch))
+		ids := make([]uuid.UUID, len(batch))
+		for i, r := range batch {
+			builders[i] = r.create
+			ids[i] = r.id
+		}
 		// Exec, never Save: when DO NOTHING skips rows, RETURNING yields
 		// fewer IDs than builders (see SeedMaintenanceOperations).
-		err := s.client.AgentHold.CreateBulk(builders[start:end]...).
+		err := s.client.AgentHold.CreateBulk(builders...).
 			OnConflict(
 				entsql.ConflictColumns(agenthold.FieldAgentID, agenthold.FieldRootPrincipalID),
 				entsql.ConflictWhere(entsql.IsNull(agenthold.FieldClearedAt)),
@@ -172,7 +191,7 @@ func (s *AgentHoldStore) CreateAgentHolds(ctx context.Context, holds []*store.Ag
 			return inserted, mapError(err)
 		}
 		n, err := s.client.AgentHold.Query().
-			Where(agenthold.IDIn(ids[start:end]...)).
+			Where(agenthold.IDIn(ids...)).
 			Count(ctx)
 		if err != nil {
 			return inserted, mapError(err)
@@ -180,6 +199,41 @@ func (s *AgentHoldStore) CreateAgentHolds(ctx context.Context, holds []*store.Ag
 		inserted += n
 	}
 	return inserted, nil
+}
+
+// checkAgentHoldProjects loads the agent rows of batch with one IN query and
+// returns ErrInvalidInput unless every hold's agent row exists and its
+// project_id equals the hold's project ID.
+func (s *AgentHoldStore) checkAgentHoldProjects(ctx context.Context, batch []agentHoldRow) error {
+	want := make(map[uuid.UUID]bool, len(batch))
+	ids := make([]uuid.UUID, 0, len(batch))
+	for _, r := range batch {
+		if !want[r.agentID] {
+			want[r.agentID] = true
+			ids = append(ids, r.agentID)
+		}
+	}
+	agents, err := s.client.Agent.Query().
+		Where(agent.IDIn(ids...)).
+		Select(agent.FieldID, agent.FieldProjectID).
+		All(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	projectOf := make(map[uuid.UUID]uuid.UUID, len(agents))
+	for _, a := range agents {
+		projectOf[a.ID] = a.ProjectID
+	}
+	for _, r := range batch {
+		p, ok := projectOf[r.agentID]
+		if !ok {
+			return fmt.Errorf("%w: agent hold names agent %s, which has no row", store.ErrInvalidInput, r.agentID)
+		}
+		if p != r.projectID {
+			return fmt.Errorf("%w: agent hold project %s is not the project of agent %s", store.ErrInvalidInput, r.projectID, r.agentID)
+		}
+	}
+	return nil
 }
 
 // HasActiveAgentHold reports whether the agent has an active hold.

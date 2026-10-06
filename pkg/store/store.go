@@ -2889,18 +2889,21 @@ type DelegationEdgeStore interface {
 type AgentHoldStore interface {
 	// CreateAgentHolds inserts holds, skipping any whose (AgentID,
 	// RootPrincipalID) already has an active hold, and returns the number
-	// inserted. Repeating the call, or racing it from another hub
-	// instance, inserts nothing more. Empty ID and zero CreatedAt are
-	// filled in; ClearedAt and the cleared-by fields must be empty.
-	// RootPrincipalType must be AgentHoldRootUser and RootPrincipalID a
-	// UUID, stored in canonical form. Returns ErrInvalidInput for an
-	// unknown cause or trigger, a missing agent or project, or an invalid
-	// root principal.
+	// of rows this call inserted. Repeating the call, or racing it from
+	// another hub instance, inserts nothing more while the holds are
+	// active. Zero CreatedAt is filled in; ClearedAt and the cleared-by
+	// fields must be empty. RootPrincipalType must be AgentHoldRootUser and
+	// RootPrincipalID a UUID, stored in canonical form. Each hold's agent
+	// must have a row whose project is the hold's ProjectID. Returns
+	// ErrInvalidInput, and inserts nothing, for an unknown cause or
+	// trigger, an invalid root principal, a malformed agent or project ID,
+	// an agent with no row, or a ProjectID that is not the agent's project.
 	//
-	// The call writes an ID into every hold it is given, but that ID only
-	// names a stored row for holds this call inserted: holds skipped as
-	// already active, and holds of a call that returned an error, have no
-	// row with that ID.
+	// ID is output-only: every call assigns a fresh ID to every hold it is
+	// given, replacing any ID already set, so the same holds can be passed
+	// again. That ID only names a stored row for holds this call inserted:
+	// holds skipped as already active, and holds of a call that returned
+	// an error, have no row with that ID.
 	CreateAgentHolds(ctx context.Context, holds []*AgentHold) (inserted int, err error)
 
 	// HasActiveAgentHold reports whether the agent has at least one active

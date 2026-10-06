@@ -472,6 +472,10 @@ func (s *DelegationEdgeStore) descendantLevel(ctx context.Context, q store.Desce
 		parentIDs[i] = p.id.String()
 	}
 
+	// delegator_id and scope_id are text columns matched against the
+	// canonical form (lower-case, hyphenated) of the parent and project IDs.
+	// Stored IDs are matched in canonical text form only, so writers must
+	// store canonical IDs (the create paths store uuid.UUID.String()).
 	for start := 0; start < len(parentIDs); start += descendantFrontierBatch {
 		chunk := parentIDs[start:min(start+descendantFrontierBatch, len(parentIDs))]
 		edges, err := s.client.DelegationEdge.Query().
@@ -539,6 +543,8 @@ func (s *DelegationEdgeStore) descendantLevel(ctx context.Context, q store.Desce
 		// Ancestry is a fallback for agents without an owner: an agent
 		// with an owner is reached through it, so an agent whose owner
 		// changed is not reached from an earlier root in its ancestry.
+		// Ancestry entries are matched against the canonical root ID in
+		// text form only, so writers must store canonical IDs.
 		seeded, err := s.descendantAgents(ctx, agentScope, agent.OwnerIDIsNil(), ancestryContains(q.RootID))
 		if err != nil {
 			return nil, err

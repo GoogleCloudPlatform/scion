@@ -126,6 +126,62 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 			assert.Equal(t, map[string]int{rootU: 1, rootV: 1, rootW: 1}, roots)
 		})
 
+		t.Run("the same holds can be passed again", func(t *testing.T) {
+			s := factory(t)
+			f := seedHoldFixture(t, ctx, s, 1)
+			a := f.agents[0]
+			holds := []*store.AgentHold{newHold(f.projectID, a, uuid.NewString())}
+
+			n, err := s.CreateAgentHolds(ctx, holds)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+			first := holds[0].ID
+			require.NotEmpty(t, first)
+
+			// The same slice again while the hold is active: nothing
+			// inserted, and the count says so.
+			n, err = s.CreateAgentHolds(ctx, holds)
+			require.NoError(t, err)
+			assert.Equal(t, 0, n)
+			assert.NotEqual(t, first, holds[0].ID, "every call assigns a fresh ID")
+
+			_, err = s.ClearAgentHolds(ctx, a, store.ClearActor{Kind: store.ClearActorUser, ID: uuid.NewString()}, "resumed")
+			require.NoError(t, err)
+
+			// After the clear, the same slice inserts a new active hold.
+			n, err = s.CreateAgentHolds(ctx, holds)
+			require.NoError(t, err)
+			assert.Equal(t, 1, n)
+			active, err := s.ListActiveAgentHolds(ctx, a)
+			require.NoError(t, err)
+			require.Len(t, active, 1)
+			assert.Equal(t, holds[0].ID, active[0].ID)
+		})
+
+		t.Run("a hold outside its agent's project is refused", func(t *testing.T) {
+			s := factory(t)
+			f := seedHoldFixture(t, ctx, s, 1)
+			other := seedHoldFixture(t, ctx, s, 1)
+
+			for name, holds := range map[string][]*store.AgentHold{
+				"another project":    {newHold(other.projectID, f.agents[0], uuid.NewString())},
+				"an unknown project": {newHold(uuid.NewString(), f.agents[0], uuid.NewString())},
+				"one hold of a batch": {
+					newHold(f.projectID, f.agents[0], uuid.NewString()),
+					newHold(f.projectID, other.agents[0], uuid.NewString()),
+				},
+			} {
+				n, err := s.CreateAgentHolds(ctx, holds)
+				assert.ErrorIs(t, err, store.ErrInvalidInput, name)
+				assert.Equal(t, 0, n, name)
+			}
+			for _, a := range []string{f.agents[0], other.agents[0]} {
+				held, err := s.HasActiveAgentHold(ctx, a)
+				require.NoError(t, err)
+				assert.False(t, held, "nothing is stored for a refused call")
+			}
+		})
+
 		t.Run("fields round-trip", func(t *testing.T) {
 			s := factory(t)
 			f := seedHoldFixture(t, ctx, s, 2)
