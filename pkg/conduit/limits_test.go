@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,7 +103,15 @@ func recvEnteredOn(t *testing.T, s *session, entered <-chan context.Context) con
 // OpenStream calls reach the peer in stream-id order, so the peer (which
 // refuses an id not above the last one) keeps the session. With both sides
 // opening at once, each side's ids arrive in order.
+//
+// The race needs openers running in parallel, so the test raises
+// GOMAXPROCS to at least 4 for its duration. GOMAXPROCS is process-wide,
+// so this test must not use t.Parallel.
 func TestOpenStreamConcurrentIDsInOrder(t *testing.T) {
+	if prev := runtime.GOMAXPROCS(0); prev < 4 {
+		runtime.GOMAXPROCS(4)
+		t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+	}
 	const n = 64
 	for _, tc := range []struct {
 		name                    string
@@ -229,13 +238,15 @@ func TestOpenStreamBlockedOpenReleases(t *testing.T) {
 		},
 		{
 			name: "holder's ctx",
-			run: func(t *testing.T, _ *session, holder, waiter <-chan result, cancelHolder, cancelWaiter context.CancelFunc) {
+			run: func(t *testing.T, s *session, holder, waiter <-chan result, cancelHolder, cancelWaiter context.CancelFunc) {
 				cancelHolder()
 				if r := recvResult(t, holder); !errors.Is(r.err, context.Canceled) {
 					t.Fatalf("holder err = %v, want context.Canceled", r.err)
 				}
 				// The waiter now holds the turn and is stuck queueing in
-				// its place; its own ctx still releases it.
+				// its place (its stream is added under the open lock
+				// before it queues); its own ctx still releases it.
+				eventually(t, "waiter queueing", func() bool { return s.Stats().OpenStreams == 1 })
 				cancelWaiter()
 				if r := recvResult(t, waiter); !errors.Is(r.err, context.Canceled) {
 					t.Fatalf("waiter err = %v, want context.Canceled", r.err)
