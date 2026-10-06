@@ -431,6 +431,10 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get environment variable: %w", err)
 	}
+	if envVar == nil {
+		// A 2xx response with no body (e.g. 204) decodes to nil, nil.
+		return fmt.Errorf("failed to get environment variable: hub returned no content for %q", key)
+	}
 
 	if wantJSON(envOutputJSON) {
 		return outputJSON(newEnvVarOutput(envVar))

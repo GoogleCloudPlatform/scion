@@ -35,6 +35,9 @@ var jsonModes = []struct {
 	{name: "format json", format: "json"},
 }
 
+// noContentBody makes newJSONRoutesServer answer a route with 204 and no body.
+type noContentBody struct{}
+
 // newJSONRoutesServer serves fixed JSON bodies by path, plus /healthz.
 func newJSONRoutesServer(t *testing.T, routes map[string]interface{}) *httptest.Server {
 	t.Helper()
@@ -47,6 +50,10 @@ func newJSONRoutesServer(t *testing.T, routes map[string]interface{}) *httptest.
 		body, ok := routes[r.URL.Path]
 		if !ok || r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if _, empty := body.(noContentBody); empty {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(body)
@@ -356,6 +363,33 @@ func TestRunEnvGet_JSONEmptyValue(t *testing.T) {
 			item := items[0].(map[string]interface{})
 			require.Contains(t, item, "value")
 			assert.Equal(t, "", item["value"])
+		})
+	}
+}
+
+// A get that succeeds with no body must return an error, not panic, in both
+// the JSON and the text form.
+func TestRunEnvGet_NoContent(t *testing.T) {
+	modes := append([]struct {
+		name     string
+		format   string
+		jsonFlag bool
+	}{{name: "text"}}, jsonModes...)
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			setupJSONCmdTest(t, map[string]interface{}{
+				"/api/v1/env/GONE": noContentBody{},
+			})
+			outputFormat = mode.format
+			envOutputJSON = mode.jsonFlag
+
+			var runErr error
+			out := captureStdout(t, func() {
+				runErr = runEnvGet(hubEnvGetCmd, []string{"GONE"})
+			})
+			require.Error(t, runErr)
+			assert.Contains(t, runErr.Error(), "no content")
+			assert.Empty(t, out)
 		})
 	}
 }
