@@ -19,6 +19,13 @@ package router_test
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
+	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,5 +267,205 @@ func TestRouterInvalidRequests(t *testing.T) {
 	req.Want.AnyExecScope = true
 	if _, err := rt.Resolve(context.Background(), req, nil); !errors.Is(err, router.ErrNoSession) {
 		t.Fatalf("stateless AnyExecScope: err = %v, want ErrNoSession (valid request, no session)", err)
+	}
+}
+
+// front stands in for a proxy or mesh in front of a relay's internal
+// endpoint, so a test can make the endpoint fail in ways the relay itself
+// would not.
+type front struct {
+	srv       *httptest.Server
+	mode      atomic.Int32
+	forwarded atomic.Int32 // requests handed to the relay
+}
+
+const (
+	frontForward        int32 = iota
+	frontBare503              // 503 with no refusal reason
+	frontOtherReason503       // 503 whose reason is not a pre-admission refusal
+	frontLoseResponse         // deliver to the relay, then drop the connection
+)
+
+func newFront(t *testing.T, target string) *front {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := httputil.NewSingleHostReverseProxy(u)
+	f := &front{}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch f.mode.Load() {
+		case frontBare503:
+			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+		case frontLoseResponse:
+			f.forwarded.Add(1)
+			rp.ServeHTTP(httptest.NewRecorder(), r)
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		default:
+			f.forwarded.Add(1)
+			rp.ServeHTTP(w, r)
+		}
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// TestRouterExcludesUnreachableOwner (design §3.5): a failed dial to an
+// owner excludes that relay and re-resolves within the bound.
+// With no alternative the original error is returned. A bare 503, a
+// status produced by the target, a lost response and a failure after
+// admission are not re-resolved.
+func TestRouterExcludesUnreachableOwner(t *testing.T) {
+	const live = "relay-live"
+	type env struct {
+		fronts map[string]*front
+		nodes  map[string]*relaytest.Node
+	}
+	dialFail := func(e env, id string) { e.fronts[id].srv.Close() }
+	frontMode := func(m int32) func(env, string) {
+		return func(e env, id string) { e.fronts[id].mode.Store(m) }
+	}
+	isOwnerUnreachable := func(err error) error {
+		var ce *conduit.CloseError
+		switch {
+		case !errors.Is(err, relay.ErrOwnerUnreachable):
+			return errors.New("want ErrOwnerUnreachable")
+		case errors.Is(err, router.ErrNoSession):
+			return errors.New("want the owner's error, not ErrNoSession")
+		case !errors.As(err, &ce) && !strings.Contains(err.Error(), "dialing owner relay"):
+			return errors.New("want the original dial or close error")
+		}
+		return nil
+	}
+	notRetriable := func(err error) error {
+		if err == nil || errors.Is(err, relay.ErrOwnerUnreachable) || errors.Is(err, router.ErrNoSession) {
+			return errors.New("want a non-retriable owner error")
+		}
+		return nil
+	}
+	blockingTarget := conduit.Config{RPCHandler: conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+		<-ctx.Done()
+		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: 200}
+	})}
+	target503 := conduit.Config{RPCHandler: conduit.RPCHandlerFunc(func(_ context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: http.StatusServiceUnavailable, Body: []byte("target busy")}
+	})}
+
+	for _, tc := range []struct {
+		name    string
+		stream  bool
+		failing []string // dialled after the live relay, so ranked first
+		live    bool
+		target  conduit.Config // the failing relays' sessions
+		mod     func(*relay.Config)
+		breakFn func(env, string)
+		want    []string // relays tried, in order
+		check   func(error) error
+		status  int32 // RpcResponse status seen by the last call (rpc)
+		// delivered: the request reached relay-a exactly once.
+		delivered bool
+	}{
+		{name: "dial failure re-resolves (rpc)", failing: []string{"relay-a"}, live: true, breakFn: dialFail,
+			want: []string{"relay-a", live}, status: 200},
+		{name: "dial failure re-resolves (stream)", stream: true, failing: []string{"relay-a"}, live: true, breakFn: dialFail,
+			want: []string{"relay-a", live}},
+		{name: "excluded relays are not chosen again", failing: []string{"relay-a", "relay-b"}, live: true, breakFn: dialFail,
+			want: []string{"relay-b", "relay-a", live}, status: 200},
+		{name: "bound reached returns the owner error", failing: []string{"relay-a", "relay-b", "relay-c"}, live: true, breakFn: dialFail,
+			want: []string{"relay-c", "relay-b", "relay-a"}, check: isOwnerUnreachable},
+		{name: "no alternative after a dial failure", failing: []string{"relay-a"}, breakFn: dialFail,
+			want: []string{"relay-a"}, check: isOwnerUnreachable},
+		{name: "bare 503 is not re-resolved (rpc)", failing: []string{"relay-a"}, live: true, breakFn: frontMode(frontBare503),
+			want: []string{"relay-a"}, check: notRetriable},
+		{name: "bare 503 is not re-resolved (stream)", stream: true, failing: []string{"relay-a"}, live: true, breakFn: frontMode(frontBare503),
+			want: []string{"relay-a"}, check: notRetriable},
+		{name: "target 503 in the RpcResponse is not re-resolved", failing: []string{"relay-a"}, live: true, target: target503,
+			want: []string{"relay-a"}, status: http.StatusServiceUnavailable},
+		{name: "lost response is not re-resolved", failing: []string{"relay-a"}, live: true, breakFn: frontMode(frontLoseResponse),
+			want: []string{"relay-a"}, check: notRetriable, delivered: true},
+		{name: "failure after admission is not re-resolved", failing: []string{"relay-a"}, live: true, target: blockingTarget,
+			mod: func(c *relay.Config) { c.RPCTimeout = 50 * time.Millisecond }, want: []string{"relay-a"}, check: notRetriable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := relaytest.NewWorld(t)
+			w.SetPrincipal("b", relay.Principal{Kind: registry.PrincipalBroker, ID: brokerID, Incarnation: "inc-1"})
+			e := env{fronts: map[string]*front{}, nodes: map[string]*relaytest.Node{}}
+			if tc.live {
+				n := w.StartNode(live, nil)
+				n.MustDial("b", relaytest.BrokerHello(brokerID, "inc-1"), echoTarget())
+			}
+			for _, id := range tc.failing {
+				n := w.StartNode(id, func(c *relay.Config) {
+					f := newFront(t, c.InternalEndpoint)
+					c.InternalEndpoint = f.srv.URL
+					e.fronts[id] = f
+					if tc.mod != nil {
+						tc.mod(c)
+					}
+				})
+				e.nodes[id] = n
+				target := tc.target
+				if target.RPCHandler == nil {
+					target = echoTarget()
+				}
+				n.MustDial("b", relaytest.BrokerHello(brokerID, "inc-1"), target)
+			}
+			if tc.breakFn != nil {
+				for _, id := range tc.failing {
+					tc.breakFn(e, id)
+				}
+			}
+			before := map[string]int32{}
+			for id, f := range e.fronts {
+				before[id] = f.forwarded.Load()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			rt := newRouter(t, w.StartNode("relay-r", nil))
+			req := router.Request{Op: router.OpStatefulRPC, Kind: registry.PrincipalBroker, ID: brokerID, BrokerIncarnation: "inc-1"}
+			if tc.stream {
+				req.Op = router.OpStream
+			}
+			var tried []string
+			var status int32
+			err := rt.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+				tried = append(tried, res.Record.RelayInstanceID)
+				if tc.stream {
+					st, err := res.Session.OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY})
+					if err != nil {
+						return err
+					}
+					return st.Close()
+				}
+				resp, err := res.Session.Call(ctx, &conduitv1.RpcRequest{RequestId: "r1", Method: "exec"})
+				if err != nil {
+					return err
+				}
+				status = resp.GetStatus()
+				return nil
+			})
+			if !slices.Equal(tried, tc.want) {
+				t.Fatalf("relays tried = %v, want %v (err %v)", tried, tc.want, err)
+			}
+			if tc.check != nil {
+				if cerr := tc.check(err); cerr != nil {
+					t.Fatalf("err = %v: %v", err, cerr)
+				}
+			} else if err != nil {
+				t.Fatalf("err = %v, want success", err)
+			}
+			if status != tc.status {
+				t.Fatalf("RpcResponse status = %d, want %d", status, tc.status)
+			}
+			if tc.delivered {
+				if got := e.fronts["relay-a"].forwarded.Load() - before["relay-a"]; got != 1 {
+					t.Fatalf("requests delivered to relay-a = %d, want 1", got)
+				}
+			}
+		})
 	}
 }

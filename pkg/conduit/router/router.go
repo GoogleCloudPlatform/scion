@@ -31,7 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 )
 
-// MaxReResolves bounds re-resolution after a stale route (design §3.5).
+// MaxReResolves bounds re-resolution after a stale route or an
+// unreachable owner relay (design §3.5).
 const MaxReResolves = 2
 
 // Errors.
@@ -165,6 +166,22 @@ func (r *Router) wants(req Request) ([]registry.Want, error) {
 // internal endpoint, provided the owner row is of the session's
 // generation and addressable.
 func (r *Router) Resolve(ctx context.Context, req Request, exclude map[string]bool) (Resolved, error) {
+	return r.resolve(ctx, req, exclusions{sessions: exclude})
+}
+
+// exclusions are the candidates a resolution has ruled out: session ids
+// (stale routes) and relay instance ids (an unreachable owner, which
+// rules out every session it holds).
+type exclusions struct {
+	sessions map[string]bool
+	relays   map[string]bool
+}
+
+func (x exclusions) excluded(rec registry.SessionRecord) bool {
+	return x.sessions[rec.SessionID] || x.relays[rec.RelayInstanceID]
+}
+
+func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (Resolved, error) {
 	wants, err := r.wants(req)
 	if err != nil {
 		return Resolved{}, err
@@ -179,7 +196,7 @@ func (r *Router) Resolve(ctx context.Context, req Request, exclude map[string]bo
 			return Resolved{}, fmt.Errorf("%w: %w", ErrRegistryUnavailable, err)
 		}
 		for _, rec := range recs {
-			if exclude[rec.SessionID] {
+			if exclude.excluded(rec) {
 				continue
 			}
 			if rec.RelayInstanceID == self {
@@ -224,26 +241,46 @@ func (r *Router) ownerEndpoint(ctx context.Context, rec registry.SessionRecord) 
 	return "", nil
 }
 
-// Do resolves req and runs fn on the session. If fn reports a stale route
-// (relay.ErrStaleRoute: the owner no longer holds the session or it is no
-// longer admissible), the session is excluded and req re-resolved, at most
-// MaxReResolves times; then ErrNoSession. fn receives the resolution so it
-// can mint a grant for exactly that session (session id, epoch,
-// incarnation) on every attempt.
+// Do resolves req and runs fn on the session, re-resolving at most
+// MaxReResolves times when fn's error shows another session may serve:
+//
+//   - relay.ErrStaleRoute (the owner no longer holds the session or it is
+//     no longer admissible): that session is excluded. When the bound is
+//     reached the result is ErrNoSession.
+//   - relay.ErrOwnerUnreachable (the internal dial failed): that relay
+//     instance, and so every session it holds, is excluded for the rest
+//     of the resolution. When the bound is reached, or no other session
+//     is eligible, fn's error is returned unchanged.
+//
+// fn receives the resolution so it can mint a grant for exactly that
+// session (session id, epoch, incarnation) on every attempt.
 func (r *Router) Do(ctx context.Context, req Request, fn func(context.Context, Resolved) error) error {
-	exclude := map[string]bool{}
+	exclude := exclusions{sessions: map[string]bool{}, relays: map[string]bool{}}
+	var unreachable error // fn's error when the last attempt's owner was unreachable
 	for attempt := 0; ; attempt++ {
-		res, err := r.Resolve(ctx, req, exclude)
+		res, err := r.resolve(ctx, req, exclude)
 		if err != nil {
+			if unreachable != nil && errors.Is(err, ErrNoSession) {
+				return unreachable
+			}
 			return err
 		}
 		err = fn(ctx, res)
-		if !errors.Is(err, relay.ErrStaleRoute) {
+		unreachable = nil
+		switch {
+		case errors.Is(err, relay.ErrStaleRoute):
+			if attempt >= MaxReResolves {
+				return fmt.Errorf("%w (after %d re-resolutions): %w", ErrNoSession, attempt, err)
+			}
+			exclude.sessions[res.Record.SessionID] = true
+		case errors.Is(err, relay.ErrOwnerUnreachable):
+			if attempt >= MaxReResolves {
+				return err
+			}
+			exclude.relays[res.Record.RelayInstanceID] = true
+			unreachable = err
+		default:
 			return err
 		}
-		if attempt >= MaxReResolves {
-			return fmt.Errorf("%w (after %d re-resolutions): %w", ErrNoSession, attempt, err)
-		}
-		exclude[res.Record.SessionID] = true
 	}
 }
