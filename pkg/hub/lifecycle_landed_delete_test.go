@@ -220,12 +220,14 @@ func TestCreateExisting_DeleteWinsAfterLanding(t *testing.T) {
 				client.onLand = func() { del.apply(t, f.store, agent.ID) }
 				f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default()))
 
-				req := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID}
+				req := map[string]interface{}{"name": agent.Slug, "projectId": f.project.ID, "notify": true}
 				for k, v := range br.body {
 					req[k] = v
 				}
 				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", req)
 				sent := client.lastStartExtras.RunID
+				subs, err := f.store.GetNotificationSubscriptions(context.Background(), agent.ID)
+				require.NoError(t, err)
 				require.NotEmpty(t, sent, "the start reached the broker: %s", rec.Body.String())
 
 				if !del.compensate {
@@ -235,6 +237,7 @@ func TestCreateExisting_DeleteWinsAfterLanding(t *testing.T) {
 					require.NotNil(t, resp.Agent)
 					assert.Equal(t, agent.ID, resp.Agent.ID)
 					assert.Empty(t, client.deleteRuns, "no compensating delete")
+					assert.NotEmpty(t, subs, "notify subscribes on a successful start")
 					return
 				}
 
@@ -248,6 +251,15 @@ func TestCreateExisting_DeleteWinsAfterLanding(t *testing.T) {
 				assert.NotContains(t, raw, "agent", "no agent body")
 				assert.Equal(t, []string{sent}, client.deleteRuns,
 					"the landed run is deleted once, scoped to its run ID")
+				assert.Empty(t, subs, "no notify subscription after the delete won")
+				// Nothing is written after the dispatch: the claim keeps its
+				// marker and the start's running write never lands.
+				if del.name == "delete-claimed" {
+					got, err := f.store.GetAgent(context.Background(), agent.ID)
+					require.NoError(t, err)
+					assert.NotEqual(t, string(state.PhaseRunning), got.Phase)
+					assert.Equal(t, store.DeletionStateDeleting, got.DeletionState)
+				}
 			})
 		}
 	}
@@ -279,6 +291,7 @@ func TestCreateExisting_DeleteWinsAfterReRead_HardDelete409(t *testing.T) {
 	}{
 		{"resume-suspended", state.PhaseSuspended, nil},
 		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
+		{"force-recover", state.PhaseError, map[string]interface{}{"resume": true, "forceResume": true}},
 		{"start-created", state.PhaseCreated, nil},
 	}
 	for _, br := range branches {
