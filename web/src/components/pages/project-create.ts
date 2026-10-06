@@ -29,6 +29,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import {
+  GIT_REMOTE_INVALID,
   displayGitRemote,
   normalizeGitRemote,
   sanitizeGitRemote,
@@ -42,6 +43,7 @@ import { can, isEmptyPerAgentWorkspace } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type WorkspaceType = 'git' | 'shared' | 'empty-per-agent' | 'linked';
 type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
@@ -141,6 +143,83 @@ function templateDescription(t: ProjectTemplate): string {
     return `Git · ${GIT_WORKSPACE_MODE_LABELS[templateGitWorkspaceMode(t)].toLowerCase()}`;
   }
   return workspaceTypeLabel(type);
+}
+
+/**
+ * Client-side hint for the clone-url label the create form derives from the
+ * git remote: the hub accepts only plain repository URLs (no userinfo, query
+ * or fragment) and answers 400 otherwise. Returns a message to show, or null.
+ * An ssh:// or scp-style login (git@host:org/repo) is fine; the hub remains
+ * the authority.
+ */
+export function cloneUrlCredentialHint(remote: string): string | null {
+  const url = trimRemote(remote);
+  const advice =
+    ' Use a plain repository URL and configure clone authentication with project secrets or the GitHub App.';
+  if (!/^[\x21-\x7e]*$/.test(url)) {
+    return 'The repository URL must not include spaces, control or non-ASCII characters.';
+  }
+  // A leading '//' is a network-path reference (//user:pass@host/repo), not a local path.
+  const isLocalPath =
+    (url.startsWith('/') && !url.startsWith('//')) || url.startsWith('./') || url.startsWith('../');
+  if (isLocalPath) return null;
+  if (/[?#]/.test(url)) {
+    return 'The repository URL must not include a query string or fragment.' + advice;
+  }
+  if (!url.includes('@')) return null;
+  const scpLogin = /^[A-Za-z0-9._-]+$/;
+  // Mirror of util.ValidateCloneURLLabel: only an RFC 3986 scheme prefix counts.
+  const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/.exec(url);
+  let loginOnly = false;
+  if (scheme) {
+    const rest = scheme[2];
+    const authority = rest.split('/')[0];
+    const at = authority.indexOf('@');
+    loginOnly =
+      scheme[1].toLowerCase() === 'ssh' &&
+      rest.split('@').length === 2 &&
+      at > 0 &&
+      scpLogin.test(authority.slice(0, at));
+  } else {
+    const scp = /^([A-Za-z0-9._-]+)@([^:/@]+):(.*)$/.exec(url);
+    loginOnly = scp !== null && !scp[3].includes('@');
+  }
+  return loginOnly
+    ? null
+    : "The repository URL must not include a username, password or token ('@' is allowed only in an ssh or scp-style login)." +
+        advice;
+}
+
+/**
+ * The HTTPS clone URL the create form stores as the clone-url label, derived
+ * from whatever the user entered. Credentials, query, fragment, scheme and any
+ * ssh/scp login are dropped (displayGitRemote), then https:// and .git are
+ * added (except for Azure DevOps URLs, where .git would break the path). The
+ * hub refuses a clone-url carrying userinfo, so a login such as
+ * ssh://git@host/... or deploy@host:team/proj must not survive here.
+ */
+export function deriveCloneUrl(remote: string): string {
+  // git+ssh:// and ssh+git:// are ssh:// (mirror of util.canonicalSSHScheme),
+  // so the login is kept as transport and dropped by displayGitRemote below.
+  const canonical = trimRemote(remote).replace(/^(git\+ssh|ssh\+git):\/\//i, 'ssh://');
+  let cloneUrl = displayGitRemote(canonical);
+  // Nothing usable after sanitizing (empty, or a '?'/'#' inside the userinfo).
+  if (!cloneUrl) return '';
+  // An ssh:// port is the ssh daemon's, not the https server's.
+  if (/^ssh:\/\//i.test(canonical)) {
+    cloneUrl = cloneUrl.replace(/^([^/]+):\d+(?=\/|$)/, '$1');
+  }
+  const lowerUrl = cloneUrl.toLowerCase();
+  const isADO =
+    lowerUrl.startsWith('dev.azure.com/') ||
+    /^[^.]+\.visualstudio\.com(\/|$)/.test(lowerUrl) ||
+    lowerUrl.includes('/_git/');
+  if (isADO) {
+    cloneUrl = cloneUrl.replace(/\.git$/, '');
+  } else if (!cloneUrl.endsWith('.git')) {
+    cloneUrl += '.git';
+  }
+  return `https://${cloneUrl}`;
 }
 
 /** The template's clone URL, used as the git remote override placeholder. */
@@ -293,7 +372,7 @@ export class ScionPageProjectCreate extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.checkCreateCapability();
-    this.checkGitHubApp();
+    void this.checkGitHubApp();
     void this.loadSystemStatus();
     void this.loadTemplates();
   }
@@ -886,8 +965,14 @@ export class ScionPageProjectCreate extends LitElement {
    * re-validates (a 400 on gitRemote is shown inline too).
    */
   private checkTemplateGitRemote(): boolean {
-    const remote = stripQueryAndFragment(trimRemote(this.templateGitRemote));
-    this.templateGitRemoteError = remote ? validateGitRemote(remote) : null;
+    const trimmed = trimRemote(this.templateGitRemote);
+    const remote = stripQueryAndFragment(trimmed);
+    // '' from a non-empty value: a '?' or '#' inside the userinfo.
+    this.templateGitRemoteError = remote
+      ? validateGitRemote(remote)
+      : trimmed
+        ? GIT_REMOTE_INVALID
+        : null;
     return this.templateGitRemoteError === null;
   }
 
@@ -960,7 +1045,7 @@ export class ScionPageProjectCreate extends LitElement {
     }
     const url = this.gitRemote.trim();
     if (url.length > 5) {
-      this.gitRemoteCheckTimer = setTimeout(() => this.checkExistingProjects(url), 500);
+      this.gitRemoteCheckTimer = setTimeout(() => void this.checkExistingProjects(url), 500);
     } else {
       this.existingProjectsForRemote = [];
     }
@@ -980,8 +1065,7 @@ export class ScionPageProjectCreate extends LitElement {
   }
 
   private navigateToProject(projectId: string): void {
-    window.history.pushState({}, '', `/projects/${projectId}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateTo(`/projects/${projectId}`);
   }
 
   private async handleSubmit(_e: Event): Promise<void> {
@@ -999,6 +1083,14 @@ export class ScionPageProjectCreate extends LitElement {
     if (this.mode === 'git' && !this.gitRemote.trim()) {
       this.error = 'Git remote URL is required for git-backed projects.';
       return;
+    }
+
+    if (this.mode === 'git') {
+      const hint = cloneUrlCredentialHint(this.gitRemote);
+      if (hint) {
+        this.error = hint;
+        return;
+      }
     }
 
     if (this.mode === 'linked') {
@@ -1036,30 +1128,11 @@ export class ScionPageProjectCreate extends LitElement {
 
       if (this.mode === 'git') {
         const trimmedUrl = this.gitRemote.trim();
-        // Build an HTTPS clone URL from whatever the user entered.
-        // Strip known schemes/prefixes, then re-add https:// and .git
-        // (except for Azure DevOps URLs where .git would break the path).
-        let cloneUrl = trimmedUrl;
-        const hadGitAt = cloneUrl.startsWith('git@');
-        cloneUrl = cloneUrl.replace(/^(https?:\/\/|ssh:\/\/|git:\/\/|git@)/, '');
-        if (hadGitAt) {
-          cloneUrl = cloneUrl.replace(':', '/'); // git@host:org/repo → host/org/repo
-        }
-        const lowerUrl = cloneUrl.toLowerCase();
-        const isADO =
-          lowerUrl.startsWith('dev.azure.com/') ||
-          /^[^.]+\.visualstudio\.com(\/|$)/.test(lowerUrl) ||
-          lowerUrl.includes('/_git/');
-        if (isADO) {
-          cloneUrl = cloneUrl.replace(/\.git$/, '');
-        } else if (!cloneUrl.endsWith('.git')) {
-          cloneUrl += '.git';
-        }
-        cloneUrl = `https://${cloneUrl}`;
+        const cloneUrl = deriveCloneUrl(trimmedUrl);
         body.gitRemote = trimmedUrl;
         const labels: Record<string, string> = {
           'scion.dev/default-branch': this.branch.trim() || 'main',
-          'scion.dev/clone-url': cloneUrl,
+          ...(cloneUrl ? { 'scion.dev/clone-url': cloneUrl } : {}),
           'scion.dev/source-url': trimmedUrl,
         };
         if (this.gitWorkspaceMode === 'shared') {
@@ -1589,7 +1662,7 @@ export class ScionPageProjectCreate extends LitElement {
               ${this.gitWorkspaceMode === 'worktree-per-agent'
                 ? html`<div class="workspace-mode-note">
                     A single base clone is created, and each agent gets a lightweight git worktree.
-                    Requires git ≥ 2.47 on the node. On Kubernetes, requires the NFS backend.
+                    Requires git ≥ 2.48 on the node. On Kubernetes, requires the NFS backend.
                   </div>`
                 : this.gitWorkspaceMode === 'shared'
                   ? html`<div class="workspace-mode-note">

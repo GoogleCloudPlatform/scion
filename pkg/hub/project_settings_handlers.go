@@ -16,7 +16,12 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -47,6 +52,8 @@ const (
 	// Default GCP identity
 	projectSettingDefaultGCPIdentityMode = "scion.io/default-gcp-identity-mode"
 	projectSettingDefaultGCPIdentitySAID = "scion.io/default-gcp-identity-service-account-id"
+	// JSON object: broker profile name -> registered SA ID.
+	projectSettingDefaultGCPIdentitySAIDByProfile = "scion.io/default-gcp-identity-service-account-id-by-profile"
 
 	// Default resource spec (flat keys)
 	projectSettingDefaultResourcesCPUReq = "scion.io/default-resources-cpu-request"
@@ -140,6 +147,7 @@ var projectSettingKeys = []string{
 	// Default GCP identity
 	projectSettingDefaultGCPIdentityMode,
 	projectSettingDefaultGCPIdentitySAID,
+	projectSettingDefaultGCPIdentitySAIDByProfile,
 
 	// Default resource spec (flat keys)
 	projectSettingDefaultResourcesCPUReq,
@@ -295,6 +303,10 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 		}
 	}
 
+	if !s.validateProfileDefaultSAIDs(w, ctx, project, req.DefaultGCPIdentityServiceAccountIDByProfile) {
+		return false
+	}
+
 	// mode=assign with no service account is the same defect wearing different
 	// clothes: the consumption path falls straight through to block.
 	if req.DefaultGCPIdentityMode == store.GCPMetadataModeAssign && req.DefaultGCPIdentityServiceAccountID == "" {
@@ -317,9 +329,23 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// change here — because the agent create and PATCH paths had NOT followed
 	// this rule and now do. Three copies of a string whose entire value is that
 	// they match is three chances to stop matching.
+	// The check itself lives in validateProjectDefaultSAID, shared with the
+	// per-profile map.
+	return s.validateProjectDefaultSAID(w, ctx, project, req.DefaultGCPIdentityServiceAccountID, "the project default")
+}
+
+// validateProjectDefaultSAID checks that saID names a service account that
+// is reachable from project and verified: the same conditions the create
+// path's default rungs (resolveDefaultSAAssignmentCore) test, so a saved
+// default applies. what names the setting in the not-verified message. It
+// writes the error response itself and returns false when the caller must
+// stop.
+func (s *Server) validateProjectDefaultSAID(w http.ResponseWriter, ctx context.Context, project *store.Project, saID, what string) bool {
+	// See validateDefaultGCPIdentity: not-found and not-reachable share one
+	// message so the endpoint is not an existence oracle.
 	const notAvailable = msgSANotAvailableInProject
 
-	sa, err := s.store.GetGCPServiceAccount(ctx, req.DefaultGCPIdentityServiceAccountID)
+	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			BadRequest(w, notAvailable)
@@ -337,11 +363,100 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// Safe to be specific: this service account is already readable by this
 	// caller, so naming its state discloses nothing they cannot already see.
 	if !gcpServiceAccountVerified(sa) {
-		BadRequest(w, "GCP service account is not verified; verify it before setting it as the project default")
+		BadRequest(w, "GCP service account is not verified; verify it before setting it as "+what)
 		return false
 	}
 
 	return true
+}
+
+// Bounds on the per-profile default service account map. Profile names are
+// not checked against the profiles brokers report (a broker may be offline
+// when the setting is saved); they only have to look like a profile name.
+const (
+	maxProfileDefaultSAEntries = 64
+	maxProfileDefaultNameLen   = 63
+)
+
+// profileDefaultNamePattern is the accepted profile-name charset: letters,
+// digits, '-' and '_', starting with a letter or digit, at most
+// maxProfileDefaultNameLen characters. Dots are excluded because settings
+// loading splits dotted profile names.
+var profileDefaultNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
+
+// validateProfileDefaultSAIDs checks every entry of the per-profile default
+// service account map: at most maxProfileDefaultSAEntries entries, a profile
+// name matching profileDefaultNamePattern, and a service account that passes
+// validateProjectDefaultSAID. A nil or empty map is always accepted
+// (nil keeps the stored map, empty clears it).
+func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.Context, project *store.Project, byProfile map[string]string) bool {
+	if len(byProfile) > maxProfileDefaultSAEntries {
+		BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: at most %d entries are allowed", maxProfileDefaultSAEntries))
+		return false
+	}
+	profiles := make([]string, 0, len(byProfile))
+	for profile := range byProfile {
+		profiles = append(profiles, profile)
+	}
+	// Sorted so the first reported error is deterministic.
+	sort.Strings(profiles)
+	for _, profile := range profiles {
+		saID := byProfile[profile]
+		if !profileDefaultNamePattern.MatchString(profile) {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: profile name %q is invalid; use 1-%d letters, digits, '-' or '_', starting with a letter or digit", profile, maxProfileDefaultNameLen))
+			return false
+		}
+		if saID == "" {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile[%s]: a service account ID is required; remove the entry to clear it", profile))
+			return false
+		}
+		if !s.validateProjectDefaultSAID(w, ctx, project, saID, fmt.Sprintf("the default for profile %q", profile)) {
+			return false
+		}
+	}
+	return true
+}
+
+// profileDefaultSAIDsFromAnnotations decodes the per-profile default service
+// account annotation. A missing, empty or malformed value yields nil (the
+// annotation is written only by setProfileDefaultSAIDsAnnotation, so a
+// malformed value means a hand edit; it is logged and ignored).
+func profileDefaultSAIDsFromAnnotations(annotations map[string]string) map[string]string {
+	raw := annotations[projectSettingDefaultGCPIdentitySAIDByProfile]
+	if raw == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		slog.Warn("ignoring malformed per-profile default GCP service account annotation",
+			"annotation", projectSettingDefaultGCPIdentitySAIDByProfile, "error", err)
+		return nil
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// setProfileDefaultSAIDsAnnotation stores m as the per-profile default
+// service account annotation, or deletes the annotation when m is empty.
+func setProfileDefaultSAIDsAnnotation(annotations map[string]string, m map[string]string) {
+	if annotations == nil {
+		// Callers initialize the map; nothing can be stored without one.
+		return
+	}
+	if len(m) == 0 {
+		delete(annotations, projectSettingDefaultGCPIdentitySAIDByProfile)
+		return
+	}
+	// encoding/json sorts map keys, so the stored value is stable.
+	b, err := json.Marshal(m)
+	if err != nil {
+		// A map[string]string always marshals; keep the stored value rather
+		// than writing a partial one.
+		return
+	}
+	annotations[projectSettingDefaultGCPIdentitySAIDByProfile] = string(b)
 }
 
 // isKubernetesRuntimeType reports whether a BrokerProfile.Type names the
@@ -490,6 +605,7 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	// Default GCP identity
 	settings.DefaultGCPIdentityMode = project.Annotations[projectSettingDefaultGCPIdentityMode]
 	settings.DefaultGCPIdentityServiceAccountID = project.Annotations[projectSettingDefaultGCPIdentitySAID]
+	settings.DefaultGCPIdentityServiceAccountIDByProfile = profileDefaultSAIDsFromAnnotations(project.Annotations)
 
 	// Default resources (flat annotation keys)
 	res := projectResourcesFromAnnotations(project.Annotations)
@@ -564,6 +680,12 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	// Default GCP identity
 	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentityMode, settings.DefaultGCPIdentityMode)
 	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentitySAID, settings.DefaultGCPIdentityServiceAccountID)
+	// The per-profile map is kept when the field is absent: the web settings
+	// page sends a full body that does not carry it, and a save there must
+	// not wipe it. An empty object clears it.
+	if settings.DefaultGCPIdentityServiceAccountIDByProfile != nil {
+		setProfileDefaultSAIDsAnnotation(project.Annotations, settings.DefaultGCPIdentityServiceAccountIDByProfile)
+	}
 
 	// Default agent limits
 	setOrDeleteInt(project.Annotations, projectSettingDefaultMaxTurns, settings.DefaultMaxTurns)

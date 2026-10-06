@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,6 +60,16 @@ type startContext struct {
 	// yet (GoogleCloudPlatform/scion#127 P3b); this exists so the broker's
 	// own classifications survive the function that computes them.
 	EnvClassifications map[string]api.EnvKind
+
+	// ProvisionedWorktreeRepoRoot is the shared-base repo root when
+	// tryProvisionWorktree provisioned a broker-managed worktree for this
+	// dispatch, or "" otherwise. It never crosses the wire — it is broker-local
+	// state, discovered only as a side effect of buildStartContext's own
+	// provisioning work. The caller threads it onto ctx via
+	// api.ContextWithProvisionedWorktreeRepoRoot before calling
+	// Manager.Start/Provision, exactly like withHubAgentDefaults threads
+	// req.Config's agent_defaults.
+	ProvisionedWorktreeRepoRoot string
 
 	// AssignSelection is the profile and runtime entry a GCP identity
 	// "assign" dispatch on Kubernetes read its ServiceAccount mapping and
@@ -349,7 +358,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the broker's default: a broker can register more than one profile
 	// (e.g. both a "docker" and a "kubernetes" profile), and a dispatch's
 	// profile selects which one it runs on. mgr and dispatchRuntimeType are
-	// resolved exactly once here, via resolveManagerForOpts (handlers.go) —
+	// resolved exactly once here, via resolveManagerForOptsStrict (handlers.go) —
 	// the same function that ultimately selects the manager this function
 	// returns — and reused below instead of re-resolving, so within this one
 	// buildStartContext call the GCP check and the manager it returns cannot
@@ -375,14 +384,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
 	}
+	savedProfile := false
 	if gcpIdentityProfile == "" && in.Operation != opCreate {
 		gcpIdentityProfile = agent.GetSavedProfile(in.Name, in.ProjectPath)
+		savedProfile = gcpIdentityProfile != ""
 	}
-	mgr, dispatchRuntimeType := s.resolveManagerForOpts(api.StartOptions{
+	// A saved profile that no longer resolves fails here, with the same
+	// 503 as start/restart's own later resolution, rather than classifying
+	// the dispatch against the default runtime first (ptone/scion#2709).
+	// Create and a start without a saved profile stay non-strict.
+	mgr, dispatchRuntimeType, err := s.resolveManagerForOptsStrict(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	})
+	}, savedProfile, slog.LevelWarn)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
 	// Default when no GCP identity config is provided at all: "block" on
@@ -881,12 +900,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// is git-backed, provision a shared base clone + per-agent worktree on
 	// the host BEFORE the container starts, then dual-mount it. This avoids
 	// the full in-container clone. Falls through to clone-per-agent on error
-	// or if git is too old (< 2.47) — but only when this call has not yet
+	// or if git is too old (< 2.48) — but only when this call has not yet
 	// created the agent's own worktree; see tryProvisionWorktree.
 	worktreeProvisioned := false
+	var provisionedWorktreeRoot string
 	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
-		worktreeProvisioned, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
+		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: err.Error()}
@@ -956,7 +976,8 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		isGitWorkspace = util.IsGitRepoDir(opts.Workspace)
 	}
 	if !isGitWorkspace {
-		isGitWorkspace = in.ResolvedEnv["SCION_WORKSPACE_GIT"] == "true"
+		// Parsed like sciontool init does (util.ParseBool), so both agree.
+		isGitWorkspace, _ = util.ParseBool(in.ResolvedEnv["SCION_WORKSPACE_GIT"])
 	}
 	if emptyPerAgent {
 		// Never git, whatever a stale resolvedEnv claims.
@@ -1051,11 +1072,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
 	sc := &startContext{
-		Opts:               opts,
-		TemplateSlug:       templateSlug,
-		Manager:            mgr,
-		RuntimeType:        dispatchRuntimeType,
-		EnvClassifications: envCls,
+		Opts:                        opts,
+		TemplateSlug:                templateSlug,
+		Manager:                     mgr,
+		RuntimeType:                 dispatchRuntimeType,
+		EnvClassifications:          envCls,
+		ProvisionedWorktreeRepoRoot: provisionedWorktreeRoot,
 	}
 	if resolvedKSAName != "" {
 		sel := assignIdentity.Selection
@@ -1360,9 +1382,11 @@ func shouldCleanupPartialWorktree(projectRoot, worktreePath string, preExisted b
 // the exact string, not a resolved form of it — must already be the
 // canonical "worktrees/<name>" path, and must also be, once symlinks are
 // resolved, a direct child of base's own "worktrees" directory, and a real
-// git worktree of base (provision.IsRealWorktreeDir). The "worktrees"
-// directory itself is checked to confirm it is not a symlink; that check
-// does not by itself say anything about workspacePath's own location.
+// git worktree of base (provision.IsValidJoinWorktree, which also proves the
+// admin-directory back-link rather than just a gitdir pointer shape). The
+// "worktrees" directory itself is checked to confirm it is not a symlink;
+// that check does not by itself say anything about workspacePath's own
+// location.
 func validateMountedWorktree(workspacePath, base string) error {
 	worktreesDir := filepath.Join(base, "worktrees")
 	wtInfo, err := os.Lstat(worktreesDir)
@@ -1385,8 +1409,8 @@ func validateMountedWorktree(workspacePath, base string) error {
 		return fmt.Errorf("resolving %s: %w", worktreesDir, err)
 	}
 
-	if !provision.IsRealWorktreeDir(workspacePath, base) {
-		return fmt.Errorf("%s is not a git worktree of this checkout", workspacePath)
+	if err := provision.IsValidJoinWorktree(base, workspacePath); err != nil {
+		return fmt.Errorf("%s is not a git worktree of this checkout: %w", workspacePath, err)
 	}
 
 	resolvedWorkspace, err := filepath.EvalSymlinks(workspacePath)
@@ -1430,15 +1454,24 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 
 // tryProvisionWorktree attempts to provision a per-agent worktree on the host
 // for worktree-per-agent mode. On success it sets opts.Workspace to the
-// worktree path and returns true (opts.GitClone is NOT set, suppressing the
-// in-container clone). On failure or if git is too old, it logs a warning and
-// returns false so the caller falls through to clone-per-agent.
+// worktree path and returns (true, repoRoot, nil), where repoRoot is the
+// shared base clone's path — the git repo root that owns this worktree
+// (opts.GitClone is NOT set, suppressing the in-container clone). On an
+// ordinary fallback condition (git too old, no valid worktree-per-agent
+// input) it logs a warning and returns (false, "", nil) so the caller falls
+// through to clone-per-agent. On a condition that must not silently fall
+// back (missing agent identity on a start dispatch, or a pre-existing
+// worktree this call must not touch or replace), it returns a non-nil error
+// instead so the caller fails the dispatch.
+//
+// The caller threads repoRoot onto ctx via
+// api.ContextWithProvisionedWorktreeRepoRoot; see that function's doc for why.
 //
 // runtimeName is the runtime this dispatch resolved to (buildStartContext's
 // dispatchRuntimeType), not the broker's default runtime: host-side
 // provisioning is skipped for an agent dispatched to kubernetes even when the
 // broker's default runtime is docker.
-func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string, runtimeName string) (bool, error) {
+func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string, runtimeName string) (bool, string, error) {
 	// A path recovered from the agent's container is a .scion directory,
 	// not the project root a worktree base is created under; provisioning
 	// sees no project path for it, as it did before that path was recovered
@@ -1466,13 +1499,13 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// whatever this agent's real worktree holds, and there is no way to
 		// tell from here whether one exists.
 		if result.MissingIdentity && in.Operation != opCreate {
-			return false, fmt.Errorf("worktree-per-agent: agent identity is not available for this start dispatch")
+			return false, "", fmt.Errorf("worktree-per-agent: agent identity is not available for this start dispatch")
 		}
 		if result.Reason != "" {
 			slog.Warn("worktree-per-agent: falling back to clone-per-agent",
 				"agent_id", in.AgentID, "reason", result.Reason)
 		}
-		return false, nil
+		return false, "", nil
 	}
 
 	// Set Ctx from the buildStartContext context.
@@ -1502,7 +1535,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	// fresh by ensureWorktree.
 	worktreesDir := filepath.Join(result.ProjectRoot, "worktrees")
 	if wtInfo, statErr := os.Lstat(worktreesDir); statErr == nil && wtInfo.Mode()&os.ModeSymlink != 0 {
-		return false, fmt.Errorf("worktree-per-agent: %s must not be a symlink", worktreesDir)
+		return false, "", fmt.Errorf("worktree-per-agent: %s must not be a symlink", worktreesDir)
 	}
 
 	// Record whether this agent's own worktree, or the worktree of another
@@ -1519,7 +1552,25 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		}
 	}
 	if !preExisted {
-		if _, regPath, err := provision.ListSharers(result.ProjectRoot, branch); err == nil && regPath != "" {
+		// ListSharersForJoin reports the registered path exactly as
+		// ensureWorktree's JOIN check sees it, including a recorded path
+		// that matches no scion-created worktree shape, so an existing entry
+		// at that path is never treated as absent here.
+		_, regPath, listErr := provision.ListSharersForJoin(result.ProjectRoot, branch)
+		if listErr != nil {
+			// The registry read boundary refused this branch's marker outright
+			// (a non-canonical or symlink-crossing form, not merely a stale
+			// or foreign value — see provision.readMarker) rather than
+			// silently discarding it.
+			// That is a deliberate signal, not an ordinary "nothing registered
+			// yet" absence: surface it as a hard failure here too, the same as
+			// ProvisionShared itself will if this call fell through instead.
+			// Treating it as "preExisted stays false" would let the fallback
+			// path below silently paper over a condition the registry layer
+			// chose to refuse.
+			return false, "", fmt.Errorf("worktree-per-agent: %w", listErr)
+		}
+		if regPath != "" {
 			if _, statErr := os.Lstat(regPath); statErr == nil {
 				preExisted = true
 			}
@@ -1533,7 +1584,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	// either the sentinel or the shared base's .git is missing, which is a
 	// superset of that trigger condition.
 	if preExisted && !worktreeBaseIsProvisioned(result.ProvisionInput) {
-		return false, fmt.Errorf("worktree-per-agent: the existing worktree for agent %q is missing its provisioning marker or the shared base's .git; refusing to provision to avoid replacing it", in.AgentID)
+		return false, "", fmt.Errorf("worktree-per-agent: the existing worktree for agent %q is missing its provisioning marker or the shared base's .git; refusing to provision to avoid replacing it", in.AgentID)
 	}
 
 	if err := provision.ProvisionShared(result.ProvisionInput); err != nil {
@@ -1555,7 +1606,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 			// logged server-side only; the client sees a generic message.
 			slog.Error("worktree-per-agent: provisioning failed for an existing worktree; refusing to remove it or fall back to a fresh clone",
 				"agent_id", in.AgentID, "path", result.WorktreePath, "clone_url", cloneURL, "error", sanitizedErr)
-			return false, fmt.Errorf("worktree-per-agent: provisioning failed for the existing worktree of agent %q; the existing workspace was left untouched", in.AgentID)
+			return false, "", fmt.Errorf("worktree-per-agent: provisioning failed for the existing worktree of agent %q; the existing workspace was left untouched", in.AgentID)
 		}
 		slog.Warn("worktree-per-agent: provisioning failed, falling back to clone-per-agent",
 			"agent_id", in.AgentID, "clone_url", cloneURL, "error", sanitizedErr)
@@ -1571,11 +1622,22 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// isStrictWorktreeChild additionally guards that the path is a real
 		// descendant of <base>/worktrees and never that directory itself, so
 		// a resolver bug can never turn this into a removal of every agent's
-		// worktree.
+		// worktree. Uses `git worktree remove --force` (via SafeGitCommand)
+		// so the worktree's admin metadata in the base's .git/worktrees/<id> is
+		// unregistered too — a bare os.RemoveAll would leave a stale
+		// registration that makes git refuse to recreate the worktree at that
+		// path on retry. Falls back to os.RemoveAll + prune.
 		if shouldCleanupPartialWorktree(result.ProjectRoot, result.WorktreePath, preExisted) {
-			rm := exec.CommandContext(ctx, "git", "-C", result.ProjectRoot,
+			rm, rmCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot,
 				"worktree", "remove", "--force", result.WorktreePath)
-			if out, rmErr := rm.CombinedOutput(); rmErr != nil {
+			var out []byte
+			var rmErr error
+			if rmCmdErr != nil {
+				rmErr = rmCmdErr
+			} else {
+				out, rmErr = rm.CombinedOutput()
+			}
+			if rmErr != nil {
 				slog.Warn("worktree-per-agent: git worktree remove failed, falling back to os.RemoveAll+prune",
 					"agent_id", in.AgentID, "path", result.WorktreePath,
 					"error", rmErr, "output", strings.TrimSpace(string(out)))
@@ -1584,22 +1646,21 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 						"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
 				}
 				// Prune the now-stale .git/worktrees/<id> registration so retries succeed.
-				_ = exec.CommandContext(ctx, "git", "-C", result.ProjectRoot, "worktree", "prune").Run()
+				if pruneCmd, pruneCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot, "worktree", "prune"); pruneCmdErr == nil {
+					_ = pruneCmd.Run()
+				}
 			} else {
 				slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
 					"agent_id", in.AgentID, "path", result.WorktreePath)
 			}
 		}
-		return false, nil
+		return false, "", nil
 	}
 
 	// Source the authoritative worktree path from the sharer registry.
 	// For a JOIN, the agent shares an existing worktree rather than having
 	// its own at WorktreePath(base, agentID).
-	actualWorkspace := result.WorktreePath
-	if _, regPath, err := provision.ListSharers(result.ProjectRoot, branch); err == nil && regPath != "" {
-		actualWorkspace = regPath
-	}
+	actualWorkspace := resolveActualWorkspace(result.ProjectRoot, branch, result.WorktreePath, in.AgentID)
 
 	// The authoritative gate before mounting: whichever path actualWorkspace
 	// turned out to be — this agent's own worktree, or a sharer-registry
@@ -1611,7 +1672,7 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	if err := validateMountedWorktree(actualWorkspace, result.ProjectRoot); err != nil {
 		slog.Error("worktree-per-agent: resolved workspace failed validation; refusing to mount it",
 			"agent_id", in.AgentID, "path", actualWorkspace, "error", err)
-		return false, fmt.Errorf("worktree-per-agent: the resolved workspace for agent %q failed validation", in.AgentID)
+		return false, "", fmt.Errorf("worktree-per-agent: the resolved workspace for agent %q failed validation", in.AgentID)
 	}
 
 	// Write .scion workspace marker so the in-container CLI discovers project context.
@@ -1626,10 +1687,43 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("Worktree-per-agent mode enabled",
 			"agent_id", in.AgentID,
-			"workspace", result.WorktreePath,
-			"project_root", result.ProjectRoot)
+			"repo_root", result.ProjectRoot,
+			"workspace", actualWorkspace)
 	}
-	return true, nil
+	return true, result.ProjectRoot, nil
+}
+
+// resolveActualWorkspace decides the actual host path to mount for a
+// worktree-per-agent agent after ProvisionShared has run: the sharer
+// registry's recorded path for branch if — and only if — it passes the full
+// worktree relationship check (ValidateWorktreeForBase), otherwise
+// fallbackWorktreePath (the agent's own freshly-provisioned path).
+//
+// The read boundary (pkg/provision.ListSharers -> readMarker) only proves the
+// recorded path is in-tree-SHAPED (lexical); it may still be an in-tree decoy
+// or a fake-back-link redirect (see pkg/provision/provision.go's JOIN path,
+// which applies this identical full check to its own two JOIN sources). This
+// is a second, independent read of the registry after ProvisionShared's own
+// internal JOIN decision — a defensive re-check against a marker that could
+// have been rewritten between the two reads — so it must not skip the full
+// check just because ProvisionShared already validated once.
+//
+// Hub-managed worktree-per-agent bases always use the ProvisionShared
+// (repoRoot/worktrees/<name>) layout, never ProvisionAgent's local shape, so
+// "" is passed as ListSharers' projectDir — see WorktreePathIsScionCreated's
+// doc comment for why that's the correct value for a caller with no
+// ProvisionAgent-layout concept.
+func resolveActualWorkspace(repoRoot, branch, fallbackWorktreePath, agentID string) string {
+	_, regPath, err := provision.ListSharers(repoRoot, "", branch)
+	if err != nil || regPath == "" {
+		return fallbackWorktreePath
+	}
+	if valErr := provision.IsValidJoinWorktree(repoRoot, regPath); valErr != nil {
+		slog.Warn("worktree-per-agent: registry worktree path failed relationship validation, using freshly provisioned path instead",
+			"agent_id", agentID, "branch", branch, "path", regPath, "error", valErr)
+		return fallbackWorktreePath
+	}
+	return regPath
 }
 
 // projectProvisionMutex returns the per-project mutex for serializing worktree

@@ -124,6 +124,9 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 	// Perform the cache refresh
 	resp, err := s.refreshProjectCacheFromBroker(ctx, project, brokerID, stor)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		RuntimeError(w, "Cache refresh failed: "+err.Error())
 		return
 	}
@@ -144,7 +147,9 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	// Check if a cache exists on disk
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		InternalError(w)
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
 		return
 	}
 
@@ -197,7 +202,9 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	// Download the latest workspace from GCS to local cache
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		InternalError(w)
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
 		return
 	}
 

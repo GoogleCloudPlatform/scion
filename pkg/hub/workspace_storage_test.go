@@ -808,7 +808,8 @@ func TestHealthCheck_NFSUnhealthy(t *testing.T) {
 	var resp HealthResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	assert.Contains(t, resp.Checks["workspace_storage"], "unhealthy")
-	assert.Equal(t, "degraded", resp.Status)
+	// Critical check: /readyz 503s on it, so /healthz reports unhealthy too.
+	assert.Equal(t, "unhealthy", resp.Status)
 }
 
 func TestReadiness_NFSUnavailable(t *testing.T) {

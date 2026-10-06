@@ -152,7 +152,7 @@ func TestRecoverAuthz_RequiresFlag(t *testing.T) {
 		recoverDisableAll = oldDA
 	}()
 
-	err := runRecoverAuthz(newTestRecoverCmd(), nil)
+	err := recoverAuthzArgs(newTestRecoverCmd(), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "either --disable-constraint")
 }
@@ -167,7 +167,7 @@ func TestRecoverAuthz_MutuallyExclusiveFlags(t *testing.T) {
 		recoverDisableAll = oldDA
 	}()
 
-	err := runRecoverAuthz(newTestRecoverCmd(), nil)
+	err := recoverAuthzArgs(newTestRecoverCmd(), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "mutually exclusive")
 }
@@ -185,7 +185,7 @@ func TestRecoverAuthz_DisableAllRequiresConfirmPhrase(t *testing.T) {
 		recoverConfirmationPhrase = oldCP
 	}()
 
-	err := runRecoverAuthz(newTestRecoverCmd(), nil)
+	err := recoverAuthzArgs(newTestRecoverCmd(), nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "requires --confirm")
 }

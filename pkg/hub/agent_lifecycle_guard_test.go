@@ -97,6 +97,7 @@ func softDeletedWithEdge(t *testing.T, srv *Server, s store.Store, name, delegat
 // outside the transaction succeeds.
 type lifecycleFaultStore struct {
 	store.Store
+	fault       *storeFaultSwitch // nil: always active
 	failUser    bool
 	failEdges   bool
 	failAgentID string
@@ -106,27 +107,30 @@ type lifecycleFaultStore struct {
 var errInjectedLookup = errors.New("injected lookup fault")
 
 func (f *lifecycleFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !f.fault.Active() {
+		return f.Store.WithTx(ctx, fn)
+	}
 	return f.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&lifecycleFaultStore{Store: tx, failUser: f.failUser, failEdges: f.failEdges, failAgentID: f.failAgentID, inTx: true})
+		return fn(&lifecycleFaultStore{Store: tx, fault: f.fault, failUser: f.failUser, failEdges: f.failEdges, failAgentID: f.failAgentID, inTx: true})
 	})
 }
 
 func (f *lifecycleFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if f.inTx && f.failAgentID != "" && id == f.failAgentID {
+	if f.fault.Active() && f.inTx && f.failAgentID != "" && id == f.failAgentID {
 		return nil, errInjectedLookup
 	}
 	return f.Store.GetAgent(ctx, id)
 }
 
 func (f *lifecycleFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if f.failUser {
+	if f.failUser && f.fault.Active() {
 		return nil, errInjectedLookup
 	}
 	return f.Store.GetUser(ctx, id)
 }
 
 func (f *lifecycleFaultStore) GetDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause store.EdgeDeactivationCause, opID string) ([]*store.DelegationEdge, error) {
-	if f.failEdges {
+	if f.failEdges && f.fault.Active() {
 		return nil, errInjectedLookup
 	}
 	return f.Store.GetDeactivatedDelegationEdgesForDelegate(ctx, delegateType, delegateID, cause, opID)
@@ -162,7 +166,9 @@ func (d *softDeletingDispatcher) DispatchAgentCreateWithGather(ctx context.Conte
 
 // A soft delete that finishes between the create dispatch and the
 // post-dispatch write keeps the row soft-deleted with its operation ID, and
-// a restore then reactivates the edge the soft delete deactivated.
+// a restore then reactivates the edge the soft delete deactivated. The
+// create itself answers 409 delete_in_progress with no agent body: the
+// agent was deleted while it was being created (ptone/scion#3099).
 func TestPostDispatchWriteKeepsSoftDeletedRow(t *testing.T) {
 	disp := &softDeletingDispatcher{createAgentDispatcher: &createAgentDispatcher{createPhase: string(state.PhaseRunning)}}
 	srv, s, project := setupCreateAgentServer(t, disp)
@@ -170,10 +176,10 @@ func TestPostDispatchWriteKeepsSoftDeletedRow(t *testing.T) {
 	srv.config.SoftDeleteRetention = time.Hour
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "soft-race", ProjectID: project.ID, Task: "t"})
-	require.Less(t, rec.Code, 300, rec.Body.String())
 	require.NoError(t, disp.err, "the soft delete during dispatch")
 	require.NotNil(t, disp.capturedAgent)
 	id := disp.capturedAgent.ID
+	requireDeletedDuringCreate(t, rec, id)
 
 	got := mustGetAgent(t, s, id)
 	assert.False(t, got.DeletedAt.IsZero(), "the row stays soft-deleted")
@@ -223,12 +229,16 @@ func TestRestoreStaleVersionWritesNothing(t *testing.T) {
 // transaction.
 type claimOnLoadStore struct {
 	store.Store
+	fault *storeFaultSwitch // nil: always active
 	once  sync.Once
 	claim func()
 }
 
 func (c *claimOnLoadStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	a, err := c.Store.GetAgent(ctx, id)
+	if !c.fault.Active() {
+		return a, err
+	}
 	c.once.Do(c.claim)
 	return a, err
 }
@@ -237,14 +247,19 @@ func (c *claimOnLoadStore) GetAgent(ctx context.Context, id string) (*store.Agen
 // returns 409 and writes nothing.
 func TestRestoreAfterDeleteClaimConflicts(t *testing.T) {
 	srv, s, _, _ := engineTestServer(t)
+	// Installed before softDeletedWithEdge, whose DELETE emits a mutation
+	// audit that reads srv.store from a goroutine (ptone/scion#3184).
+	claiming, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *claimOnLoadStore {
+		return &claimOnLoadStore{Store: inner, fault: f}
+	})
 	agent, edge := softDeletedWithEdge(t, srv, s, "restore-claimed", store.DelegationPrincipalUser, tid("claimed-delegator"))
-	srv.store = &claimOnLoadStore{Store: s, claim: func() { seedAgentDeletion(t, s, agent.ID, seedLiveDeleting) }}
+	claiming.claim = func() { seedAgentDeletion(t, s, agent.ID, seedLiveDeleting) }
+	fault.Arm()
 
 	rec := restoreForTest(t, srv, agent.ID)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "delegated to this agent is not active", "the 409 comes from the delete claim")
 
-	srv.store = s
 	before := mustGetAgent(t, s, agent.ID)
 	assert.Equal(t, store.DeletionStateDeleting, before.DeletionState, "the delete claim stands")
 	assert.Equal(t, agent.SoftDeleteOpID, before.SoftDeleteOpID)
@@ -372,22 +387,27 @@ func TestRestoreDelegatorLookupFault503(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, _, _ := engineTestServer(t)
+			// Installed before softDeletedWithEdge, whose DELETE emits a
+			// mutation audit that reads srv.store from a goroutine
+			// (ptone/scion#3184).
+			faulty, sw := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *lifecycleFaultStore {
+				w := tc.fault
+				w.Store, w.fault = inner, f
+				return &w
+			})
 			delegatorID := tid("fault-delegator-" + tc.name)
 			if tc.delegatorType == store.DelegationPrincipalAgent {
 				delegatorID = setupBrokerAgentInPhase(t, s, "fault-parent-"+string(rune('a'+i)), state.PhaseRunning).ID
 			}
 			agent, edge := softDeletedWithEdge(t, srv, s, "lookup-fault-"+tidSlugSafe(tc.name), tc.delegatorType, delegatorID)
-			fault := tc.fault
-			fault.Store = s
 			if tc.delegatorType == store.DelegationPrincipalAgent {
-				fault.failAgentID = delegatorID
+				faulty.failAgentID = delegatorID
 			}
-			srv.store = &fault
+			sw.Arm()
 
 			rec := restoreForTest(t, srv, agent.ID)
 			require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 
-			srv.store = s
 			assertRestoreWroteNothing(t, s, agent, edge)
 		})
 	}

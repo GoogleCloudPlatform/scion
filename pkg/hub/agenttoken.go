@@ -95,9 +95,8 @@ const (
 	// ScopeProjectArtifactWrite allows the agent to publish artifacts, and
 	// new versions of them, homed in its own project (artifact.create,
 	// artifact.update). Deliberately excludes deletion and grant
-	// management. Not yet minted into any agent token: the artifact service
-	// has no behaviour until a later phase wires it into the mint
-	// candidates.
+	// management. Minted for the baseline and full agent roles
+	// (ScopesForRole).
 	ScopeProjectArtifactWrite AgentTokenScope = "project:artifact:write"
 	// ScopeAgentSetMessageMode allows the agent to change message mode
 	// for agents within the same project.
