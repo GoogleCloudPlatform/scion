@@ -1432,6 +1432,139 @@ describe('scion-page-admin-server-config', () => {
       expect(payload).not.toHaveProperty('default_gcp_identity_mode');
       expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
     });
+
+    // ptone/scion#2720: with the mode env-pinned, the form mode holds the
+    // settings-file value, not the effective one, so it must not drive
+    // clearing of the account. An unchanged account is left out of the
+    // payload, so the server neither clears nor re-checks it.
+    const pinnedFileConfig = (formMode: string, said: string) =>
+      makeBaseConfig({
+        settings_tier: 'file',
+        env_overrides: ['default_gcp_identity_mode'],
+        default_gcp_identity_mode: formMode,
+        default_gcp_identity_service_account_id: said,
+      });
+
+    it.each(['', 'block', 'passthrough', 'assign'])(
+      'buildFilePayload omits an unchanged GCP service account when the mode is env-pinned (form mode=%j)',
+      async (formMode) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig(formMode, 'sa-123')));
+        const el = element as any;
+        expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+      }
+    );
+
+    it.each([
+      ['changed', 'sa-456'],
+      ['cleared', ''],
+    ])(
+      'buildFilePayload sends an edited GCP service account when the mode is env-pinned (%s)',
+      async (_label, edited) => {
+        element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+        const el = element as any;
+        el.defaultGCPIdentitySAID = edited;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', edited);
+      }
+    );
+
+    it('buildFilePayload compares the GCP service account with the latest load when the mode is env-pinned', async () => {
+      element = await createComponent(createFetchHandler(pinnedFileConfig('assign', 'sa-123')));
+      const el = element as any;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-123');
+
+      // Reload (as after a save) with a different stored account.
+      vi.stubGlobal('fetch', vi.fn(createFetchHandler(pinnedFileConfig('assign', 'sa-789'))));
+      await el.loadConfig();
+      await el.updateComplete;
+      expect(el.defaultGCPIdentitySAID).toBe('sa-789');
+      expect(el.readOnlyReason('default_gcp_identity_mode')).not.toBeNull();
+
+      // Unchanged since the reload: omitted.
+      let payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+
+      // Back to the first-load value: now an edit, so it is sent.
+      el.defaultGCPIdentitySAID = 'sa-123';
+      payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it.each([
+      ['assign', 'sa-123'],
+      ['block', ''],
+    ])(
+      'buildFilePayload sends the loaded GCP service account when the mode is editable (mode=%j)',
+      async (mode, expected) => {
+        element = await createComponent(
+          createFetchHandler(
+            makeBaseConfig({
+              settings_tier: 'file',
+              default_gcp_identity_mode: mode,
+              default_gcp_identity_service_account_id: 'sa-123',
+            })
+          )
+        );
+        const el = element as any;
+
+        const payload = el.buildFilePayload() as Record<string, unknown>;
+        expect(payload).toHaveProperty('default_gcp_identity_mode', mode);
+        expect(payload).toHaveProperty('default_gcp_identity_service_account_id', expected);
+      }
+    );
+
+    // The db-tier test schema does not list the GCP identity keys, so the
+    // tests set the Layer-1 key set the page uses to decide editability.
+    const GCP_KEYS = ['default_gcp_identity_mode', 'default_gcp_identity_service_account_id'];
+
+    it('buildLayer1Payload sends the GCP service account in assign mode', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'assign');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
+
+    it('buildLayer1Payload clears the GCP service account when mode is not assign', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(GCP_KEYS);
+      el.defaultGCPIdentityMode = 'block';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    // In the db tier env vars do not lock Layer-1 fields. Both GCP keys
+    // are in one settings section, so they are Layer-1 together or
+    // deployment-managed together; the page never reaches the read-only
+    // mode branch of the account helper there. When both are locked,
+    // neither key is sent.
+    it('buildLayer1Payload omits both GCP keys when they are not Layer-1', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set();
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildLayer1Payload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).not.toHaveProperty('default_gcp_identity_service_account_id');
+    });
   });
 
   // ── Cross-project messaging (D1) ──
