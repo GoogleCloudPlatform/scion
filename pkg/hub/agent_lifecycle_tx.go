@@ -415,10 +415,13 @@ type reincarnateAuthority struct {
 }
 
 // reincarnateClaimTx claims agent for a reincarnation in one transaction.
-// agent carries the claimed fields (ReincarnationState pending) and the
-// state_version the caller read. In order: the claim UpdateAgent (its
-// state_version guard turns a concurrent change into
-// store.ErrVersionConflict), the reincarnation record, the authority
+// agent carries the state_version the caller read and, in
+// ReincarnationUpdatedAt, the claim time. In order: the claim,
+// ClaimAgentReincarnation (a single conditional update that sets
+// reincarnation_state pending; refused with store.ErrVersionConflict after a
+// concurrent change, a *store.ClaimHeldError while a start claim is held, or
+// store.ErrClaimPredicate while a reincarnation is already in flight), the
+// reincarnation record, the authority
 // re-record when auth is non-nil (deactivate the agent's active edges with
 // cause reincarnate_replaced, create the requester's edge), the
 // reincarnate-claim hooks, and the agent_reincarnate_claim audit record.

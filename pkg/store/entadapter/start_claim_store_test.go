@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -783,11 +784,56 @@ func TestStartClaim_ClaimAgentReincarnation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.ReincarnationStatePending, got.ReincarnationState)
 	assert.Equal(t, v, got.StateVersion)
+	require.NotNil(t, got.ReincarnationUpdatedAt)
+	assert.True(t, got.ReincarnationUpdatedAt.Equal(at), "the claim records the given time")
 
 	_, err = s.ClaimAgentReincarnation(ctx, a.ID, v, at)
 	require.ErrorIs(t, err, store.ErrClaimPredicate, "a reincarnation in flight refuses another")
 	_, err = s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimUser, "", testClaimTTL)
 	require.ErrorIs(t, err, store.ErrClaimPredicate, "a start claim is refused while a reincarnation is in flight")
+}
+
+// The reincarnation claim joins a caller's transaction: rolled back with
+// it, applied with its commit. A failed reincarnation can be claimed again.
+func TestStartClaim_ClaimAgentReincarnationInTransaction(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-reinc-tx")
+	cs := NewCompositeStore(s.client)
+	cur, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	at := time.Now().UTC().Truncate(time.Microsecond)
+
+	abort := errors.New("abort")
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		_, err := tx.ClaimAgentReincarnation(ctx, a.ID, cur.StateVersion, at)
+		require.NoError(t, err)
+		return abort
+	})
+	require.ErrorIs(t, err, abort)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, cur.StateVersion, got.StateVersion, "rolled back with the transaction")
+	assert.Equal(t, store.ReincarnationStateNone, got.ReincarnationState)
+
+	var v int64
+	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+		var err error
+		v, err = tx.ClaimAgentReincarnation(ctx, a.ID, cur.StateVersion, at)
+		return err
+	}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, v, got.StateVersion)
+	assert.Equal(t, store.ReincarnationStatePending, got.ReincarnationState)
+	require.NotNil(t, got.ReincarnationUpdatedAt)
+	assert.True(t, got.ReincarnationUpdatedAt.Equal(at))
+
+	_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetReincarnationState(store.ReincarnationStateFailed).Save(ctx)
+	require.NoError(t, err)
+	v2, err := s.ClaimAgentReincarnation(ctx, a.ID, v, at.Add(time.Second))
+	require.NoError(t, err, "a failed reincarnation can be claimed again")
+	assert.Equal(t, v+1, v2)
 }
 
 func TestStartClaim_IntentStrictlyIncreasesWhenClockBehind(t *testing.T) {
