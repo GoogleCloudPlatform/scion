@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -50,7 +51,7 @@ func newMockHubServerForExistingTemplate(t *testing.T, remoteFiles map[string]st
 
 		switch {
 		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 				"templates": []map[string]interface{}{{
 					"id":          "existing-tpl-id",
 					"name":        "base",
@@ -64,7 +65,7 @@ func newMockHubServerForExistingTemplate(t *testing.T, remoteFiles map[string]st
 			if remoteFiles == nil {
 				// Mirrors the Hub's message, which embeds the template name and ID.
 				w.WriteHeader(http.StatusBadRequest)
-				require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+				assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 					"error": map[string]interface{}{
 						"code":    "validation_error",
 						"message": "template base (existing-tpl-id) has no files — sync template files first with: scion template sync base",
@@ -80,24 +81,30 @@ func newMockHubServerForExistingTemplate(t *testing.T, remoteFiles map[string]st
 					"url":  "file:///storage/templates/global/base/" + path,
 				})
 			}
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"files": files}))
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"files": files}))
 
 		case r.URL.Path == "/api/v1/templates/existing-tpl-id/upload" && r.Method == http.MethodPost:
 			calls.uploadRequests++
 			var req struct {
 				Files []hubclient.FileUploadRequest `json:"files"`
 			}
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			for _, f := range req.Files {
 				calls.uploadRequested = append(calls.uploadRequested, f.Path)
 			}
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []map[string]interface{}{}}))
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []map[string]interface{}{}}))
 
 		case r.URL.Path == "/api/v1/templates/existing-tpl-id/finalize" && r.Method == http.MethodPost:
 			var req hubclient.FinalizeRequest
-			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			calls.finalized = req.Manifest
-			require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":          "existing-tpl-id",
 				"name":        "base",
 				"status":      "active",
