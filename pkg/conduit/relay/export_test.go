@@ -97,3 +97,6 @@ const DrainWriteConcurrency = drainWriteConcurrency
 
 // PongFrame is an inbound Pong.
 var PongFrame = &conduitv1.Frame{Body: &conduitv1.Frame_Pong{Pong: &conduitv1.Pong{}}}
+
+// ServingForTest reports whether the relay is still serving.
+func (r *Relay) ServingForTest() bool { return r.serving() }

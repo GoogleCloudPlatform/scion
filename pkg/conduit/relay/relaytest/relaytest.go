@@ -179,6 +179,9 @@ func (w *World) NewNode(id string, mod func(*relay.Config)) (*Node, error) {
 	if mod != nil {
 		mod(&cfg)
 	}
+	// Caller-side hops use the relay clock and close wait too.
+	n.Peers.Clock = n.Clock
+	n.Peers.CloseWait = cfg.Session.HandshakeTimeout
 	r, err := relay.New(cfg)
 	if err != nil {
 		return nil, err

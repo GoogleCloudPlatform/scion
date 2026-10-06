@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -25,19 +26,27 @@ import (
 
 // Start labels the new runtime entry with the run ID the broker passes
 // (ptone/scion#2550 P1), and mints a UUID when none is given (a local CLI
-// start), so every entry carries a run label.
+// start), so every entry carries a run label. SCION_LAUNCH_ID in the
+// container env is the same value, whatever the request env carried.
 func TestStart_LabelsRunID(t *testing.T) {
-	for _, tc := range []struct{ name, runID string }{
-		{"hub run ID", "run-from-hub"},
-		{"minted when absent", ""},
+	for _, tc := range []struct {
+		name, runID string
+		env         map[string]string
+	}{
+		{name: "hub run ID", runID: "run-from-hub"},
+		{name: "minted when absent"},
+		{name: "request env value replaced", runID: "run-from-hub", env: map[string]string{"SCION_LAUNCH_ID": "forged"}},
+		{name: "request env value replaced when minted", env: map[string]string{"SCION_LAUNCH_ID": "forged"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			projectScionDir, _ := startTZFixture(t, "", `""`)
 			var labels map[string]string
+			var env []string
 			rt := &runtime.MockRuntime{
 				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
 				RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
 					labels = cfg.Labels
+					env = cfg.Env
 					return "mock-id", nil
 				},
 			}
@@ -47,6 +56,7 @@ func TestStart_LabelsRunID(t *testing.T) {
 				BrokerMode:  true,
 				NoAuth:      true,
 				RunID:       tc.runID,
+				Env:         tc.env,
 			})
 			if err != nil {
 				t.Fatalf("Start: %v", err)
@@ -58,6 +68,15 @@ func TestStart_LabelsRunID(t *testing.T) {
 				}
 			} else if _, err := uuid.Parse(got); err != nil {
 				t.Errorf("label %s = %q, want a minted UUID", api.LabelRunID, got)
+			}
+			var launchIDs []string
+			for _, kv := range env {
+				if v, ok := strings.CutPrefix(kv, "SCION_LAUNCH_ID="); ok {
+					launchIDs = append(launchIDs, v)
+				}
+			}
+			if len(launchIDs) != 1 || launchIDs[0] != got {
+				t.Errorf("env SCION_LAUNCH_ID = %q, want exactly the labelled %q", launchIDs, got)
 			}
 			if info.RunID != got {
 				t.Errorf("returned RunID = %q, want the labelled %q", info.RunID, got)
