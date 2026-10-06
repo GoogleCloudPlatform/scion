@@ -49,8 +49,8 @@ func (c *AuthenticatedBrokerClient) StartAgent(ctx context.Context, brokerID, br
 }
 
 // StopAgent stops an agent on a remote runtime broker with HMAC authentication.
-func (c *AuthenticatedBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
-	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+func (c *AuthenticatedBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
+	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 }
 
 // RestartAgent restarts an agent on a remote runtime broker with HMAC authentication.

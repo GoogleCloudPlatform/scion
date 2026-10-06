@@ -423,11 +423,21 @@ func TestLaunchRegistry_CancelLocalForRun(t *testing.T) {
 			rec := newLaunchRecord("L1", "a", "create", "", time.Time{}, func() { cancelled = true })
 			rec.RunID = tc.recRun
 			r.Begin(key, rec)
-			r.CancelLocalForRun(key, tc.deleteRun)
+			woke := r.CancelLocalForRun(key, tc.deleteRun)
 			if cancelled != tc.wantCancel {
 				t.Errorf("cancelled = %v, want %v", cancelled, tc.wantCancel)
 			}
+			if woke != tc.wantCancel {
+				t.Errorf("CancelLocalForRun returned %v, want %v", woke, tc.wantCancel)
+			}
 		})
+	}
+	if newLaunchRegistry().CancelLocalForRun(key, "r1") {
+		t.Error("CancelLocalForRun returned true with no launch registered")
+	}
+	var nilReg *launchRegistry
+	if nilReg.CancelLocalForRun(key, "r1") {
+		t.Error("nil registry returned true")
 	}
 }
 
@@ -795,8 +805,18 @@ func (m *panickingManager) List(ctx context.Context, filter map[string]string) (
 	return m.mockManager.List(ctx, filter)
 }
 
-func (m *panickingManager) Stop(ctx context.Context, agentID, projectPath string) error {
-	err := m.mockManager.Stop(ctx, agentID, projectPath)
+func (m *panickingManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+	err := m.mockManager.Stop(ctx, agentID, projectPath, runID)
+	if m.panicIn == "stop" {
+		panic("stop panicked")
+	}
+	return err
+}
+
+// StopTarget is the stop the broker's restart leg calls (ptone/scion#2550
+// P3); it panics the same way Stop does.
+func (m *panickingManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
+	err := m.mockManager.StopTarget(ctx, ref)
 	if m.panicIn == "stop" {
 		panic("stop panicked")
 	}
