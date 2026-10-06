@@ -262,6 +262,19 @@ func listRowReadCeiling(request AuthzRequest, permissionID string, boundary *Tok
 	return ceiling
 }
 
+// listRowReadReasonMarker is appended to the Reason of an allowed
+// decision that passed the UAT ceiling only through listRowReadCeiling,
+// so the audit record shows that agent.read was allowed as an agent-list
+// row read. It is a fixed string and carries no token or ceiling value.
+const listRowReadReasonMarker = "agent-list row read"
+
+// listRowReadWidened reports whether listRowReadCeiling adds agent.read
+// to ceiling for request.
+func listRowReadWidened(request AuthzRequest, permissionID string, boundary *TokenBoundary, ceiling permissions.FrozenPermissionCeiling) bool {
+	return !ceiling.Allows("agent.read") &&
+		listRowReadCeiling(request, permissionID, boundary, ceiling).Allows("agent.read")
+}
+
 // DecisionActor identifies the initiator of an operation. Audit-only.
 type DecisionActor struct {
 	Kind PrincipalKind `json:"kind,omitempty"`
@@ -1131,6 +1144,15 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				InactiveGrants:  []GrantDetail{},
 				MembershipPaths: []MembershipPathDetail{},
 			}
+		}
+	}
+
+	if decision.Allowed && credential.Kind == CredentialKindUAT &&
+		listRowReadWidened(request, permissionID, credential.Boundary, credential.Ceiling) {
+		if decision.Reason == "" {
+			decision.Reason = listRowReadReasonMarker
+		} else {
+			decision.Reason += " (" + listRowReadReasonMarker + ")"
 		}
 	}
 
