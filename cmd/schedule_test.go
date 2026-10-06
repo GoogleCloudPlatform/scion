@@ -40,7 +40,7 @@ func TestScheduleCreateValidation(t *testing.T) {
 	t.Run("empty type rejected", func(t *testing.T) {
 		scheduleType = ""
 		scheduleIn = "30m"
-		err := runScheduleCreate(nil, nil)
+		err := scheduleCreateArgs(nil, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported event type")
 	})
@@ -49,7 +49,7 @@ func TestScheduleCreateValidation(t *testing.T) {
 		scheduleType = "message"
 		scheduleIn = ""
 		scheduleAt = ""
-		err := runScheduleCreate(nil, nil)
+		err := scheduleCreateArgs(nil, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "either --in or --at is required")
 	})
@@ -58,7 +58,7 @@ func TestScheduleCreateValidation(t *testing.T) {
 		scheduleType = "message"
 		scheduleIn = "30m"
 		scheduleAt = "2026-03-18T15:00:00Z"
-		err := runScheduleCreate(nil, nil)
+		err := scheduleCreateArgs(nil, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "mutually exclusive")
 	})
@@ -67,7 +67,7 @@ func TestScheduleCreateValidation(t *testing.T) {
 		scheduleType = "invalid"
 		scheduleIn = "30m"
 		scheduleAt = ""
-		err := runScheduleCreate(nil, nil)
+		err := scheduleCreateArgs(nil, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "unsupported event type")
 	})
@@ -78,7 +78,7 @@ func TestScheduleCreateValidation(t *testing.T) {
 		scheduleAt = ""
 		scheduleAgent = ""
 		scheduleMessage = "hello"
-		err := runScheduleCreate(nil, nil)
+		err := scheduleCreateArgs(nil, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "--agent is required")
 	})
@@ -89,7 +89,7 @@ func TestScheduleCreateValidation(t *testing.T) {
 		scheduleAt = ""
 		scheduleAgent = "worker-1"
 		scheduleMessage = ""
-		err := runScheduleCreate(nil, nil)
+		err := scheduleCreateArgs(nil, nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "--message is required")
 	})

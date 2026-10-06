@@ -87,7 +87,7 @@ func runAdminPromote(cmd *cobra.Command, _ []string) error {
 
 	email := strings.TrimSpace(strings.ToLower(adminPromoteEmail))
 	if email == "" {
-		return fmt.Errorf("--email is required")
+		return newUsageError("--email is required")
 	}
 
 	// Load config to find database
