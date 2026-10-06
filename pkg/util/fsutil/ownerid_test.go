@@ -15,6 +15,8 @@
 package fsutil
 
 import (
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -35,6 +37,11 @@ func TestValidateOwnerID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// A 32-bit int cannot hold ids above math.MaxInt32, so
+			// int(tt.id) would wrap and test a different value.
+			if strconv.IntSize < 64 && tt.id > math.MaxInt32 {
+				t.Skipf("%d does not fit in a %d-bit int", tt.id, strconv.IntSize)
+			}
 			err := ValidateOwnerID("--uid", int(tt.id))
 			if tt.wantErr {
 				if err == nil {

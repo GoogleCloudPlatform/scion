@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -707,18 +708,24 @@ func TestStartNFSWorkspace_OwnerIDRange(t *testing.T) {
 		wantField string
 		// wantUID/wantGID are the ids the runtime must get; 0 means
 		// unset, which the runtime reads as the default 1000.
-		wantUID, wantGID int
+		wantUID, wantGID int64
+		// wide marks ids above math.MaxInt32, which a 32-bit int
+		// cannot hold.
+		wide bool
 	}{
 		{name: "unset uses default", ownerYAML: ""},
 		{name: "explicit", ownerYAML: "      uid: 2000\n      gid: 3000\n", wantUID: 2000, wantGID: 3000},
-		{name: "maximum", ownerYAML: "      uid: 4294967294\n      gid: 4294967294\n", wantUID: 4294967294, wantGID: 4294967294},
+		{name: "maximum", ownerYAML: "      uid: 4294967294\n      gid: 4294967294\n", wantUID: 4294967294, wantGID: 4294967294, wide: true},
 		{name: "negative one uid", ownerYAML: "      uid: -1\n", wantField: "server.workspace_storage.nfs.uid"},
 		{name: "negative gid", ownerYAML: "      gid: -5\n", wantField: "server.workspace_storage.nfs.gid"},
-		{name: "unsigned sentinel uid", ownerYAML: "      uid: 4294967295\n", wantField: "server.workspace_storage.nfs.uid"},
-		{name: "unsigned sentinel gid", ownerYAML: "      gid: 4294967295\n", wantField: "server.workspace_storage.nfs.gid"},
+		{name: "unsigned sentinel uid", ownerYAML: "      uid: 4294967295\n", wantField: "server.workspace_storage.nfs.uid", wide: true},
+		{name: "unsigned sentinel gid", ownerYAML: "      gid: 4294967295\n", wantField: "server.workspace_storage.nfs.gid", wide: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.wide && strconv.IntSize < 64 {
+				t.Skipf("ids in this case do not fit in a %d-bit int", strconv.IntSize)
+			}
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 			projectsDir := filepath.Join(mountRoot, "share-1", "projects")
@@ -753,8 +760,8 @@ func TestStartNFSWorkspace_OwnerIDRange(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, ran)
 			assert.DirExists(t, filepath.Join(projectsDir, testNFSWorkspaceProjectID, "workspace"))
-			assert.Equal(t, tt.wantUID, got.NFSUID)
-			assert.Equal(t, tt.wantGID, got.NFSGID)
+			assert.Equal(t, tt.wantUID, int64(got.NFSUID))
+			assert.Equal(t, tt.wantGID, int64(got.NFSGID))
 		})
 	}
 }

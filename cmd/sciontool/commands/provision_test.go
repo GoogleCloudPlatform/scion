@@ -5,6 +5,7 @@ package commands
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -364,6 +365,11 @@ func TestValidateProvisionOwner(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// A 32-bit int cannot hold ids above math.MaxInt32, so the
+			// int conversions below would wrap and test a different value.
+			if strconv.IntSize < 64 && max(tt.uid, tt.gid) > math.MaxInt32 {
+				t.Skipf("%d/%d does not fit in a %d-bit int", tt.uid, tt.gid, strconv.IntSize)
+			}
 			err := validateProvisionOwner(int(tt.uid), int(tt.gid))
 			if tt.wantFlag == "" {
 				if err != nil {
