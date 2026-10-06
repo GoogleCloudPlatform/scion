@@ -1659,8 +1659,9 @@ type GroupStore interface {
 	// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
 	// child group of parentGroupID. It returns ErrNotFound when no edge row
 	// was deleted, including when another transaction removed it first.
-	// Like RemoveGroupMember, it refuses project_agents parent groups with
-	// ErrInvalidInput.
+	// It refuses project_agents parent groups with ErrInvalidInput, as
+	// RemoveGroupMember does, but unlike RemoveGroupMember it does not bump
+	// the parent group's updated timestamp.
 	RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error
 
 	// GetDirectParentGroupIDs returns the IDs of the groups that contain the

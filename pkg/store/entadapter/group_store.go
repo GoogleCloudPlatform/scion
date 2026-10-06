@@ -928,11 +928,12 @@ func (s *GroupStore) GetDirectParentGroupIDs(ctx context.Context, groupID string
 }
 
 // RemoveChildGroupEdge removes the edge that makes childGroupID a direct
-// child group of parentGroupID. Unlike RemoveGroupMember's group branch, it
-// deletes the join-table row directly and returns store.ErrNotFound when no
-// row was deleted. On PostgreSQL a concurrent delete of the same row waits
-// for the first transaction and then deletes nothing, so exactly one caller
-// sees success.
+// child group of parentGroupID. It shares only RemoveGroupMember's
+// project_agents guard. Unlike RemoveGroupMember's group branch, it deletes
+// the join-table row directly, returns store.ErrNotFound when no row was
+// deleted, and does not bump the parent group's updated timestamp. On
+// PostgreSQL a concurrent delete of the same row waits for the first
+// transaction and then deletes nothing, so exactly one caller sees success.
 func (s *GroupStore) RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error {
 	parentUID, err := parseUUID(parentGroupID)
 	if err != nil {

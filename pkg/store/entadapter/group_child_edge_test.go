@@ -19,6 +19,8 @@ package entadapter
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -107,6 +109,50 @@ func TestRemoveChildGroupEdge_RemovesOnlyThatEdge(t *testing.T) {
 	parents, err = s.GetDirectParentGroupIDs(ctx, child)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{other, projectAgents.String()}, parents)
+}
+
+// TestRemoveChildGroupEdge_DirectParentsListSelfEdgeSorted pins the
+// GetDirectParentGroupIDs contract that the startup edge removal relies on,
+// on both backends: a self-edge is reported, and a result with several
+// parents is sorted. The groups are created in descending ID order, so a
+// result in creation order would not be sorted.
+func TestRemoveChildGroupEdge_DirectParentsListSelfEdgeSorted(t *testing.T) {
+	ctx := context.Background()
+	s := NewCompositeStore(enttest.NewClient(t))
+
+	ids := make([]string, 5)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
+	for i, id := range ids {
+		name := fmt.Sprintf("direct-parents-%d", i)
+		require.NoError(t, s.CreateGroup(ctx, &store.Group{
+			ID: id, Name: name, Slug: name + "-" + id[:8], GroupType: store.GroupTypeExplicit,
+		}))
+	}
+
+	// ids[2] is the child; it is also its own parent through a self-edge.
+	child := ids[2]
+	for _, parent := range ids {
+		addChildGroupEdge(t, s, parent, child)
+	}
+
+	parents, err := s.GetDirectParentGroupIDs(ctx, child)
+	require.NoError(t, err)
+	want := append([]string(nil), ids...)
+	sort.Strings(want)
+	assert.Equal(t, want, parents, "all direct parents, including the self-edge, in sorted order")
+
+	// Only the self-edge left: the group reports itself.
+	for _, parent := range ids {
+		if parent != child {
+			require.NoError(t, s.RemoveChildGroupEdge(ctx, parent, child))
+		}
+	}
+	parents, err = s.GetDirectParentGroupIDs(ctx, child)
+	require.NoError(t, err)
+	assert.Equal(t, []string{child}, parents, "a self-edge is reported")
 }
 
 // removeChildEdgeWithAudit removes the edge and writes one audit record in
