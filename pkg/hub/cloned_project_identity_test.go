@@ -470,10 +470,19 @@ func TestAlignClonedProjectIdentities_IdentityOutsideExpectedFormChangesNothing(
 				slug = project.Slug
 			}
 
-			// A directory where the recorded identity would point.
-			named, err := config.ProjectMarker{ProjectID: tc.id, ProjectSlug: slug}.ExternalProjectPath()
-			require.NoError(t, err)
-			named = filepath.Dir(named)
+			// The project-config path accepts only IDs in the project ID format.
+			if config.ValidateProjectID(tc.id) != nil {
+				_, err := config.ProjectMarker{ProjectID: tc.id, ProjectSlug: slug}.ExternalProjectPath()
+				require.ErrorIs(t, err, config.ErrInvalidProjectID)
+			}
+
+			// A directory where an unchecked join of the recorded identity
+			// would point.
+			short := strings.ReplaceAll(tc.id, "-", "")
+			if len(short) > 8 {
+				short = short[:8]
+			}
+			named := filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir, slug+"__"+short)
 			require.NoError(t, os.MkdirAll(named, 0755))
 			require.NoError(t, os.WriteFile(filepath.Join(named, "file.txt"), []byte("other"), 0644))
 
@@ -481,6 +490,7 @@ func TestAlignClonedProjectIdentities_IdentityOutsideExpectedFormChangesNothing(
 
 			counts := srv.alignClonedProjectIdentities(ctx)
 			assert.Equal(t, 1, counts.skippedUnexpectedIdentity)
+			assert.Zero(t, counts.failed)
 			assert.Zero(t, counts.aligned)
 
 			res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
@@ -1048,4 +1058,27 @@ func TestRemoveEmptyDirs_RemovesOnlyDirectories(t *testing.T) {
 		require.ErrorIs(t, removeEmptyDirs(root), errConfigRootNotEmpty)
 		assert.Equal(t, "keep", readFile(t, file))
 	})
+}
+
+func TestAlignWorkspaceProjectIdentity_UnreadableIdentityIsFailure(t *testing.T) {
+	identityTestHome(t)
+	srv, st := testServer(t)
+	ctx := context.Background()
+	project := sharedWorkspaceProject("unreadable-identity")
+	require.NoError(t, st.CreateProject(ctx, project))
+	workspacePath, previous := seedWorkspaceIdentity(t, project.Slug, api.NewUUID(), false)
+
+	// The project-id entry cannot be read as a file.
+	scionPath := filepath.Join(workspacePath, config.DotScion)
+	require.NoError(t, os.Remove(filepath.Join(scionPath, projectkeys.ProjectIDFile)))
+	require.NoError(t, os.MkdirAll(filepath.Join(scionPath, projectkeys.ProjectIDFile, "x"), 0755))
+
+	_, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, notInUse)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, config.ErrInvalidProjectID)
+
+	counts := srv.alignClonedProjectIdentities(ctx)
+	assert.Equal(t, 1, counts.failed)
+	assert.Zero(t, counts.skippedUnexpectedIdentity)
+	assert.DirExists(t, previous)
 }

@@ -238,9 +238,10 @@ func TestRecordHubProjectIdentity_IdentityOutsideExpectedFormSkips(t *testing.T)
 	outcome, err := recordHubProjectIdentity(workspace, brokerTestSlug, brokerTestHubID, notBusy)
 	require.NoError(t, err)
 	assert.Equal(t, hubIdentityUnexpectedForm, outcome)
-	id, err := config.ReadProjectID(scionPath)
+	// The recorded project-id is left exactly as it was.
+	raw, err := os.ReadFile(filepath.Join(scionPath, "project-id"))
 	require.NoError(t, err)
-	assert.Equal(t, "../../other", id)
+	assert.Equal(t, "../../other\n", string(raw))
 }
 
 func TestOtherProjectAgentsInUse(t *testing.T) {
@@ -461,4 +462,32 @@ func TestCreateAgent_BrokerRecordFailureLogDescribesErrorWithoutPath(t *testing.
 	assert.Contains(t, out, "op=mkdir")
 	assert.Contains(t, out, syscall.ENOTDIR.Error())
 	assert.NotContains(t, out, home)
+}
+
+func TestAlignHubManagedProjectIdentity_UnexpectedFormLogOmitsRecordedValue(t *testing.T) {
+	workspace, _ := seedBrokerWorkspace(t, brokerTestLocalID, false)
+	writeBrokerRecord(t, brokerTestHubID)
+	scionPath := filepath.Join(workspace, config.DotScion)
+	require.NoError(t, config.WriteProjectID(scionPath, "../../other"))
+
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	logs := captureLifecycleLog(srv)
+	srv.alignHubManagedProjectIdentity(context.Background(), "agent-1", workspace, brokerTestSlug, brokerTestHubID)
+
+	out := logs.String()
+	assert.Contains(t, out, "reason=unexpected_form")
+	assert.NotContains(t, out, "../../other")
+	assert.NotContains(t, out, workspace)
+}
+
+func TestRecordHubProjectIdentity_UnreadableIdentityIsFailure(t *testing.T) {
+	workspace, _ := seedBrokerWorkspace(t, brokerTestLocalID, false)
+	writeBrokerRecord(t, brokerTestHubID)
+	scionPath := filepath.Join(workspace, config.DotScion)
+	require.NoError(t, os.Remove(filepath.Join(scionPath, "project-id")))
+	require.NoError(t, os.MkdirAll(filepath.Join(scionPath, "project-id", "x"), 0o755))
+
+	_, err := recordHubProjectIdentity(workspace, brokerTestSlug, brokerTestHubID, notBusy)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, config.ErrInvalidProjectID)
 }
