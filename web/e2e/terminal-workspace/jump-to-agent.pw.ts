@@ -14,14 +14,13 @@
 
 /**
  * Chromium, real xterm: the terminal workspace's "Jump to agent" palette —
- * the terminal list footer's button opens it with the chat palette's
- * type scale, its options spanning the full width of the results; in a
- * multi-pane grid a
- * pick adds a pane, or replaces the focused pane when the grid is full; in
- * a single-pane view (the single preset, or any preset on
- * a narrow viewport) a pick navigates to the agent's URL like the rail; the
- * picked pane takes keyboard focus; Meta+K opens it from inside a pane, but
- * not over a pane's own open dialog, and Ctrl+K keeps reaching the PTY from
+ * the terminal list footer's button opens it with the chat palette's type
+ * scale, its options spanning the full width of the results; in a multi-pane
+ * grid a pick adds a pane, or replaces the focused pane when the grid is
+ * full; in a single-pane view (the single preset, or any preset on a narrow
+ * viewport) a pick navigates to the agent's URL like the rail; the picked
+ * pane takes keyboard focus; Meta+K opens it from inside a pane, but not
+ * over a pane's own open dialog, and Ctrl+K keeps reaching the PTY from
  * inside a pane while still opening the palette from outside one; leaving
  * /terminals with the palette open closes it, so the destination page keeps
  * keyboard focus and scrolling.
