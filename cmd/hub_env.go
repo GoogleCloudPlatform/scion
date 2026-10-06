@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -482,15 +483,23 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 }
 
 // envVarOutput is the JSON shape of one env var in "scion hub env get"
-// and "scion hub env list". It carries the fields the text output shows;
-// Value is left out when the variable is sensitive.
+// and "scion hub env list". It keeps the field names of the Hub record
+// so existing readers keep working. Value is always present for a
+// non-sensitive variable, even when empty, and left out for a sensitive
+// one, as in the text output.
 type envVarOutput struct {
-	Key           string `json:"key"`
-	Value         string `json:"value,omitempty"`
-	Scope         string `json:"scope"`
-	Sensitive     bool   `json:"sensitive"`
-	InjectionMode string `json:"injectionMode,omitempty"`
-	Secret        bool   `json:"secret"`
+	ID            string    `json:"id"`
+	Key           string    `json:"key"`
+	Value         *string   `json:"value,omitempty"`
+	Scope         string    `json:"scope"`
+	ScopeID       string    `json:"scopeId"`
+	Description   string    `json:"description,omitempty"`
+	Sensitive     bool      `json:"sensitive"`
+	InjectionMode string    `json:"injectionMode,omitempty"`
+	Secret        bool      `json:"secret"`
+	Created       time.Time `json:"created"`
+	Updated       time.Time `json:"updated"`
+	CreatedBy     string    `json:"createdBy,omitempty"`
 }
 
 // envListOutput is the JSON shape of "scion hub env list".
@@ -501,14 +510,21 @@ type envListOutput struct {
 
 func newEnvVarOutput(v *hubclient.EnvVar) envVarOutput {
 	out := envVarOutput{
+		ID:            v.ID,
 		Key:           v.Key,
 		Scope:         v.Scope,
+		ScopeID:       v.ScopeID,
+		Description:   v.Description,
 		Sensitive:     v.Sensitive,
 		InjectionMode: v.InjectionMode,
 		Secret:        v.Secret,
+		Created:       v.Created,
+		Updated:       v.Updated,
+		CreatedBy:     v.CreatedBy,
 	}
 	if !v.Sensitive {
-		out.Value = v.Value
+		value := v.Value
+		out.Value = &value
 	}
 	return out
 }

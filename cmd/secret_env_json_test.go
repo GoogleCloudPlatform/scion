@@ -73,6 +73,8 @@ func setupJSONCmdTest(t *testing.T, routes map[string]interface{}) {
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	projectPath = setupSecretProject(t, tmpHome, server.URL)
 
+	origCtx := agentSecretListCmd.Context()
+	t.Cleanup(func() { agentSecretListCmd.SetContext(origCtx) })
 	agentSecretListCmd.SetContext(context.Background())
 
 	outputFormat = ""
@@ -174,7 +176,7 @@ func TestRunSecretGet_NoKeyEmptyJSON(t *testing.T) {
 
 func envJSONFixture() []map[string]interface{} {
 	return []map[string]interface{}{
-		{"id": "e1", "key": "LOG_LEVEL", "value": "debug", "scope": "user", "scopeId": "u1", "injectionMode": "as_needed", "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"},
+		{"id": "e1", "key": "LOG_LEVEL", "value": "debug", "scope": "user", "scopeId": "u1", "description": "log verbosity", "injectionMode": "as_needed", "created": "2026-01-01T00:00:00Z", "updated": "2026-01-02T00:00:00Z", "createdBy": "user-1"},
 		{"id": "e2", "key": "TOKEN", "value": "hidden-value", "scope": "user", "sensitive": true, "secret": true},
 	}
 }
@@ -194,8 +196,11 @@ func TestRunEnvGet_JSON(t *testing.T) {
 			})
 			got := decodeJSONObject(t, out)
 			assert.Equal(t, map[string]interface{}{
-				"key": "LOG_LEVEL", "value": "debug", "scope": "user",
-				"sensitive": false, "injectionMode": "as_needed", "secret": false,
+				"id": "e1", "key": "LOG_LEVEL", "value": "debug", "scope": "user",
+				"scopeId": "u1", "description": "log verbosity", "sensitive": false,
+				"injectionMode": "as_needed", "secret": false,
+				"created": "2026-01-01T00:00:00Z", "updated": "2026-01-02T00:00:00Z",
+				"createdBy": "user-1",
 			}, got)
 
 			out = captureStdout(t, func() {
@@ -231,11 +236,15 @@ func TestRunEnvList_JSONModes(t *testing.T) {
 			require.True(t, ok, "envVars must be an array")
 			require.Len(t, items, 2)
 			first := items[0].(map[string]interface{})
-			assert.ElementsMatch(t, []string{"key", "value", "scope", "sensitive", "injectionMode", "secret"}, mapKeys(first))
+			assert.ElementsMatch(t, []string{
+				"id", "key", "value", "scope", "scopeId", "description", "sensitive",
+				"injectionMode", "secret", "created", "updated", "createdBy",
+			}, mapKeys(first))
 			assert.Equal(t, "debug", first["value"])
 			second := items[1].(map[string]interface{})
 			assert.NotContains(t, second, "value")
 			assert.Equal(t, true, second["sensitive"])
+			assert.Equal(t, "e2", second["id"])
 		})
 	}
 }
@@ -273,6 +282,39 @@ func TestRunEnvGet_NoKeyEmptyJSON(t *testing.T) {
 			})
 			got := decodeJSONObject(t, out)
 			assert.Equal(t, []interface{}{}, got["envVars"])
+		})
+	}
+}
+
+func TestRunEnvGet_JSONEmptyValue(t *testing.T) {
+	for _, mode := range jsonModes {
+		t.Run(mode.name, func(t *testing.T) {
+			setupJSONCmdTest(t, map[string]interface{}{
+				"/api/v1/env/EMPTY": map[string]interface{}{"id": "e3", "key": "EMPTY", "value": "", "scope": "user"},
+				"/api/v1/env": map[string]interface{}{"envVars": []interface{}{
+					map[string]interface{}{"id": "e3", "key": "EMPTY", "value": "", "scope": "user"},
+				}, "scope": "user"},
+			})
+			outputFormat = mode.format
+			envOutputJSON = mode.jsonFlag
+
+			out := captureStdout(t, func() {
+				require.NoError(t, runEnvGet(hubEnvGetCmd, []string{"EMPTY"}))
+			})
+			got := decodeJSONObject(t, out)
+			require.Contains(t, got, "value", "an empty value of a plain variable is still shown")
+			assert.Equal(t, "", got["value"])
+
+			out = captureStdout(t, func() {
+				require.NoError(t, runEnvList(hubEnvListCmd, nil))
+			})
+			got = decodeJSONObject(t, out)
+			items, ok := got["envVars"].([]interface{})
+			require.True(t, ok, "envVars must be an array")
+			require.Len(t, items, 1)
+			item := items[0].(map[string]interface{})
+			require.Contains(t, item, "value")
+			assert.Equal(t, "", item["value"])
 		})
 	}
 }
