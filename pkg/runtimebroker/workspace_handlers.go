@@ -86,6 +86,19 @@ type WorkspaceApplyResponse struct {
 // Workspace Handlers
 // ============================================================================
 
+// Workspace transfer ops (writeRuntimeOpError): a failed step answers with
+// the fixed "Failed to <op>" text only. The cause's own text stays in the
+// broker log, since it can name broker filesystem paths or GCS bucket,
+// object or credential detail (ptone/scion#3496). The GCS download op is
+// opDownloadWorkspace, shared with the create-time bootstrap.
+const (
+	opResolveWorkspacePath   = "resolve workspace path"
+	opAccessWorkspacePath    = "access workspace path"
+	opBuildWorkspaceManifest = "build workspace manifest"
+	opUploadWorkspace        = "upload workspace to GCS"
+	opUploadManifest         = "upload manifest"
+)
+
 // handleWorkspaceUpload handles POST /api/v1/workspace/upload
 // It uploads the agent's workspace directory to GCS.
 func (s *Server) handleWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
@@ -137,27 +150,27 @@ func (s *Server) handleWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 			NotFound(w, "Agent")
 			return
 		}
-		RuntimeError(w, "Failed to resolve workspace path: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, opResolveWorkspacePath, err, "agent_slug", req.Slug)
 		return
 	}
 
 	// Build manifest from container workspace
 	manifest, err := s.buildWorkspaceManifest(workspacePath, req.ExcludePatterns)
 	if err != nil {
-		RuntimeError(w, "Failed to build workspace manifest: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, opBuildWorkspaceManifest, err, "agent_slug", req.Slug)
 		return
 	}
 
 	// Sync workspace to GCS using rclone
 	filesPath := req.StoragePath + "/files"
-	if err := gcp.SyncToGCS(ctx, workspacePath, bucket, filesPath); err != nil {
-		RuntimeError(w, "Failed to upload workspace to GCS: "+err.Error())
+	if err := s.workspaceUploader()(ctx, workspacePath, bucket, filesPath); err != nil {
+		s.writeRuntimeOpError(w, ctx, opUploadWorkspace, err, "agent_slug", req.Slug)
 		return
 	}
 
 	// Upload the manifest
-	if err := s.uploadManifest(ctx, bucket, req.StoragePath, manifest); err != nil {
-		RuntimeError(w, "Failed to upload manifest: "+err.Error())
+	if err := s.manifestUploader()(ctx, bucket, req.StoragePath, manifest); err != nil {
+		s.writeRuntimeOpError(w, ctx, opUploadManifest, err, "agent_slug", req.Slug)
 		return
 	}
 
@@ -234,14 +247,14 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 			NotFound(w, "Agent")
 			return
 		}
-		RuntimeError(w, "Failed to resolve workspace path: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, opResolveWorkspacePath, err, "agent_slug", req.Slug)
 		return
 	}
 
 	// Sync workspace from GCS to local using rclone
 	filesPath := req.StoragePath + "/files"
-	if err := gcp.SyncFromGCS(ctx, bucket, filesPath, workspacePath); err != nil {
-		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
+	if err := s.workspaceDownloader()(ctx, bucket, filesPath, workspacePath); err != nil {
+		s.writeRuntimeOpError(w, ctx, opDownloadWorkspace, err, "agent_slug", req.Slug)
 		return
 	}
 
@@ -390,7 +403,7 @@ func (s *Server) buildWorkspaceManifest(workspacePath string, excludePatterns []
 }
 
 // uploadManifest uploads the workspace manifest to GCS.
-func (s *Server) uploadManifest(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error {
+func uploadManifest(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error {
 	// Create storage client
 	cfg := storage.Config{
 		Provider: storage.ProviderGCS,
@@ -569,12 +582,12 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	req.WorkspacePath = resolvedWorkspacePath
 
 	// Verify the resolved workspace path exists.
-	if _, err := os.Stat(req.WorkspacePath); err != nil {
+	if _, err := s.projectWorkspaceStatter()(req.WorkspacePath); err != nil {
 		if os.IsNotExist(err) {
 			NotFound(w, "Project workspace path")
 			return
 		}
-		RuntimeError(w, "Failed to access workspace path: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, opAccessWorkspacePath, err, "project_id", req.ProjectID)
 		return
 	}
 
@@ -590,20 +603,20 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	// Build manifest from project workspace
 	manifest, err := s.buildWorkspaceManifest(req.WorkspacePath, req.ExcludePatterns)
 	if err != nil {
-		RuntimeError(w, "Failed to build workspace manifest: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, opBuildWorkspaceManifest, err, "project_id", req.ProjectID)
 		return
 	}
 
 	// Sync workspace to GCS using rclone
 	filesPath := req.StoragePath + "/files"
-	if err := gcp.SyncToGCS(ctx, req.WorkspacePath, bucket, filesPath); err != nil {
-		RuntimeError(w, "Failed to upload workspace to GCS: "+err.Error())
+	if err := s.workspaceUploader()(ctx, req.WorkspacePath, bucket, filesPath); err != nil {
+		s.writeRuntimeOpError(w, ctx, opUploadWorkspace, err, "project_id", req.ProjectID)
 		return
 	}
 
 	// Upload the manifest
-	if err := s.uploadManifest(ctx, bucket, req.StoragePath, manifest); err != nil {
-		RuntimeError(w, "Failed to upload manifest: "+err.Error())
+	if err := s.manifestUploader()(ctx, bucket, req.StoragePath, manifest); err != nil {
+		s.writeRuntimeOpError(w, ctx, opUploadManifest, err, "project_id", req.ProjectID)
 		return
 	}
 
@@ -628,4 +641,84 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// ============================================================================
+// Test seams
+// ============================================================================
+//
+// Each step below follows SetWorkspaceDownloader/workspaceDownloader: a
+// setter replaces the step on this Server (nil restores the default), and
+// the accessor returns the replacement or the real implementation. They
+// exist so tests can fail one step without real GCS or filesystem faults.
+
+// setWorkspaceUploader replaces the GCS upload of a workspace directory.
+func (s *Server) setWorkspaceUploader(fn func(ctx context.Context, localPath, bucket, prefix string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workspaceUpload = fn
+}
+
+// workspaceUploader returns the GCS upload of a workspace directory.
+func (s *Server) workspaceUploader() func(ctx context.Context, localPath, bucket, prefix string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.workspaceUpload != nil {
+		return s.workspaceUpload
+	}
+	return gcp.SyncToGCS
+}
+
+// setManifestUploader replaces the upload of a workspace manifest.
+func (s *Server) setManifestUploader(fn func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.manifestUpload = fn
+}
+
+// manifestUploader returns the upload of a workspace manifest.
+func (s *Server) manifestUploader() func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.manifestUpload != nil {
+		return s.manifestUpload
+	}
+	return uploadManifest
+}
+
+// setProjectWorkspaceStatter replaces the project upload's existence
+// check, so a test can produce a stat error other than not-exist (path
+// validation refuses every one it can cause on a real filesystem first).
+func (s *Server) setProjectWorkspaceStatter(fn func(path string) (os.FileInfo, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projectWorkspaceStat = fn
+}
+
+// projectWorkspaceStatter returns the project upload's existence check.
+func (s *Server) projectWorkspaceStatter() func(path string) (os.FileInfo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.projectWorkspaceStat != nil {
+		return s.projectWorkspaceStat
+	}
+	return os.Stat
+}
+
+// setProjectAbs replaces deleteProject's filepath.Abs, which cannot fail
+// for the absolute paths it is given.
+func (s *Server) setProjectAbs(fn func(path string) (string, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.projectPathAbs = fn
+}
+
+// projectAbs returns deleteProject's filepath.Abs.
+func (s *Server) projectAbs() func(path string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.projectPathAbs != nil {
+		return s.projectPathAbs
+	}
+	return filepath.Abs
 }
