@@ -71,6 +71,13 @@ const (
 	scopedPageRowDecisions = 8
 )
 
+// completeBranchMaxCandidates is the largest candidate count n for which
+// the complete branch, costing 5 + n*(1+perRow) decisions, fits
+// sortedProjectDecisionCeiling; larger fit requests use the paged branch.
+func completeBranchMaxCandidates(perRow int) int {
+	return (sortedProjectDecisionCeiling - 5) / (1 + perRow)
+}
+
 // This file implements sorted mode on the project agents endpoint: both
 // sort keys and both directions, fit/complete,
 // stats=1, the candidate-count ceiling, the v2 cursor, and both the user
@@ -357,6 +364,16 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	if scoped, ok := identity.(*ScopedUserIdentity); ok && scoped != nil {
 		scopedToken = !scoped.Ceiling().Allows("agent.read")
 	}
+	// Fit requests whose complete branch would exceed the decision budget
+	// are served through the paged branch. Which rows are listed does not
+	// change.
+	perRow := pageRowDecisions
+	if scopedToken {
+		perRow = scopedPageRowDecisions
+	}
+	if complete && n > completeBranchMaxCandidates(perRow) {
+		complete = false
+	}
 
 	readable := make([]store.AgentMember, 0, len(members))
 	readableReadCaps := make([]*Capabilities, 0, len(members))
@@ -396,15 +413,10 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		// pre-check COUNT, which can be lower if the pool grew in between)
 		// and by the per-row cost, not just the request's limit, so the
 		// per-request decision cost 5+n+perRow*pageSize never exceeds the
-		// decision ceiling. A scoped token's page rows cost one more
-		// decision each (the plain read below). pEff deliberately does
+		// decision ceiling. pEff deliberately does
 		// not enter the cursor binding (binding, above, is built before
 		// pEff exists): n can differ from one page to the next without
 		// invalidating a cursor.
-		perRow := pageRowDecisions
-		if scopedToken {
-			perRow = scopedPageRowDecisions
-		}
 		pEff := effectivePagedPageSize(p.limit, n, perRow)
 		end := start + pEff
 		if end > len(r) {
