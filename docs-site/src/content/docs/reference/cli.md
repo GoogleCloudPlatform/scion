@@ -515,6 +515,7 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
     - `--broker <name|id>`: Target another Runtime Broker for the new generation. Both Runtime Brokers must mount the same NFS export, so the workspace would move without being copied. Requires `--dry-run`: without it the CLI fails before contacting the Hub, because a real move is not supported yet.
+    - `--thinking-level <value>`: Patch the thinking level of the new generation. Accepts the same values as `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The Hub receives the integer. Without the flag, the thinking level is not patched. An invalid value fails before contacting the Hub.
 
 **Checking a move to another Runtime Broker.** `scion reincarnate <agent> --broker <name|id> --dry-run`
 reports whether the agent could move, and changes nothing. The Hub runs nine checks in this order:
