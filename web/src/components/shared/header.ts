@@ -55,6 +55,7 @@ import {
 import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
+import { isMacPlatform } from '../../utils/platform.js';
 
 // ---------------------------------------------------------------------------
 // Project-context helpers for the dashboard <-> chat mode switch.
@@ -86,23 +87,6 @@ export function slugFromChatPath(path: string): string | null {
   if (/^\/chat\/dm\//.test(path)) return null;
   const m = path.match(/^\/chat\/([^/?#]+)/);
   return m ? m[1] : null;
-}
-
-/**
- * Detect whether the current device is a Mac (including iPhone/iPad/iPod),
- * for the palette button's shortcut label and `aria-keyshortcuts`. Prefers
- * the User-Agent Client Hints API (`navigator.userAgentData`), which is not
- * subject to User-Agent string reduction, and falls back to the deprecated
- * `navigator.platform` where Client Hints is unavailable -- notably Safari,
- * which never implemented it. Guarded for environments with no `navigator`
- * at all.
- */
-export function isMacPlatform(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const uaDataPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } })
-    .userAgentData?.platform;
-  if (uaDataPlatform) return /mac/i.test(uaDataPlatform);
-  return /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 }
 
 /** URL for the Scion documentation site, opened by the Help button. */
@@ -1489,7 +1473,9 @@ export class ScionHeader extends LitElement {
   private rememberModePath(): void {
     const path = this.currentPath || window.location.pathname;
     if (path.startsWith('/chat')) {
-      rememberedModePaths.chat = path;
+      // Drop a `#msg-…` jump target: coming back to chat should land where
+      // the user left off, not replay the jump that first opened the thread.
+      rememberedModePaths.chat = path.split('#')[0];
     } else if (path !== '/terminals' && !path.startsWith('/terminals/')) {
       rememberedModePaths.dashboard = path || '/';
     }
