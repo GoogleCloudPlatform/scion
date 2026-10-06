@@ -31,11 +31,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// multiDeleteHub is a hub stub for several agents whose DELETE answers 202.
-// GET of an agent's ID answers "deleting" until release says the delete is
-// done, then 404. It tracks how many agents were mid-poll at once.
+// multiDeleteHub is a hub stub for several agents whose DELETE answers 202
+// (or deleteStatus[name]). GET of an agent's ID answers "deleting" until
+// release says the delete is done, then 404 (or final[name]). It tracks how
+// many agents were mid-poll at once.
 type multiDeleteHub struct {
-	projectID string
+	projectID    string
+	dirs         map[string]string   // local agent dirs, for release rules
+	deleteStatus map[string]int      // DELETE status per agent; default 202
+	final        map[string]getReply // reply once released; default 404
 
 	mu sync.Mutex
 	// release reports whether name's delete is done. It runs under mu.
@@ -57,13 +61,19 @@ func (h *multiDeleteHub) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/healthz":
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, agentPath):
+		if st, ok := h.deleteStatus[rest]; ok && st != http.StatusAccepted {
+			w.WriteHeader(st)
+			if st >= 400 {
+				_, _ = w.Write([]byte(`{"error":{"code":"conflict","message":"agent is busy"}}`))
+			}
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"agentId":"id-` + rest + `","deletion":{"state":"deleting","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`))
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "id-"):
 		name := strings.TrimPrefix(rest, "id-")
 		if h.released[name] {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"gone"}}`))
+			h.writeFinal(w, name)
 			return
 		}
 		if h.polls[name] == 0 {
@@ -75,14 +85,36 @@ func (h *multiDeleteHub) serve(w http.ResponseWriter, r *http.Request) {
 			h.released[name] = true
 			h.releaseSeq = append(h.releaseSeq, name)
 			h.inFlight--
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"gone"}}`))
+			h.writeFinal(w, name)
 			return
 		}
 		_, _ = w.Write([]byte(`{"id":"id-` + name + `","name":"` + name + `","phase":"stopping","deletion":{"state":"deleting","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (h *multiDeleteHub) writeFinal(w http.ResponseWriter, name string) {
+	rep, ok := h.final[name]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"gone"}}`))
+		return
+	}
+	if rep.status == 0 {
+		rep.status = http.StatusOK
+	}
+	w.WriteHeader(rep.status)
+	if rep.body != "" {
+		_, _ = w.Write([]byte(strings.ReplaceAll(rep.body, "%s", name)))
+	} else {
+		_, _ = w.Write([]byte(`{"error":{"code":"x","message":"` + http.StatusText(rep.status) + `"}}`))
+	}
+}
+
+func dirGone(p string) bool {
+	_, err := os.Stat(p)
+	return os.IsNotExist(err)
 }
 
 type multiDeleteEnv struct {
@@ -116,7 +148,7 @@ func setupMultiDelete(t *testing.T, limit int, release func(h *multiDeleteHub, n
 		dirs[n] = createAgentDir(t, projectDir, n)
 		hubsync.AddSyncedAgent(projectDir, n)
 	}
-	hub := &multiDeleteHub{projectID: "project-multi", release: release, polls: map[string]int{}, released: map[string]bool{}}
+	hub := &multiDeleteHub{projectID: "project-multi", dirs: dirs, release: release, polls: map[string]int{}, released: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(hub.serve))
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
@@ -130,9 +162,10 @@ func setupMultiDelete(t *testing.T, limit int, release func(h *multiDeleteHub, n
 }
 
 // releaseFirstLast holds every delete until all agents have been polled at
-// least once, and holds the first agent's until every other one is done.
-// A sequential poll can never satisfy it: the first agent's poll would run
-// alone until its budget ran out.
+// least once, and holds the first agent's until every other one is done and
+// its local dir has been removed. A sequential poll can never satisfy it
+// (the first agent's poll would run alone until its budget ran out), and
+// neither can cleanup that waits for the first agent's result.
 func releaseFirstLast(names []string) func(h *multiDeleteHub, name string) bool {
 	return func(h *multiDeleteHub, name string) bool {
 		for _, n := range names {
@@ -144,7 +177,7 @@ func releaseFirstLast(names []string) func(h *multiDeleteHub, name string) bool 
 			return true
 		}
 		for _, n := range names[1:] {
-			if !h.released[n] {
+			if !h.released[n] || !dirGone(h.dirs[n]) {
 				return false
 			}
 		}
@@ -201,18 +234,100 @@ func TestDeleteAgentsViaHub_202PollsConcurrentlyInOrder(t *testing.T) {
 	})
 }
 
-// ptone/scion#2895: no more than hubDeletePollConcurrency polls run at once.
+// ptone/scion#2895: exactly hubDeletePollConcurrency polls run at once. Each
+// delete is held until the limit is reached (or too few agents remain to
+// reach it), so a lower effective bound deterministically times out. Each
+// held poll also runs for 20 rounds, long enough that an extra poll started
+// past the limit shows up in maxInFlight.
 func TestDeleteAgentsViaHub_202PollConcurrencyIsBounded(t *testing.T) {
+	const limit = 2
 	names := []string{"agent-1", "agent-2", "agent-3", "agent-4", "agent-5"}
-	release := func(h *multiDeleteHub, name string) bool { return h.polls[name] >= 5 }
-	env := setupMultiDelete(t, 2, release, names...)
+	release := func(h *multiDeleteHub, name string) bool {
+		reached := h.inFlight >= limit || len(names)-len(h.released) < limit
+		return reached && h.polls[name] >= 20
+	}
+	env := setupMultiDelete(t, limit, release, names...)
 
 	_, stderr := captureStdIO(t, func() {
 		require.NoError(t, deleteAgentsViaHub(env.hubCtx, names))
 	})
-	assert.LessOrEqual(t, env.hub.maxInFlight, 2, "at most two polls in flight")
+	assert.Equal(t, limit, env.hub.maxInFlight, "exactly the limit of polls in flight")
 	assert.Len(t, env.hub.releaseSeq, len(names), "every delete confirmed")
 	for _, n := range names {
 		assert.Contains(t, stderr, "Agent '"+n+"' deleted via Hub.")
 	}
+}
+
+// ptone/scion#2895: per-agent outcomes and the exit status are unchanged when
+// different outcomes are polled in one run.
+func TestDeleteAgentsViaHub_202MixedOutcomes(t *testing.T) {
+	names := []string{"ok-204", "ok-202", "fail-202", "err-delete", "pending-403"}
+	release := func(h *multiDeleteHub, name string) bool { return h.polls[name] >= 2 }
+	setup := func(t *testing.T) *multiDeleteEnv {
+		env := setupMultiDelete(t, 4, release, names...)
+		env.hub.deleteStatus = map[string]int{"ok-204": http.StatusNoContent, "err-delete": http.StatusConflict}
+		env.hub.final = map[string]getReply{
+			"fail-202":    {body: replyRuntime},
+			"pending-403": {status: http.StatusForbidden},
+		}
+		return env
+	}
+	checkDirs := func(t *testing.T, env *multiDeleteEnv) {
+		assert.True(t, dirGone(env.dirs["ok-204"]), "204 cleans up")
+		assert.True(t, dirGone(env.dirs["ok-202"]), "confirmed 202 cleans up")
+		assert.False(t, dirGone(env.dirs["fail-202"]), "failed delete keeps the worktree")
+		assert.False(t, dirGone(env.dirs["err-delete"]), "DELETE error keeps the worktree")
+		assert.False(t, dirGone(env.dirs["pending-403"]), "unobservable delete keeps the worktree")
+	}
+
+	t.Run("text", func(t *testing.T) {
+		env := setup(t)
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = deleteAgentsViaHub(env.hubCtx, names)
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to delete some agents via Hub")
+		assert.Contains(t, err.Error(), "fail-202: delete failed on the Hub (runtime_error): broker unreachable")
+		assert.Contains(t, err.Error(), "err-delete: ")
+		for _, n := range []string{"ok-204", "ok-202", "pending-403"} {
+			assert.NotContains(t, err.Error(), n+":")
+		}
+		want := []string{
+			"Agent 'ok-204' deleted via Hub.",
+			"Agent 'ok-202' deleted via Hub.",
+			"Agent 'pending-403': delete accepted; cannot observe completion; local worktree kept (the Hub did not allow reading the agent).",
+		}
+		last := -1
+		for _, w := range want {
+			i := strings.Index(stderr, w)
+			require.GreaterOrEqual(t, i, 0, "missing %q in:\n%s", w, stderr)
+			assert.Greater(t, i, last, "results are printed in input order")
+			last = i
+		}
+		checkDirs(t, env)
+	})
+
+	t.Run("json", func(t *testing.T) {
+		env := setup(t)
+		setJSONOutput(t)
+		stdout, _ := captureStdIO(t, func() {
+			require.NoError(t, deleteAgentsViaHub(env.hubCtx, names))
+		})
+		var out struct {
+			Status  string                   `json:"status"`
+			Results []map[string]interface{} `json:"results"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
+		assert.Equal(t, "partial", out.Status)
+		require.Len(t, out.Results, len(names))
+		wantStatus := []string{"success", "success", "error", "error", "accepted"}
+		for i, n := range names {
+			assert.Equal(t, n, out.Results[i]["agent"], "JSON results are in input order")
+			assert.Equal(t, wantStatus[i], out.Results[i]["status"], n)
+		}
+		assert.Contains(t, out.Results[2]["error"], "(runtime_error)")
+		assert.Equal(t, true, out.Results[4]["worktreeKept"])
+		checkDirs(t, env)
+	})
 }

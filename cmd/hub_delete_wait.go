@@ -70,13 +70,14 @@ func deleteViaHubAndWait(ctx context.Context, svc hubclient.AgentService, agentN
 // already known (204, or a client that cannot tell 202 from 204), or the hub
 // answered 202 and Wait must poll for it.
 type sentHubDelete struct {
-	svc     hubclient.AgentService
-	pollID  string // set only when a poll is needed
-	outcome hubDeleteOutcome
+	svc       hubclient.AgentService
+	needsPoll bool   // the hub answered 202
+	pollID    string // ID to poll; meaningful only when needsPoll
+	outcome   hubDeleteOutcome
 }
 
 // NeedsPoll reports whether the hub answered 202, so Wait will poll.
-func (s sentHubDelete) NeedsPoll() bool { return s.pollID != "" }
+func (s sentHubDelete) NeedsPoll() bool { return s.needsPoll }
 
 // Wait returns the outcome, polling first if the hub answered 202. The poll
 // has its own budget, independent of ctx: ctx is the DELETE request's
@@ -115,7 +116,7 @@ func sendHubDelete(ctx context.Context, svc hubclient.AgentService, agentName st
 	if pollID == "" {
 		pollID = agentName
 	}
-	return sentHubDelete{svc: svc, pollID: pollID}, nil
+	return sentHubDelete{svc: svc, needsPoll: true, pollID: pollID}, nil
 }
 
 // hubDeleteFailure returns the error for an accepted delete that FAILED or

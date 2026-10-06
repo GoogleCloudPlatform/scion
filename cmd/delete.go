@@ -215,6 +215,20 @@ already removes the container.`,
 // deleteAgentsViaHub polls at once. Tests override it.
 var hubDeletePollConcurrency = 4
 
+// hubDeleteJob is one agent in a multi-agent hub delete.
+type hubDeleteJob struct {
+	name    string
+	sent    sentHubDelete
+	outcome hubDeleteOutcome
+	err     error // DELETE request error
+
+	// Set by finishHubDelete; printed by the caller in input order.
+	lines  []string               // text-mode status lines
+	result map[string]interface{} // JSON-mode result entry
+	errMsg string                 // non-empty if this agent's delete failed
+	done   chan struct{}          // closed once finishHubDelete has run
+}
+
 func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -224,22 +238,54 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		Force:        deleteForce,
 	}
 
-	// Send the DELETEs one at a time, in order. Each 202 starts a poll in
-	// the background (at most hubDeletePollConcurrency at once), so a slow
-	// broker costs one poll budget for the whole run, not one per agent.
-	// Results are then handled in input order, which keeps the output and
-	// the local cleanup (git worktree removal) sequential and deterministic.
+	// Send the DELETEs one at a time, in order. Each 202 queues a poll; a
+	// feeder starts the queued polls in input order, at most
+	// hubDeletePollConcurrency at once, so up to that many slow deletes cost
+	// one poll budget in total (n accepted deletes cost at most
+	// ceil(n/limit) budgets) instead of one budget each.
+	//
+	// Local cleanup (git worktree removal, sync state) runs on a single
+	// goroutine as each outcome becomes known, so git operations never
+	// overlap and a confirmed agent is cleaned up without waiting for slow
+	// agents named before it. Each agent's output is buffered and printed
+	// in input order, so the results and the JSON are deterministic.
+	//
+	// There is no SIGINT handler: interrupting the command while polls are
+	// still running leaves those agents (whose deletes the Hub may still
+	// finish) with their local worktree and sync entry; clean them up with
+	// 'scion --no-hub delete <name>'. Agents already confirmed by then have
+	// been cleaned up.
 	agentSvc := hubCtx.Client.ProjectAgents(hubCtx.ProjectID)
-	type hubDeleteJob struct {
-		outcome hubDeleteOutcome
-		err     error
-		done    chan struct{}
-	}
 	jobs := make([]*hubDeleteJob, len(agentNames))
+	pollQueue := make(chan *hubDeleteJob, len(agentNames))
+	finished := make(chan *hubDeleteJob, len(agentNames))
+
+	// Created here, not in the feeder: the feeder may outlive this call
+	// when nothing was queued, and must not read package state then.
 	sem := make(chan struct{}, max(hubDeletePollConcurrency, 1))
+	go func() { // feeder: start polls in input order, bounded
+		for job := range pollQueue {
+			sem <- struct{}{}
+			go func() {
+				// The poll has its own budget (hubDeletionWaitOptions); it
+				// does not inherit the DELETE request's timeout.
+				job.outcome = job.sent.Wait(context.Background())
+				<-sem
+				finished <- job
+			}()
+		}
+	}()
+	go func() { // cleanup: one job at a time, in completion order
+		for range agentNames {
+			job := <-finished
+			finishHubDelete(hubCtx, job)
+			close(job.done)
+		}
+	}()
+
 	for i, agentName := range agentNames {
 		statusf("Deleting agent '%s'...\n", agentName)
-		job := &hubDeleteJob{done: make(chan struct{})}
+		job := &hubDeleteJob{name: agentName, done: make(chan struct{})}
 		jobs[i] = job
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -248,95 +294,31 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		// is known (design ptone/scion#2483 R4).
 		sent, err := sendHubDelete(ctx, agentSvc, agentName, opts)
 		cancel()
+		job.sent, job.err = sent, err
 		if err != nil || !sent.NeedsPoll() {
-			job.err = err
 			if err == nil {
 				job.outcome = sent.Wait(context.Background()) // known already; no poll
 			}
-			close(job.done)
+			finished <- job
 			continue
 		}
 		statusf("Agent '%s': the Hub is still deleting it; waiting for the delete to finish...\n", agentName)
-		go func() {
-			defer close(job.done)
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			// The poll has its own budget (hubDeletionWaitOptions); it does
-			// not inherit the DELETE request's timeout.
-			job.outcome = sent.Wait(context.Background())
-		}()
+		pollQueue <- job
 	}
+	close(pollQueue)
 
 	var errs []string
 	var results []map[string]interface{}
-	for i, agentName := range agentNames {
-		job := jobs[i]
+	for _, job := range jobs {
 		<-job.done
-		outcome, err := job.outcome, job.err
-		if err != nil {
-			err = wrapHubError(err)
-		} else {
-			err = hubDeleteFailure(agentName, outcome, "local worktree kept")
+		for _, line := range job.lines {
+			statusf("%s\n", line)
 		}
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", agentName, err))
-			if isJSONOutput() {
-				results = append(results, map[string]interface{}{
-					"agent":  agentName,
-					"status": "error",
-					"error":  err.Error(),
-				})
-			}
-			continue
+		if job.result != nil {
+			results = append(results, job.result)
 		}
-
-		if !outcome.Confirmed() {
-			// Accepted, but completion could not be observed (403 or poll
-			// timeout; failures were handled above). Not a failure, but
-			// nothing local is touched: the worktree is kept, and the sync
-			// state is left alone so that a later sync sees the agent as
-			// stale once the hub finishes.
-			msg := hubDeletePendingMessage(outcome)
-			if isJSONOutput() {
-				results = append(results, map[string]interface{}{
-					"agent":        agentName,
-					"status":       "accepted",
-					"message":      msg,
-					"worktreeKept": true,
-				})
-			} else {
-				statusf("Agent '%s': %s.\n", agentName, msg)
-			}
-			continue
-		}
-
-		// Confirmed (204, or 202 then the poll saw the agent gone).
-		// Also clean up local agent files (worktree, agent directory).
-		// The Hub dispatches container cleanup to the runtime broker, but local
-		// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
-		branchDeleted, err := agent.DeleteAgentFiles(agentName, projectPath, !preserveBranch)
-		if err != nil {
-			statusf("Warning: Hub record deleted but local cleanup failed for '%s': %v\n", agentName, err)
-			statusf("Run 'scion --no-hub delete %s' to retry targeted cleanup, or 'scion clean' to reset the project.\n", agentName)
-		}
-
-		// Keep sync watermark current after a successful Hub delete. If hub server
-		// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
-		if hubCtx != nil && hubCtx.ProjectPath != "" {
-			hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
-			hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
-		}
-		if branchDeleted {
-			statusf("Git branch associated with agent '%s' deleted.\n", agentName)
-		}
-
-		if isJSONOutput() {
-			results = append(results, map[string]interface{}{
-				"agent":  agentName,
-				"status": "success",
-			})
-		} else {
-			statusf("Agent '%s' deleted via Hub.\n", agentName)
+		if job.errMsg != "" {
+			errs = append(errs, job.errMsg)
 		}
 	}
 
@@ -356,6 +338,80 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		return fmt.Errorf("failed to delete some agents via Hub:\n  %s", strings.Join(errs, "\n  "))
 	}
 	return nil
+}
+
+// finishHubDelete turns one agent's DELETE/poll outcome into its result
+// and, if the delete is confirmed, removes the local agent files and sync
+// entry. It records output on job instead of printing, so the caller can
+// print results in input order. Calls must not overlap.
+func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
+	agentName, outcome, err := job.name, job.outcome, job.err
+	if err != nil {
+		err = wrapHubError(err)
+	} else {
+		err = hubDeleteFailure(agentName, outcome, "local worktree kept")
+	}
+	if err != nil {
+		job.errMsg = fmt.Sprintf("%s: %v", agentName, err)
+		if isJSONOutput() {
+			job.result = map[string]interface{}{
+				"agent":  agentName,
+				"status": "error",
+				"error":  err.Error(),
+			}
+		}
+		return
+	}
+
+	if !outcome.Confirmed() {
+		// Accepted, but completion could not be observed (403 or poll
+		// timeout; failures were handled above). Not a failure, but
+		// nothing local is touched: the worktree is kept, and the sync
+		// state is left alone so that a later sync sees the agent as
+		// stale once the hub finishes.
+		msg := hubDeletePendingMessage(outcome)
+		if isJSONOutput() {
+			job.result = map[string]interface{}{
+				"agent":        agentName,
+				"status":       "accepted",
+				"message":      msg,
+				"worktreeKept": true,
+			}
+		} else {
+			job.lines = append(job.lines, fmt.Sprintf("Agent '%s': %s.", agentName, msg))
+		}
+		return
+	}
+
+	// Confirmed (204, or 202 then the poll saw the agent gone).
+	// Also clean up local agent files (worktree, agent directory).
+	// The Hub dispatches container cleanup to the runtime broker, but local
+	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
+	branchDeleted, err := agent.DeleteAgentFiles(agentName, projectPath, !preserveBranch)
+	if err != nil {
+		job.lines = append(job.lines,
+			fmt.Sprintf("Warning: Hub record deleted but local cleanup failed for '%s': %v", agentName, err),
+			fmt.Sprintf("Run 'scion --no-hub delete %s' to retry targeted cleanup, or 'scion clean' to reset the project.", agentName))
+	}
+
+	// Keep sync watermark current after a successful Hub delete. If hub server
+	// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
+	if hubCtx != nil && hubCtx.ProjectPath != "" {
+		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
+		hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
+	}
+	if branchDeleted {
+		job.lines = append(job.lines, fmt.Sprintf("Git branch associated with agent '%s' deleted.", agentName))
+	}
+
+	if isJSONOutput() {
+		job.result = map[string]interface{}{
+			"agent":  agentName,
+			"status": "success",
+		}
+	} else {
+		job.lines = append(job.lines, fmt.Sprintf("Agent '%s' deleted via Hub.", agentName))
+	}
 }
 
 func deleteStoppedViaHub(hubCtx *HubContext) error {
