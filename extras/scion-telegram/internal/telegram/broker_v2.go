@@ -738,6 +738,13 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		}
 	}
 
+	// Discard the retired end-of-turn assistant-reply mirror; an older hub
+	// may still forward it.
+	if msg != nil && msg.Type == messages.TypeAssistantReply {
+		b.log.Debug("Discarding retired assistant-reply message", "sender", msg.Sender)
+		return nil
+	}
+
 	// Handle InputNeeded messages with inline keyboards.
 	if msg != nil && msg.Type == messages.TypeInputNeeded {
 		return b.publishInputNeeded(ctx, api, sq, chatIDs, msg, agentSlug, projectID)

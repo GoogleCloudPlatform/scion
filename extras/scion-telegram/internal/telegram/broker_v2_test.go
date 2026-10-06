@@ -3487,3 +3487,21 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 		})
 	}
 }
+
+// The retired assistant-reply mirror is discarded even if an older hub still
+// forwards it; the same message as an instruction is the control.
+func TestV2_Publish_DiscardsRetiredAssistantReply(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+	meta := map[string]string{"telegram_chat_id": "-200", "telegram_message_id": "42"}
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "turn text",
+			Type: messages.TypeAssistantReply, Metadata: meta}))
+	assert.Empty(t, tgSrv.getSentMessages(), "assistant-reply must be discarded")
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "deliberate",
+			Type: messages.TypeInstruction, Metadata: meta}))
+	assert.Len(t, tgSrv.getSentMessages(), 1, "control: an instruction is sent")
+}

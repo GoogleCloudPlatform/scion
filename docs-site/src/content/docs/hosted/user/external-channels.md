@@ -7,10 +7,6 @@ description: Connect Scion to Telegram, Discord, and A2A for external messaging 
 
 Scion can relay agent messages and notifications to external platforms, extending communication beyond the CLI and Web Dashboard. Multiple external channels are supported: **Telegram** (bidirectional group chat), **Discord** (bidirectional chat and outbound notifications), **Google Chat** (comprehensive bidirectional workspace integration), **Microsoft Teams** (enterprise-grade bidirectional channel messaging), and the **A2A protocol** (exposing agents as programmatically queryable endpoints).
 
-:::caution[Upgrade the Hub first]
-Upgrade the Hub before the Telegram, Discord and Slack plugins. Older Hubs forward the retired end-of-turn `assistant-reply` mirror on every agent turn, and current plugins no longer filter it, so a newer plugin on an older Hub posts each turn's text to linked chats.
-:::
-
 ## Telegram
 
 The Telegram integration provides **bidirectional messaging** — users can message agents from Telegram groups and receive replies directly in the chat.

@@ -628,6 +628,13 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
+	// Discard the retired end-of-turn assistant-reply mirror; an older hub
+	// may still forward it.
+	if msg != nil && msg.Type == messages.TypeAssistantReply {
+		b.log.Debug("Discarding retired assistant-reply message")
+		return nil
+	}
+
 	// Determine whether this message should be sent via webhook (agent identity)
 	// or via the bot API. Webhook routing applies when:
 	//   - Sender is an agent (starts with "agent:")
