@@ -4410,7 +4410,12 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	// Read before the dispatch: the reconcile below only counts the agent
-	// as unseen if nothing reported it from here on.
+	// as unseen if nothing reported it from here on. last_seen may be
+	// stamped by another hub replica, so this assumes replica clocks agree
+	// to well within an exec's duration (NTP). No margin is subtracted: skew
+	// can only matter for a status report racing a real disappearance
+	// (start, restart and stop are caught by the run ID, state_version and
+	// start-claim guards), and the next heartbeat corrects that case.
 	dispatchedAt := time.Now()
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
@@ -4418,7 +4423,11 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 			// The broker answered that the agent has no running container
 			// (e.g. its pod is gone): a state conflict, not a broker
 			// failure (ptone/scion#3443). Record it on the agent too
-			// (ptone/scion#3470).
+			// (ptone/scion#3470). This runs before the 409 on purpose: the
+			// response is buffered until the handler returns anyway, and a
+			// caller that re-reads the agent after the 409 sees the
+			// reconciled phase. The write is one list query plus one
+			// conditional update, bounded by execReconcileTimeout.
 			s.reconcileExecAgentNotFound(ctx, agent, dispatchedAt)
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 				"Agent has no running container on its runtime broker; start or restart the agent and retry", nil)

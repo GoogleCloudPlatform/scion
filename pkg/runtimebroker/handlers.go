@@ -53,6 +53,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	k8sexecutil "k8s.io/client-go/util/exec"
 )
 
 var tracer = otel.Tracer("scion-broker")
@@ -4313,16 +4315,21 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 
 	output, err := rt.Exec(ctx, target, req.Command)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, "Agent")
-			return
-		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		// A command that ran and exited non-zero is a command result, not a
+		// missing agent, whatever its output says. Check this first: on k8s
+		// the command's stderr is part of the error text, so a command in a
+		// live pod printing "sh: foo: not found" must never be reported as
+		// agent_not_found (the hub treats that as the container being gone;
+		// ptone/scion#3470).
+		if code, ok := execCommandExitCode(err); ok {
 			writeJSON(w, http.StatusOK, ExecResponse{
 				Output:   output,
-				ExitCode: exitErr.ExitCode(),
+				ExitCode: code,
 			})
+			return
+		}
+		if ctx.Err() == nil && isExecTargetNotFound(err) {
+			NotFound(w, "Agent")
 			return
 		}
 		s.writeRuntimeOpError(w, ctx, "execute command on agent", err, "agent_id", id, "project_id", projectID)
@@ -4333,6 +4340,49 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 		Output:   output,
 		ExitCode: 0,
 	})
+}
+
+// execCommandExitCode reports the exit code when err means the command ran
+// inside the container and exited non-zero: an os/exec.ExitError (docker,
+// podman, apple and cloudrun-sandbox exec run a CLI) or the k8s client-go
+// util/exec.ExitError returned by remotecommand. Mirrors classifyProbeErr.
+func execCommandExitCode(err error) (int, bool) {
+	var stdExitErr *exec.ExitError
+	if errors.As(err, &stdExitErr) {
+		return stdExitErr.ExitCode(), true
+	}
+	var k8sExitErr k8sexecutil.ExitError
+	if errors.As(err, &k8sExitErr) {
+		return k8sExitErr.ExitStatus(), true
+	}
+	return 0, false
+}
+
+// execStderrMarker is where the k8s runtime appends the command's stderr to
+// an exec stream error (wrapExecStreamError in pkg/runtime). Text after it
+// is command output and must not drive classification.
+const execStderrMarker = " (stderr: "
+
+// isExecTargetNotFound reports whether an rt.Exec error (that is not a
+// command exit, see execCommandExitCode) means the agent's container is
+// gone. The structured signal is a Kubernetes NotFound status (the pod no
+// longer exists). The runtimes have no not-found sentinel otherwise, so the
+// fallback is the runtime's own "not found" wording, matched only on the
+// part of the message that cannot carry command output. A missing runtime
+// binary (os/exec.ErrNotFound, "executable file not found") is a broker
+// problem, not a missing agent.
+func isExecTargetNotFound(err error) bool {
+	if k8serrors.IsNotFound(err) {
+		return true
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		return false
+	}
+	msg := err.Error()
+	if i := strings.Index(msg, execStderrMarker); i >= 0 {
+		msg = msg[:i]
+	}
+	return strings.Contains(msg, "not found")
 }
 
 // scionTokenDirScript sets TOKEN_DIR to the scion user's ~/.scion inside

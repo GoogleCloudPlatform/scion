@@ -5073,6 +5073,120 @@ func TestHandleAgentExec_BrokerAgentNotFound_ConcurrentChange(t *testing.T) {
 	}
 }
 
+// execMarkCountingStore counts the exec reconcile's conditional store write.
+type execMarkCountingStore struct {
+	store.Store
+	marks atomic.Int32
+}
+
+func (s *execMarkCountingStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre store.ContainerMissingPrecondition, message string) (*store.Agent, error) {
+	s.marks.Add(1)
+	return s.Store.MarkAgentContainerMissingIfUnchanged(ctx, id, brokerID, cutoff, pre, message)
+}
+
+// TestHandleAgentExec_BrokerAgentNotFound_HubSkips pins the hub-side skips
+// of the exec reconcile (ptone/scion#3470): an agent with a lifecycle op in
+// flight on this hub, a reincarnation in flight, or a lifecycle dispatch
+// queued for its broker is left alone without attempting the store write
+// (a queued dispatch or an op that has not yet taken a start claim is not
+// covered by the store's compare-and-set). The caller still gets the 409.
+func TestHandleAgentExec_BrokerAgentNotFound_HubSkips(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup runs after the agent is created, before the exec request;
+		// it may return a cleanup.
+		setup     func(t *testing.T, srv *Server, s store.Store, a *store.Agent) func()
+		wantMarks int32
+		wantPhase string
+	}{
+		{
+			name:      "no skip writes",
+			wantMarks: 1,
+			wantPhase: string(state.PhaseError),
+		},
+		{
+			name: "lifecycle op in flight",
+			setup: func(t *testing.T, srv *Server, _ store.Store, a *store.Agent) func() {
+				return srv.beginLifecycleOp(a.ID)
+			},
+			wantPhase: string(state.PhaseRunning),
+		},
+		{
+			name: "reincarnation in flight",
+			setup: func(t *testing.T, _ *Server, s store.Store, a *store.Agent) func() {
+				cur, err := s.GetAgent(context.Background(), a.ID)
+				require.NoError(t, err)
+				cur.ReincarnationState = store.ReincarnationStateStarting
+				require.NoError(t, s.UpdateAgent(context.Background(), cur))
+				return nil
+			},
+			wantPhase: string(state.PhaseRunning),
+		},
+		{
+			name: "lifecycle dispatch queued",
+			setup: func(t *testing.T, _ *Server, s store.Store, a *store.Agent) func() {
+				require.NoError(t, s.InsertBrokerDispatch(context.Background(), &store.BrokerDispatch{
+					ID: tid("dispatch-exec-skip"), BrokerID: a.RuntimeBrokerID, AgentID: a.ID,
+					AgentSlug: a.Slug, ProjectID: a.ProjectID, Op: "restart", State: "pending",
+				}))
+				return nil
+			},
+			wantPhase: string(state.PhaseRunning),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			counting := &execMarkCountingStore{Store: srv.store}
+			srv.store = counting
+
+			var execHits atomic.Int32
+			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/exec") {
+					execHits.Add(1)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"agent_not_found","message":"agent not found"}}`))
+			}))
+			t.Cleanup(fakeBroker.Close)
+
+			project := &store.Project{ID: tid("project-exec-skip"), Name: "Exec Skip", Slug: "exec-skip"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-exec-skip"), Name: "Exec Skip Broker", Slug: "exec-skip-broker",
+				Endpoint: fakeBroker.URL, Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: tid("agent-exec-skip"), Slug: tid("agent-exec-skip"), Name: "Exec Skip Agent",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID, Phase: string(state.PhaseRunning),
+				LastSeen: time.Now().Add(-time.Hour),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			if tc.setup != nil {
+				if cleanup := tc.setup(t, srv, s, agent); cleanup != nil {
+					defer cleanup()
+				}
+			}
+
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(srv.store, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec", map[string]interface{}{
+				"command": []string{"tmux", "capture-pane", "-p"},
+			})
+			require.Equal(t, http.StatusConflict, rec.Code, "response body: %s", rec.Body.String())
+			require.Positive(t, execHits.Load(), "exec request never reached the fake broker")
+
+			assert.Equal(t, tc.wantMarks, counting.marks.Load(), "conditional store writes attempted")
+			got, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, got.Phase)
+		})
+	}
+}
+
 // TestSubmitAgentEnv_ReservedTarget_Rejected verifies that POST
 // /api/v1/agents/{id}/env — the CLI's env-gather submission endpoint — is
 // also a reserved-target write site: a caller cannot use it to set a scion

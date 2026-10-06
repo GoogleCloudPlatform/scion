@@ -546,7 +546,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 
 // execMissingAgentMessage is the status message recorded on an agent marked
 // missing because its broker answered an exec with agent_not_found.
-const execMissingAgentMessage = "The runtime broker reported no container for this agent when a command was run in it; it was removed outside of Scion (for example by a node drain or eviction)."
+const execMissingAgentMessage = "The runtime broker reported no container for this agent when a command was run in it."
 
 // execReconcileTimeout bounds the reconcile write after an exec, which runs
 // even if the exec caller has gone away.
