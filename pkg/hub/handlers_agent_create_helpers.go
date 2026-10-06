@@ -254,12 +254,11 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
 	// Shared-workspace git projects skip clone — agents mount the shared workspace instead.
+	// The shared workspace's own clone settings travel separately, at
+	// dispatch time (sharedWorkspaceCloneConfig), so they never turn on the
+	// broker's per-agent clone mode.
 	if project != nil && project.GitRemote != "" && !project.IsSharedWorkspace() {
-		cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
-		defaultBranch := project.Labels[store.LabelDefaultBranch]
-		if defaultBranch == "" {
-			defaultBranch = "main"
-		}
+		cloneURL, defaultBranch := projectCloneSource(project)
 		defaultDepth := 1
 		agent.AppliedConfig.GitClone = &api.GitCloneConfig{
 			URL:    cloneURL,
@@ -294,6 +293,41 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+}
+
+// projectCloneSource returns the URL and branch to clone a git-anchored
+// project from: the clone-url label (or the git remote), and the
+// default-branch label (or "main").
+func projectCloneSource(project *store.Project) (cloneURL, branch string) {
+	cloneURL = resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	branch = project.Labels[store.LabelDefaultBranch]
+	if branch == "" {
+		branch = "main"
+	}
+	return cloneURL, branch
+}
+
+// sharedWorkspaceCloneConfig returns the clone settings for the workspace of
+// a shared-plain git project, or nil for any other project. They describe
+// the same full clone of the default branch the hub makes for the project's
+// own workspace (cloneSharedWorkspaceProject).
+//
+// They are sent to the broker separately from AppliedConfig.GitClone, which
+// stays nil for these projects: GitClone would make the broker clone into a
+// per-agent workspace. Only the Kubernetes runtime uses these settings, in
+// the workspace-provision init container of an NFS-backed workspace
+// (RunConfig.GitCloneForInit), where the first agent to start clones the
+// repository into the shared workspace.
+func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
+	if project == nil || !project.IsSharedWorkspace() {
+		return nil
+	}
+	cloneURL, branch := projectCloneSource(project)
+	if cloneURL == "" {
+		return nil
+	}
+	fullClone := 0
+	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone}
 }
 
 // deriveAgentConfig is create's whole config-resolution pipeline, run after

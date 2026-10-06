@@ -404,7 +404,7 @@ func TestDeleteGate_DMWake(t *testing.T) {
 
 			result, dmErr := srv.ExecuteAgentDM(context.Background(), &AgentDMInput{
 				SenderAgent:    sender,
-				SenderIdentity: &wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
+				SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle),
 				TargetAgent:    fresh,
 				Msg:            "hello",
 				Type:           "instruction",

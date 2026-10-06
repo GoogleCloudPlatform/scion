@@ -30,6 +30,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { styleMap } from 'lit/directives/style-map.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
@@ -59,6 +60,55 @@ export interface AttachmentRefInfo {
   name: string;
   mime: string;
   size: number;
+  /** Pixel width of an image attachment, when the server knows it. */
+  width?: number;
+  /** Pixel height of an image attachment, when the server knows it. */
+  height?: number;
+}
+
+/** The largest box an inline image thumbnail is drawn in, in CSS px. */
+export const IMAGE_THUMB_MAX_WIDTH_PX = 320;
+export const IMAGE_THUMB_MAX_HEIGHT_PX = 240;
+
+/** Intrinsic pixel size of an image. */
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
+/** The intrinsic size of an image attachment, when its reference carries one. */
+export function knownImageSize(ref: AttachmentRefInfo): ImageSize | null {
+  if (ref.width && ref.height && ref.width > 0 && ref.height > 0) {
+    return { width: ref.width, height: ref.height };
+  }
+  return null;
+}
+
+/**
+ * The inline style that reserves an image thumbnail's box before it loads.
+ * A known size scales down to fit the thumbnail box, keeping its aspect
+ * ratio, and still narrows with the bubble (max-width: 100% in the
+ * stylesheet). An unknown size reserves the whole 4:3 thumbnail box and
+ * keeps it once the image loads, showing the image inside it at its own
+ * shape (object-fit: contain in the stylesheet), so a load never moves the
+ * thread. The box has a definite width: a percentage would resolve against
+ * the shrink-to-fit button around the image and collapse the box to
+ * nothing until the image arrives.
+ */
+export function imageThumbStyle(size: ImageSize | null): Record<string, string> {
+  if (!size) {
+    return {
+      width: `${IMAGE_THUMB_MAX_WIDTH_PX}px`,
+      aspectRatio: `${IMAGE_THUMB_MAX_WIDTH_PX} / ${IMAGE_THUMB_MAX_HEIGHT_PX}`,
+    };
+  }
+  const scale = Math.min(
+    1,
+    IMAGE_THUMB_MAX_WIDTH_PX / size.width,
+    IMAGE_THUMB_MAX_HEIGHT_PX / size.height
+  );
+  const width = Math.max(1, Math.round(size.width * scale));
+  return { width: `${width}px`, aspectRatio: `${size.width} / ${size.height}` };
 }
 
 /** Image MIME types rendered inline. */
@@ -1063,6 +1113,8 @@ export class ScionChatMessage extends LitElement {
     .image-preview-wrapper {
       position: relative;
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
     }
 
     .image-actions {
@@ -1104,6 +1156,8 @@ export class ScionChatMessage extends LitElement {
     /* The image is the button: no chrome of its own, just a focus ring. */
     .image-expand {
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
       padding: 0;
       border: none;
       background: none;
@@ -1116,9 +1170,15 @@ export class ScionChatMessage extends LitElement {
       outline-offset: 2px;
     }
 
+    /* The thumbnail box comes from imageThumbStyle(): its width and aspect
+       ratio are set before the image loads and kept after, so a late load
+       doesn't shift the thread; an image of another shape is letterboxed
+       inside it. The box never runs past the bubble on a narrow screen. */
     .attachment-image {
-      max-width: 320px;
-      max-height: 240px;
+      display: block;
+      max-width: 100%;
+      height: auto;
+      box-sizing: border-box;
       border-radius: 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       cursor: pointer;
@@ -1378,6 +1438,14 @@ export class ScionChatMessage extends LitElement {
     }
 
     .delivery-state.deferred sl-icon {
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .delivery-state.no-recipient {
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .delivery-state.no-recipient sl-icon {
       color: var(--scion-warning-600, #d97706);
     }
 
@@ -2102,6 +2170,15 @@ export class ScionChatMessage extends LitElement {
             Sending
           </div>
         `;
+      case 'waking':
+        // Client-only state (chat-wake.ts): the user chose "Wake and send"
+        // and the hub is resuming the suspended agent before delivery.
+        return html`
+          <div class="delivery-state pending waking">
+            <sl-icon name="hourglass-split"></sl-icon>
+            Waking agent…
+          </div>
+        `;
       case 'dispatched':
         return this.seen
           ? html`
@@ -2131,6 +2208,17 @@ export class ScionChatMessage extends LitElement {
             <div class="delivery-state deferred">
               <sl-icon name="pause-circle"></sl-icon>
               Deferred: agent is reincarnating (saved)
+            </div>
+          </sl-tooltip>
+        `;
+      case 'no_recipient':
+        // A thread message that resolved no agent recipient: it was saved
+        // to the thread, but no agent was given it.
+        return html`
+          <sl-tooltip content="Mention an agent to send it to that agent" hoist>
+            <div class="delivery-state no-recipient">
+              <sl-icon name="info-circle"></sl-icon>
+              Not delivered to any agent, mention an agent to send it
             </div>
           </sl-tooltip>
         `;
@@ -2236,6 +2324,7 @@ export class ScionChatMessage extends LitElement {
                         src=${attachmentURL(img.id)}
                         alt=${img.name}
                         loading="lazy"
+                        style=${styleMap(imageThumbStyle(knownImageSize(img)))}
                       />
                     </button>
                     <div class="image-actions">
