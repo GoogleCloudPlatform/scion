@@ -1119,7 +1119,9 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 // checked before quota and run intent), fail the start-dispatch setup
 // (beginStartDispatchHTTP, branches 1 and 2: the quota reservation, the
 // starting-phase write, or a delete claim taking the row) or run-intent
-// bookkeeping, or get a dispatch error. The one exception is a
+// bookkeeping, or get a dispatch error, or find, after a start dispatch that
+// landed, that a delete won (409 delete_in_progress; existingAgentDeleteWon,
+// existingAgentGoneAfterLanding). The one exception is a
 // dispatch-time start-guard refusal reporting a launch already in flight,
 // which is answered like the start gate above → existingAgentStarted.
 // Branch 3 writes an error → existingAgentErrored when recording run intent,
