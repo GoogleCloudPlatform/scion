@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -150,16 +149,10 @@ func uploadHarnessConfigFileBySignedURL(
 	return nil
 }
 
-// writeHarnessConfigFile writes content to relPath inside root, creating any
-// missing parent directories first. Both steps go through root.
+// writeHarnessConfigFile writes content to relPath inside root through
+// transfer.WriteFileInRoot, which also creates any missing parent directories.
 func writeHarnessConfigFile(root *os.Root, relPath string, content []byte) error {
-	name := filepath.FromSlash(relPath)
-	if dir := filepath.Dir(name); dir != "." {
-		if err := root.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("create harness config destination directory: %w", err)
-		}
-	}
-	if err := root.WriteFile(name, content, 0644); err != nil {
+	if err := transfer.WriteFileInRoot(root, relPath, content, 0644); err != nil {
 		return fmt.Errorf("write harness config file: %w", err)
 	}
 	return nil
