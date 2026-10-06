@@ -2068,7 +2068,7 @@ func TestCloudRunSandboxRuntime_Stop(t *testing.T) {
 
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-stop", AgentID: "agent-stop"})
 
-	err := rt.Stop(context.Background(), "sb-stop")
+	err := rt.Stop(context.Background(), RunRef{ID: "sb-stop"})
 	if err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}

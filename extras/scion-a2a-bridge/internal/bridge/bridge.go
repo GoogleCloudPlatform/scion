@@ -563,7 +563,11 @@ func (b *Bridge) taskEventToTaskResult(taskID, contextID string, ev *state.TaskE
 		if err := json.Unmarshal(ev.Payload, &au); err != nil {
 			return nil, fmt.Errorf("unmarshal artifact event: %w", err)
 		}
-		result.Status = TaskStatus{State: TaskStateWorking}
+		artState := TaskStateWorking
+		if au.State != "" {
+			artState = au.State
+		}
+		result.Status = TaskStatus{State: artState}
 		result.Artifacts = []Artifact{au.Artifact}
 		return result, nil
 	default:
@@ -1184,7 +1188,7 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 	}
 
 	if msg.Type == messages.TypeStateChange {
-		taskState := MapActivityToTaskState(msg.Msg)
+		taskState := MapActivityToTaskState(stateChangeActivity(msg))
 		isFinal := IsTerminalState(taskState)
 
 		statusPayload, _ := json.Marshal(TaskStatusUpdate{
@@ -1254,11 +1258,30 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 	a2aMsg, artifacts := TranslateScionToA2A(msg)
 
 	currentState := TaskStateWorking
+	legacyTerminal := false
 	if task, err := b.store.GetTask(ctx, taskID); err != nil {
 		b.log.Error("failed to get task for content message",
 			"task_id", taskID, "error", err)
 	} else if task != nil {
 		currentState = task.State
+		legacyTerminal = IsTerminalState(task.State)
+	}
+
+	// An input-needed message is the agent asking the caller a question. The
+	// response state is derived from the message type, not from the legacy
+	// store: SDK executor tasks have no legacy row, so the CAS below updates
+	// nothing for them. The CAS is a best-effort update of the legacy row
+	// when one exists (the store itself refuses to leave a terminal state).
+	// For a legacy task that is already terminal, the artifact and message
+	// events are not labelled input-required. Otherwise the artifact carries
+	// the state so the question is not mistaken for the final answer.
+	artifactState := ""
+	if msg.Type == messages.TypeInputNeeded && !legacyTerminal {
+		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateInputRequired); err != nil {
+			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
+		}
+		currentState = TaskStateInputRequired
+		artifactState = TaskStateInputRequired
 	}
 
 	// Write artifact events.
@@ -1266,6 +1289,7 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 		artPayload, _ := json.Marshal(TaskArtifactUpdate{
 			TaskID:   taskID,
 			Artifact: art,
+			State:    artifactState,
 		})
 		if _, err := b.store.AppendTaskEvent(ctx, &state.TaskEvent{
 			TaskID:   taskID,
@@ -1280,6 +1304,7 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 			ArtifactUpdate: &TaskArtifactUpdate{
 				TaskID:   taskID,
 				Artifact: art,
+				State:    artifactState,
 			},
 		}
 		b.push.Dispatch(ctx, taskID, artEvent)
@@ -1314,6 +1339,20 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 		},
 	}
 	b.push.Dispatch(ctx, taskID, statusEvent)
+}
+
+// stateChangeActivity returns the agent activity a state-change message
+// reports. Hub notifications carry the activity in Status and a
+// human-readable sentence in Msg ("x has reached a state of COMPLETED: ..."),
+// so Status is authoritative; Msg is used only when Status is empty.
+func stateChangeActivity(msg *messages.StructuredMessage) string {
+	if msg == nil {
+		return ""
+	}
+	if msg.Status != "" {
+		return msg.Status
+	}
+	return msg.Msg
 }
 
 // failFollowUpTask centralises the failure-notification pattern for follow-up

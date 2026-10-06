@@ -30,7 +30,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1733,34 +1732,23 @@ func resolveSessionSecret() string {
 }
 
 // parseBoolEnv reports whether the named environment variable is set to a
-// truthy value. Leading/trailing whitespace is stripped (file-mounted
-// secrets often include a trailing newline). It accepts every spelling
-// strconv.ParseBool understands (1, t, true, TRUE, True, etc.) plus the
-// operator-friendly yes/y/on (and their no/n/off counterparts), all
-// case-insensitively. Unset, empty, and
-// unparseable values are false, but an unparseable non-empty value also logs
-// a warning so a typo does not silently disable a feature the operator meant
-// to turn on.
+// truthy value, using util.LookupBoolEnv for the accepted spellings
+// (whitespace-trimmed, case-insensitive strconv.ParseBool plus yes/y/on and
+// no/n/off). Unset, empty, and unparseable values are false, but an
+// unparseable non-empty value also logs a warning so a typo does not silently
+// disable a feature the operator meant to turn on.
 //
 // The warning uses the stdlib logger because parseBoolEnv runs during
 // initServerLogging, before the slog loggers are wired.
 func parseBoolEnv(key string) bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if v == "" {
-		return false
+	if v, ok := util.LookupBoolEnv(key); ok {
+		return v
 	}
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
+	// ok is false for both unset/empty and garbage; warn only on garbage.
+	if raw := os.Getenv(key); strings.TrimSpace(raw) != "" {
+		log.Printf("WARNING: environment variable %s=%q is not a recognized boolean value; treating as false. "+
+			"Accepted truthy values: true, 1, t, yes, y, on (case-insensitive, whitespace-trimmed).", key, raw)
 	}
-	switch v {
-	case "yes", "y", "on":
-		return true
-	case "no", "n", "off":
-		// Recognized as an explicit "disabled" spelling: false, but no warning.
-		return false
-	}
-	log.Printf("WARNING: environment variable %s=%q is not a recognized boolean value; treating as false. "+
-		"Accepted truthy values: true, 1, t, yes, y, on (case-insensitive, whitespace-trimmed).", key, os.Getenv(key))
 	return false
 }
 
@@ -2890,6 +2878,32 @@ func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func
 			line = fmt.Sprintf("shared_dir_storage for profile %s: %s (from %s)", name, summary, source)
 		}
 		logf("%s", line)
+	}
+	// Per-dir entries: one line per profile and shared dir whose backend
+	// comes from a shared_dir_storage_backends entry.
+	for _, name := range names {
+		dirSet := map[string]bool{}
+		p := gs.Profiles[name]
+		for dir := range p.SharedDirStorageBackends {
+			dirSet[dir] = true
+		}
+		if rt, ok := gs.Runtimes[p.Runtime]; ok {
+			for dir := range rt.SharedDirStorageBackends {
+				dirSet[dir] = true
+			}
+		}
+		dirs := make([]string, 0, len(dirSet))
+		for dir := range dirSet {
+			dirs = append(dirs, dir)
+		}
+		sort.Strings(dirs)
+		for _, dir := range dirs {
+			backend, source, perDir := gs.ResolveSharedDirStorageBackend(name, dir)
+			if !perDir {
+				continue
+			}
+			logf("shared_dir_storage for profile %s, shared dir %s: backend=%s (from %s)", name, dir, backend, source)
+		}
 	}
 }
 

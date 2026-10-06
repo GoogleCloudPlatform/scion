@@ -109,6 +109,11 @@ probes:
     # liveness block and its coupling to hub.webPort render nowhere else.
     enabled: true
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   sessionSecret: ci-varied-session-secret-not-real
   # The false branch of the ternary. Every other permutation renders true (the
