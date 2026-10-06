@@ -524,6 +524,11 @@ func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
 	method := http.MethodGet
 	path := route
 	body := ""
+	// A key registered with a method prefix ("DELETE /api/v1/...") names
+	// its method.
+	if i := strings.Index(route, " /"); i >= 0 {
+		method, path = route[:i], route[i+1:]
+	}
 
 	switch route {
 	case "/api/v1/admin/users/invite", "/api/v1/admin/users/invite/bulk",

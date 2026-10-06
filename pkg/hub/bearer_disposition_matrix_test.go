@@ -121,10 +121,7 @@ type bearerMatrixFixture struct {
 	ids          idFixtures
 	adminID      string
 	otherProject string
-	// hubPreStartHook is a seeded hub pre-start hook, for the hub hook
-	// entry points the live method inventory does not probe.
-	hubPreStartHook string
-	tokens          map[string]string
+	tokens       map[string]string
 }
 
 func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
@@ -143,13 +140,7 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// bound to it.
 	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", other, store.ProjectRoleOwner)
 
-	hook, err := s.CreateHubPreStartHook(ctx, &store.ProjectPreStartHook{
-		Scope: store.PreStartHookScopeHub, Name: "bdm-hub-hook", Slug: "bdm-hub-hook",
-		Script: "#!/bin/sh\necho bdm\n", CreatedBy: adminID + "@test.com", UpdatedBy: adminID + "@test.com",
-	})
-	require.NoError(t, err)
-
-	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, hubPreStartHook: hook.ID, tokens: map[string]string{}}
+	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
 }
 
 // mint returns a real token for the super-admin, minted through
@@ -231,7 +222,7 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	id := string(e.Spec.ID)
 	params := opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
 	if params == nil {
-		params = m.patternOverrides()[ep.Pattern]
+		params = bearerMatrixPatternOverrides(m.ids)[ep.Pattern]
 	}
 	if params == nil {
 		params = patternOverrides(m.ids)[ep.Pattern]
@@ -265,14 +256,12 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	return rec
 }
 
-// patternOverrides holds path parameters for entry points the live method
-// inventory does not probe (it covers HTTP routes only, and only
-// catalogued ones), so that the matrix addresses a seeded record.
-func (m *bearerMatrixFixture) patternOverrides() map[string]map[string]string {
+// bearerMatrixPatternOverrides holds path parameters for entry points the
+// live method inventory does not probe (it covers HTTP routes only), so
+// that the matrix addresses a seeded record.
+func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
-		"/api/v1/agents/{id}/pty":               {"id": m.ids.agent},
-		"/api/v1/pre-start-hooks/{id}":          {"id": m.hubPreStartHook},
-		"/api/v1/pre-start-hooks/{id}/activate": {"id": m.hubPreStartHook},
+		"/api/v1/agents/{id}/pty": {"id": f.agent},
 	}
 }
 
@@ -528,6 +517,26 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
+	{"hub.config.update", http.MethodPut, "/api/v1/admin/server-config"}: {
+		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"hub.config.update", http.MethodPatch, "/api/v1/admin/server-config"}: {
+		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"hub.config.update", http.MethodPost, "/api/v1/admin/server-config"}: {
+		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"hub.messaging.update", http.MethodPut, "/api/v1/admin/messaging"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodGet, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodPut, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.experiments.update", http.MethodDelete, "/api/v1/admin/experiments"}: {
+		http.StatusServiceUnavailable, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPut, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPatch, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.projectdefaults.update", http.MethodPost, "/api/v1/admin/project-defaults"}: {
+		http.StatusNotImplemented, "the test server configures no operational settings"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization
