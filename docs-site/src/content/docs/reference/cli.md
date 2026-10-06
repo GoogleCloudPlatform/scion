@@ -95,6 +95,7 @@ ptone/scion#1855.
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
     - `--harness-config <string>`: Named harness configuration to use.
+    - `--thinking-level <value>`: Thinking level to inject into the agent config: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The level is stored as an integer; each harness maps it to its own tiers (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)).
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. In Hub mode, a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
@@ -174,8 +175,14 @@ start or stop was recorded first. With `--rm`, a queued stop does not remove the
 **Usage:** `scion stop <agent-name> [flags]`
 
 - **Flags:**
-    - `--rm`: Remove the agent after stopping.
-    - `-a, --all`: Stop all running agents in the current project.
+    - `--rm`: Remove the agent after stopping. Once the removal is confirmed, the agent's local
+      files (agent directory and worktree) are removed too, as with `scion delete`; its git branch
+      is kept. If the Hub accepts the removal but cannot confirm it, or the removal fails, local
+      files are left in place. If the local cleanup itself fails, the command still succeeds and
+      prints a warning suggesting `scion --no-hub delete --preserve-branch <agent-name>`.
+    - `-a, --all`: Stop all running agents in the current project. If any agent fails to stop
+      (or, with `--rm`, to be removed), the command exits 1. With `--format json` the result
+      object (`"status": "partial"`) is still printed on stdout, and no separate error message is added.
 
 ### `scion suspend`
 
@@ -444,7 +451,11 @@ Lists all agents and their status.
 
 Deletes an agent, removing its container, home directory, and worktree.
 
-**Usage:** `scion delete <agent-name> [flags]`
+You can name several agents. If any of them cannot be deleted, the command exits 1 after
+handling the rest. With `--format json` the result object (`"status": "partial"`, with an entry
+per agent) is still printed on stdout, and no separate error message is added.
+
+**Usage:** `scion delete <agent-name>... [flags]`
 
 - **Flags:**
     - `-b, --preserve-branch`: Preserve the git branch associated with the worktree (default: deleted).
@@ -509,6 +520,7 @@ as stop, start, and restart); an agent can always reincarnate itself.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch) without migrating anything.
     - `--broker <name|id>`: Target another Runtime Broker for the new generation. Both Runtime Brokers must mount the same NFS export, so the workspace would move without being copied. Requires `--dry-run`: without it the CLI fails before contacting the Hub, because a real move is not supported yet.
+    - `--thinking-level <value>`: Patch the thinking level of the new generation. Accepts the same values as `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The Hub receives the integer. Without the flag, the thinking level is not patched. An invalid value fails before contacting the Hub.
 
 **Checking a move to another Runtime Broker.** `scion reincarnate <agent> --broker <name|id> --dry-run`
 reports whether the agent could move, and changes nothing. The Hub runs nine checks in this order:
@@ -862,7 +874,7 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--port <port>`: Port of the local broker.
 - `scion runtime-broker provide`: Add this broker as a provider for a project.
     - `--project <name|id>`: The project to provide for. Without it, the project is resolved from the current directory.
-    - `--path <path>`: The local project path to register for this broker. With `--project`, no path is sent unless `--path` is given: an existing provider path is kept, and otherwise the broker uses its Hub-managed project directory. The broker's global directory (`~/.scion`) is refused as the path of any project other than the global project.
+    - `--path <path>`: The project path to register for this broker, resolved on this host. When `--broker` names another host's broker, give the absolute path to the project root (the directory containing `.scion`) on that host; it is sent as given, without checking this host's filesystem. For a remote broker, a path whose last element is `.scion` is refused; pass the directory that contains it. With `--project`, no path is sent unless `--path` is given: an existing provider path is kept, and otherwise the broker uses its Hub-managed project directory. The broker's global directory (`~/.scion`) is refused as the path of any project other than the global project.
     - `--make-default`: Make this broker the project's default Runtime Broker.
     - `--broker <name|id>`, `--hub <name>`: Operate on another broker or Hub connection.
 - `scion runtime-broker withdraw`: Remove this broker as a provider from a project.
