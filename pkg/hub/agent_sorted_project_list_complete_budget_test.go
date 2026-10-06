@@ -259,6 +259,7 @@ func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_RacedWorstCase_Wit
 		}
 		require.LessOrEqual(t, cost, worst, "the two worst cases bound every raced cost")
 	}
+	require.LessOrEqual(t, worst, raceAllowance, "the raced worst case fits the race allowance")
 
 	cases := []struct {
 		name     string
