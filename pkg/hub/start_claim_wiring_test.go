@@ -800,8 +800,13 @@ func TestStartClaimWiring_KeepCallerDeadline(t *testing.T) {
 		parent, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 		d.start = func(ctx context.Context, cur *store.Agent) error {
-			<-ctx.Done()
-			return ctx.Err()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(5 * time.Second):
+				t.Fatal("the caller's deadline did not end the dispatch")
+				return nil
+			}
 		}
 		err := f.srv.startAgentCore(parent, a, StartOpts{Kind: store.StartClaimUser, KeepCallerDeadline: true})
 		require.ErrorIs(t, err, context.DeadlineExceeded)
