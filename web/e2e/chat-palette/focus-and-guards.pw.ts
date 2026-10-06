@@ -19,8 +19,9 @@
  * Alt/Shift and IME do not accidentally toggle/commit.
  */
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { setupApiMocks, AGENT_WITH_DM, SELF_USER_ID, type TrackedRequest } from './mock-api.js';
+import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
 
 const DM_KEY = `dm:agent:${AGENT_WITH_DM.id}:user:${SELF_USER_ID}`;
 const ROUTE = `/chat/dm/${encodeURIComponent(DM_KEY)}`;
@@ -79,6 +80,96 @@ test('Meta+K also opens the palette from the composer', async ({ page }) => {
 
   await expect(paletteDialog(page)).toBeVisible();
   await expect(paletteInput(page)).toBeFocused();
+});
+
+function paletteOptions(page: Page): Locator {
+  return page.locator('scion-quick-palette .palette-option');
+}
+
+/**
+ * Types `coder` straight after Ctrl+K, without waiting for the palette, and
+ * checks that it all became the query: the input has focus right after the
+ * open, the results are filtered, and the composer draft is untouched.
+ */
+async function expectTypingRightAfterOpenFilters(page: Page): Promise<void> {
+  const textarea = composerTextarea(page);
+  await textarea.click();
+  await textarea.fill('draft');
+
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('coder');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(paletteInput(page)).toHaveValue('coder');
+  await expect(paletteOptions(page)).toHaveText([/Coder One/]);
+  await expect(textarea).toHaveValue('draft');
+}
+
+test('typing straight after Ctrl+K becomes the query, not composer text', async ({ page }) => {
+  await gotoWithComposer(page);
+  await expectTypingRightAfterOpenFilters(page);
+});
+
+test('typing straight after Ctrl+K becomes the query while the palette module is still loading', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  await gotoWithComposer(page);
+  await expectTypingRightAfterOpenFilters(page);
+});
+
+test('a word delete typed while the palette module loads edits the query, not the composer draft', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  await gotoWithComposer(page);
+  const textarea = composerTextarea(page);
+  await textarea.click();
+  await textarea.fill('my long draft');
+
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('cox');
+  await page.keyboard.press('Control+Backspace');
+  await page.keyboard.type('coder');
+
+  await expect(paletteInput(page)).toHaveValue('coder');
+  await expect(paletteOptions(page)).toHaveText([/Coder One/]);
+  await expect(textarea).toHaveValue('my long draft');
+});
+
+test('typing straight after a reopen becomes the new query', async ({ page }) => {
+  await gotoWithComposer(page);
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('review');
+  await expect(paletteInput(page)).toHaveValue('review');
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+
+  await expectTypingRightAfterOpenFilters(page);
+});
+
+test('typing straight after a Ctrl+K pressed during the close animation becomes the reopened query', async ({
+  page,
+}) => {
+  await gotoWithComposer(page);
+  const textarea = composerTextarea(page);
+  await textarea.click();
+  await textarea.fill('draft');
+  await page.keyboard.press('Control+k');
+  await expect(paletteInput(page)).toBeFocused();
+  await page.keyboard.type('review');
+
+  // No wait between the Escape and the reopen: the close is still animating.
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('coder');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  await expect(paletteInput(page)).toHaveValue('coder');
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(paletteOptions(page)).toHaveText([/Coder One/]);
+  await expect(textarea).toHaveValue('draft');
 });
 
 test('Escape restores focus and the caret position in the composer', async ({ page }) => {
