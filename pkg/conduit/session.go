@@ -47,6 +47,13 @@ type session struct {
 	errMu    sync.Mutex
 	err      error
 
+	// openLock (one slot) is held from taking a stream id to queueing
+	// its StreamOpen, so StreamOpen frames go out in id order: the peer
+	// refuses an id that is not above the last one it saw. A channel, not
+	// a mutex, so a waiting opener still honours its ctx and session end.
+	// Acquired before mu, st.mu and the scheduler's lock, never under them.
+	openLock chan struct{}
+
 	mu           sync.Mutex
 	info         SessionInfo
 	streams      map[uint32]*stream
@@ -97,6 +104,7 @@ func newSession(cfg Config, conn transport.Conn, isDialer bool) *session {
 		isDialer:    isDialer,
 		sched:       newScheduler(cfg.BufferBudget),
 		done:        make(chan struct{}),
+		openLock:    make(chan struct{}, 1),
 		streams:     map[uint32]*stream{},
 		goAwayRecv:  make(chan struct{}),
 		pendingRPC:  map[string]chan *conduitv1.RpcResponse{},
@@ -945,13 +953,22 @@ func (s *session) OpenStream(ctx context.Context, open *conduitv1.StreamOpen) (S
 	timeout := openTimeout(open.GetOpenTimeoutMs())
 	open.OpenTimeoutMs = uint32(timeout / time.Millisecond)
 
+	select {
+	case s.openLock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.done:
+		return nil, ErrSessionClosed
+	}
 	s.mu.Lock()
 	if s.isDone() {
 		s.mu.Unlock()
+		<-s.openLock
 		return nil, ErrSessionClosed
 	}
 	if s.draining {
 		s.mu.Unlock()
+		<-s.openLock
 		return nil, ErrDraining
 	}
 	id := s.nextID
@@ -966,7 +983,9 @@ func (s *session) OpenStream(ctx context.Context, open *conduitv1.StreamOpen) (S
 	st.openTimer = s.clk.AfterFunc(timeout, func() { close(timedOut) })
 	st.mu.Unlock()
 
-	if err := s.sendControl(ctx, &conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: open}}); err != nil {
+	err := s.sendControl(ctx, &conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: open}})
+	<-s.openLock
+	if err != nil {
 		st.abort(CloseCancelled, "open not sent", false)
 		return nil, err
 	}

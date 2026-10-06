@@ -245,6 +245,12 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		}
 		intentAt = args.IntentAt
 		supersedes = args.SupersedesClaim
+		if args.RunID != "" {
+			// Stop the run the intent was queued for, not whatever run the
+			// row names now (ptone/scion#2550). agent is this call's own
+			// copy, loaded by resolveDispatchAgent above.
+			agent.RunID = args.RunID
+		}
 	}
 	// A stop queued while the broker was offline applies only while the
 	// stop intent it was queued for is still the current one; a start or
@@ -268,23 +274,35 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		s.logStopRunMismatch(agent, "queued stop", err)
 		return "", fmt.Errorf("dispatch stop: %w", err)
 	}
 	if intentAt != nil {
 		// The queued stop has now been applied: release the per-broker
 		// reservation as a direct stop does, and replace the stop_queued
 		// container status and the queued-stop notice the offline stop set.
-		s.releaseBrokerQuota(ctx, agent)
-		// The start claim held when the stop was recorded is superseded.
+		// Both only while the row still holds the run the stop was queued
+		// for (agent.RunID, the intent's run): a newer run keeps its state
+		// and reservation (ptone/scion#2550).
+		// The start claim held when the stop was recorded is superseded
+		// (compare-and-set on the stop's intent time, whatever the run).
 		s.releaseSupersededClaim(ctx, agent.ID, supersedes, *intentAt)
 		if agent.ContainerStatus == containerStatusStopQueued {
-			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			recorded, err := s.recordStopStatus(ctx, agent.ID, agent.RunID, "queued stop", store.AgentStatusUpdate{
 				ContainerStatus: "stopped",
 				ClearMessageIf:  offlineStopMessage,
-			}); err != nil {
+			})
+			if err != nil {
 				s.agentLifecycleLog.Warn("reconcile: failed to update container status after queued stop",
 					"id", d.ID, "agent_id", agent.ID, "error", err)
 			}
+			if recorded {
+				s.releaseBrokerQuota(ctx, agent)
+			}
+		} else if s.stopRunStillCurrent(ctx, agent.ID, agent.RunID, "queued stop") {
+			// A check, not a lock: a run minted between this read and the
+			// release loses its reservation until the backfill restores it.
+			s.releaseBrokerQuota(ctx, agent)
 		}
 	}
 	return "", nil
