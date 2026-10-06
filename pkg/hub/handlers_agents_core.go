@@ -212,11 +212,7 @@ type CreateAgentRequest struct {
 	Name            string            `json:"name"`
 	ProjectID       string            `json:"projectId"`
 	RuntimeBrokerID string            `json:"runtimeBrokerId,omitempty"` // Optional: uses project's default if not specified
-	// ExpectedRuntimeTargetID is an optional staleness guard: the runtime
-	// target the client expects the agent to land on (flat Runtime Brokers,
-	// .design/flat-runtime-brokers-contract.md section 9).
-	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
-	Template                string `json:"template"`
+	Template        string            `json:"template"`
 	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
 	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
 	Profile         string            `json:"profile,omitempty"`       // Settings profile for the runtime broker to use
@@ -249,6 +245,10 @@ type CreateAgentRequest struct {
 	// recreated out from under itself. The harness receives its resume flag so
 	// the prior session is continued rather than restarted fresh.
 	ForceResume bool `json:"forceResume,omitempty"`
+	// ExpectedRuntimeTargetID is an optional staleness guard: the runtime
+	// target the client expects the agent to land on (flat Runtime Brokers,
+	// .design/flat-runtime-brokers-contract.md section 9).
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 	// NoAuth indicates the agent should start with zero injected credentials.
 	// When true, the Hub skips secret resolution and the broker skips credential injection.
 	NoAuth bool `json:"noAuth,omitempty"`
