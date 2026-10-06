@@ -158,7 +158,6 @@ func TestHarnessConfigFileRead_RawAndJSONRejectSamePaths(t *testing.T) {
 	base := "/api/v1/harness-configs/" + hc.ID + "/files/"
 	for _, p := range []string{
 		url.PathEscape(outsidePath),
-		strings.ReplaceAll(outsidePath, "/", "%2F"),
 		"%2Fetc%2Fhostname",
 		"home%5Cevil.txt",
 		"unknown.txt",
