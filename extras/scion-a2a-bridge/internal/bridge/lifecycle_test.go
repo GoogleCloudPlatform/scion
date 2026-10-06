@@ -1695,3 +1695,62 @@ func TestLiveSDKEventResponseState(t *testing.T) {
 		})
 	}
 }
+
+// TestStateChangeUsesStatusField covers ptone/scion#3385: hub notifications
+// carry the activity in Status and prose in Msg. The task state must come
+// from Status; Msg is only a fallback when Status is empty.
+func TestStateChangeUsesStatusField(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    string
+		msg       string
+		wantState string
+		wantFinal bool
+	}{
+		{"status completed with prose msg", "COMPLETED", "agent-a has reached a state of COMPLETED: done", TaskStateCompleted, true},
+		{"status wins over msg", "ERROR", "COMPLETED", TaskStateFailed, true},
+		// The THINKING and DELETED cases use a bare activity word as Msg (not
+		// real hub prose) that the mapper recognises, so a fallback to Msg
+		// would map to completed and be detected.
+		{"status thinking keeps task open", "THINKING", "COMPLETED", TaskStateWorking, false},
+		{"status waiting for input", "WAITING_FOR_INPUT", "agent-a is WAITING_FOR_INPUT: which region?", TaskStateInputRequired, false},
+		{"unknown status is authoritative over msg", "DELETED", "COMPLETED", TaskStateWorking, false},
+		{"empty status falls back to msg", "", "COMPLETED", TaskStateCompleted, true},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, store := newLifecycleTestBridge(t)
+			taskID := fmt.Sprintf("status-field-%d", i)
+			seedLifecycleTask(t, b, store, taskID, "proj1", "agent-a")
+
+			sc := &messages.StructuredMessage{
+				Version:   1,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Sender:    "agent:agent-a",
+				Recipient: "user:test-user",
+				Msg:       tt.msg,
+				Status:    tt.status,
+				Type:      messages.TypeStateChange,
+				Metadata:  map[string]string{"a2aTaskId": taskID},
+			}
+			if err := b.HandleBrokerMessage(context.Background(), "scion.project.proj1.user.test-user.messages", sc); err != nil {
+				t.Fatalf("HandleBrokerMessage: %v", err)
+			}
+
+			task, err := store.GetTask(context.Background(), taskID)
+			if err != nil || task == nil {
+				t.Fatalf("GetTask: %v (task=%v)", err, task)
+			}
+			if task.State != tt.wantState {
+				t.Errorf("task state = %q, want %q", task.State, tt.wantState)
+			}
+			events, err := store.ReadTaskEvents(context.Background(), taskID, 0, 100)
+			if err != nil {
+				t.Fatalf("ReadTaskEvents: %v", err)
+			}
+			if len(events) != 1 || events[0].Kind != "status" || events[0].Final != tt.wantFinal {
+				t.Errorf("events = %+v, want one status event with final=%v", events, tt.wantFinal)
+			}
+		})
+	}
+}

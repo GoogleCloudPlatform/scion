@@ -1188,7 +1188,7 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 	}
 
 	if msg.Type == messages.TypeStateChange {
-		taskState := MapActivityToTaskState(msg.Msg)
+		taskState := MapActivityToTaskState(stateChangeActivity(msg))
 		isFinal := IsTerminalState(taskState)
 
 		statusPayload, _ := json.Marshal(TaskStatusUpdate{
@@ -1339,6 +1339,17 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 		},
 	}
 	b.push.Dispatch(ctx, taskID, statusEvent)
+}
+
+// stateChangeActivity returns the agent activity a state-change message
+// reports. Hub notifications carry the activity in Status and a
+// human-readable sentence in Msg ("x has reached a state of COMPLETED: ..."),
+// so Status is authoritative; Msg is used only when Status is empty.
+func stateChangeActivity(msg *messages.StructuredMessage) string {
+	if msg.Status != "" {
+		return msg.Status
+	}
+	return msg.Msg
 }
 
 // failFollowUpTask centralises the failure-notification pattern for follow-up
