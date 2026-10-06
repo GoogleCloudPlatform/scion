@@ -2983,6 +2983,12 @@ func (s *Server) trackedStartRunID(id, projectID, queryRunID, bodyRunID string) 
 func resolvedStopRef(target string, m agentMatch) scionrt.RunRef {
 	ref := scionrt.RunRef{ID: target}
 	if m.containerID == target {
+		// The target as an operation ID (namespace-qualified with the
+		// matched entry's namespace for a pod listed outside the runtime's
+		// default namespace, GoogleCloudPlatform/scion#2515), and its run.
+		e := m.entry
+		e.ContainerID = target
+		ref.ID = scionrt.AgentOperationID(e)
 		ref.RunID = m.entry.RunID
 	}
 	return ref
