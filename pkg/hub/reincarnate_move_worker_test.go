@@ -899,3 +899,41 @@ func TestReincarnateMove_SessionUserRollbackKeepsUserEdge(t *testing.T) {
 	assertRolledBackToSource(t, f, r, a)
 	assertEdgeReRecordedTo(t, f, user, old)
 }
+
+// Merge-review Nit-1: rollback reverts to the source run without settling
+// it: the runs listed before the move keep their entries in PreviousRunIDs
+// (a settling CAS would clear them), so a later delete still names them.
+func TestReincarnateMove_RollbackKeepsPreviousRunIDs(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	f.disp.startErr = fmt.Errorf("start refused by broker: %w", errStartRequestNotSent)
+
+	r, a := startMove(t, f)
+	assertRolledBackToSource(t, f, r, a)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "run-src", a.RunID)
+	assert.Contains(t, a.PreviousRunIDs, "run-src", "the revert leaves the listed runs in place")
+}
+
+// Merge-review Nit-2: the authority check runs before the move target is
+// resolved, so a requester who cannot delegate gets 403 for an unknown or
+// ambiguous target alike, never the target's 404 or 409.
+func TestReincarnateMove_AuthorityRefusedBeforeTargetResolution(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	f.addMoveBroker(t, tid("amb-1-"+t.Name()), "amb-twin", "amb-twin-1-"+tidSlugSafe(t.Name()), true)
+	f.addMoveBroker(t, tid("amb-2-"+t.Name()), "amb-twin", "amb-twin-2-"+tidSlugSafe(t.Name()), true)
+	user := newReincarnateAuthzUser(t, f.s, tidSlugSafe(t.Name()))
+	grantAgentLifecycleAtProject(t, f.s, user.ID, f.project.ID) // lifecycle, but no delegation
+	id := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+	count := f.agentCount(t)
+
+	for _, target := range []string{"no-such-broker", "amb-twin"} {
+		for _, dryRun := range []bool{true, false} {
+			rec := httptest.NewRecorder()
+			f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, id, ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun, TargetBroker: target}), f.agent.ID)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "target %q dryRun=%t: %s", target, dryRun, rec.Body.String())
+		}
+	}
+	f.assertNoMoveSideEffects(t, count)
+}
