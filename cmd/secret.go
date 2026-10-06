@@ -180,10 +180,10 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 
 	// Validate key.
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return newUsageError("key cannot be empty")
 	}
 	if strings.ContainsAny(key, "= \t\n") {
-		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
+		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
 	localType := agentSecretType
@@ -193,7 +193,7 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 	if strings.HasPrefix(value, "@") {
 		filePath := value[1:]
 		if filePath == "" {
-			return fmt.Errorf("empty file path: VALUE starting with @ must be followed by a file path (e.g., @/path/to/file)")
+			return newUsageError("empty file path: VALUE starting with @ must be followed by a file path (e.g., @/path/to/file)")
 		}
 		// Expand ~ in source file path for reading.
 		if filePath == "~" || strings.HasPrefix(filePath, "~/") {
