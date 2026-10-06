@@ -31,8 +31,14 @@ import (
 // TestMaxConcurrentStreams: peer-opened streams beyond the limit are
 // refused with 4400; a finished stream frees its slot (1a-r1-F5).
 func TestMaxConcurrentStreams(t *testing.T) {
-	// The handler never decides: streams stay opening, holding slots.
-	hold := StreamHandlerFunc(func(context.Context, *conduitv1.StreamOpen, PendingStream) error { return nil })
+	// The handler never decides: streams stay opening, holding slots. It
+	// runs once the stream is in the table, so each entry means one more
+	// open stream; its ctx ends when the stream ends.
+	entered := make(chan context.Context, 4)
+	hold := StreamHandlerFunc(func(ctx context.Context, _ *conduitv1.StreamOpen, _ PendingStream) error {
+		entered <- ctx
+		return nil
+	})
 	p := newPair(t, Config{}, Config{StreamHandler: hold, MaxConcurrentStreams: 2})
 	var cancels []context.CancelFunc
 	defer func() {
@@ -47,14 +53,263 @@ func TestMaxConcurrentStreams(t *testing.T) {
 	}
 	open()
 	open()
-	eventually(t, "two pending streams", func() bool { return p.relay.Stats().OpenStreams == 2 })
+	held := []context.Context{recvEntered(t, p, entered), recvEntered(t, p, entered)}
+	if n := p.relay.Stats().OpenStreams; n != 2 {
+		t.Fatalf("%d open streams, want 2", n)
+	}
 	if _, err := p.dialer.OpenStream(context.Background(), tcpOpen()); CodeOf(err, 0) != CloseProtocolError {
 		t.Fatalf("third stream err = %v, want 4400", err)
 	}
 	cancels[0]() // 4499: the relay forgets the stream
+	select {
+	case <-held[0].Done():
+	case <-held[1].Done():
+	case <-time.After(waitTimeout):
+		t.Fatal("cancelled stream's handler context not done")
+	}
+	// The handler context ends just before the stream leaves the table.
 	eventually(t, "slot freed", func() bool { return p.relay.Stats().OpenStreams == 1 })
 	open()
-	eventually(t, "slot reused", func() bool { return p.relay.Stats().OpenStreams == 2 })
+	recvEntered(t, p, entered)
+	if n := p.relay.Stats().OpenStreams; n != 2 {
+		t.Fatalf("%d open streams after reusing the slot, want 2", n)
+	}
+}
+
+// recvEntered waits for the next stream handler entry on the relay,
+// failing if the relay session ends first.
+func recvEntered(t *testing.T, p *pair, entered <-chan context.Context) context.Context {
+	t.Helper()
+	return recvEnteredOn(t, p.relay, entered)
+}
+
+// recvEnteredOn waits for the next stream handler entry on s, failing if
+// s ends first.
+func recvEnteredOn(t *testing.T, s *session, entered <-chan context.Context) context.Context {
+	t.Helper()
+	select {
+	case ctx := <-entered:
+		return ctx
+	case <-s.Done():
+		t.Fatalf("session ended: %v", s.Err())
+	case <-time.After(waitTimeout):
+		t.Fatal("stream handler not entered")
+	}
+	return nil
+}
+
+// TestOpenStreamConcurrentIDsInOrder: StreamOpen frames from concurrent
+// OpenStream calls reach the peer in stream-id order, so the peer (which
+// refuses an id not above the last one) keeps the session. With both sides
+// opening at once, each side's ids arrive in order.
+func TestOpenStreamConcurrentIDsInOrder(t *testing.T) {
+	const n = 64
+	for _, tc := range []struct {
+		name                    string
+		dialerOpens, relayOpens bool
+	}{
+		{name: "dialer opens", dialerOpens: true},
+		{name: "relay opens", relayOpens: true},
+		{name: "both sides open", dialerOpens: true, relayOpens: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dcfg, dIDs, dEntered := recordOpens(n)
+			rcfg, rIDs, rEntered := recordOpens(n)
+			p := newPair(t, dcfg, rcfg)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			start := make(chan struct{})
+			opens := func(s *session) {
+				for range n {
+					go func() {
+						<-start
+						_, _ = s.OpenStream(ctx, tcpOpen())
+					}()
+				}
+			}
+			if tc.dialerOpens {
+				opens(p.dialer)
+			}
+			if tc.relayOpens {
+				opens(p.relay)
+			}
+			close(start)
+			// Each side's handler entries count the streams it accepted
+			// from the other; either session ending fails the test.
+			for range n {
+				if tc.dialerOpens {
+					recvEntered(t, p, rEntered)
+				}
+				if tc.relayOpens {
+					recvEnteredOn(t, p.dialer, dEntered)
+				}
+			}
+			if tc.dialerOpens {
+				assertInOrder(t, "relay saw from dialer", rIDs, n)
+			}
+			if tc.relayOpens {
+				assertInOrder(t, "dialer saw from relay", dIDs, n)
+			}
+			for name, s := range map[string]*session{"dialer": p.dialer, "relay": p.relay} {
+				select {
+				case <-s.Done():
+					t.Fatalf("%s session ended: %v", name, s.Err())
+				default:
+				}
+			}
+		})
+	}
+}
+
+// openIDs records the stream ids of inbound StreamOpen frames.
+type openIDs struct {
+	mu  sync.Mutex
+	ids []uint32
+}
+
+// recordOpens returns a Config whose stream handler holds each stream
+// (signalling entry) and whose interceptor records inbound StreamOpen ids.
+func recordOpens(n int) (Config, *openIDs, chan context.Context) {
+	rec := &openIDs{}
+	entered := make(chan context.Context, n)
+	return Config{
+		MaxConcurrentStreams: n,
+		StreamHandler: StreamHandlerFunc(func(ctx context.Context, _ *conduitv1.StreamOpen, _ PendingStream) error {
+			entered <- ctx
+			return nil
+		}),
+		Interceptor: func(dir Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+			if o := f.GetStreamOpen(); dir == Inbound && o != nil {
+				rec.mu.Lock()
+				rec.ids = append(rec.ids, o.GetStreamId())
+				rec.mu.Unlock()
+			}
+			return []*conduitv1.Frame{f}
+		},
+	}, rec, entered
+}
+
+func assertInOrder(t *testing.T, what string, rec *openIDs, n int) {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.ids) != n {
+		t.Fatalf("%s: %d StreamOpen frames, want %d", what, len(rec.ids), n)
+	}
+	for i := 1; i < len(rec.ids); i++ {
+		if rec.ids[i] <= rec.ids[i-1] {
+			t.Fatalf("%s: StreamOpen ids out of order: %v", what, rec.ids)
+		}
+	}
+}
+
+// TestOpenStreamBlockedOpenReleases: while one OpenStream is stuck
+// queueing its StreamOpen (the outbound buffer is full), another opener
+// waiting its turn still returns on its own ctx, and the stuck one returns
+// on its ctx or when the session ends; neither keeps the other waiting.
+func TestOpenStreamBlockedOpenReleases(t *testing.T) {
+	type result struct{ err error }
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T, s *session, holder, waiter <-chan result, cancelHolder, cancelWaiter context.CancelFunc)
+	}{
+		{
+			name: "waiter's ctx",
+			run: func(t *testing.T, _ *session, holder, waiter <-chan result, _, cancelWaiter context.CancelFunc) {
+				cancelWaiter()
+				if r := recvResult(t, waiter); !errors.Is(r.err, context.Canceled) {
+					t.Fatalf("waiter err = %v, want context.Canceled", r.err)
+				}
+				select {
+				case r := <-holder:
+					t.Fatalf("holder returned %v while the buffer is still full", r.err)
+				default:
+				}
+			},
+		},
+		{
+			name: "holder's ctx",
+			run: func(t *testing.T, _ *session, holder, waiter <-chan result, cancelHolder, cancelWaiter context.CancelFunc) {
+				cancelHolder()
+				if r := recvResult(t, holder); !errors.Is(r.err, context.Canceled) {
+					t.Fatalf("holder err = %v, want context.Canceled", r.err)
+				}
+				// The waiter now holds the turn and is stuck queueing in
+				// its place; its own ctx still releases it.
+				cancelWaiter()
+				if r := recvResult(t, waiter); !errors.Is(r.err, context.Canceled) {
+					t.Fatalf("waiter err = %v, want context.Canceled", r.err)
+				}
+			},
+		},
+		{
+			name: "session ends",
+			run: func(t *testing.T, s *session, holder, waiter <-chan result, _, _ context.CancelFunc) {
+				_ = s.Close()
+				for name, ch := range map[string]<-chan result{"holder": holder, "waiter": waiter} {
+					if r := recvResult(t, ch); !errors.Is(r.err, ErrSessionClosed) {
+						t.Fatalf("%s err = %v, want ErrSessionClosed", name, r.err)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A small budget and a peer that never reads: the writer blocks
+			// on the first frame and the next one fills the buffer.
+			dequeued := make(chan struct{}, 1)
+			icpt := func(dir Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+				if dir == Outbound && f.GetRpcRequest() != nil {
+					select {
+					case dequeued <- struct{}{}:
+					default:
+					}
+				}
+				return []*conduitv1.Frame{f}
+			}
+			s, _ := dialAgainstRaw(t, Config{BufferBudget: 1024, Interceptor: icpt}, transport.MemoryOptions{Buffer: 0})
+			callCtx, cancelCalls := context.WithCancel(context.Background())
+			defer cancelCalls()
+			body := bytes.Repeat([]byte("x"), 1500)
+			go func() { _, _ = s.Call(callCtx, &conduitv1.RpcRequest{RequestId: "r1", Body: body}) }()
+			select {
+			case <-dequeued:
+			case <-time.After(waitTimeout):
+				t.Fatal("writer did not take the first frame")
+			}
+			go func() { _, _ = s.Call(callCtx, &conduitv1.RpcRequest{RequestId: "r2", Body: body}) }()
+			eventually(t, "buffer filled", func() bool { return s.Stats().QueuedControlBytes > 0 })
+
+			open := func(ctx context.Context) <-chan result {
+				ch := make(chan result, 1)
+				go func() {
+					_, err := s.OpenStream(ctx, tcpOpen())
+					ch <- result{err}
+				}()
+				return ch
+			}
+			hctx, cancelHolder := context.WithCancel(context.Background())
+			defer cancelHolder()
+			holder := open(hctx)
+			eventually(t, "holder has the open turn", func() bool { return len(s.openLock) == 1 })
+			wctx, cancelWaiter := context.WithCancel(context.Background())
+			defer cancelWaiter()
+			waiter := open(wctx)
+			tc.run(t, s, holder, waiter, cancelHolder, cancelWaiter)
+		})
+	}
+}
+
+func recvResult[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(waitTimeout):
+		t.Fatal("OpenStream did not return")
+	}
+	var zero T
+	return zero
 }
 
 // TestMaxConcurrentRPCs: inbound RPCs beyond the limit are answered 429.
