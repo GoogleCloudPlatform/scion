@@ -136,6 +136,39 @@ func TestUnrecordedDenialCarriesAdoptionDetails(t *testing.T) {
 	assert.NotContains(t, w.Body.String(), "details")
 }
 
+// The SA gate's ceiling_unrecorded 403 carries one message, which names the
+// user-side remedy for both an unrecorded own edge and an unrecorded
+// ancestor edge, and the adoption details, which name the admin-side
+// remedy. The details add no message text of their own.
+func TestUnrecordedSAAssignDenialMessageAndDetailsAgree(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-msg")
+	child, _ := f.childOf(t, f.legacy, "adopt-msg-c")
+	cases := []struct {
+		name    string
+		agentID string
+		slug    string
+	}{
+		{"own edge unrecorded", f.legacy.ID, "adopt-msg-own"},
+		{"ancestor edge unrecorded", child.ID, "adopt-msg-anc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := f.createAsParent(t, f.agentToken(t, tc.agentID), f.assignBody(tc.slug))
+			assertSAGateUnrecordedDenied(t, rec)
+			apiErr := decodeTargetAPIError(t, rec)
+			assert.Equal(t, scaUnrecordedDenyMsg, apiErr.Message)
+			assert.Equal(t, 1, strings.Count(rec.Body.String(), "recorded provenance"), "the message appears once")
+			assert.Equal(t, map[string]interface{}{
+				"resource_type":    "gcp_service_account",
+				"denied_action":    string(ActionAssign),
+				"deny_cause":       string(DenyCauseCeilingUnrecorded),
+				"remediation":      remediationDelegationProvenanceAdoption,
+				"remediation_path": delegationAdoptionPath,
+			}, apiErr.Details)
+		})
+	}
+}
+
 func TestDelegationAdoptionPreviewRequiresSystemAdmin(t *testing.T) {
 	f := newLegacyFixture(t, "adopt-authz")
 	admin := adoptionAdmin(t, f.store, "adopt-authz-admin")

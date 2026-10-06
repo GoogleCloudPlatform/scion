@@ -147,6 +147,11 @@ adds these keys to the error `details`:
 }
 ```
 
+On a service-account assignment, the message asks for an authorized user to
+recreate the agent directly, which clears the denial whether the unrecorded
+hop is the agent's own edge or an ancestor's. The details name the admin
+alternative: adopting the chain through the route above.
+
 No edge or ancestor ID is returned to the caller. The Hub's server log, at
 debug level, names the delegate of the unrecorded hop. A hop denied only
 because its provenance version is not supported keeps the same denial
