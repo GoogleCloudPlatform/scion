@@ -33,6 +33,7 @@ import {
 import '../components/shared/header.js';
 import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import { showConfirm } from '../components/shared/confirm-dialog.js';
 import '../components/terminal/terminal-pane.js';
 
 interface RailEntry {
@@ -43,6 +44,48 @@ interface RailEntry {
   unsubscribeMetadata: () => void;
   /** Monotonic insertion index for stable chronological sorting. */
   addedAt: number;
+}
+
+/** The parts of a rail entry the bulk-action eligibility rules read. */
+type RailEntryStatus = Pick<RailEntry, 'state' | 'metadata'>;
+
+/**
+ * Whether the per-row Reconnect action applies: the session has dropped
+ * (disconnected or unavailable) and was not ended by an agent deletion.
+ * Pending, connecting, connected, closed and idle entries are excluded;
+ * idle entries connect through selection instead.
+ */
+export function canReconnectEntry(entry: RailEntryStatus): boolean {
+  const { connection, disconnectReason } = entry.state;
+  return (
+    (connection === 'disconnected' || connection === 'unavailable') &&
+    disconnectReason !== 'agent-deleted'
+  );
+}
+
+/**
+ * Whether "Reconnect all" acts on an entry: the per-row Reconnect applies
+ * and the agent still exists.
+ */
+export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
+  return canReconnectEntry(entry) && entry.metadata.availability !== 'deleted';
+}
+
+/**
+ * Whether "Remove all inactive" removes an entry: its agent was deleted,
+ * or its session has dropped (disconnected or unavailable). Connected
+ * entries stay, as do entries still connecting and idle entries restored
+ * from a saved list, which have not tried to connect yet.
+ */
+export function isInactiveEntry(entry: RailEntryStatus): boolean {
+  const { connection, disconnectReason } = entry.state;
+  if (connection === 'closed') return false;
+  return (
+    entry.metadata.availability === 'deleted' ||
+    disconnectReason === 'agent-deleted' ||
+    connection === 'disconnected' ||
+    connection === 'unavailable'
+  );
 }
 
 // TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
@@ -97,6 +140,9 @@ export class TerminalWorkspaceRoot {
   private readonly railList = document.createElement('div');
   private readonly railFooter = document.createElement('div');
   private readonly count = document.createElement('span');
+  private readonly railBulk = document.createElement('div');
+  private readonly bulkReconnect = document.createElement('button');
+  private readonly bulkRemove = document.createElement('button');
   private readonly empty = document.createElement('div');
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
@@ -240,7 +286,8 @@ export class TerminalWorkspaceRoot {
     this.empty.className = 'terminal-empty';
     this.empty.textContent = 'No terminals are open.';
     this.buildRailFooter();
-    this.rail.append(railHeader, this.railList, this.railFooter);
+    this.buildRailBulkActions();
+    this.rail.append(railHeader, this.railBulk, this.railList, this.railFooter);
 
     // Layout toolbar
     this.layoutBar.className = 'terminal-layout-bar';
@@ -987,6 +1034,7 @@ export class TerminalWorkspaceRoot {
         ? document.activeElement.dataset.railFocusId
         : null;
     this.count.textContent = String(total);
+    this.updateRailBulkActions(entries, total);
 
     const layoutState = this.layoutManager.getState();
     const visibleSlots = this.layoutManager.getVisibleSlots();
@@ -1214,6 +1262,97 @@ export class TerminalWorkspaceRoot {
       ?.focus();
   }
 
+  /** The rail's Reconnect action, shared by the row button and "Reconnect all". */
+  private reconnectEntry(entry: RailEntry): void {
+    void this.registry?.metadata.refresh(entry.state.agentId);
+    void entry.session.connect();
+  }
+
+  /** The rail's Close action, shared by the row button and "Remove all inactive". */
+  private removeEntry(entry: RailEntry): void {
+    entry.session.close();
+  }
+
+  /**
+   * Builds the bulk-action bar between the rail header and the list. Each
+   * button sits above the row column it acts on (Reconnect, then Close).
+   */
+  private buildRailBulkActions(): void {
+    this.railBulk.className = 'terminal-rail-bulk';
+    this.railBulk.setAttribute('role', 'toolbar');
+    this.railBulk.setAttribute('aria-label', 'Bulk terminal actions');
+    const label = document.createElement('span');
+    label.className = 'terminal-rail-bulk-label';
+    label.textContent = 'All terminals';
+    label.setAttribute('aria-hidden', 'true');
+
+    this.bulkReconnect.type = 'button';
+    this.bulkReconnect.className = 'terminal-bulk-action terminal-bulk-reconnect';
+    this.bulkReconnect.innerHTML = '<sl-icon name="arrow-repeat"></sl-icon>';
+    this.bulkReconnect.addEventListener('click', () => this.reconnectAll());
+
+    this.bulkRemove.type = 'button';
+    this.bulkRemove.className = 'terminal-bulk-action terminal-bulk-remove';
+    this.bulkRemove.innerHTML = '<sl-icon name="trash"></sl-icon>';
+    this.bulkRemove.addEventListener('click', () => void this.removeAllInactive());
+
+    this.railBulk.append(label, this.bulkReconnect, this.bulkRemove);
+  }
+
+  /** Syncs the bulk buttons' enabled state and hover help with the entries. */
+  private updateRailBulkActions(entries: readonly RailEntry[], total: number): void {
+    this.railBulk.hidden = total === 0;
+    const reconnectable = entries.filter(isBulkReconnectEligible).length;
+    const inactive = entries.filter(isInactiveEntry).length;
+
+    this.bulkReconnect.disabled = reconnectable === 0;
+    this.bulkReconnect.title =
+      reconnectable === 0
+        ? 'Reconnect all: no disconnected terminals for existing agents'
+        : `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
+            reconnectable === 1 ? 'is' : 'are'
+          } disconnected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`;
+    this.bulkReconnect.setAttribute(
+      'aria-label',
+      `Reconnect all disconnected terminals (${reconnectable})`
+    );
+
+    this.bulkRemove.disabled = inactive === 0;
+    this.bulkRemove.title =
+      inactive === 0
+        ? 'Remove all inactive: no deleted or disconnected terminals'
+        : `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
+            inactive === 1 ? 'is' : 'are'
+          } disconnected. Connected terminals stay open.`;
+    this.bulkRemove.setAttribute('aria-label', `Remove all inactive terminals (${inactive})`);
+  }
+
+  /** "Reconnect all": runs the row Reconnect action on every eligible entry. */
+  reconnectAll(): void {
+    for (const entry of [...this.entries.values()].filter(isBulkReconnectEligible)) {
+      this.reconnectEntry(entry);
+    }
+  }
+
+  /**
+   * "Remove all inactive": asks for confirmation, then runs the row Close
+   * action on every inactive entry. Eligibility is checked again after the
+   * dialog, so an entry that reconnected while it was open is kept.
+   * Resolves to the number of entries removed.
+   */
+  async removeAllInactive(): Promise<number> {
+    const count = [...this.entries.values()].filter(isInactiveEntry).length;
+    if (count === 0) return 0;
+    const confirmed = await showConfirm(
+      `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are disconnected. Connected terminals stay open.`,
+      { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
+    );
+    if (!confirmed) return 0;
+    const targets = [...this.entries.values()].filter(isInactiveEntry);
+    for (const entry of targets) this.removeEntry(entry);
+    return targets.length;
+  }
+
   private renderRailEntry(entry: RailEntry): HTMLElement {
     const metadata = entry.metadata;
     const agent = metadata.agent ?? entry.state.agent;
@@ -1266,19 +1405,10 @@ export class TerminalWorkspaceRoot {
     reconnect.dataset.railFocusId = `${entry.state.key}:reconnect`;
     reconnect.title = 'Reconnect';
     reconnect.innerHTML = '<sl-icon name="arrow-clockwise"></sl-icon>';
-    reconnect.disabled =
-      entry.state.connection === 'loading' ||
-      entry.state.connection === 'connecting' ||
-      entry.state.connection === 'connected' ||
-      entry.state.connection === 'closed' ||
-      // Idle entries connect via selection (setFrontmost), not the rail's
-      // manual Reconnect action.
-      entry.state.connection === 'idle' ||
-      entry.state.disconnectReason === 'agent-deleted';
+    reconnect.disabled = !canReconnectEntry(entry);
     reconnect.addEventListener('click', (event) => {
       event.stopPropagation();
-      void this.registry?.metadata.refresh(entry.state.agentId);
-      void entry.session.connect();
+      this.reconnectEntry(entry);
     });
     const close = document.createElement('button');
     close.type = 'button';
@@ -1289,7 +1419,7 @@ export class TerminalWorkspaceRoot {
     close.innerHTML = '<sl-icon name="x-circle"></sl-icon>';
     close.addEventListener('click', (event) => {
       event.stopPropagation();
-      entry.session.close();
+      this.removeEntry(entry);
     });
     // Drag handle
     const dragHandle = document.createElement('span');
@@ -1641,6 +1771,50 @@ export class TerminalWorkspaceRoot {
       .terminal-sort-btn:hover {
         color: var(--scion-text, #1e293b);
       }
+      /* Inset to line each button up with its row column (see .terminal-rail-actions). */
+      .terminal-rail-bulk {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.125rem;
+        padding: 0.375rem 0.75rem 0 0.75rem;
+      }
+      .terminal-rail-bulk[hidden] {
+        display: none;
+      }
+      .terminal-rail-bulk-label {
+        margin-right: auto;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-bulk-action {
+        width: 1.875rem;
+        height: 1.625rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-primary-600, #2563eb);
+        border-radius: 999px;
+        cursor: pointer;
+      }
+      .terminal-bulk-remove {
+        color: var(--scion-danger-600, #dc2626);
+      }
+      .terminal-bulk-action:hover:not(:disabled),
+      .terminal-bulk-action:focus-visible {
+        border-color: currentColor;
+        outline: none;
+      }
+      .terminal-bulk-action:disabled {
+        cursor: default;
+        color: var(--scion-text-muted, #64748b);
+        opacity: 0.45;
+      }
       .terminal-rail-list {
         flex: 1;
         min-height: 0;
@@ -1691,7 +1865,7 @@ export class TerminalWorkspaceRoot {
       }
       .terminal-jump-btn:focus-visible {
         background: var(--scion-bg-subtle, #f1f5f9);
-        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline: 2px solid var(--scion-primary-600, #2563eb);
         outline-offset: -2px;
       }
       /* Hover only where it does not stick after a tap. */
@@ -1732,7 +1906,7 @@ export class TerminalWorkspaceRoot {
         cursor: grabbing;
       }
       .terminal-rail-item[data-selected='true'] {
-        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
+        background: color-mix(in srgb, var(--scion-primary-600, #2563eb) 10%, transparent);
       }
       .terminal-rail-select {
         min-width: 0;
@@ -1860,9 +2034,9 @@ export class TerminalWorkspaceRoot {
         outline: none;
       }
       .terminal-layout-btn[data-active='true'] {
-        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
-        border-color: var(--scion-primary, #3b82f6);
-        color: var(--scion-primary, #3b82f6);
+        background: color-mix(in srgb, var(--scion-primary-600, #2563eb) 15%, transparent);
+        border-color: var(--scion-primary-600, #2563eb);
+        color: var(--scion-primary-600, #2563eb);
         font-weight: 600;
       }
       .terminal-layout-restore {
@@ -1902,9 +2076,9 @@ export class TerminalWorkspaceRoot {
       .terminal-pane-host[data-effective-layout='two-columns'] scion-terminal-pane[data-focused],
       .terminal-pane-host[data-effective-layout='two-rows'] scion-terminal-pane[data-focused],
       .terminal-pane-host[data-effective-layout='four'] scion-terminal-pane[data-focused] {
-        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline: 2px solid var(--scion-primary-600, #2563eb);
         outline-offset: -2px;
-        border-color: var(--scion-primary, #3b82f6);
+        border-color: var(--scion-primary-600, #2563eb);
       }
       .terminal-slot-placeholder {
         display: flex;
@@ -1921,11 +2095,11 @@ export class TerminalWorkspaceRoot {
         transition: border-color 0.15s, background 0.15s;
       }
       .terminal-slot-placeholder[data-drag-over='true'] {
-        border-color: var(--scion-primary, #3b82f6);
-        background: color-mix(in srgb, var(--scion-primary, #3b82f6) 15%, transparent);
+        border-color: var(--scion-primary-600, #2563eb);
+        background: color-mix(in srgb, var(--scion-primary-600, #2563eb) 15%, transparent);
       }
       scion-terminal-pane[data-drag-over='true'] {
-        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline: 2px solid var(--scion-primary-600, #2563eb);
         outline-offset: -2px;
       }
       .terminal-aria-live {
@@ -1996,6 +2170,10 @@ export class TerminalWorkspaceRoot {
     `;
     this.element.appendChild(style);
   }
+}
+
+function countLabel(count: number): string {
+  return `${count} ${count === 1 ? 'terminal' : 'terminals'}`;
 }
 
 function connectionLabel(state: TerminalConnectionState): string {
