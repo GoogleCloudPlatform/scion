@@ -69,8 +69,8 @@ resource "google_compute_managed_ssl_certificate" "this" {
 # Building the NEG IDs statically from var.neg_zones would not remove that
 # race: the backend-service API rejects a backend group that does not exist
 # yet, so the failure would only move from this read to the backend-service
-# create. Reading the NEGs also proves they exist in the expected zones, and
-# feeds the neg_zones_read output that hub-gke's annotation-zones check uses.
+# create. Reading the NEGs also proves they exist in the expected zones
+# (asserted by configurations/hub-gke's plan test).
 data "google_compute_network_endpoint_group" "this" {
   for_each = toset(var.neg_zones)
 
