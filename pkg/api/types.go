@@ -1136,6 +1136,13 @@ type StartOptions struct {
 	Workspace          string
 	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// SharedWorkspaceClone holds the clone settings of a shared-plain git
+	// project's workspace. Set only with SharedWorkspace and without
+	// GitClone. It does not change how the workspace is mounted or created:
+	// only the Kubernetes runtime uses it, through RunConfig.GitCloneForInit,
+	// so the workspace-provision init container clones into an NFS-backed
+	// shared workspace that has not been cloned yet.
+	SharedWorkspaceClone *GitCloneConfig
 	// FreshProvision marks this dispatch as a create, not a start or restart:
 	// GetAgent wipes and re-clones an existing populated workspace only when
 	// this is set, so a same-named leftover agent directory is not confused
