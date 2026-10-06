@@ -1979,6 +1979,39 @@ describe('scion-chat-thread initial scroll position', () => {
       globalThis.ResizeObserver = original;
     }
   });
+
+  it('stops watching the message list once removed', async () => {
+    const instances: { targets: Element[]; disconnects: number }[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly record = { targets: [] as Element[], disconnects: 0 };
+      constructor() {
+        instances.push(this.record);
+      }
+      observe(target: Element): void {
+        this.record.targets.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {
+        this.record.disconnects++;
+      }
+    } as unknown as typeof ResizeObserver;
+    try {
+      const el = await mountWithHistory();
+      const watch = instances.find((r) =>
+        r.targets.some((t) => t.classList.contains('messages-list'))
+      );
+      expect(watch, 'the list is watched while open').toBeDefined();
+      const before = watch!.disconnects;
+
+      el.remove();
+
+      expect(watch!.disconnects).toBe(before + 1);
+      expect((el as unknown as Record<string, unknown>)._bottomPinTarget).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
 });
 
 describe('pinnedAfterScroll', () => {
