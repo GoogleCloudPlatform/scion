@@ -1178,7 +1178,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 
 		// Warn if user-provided GITHUB_TOKEN overlaps with GitHub App
-		if os.Getenv(hub.EnvUserGitHubToken) == "true" {
+		if util.ParseBoolEnv(hub.EnvUserGitHubToken, false) {
 			log.Info("User-provided GITHUB_TOKEN detected alongside GitHub App installation")
 			log.Info("The user's GITHUB_TOKEN will be used for gh CLI; GitHub App tokens will be used for git credential helper")
 		}
@@ -2739,7 +2739,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
 	var credentialHelper string
-	if os.Getenv("SCION_GITHUB_APP_ENABLED") == "true" {
+	if hub.IsGitHubAppEnabled() {
 		credentialHelper = "!sciontool credential-helper"
 	} else {
 		credentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
@@ -2963,10 +2963,10 @@ func resolveIsSharedGitWorkspace() bool {
 	if workspaceMode := os.Getenv("SCION_WORKSPACE_MODE"); workspaceMode != "" {
 		// New path: broker emits canonical workspace mode vars.
 		// A shared-plain workspace is git-backed when SCION_WORKSPACE_GIT=true.
-		return workspaceMode == "shared-plain" && os.Getenv("SCION_WORKSPACE_GIT") == "true"
+		return workspaceMode == "shared-plain" && util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
 	}
 	// Fallback: older broker that only emits SCION_SHARED_WORKSPACE.
-	return os.Getenv("SCION_SHARED_WORKSPACE") == "true"
+	return util.ParseBoolEnv("SCION_SHARED_WORKSPACE", false)
 }
 
 // errSharedWorkspaceGitPrivilegeDropRequired is returned when
@@ -3052,7 +3052,7 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	// Configure credential helper using sciontool's credential-helper command,
 	// which handles both GITHUB_TOKEN env var and GitHub App token refresh.
 	var credentialHelper string
-	if os.Getenv("SCION_GITHUB_APP_ENABLED") == "true" {
+	if hub.IsGitHubAppEnabled() {
 		// Use sciontool credential-helper for GitHub App token refresh
 		credentialHelper = "!sciontool credential-helper"
 	} else {
