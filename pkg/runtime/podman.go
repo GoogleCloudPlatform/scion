@@ -364,7 +364,8 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 	_, _ = runSimpleCommand(ctx, r.Command, "exec", "--user", r.ExecUser(),
 		agent.ContainerID, "tmux", "set-option", "-g", "window-size", "latest")
 
-	return runInteractiveCommand(r.Command, "exec", "-it", "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")
+	args := append([]string{"exec", "-it"}, ExecDetachKeysArgs(r.Command)...)
+	return runInteractiveCommand(r.Command, append(args, "--user", r.ExecUser(), agent.ContainerID, "tmux", "attach", "-t", "scion")...)
 }
 
 func (r *PodmanRuntime) ImageExists(ctx context.Context, image string) (bool, error) {

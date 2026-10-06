@@ -1144,7 +1144,7 @@ func (s *LocalPTYSession) startDockerExec() error {
 		}
 	}
 
-	args := []string{"exec", "-it"}
+	args := append([]string{"exec", "-it"}, runtime.ExecDetachKeysArgs(s.runtimeCmd)...)
 	if s.attachNonce != "" {
 		args = append(args, "-e", "SCION_ATTACH_NONCE="+s.attachNonce)
 	}
@@ -1718,7 +1718,7 @@ func (h *StreamPTYHandler) startDockerExec() error {
 		}
 	}
 
-	args := []string{"exec", "-it"}
+	args := append([]string{"exec", "-it"}, runtime.ExecDetachKeysArgs(runtimeCmd)...)
 	if h.attachNonce != "" {
 		args = append(args, "-e", "SCION_ATTACH_NONCE="+h.attachNonce)
 	}

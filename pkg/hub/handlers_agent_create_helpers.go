@@ -1123,6 +1123,12 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+			return existingAgentErrored
+		}
+
 		if req.Task != "" {
 			if existingAgent.AppliedConfig == nil {
 				existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
@@ -1222,6 +1228,12 @@ func (s *Server) handleExistingAgent(
 			if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 					"cannot resume agent: no runtime broker available", nil)
+				return existingAgentErrored
+			}
+
+			// Fail fast on a GCP identity the token-mint gate would refuse,
+			// before any quota reservation or run-intent write.
+			if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
 				return existingAgentErrored
 			}
 
@@ -1338,7 +1350,15 @@ func (s *Server) handleExistingAgent(
 		// fall-through create below mints a credential for the new agent
 		// row's own (distinct) ID.
 		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
-		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
+		// The row delete runs as a hard-delete lifecycle transaction, so the
+		// agent's delegation edges are deactivated, the hard-delete hooks run
+		// and the agent_hard_delete audit record is written atomically with it.
+		if err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.DeleteAgent(ctx, existingAgent.ID); err != nil {
+				return err
+			}
+			return s.hardDeleteAgentTx(ctx, tx, existingAgent, auditActorFromContext(ctx))
+		}); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}
@@ -1369,6 +1389,12 @@ func (s *Server) handleExistingAgent(
 		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				"cannot start agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "start") {
 			return existingAgentErrored
 		}
 
@@ -2052,7 +2078,7 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 		return false, err
 	}
 	for _, sa := range sas {
-		if sa.Verified {
+		if gcpServiceAccountVerified(&sa) {
 			return true, nil
 		}
 	}

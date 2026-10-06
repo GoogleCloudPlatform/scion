@@ -166,6 +166,11 @@ func RuntimeBrokerID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRuntimeBrokerID, v))
 }
 
+// WorkspacePlacement applies equality check predicate on the "workspace_placement" field. It's identical to WorkspacePlacementEQ.
+func WorkspacePlacement(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldWorkspacePlacement, v))
+}
+
 // WebPtyEnabled applies equality check predicate on the "web_pty_enabled" field. It's identical to WebPtyEnabledEQ.
 func WebPtyEnabled(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldWebPtyEnabled, v))
@@ -404,6 +409,11 @@ func StartClaimHoldUntil(v time.Time) predicate.Agent {
 // StartClaimLaunchID applies equality check predicate on the "start_claim_launch_id" field. It's identical to StartClaimLaunchIDEQ.
 func StartClaimLaunchID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldStartClaimLaunchID, v))
+}
+
+// SoftDeleteOpID applies equality check predicate on the "soft_delete_op_id" field. It's identical to SoftDeleteOpIDEQ.
+func SoftDeleteOpID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSoftDeleteOpID, v))
 }
 
 // SlugEQ applies the EQ predicate on the "slug" field.
@@ -1764,6 +1774,81 @@ func RuntimeBrokerIDEqualFold(v string) predicate.Agent {
 // RuntimeBrokerIDContainsFold applies the ContainsFold predicate on the "runtime_broker_id" field.
 func RuntimeBrokerIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldRuntimeBrokerID, v))
+}
+
+// WorkspacePlacementEQ applies the EQ predicate on the "workspace_placement" field.
+func WorkspacePlacementEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementNEQ applies the NEQ predicate on the "workspace_placement" field.
+func WorkspacePlacementNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementIn applies the In predicate on the "workspace_placement" field.
+func WorkspacePlacementIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldWorkspacePlacement, vs...))
+}
+
+// WorkspacePlacementNotIn applies the NotIn predicate on the "workspace_placement" field.
+func WorkspacePlacementNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldWorkspacePlacement, vs...))
+}
+
+// WorkspacePlacementGT applies the GT predicate on the "workspace_placement" field.
+func WorkspacePlacementGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementGTE applies the GTE predicate on the "workspace_placement" field.
+func WorkspacePlacementGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementLT applies the LT predicate on the "workspace_placement" field.
+func WorkspacePlacementLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementLTE applies the LTE predicate on the "workspace_placement" field.
+func WorkspacePlacementLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementContains applies the Contains predicate on the "workspace_placement" field.
+func WorkspacePlacementContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementHasPrefix applies the HasPrefix predicate on the "workspace_placement" field.
+func WorkspacePlacementHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementHasSuffix applies the HasSuffix predicate on the "workspace_placement" field.
+func WorkspacePlacementHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementIsNil applies the IsNil predicate on the "workspace_placement" field.
+func WorkspacePlacementIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldWorkspacePlacement))
+}
+
+// WorkspacePlacementNotNil applies the NotNil predicate on the "workspace_placement" field.
+func WorkspacePlacementNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldWorkspacePlacement))
+}
+
+// WorkspacePlacementEqualFold applies the EqualFold predicate on the "workspace_placement" field.
+func WorkspacePlacementEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementContainsFold applies the ContainsFold predicate on the "workspace_placement" field.
+func WorkspacePlacementContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldWorkspacePlacement, v))
 }
 
 // WebPtyEnabledEQ applies the EQ predicate on the "web_pty_enabled" field.
@@ -4669,6 +4754,81 @@ func StartClaimLaunchIDEqualFold(v string) predicate.Agent {
 // StartClaimLaunchIDContainsFold applies the ContainsFold predicate on the "start_claim_launch_id" field.
 func StartClaimLaunchIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldStartClaimLaunchID, v))
+}
+
+// SoftDeleteOpIDEQ applies the EQ predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDNEQ applies the NEQ predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDIn applies the In predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldSoftDeleteOpID, vs...))
+}
+
+// SoftDeleteOpIDNotIn applies the NotIn predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldSoftDeleteOpID, vs...))
+}
+
+// SoftDeleteOpIDGT applies the GT predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDGTE applies the GTE predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDLT applies the LT predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDLTE applies the LTE predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDContains applies the Contains predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDHasPrefix applies the HasPrefix predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDHasSuffix applies the HasSuffix predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDIsNil applies the IsNil predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldSoftDeleteOpID))
+}
+
+// SoftDeleteOpIDNotNil applies the NotNil predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldSoftDeleteOpID))
+}
+
+// SoftDeleteOpIDEqualFold applies the EqualFold predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDContainsFold applies the ContainsFold predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldSoftDeleteOpID, v))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

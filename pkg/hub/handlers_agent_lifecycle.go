@@ -511,6 +511,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			s.writeLaunchingAgent(ctx, w, agent, warnings)
 			return
 		}
+		// Fail fast on a GCP identity the token-mint gate would refuse.
+		// Checked before restart's stop leg, so a refused restart leaves
+		// the running agent alone. Stop and suspend are never gated.
+		if s.gcpIdentityStartRefusal(ctx, w, agent, action) {
+			return
+		}
 	case api.AgentActionStop, api.AgentActionSuspend:
 		// The agent is already going down: stop (and suspend, which would
 		// otherwise race the delete's teardown on the broker) is a no-op

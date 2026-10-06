@@ -2779,6 +2779,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/agent/gcp-identity-token", Kind: ExemptionInternalOnly, Reason: "Agent GCP identity token, agent-JWT auth", Owner: "route_metadata.go"},
 	{Pattern: "POST /api/v1/agent/identity-token", Kind: ExemptionInternalOnly, Reason: "Agent OIDC identity token, agent-JWT auth", Owner: "route_metadata.go"},
 	{Pattern: "POST /api/v1/agent/secrets", Kind: ExemptionInternalOnly, Reason: "Agent secret fetch, agent-JWT auth", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/conduit", Kind: ExemptionInternalOnly, Reason: "Agent conduit session, agent-JWT auth (own agent row only), experiment-gated", Owner: "route_metadata.go"},
 
 	// Webhook endpoints — signature verification
 	{Pattern: "/api/v1/webhooks/github", Kind: ExemptionInternalOnly, Reason: "GitHub webhook, signature-verified", Owner: "route_metadata.go"},
@@ -2884,8 +2885,6 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/handlers_gcp_identity.go — GCP service account operations
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "createGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
-	{File: "pkg/hub/handlers_gcp_identity.go", Function: "createGCPServiceAccount", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.create"},
-	{File: "pkg/hub/handlers_gcp_identity.go", Function: "createGCPServiceAccount", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.create"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "deleteGCPServiceAccount", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "handleAgentGCPToken", Symbol: "GenerateAccessToken", OperationID: "gcp.identity.mint"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
@@ -2895,14 +2894,15 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "DeleteServiceAccount", OperationID: "gcp.identity.create"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "SetIAMPolicy", OperationID: "gcp.identity.create"},
 	{File: "pkg/hub/handlers_gcp_identity.go", Function: "mintGCPServiceAccount", Symbol: "SetIAMPolicy", OperationID: "gcp.identity.create"},
-	{File: "pkg/hub/handlers_gcp_identity.go", Function: "runGCPServiceAccountVerification", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.verify"},
-	{File: "pkg/hub/handlers_gcp_identity.go", Function: "runGCPServiceAccountVerification", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.verify"},
+	// applyGCPVerificationResult persists every verification outcome: the verify
+	// routes (gcp.identity.verify) and the auto-verify step of both create
+	// handlers (gcp.identity.create) reach it after their own authorization.
+	{File: "pkg/hub/handlers_gcp_identity.go", Function: "applyGCPVerificationResult", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.verify"},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_gcp_identity_scoped.go — hub-scoped GCP identity
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "createHubScopedGCPServiceAccount", Symbol: "CreateGCPServiceAccount", OperationID: "gcp.identity.create"},
-	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "createHubScopedGCPServiceAccount", Symbol: "UpdateGCPServiceAccount", OperationID: "gcp.identity.create"},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "deleteGCPServiceAccountByID", Symbol: "DeleteGCPServiceAccount", OperationID: "gcp.identity.delete"},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "SetIAMPolicy", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: sets IAM policy on new service account", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
 	{File: "pkg/hub/handlers_gcp_identity_scoped.go", Function: "mintHubScopedGCPServiceAccount", Symbol: "SetIAMPolicy", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Hub-scope GCP SA mint: sets IAM policy on new service account", Scope: "pkg/hub/handlers_gcp_identity_scoped.go"}},
