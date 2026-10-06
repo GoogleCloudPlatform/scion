@@ -79,6 +79,47 @@ interface HealthSummary {
   };
 }
 
+/** The parts of the GET /api/v1/admin/server-config response the stall editor reads. */
+export interface ServerConfigSnapshot {
+  server?: {
+    hub?: {
+      stalled_threshold?: string;
+      soft_delete_retention?: string;
+      soft_delete_retain_files?: boolean;
+    };
+  };
+  section_metadata?: Record<string, { revision?: number }>;
+}
+
+/**
+ * Builds the PUT /api/v1/admin/server-config body that sets
+ * server.hub.auto_suspend_stalled.
+ *
+ * The hub decodes a nested object; a flat dotted key such as
+ * "server.hub.auto_suspend_stalled" is silently dropped and the PUT still
+ * returns 200 (ptone/scion#3059). A DB-backed hub also replaces the whole
+ * lifecycle row, keeping only the start-claim keys a PUT omits, so the other
+ * lifecycle keys are carried over from `current`. When the lifecycle row
+ * exists in the DB, its revision is sent so a concurrent edit gets a 409
+ * instead of being overwritten (a file-backed hub ignores it).
+ */
+export function buildStallConfigUpdate(
+  current: ServerConfigSnapshot,
+  autoSuspend: boolean
+): Record<string, unknown> {
+  const curHub = current.server?.hub ?? {};
+  const hub: Record<string, unknown> = { auto_suspend_stalled: autoSuspend };
+  if (curHub.stalled_threshold) hub.stalled_threshold = curHub.stalled_threshold;
+  if (curHub.soft_delete_retention) hub.soft_delete_retention = curHub.soft_delete_retention;
+  if (typeof curHub.soft_delete_retain_files === 'boolean') {
+    hub.soft_delete_retain_files = curHub.soft_delete_retain_files;
+  }
+  const body: Record<string, unknown> = { server: { hub } };
+  const rev = current.section_metadata?.lifecycle?.revision;
+  if (typeof rev === 'number' && rev > 0) body.expected_revisions = { lifecycle: rev };
+  return body;
+}
+
 @customElement('scion-page-health-dashboard')
 export class ScionPageHealthDashboard extends LitElement {
   @state()
@@ -199,13 +240,23 @@ export class ScionPageHealthDashboard extends LitElement {
   private async saveStallConfig(): Promise<void> {
     this.savingStall = true;
     try {
-      const settings: Record<string, unknown> = {
-        'server.hub.auto_suspend_stalled': this.stallAutoSuspend,
-      };
+      // Read the current lifecycle settings first: a DB-backed hub replaces
+      // the whole lifecycle row on PUT, so the keys this form does not edit
+      // must be sent back or they are dropped (ptone/scion#3059).
+      const cur = await apiFetch('/api/v1/admin/server-config');
+      if (!cur.ok) {
+        const msg = await extractApiError(cur, 'Failed to load current stall settings');
+        showToast(msg, 'danger');
+        return;
+      }
+      const body = buildStallConfigUpdate(
+        (await cur.json()) as ServerConfigSnapshot,
+        this.stallAutoSuspend
+      );
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const msg = await extractApiError(res, 'Failed to save stall settings');

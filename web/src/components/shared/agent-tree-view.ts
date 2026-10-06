@@ -902,6 +902,10 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   private onPointerDown(e: PointerEvent): void {
+    // Only the primary button pans (ptone/scion#2941): a right click opens the
+    // context menu and a middle click may autoscroll, neither should drag the
+    // graph. Touch and pen contacts report button 0, so they still pan.
+    if (e.button !== 0) return;
     // Only pan from the background — keep node and control clicks working.
     for (const el of e.composedPath()) {
       if (el === this.canvasEl) break;
