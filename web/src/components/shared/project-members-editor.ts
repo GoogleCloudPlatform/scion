@@ -325,19 +325,21 @@ export function defaultBuiltInForAdd(
 
 /**
  * Whether the "None" built-in radio is offered. None means "custom roles
- * only", so it is shown only when it can be meaningful: the catalog has
- * custom roles, or (Edit mode) the principal holds no built-in role now or
- * holds custom roles.
+ * only", so it is shown only when it can be meaningful. In Add mode: the
+ * catalog has custom roles and the principal is not an agent (agents get no
+ * custom roles in this dialog). In Edit mode: the catalog has custom roles,
+ * or the principal holds no built-in role now or holds custom roles.
  */
 export function showNoProjectRoleOption(opts: {
   mode: MemberDialogMode;
+  principalType: string;
   assignable: readonly AssignableProjectRole[];
   currentBuiltInId: string;
   heldCustomCount: number;
 }): boolean {
-  if (customCatalog(opts.assignable).length > 0) return true;
-  if (opts.mode !== 'edit') return false;
-  return opts.currentBuiltInId === NO_PROJECT_ROLE || opts.heldCustomCount > 0;
+  const hasCustom = customCatalog(opts.assignable).length > 0;
+  if (opts.mode === 'add') return hasCustom && opts.principalType !== 'agent';
+  return hasCustom || opts.currentBuiltInId === NO_PROJECT_ROLE || opts.heldCustomCount > 0;
 }
 
 /** Whether any binding in the view comes from somewhere other than a direct
@@ -1127,6 +1129,7 @@ export class ScionProjectMembersEditor extends LitElement {
   private get noProjectRoleShown(): boolean {
     return showNoProjectRoleOption({
       mode: this.dialogMode,
+      principalType: this.dlgPrincipalType,
       assignable: this.assignableRoles,
       currentBuiltInId: this.dlgCurrentBuiltIn,
       heldCustomCount: this.dlgHeldCustom.length,

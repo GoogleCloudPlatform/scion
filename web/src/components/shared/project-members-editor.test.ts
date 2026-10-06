@@ -603,8 +603,16 @@ describe('None radio visibility', () => {
     mode: MemberDialogMode,
     assignable: AssignableProjectRole[],
     currentBuiltInId = NO_PROJECT_ROLE,
-    heldCustomCount = 0
-  ) => showNoProjectRoleOption({ mode, assignable, currentBuiltInId, heldCustomCount });
+    heldCustomCount = 0,
+    principalType = 'user'
+  ) =>
+    showNoProjectRoleOption({
+      mode,
+      principalType,
+      assignable,
+      currentBuiltInId,
+      heldCustomCount,
+    });
 
   it('is hidden in Add mode when there are no custom roles', () => {
     expect(show('add', BUILTIN_ONLY_CATALOG)).toBe(false);
@@ -614,6 +622,29 @@ describe('None radio visibility', () => {
   it('is shown whenever the catalog has custom roles', () => {
     expect(show('add', OWNER_CATALOG)).toBe(true);
     expect(show('edit', OWNER_CATALOG, 'r-member')).toBe(true);
+  });
+
+  it('is hidden for an agent in Add mode even with custom roles in the catalog', () => {
+    expect(show('add', OWNER_CATALOG, NO_PROJECT_ROLE, 0, 'agent')).toBe(false);
+    expect(show('add', OWNER_CATALOG, NO_PROJECT_ROLE, 0, 'user')).toBe(true);
+    expect(show('add', OWNER_CATALOG, NO_PROJECT_ROLE, 0, 'group')).toBe(true);
+  });
+
+  it('keeps the Edit rule for agents', () => {
+    expect(show('edit', OWNER_CATALOG, 'r-member', 0, 'agent')).toBe(true);
+    expect(show('edit', BUILTIN_ONLY_CATALOG, 'r-member', 1, 'agent')).toBe(true);
+    expect(show('edit', BUILTIN_ONLY_CATALOG, 'r-member', 0, 'agent')).toBe(false);
+  });
+
+  it('Add dialog hides None for an agent and shows it for a user (same catalog)', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    el.openAddDialog();
+    await el.updateComplete;
+    expect(q(el, `sl-radio[value="${NO_PROJECT_ROLE}"]`)).not.toBeNull();
+    el.onPrincipalTypeChange('agent');
+    await el.updateComplete;
+    expect(q(el, `sl-radio[value="${NO_PROJECT_ROLE}"]`)).toBeNull();
+    expect(el.dlgBuiltIn).toBe('r-member');
   });
 
   it('is shown in Edit mode for a principal with no built-in role or with custom roles', () => {
