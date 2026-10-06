@@ -64,6 +64,80 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
   ```
   On a broker machine, `scion runtime-broker status` shows that broker's own state.
 
+## Moving an Agent to Another Runtime Broker
+
+`scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.
+
+The workspace is never copied. A move works only when both Runtime Brokers mount the **same NFS export**, so the target sees the very directory the source used. A move that does not meet that requirement is refused; there is no fallback that re-clones or copies the workspace.
+
+```bash
+# Check the move without changing anything
+scion reincarnate my-agent --broker broker-b --dry-run
+
+# Move it
+scion reincarnate my-agent --broker broker-b --handoff-file handoff.md
+```
+
+### Requirements
+
+- **The same NFS export on both Runtime Brokers.** Set [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) to the `nfs` backend on both, with the same `server`, `export`, and `subpath_root` for the first share (`nfs.shares[0]`), which holds the workspaces. Each Runtime Broker also writes or reads an export identity marker, `.scion-export-id`, in `<subpath_root>` through its own mount, and the two must report the same marker, so `subpath_root` must exist and be writable. Matching settings alone are not enough: two brokers that configure the same address but mount different directories are refused.
+- **The workspace is on the export.** The Runtime Broker records where the agent's workspace is each time it starts the agent:
+  - Shared-workspace (shared-plain) and Hub-managed workspaces are on the export on Docker, Podman, Apple `container`, Cloud Run, and Kubernetes with a PV claim (`nfs.shares[].pv_name`).
+  - Clone-per-agent and empty-per-agent workspaces are on the export only on Kubernetes with a PV claim, so both the agent's current runtime and the target's profile must be Kubernetes.
+  - An agent that has not started since its Runtime Broker began recording this has an unknown placement and is refused. Reincarnate it once without `--broker` to record it.
+  - Worktree-per-agent agents, agents in linked projects, and workspaces kept as a GCS-synced copy cannot move.
+- **The target profile.** The profile the agent runs under (its own, else the project's active profile, else the target's default profile) must exist on the target and be available.
+- **Both Runtime Brokers support agent move and are up to date.** Each must report its workspace storage and the agent-move capability. An older Runtime Broker on either side gets `412 Precondition Failed`, and nothing on the export is touched.
+- **Both Runtime Brokers are online.** The target must be reachable and report its NFS mount healthy (`503` otherwise). The source must be online too, because it removes its local copy of the agent after the move. A move off an offline source is refused with `412`.
+- **Room on the target** under its [per-broker agent limit](#considerations) (`429` otherwise).
+
+### What moves and what is regenerated
+
+- **Moves:** the agent's identity and generation chain, and its workspace on the export. The workspace stays in place on the export; only the Runtime Broker that runs the agent changes. The agent's quota reservation moves from the source to the target, and its exposed ports are cleared.
+- **Regenerated:** the agent home. It is broker-local, so the target builds it fresh from the template and harness config, as any reincarnation does. Harness session history is not carried over; continuity comes from the handoff.
+- **Experimental NFS home:** an agent created with a persistent [NFS home](/scion/hosted/ha/kubernetes/#persistent-agent-home-nfs) (the `hub.k8s_nfs_home` experiment) keeps its home on the export, so the home travels with the move and the target uses it. That is expected, and is not data loss.
+
+### Checks and dry run
+
+The Hub checks the move in a fixed order: workspace mode, workspace storage reported by both Runtime Brokers, same NFS export, workspace on the export, target profile, target health, access, agent-move capability, and capacity. The first failing check decides the answer, and the CLI prints every check as passed, failed, or not evaluated.
+
+A refused move is refused **before any side effect**: the agent is not stopped, no quota changes, and the target is not linked to the project. `--dry-run` runs the same checks and returns the verdict and plan without doing anything else. Without `--dry-run`, the CLI sends a dry run first and stops if it is refused, so a real request is only sent for an eligible move, and never to a Hub that does not support `--broker`. Patch flags such as `--model` or `--image` combine with `--broker`, and the checks judge the patched configuration.
+
+### Permissions
+
+Every move needs `agent.lifecycle` on the agent, as any reincarnation does. If you are not the agent, you also become its recorded delegator, so you must be able to delegate its role: a non-admin reincarnating an agent with a privileged role gets `403` from this authority check before any of the move checks run. Then:
+
+- **Seeing the target.** A target you cannot see is answered exactly like an unknown one: `404 runtime_broker_not_found`. You can see a Runtime Broker that has AutoProvide on, or already serves the agent's project, or that you can read (`broker.read`). A purely project-scoped caller therefore gets `404` for a broker outside the project.
+- **Dispatching to the target.** You need dispatch on the target (`broker.dispatch`), unless it has AutoProvide on.
+- **Linking the target.** If the target does not serve the project yet, the move links it as a provider, which needs project update (`project.update`).
+- **User access tokens** are single-project and cannot carry broker read or broker dispatch, so a token caller can move an agent only to a Runtime Broker that already serves the project and has AutoProvide on. To reach any other broker, sign in (`scion hub auth login`).
+- **An agent moving itself** needs no extra permission, but may move only to a Runtime Broker that already serves its project; otherwise it gets `409` and nothing is linked. An agent that runs with a GCP passthrough identity cannot move itself (`403`, "ask a user to move you").
+
+So a move succeeds in one of two topologies:
+
+1. **The target already serves the project and has AutoProvide on.** Any caller with `agent.lifecycle` on the agent can move it there, including a user access token and the agent itself.
+2. **Any other target.** A signed-in user needs `broker.read` on the target, `broker.dispatch` on it (unless it has AutoProvide on), and `project.update` if it does not serve the project yet. The Hub's member and viewer roles give signed-in users broker read.
+
+### What happens during a move
+
+The Hub accepts an eligible move with `202 Accepted` and runs it in the background. It re-runs the checks, stops the agent on the source, moves its quota, assigns it to the target, links the target to the project if needed, and provisions the agent on the target. The target first confirms through its own mount that the workspace directory exists, and refuses with `409` if it does not. The Hub then starts the new generation with the preamble and handoff, and finally asks the source to remove its local copy of the agent: its container, its broker-local agent directory, and its home. That cleanup never touches the export or the agent's branch.
+
+- **Rollback.** If anything fails after the agent is assigned to the target and before the new generation is running, including a start that definitely left no container, the Hub rolls the move back: it removes the agent's local state on the target, and restores the agent to the source with its quota, previous configuration, and workspace. The agent is left on the source, not running, in the `error` phase; start it or retry the move. A provider link created by the move stays.
+- **Ambiguous start.** If the target's start fails in a way that may have left a container, the agent stays on the target in the `error` phase, with its quota there, and the source is not cleaned up.
+- **Moving to a freshly linked target.** A target that has never hosted the project is linked to it by the move, just before it provisions the agent. If the target cannot confirm the workspace through its mount, the move is refused with `409` and rolled back as above, and nothing on the export is lost. Check that the target mounts the export and that the project's workspace is visible there, then retry. The provider link stays, so the retry no longer needs `project.update`.
+
+### Operator notes and limits
+
+The Hub records the outcome of the source cleanup on the move's reincarnation record (`sourceCleanup`, not shown by the CLI). A completed move counts as completed whatever the cleanup outcome; the Hub log has a warning when the cleanup failed or was skipped for lack of a run ID. The outcomes are:
+
+- `done`: the source removed its local copy of the agent.
+- `failed:<reason>`: the source could not remove it, and its local state is left in place.
+- `skipped:no-run-id`: the agent had no run ID on the source, because an older version started it. Without one, the source could only find the agent by name, and on a Kubernetes namespace shared by both Runtime Brokers that could remove the agent's new pod, so the Hub leaves the source alone.
+- `skipped:ambiguous-start`: the target's start may have left a container, so the agent stays on the target (see above).
+- `skipped:interrupted`: the move failed before it completed. That covers a rollback, and a move cut short, for example by a Hub restart. The Hub moves the quota back to whichever Runtime Broker the agent is assigned to, and does not clean up the source.
+
+**Cleaning up stale source state.** If the agent ended up on the target (its Runtime Broker in `scion list` or the agent record is the target) and the source was not cleaned up, the source Runtime Broker may still hold the agent's old container or pod, its broker-local agent directory (in the project's directory under `~/.scion/projects/` on that broker), and its home. None of this holds workspace data, and the Hub does not remove it automatically. Remove the old container or pod with the runtime's own tools. On Kubernetes, check that its `scion.run_id` label is the source's run and not the agent's new pod, especially when both Runtime Brokers share a namespace. Then remove the broker-local agent directory. Do not clean up a source the agent was rolled back to: it still runs the agent. **Never delete anything on the NFS export:** the agent's workspace lives there and is in use.
+
 ## IAP-Protected Hubs
 
 When the Hub is behind [Google IAP](/scion/hosted/ha/auth-proxy-iap/), **all** brokers connecting to it need transport auth configured. Each broker must carry an OIDC token to traverse the platform guard.
