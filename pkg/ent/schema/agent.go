@@ -254,6 +254,15 @@ func (Agent) Fields() []ent.Field {
 		field.String("run_id").
 			Optional().
 			Default(""),
+		// previous_run_ids are the runs this agent's runtime entries may
+		// still carry besides run_id (ptone/scion#3097), oldest first: each
+		// run-ID write appends the run it replaced, and a write that settles
+		// the run (the broker reported or replaced the entry, or the dispatch
+		// reverted) clears them. A delete names each of them as well as
+		// run_id, so a start that never landed does not leave the previous
+		// entry behind. Empty for a settled run.
+		field.Strings("previous_run_ids").
+			Optional(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns

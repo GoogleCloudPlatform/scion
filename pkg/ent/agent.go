@@ -115,6 +115,8 @@ type Agent struct {
 	LaunchID string `json:"launch_id,omitempty"`
 	// RunID holds the value of the "run_id" field.
 	RunID string `json:"run_id,omitempty"`
+	// PreviousRunIds holds the value of the "previous_run_ids" field.
+	PreviousRunIds []string `json:"previous_run_ids,omitempty"`
 	// LaunchState holds the value of the "launch_state" field.
 	LaunchState string `json:"launch_state,omitempty"`
 	// LaunchEndReason holds the value of the "launch_end_reason" field.
@@ -234,7 +236,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case agent.FieldCreatedBy, agent.FieldOwnerID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry:
+		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry, agent.FieldPreviousRunIds:
 			values[i] = new([]byte)
 		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldLaunchAsyncOptIn:
 			values[i] = new(sql.NullBool)
@@ -564,6 +566,14 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field run_id", values[i])
 			} else if value.Valid {
 				_m.RunID = value.String
+			}
+		case agent.FieldPreviousRunIds:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field previous_run_ids", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.PreviousRunIds); err != nil {
+					return fmt.Errorf("unmarshal field previous_run_ids: %w", err)
+				}
 			}
 		case agent.FieldLaunchState:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -978,6 +988,9 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("run_id=")
 	builder.WriteString(_m.RunID)
+	builder.WriteString(", ")
+	builder.WriteString("previous_run_ids=")
+	builder.WriteString(fmt.Sprintf("%v", _m.PreviousRunIds))
 	builder.WriteString(", ")
 	builder.WriteString("launch_state=")
 	builder.WriteString(_m.LaunchState)

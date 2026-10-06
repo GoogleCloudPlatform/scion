@@ -285,6 +285,9 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		removeBranch = args.RemoveBranch
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
+		if len(args.PreviousRunIDs) > 0 {
+			agent.PreviousRunIDs = args.PreviousRunIDs
+		}
 	}
 	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
 		return "", fmt.Errorf("dispatch delete: %w", err)

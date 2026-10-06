@@ -877,6 +877,24 @@ func (_u *AgentUpdate) ClearRunID() *AgentUpdate {
 	return _u
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_u *AgentUpdate) SetPreviousRunIds(v []string) *AgentUpdate {
+	_u.mutation.SetPreviousRunIds(v)
+	return _u
+}
+
+// AppendPreviousRunIds appends value to the "previous_run_ids" field.
+func (_u *AgentUpdate) AppendPreviousRunIds(v []string) *AgentUpdate {
+	_u.mutation.AppendPreviousRunIds(v)
+	return _u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (_u *AgentUpdate) ClearPreviousRunIds() *AgentUpdate {
+	_u.mutation.ClearPreviousRunIds()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
 	_u.mutation.SetLaunchState(v)
@@ -1938,6 +1956,17 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.RunIDCleared() {
 		_spec.ClearField(agent.FieldRunID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedPreviousRunIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldPreviousRunIds, value)
+		})
+	}
+	if _u.mutation.PreviousRunIdsCleared() {
+		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -3113,6 +3142,24 @@ func (_u *AgentUpdateOne) ClearRunID() *AgentUpdateOne {
 	return _u
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_u *AgentUpdateOne) SetPreviousRunIds(v []string) *AgentUpdateOne {
+	_u.mutation.SetPreviousRunIds(v)
+	return _u
+}
+
+// AppendPreviousRunIds appends value to the "previous_run_ids" field.
+func (_u *AgentUpdateOne) AppendPreviousRunIds(v []string) *AgentUpdateOne {
+	_u.mutation.AppendPreviousRunIds(v)
+	return _u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (_u *AgentUpdateOne) ClearPreviousRunIds() *AgentUpdateOne {
+	_u.mutation.ClearPreviousRunIds()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
 	_u.mutation.SetLaunchState(v)
@@ -4204,6 +4251,17 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.RunIDCleared() {
 		_spec.ClearField(agent.FieldRunID, field.TypeString)
+	}
+	if value, ok := _u.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedPreviousRunIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldPreviousRunIds, value)
+		})
+	}
+	if _u.mutation.PreviousRunIdsCleared() {
+		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)

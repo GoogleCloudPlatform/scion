@@ -197,6 +197,7 @@ var (
 		{Name: "launch_async_opt_in", Type: field.TypeBool, Default: false},
 		{Name: "launch_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "run_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "previous_run_ids", Type: field.TypeJSON, Nullable: true},
 		{Name: "launch_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_end_reason", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_kind", Type: field.TypeString, Nullable: true, Default: ""},
@@ -239,7 +240,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[79]},
+				Columns:    []*schema.Column{AgentsColumns[80]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -248,12 +249,12 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[79]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[80]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[50]},
+				Columns: []*schema.Column{AgentsColumns[51]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -266,12 +267,12 @@ var (
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[65]},
+				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[66]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[70], AgentsColumns[74]},
+				Columns: []*schema.Column{AgentsColumns[71], AgentsColumns[75]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
