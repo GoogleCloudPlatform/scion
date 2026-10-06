@@ -51,6 +51,9 @@ type BrokerInfoResponse struct {
 	Capabilities *BrokerCapabilities `json:"capabilities,omitempty"`
 	Profiles     []BrokerProfile     `json:"profiles,omitempty"`
 	Projects     []ProjectInfo       `json:"projects,omitempty"`
+	// WorkspaceStorage is the broker's workspace storage descriptor, the
+	// same value it reports to the hub on every heartbeat.
+	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -95,6 +98,16 @@ type BrokerCapabilities struct {
 	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
 	// hub refuses to dispatch such agents to a broker without it (412).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// AgentMove indicates this broker can take part in moving an agent to
+	// or from another broker on the same workspace export (`scion
+	// reincarnate --broker`). The hub refuses a move unless both brokers
+	// report it (412).
+	AgentMove bool `json:"agentMove"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -165,6 +178,15 @@ type AgentResponse struct {
 	// them in its own create and start responses. Other broker-local start
 	// warnings are deliberately not included.
 	Warnings []string `json:"warnings,omitempty"`
+	// RunID is the run identity the runtime entry carries (its scion.run_id
+	// label). It usually echoes the runId the hub sent, but a start that
+	// found the agent already running reports the existing run's ID, so
+	// the hub can record the run that actually exists (ptone/scion#2550).
+	RunID string `json:"runId,omitempty"`
+	// WorkspacePlacement is where the start this response answers placed
+	// the agent's workspace (api.WorkspacePlacementExport or
+	// WorkspacePlacementLocal). Empty when no start resolved it.
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -308,6 +330,12 @@ type CreateAgentRequest struct {
 	// LaunchID is the Hub's launch identifier (BeginLaunch's return value),
 	// echoed back on every report for this launch.
 	LaunchID string `json:"launchId,omitempty"`
+	// RunID is the Hub-minted identity of the run this create starts
+	// (ptone/scion#2550), distinct from LaunchID. The broker labels the
+	// runtime entry with it (api.LabelRunID) so a later delete carrying it
+	// targets only this run. Empty from an older hub; pkg/agent then mints
+	// one itself.
+	RunID string `json:"runId,omitempty"`
 	// LaunchTimeoutSeconds is the remaining launch budget at send time
 	// (ceil(launch_deadline - send time)), not the Hub's configured
 	// launchTimeout setting.
@@ -363,6 +391,13 @@ type CreateAgentConfig struct {
 	// workspace (git-workspace hybrid mode). When true, the broker skips
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings, sent by the Hub alongside SharedWorkspace. It never turns on
+	// the per-agent clone mode GitClone does; it reaches the runtime only as
+	// the clone settings of the Kubernetes workspace-provision init container
+	// (api.StartOptions.SharedWorkspaceClone).
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
 
 	// SharedDirs contains project-level shared directory declarations.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
@@ -590,6 +625,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		ID:                    info.ID,
 		Slug:                  info.Slug,
 		ContainerID:           info.ContainerID,
+		RunID:                 info.RunID,
 		Name:                  info.Name,
 		Template:              info.Template,
 		HarnessConfig:         info.HarnessConfig,
@@ -606,6 +642,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
+		WorkspacePlacement:    info.WorkspacePlacement,
 	}
 	if len(info.HubOnlyEnvWarnings) > 0 {
 		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)

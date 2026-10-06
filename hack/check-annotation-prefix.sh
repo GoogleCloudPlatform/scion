@@ -5,7 +5,7 @@
 # check ensures no new scion.io/ references are added without explicit intent.
 #
 # Severity: FORMATTING-GRADE
-#   - Missing rg: exit 0 (silent skip)
+#   - Missing rg: exit 3 (nothing analysed; see hack/lib/require-tool.sh)
 #   - No candidates: exit 0
 #   - Violations found: exit 1
 #   - Clean: exit 0
@@ -21,11 +21,10 @@ if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   sha="${sha}-dirty"
 fi
 
-# --- Dependency check (formatting-grade: exit 0 if missing) ---
-if ! command -v rg >/dev/null 2>&1; then
-  echo "Warning: ripgrep (rg) not found — skipping annotation-prefix check" >&2
-  exit 0
-fi
+# --- Dependency check (exit 3 if missing, at every severity level) ---
+# shellcheck source=SCRIPTDIR/lib/require-tool.sh
+source hack/lib/require-tool.sh
+require_tool rg check-annotation-prefix "ripgrep (rg)"
 
 # --- Pre-filter: find candidate files ---
 tmp="$(mktemp)"
@@ -78,7 +77,12 @@ allowed_paths=(
   # Ent adapter: queries brokers by scion.io/broker-role label.
   "^pkg/store/entadapter/project_store.go$"
 
-  # Model constants: defines LabelTemplate = "scion.io/template".
+  # Model constants: defines LabelTemplate = "scion.io/template", the
+  # shared project members group marker keys (canonical
+  # scion.io/project-members-group and the read-only legacy
+  # scion.io/system-project-members-group, ptone/scion#2556) and the project
+  # agents group marker scion.io/project-agents-group, so pkg/hub and
+  # pkg/store/entadapter import one definition.
   "^pkg/store/models.go$"
 
   # --- pkg/hub/ ---
@@ -87,6 +91,9 @@ allowed_paths=(
 
   # Runtime broker handlers: filters by scion.io/plugin label.
   "^pkg/hub/handlers_runtime_brokers.go$"
+
+  # Reincarnate move target resolution: excludes scion.io/plugin-labelled brokers.
+  "^pkg/hub/reincarnate_move.go$"
 
   # Agent creation helpers: references scion.io/default-harness-config in
   # design comment.
@@ -111,16 +118,12 @@ allowed_paths=(
   "^pkg/hubclient/types.go$"
 
   # --- pkg/store/entadapter/ ---
-  # Composite adapter: defines system annotation constants for project
-  # members-group, agents-group, and adoption-review-required.
+  # Composite adapter: defines the adoption-review-required annotation
+  # constant (the agents-group and members-group keys live in
+  # pkg/store/models.go).
   "^pkg/store/entadapter/composite.go$"
 
   # --- pkg/hub/ (additional) ---
-  # Core project handlers: defines system annotation constants for project
-  # members-group and agents-group, including the legacy read-only
-  # scion.io/system-project-members-group key (ptone/scion#2556).
-  "^pkg/hub/handlers_projects_core.go$"
-
   # Passthrough gate: checks scion.io/broker-role label on embedded brokers.
   "^pkg/hub/passthrough_gate.go$"
 

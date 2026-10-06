@@ -46,6 +46,20 @@ func deleteStopNoop(a *store.Agent) bool {
 	return deletionActive(a) || a.DeletionState == store.DeletionStateFinalizing
 }
 
+// deletedOrDeleteHeld reports whether an agent row that still exists is
+// soft-deleted or held by a delete (deleteStopNoop). With a row that is
+// gone, it is the "the agent is not live" rule shared by the created
+// publish (publishAgentCreatedIfLive), the message-broker subscription on
+// created (createdAgentLive) and the compensating delete of a landed run
+// (compensateLandedRun). A failed delete, or a deleting row whose lease
+// expired, does not count: that delete gave up.
+func deletedOrDeleteHeld(a *store.Agent) bool {
+	if a == nil {
+		return false
+	}
+	return !a.DeletedAt.IsZero() || deleteStopNoop(a)
+}
+
 // deleteBlocksStart is the start-block predicate (design §2.1):
 //
 //	deletionActive(a)
@@ -60,7 +74,9 @@ func (s *Server) deleteBlocksStart(ctx context.Context, a *store.Agent) (bool, e
 	if a == nil {
 		return false, nil
 	}
-	if deletionActive(a) || a.DeletionState == store.DeletionStateFinalizing {
+	// store.DeletionHoldsRow is deletionActive(a) || finalizing (even
+	// expired); SetAgentRunID refuses under the same predicate.
+	if a.DeletionHoldsRow(time.Now()) {
 		return true, nil
 	}
 	return s.store.HasOutstandingBrokerDispatch(ctx, a.ID, brokerDispatchOpDelete)
@@ -139,6 +155,8 @@ func (r *startRefusal) dmError() *AgentDMError {
 // match wins:
 //
 //  1. deleteBlocksStart → 409 delete_in_progress (this design);
+//     1b. soft-deleted, on start, restart and wake → 409 "agent is
+//     deleted; restore it first";
 //  2. IsIncompleteCreate → 409 agent_create_incomplete (T1 P1b-3);
 //  3. IsInFlight, before the launch deadline → 409 agent_launching with
 //     InFlight set (T1 P1b-3). Start, restart and create-existing answer
@@ -164,18 +182,89 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 		}
 	}
 	if blocked {
-		return &startRefusal{
-			HTTPStatus: http.StatusConflict,
-			Code:       ErrCodeDeleteInProgress,
-			Message:    "a delete is in progress for this agent; wait for it to finish, or force the delete",
-			Details: map[string]interface{}{
-				"agentId": a.ID,
-			},
-		}
+		return deleteInProgressRefusal(a.ID)
+	}
+
+	// Step 1b: a soft-deleted row is not started or woken in place; only
+	// restore brings it back (ptone/scion#2550 P1). Without this the start
+	// would pass the gate and fail later at beginRun, whose run-ID write
+	// refuses a soft-deleted row, after quota was reserved. It comes after
+	// step 1 because a restore is refused while a delete holds the row.
+	if !a.DeletedAt.IsZero() && (entry == startEntryStart || entry == startEntryRestart || entry == startEntryWake) {
+		return agentDeletedRefusal(a.ID)
 	}
 
 	// Steps 2-3: incomplete create, then in flight.
 	return launchStartRefusal(a, time.Now())
+}
+
+// agentDeletedRefusal is the 409 answer to starting or waking a
+// soft-deleted agent.
+func agentDeletedRefusal(agentID string) *startRefusal {
+	return &startRefusal{
+		HTTPStatus: http.StatusConflict,
+		Code:       ErrCodeConflict,
+		Message:    "agent is deleted; restore it first",
+		Details: map[string]interface{}{
+			"agentId": agentID,
+		},
+	}
+}
+
+// deleteInProgressRefusal is the 409 delete_in_progress answer.
+func deleteInProgressRefusal(agentID string) *startRefusal {
+	return &startRefusal{
+		HTTPStatus: http.StatusConflict,
+		Code:       ErrCodeDeleteInProgress,
+		Message:    "a delete is in progress for this agent; wait for it to finish, or force the delete",
+		Details: map[string]interface{}{
+			"agentId": agentID,
+		},
+	}
+}
+
+// deletedDuringCreateMessage is the message of the 409 a synchronous create
+// answers when a delete won the race (writeDeletedDuringCreate).
+const deletedDuringCreateMessage = "agent was deleted while it was being created"
+
+// writeDeletedDuringCreate writes the 409 delete_in_progress answer to a
+// synchronous create whose agent was deleted, or is held by a delete, by the
+// time the dispatch returned (ptone/scion#3099). The code is the one start
+// and restart answer when they lose to a delete mid-dispatch
+// (deleteClaimedDuringDispatch), and is the same whether the delete still
+// holds the row or has finished. The body carries no agent; warnings (the
+// outcome of the compensating delete of a run that landed) go in details.
+func writeDeletedDuringCreate(w http.ResponseWriter, agentID string, warnings []string) {
+	details := map[string]interface{}{"agentId": agentID}
+	if len(warnings) > 0 {
+		details["warnings"] = warnings
+	}
+	writeError(w, http.StatusConflict, ErrCodeDeleteInProgress, deletedDuringCreateMessage, details)
+}
+
+// deleteClaimedDuringDispatch returns the delete_in_progress refusal when a
+// start or restart dispatch failed because a delete claimed the agent after
+// the start gate passed: beginRun's run-ID write is refused once a delete
+// holds the row (store.ErrDeleteInProgress), so the start fails closed
+// before reaching the broker, rather than starting a run the delete's
+// snapshot does not name (ptone/scion#2550 P1 round 3).
+func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
+	if !errors.Is(err, store.ErrDeleteInProgress) {
+		return nil
+	}
+	return deleteInProgressRefusal(agentID)
+}
+
+// writeRunIntentError answers a failed running-intent write. A refusal
+// because a delete holds the row (store.ErrDeleteInProgress) gets the same
+// delete_in_progress body, details.agentId included, as every other
+// delete_in_progress answer; anything else goes to writeErrorFromErr.
+func writeRunIntentError(w http.ResponseWriter, err error, agentID string) {
+	if refusal := deleteClaimedDuringDispatch(err, agentID); refusal != nil {
+		refusal.write(w)
+		return
+	}
+	writeErrorFromErr(w, err, "")
 }
 
 // clearFailedDeletion clears a failed delete marker after a successful
@@ -265,14 +354,17 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 //
 // Only the columns the in-tx guard and the clear can change are carried over
 // from the re-read; in-memory fields the dispatch set are kept. If the re-read
-// fails, a falls back to the requested phase (the pre-guard behaviour).
-func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) {
+// fails, a falls back to the requested phase (the pre-guard behaviour) and
+// reloaded is false.
+func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloaded bool) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
 	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
+		return false
 	}
+	return true
 }
 
 // reloadGuardedColumns re-reads a's row and copies the columns a concurrent
@@ -291,6 +383,7 @@ func (s *Server) reloadGuardedColumns(ctx context.Context, a *store.Agent) error
 	a.Message = fresh.Message
 	a.StateVersion = fresh.StateVersion
 	a.DeletedAt = fresh.DeletedAt
+	a.SoftDeleteOpID = fresh.SoftDeleteOpID
 	a.DeletionState = fresh.DeletionState
 	a.DeletionClaim = fresh.DeletionClaim
 	a.DeletionLeaseAt = fresh.DeletionLeaseAt

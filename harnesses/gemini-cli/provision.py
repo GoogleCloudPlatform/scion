@@ -271,6 +271,16 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         "GEMINI_TELEMETRY_USE_COLLECTOR": "false",
         "GEMINI_TELEMETRY_OUTFILE": "",
     })
+    # ptone/scion#2234: gemini-cli's usage (gen_ai.api.calls /
+    # scion.usage.tokens) is derived by sciontool's receiver from the native
+    # gemini_cli.api_response / gemini_cli.api_error log events, vetted
+    # against a captured fixture (pkg/sciontool/telemetry/testdata/usage/
+    # gemini-cli-0.62.0.pb.json). Set only when telemetry is enabled, the
+    # same as codex and claude: narrow to usage (D4), and unset means no
+    # usage is published at all (D10) -- the unvetted AfterModel hook calls
+    # stay off either way.
+    if enabled:
+        env["SCION_USAGE_SOURCE"] = "native"
     settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
     try:
         settings = scion_harness.load_json(settings_path) if os.path.isfile(settings_path) else {}

@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Agent list views selected by the "view" query parameter of
@@ -28,11 +30,16 @@ const (
 )
 
 // AgentCompactItem is one agent in a view=compact agent list: the fields a
-// graph or tree consumer needs (identity, project, status, lineage,
-// messaging mode, creator) plus the same per-item capabilities and
-// messageability the full view carries. It deliberately has no
-// appliedConfig: the only value taken from the applied configuration is
-// CreatorName.
+// graph or tree consumer needs (identity, project, status, detail message,
+// lineage, messaging mode, creator) plus the same per-item capabilities and
+// messageability and deletion view the full view carries. It deliberately
+// has no appliedConfig: the only value taken from the applied configuration
+// is CreatorName.
+//
+// Message, the agent's detail status message, has the same type and tag as
+// the full item's field (store.Agent.Message) and is copied from the same
+// full item, so compact emits exactly what full emits for every caller,
+// including omitting it when empty.
 //
 // The JSON key set is fixed by TestAgentCompactView_KeySetIsAllowlist.
 type AgentCompactItem struct {
@@ -46,6 +53,7 @@ type AgentCompactItem struct {
 	Phase           string            `json:"phase,omitempty"`
 	Activity        string            `json:"activity,omitempty"`
 	ContainerStatus string            `json:"containerStatus,omitempty"`
+	Message         string            `json:"message,omitempty"`
 	MessageMode     string            `json:"messageMode"`
 	Ancestry        []string          `json:"ancestry,omitempty"`
 	CreatedBy       string            `json:"createdBy,omitempty"`
@@ -61,6 +69,11 @@ type AgentCompactItem struct {
 	// value. It is set only where the full view sets it (the global
 	// endpoint).
 	Messageability interface{} `json:"_messageability,omitempty"`
+	// Deletion has the same type and tag as the full item's field (always
+	// emitted, an explicit null when no delete is active or failed) and is
+	// copied as is, so a graph loaded from the compact view shows the
+	// same deletion state as one loaded from the full view.
+	Deletion *store.DeletionInfo `json:"deletion"`
 }
 
 // listAgentsCompactResponse is ListAgentsResponse with its agents replaced
@@ -93,6 +106,7 @@ func toCompact(a AgentWithCapabilities) AgentCompactItem {
 		Phase:             a.Phase,
 		Activity:          a.Activity,
 		ContainerStatus:   a.ContainerStatus,
+		Message:           a.Message,
 		MessageMode:       a.MessageMode,
 		Ancestry:          a.Ancestry,
 		CreatedBy:         a.CreatedBy,
@@ -101,6 +115,7 @@ func toCompact(a AgentWithCapabilities) AgentCompactItem {
 		LastActivityEvent: a.LastActivityEvent,
 		Cap:               a.Cap,
 		Messageability:    a.Messageability,
+		Deletion:          a.Deletion,
 	}
 	if a.AppliedConfig != nil {
 		item.CreatorName = a.AppliedConfig.CreatorName

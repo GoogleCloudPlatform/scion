@@ -56,7 +56,11 @@ func (m *mockAgentManager) Start(ctx context.Context, opts api.StartOptions) (*a
 	return nil, nil
 }
 
-func (m *mockAgentManager) Stop(ctx context.Context, name string, projectPath string) error {
+func (m *mockAgentManager) Stop(ctx context.Context, name, projectPath, runID string) error {
+	return nil
+}
+
+func (m *mockAgentManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
 	return nil
 }
 
@@ -64,7 +68,7 @@ func (m *mockAgentManager) Delete(ctx context.Context, name string, deleteFiles 
 	return true, nil
 }
 
-func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockAgentManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
@@ -73,10 +77,6 @@ func (m *mockAgentManager) List(ctx context.Context, filter map[string]string) (
 }
 
 func (m *mockAgentManager) Message(ctx context.Context, name, projectID, message string, interrupt bool) error {
-	return nil
-}
-
-func (m *mockAgentManager) MessageRaw(ctx context.Context, name, projectID string, keys string) error {
 	return nil
 }
 

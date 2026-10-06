@@ -166,6 +166,11 @@ func RuntimeBrokerID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRuntimeBrokerID, v))
 }
 
+// WorkspacePlacement applies equality check predicate on the "workspace_placement" field. It's identical to WorkspacePlacementEQ.
+func WorkspacePlacement(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldWorkspacePlacement, v))
+}
+
 // WebPtyEnabled applies equality check predicate on the "web_pty_enabled" field. It's identical to WebPtyEnabledEQ.
 func WebPtyEnabled(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldWebPtyEnabled, v))
@@ -249,6 +254,11 @@ func LaunchAsyncOptIn(v bool) predicate.Agent {
 // LaunchID applies equality check predicate on the "launch_id" field. It's identical to LaunchIDEQ.
 func LaunchID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchID, v))
+}
+
+// RunID applies equality check predicate on the "run_id" field. It's identical to RunIDEQ.
+func RunID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunID, v))
 }
 
 // LaunchState applies equality check predicate on the "launch_state" field. It's identical to LaunchStateEQ.
@@ -349,6 +359,61 @@ func RunIntent(v string) predicate.Agent {
 // RunIntentAt applies equality check predicate on the "run_intent_at" field. It's identical to RunIntentAtEQ.
 func RunIntentAt(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRunIntentAt, v))
+}
+
+// StartClaimID applies equality check predicate on the "start_claim_id" field. It's identical to StartClaimIDEQ.
+func StartClaimID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimID, v))
+}
+
+// StartClaimKind applies equality check predicate on the "start_claim_kind" field. It's identical to StartClaimKindEQ.
+func StartClaimKind(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimKind, v))
+}
+
+// StartClaimState applies equality check predicate on the "start_claim_state" field. It's identical to StartClaimStateEQ.
+func StartClaimState(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimState, v))
+}
+
+// StartClaimOwner applies equality check predicate on the "start_claim_owner" field. It's identical to StartClaimOwnerEQ.
+func StartClaimOwner(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimOwner, v))
+}
+
+// StartClaimTarget applies equality check predicate on the "start_claim_target" field. It's identical to StartClaimTargetEQ.
+func StartClaimTarget(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimTarget, v))
+}
+
+// StartClaimAt applies equality check predicate on the "start_claim_at" field. It's identical to StartClaimAtEQ.
+func StartClaimAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimAt, v))
+}
+
+// StartClaimLeaseUntil applies equality check predicate on the "start_claim_lease_until" field. It's identical to StartClaimLeaseUntilEQ.
+func StartClaimLeaseUntil(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimLeaseUntil, v))
+}
+
+// StartClaimUnconfirmedAt applies equality check predicate on the "start_claim_unconfirmed_at" field. It's identical to StartClaimUnconfirmedAtEQ.
+func StartClaimUnconfirmedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimUnconfirmedAt, v))
+}
+
+// StartClaimHoldUntil applies equality check predicate on the "start_claim_hold_until" field. It's identical to StartClaimHoldUntilEQ.
+func StartClaimHoldUntil(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimHoldUntil, v))
+}
+
+// StartClaimLaunchID applies equality check predicate on the "start_claim_launch_id" field. It's identical to StartClaimLaunchIDEQ.
+func StartClaimLaunchID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimLaunchID, v))
+}
+
+// SoftDeleteOpID applies equality check predicate on the "soft_delete_op_id" field. It's identical to SoftDeleteOpIDEQ.
+func SoftDeleteOpID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSoftDeleteOpID, v))
 }
 
 // SlugEQ applies the EQ predicate on the "slug" field.
@@ -1711,6 +1776,81 @@ func RuntimeBrokerIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldRuntimeBrokerID, v))
 }
 
+// WorkspacePlacementEQ applies the EQ predicate on the "workspace_placement" field.
+func WorkspacePlacementEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementNEQ applies the NEQ predicate on the "workspace_placement" field.
+func WorkspacePlacementNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementIn applies the In predicate on the "workspace_placement" field.
+func WorkspacePlacementIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldWorkspacePlacement, vs...))
+}
+
+// WorkspacePlacementNotIn applies the NotIn predicate on the "workspace_placement" field.
+func WorkspacePlacementNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldWorkspacePlacement, vs...))
+}
+
+// WorkspacePlacementGT applies the GT predicate on the "workspace_placement" field.
+func WorkspacePlacementGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementGTE applies the GTE predicate on the "workspace_placement" field.
+func WorkspacePlacementGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementLT applies the LT predicate on the "workspace_placement" field.
+func WorkspacePlacementLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementLTE applies the LTE predicate on the "workspace_placement" field.
+func WorkspacePlacementLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementContains applies the Contains predicate on the "workspace_placement" field.
+func WorkspacePlacementContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementHasPrefix applies the HasPrefix predicate on the "workspace_placement" field.
+func WorkspacePlacementHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementHasSuffix applies the HasSuffix predicate on the "workspace_placement" field.
+func WorkspacePlacementHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementIsNil applies the IsNil predicate on the "workspace_placement" field.
+func WorkspacePlacementIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldWorkspacePlacement))
+}
+
+// WorkspacePlacementNotNil applies the NotNil predicate on the "workspace_placement" field.
+func WorkspacePlacementNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldWorkspacePlacement))
+}
+
+// WorkspacePlacementEqualFold applies the EqualFold predicate on the "workspace_placement" field.
+func WorkspacePlacementEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldWorkspacePlacement, v))
+}
+
+// WorkspacePlacementContainsFold applies the ContainsFold predicate on the "workspace_placement" field.
+func WorkspacePlacementContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldWorkspacePlacement, v))
+}
+
 // WebPtyEnabledEQ applies the EQ predicate on the "web_pty_enabled" field.
 func WebPtyEnabledEQ(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldWebPtyEnabled, v))
@@ -2609,6 +2749,91 @@ func LaunchIDEqualFold(v string) predicate.Agent {
 // LaunchIDContainsFold applies the ContainsFold predicate on the "launch_id" field.
 func LaunchIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldLaunchID, v))
+}
+
+// RunIDEQ applies the EQ predicate on the "run_id" field.
+func RunIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldRunID, v))
+}
+
+// RunIDNEQ applies the NEQ predicate on the "run_id" field.
+func RunIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldRunID, v))
+}
+
+// RunIDIn applies the In predicate on the "run_id" field.
+func RunIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldRunID, vs...))
+}
+
+// RunIDNotIn applies the NotIn predicate on the "run_id" field.
+func RunIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldRunID, vs...))
+}
+
+// RunIDGT applies the GT predicate on the "run_id" field.
+func RunIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldRunID, v))
+}
+
+// RunIDGTE applies the GTE predicate on the "run_id" field.
+func RunIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldRunID, v))
+}
+
+// RunIDLT applies the LT predicate on the "run_id" field.
+func RunIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldRunID, v))
+}
+
+// RunIDLTE applies the LTE predicate on the "run_id" field.
+func RunIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldRunID, v))
+}
+
+// RunIDContains applies the Contains predicate on the "run_id" field.
+func RunIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldRunID, v))
+}
+
+// RunIDHasPrefix applies the HasPrefix predicate on the "run_id" field.
+func RunIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldRunID, v))
+}
+
+// RunIDHasSuffix applies the HasSuffix predicate on the "run_id" field.
+func RunIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldRunID, v))
+}
+
+// RunIDIsNil applies the IsNil predicate on the "run_id" field.
+func RunIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldRunID))
+}
+
+// RunIDNotNil applies the NotNil predicate on the "run_id" field.
+func RunIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldRunID))
+}
+
+// RunIDEqualFold applies the EqualFold predicate on the "run_id" field.
+func RunIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldRunID, v))
+}
+
+// RunIDContainsFold applies the ContainsFold predicate on the "run_id" field.
+func RunIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldRunID, v))
+}
+
+// PreviousRunIdsIsNil applies the IsNil predicate on the "previous_run_ids" field.
+func PreviousRunIdsIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldPreviousRunIds))
+}
+
+// PreviousRunIdsNotNil applies the NotNil predicate on the "previous_run_ids" field.
+func PreviousRunIdsNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldPreviousRunIds))
 }
 
 // LaunchStateEQ applies the EQ predicate on the "launch_state" field.
@@ -3889,6 +4114,731 @@ func RunIntentAtIsNil() predicate.Agent {
 // RunIntentAtNotNil applies the NotNil predicate on the "run_intent_at" field.
 func RunIntentAtNotNil() predicate.Agent {
 	return predicate.Agent(sql.FieldNotNull(FieldRunIntentAt))
+}
+
+// StartClaimIDEQ applies the EQ predicate on the "start_claim_id" field.
+func StartClaimIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimID, v))
+}
+
+// StartClaimIDNEQ applies the NEQ predicate on the "start_claim_id" field.
+func StartClaimIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimID, v))
+}
+
+// StartClaimIDIn applies the In predicate on the "start_claim_id" field.
+func StartClaimIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimID, vs...))
+}
+
+// StartClaimIDNotIn applies the NotIn predicate on the "start_claim_id" field.
+func StartClaimIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimID, vs...))
+}
+
+// StartClaimIDGT applies the GT predicate on the "start_claim_id" field.
+func StartClaimIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimID, v))
+}
+
+// StartClaimIDGTE applies the GTE predicate on the "start_claim_id" field.
+func StartClaimIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimID, v))
+}
+
+// StartClaimIDLT applies the LT predicate on the "start_claim_id" field.
+func StartClaimIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimID, v))
+}
+
+// StartClaimIDLTE applies the LTE predicate on the "start_claim_id" field.
+func StartClaimIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimID, v))
+}
+
+// StartClaimIDContains applies the Contains predicate on the "start_claim_id" field.
+func StartClaimIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldStartClaimID, v))
+}
+
+// StartClaimIDHasPrefix applies the HasPrefix predicate on the "start_claim_id" field.
+func StartClaimIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldStartClaimID, v))
+}
+
+// StartClaimIDHasSuffix applies the HasSuffix predicate on the "start_claim_id" field.
+func StartClaimIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldStartClaimID, v))
+}
+
+// StartClaimIDIsNil applies the IsNil predicate on the "start_claim_id" field.
+func StartClaimIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimID))
+}
+
+// StartClaimIDNotNil applies the NotNil predicate on the "start_claim_id" field.
+func StartClaimIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimID))
+}
+
+// StartClaimIDEqualFold applies the EqualFold predicate on the "start_claim_id" field.
+func StartClaimIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldStartClaimID, v))
+}
+
+// StartClaimIDContainsFold applies the ContainsFold predicate on the "start_claim_id" field.
+func StartClaimIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldStartClaimID, v))
+}
+
+// StartClaimKindEQ applies the EQ predicate on the "start_claim_kind" field.
+func StartClaimKindEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimKind, v))
+}
+
+// StartClaimKindNEQ applies the NEQ predicate on the "start_claim_kind" field.
+func StartClaimKindNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimKind, v))
+}
+
+// StartClaimKindIn applies the In predicate on the "start_claim_kind" field.
+func StartClaimKindIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimKind, vs...))
+}
+
+// StartClaimKindNotIn applies the NotIn predicate on the "start_claim_kind" field.
+func StartClaimKindNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimKind, vs...))
+}
+
+// StartClaimKindGT applies the GT predicate on the "start_claim_kind" field.
+func StartClaimKindGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimKind, v))
+}
+
+// StartClaimKindGTE applies the GTE predicate on the "start_claim_kind" field.
+func StartClaimKindGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimKind, v))
+}
+
+// StartClaimKindLT applies the LT predicate on the "start_claim_kind" field.
+func StartClaimKindLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimKind, v))
+}
+
+// StartClaimKindLTE applies the LTE predicate on the "start_claim_kind" field.
+func StartClaimKindLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimKind, v))
+}
+
+// StartClaimKindContains applies the Contains predicate on the "start_claim_kind" field.
+func StartClaimKindContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldStartClaimKind, v))
+}
+
+// StartClaimKindHasPrefix applies the HasPrefix predicate on the "start_claim_kind" field.
+func StartClaimKindHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldStartClaimKind, v))
+}
+
+// StartClaimKindHasSuffix applies the HasSuffix predicate on the "start_claim_kind" field.
+func StartClaimKindHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldStartClaimKind, v))
+}
+
+// StartClaimKindIsNil applies the IsNil predicate on the "start_claim_kind" field.
+func StartClaimKindIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimKind))
+}
+
+// StartClaimKindNotNil applies the NotNil predicate on the "start_claim_kind" field.
+func StartClaimKindNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimKind))
+}
+
+// StartClaimKindEqualFold applies the EqualFold predicate on the "start_claim_kind" field.
+func StartClaimKindEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldStartClaimKind, v))
+}
+
+// StartClaimKindContainsFold applies the ContainsFold predicate on the "start_claim_kind" field.
+func StartClaimKindContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldStartClaimKind, v))
+}
+
+// StartClaimStateEQ applies the EQ predicate on the "start_claim_state" field.
+func StartClaimStateEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimState, v))
+}
+
+// StartClaimStateNEQ applies the NEQ predicate on the "start_claim_state" field.
+func StartClaimStateNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimState, v))
+}
+
+// StartClaimStateIn applies the In predicate on the "start_claim_state" field.
+func StartClaimStateIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimState, vs...))
+}
+
+// StartClaimStateNotIn applies the NotIn predicate on the "start_claim_state" field.
+func StartClaimStateNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimState, vs...))
+}
+
+// StartClaimStateGT applies the GT predicate on the "start_claim_state" field.
+func StartClaimStateGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimState, v))
+}
+
+// StartClaimStateGTE applies the GTE predicate on the "start_claim_state" field.
+func StartClaimStateGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimState, v))
+}
+
+// StartClaimStateLT applies the LT predicate on the "start_claim_state" field.
+func StartClaimStateLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimState, v))
+}
+
+// StartClaimStateLTE applies the LTE predicate on the "start_claim_state" field.
+func StartClaimStateLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimState, v))
+}
+
+// StartClaimStateContains applies the Contains predicate on the "start_claim_state" field.
+func StartClaimStateContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldStartClaimState, v))
+}
+
+// StartClaimStateHasPrefix applies the HasPrefix predicate on the "start_claim_state" field.
+func StartClaimStateHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldStartClaimState, v))
+}
+
+// StartClaimStateHasSuffix applies the HasSuffix predicate on the "start_claim_state" field.
+func StartClaimStateHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldStartClaimState, v))
+}
+
+// StartClaimStateIsNil applies the IsNil predicate on the "start_claim_state" field.
+func StartClaimStateIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimState))
+}
+
+// StartClaimStateNotNil applies the NotNil predicate on the "start_claim_state" field.
+func StartClaimStateNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimState))
+}
+
+// StartClaimStateEqualFold applies the EqualFold predicate on the "start_claim_state" field.
+func StartClaimStateEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldStartClaimState, v))
+}
+
+// StartClaimStateContainsFold applies the ContainsFold predicate on the "start_claim_state" field.
+func StartClaimStateContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldStartClaimState, v))
+}
+
+// StartClaimOwnerEQ applies the EQ predicate on the "start_claim_owner" field.
+func StartClaimOwnerEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerNEQ applies the NEQ predicate on the "start_claim_owner" field.
+func StartClaimOwnerNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerIn applies the In predicate on the "start_claim_owner" field.
+func StartClaimOwnerIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimOwner, vs...))
+}
+
+// StartClaimOwnerNotIn applies the NotIn predicate on the "start_claim_owner" field.
+func StartClaimOwnerNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimOwner, vs...))
+}
+
+// StartClaimOwnerGT applies the GT predicate on the "start_claim_owner" field.
+func StartClaimOwnerGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerGTE applies the GTE predicate on the "start_claim_owner" field.
+func StartClaimOwnerGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerLT applies the LT predicate on the "start_claim_owner" field.
+func StartClaimOwnerLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerLTE applies the LTE predicate on the "start_claim_owner" field.
+func StartClaimOwnerLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerContains applies the Contains predicate on the "start_claim_owner" field.
+func StartClaimOwnerContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerHasPrefix applies the HasPrefix predicate on the "start_claim_owner" field.
+func StartClaimOwnerHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerHasSuffix applies the HasSuffix predicate on the "start_claim_owner" field.
+func StartClaimOwnerHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerIsNil applies the IsNil predicate on the "start_claim_owner" field.
+func StartClaimOwnerIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimOwner))
+}
+
+// StartClaimOwnerNotNil applies the NotNil predicate on the "start_claim_owner" field.
+func StartClaimOwnerNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimOwner))
+}
+
+// StartClaimOwnerEqualFold applies the EqualFold predicate on the "start_claim_owner" field.
+func StartClaimOwnerEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldStartClaimOwner, v))
+}
+
+// StartClaimOwnerContainsFold applies the ContainsFold predicate on the "start_claim_owner" field.
+func StartClaimOwnerContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldStartClaimOwner, v))
+}
+
+// StartClaimTargetEQ applies the EQ predicate on the "start_claim_target" field.
+func StartClaimTargetEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetNEQ applies the NEQ predicate on the "start_claim_target" field.
+func StartClaimTargetNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetIn applies the In predicate on the "start_claim_target" field.
+func StartClaimTargetIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimTarget, vs...))
+}
+
+// StartClaimTargetNotIn applies the NotIn predicate on the "start_claim_target" field.
+func StartClaimTargetNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimTarget, vs...))
+}
+
+// StartClaimTargetGT applies the GT predicate on the "start_claim_target" field.
+func StartClaimTargetGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetGTE applies the GTE predicate on the "start_claim_target" field.
+func StartClaimTargetGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetLT applies the LT predicate on the "start_claim_target" field.
+func StartClaimTargetLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetLTE applies the LTE predicate on the "start_claim_target" field.
+func StartClaimTargetLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetContains applies the Contains predicate on the "start_claim_target" field.
+func StartClaimTargetContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetHasPrefix applies the HasPrefix predicate on the "start_claim_target" field.
+func StartClaimTargetHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetHasSuffix applies the HasSuffix predicate on the "start_claim_target" field.
+func StartClaimTargetHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetIsNil applies the IsNil predicate on the "start_claim_target" field.
+func StartClaimTargetIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimTarget))
+}
+
+// StartClaimTargetNotNil applies the NotNil predicate on the "start_claim_target" field.
+func StartClaimTargetNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimTarget))
+}
+
+// StartClaimTargetEqualFold applies the EqualFold predicate on the "start_claim_target" field.
+func StartClaimTargetEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldStartClaimTarget, v))
+}
+
+// StartClaimTargetContainsFold applies the ContainsFold predicate on the "start_claim_target" field.
+func StartClaimTargetContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldStartClaimTarget, v))
+}
+
+// StartClaimAtEQ applies the EQ predicate on the "start_claim_at" field.
+func StartClaimAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimAt, v))
+}
+
+// StartClaimAtNEQ applies the NEQ predicate on the "start_claim_at" field.
+func StartClaimAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimAt, v))
+}
+
+// StartClaimAtIn applies the In predicate on the "start_claim_at" field.
+func StartClaimAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimAt, vs...))
+}
+
+// StartClaimAtNotIn applies the NotIn predicate on the "start_claim_at" field.
+func StartClaimAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimAt, vs...))
+}
+
+// StartClaimAtGT applies the GT predicate on the "start_claim_at" field.
+func StartClaimAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimAt, v))
+}
+
+// StartClaimAtGTE applies the GTE predicate on the "start_claim_at" field.
+func StartClaimAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimAt, v))
+}
+
+// StartClaimAtLT applies the LT predicate on the "start_claim_at" field.
+func StartClaimAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimAt, v))
+}
+
+// StartClaimAtLTE applies the LTE predicate on the "start_claim_at" field.
+func StartClaimAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimAt, v))
+}
+
+// StartClaimAtIsNil applies the IsNil predicate on the "start_claim_at" field.
+func StartClaimAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimAt))
+}
+
+// StartClaimAtNotNil applies the NotNil predicate on the "start_claim_at" field.
+func StartClaimAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimAt))
+}
+
+// StartClaimLeaseUntilEQ applies the EQ predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimLeaseUntil, v))
+}
+
+// StartClaimLeaseUntilNEQ applies the NEQ predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimLeaseUntil, v))
+}
+
+// StartClaimLeaseUntilIn applies the In predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimLeaseUntil, vs...))
+}
+
+// StartClaimLeaseUntilNotIn applies the NotIn predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimLeaseUntil, vs...))
+}
+
+// StartClaimLeaseUntilGT applies the GT predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimLeaseUntil, v))
+}
+
+// StartClaimLeaseUntilGTE applies the GTE predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimLeaseUntil, v))
+}
+
+// StartClaimLeaseUntilLT applies the LT predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimLeaseUntil, v))
+}
+
+// StartClaimLeaseUntilLTE applies the LTE predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimLeaseUntil, v))
+}
+
+// StartClaimLeaseUntilIsNil applies the IsNil predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimLeaseUntil))
+}
+
+// StartClaimLeaseUntilNotNil applies the NotNil predicate on the "start_claim_lease_until" field.
+func StartClaimLeaseUntilNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimLeaseUntil))
+}
+
+// StartClaimUnconfirmedAtEQ applies the EQ predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimUnconfirmedAt, v))
+}
+
+// StartClaimUnconfirmedAtNEQ applies the NEQ predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimUnconfirmedAt, v))
+}
+
+// StartClaimUnconfirmedAtIn applies the In predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimUnconfirmedAt, vs...))
+}
+
+// StartClaimUnconfirmedAtNotIn applies the NotIn predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimUnconfirmedAt, vs...))
+}
+
+// StartClaimUnconfirmedAtGT applies the GT predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimUnconfirmedAt, v))
+}
+
+// StartClaimUnconfirmedAtGTE applies the GTE predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimUnconfirmedAt, v))
+}
+
+// StartClaimUnconfirmedAtLT applies the LT predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimUnconfirmedAt, v))
+}
+
+// StartClaimUnconfirmedAtLTE applies the LTE predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimUnconfirmedAt, v))
+}
+
+// StartClaimUnconfirmedAtIsNil applies the IsNil predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimUnconfirmedAt))
+}
+
+// StartClaimUnconfirmedAtNotNil applies the NotNil predicate on the "start_claim_unconfirmed_at" field.
+func StartClaimUnconfirmedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimUnconfirmedAt))
+}
+
+// StartClaimHoldUntilEQ applies the EQ predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimHoldUntil, v))
+}
+
+// StartClaimHoldUntilNEQ applies the NEQ predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimHoldUntil, v))
+}
+
+// StartClaimHoldUntilIn applies the In predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimHoldUntil, vs...))
+}
+
+// StartClaimHoldUntilNotIn applies the NotIn predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimHoldUntil, vs...))
+}
+
+// StartClaimHoldUntilGT applies the GT predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimHoldUntil, v))
+}
+
+// StartClaimHoldUntilGTE applies the GTE predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimHoldUntil, v))
+}
+
+// StartClaimHoldUntilLT applies the LT predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimHoldUntil, v))
+}
+
+// StartClaimHoldUntilLTE applies the LTE predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimHoldUntil, v))
+}
+
+// StartClaimHoldUntilIsNil applies the IsNil predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimHoldUntil))
+}
+
+// StartClaimHoldUntilNotNil applies the NotNil predicate on the "start_claim_hold_until" field.
+func StartClaimHoldUntilNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimHoldUntil))
+}
+
+// StartClaimLaunchIDEQ applies the EQ predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDNEQ applies the NEQ predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDIn applies the In predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldStartClaimLaunchID, vs...))
+}
+
+// StartClaimLaunchIDNotIn applies the NotIn predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldStartClaimLaunchID, vs...))
+}
+
+// StartClaimLaunchIDGT applies the GT predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDGTE applies the GTE predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDLT applies the LT predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDLTE applies the LTE predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDContains applies the Contains predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDHasPrefix applies the HasPrefix predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDHasSuffix applies the HasSuffix predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDIsNil applies the IsNil predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldStartClaimLaunchID))
+}
+
+// StartClaimLaunchIDNotNil applies the NotNil predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldStartClaimLaunchID))
+}
+
+// StartClaimLaunchIDEqualFold applies the EqualFold predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldStartClaimLaunchID, v))
+}
+
+// StartClaimLaunchIDContainsFold applies the ContainsFold predicate on the "start_claim_launch_id" field.
+func StartClaimLaunchIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldStartClaimLaunchID, v))
+}
+
+// SoftDeleteOpIDEQ applies the EQ predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDNEQ applies the NEQ predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDIn applies the In predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldSoftDeleteOpID, vs...))
+}
+
+// SoftDeleteOpIDNotIn applies the NotIn predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldSoftDeleteOpID, vs...))
+}
+
+// SoftDeleteOpIDGT applies the GT predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDGTE applies the GTE predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDLT applies the LT predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDLTE applies the LTE predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDContains applies the Contains predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDHasPrefix applies the HasPrefix predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDHasSuffix applies the HasSuffix predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDIsNil applies the IsNil predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldSoftDeleteOpID))
+}
+
+// SoftDeleteOpIDNotNil applies the NotNil predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldSoftDeleteOpID))
+}
+
+// SoftDeleteOpIDEqualFold applies the EqualFold predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldSoftDeleteOpID, v))
+}
+
+// SoftDeleteOpIDContainsFold applies the ContainsFold predicate on the "soft_delete_op_id" field.
+func SoftDeleteOpIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldSoftDeleteOpID, v))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

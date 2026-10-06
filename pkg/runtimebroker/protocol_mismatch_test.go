@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 func TestHandleAgentByID_QueryParameters(t *testing.T) {
@@ -107,14 +108,18 @@ func (m *protocolMockManager) Reprovision(ctx context.Context, opts api.StartOpt
 func (m *protocolMockManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	return nil, nil
 }
-func (m *protocolMockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+func (m *protocolMockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+	return nil
+}
+
+func (m *protocolMockManager) StopTarget(ctx context.Context, ref scionrt.RunRef) error {
 	return nil
 }
 func (m *protocolMockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 
-func (m *protocolMockManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *protocolMockManager) DeleteTarget(ctx context.Context, agentName string, ref scionrt.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 func (m *protocolMockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
@@ -123,10 +128,6 @@ func (m *protocolMockManager) List(ctx context.Context, filter map[string]string
 func (m *protocolMockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
 	return nil
 }
-func (m *protocolMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return nil
-}
-
 func (m *protocolMockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	return nil
 }

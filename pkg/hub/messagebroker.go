@@ -333,6 +333,9 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent created event", "error", err)
 			return
 		}
+		if !p.createdAgentLive(created) {
+			return
+		}
 		p.subscribeAgent(created.ProjectID, created.Slug)
 		p.subscribeProjectBroadcast(created.ProjectID)
 		p.subscribeProjectUserMessages(created.ProjectID)
@@ -369,6 +372,41 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next project rebuild",
 			"agent_id", deleted.AgentID, "project_id", deleted.ProjectID)
 	}
+}
+
+// createdAgentLive reports whether an agent.created event still names a live
+// agent, by the same rule publishAgentCreatedIfLive applies before it
+// publishes (ptone/scion#2972): the row exists, is not soft-deleted, and no
+// delete claim holds it. A stale created (one that lost the publish's
+// residual window, or a replay) must not subscribe a deleted agent's slug,
+// because agent.deleted does not remove subscriptions (ptone/scion#3056).
+// The row is looked up by ID, so a stale created never matches a same-slug
+// successor. A read error other than not-found subscribes, as before: the
+// subscribe helpers are idempotent and a missed subscription drops messages.
+// A delete that later fails leaves the agent unsubscribed until it reports
+// running (ensureSubscriptionsForRunningAgent).
+func (p *MessageBrokerProxy) createdAgentLive(created AgentCreatedEvent) bool {
+	if created.AgentID == "" {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+	defer cancel()
+	agent, err := p.store.GetAgent(ctx, created.AgentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		p.log.Debug("Skipping subscriptions for created event: agent deleted", "agent_id", created.AgentID)
+		return false
+	case err != nil:
+		p.log.Warn("Failed to read created agent for broker subscriptions; subscribing",
+			"agent_id", created.AgentID, "error", err)
+		return true
+	}
+	if deletedOrDeleteHeld(agent) {
+		p.log.Debug("Skipping subscriptions for created event: agent deleted or being deleted",
+			"agent_id", created.AgentID, "deletion_state", agent.DeletionState)
+		return false
+	}
+	return true
 }
 
 // ensureSubscriptionsForRunningAgent subscribes a running agent's topic and
@@ -864,20 +902,8 @@ func (p *MessageBrokerProxy) subscribeGlobalBroadcast() {
 // DispatchAgentMessage path. ObserverOnly messages are skipped — they were
 // already delivered directly and are only published for plugin observers.
 //
-// Raw forwarding note (ptone/scion#2192 inventory): this function and its
-// siblings fanOutToProject/fanOutGlobal forward msg.Raw unchanged with no
-// guard. That is intentional and safe here: after ptone/scion#2192, no Hub
-// publisher places a raw message on this bus at all. Broadcast and group
-// forms reject raw upstream before they would ever publish, the
-// still-supported single-agent raw shape is dispatched directly through the
-// dispatcher (never through this bus), and the agent-to-agent observer
-// copies (agent_dm_operation.go, handlers_agent_messaging.go) are skipped
-// entirely for raw. Inbound traffic from plugin adapters never reaches this
-// bus either; it is delivered directly by handlers_broker_inbound.go /
-// _routed.go, which is where the raw guard for that ingress path lives. Do
-// not add a second guard here without first confirming a new Hub-originated
-// publisher can put a raw message on this bus — that would be duplicating
-// policy, not adding containment.
+// StructuredMessage has no raw field: raw keystroke delivery through messages
+// has been removed, so nothing forwarded on this bus can request it.
 func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agentSlug string, msg *messages.StructuredMessage) {
 	if msg.ObserverOnly {
 		return

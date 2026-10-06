@@ -2028,7 +2028,7 @@ func TestCloudRunSandboxRuntime_Delete(t *testing.T) {
 
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-del", AgentID: "agent-del"})
 
-	err := rt.Delete(context.Background(), "sb-del")
+	err := rt.Delete(context.Background(), RunRef{ID: "sb-del"})
 	if err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
@@ -2068,7 +2068,7 @@ func TestCloudRunSandboxRuntime_Stop(t *testing.T) {
 
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-stop", AgentID: "agent-stop"})
 
-	err := rt.Stop(context.Background(), "sb-stop")
+	err := rt.Stop(context.Background(), RunRef{ID: "sb-stop"})
 	if err != nil {
 		t.Fatalf("Stop() error = %v", err)
 	}

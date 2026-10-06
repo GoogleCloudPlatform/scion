@@ -36,12 +36,17 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
+import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
-  stateManager: Object.assign(new EventTarget(), { seedAgents: vi.fn() }),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
+  stateManager: Object.assign(new EventTarget(), { seedAgents: vi.fn(), setScope: vi.fn() }),
 }));
 
 vi.mock('../../client/api.js', async (importOriginal) => {
@@ -101,6 +106,9 @@ function routeByPath(
 
 beforeEach(() => {
   vi.mocked(apiFetch).mockReset();
+  // A connected page retains the agent store's hub list, which opens the
+  // store's feed; it never connects here.
+  vi.stubGlobal('EventSource', FakeEventSource);
 });
 
 /** Flushes pending microtasks (promise chains, `Response.json()`, etc.) enough times to settle `loadHubMembers`'s internal awaits. */
@@ -734,6 +742,217 @@ describe('loadHubMembers full pagination', () => {
   });
 });
 
+describe('loadHubMembers after a finished walk', () => {
+  function countRequests(prefix: string): number {
+    return vi.mocked(apiFetch).mock.calls.filter((c) => String(c[0]).startsWith(prefix)).length;
+  }
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u1']),
+        () => agentsPage(['a1'])
+      )
+    );
+  });
+
+  it('a join call (the re-parse after rail-loaded) does not walk the hub again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+    expect(countRequests('/api/v1/agents')).toBe(1);
+
+    // Seconds later, once the rail has loaded, the route is parsed again.
+    page.loadHubMembers();
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(1);
+    expect(countRequests('/api/v1/users')).toBe(1);
+    expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+  });
+
+  it('the fallback poll still walks again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    page.loadHubMembers({ refresh: true });
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+  });
+
+  it('returning to the hub view after a conversation walks again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    // A conversation opening retires the walk's generation.
+    page._hubMembersGeneration++;
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+  });
+
+  it('a project member load replaces the lists, so the next hub view walks again', async () => {
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    await page.loadV2Members('p1');
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+  });
+
+  it('a walk with a failed leg is not treated as finished', async () => {
+    let agentsCall = 0;
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u1']),
+        () => (++agentsCall === 1 ? new Response('', { status: 500 }) : agentsPage(['a1']))
+      )
+    );
+    const page = createPage();
+    page.loadHubMembers();
+    await flush();
+
+    page.loadHubMembers();
+    await flush();
+
+    expect(countRequests('/api/v1/agents')).toBe(2);
+    expect(page.v2AgentMembers.map((m: any) => m.id)).toEqual(['a1']);
+  });
+});
+
+describe('hub presence fetch', () => {
+  function membersRequests(): number {
+    return vi
+      .mocked(apiFetch)
+      .mock.calls.filter((c) => /\/chat\/spaces\/[^/]+\/members$/.test(String(c[0]))).length;
+  }
+
+  function railLoaded(page: any): void {
+    page.handleRailLoaded(
+      new CustomEvent('rail-loaded', {
+        detail: {
+          spaceIds: ['p1'],
+          spaces: [{ projectId: 'p1', projectSlug: 'p1', projectName: 'P1' }],
+        },
+      })
+    );
+  }
+
+  function presencePage(): any {
+    const page = createPage();
+    page.pageData = { user: { id: 'user-me' } };
+    // The route re-parse rail-loaded triggers is not under test here.
+    page.parseV2Route = vi.fn();
+    return page;
+  }
+
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockImplementation(
+      routeByPath(
+        () => usersPage(['u1']),
+        () => agentsPage(['a1'])
+      )
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+  });
+
+  it('is fetched once per hub view, not again on every rail reload', async () => {
+    const page = presencePage();
+    page.loadHubMembers();
+    await flush();
+
+    railLoaded(page);
+    await flush();
+    railLoaded(page);
+    railLoaded(page);
+    await flush();
+
+    expect(membersRequests()).toBe(1);
+    page.stopPresenceHeartbeat();
+  });
+
+  it('waits for the hub member list when the rail loads first', async () => {
+    const page = presencePage();
+    railLoaded(page);
+    await flush();
+    expect(membersRequests()).toBe(0);
+
+    page.loadHubMembers();
+    await flush();
+
+    expect(membersRequests()).toBe(1);
+    page.stopPresenceHeartbeat();
+  });
+
+  it('a failed presence fetch is retried by the next rail load', async () => {
+    let members = 0;
+    vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+      if (/\/members$/.test(url)) {
+        return ++members === 1 ? new Response('', { status: 500 }) : new Response('{}');
+      }
+      return routeByPath(
+        () => usersPage(['u1']),
+        () => agentsPage(['a1'])
+      )(url);
+    });
+    const page = presencePage();
+    page.loadHubMembers();
+    await flush();
+    railLoaded(page);
+    await flush();
+
+    railLoaded(page);
+    await flush();
+
+    expect(membersRequests()).toBe(2);
+    page.stopPresenceHeartbeat();
+  });
+
+  it('the fallback poll resyncs it', async () => {
+    vi.useFakeTimers();
+    const page = mountPage();
+    page.parseV2Route = vi.fn();
+    await vi.advanceTimersByTimeAsync(0);
+    // Presence already fetched for this hub view: the poll's own walk does
+    // not fetch it again, so only the poll's resync can.
+    railLoaded(page);
+    await vi.advanceTimersByTimeAsync(0);
+    const before = membersRequests();
+    expect(before).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(membersRequests()).toBe(before + 1);
+    page.remove();
+  });
+
+  it('a new hub view (after a conversation) fetches it again', async () => {
+    const page = presencePage();
+    page.loadHubMembers();
+    await flush();
+    railLoaded(page);
+    await flush();
+
+    page._hubMembersGeneration++;
+    page.loadHubMembers();
+    await flush();
+
+    expect(membersRequests()).toBe(2);
+    page.stopPresenceHeartbeat();
+  });
+});
+
 describe('loadHubMembers error handling', () => {
   it('a failed second page keeps the previous members', async () => {
     const page = createPage();
@@ -761,7 +980,9 @@ describe('loadHubMembers error handling', () => {
         () => agentsPage(['a2'])
       )
     );
-    page.loadHubMembers();
+    // A refresh (the fallback poll): a plain join call after a finished
+    // walk has nothing to do.
+    page.loadHubMembers({ refresh: true });
     await flush();
 
     // Users list is unchanged from before the failed walk; agents updated.

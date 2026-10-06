@@ -50,6 +50,7 @@ import {
   type RankedCandidate,
 } from '../../../utils/chat-palette-match.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
+import { PaletteTypeahead } from './palette-typeahead.js';
 
 /** Rows shown per group before "show more". */
 const PALETTE_GROUP_VISIBLE_LIMIT = 10;
@@ -91,10 +92,26 @@ export class ScionQuickPalette extends LitElement {
     agents: { status: 'loading', candidates: [] },
   };
 
+  /**
+   * The host's type-ahead, when the host starts capturing keys at its open
+   * request (before this element exists, on a first open). The host starts
+   * and stops it; the palette only stops it when removed from the page.
+   * Without one the palette uses its own, started when `open` turns true and
+   * stopped when it turns false. Either way the captured text becomes the
+   * query once the input has focus.
+   */
+  @property({ attribute: false }) typeahead: PaletteTypeahead | null = null;
+
+  /** The palette's own type-ahead, for a host that passes none. */
+  private readonly ownTypeahead = new PaletteTypeahead();
+
   @state() private queryText = '';
   /** The globally-selected candidate ID, or null when nothing matches. */
   @state() private activeId: string | null = null;
-  /** True once Up/Down/click has picked a candidate; a query edit clears it back to "auto". */
+  /**
+   * True once Up/Down/Tab/click has picked a candidate; a query edit clears
+   * it back to "auto". With an empty query, only a pick makes a row active.
+   */
   private manualSelection = false;
   /** True once Enter has committed a selection this open, so a stray repeat can't double-fire. */
   private committed = false;
@@ -420,20 +437,20 @@ export class ScionQuickPalette extends LitElement {
    * Recompute the active (globally-selected) candidate after the ranked list
    * changes (query edit or a group finishing/refreshing load).
    *
-   * A query edit always resets to the new global best. A group refresh
-   * preserves a manual selection by stable ID when it is still present,
-   * otherwise falls back to the new global best.
+   * A group refresh preserves the user's pick by stable ID while it is still
+   * present, so a row arriving above it never takes its place. Otherwise
+   * (a query edit, no pick, or a picked row that went away) the selection
+   * follows the ranking: the best match for a typed query, and no row at
+   * all for an empty query. An empty query ranks by the host's default
+   * order (newest activity in chat), which is not a choice the user made,
+   * so nothing is selected and Enter commits nothing until the user picks a
+   * row with the arrow keys or Tab.
    */
   private reconcileActiveId(
     ranked: Array<RankedCandidate<PaletteCandidate>>,
     queryChanged: boolean
   ): void {
-    if (queryChanged) {
-      this.manualSelection = false;
-      this.setActiveId(ranked[0]?.candidate.id ?? null);
-      return;
-    }
-    if (this.manualSelection && this.activeId !== null) {
+    if (!queryChanged && this.manualSelection && this.activeId !== null) {
       const stillPresent = ranked.some((r) => r.candidate.id === this.activeId);
       if (stillPresent) {
         // A background refresh (new candidates loaded) may have moved this
@@ -446,7 +463,9 @@ export class ScionQuickPalette extends LitElement {
         return;
       }
     }
-    this.setActiveId(ranked[0]?.candidate.id ?? null);
+    this.manualSelection = false;
+    const hasQuery = this.queryText.trim() !== '';
+    this.setActiveId(hasQuery ? (ranked[0]?.candidate.id ?? null) : null);
   }
 
   override willUpdate(changed: PropertyValues<ScionQuickPalette>): void {
@@ -466,8 +485,16 @@ export class ScionQuickPalette extends LitElement {
     if (changed.has('open')) {
       if (this.open) {
         this._startVisualViewportTracking();
+        // Keys typed until the input takes focus belong to the query. A
+        // host's type-ahead is the host's to start: it may already have
+        // captured text, and may have stopped at its time limit, keeping it.
+        if (!this.typeahead) this.ownTypeahead.start();
       } else {
         this._stopVisualViewportTracking();
+        // Only the palette's own: the host stops its type-ahead when it
+        // closes the palette, and may already have started it again for a
+        // reopen by the time this update runs.
+        this.ownTypeahead.stop();
       }
     }
     if (changedKeys.has('queryText')) {
@@ -496,6 +523,12 @@ export class ScionQuickPalette extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this._stopVisualViewportTracking();
+    this.activeTypeahead.stop();
+  }
+
+  /** The type-ahead in use: the host's, else the palette's own. */
+  private get activeTypeahead(): PaletteTypeahead {
+    return this.typeahead ?? this.ownTypeahead;
   }
 
   /**
@@ -756,9 +789,35 @@ export class ScionQuickPalette extends LitElement {
     // its own sl-initial-focus here and steal focus back to the query input.
     if (e.target !== e.currentTarget) return;
     e.preventDefault();
-    void this.updateComplete.then(() => {
-      this.paletteInputEl?.focus();
-    });
+    void this.updateComplete.then(() => this.focusQueryInput());
+  }
+
+  /** Focuses the query input, which applies any type-ahead (see {@link applyTypeahead}). */
+  private focusQueryInput(): void {
+    const input = this.paletteInputEl;
+    if (!this.open || !input) return;
+    input.focus();
+    // No focus event fires for an input that already has focus, or in a
+    // window without focus, so apply it here. After a focus event this finds
+    // nothing left to apply.
+    this.applyTypeahead();
+  }
+
+  private readonly handleQueryInputFocus = (): void => {
+    this.applyTypeahead();
+  };
+
+  /**
+   * Once the query input has focus, by the open or by a click, the keys
+   * typed since the open was requested become the query. The query is empty
+   * then: an open clears it, and keys typed before the focus were captured.
+   */
+  private applyTypeahead(): void {
+    // A focus while closed (the closing dialog's input) must leave a capture
+    // a host has started for a reopen running.
+    if (!this.open) return;
+    const typed = this.activeTypeahead.take();
+    if (typed) this.queryText = typed;
   }
 
   private handlePaletteRequestClose(
@@ -962,6 +1021,7 @@ export class ScionQuickPalette extends LitElement {
             .value=${this.queryText}
             autocomplete="off"
             @input=${this.handlePaletteQueryInput}
+            @focus=${this.handleQueryInputFocus}
             @keydown=${this.handlePaletteKeydown}
             @compositionstart=${this.handlePaletteCompositionStart}
             @compositionend=${this.handlePaletteCompositionEnd}

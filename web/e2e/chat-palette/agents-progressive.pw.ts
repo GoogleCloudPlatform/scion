@@ -39,12 +39,13 @@ function agentsLoading(page: Page) {
   return page.locator('scion-quick-palette [data-palette-group="agents"] .palette-loading');
 }
 
-/** Dispatch the same invalidation a real per-agent status SSE event produces. */
-async function simulateAgentsUpdatedEvent(page: Page): Promise<void> {
+/**
+ * Dispatch the event the member editors send after a membership change,
+ * which makes the agent store revalidate every list it holds.
+ */
+async function simulateMembershipChange(page: Page): Promise<void> {
   await page.evaluate(() => {
-    (
-      document.querySelector('scion-page-chat') as unknown as { _handleAgentsUpdated(): void }
-    )._handleAgentsUpdated();
+    window.dispatchEvent(new CustomEvent('scion:membership-changed'));
   });
 }
 
@@ -91,19 +92,19 @@ test('a refresh of an already-populated Agents group keeps showing its full list
   await expect(paletteOptions(page).filter({ hasText: PAGE_TWO_AGENT.name })).toBeVisible();
   await expect(agentsLoading(page)).toHaveCount(0);
 
-  // Now invalidate the group while it already holds the full, ready list
-  // above. The refreshed load's own first page resolves quickly, while its
+  // Then revalidate the store's list while the group already holds the
+  // full, ready list above. The refreshed load's own first page resolves quickly, while its
   // second page stays pending — the window in which a bug would be visible:
-  // if `onProgress` were wired unconditionally during this refresh (instead
-  // of only on a first load/retry), the list would shrink to just Page One
+  // if partial pages were published during this revalidation (instead of
+  // only on a first load/retry), the list would shrink to just Page One
   // Agent the instant that first page lands, well before page two's own
   // request even goes out. A single long delay on page one cannot catch
   // that — the assertion would run before any progress tick existed at all,
-  // regardless of whether `onProgress` was wired. Checking the state right
+  // regardless of whether partial pages are published. Checking the state right
   // after page one *fulfills* but before page two does is what actually
   // exercises it.
   const { requestedCursors } = routeAgentPages(page, pages, { '': 200, 'page-2': 3000 });
-  await simulateAgentsUpdatedEvent(page);
+  await simulateMembershipChange(page);
 
   // Wait until page two's own request has actually gone out — proof page
   // one has already fulfilled and the pagination loop has moved on.

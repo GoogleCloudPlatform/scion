@@ -552,6 +552,256 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Workstation hubs (layer0_editable): Layer-0 editable on the DB tier ──
+
+  describe('DB mode on a workstation hub (layer0_editable)', () => {
+    it('Layer-0 fields are editable: no deployment-configuration badges', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('deployment configuration'))).toBe(false);
+      const values = queryAll(element, '.read-only-value').map((el) => el.textContent?.trim());
+      expect(values).not.toContain('postgres');
+      expect(values).not.toContain('8080');
+    });
+
+    it('env-pinned fields stay read-only', async () => {
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        layer0_editable: true,
+        env_overrides: ['server.hub.port'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badgeTexts = queryAll(element, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+    });
+
+    async function capturePut(
+      config: Record<string, unknown>,
+      mutate: (el: any) => void
+    ): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      mutate(element as any);
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      return captured!;
+    }
+
+    it('changed Layer-0 fields go in the PUT payload for the server to split', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.logLevel = 'debug';
+          el.dbDriver = 'sqlite';
+        }
+      );
+      const server = payload.server as Record<string, unknown> | undefined;
+      expect(server?.log_level).toBe('debug');
+      expect((server?.database as Record<string, unknown> | undefined)?.driver).toBe('sqlite');
+      // The masked database URL is left out so the stored value is kept.
+      expect((server?.database as Record<string, unknown> | undefined)?.url).toBeUndefined();
+    });
+
+    it('a minimal workstation GET with no user change sends no Layer-0 leaves', async () => {
+      // The GET a hub returns for a stock workstation settings.yaml.
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: {
+          hub: { soft_delete_retain_files: false, auto_suspend_stalled: false },
+          broker: { broker_id: 'b-1', broker_token: '********' },
+          auth: {},
+          github_app: {},
+        },
+      };
+      const payload = await capturePut(minimal, () => {});
+      expect(payload).not.toHaveProperty('active_profile');
+      expect(payload).not.toHaveProperty('workspace_path');
+      const server = (payload.server ?? {}) as Record<string, Record<string, unknown>>;
+      for (const block of [
+        'broker',
+        'database',
+        'storage',
+        'secrets',
+        'message_broker',
+        'native_chat',
+      ]) {
+        expect(server).not.toHaveProperty(block);
+      }
+      expect(server.hub ?? {}).not.toHaveProperty('port');
+      expect(server.auth ?? {}).not.toHaveProperty('dev_token');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('changing one Layer-0 field sends exactly that leaf', async () => {
+      const minimal = {
+        schema_version: '1',
+        settings_tier: 'db',
+        layer0_editable: true,
+        server: { hub: {}, broker: { broker_id: 'b-1', broker_token: '********' }, auth: {} },
+      };
+      const payload = await capturePut(minimal, (el) => {
+        el.storageBucket = 'my-bucket';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.storage).toEqual({ bucket: 'my-bucket' });
+      expect(server).not.toHaveProperty('broker');
+      expect(payload).not.toHaveProperty('active_profile');
+    });
+
+    it('auto_provide shows as on when GET omits it', async () => {
+      element = await createComponent(
+        createFetchHandler({
+          schema_version: '1',
+          settings_tier: 'db',
+          layer0_editable: true,
+          server: { broker: { broker_id: 'b-1' } },
+        })
+      );
+      expect((element as any).brokerAutoProvide).toBe(true);
+    });
+
+    it('clearing authorized_domains and public_url sends [] and ""', async () => {
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        (el) => {
+          el.authAuthorizedDomains = '';
+          el.hubPublicUrl = '';
+        }
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.auth.authorized_domains).toEqual([]);
+      expect(server.hub.public_url).toBe('');
+      // The unchanged Layer-0 port is not sent.
+      expect(server.hub).not.toHaveProperty('port');
+    });
+
+    it('cleared and switched-off Layer-0 fields are sent explicitly', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.storage.bucket = 'old-bucket';
+      base.server.message_broker = { enabled: true, type: 'inprocess' };
+      const payload = await capturePut(base, (el) => {
+        el.logFormat = '';
+        el.storageBucket = '';
+        el.messageBrokerEnabled = false;
+      });
+      const server = payload.server as Record<string, Record<string, unknown> | string>;
+      expect(server.log_format).toBe('');
+      expect(server.storage).toEqual({ bucket: '' });
+      expect(server.message_broker).toEqual({ enabled: false });
+    });
+
+    it('defaulted fields GET omitted are not sent from an untouched form', async () => {
+      // makeBaseConfig has no gcp_iam_* and no native_chat.
+      const payload = await capturePut(
+        makeBaseConfig({ settings_tier: 'db', layer0_editable: true }),
+        () => {}
+      );
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server).not.toHaveProperty('native_chat');
+    });
+
+    it('defaulted fields are sent only when the user changed them', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.nativeChatEnabled = false;
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      // Unchanged since GET (even though GET had it): not sent.
+      expect(server.hub).not.toHaveProperty('gcp_iam_check_mode');
+      expect(server.hub).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+      expect(server.native_chat).toEqual({ enabled: false });
+    });
+
+    it('a hosted save never sends the file-only gcp_iam keys', async () => {
+      const payload = await capturePut(makeBaseConfig({ settings_tier: 'db' }), () => {});
+      const hub = (payload.server as Record<string, Record<string, unknown>> | undefined)?.hub;
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_check_mode');
+      expect(hub ?? {}).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+    });
+
+    it('flag-managed workstation fields are read-only and not sent', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db', layer0_editable: true });
+      const payload = await capturePut(config, () => {});
+      const badgeTexts = queryAll(element!, '.read-only-badge').map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('workstation startup defaults'))).toBe(true);
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.enabled).toBeUndefined();
+      expect(server.auth?.dev_mode).toBeUndefined();
+      expect(server.storage?.provider).toBeUndefined();
+      expect(server.hub?.host).toBeUndefined();
+    });
+  });
+
+  describe('agent-default fields the hub cannot save (ptone/scion#3067)', () => {
+    for (const tier of [
+      { settings_tier: 'db' },
+      { settings_tier: 'db', layer0_editable: true },
+      { settings_tier: 'file' },
+    ]) {
+      it(`are not sent and not editable (${JSON.stringify(tier)})`, async () => {
+        const config = makeBaseConfig({ ...tier, default_agent_role: 'full' });
+        let captured: Record<string, unknown> | null = null;
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+        expect(shadowText(element)).toContain('ptone/scion#3067');
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(captured).not.toBeNull();
+        expect(captured!).not.toHaveProperty('default_agent_role');
+        expect(captured!).not.toHaveProperty('default_max_agent_role');
+        expect(captured!).not.toHaveProperty('default_harness_auth');
+      });
+    }
+  });
+
+  describe('save errors that name keys', () => {
+    for (const code of ['unpersisted_keys_rejected', 'unclassified_keys_rejected']) {
+      it(`${code} shows the message and the keys`, async () => {
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+            putHandler: () => ({
+              status: 422,
+              body: { error: code, message: 'Not saved.', keys: ['server.hub.bogus', 'x.y'] },
+            }),
+          })
+        );
+        const buttons = queryAll(element, 'sl-button[variant="primary"]');
+        (buttons.find((b) => b.textContent?.trim() === 'Save & Reload') as HTMLElement).click();
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await (element as any).updateComplete;
+        const text = shadowText(element);
+        expect(text).toContain('Not saved.');
+        expect(text).toContain('server.hub.bogus');
+        expect(text).toContain('x.y');
+      });
+    }
+  });
+
   // ── Criterion 6: File mode ──
 
   describe('Criterion 6 — File mode', () => {
@@ -1074,11 +1324,10 @@ describe('scion-page-admin-server-config', () => {
     const clearable: Array<[string, string]> = [
       ['active_profile', 'activeProfile'],
       ['default_template', 'defaultTemplate'],
-      ['default_harness_auth', 'defaultHarnessAuth'],
+      // default_harness_auth and the agent role defaults are not sent at all
+      // until ptone/scion#3067 is fixed (see the #3067 describe block).
       ['image_registry', 'imageRegistry'],
       ['workspace_path', 'workspacePath'],
-      ['default_max_agent_role', 'defaultMaxAgentRole'],
-      ['default_agent_role', 'defaultAgentRole'],
       ['default_runtime_broker', 'defaultRuntimeBroker'],
     ];
 
@@ -1808,6 +2057,149 @@ describe('scion-page-admin-server-config', () => {
       expect(capturedPayload).not.toBeNull();
       expect(capturedPayload!.profiles.gke.shared_dir_storage_backend).toBe('local');
       expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
+    });
+  });
+  describe('home storage on runtimes and profiles', () => {
+    function homeConfig() {
+      return makeBaseConfig({
+        runtimes: {
+          k8s: { type: 'kubernetes', home_storage_backend: 'nfs', home_storage_leaf: 'broker' },
+        },
+        profiles: {
+          gke: { runtime: 'k8s', home_storage_backend: 'nfs', home_storage_leaf: 'pod' },
+        },
+      });
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    it('shows the current values on the runtime and profile cards', async () => {
+      element = await createComponent(createFetchHandler(homeConfig()));
+      const backends = queryAll(element, 'sl-select.home-storage-backend');
+      expect(backends.map((s) => s.getAttribute('value'))).toEqual(['nfs', 'nfs']);
+      const leaves = queryAll(element, 'sl-select.home-storage-leaf');
+      expect(leaves.map((s) => s.getAttribute('value'))).toEqual(['broker', 'pod']);
+    });
+
+    it('editing another profile field keeps both keys in the PUT payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(homeConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
+        | (HTMLElement & { value: string })
+        | null;
+      expect(registry).not.toBeNull();
+      registry!.value = 'registry.example.com/team';
+      registry!.dispatchEvent(new Event('sl-input'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.profiles.gke.home_storage_backend).toBe('nfs');
+      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('pod');
+      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
+      expect(capturedPayload!.runtimes.k8s.home_storage_leaf).toBe('broker');
+    });
+
+    it('changing and clearing the selects updates the payload', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(homeConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const [runtimeLeaf, profileLeaf] = queryAll(
+        element,
+        'sl-select.home-storage-leaf'
+      ) as (HTMLElement & {
+        value: string;
+      })[];
+      runtimeLeaf.value = '';
+      runtimeLeaf.dispatchEvent(new Event('sl-change'));
+      profileLeaf.value = 'broker';
+      profileLeaf.dispatchEvent(new Event('sl-change'));
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('broker');
+      expect('home_storage_leaf' in capturedPayload!.runtimes.k8s).toBe(false);
+      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
+    });
+  });
+  describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
+    const maskedServer = {
+      notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
+      oauth: { web: { github: { client_id: 'cid', client_secret: '********' } } },
+      github_app: { app_id: 42, private_key: '********', webhook_secret: '********' },
+    };
+    const withServer = (tier: string, extra: Record<string, unknown>) => {
+      const base = makeBaseConfig({ settings_tier: tier });
+      return { ...base, server: { ...base.server, ...extra } };
+    };
+
+    it('DB mode payload omits unedited masked notification_channels and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('db', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server).toBeDefined();
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildLayer1Payload())).not.toContain('********');
+    });
+
+    it('file mode payload omits unedited masked notification_channels, oauth and github_app', async () => {
+      element = await createComponent(createFetchHandler(withServer('file', maskedServer)));
+      const el = element as any;
+      // loadGitHubAppConfig may replace github_app with an unmasked copy; pin
+      // the masked GET value (what the page holds when that load fails).
+      el.rawConfig.server.github_app = maskedServer.github_app;
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toBeUndefined();
+      expect(server.oauth).toBeUndefined();
+      expect(server.github_app).toBeUndefined();
+      expect(JSON.stringify(el.buildFilePayload())).not.toContain('********');
+    });
+
+    it('DB mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        github_app: { app_id: 42, webhooks_enabled: true },
+      };
+      element = await createComponent(createFetchHandler(withServer('db', plain)));
+      const el = element as any;
+      // Pin github_app: loadGitHubAppConfig may replace it after load.
+      el.rawConfig.server.github_app = plain.github_app;
+      const server = el.buildLayer1Payload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.github_app).toEqual(plain.github_app);
+    });
+
+    it('file mode payload still sends blocks without masked values', async () => {
+      const plain = {
+        notification_channels: [{ type: 'slack', filter_urgent_only: true }],
+        oauth: { web: { github: { client_id: 'cid' } } },
+      };
+      element = await createComponent(createFetchHandler(withServer('file', plain)));
+      const server = (element as any).buildFilePayload().server as Record<string, unknown>;
+      expect(server.notification_channels).toEqual(plain.notification_channels);
+      expect(server.oauth).toEqual(plain.oauth);
     });
   });
 });

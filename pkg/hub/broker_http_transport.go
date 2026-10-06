@@ -24,8 +24,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -197,6 +199,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRunIDURL(endpoint, extras.RunID)
 	payload := map[string]interface{}{}
 	if task != "" {
 		payload["task"] = task
@@ -264,28 +267,28 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	return &result, nil
 }
 
-func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/stop", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
-	if projectID != "" {
-		endpoint += "?projectId=" + url.QueryEscape(projectID)
+	if query := stopAgentQuery(ctx, projectID, runID); query != "" {
+		endpoint += "?" + query
 	}
-	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return stopAgentError(brokerHTTPError(resp), runID)
 	}
 	return nil
 }
 
-func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/restart", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRunIDURL(endpoint, extras.RunID)
 	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
@@ -300,18 +303,25 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to marshal restart request: %w", err)
+			return nil, fmt.Errorf("failed to marshal restart request: %w", err)
 		}
 	}
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, body)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return nil, brokerHTTPError(resp)
 	}
-	return nil
+	// The broker answers a restart with the entry it started (or found
+	// still running), including its run ID. An empty or undecodable body
+	// (an older broker) is not an error: the restart succeeded.
+	var result RemoteAgentResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, nil
+	}
+	return &result, nil
 }
 
 // resetAuthBody builds the broker reset-auth request body. The transport
@@ -345,17 +355,9 @@ func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brok
 	return nil
 }
 
-func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?deleteFiles=%t&removeBranch=%t",
-		strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID), deleteFiles, removeBranch)
-	if projectID != "" {
-		endpoint += "&projectId=" + url.QueryEscape(projectID)
-	}
-	endpoint += deleteProjectPathQuery(ctx)
-	if softDelete {
-		endpoint += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.UTC().Format(time.RFC3339)))
-	}
-	endpoint = withRecordedRuntimeURL(ctx, endpoint)
+func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?%s",
+		strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID), deleteAgentQuery(ctx, projectID, opts))
 
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
 	if err != nil {
@@ -490,9 +492,22 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 		slog.Debug("Outgoing keys request to broker", "method", agentkeys.BrokerRouteMethod, "endpoint", endpoint)
 	}
 
+	// Record whether the transport ever handed this request a connection.
+	// Until GotConn fires, net/http has not written a single byte of the
+	// request (HTTP/1 calls it from getConn before writeLoop sees the
+	// request; HTTP/2 calls it before cc.RoundTrip encodes any frame), so a
+	// failure with no connection is proven pre-send. This covers the cases
+	// a bare dial *net.OpError does not: a dial still pending when the
+	// request context or the client timeout expires (net/http then returns
+	// only the context error), and a TLS handshake failure.
+	var gotConn atomic.Bool
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(httpReq.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { gotConn.Store(true) },
+	}))
+
 	resp, err := t.keysClient.Do(httpReq)
 	if err != nil {
-		return agentkeys.BrokerResult{}, classifyKeysSendError(err)
+		return agentkeys.BrokerResult{}, classifyKeysSendError(err, gotConn.Load())
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -505,18 +520,27 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 
 // classifyKeysSendError turns a transport-level send failure into
 // agentkeys.ErrNotDispatched only when the failure provably occurred before
-// any bytes reached the broker — a dial failure, where no connection was ever
-// established. Any other transport error (a timeout waiting for a response, a
-// connection reset while reading one, a TLS failure after the handshake
-// completed) does not prove the broker never received or began acting on the
-// request, so it must not be reported as a definite non-dispatch: it is
+// any bytes reached the broker: either the transport never obtained a
+// connection for the request (gotConn is false: a refused or still-pending
+// dial, a DNS failure, a TLS handshake failure, or the request context
+// expiring while waiting for a connection), or the error is itself a dial
+// failure. Any other transport error (a timeout waiting for a response, a
+// connection reset while reading one, a write failure on an established
+// connection) does not prove the broker never received or began acting on
+// the request, so it must not be reported as a definite non-dispatch: it is
 // returned as a plain, unclassified error instead, which
 // agentkeys.ClassifyDispatchError maps to OutcomeKeysOutcomeUnknown — the
 // honest "may have run" outcome required by
 // .design/agent-keys-contract.md §2.5/§4.3.
-func classifyKeysSendError(err error) error {
+//
+// The Op == "dial" clause only matters when gotConn is true: the transport
+// handed the request a connection that proved unusable before any write
+// (an HTTP/2 errClientConnUnusable retry) and the replacement dial then
+// failed, which is still pre-send. Do not remove it as redundant or widen
+// it to other ops.
+func classifyKeysSendError(err error, gotConn bool) error {
 	var opErr *net.OpError
-	if errors.As(err, &opErr) && opErr.Op == "dial" {
+	if !gotConn || (errors.As(err, &opErr) && opErr.Op == "dial") {
 		return fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 	return fmt.Errorf("keys: uncertain dispatch outcome: %w", err)

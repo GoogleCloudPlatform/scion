@@ -41,6 +41,7 @@ import type { PageData } from '../../shared/types.js';
 import { can, isEmptyPerAgentWorkspace } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
+import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 
 type WorkspaceType = 'git' | 'shared' | 'empty-per-agent' | 'linked';
 type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
@@ -1098,6 +1099,9 @@ export class ScionPageProjectCreate extends LitElement {
         throw new Error('No project ID in response');
       }
 
+      // A new project makes this session a member of it.
+      if (response.status !== 200) dispatchMembershipChanged({ kind: 'project', id: projectId });
+
       // Backend returns 200 for an existing project, 201 for newly created
       if (response.status === 200 && this.mode !== 'linked') {
         this.existingProjectId = projectId;
@@ -1186,6 +1190,7 @@ export class ScionPageProjectCreate extends LitElement {
       if (!created?.id) {
         throw new Error('No project ID in response');
       }
+      dispatchMembershipChanged({ kind: 'project', id: created.id });
       this.navigateToProject(created.id);
     } catch (err) {
       console.error('Failed to create project from template:', err);
@@ -1584,7 +1589,7 @@ export class ScionPageProjectCreate extends LitElement {
               ${this.gitWorkspaceMode === 'worktree-per-agent'
                 ? html`<div class="workspace-mode-note">
                     A single base clone is created, and each agent gets a lightweight git worktree.
-                    Requires git ≥ 2.47 on the node. On Kubernetes, requires the NFS backend.
+                    Requires git ≥ 2.48 on the node. On Kubernetes, requires the NFS backend.
                   </div>`
                 : this.gitWorkspaceMode === 'shared'
                   ? html`<div class="workspace-mode-note">

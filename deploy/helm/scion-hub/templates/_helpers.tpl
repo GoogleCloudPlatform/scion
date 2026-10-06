@@ -47,6 +47,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: scion
 {{- end }}
 
+{{- /*
+CONTRACT: a Terraform-owned NEG Service selects hub pods by exactly these two
+labels. Changing the keys or their derivation leaves that Service with no
+endpoints and breaks the load balancer without any error here. Pinned by
+tests/render-guards.sh ("Deployment selector labels are a contract").
+*/}}
 {{- define "scion-hub.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "scion-hub.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -538,7 +544,7 @@ answered first every time, so the missing layer behind it could not be seen. Bot
 layers are now asserted separately in the guard table.
 */}}
 {{- define "scion-hub.image" -}}
-{{- $repository := required "image.repository is required: set it to a hub image built from the root Dockerfile with --target hub-gke. Note that the hub-gke stage is added by the image-build change that accompanies this chart and is NOT in the root Dockerfile yet, so that build fails today with an unknown-target error. The chart has no default and cannot have one - that image is not published anywhere, and the published artifact named scion-hub is NOT it: it runs as root (image-build/hub/Dockerfile:24), which this chart's runAsNonRoot refuses, and it is built with -tags no_embed_web (image-build/scion-base/Dockerfile:55), so --enable-web has nothing to serve." .Values.image.repository }}
+{{- $repository := required "image.repository is required: set it to a hub image built from the root Dockerfile with --target hub-gke (image-build/cloudbuild-hub-gke.yaml builds and pushes it as scion-hub-gke). The chart has no default and cannot have one - it has no canonical registry to point at, and the published artifact named scion-hub is NOT it: it runs as root (image-build/hub/Dockerfile:24), which this chart's runAsNonRoot refuses, and it is built with -tags no_embed_web (image-build/scion-base/Dockerfile:55), so --enable-web has nothing to serve." .Values.image.repository }}
 {{- if and .Values.image.tag .Values.image.digest }}
 {{- fail "image.tag and image.digest are mutually exclusive: set image.digest (preferred) or image.tag, not both." }}
 {{- end }}
@@ -658,7 +664,7 @@ the mechanism was sound and only the justification was invented:
     and server.storage.provider gcs together with server.auth.mode proxy
     satisfies the one at :934. GKE does not set K_SERVICE, but hub.extraEnv can
     and it renders - measured - so that route is reachable from this chart too,
-    and assertHAUnlanded transcribes all three rather than two.
+    and scion-hub.haRoutes transcribes all three rather than two.
     hostedHAGuardsRequired (:921) is therefore satisfied and
     the hosted HA preflight DOES run - which is why this chart renders the five
     Block-1 keys in both auth modes rather than leaving them to the hub.
@@ -1742,7 +1748,7 @@ Exactly one list is.
 
 {{- /*
 5. THESE ARE DELIVERED THROUGH A CHANNEL OTHER THAN argv, AND argv WINS OVER IT
-   SILENTLY. Two of the five are delivered by this chart and three are not, and
+   SILENTLY. Four of the five are delivered by this chart and one is not, and
    that split is the paragraph. It was one claim about five flags until the
    settings rendering landed, and it is two claims now.
 
@@ -1752,17 +1758,19 @@ Exactly one list is.
                      reaching the container by envFrom at
                      templates/deployment.yaml:147-148.
      storage-bucket  server.storage.bucket in the rendered settings.yaml.
+     db              server.database.url in the rendered settings.yaml, under
+                     postgres. Landed with Cloud SQL.
+     admin-emails    server.hub.admin_emails in the rendered settings.yaml, from
+                     hub.adminEmails. parseAdminEmails
+                     (cmd/server_foreground.go) reads argv first and consults
+                     the settings file only when argv is empty.
 
    NOT DELIVERED HERE. Live on argv, nothing to disagree with, would simply take
    effect if passed:
 
-     db              cfg.Database.URL, cmd/server_foreground.go:875-877.
-                     Arrives with Cloud SQL.
-     storage-dir     cfg.Storage.LocalPath, cmd/server_foreground.go:890-892.
+     storage-dir     cfg.Storage.LocalPath, loadAndReconcileConfig
+                     (cmd/server_foreground.go).
                      Arrives with the workspace share.
-     admin-emails    cfg.Hub.AdminEmails, cmd/server_foreground.go:1402-1409 and
-                     :2116-2124. Both sites read argv first and consult the
-                     settings file only when argv is empty. No phase claims it.
 
    THIS HEADER WAS CORRECT AND STOPPED BEING CORRECT WITHOUT THE FILE BEING
    EDITED. It read "there is no second source yet for anything to disagree with"
@@ -1775,24 +1783,25 @@ Exactly one list is.
    of the chart still hold - it is how they go stale unnoticed.
 
    ALL FIVE STAY RESERVED, AND NOT BY INERTIA. Before removing an entry, name
-   where it lands instead. For base-url, storage-bucket and - since the Cloud SQL
-   phase - db, that is the first list above, and the answer is still not argv.
-   For the other two, admin-emails and storage-dir, it is nowhere yet. None of
+   where it lands instead. For base-url, storage-bucket, db (since the Cloud SQL
+   phase) and admin-emails (since hub.adminEmails), that is the first list
+   above, and the answer is still not argv. For storage-dir it is nowhere yet. None of
    the five is rendered as an argument ($setByChart), none selects
    which configuration is loaded ($neverPassed), none is a flag that no longer
    exists ($removedFlags), none is inert or misnamed ($aliasOrIgnored), and
    none weakens authentication ($unsafeToPass).
 
-   The harm is present for three of the five and scheduled for the other two.
-   Passing -base-url, -storage-bucket or -db today makes argv the silent winner
-   over a value this chart rendered, and nothing logs the disagreement. -db
-   joined that group when the Cloud SQL phase started rendering
-   server.database.url, and the move was forced rather than remembered:
-   hack/verify.sh carries the delivery state as a committed number per flag and
-   goes red when a channel appears without this paragraph being re-tensed in the
-   same diff. Passing admin-emails or storage-dir today changes a setting nothing
-   else sets; the same silent overriding starts the day its channel lands, with
-   no edit here to mark it. The
+   The harm is present for four of the five and scheduled for the fifth.
+   Passing -base-url, -storage-bucket, -db or -admin-emails today makes argv the
+   silent winner over a value this chart rendered, and nothing logs the
+   disagreement. -db joined that group when the Cloud SQL phase started
+   rendering server.database.url, and -admin-emails when hub.adminEmails started
+   rendering server.hub.admin_emails; both moves were forced rather than
+   remembered: hack/verify.sh carries the delivery state as a committed number
+   per flag and goes red when a channel appears without this paragraph being
+   re-tensed in the same diff. Passing storage-dir today changes a setting
+   nothing else sets; the same silent overriding starts the day its channel
+   lands, with no edit here to mark it. The
    asymmetry is what decides it - reserving costs an operator a flag they have no
    reason to want, un-reserving is a deliberate act with a place to record itself
    (see the closing paragraph), and reserving after the fact requires somebody to
@@ -2057,7 +2066,7 @@ overlay on the other, and no single verb covers both.
 {{- fail (printf "hub.args may not contain -%s: it is not the lever it looks like. -production is a deprecated alias bound to the same variable as -hosted, so passing it can disable hosted mode; -port is ignored whenever -enable-web is set, which this chart always sets, so passing it changes nothing observable. The chart renders neither, which is why this is a separate reservation and not a stale entry." $flag) }}
 {{- end }}
 {{- if has $flag $ownedByConfig }}
-{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Two of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket onto server.storage.bucket in the settings file it renders, so passing either makes argv the winner over a value already set here. The other three - -db, -storage-dir and -admin-emails - have no second source in this release and would simply take effect; they stay reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
+{{- fail (printf "hub.args may not contain -%s: this setting has a delivery channel other than argv - the settings file, or for base-url the SCION_SERVER_BASE_URL environment variable - and argv silently wins over both, so an argv copy is a second and invisible source for one value, with nothing reporting the disagreement. Four of the five are live in this release: -base-url is shadowed onto the SCION_SERVER_BASE_URL this chart renders, and -storage-bucket, -db and -admin-emails onto server.storage.bucket, server.database.url and server.hub.admin_emails in the settings file it renders, so passing any of them makes argv the winner over a value set here. The fifth, -storage-dir, has no second source in this release and would simply take effect; it stays reserved because the channel arrives on a schedule and reserving after the fact requires somebody to notice." $flag) }}
 {{- end }}
 {{- if has $flag $unsafeToPass }}
 {{- fail (printf "hub.args may not contain -%s: it weakens authentication or places credential material where anyone with pod read access can read it." $flag) }}
@@ -2280,8 +2289,8 @@ variable silently overrides the file this chart renders. Measured: minimal's
 settings.yaml says driver: sqlite; with SCION_SERVER_DATABASE_DRIVER=postgres in
 the environment, config.LoadGlobalConfig reports driver "postgres",
 isHADeployment (cmd/server_foreground.go:927) flips to TRUE, and the hub aborts
-at the hosted HA preflight - from a release that assertHAUnlanded passed, because
-assertHAUnlanded reads .Values.database.driver, which still says sqlite.
+at the hosted HA preflight - from a release whose HA checks never ran, because
+scion-hub.haRoutes reads .Values.database.driver, which still says sqlite.
 
 That is the harm and it is specific to this chart: the chart's guards reason
 about the configuration the chart RENDERED, and this variable changes the
@@ -2321,8 +2330,40 @@ container env entries alike, and asserting this guard refuses every one of them.
 {{- end }}
 {{- range $entry := .Values.hub.extraEnv }}
 {{- $name := toString (dig "name" "" $entry) }}
-{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
-{{- fail (printf "hub.extraEnv may not set %s. Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go:683) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go:927) becomes true while acknowledgeHAUnlanded never fires, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
+{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC|SECRETS)_" $name }}
+{{- fail (printf "hub.extraEnv may not set %s (SCION_SERVER_DATABASE_*, SCION_SERVER_OIDC_* and SCION_SERVER_SECRETS_* are refused). Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go) becomes true while the chart's HA checks never run, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead. The same holds for SCION_SERVER_SECRETS_BACKEND, which binds to server.secrets.backend after settings.yaml and can select gcpsm with no project, a hub that only logs the backend error and runs with no secret backend; configure it through secrets.backend and secrets.gcpsm, which render server.secrets." $name) }}
+{{- end }}
+{{- /*
+TWO NAMES THAT REACH THE SETTINGS DOCUMENT THROUGH THE KOANF ENV LAYER, refused
+here rather than modelled. LoadVersionedSettings (pkg/config/settings_v1.go)
+loads SCION_* environment variables on top of settings.yaml, so these do more
+than the registry check in scion-hub.settings can see from the rendered file:
+
+  SCION_ACTIVE_PROFILE overrides active_profile, so the profile whose
+  image_registry the hub resolves is not the one the chart read. Refused in
+  every form, literal or valueFrom. Set active_profile through config.extra -
+  which assertNoExtraCollision refuses today, because the chart writes it - or
+  not at all.
+
+  SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY with an empty literal
+  value. requireImageRegistryForBroker (cmd/server_foreground.go) skips an empty
+  variable, so neither is a registry source. For SCION_IMAGE_REGISTRY it is
+  worse: the env layer has already replaced the settings file's image_registry
+  with "", so a registry the chart rendered is erased and the hub refuses to
+  start. The maintenance name is refused alongside it so that the two names
+  follow one rule. An entry with no value and no valueFrom is the same empty
+  string to Kubernetes and is refused too. A non-empty value is accepted and
+  counts as a registry source; a valueFrom is accepted unread.
+
+Applied here, in the extraEnv guard, so that it also holds under
+config.existingSecret, where the settings file is the operator's but the
+environment is still the chart's.
+*/}}
+{{- if eq $name "SCION_ACTIVE_PROFILE" }}
+{{- fail "hub.extraEnv may not set SCION_ACTIVE_PROFILE: the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go), so it would replace active_profile and change which profile's image_registry the hub resolves, without the chart's registry check seeing it. Set active_profile through config.extra instead; the chart renders active_profile: default, so changing it there is refused as a collision until the chart supports it." }}
+{{- end }}
+{{- if and (has $name (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY")) (not (dig "valueFrom" "" $entry)) (eq (toString (dig "value" "" $entry)) "") }}
+{{- fail (printf "hub.extraEnv may not set %s to an empty value. An empty value is not a registry source: requireImageRegistryForBroker (cmd/server_foreground.go) skips it. An empty SCION_IMAGE_REGISTRY also erases the rendered one, because the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go) and image_registry becomes \"\", so the hub refuses to start with no registry. Remove the entry, or give it a non-empty value or a valueFrom." $name) }}
 {{- end }}
 {{- if has $name $shadowable }}
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}
@@ -2399,6 +2440,7 @@ the same runtimes.kubernetes.namespace.
 */}}
 {{- define "scion-hub.existingSecretTransfers" -}}
   auth.mode                  ->  server.auth.mode
+  auth.mode                  ->  server.auth.proxy.provider
   database.connMaxIdleTime   ->  server.database.conn_max_idle_time
   database.connMaxLifetime   ->  server.database.conn_max_lifetime
   database.maxIdleConns      ->  server.database.max_idle_conns
@@ -2422,7 +2464,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa
 {{- end }}
 
 {{/*
@@ -2472,6 +2514,16 @@ it; keep that call.
 {{- if .Values.config.extra }}{{- $inline = append $inline "config.extra" }}{{- end }}
 {{- if .Values.storage.bucket }}{{- $inline = append $inline "storage.bucket" }}{{- end }}
 {{- if .Values.agents.imageRegistry }}{{- $inline = append $inline "agents.imageRegistry" }}{{- end }}
+{{- if .Values.hub.adminEmails }}{{- $inline = append $inline "hub.adminEmails" }}{{- end }}
+{{- /*
+secrets.backend has a non-empty default, but local is also what renders nothing,
+so any other value was typed. The gcpsm leaves default empty.
+*/}}
+{{- $secretsInline := .Values.secrets | default (dict) }}
+{{- $gcpsmInline := $secretsInline.gcpsm | default (dict) }}
+{{- if ne (toString ($secretsInline.backend | default "local")) "local" }}{{- $inline = append $inline "secrets.backend" }}{{- end }}
+{{- if $gcpsmInline.projectId }}{{- $inline = append $inline "secrets.gcpsm.projectId" }}{{- end }}
+{{- if $gcpsmInline.replicationLocations }}{{- $inline = append $inline "secrets.gcpsm.replicationLocations" }}{{- end }}
 {{- /*
 PHASE 2 DELTA. The three database leaves below are the append this comment asked
 later phases for, and phase 2 owed it: phase 2 is what introduced the database
@@ -2511,6 +2563,20 @@ companion instead; that pair is explained above.
 {{- if $creds.clientId }}{{- $inline = append $inline (printf "auth.oauth.web.%s.clientId" $provider) }}{{- end }}
 {{- if $creds.clientSecret }}{{- $inline = append $inline (printf "auth.oauth.web.%s.clientSecret" $provider) }}{{- end }}
 {{- end }}
+{{- /*
+The IAP audience and the transport values: empty defaults, so a non-empty one
+was typed, and under config.existingSecret it reaches nothing. auth.proxy.provider
+is not here: its only legal value is its default, so it is indistinguishable
+from unset - the operator's file must carry server.auth.proxy.provider: iap,
+which NOTES.txt and values.yaml say.
+*/}}
+{{- $proxyValues := $auth.proxy | default (dict) }}
+{{- $iapValues := $proxyValues.iap | default (dict) }}
+{{- if $iapValues.audience }}{{- $inline = append $inline "auth.proxy.iap.audience" }}{{- end }}
+{{- $transportValues := $auth.transport | default (dict) }}
+{{- if $transportValues.mode }}{{- $inline = append $inline "auth.transport.mode" }}{{- end }}
+{{- if $transportValues.oidcAudience }}{{- $inline = append $inline "auth.transport.oidcAudience" }}{{- end }}
+{{- if $transportValues.platformAuthSa }}{{- $inline = append $inline "auth.transport.platformAuthSa" }}{{- end }}
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
@@ -2518,118 +2584,39 @@ companion instead; that pair is explained above.
 {{- end }}
 
 {{/*
-The HA acknowledgement gate.
-
-WHAT IT IS FOR. This chart can render a configuration that satisfies the hub's
-isHADeployment test (cmd/server_foreground.go, func isHADeployment), which turns
-on validateHostedHAPreflight. This release cannot satisfy the gates listed below,
-so the hub aborts where runServerForeground calls
-`if err := validateHostedHAPreflight(cfg); err != nil` before it serves anything.
-
-[HISTORY 2026-08-17] THIS PARAGRAPH SAID "that preflight has thirteen gates",
-eleven lines above the sentence below claiming there is no count anywhere in this
-file. Both were written the same day. 1b3c9418 then made the count wrong as well
-as forbidden, and the sentence that forbade it did not notice, because a prose
-claim about a file's contents is not a check on that file's contents. The count
-is gone; the prohibition below now has nothing to contradict it. The postgres/gcs
-shape is a choice an operator can coherently have made, so this is an opt-in
-acknowledgement rather than a refusal.
-
-MEASURED, gate by gate, through config.LoadGlobalConfig and the real
-validateHostedHAPreflight, on the settings.yaml this chart actually renders -
-not read off this table. cmd/helm_chart_ha_contract_test.go walks it and writes
-hack/ha-gates.txt; hack/verify.sh checks this table against that walk in both
-directions. If the hub gains or loses a gate, that check goes red and this table
-is what has to move. THERE IS NO COUNT ANYWHERE IN THIS FILE, deliberately: a
-count is the thing that agreed with itself in three places for a day while
-agreeing with the hub in none.
-
-ci/values-settings.yaml, in hub order:
-
-  GATE TABLE BEGIN
-    a durable session/signing secret           session-secret phase
-    server.auth.proxy.provider=iap             ingress/IAP phase
-    server.auth.proxy.iap.audience             ingress/IAP phase
-    server.auth.transport                      ingress/IAP phase
-    server.auth.transport.mode=iap             ingress/IAP phase
-    server.auth.transport.oidc_audience        ingress/IAP phase
-    server.auth.transport.platform_auth_sa     ingress/IAP phase
-  GATE TABLE END
-
-ci/values-settings-oauth.yaml refuses on a STRICT SUBSET of that table: the first
-two rows only. The hub's IAP gates sit inside `if cfg.Auth.Mode == "proxy"` in
-validateHostedHAPreflight, so an oauth deployment never reaches them and the
-ingress/IAP phase lands nothing that arm is waiting on.
-
-[HISTORY 2026-08-17] THIS SAID THE OPPOSITE - "refuses on one gate more,
-server.auth.mode=proxy, which is not an unlanded phase" - and it was true when
-written. 1b3c9418 "fix: do not require IAP for hosted HA preflight" deleted that
-gate and moved the IAP family inside the auth.mode test, inverting the direction:
-oauth went from superset-by-one to subset-by-six. The same claim was live in three
-places (here, templates/NOTES.txt, values.yaml at auth.mode). Correcting one of
-them by hand is what left the other two standing with MORE authority, not less,
-so the fix that matters is the exclusivity assertion in hack/verify.sh, not this
-paragraph.
-
-THE FIVE IN CIRCULATION WERE A PROBE'S EXTENT, NOT THE HUB'S. That walk stopped
-at server.auth.transport because the prober could not satisfy it, and its stop
-was read as the preflight's end. Gates lie past that wall and they are real.
-A later walk supplying a WELL-FORMED IAP audience missed a further refusal,
-isSupportedIAPAudience, which is a second objection to the value of
-server.auth.proxy.iap.audience rather than a table row. Both mistakes are the
-same mistake: reporting what the probe reached as what the hub does.
-
-WHAT THIS CHART ALREADY SATISFIES, so nobody re-derives it: server.hub.hub_id,
-server.database.driver=postgres, server.storage.provider=gcs with a bucket, and
-- since the Cloud SQL phase - server.database.url. Those four are why the refusal
-starts where it does rather than at the hub's first gate. The URL is satisfied
-only where the chart renders a settings.yaml, so under config.existingSecret it
-is the operator's again, and the table above is the list for the rendering case.
-
-server.database.url LEFT THE TABLE ABOVE BECAUSE THE WALK STOPPED NAMING IT, not
-because this phase decided it had landed. TestHelmChartHAGateWalk's authored
-tripwire went red with "gates the authored list names and the hub no longer
-refuses on: [server.database.url]" and this edit is the response to that line.
-
-THE ROUTE SET IS TRANSCRIBED FROM THE HUB, NOT INVENTED HERE.
-cmd/server_ha_preflight_test.go:248-256 (ab0d227, branch
-scion/ha-deployment-tripwire - not an ancestor of this branch; fetch that ref to
-read it) WILL make this a two-way contract once it lands: a route added there
-and not here makes this condition UNDER-trigger, rendering an HA config with no
-acknowledgement, which cannot boot; a route removed or swapped there and not
-here makes it OVER-trigger, demanding an acknowledgement for a deployment that
-is not HA. All three routes are transcribed below. Grep this tree for
-acknowledgeHAUnlanded to find it, as that comment instructs.
+THE ROUTE SET, transcribed from the hub's isHADeployment
+(cmd/server_foreground.go), once, so the HA guard in assertSettings and NOTES.txt
+cannot disagree about whether this release is on one. Emits the routes joined by
+" and ", or the empty string when there are none - which is falsey, so callers
+test it directly. cmd/server_ha_preflight_test.go pins the hub's side.
 
 Route 1 is K_SERVICE, and it is NOT dead here. GKE does not set it, but
 hub.extraEnv does - measured, it renders - so an operator can turn HA detection
 on through a channel that looks unrelated to the database. The hub tests
 os.Getenv("K_SERVICE") != "", so an explicit empty value is not the route; a
-valueFrom is counted, because the chart cannot read it and under-triggering is
-the outcome that will not boot.
+valueFrom is counted, because the chart cannot read it and under-triggering
+renders an HA config without the HA checks.
 
-Routes 2 and 3 use lower-cased comparison because the hub uses strings.EqualFold
-(:931, :934), while auth.mode is compared exactly (:934) and so is compared
-exactly here. The schema already enums all three to lower case, which makes the
-difference unobservable today - transcribed faithfully anyway, because the
-contract above is with the hub's test and not with the schema.
+Routes 2 and 3 use lower-cased comparison because the hub uses strings.EqualFold,
+while auth.mode is compared exactly, as the hub compares it. The schema already
+enums all three to lower case, which makes the difference unobservable today -
+transcribed faithfully anyway.
 
-NOT EVALUATED UNDER config.existingSecret, and that is a real hole rather than
-an oversight: the chart renders no settings.yaml in that shape, so it cannot see
-the driver, the storage provider or the auth mode. Route 1 is still checked,
-because extraEnv is the chart's own value either way.
+NOT EVALUATED UNDER config.existingSecret: the chart renders no settings.yaml in
+that shape, so it cannot see the driver, the storage provider or the auth mode.
+Route 1 is still checked, because extraEnv is the chart's own value either way.
 */}}
-{{/*
-THE ROUTE SET, once, so the refusal and NOTES.txt cannot disagree about whether
-this release is on one. Emits the routes joined by " and ", or the empty string
-when there are none - which is falsey, so callers test it directly.
-
-Shared deliberately, and it is NOT the same decision as the gate list. The
-routes are a computed property of these values and must be identical in both
-places or one of them is lying about the deployment in front of the operator.
-The gate list is prose written for two different audiences and stays duplicated,
-with a parity check over the copies rather than a shared definition.
+{{- /*
+The shape isSupportedIAPAudience (cmd/server_foreground.go) accepts, as a
+regular expression over the NORMALISED audience (see the HA check in
+scion-hub.assertSettings for the normalisation). One line, no
+surrounding whitespace: TestHelmChartIAPAudiencePattern reads it out of this
+file verbatim and checks it against the hub function.
 */}}
+{{- define "scion-hub.iapAudiencePattern" -}}
+^/projects/[^/]+/(locations/[^/]+/services|global/backendServices)/[^/]+$
+{{- end }}
+
 {{- define "scion-hub.haRoutes" -}}
 {{- $routes := list }}
 {{- range .Values.hub.extraEnv }}
@@ -2651,43 +2638,6 @@ with a parity check over the copies rather than a shared definition.
 {{- join " and " $routes }}
 {{- end }}
 
-{{/*
-THE GATE ENUMERATION IS PER-AUTH-MODE, AND IT IS THAT WAY BECAUSE THE HUB IS.
-
-Until 1b3c9418 ("fix: do not require IAP for hosted HA preflight", Preston
-Holmes, 2026-08-17) this list was the same in both modes and the chart printed
-one sentence. That commit deleted the gate "hosted HA deployment requires
-server.auth.mode=proxy for IAP authentication" and moved the seven IAP gates
-inside `if cfg.Auth.Mode == "proxy" {` in validateHostedHAPreflight. So under
-auth.mode oauth the hub now asks for NONE of the IAP configuration, and the
-single sentence became false about seven of the nine gates it named - while
-still refusing correctly, which is the dangerous combination: a refusal that
-is right about the outcome and wrong about the reason teaches the operator to
-go fix seven things that were never going to be checked.
-
-BOTH LISTS ARE DERIVED, NOT WRITTEN. hack/ha-gates.txt is produced by
-cmd/helm_chart_ha_contract_test.go driving the real validateHostedHAPreflight
-over this chart's own goldens, one gate at a time; the proxy arm walks eight
-and the oauth arm walks two. tests/render-guards.sh reads that artifact and
-asserts, per arm, that the message below names every gate in it AND NAMES NO
-OTHERS. The upper half of that assertion is new: the previous guard only
-checked that nothing was missing, so this message could name a gate the hub
-had deleted and stay green - which is exactly what it did for the forty
-minutes between 1b3c9418 landing and being noticed.
-*/}}
-{{- define "scion-hub.assertHAUnlanded" -}}
-{{- $routes := include "scion-hub.haRoutes" . }}
-{{- if and $routes (not .Values.acknowledgeHAUnlanded) }}
-{{- $gates := "a durable session/signing secret, from the session-secret phase. That is the whole list for auth.mode oauth: the hub's IAP gates sit inside `if cfg.Auth.Mode == \"proxy\"` in validateHostedHAPreflight, so this shape never reaches them and the ingress/IAP phase lands nothing this release is waiting on" }}
-{{- $removal := "That flag stops being needed for auth.mode oauth when the session-secret phase has landed. The ingress/IAP phase is not on this shape's path and waiting for it would hold the flag one phase too long; Filestore lands none of them either" }}
-{{- $auth := .Values.auth | default (dict) }}
-{{- if eq (toString $auth.mode) "proxy" }}
-{{- $gates = "a durable session/signing secret, from the session-secret phase; then server.auth.proxy.provider=iap, server.auth.proxy.iap.audience, server.auth.transport, server.auth.transport.mode=iap, server.auth.transport.oidc_audience and server.auth.transport.platform_auth_sa, all from the ingress/IAP phase" }}
-{{- $removal = "That flag stops being needed for auth.mode proxy when the session-secret phase and the ingress/IAP phase have both landed. Filestore lands none of them" }}
-{{- end }}
-{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true, its hosted HA preflight runs (cmd/server_foreground.go, func validateHostedHAPreflight), and it aborts before serving where runServerForeground calls `if err := validateHostedHAPreflight(cfg); err != nil`. These preflight gates have no source in this chart, measured in hub order by walking the real preflight: %s. The chart already satisfies server.hub.hub_id, the postgres driver, gcs storage with a bucket, and now the database URL, which is why the refusal starts at the session secret and not earlier. If you are rendering this to inspect it, or to supply the rest yourself, set acknowledgeHAUnlanded: true. %s." $routes $gates $removal) }}
-{{- end }}
-{{- end }}
 
 {{/*
 A value, as it should appear inside a diagnostic. Quoted, except when there is
@@ -2945,6 +2895,80 @@ rendered yet; see the comment in the rendered file. */}}
 {{- if ne (dig "server" "auth" "mode" "" $doc) $rootAuth.mode }}
 {{- fail (printf "rendered settings.yaml has server.auth.mode: %s but auth.mode is %s." (include "scion-hub.diagValue" (dig "server" "auth" "mode" "" $doc)) (include "scion-hub.diagValue" $rootAuth.mode)) }}
 {{- end }}
+{{- /*
+The IAP proxy and transport settings, checked on the merged document because
+config.extra can supply the keys the chart leaves out (the audience and the
+whole transport block when their values are empty).
+
+The audience is required on every proxy render, HA or not: initHubServer and
+initWebServer (cmd/server_foreground.go) both refuse provider iap without one.
+Its SHAPE is checked only where the hub checks it, on an HA shape, by
+isSupportedIAPAudience; outside HA the hub verifies JWTs against whatever
+non-empty value it is given. The shape is matched on the normalised value,
+trim (strip trailing slashes (trim aud)) - sprig's trim is strings.TrimSpace -
+with the plain pattern in scion-hub.iapAudiencePattern. The inner trim and the
+strip are validateHostedHAPreflight's TrimRight(TrimSpace(aud), "/"); the outer
+trim is the TrimSpace inside isSupportedIAPAudience. On that value the pattern
+accepts exactly what isSupportedIAPAudience accepts, and
+TestHelmChartIAPAudiencePattern (cmd/helm_chart_iap_audience_test.go) checks the
+two against each other.
+
+The HA half replaces the acknowledgement this chart used to demand: with every
+gate validateHostedHAPreflight applies under auth.mode proxy now modelled, a
+proxy HA render that is missing one is refused here, naming the chart value
+that supplies it. hack/ha-gates.txt is the measurement that the chart's own HA
+fixtures leave only the session secret, which arrives by env, not by this file.
+*/}}
+{{- $routes := include "scion-hub.haRoutes" $root }}
+{{- if eq (dig "server" "auth" "mode" "" $doc) "proxy" }}
+{{- $emittedProvider := dig "server" "auth" "proxy" "provider" "" $doc }}
+{{- if ne (toString $emittedProvider) "iap" }}
+{{- fail (printf "rendered settings.yaml has server.auth.proxy.provider: %s under auth.mode proxy; this chart renders only iap. Set auth.proxy.provider: iap, or supply the whole file through config.existingSecret." (include "scion-hub.diagValue" $emittedProvider)) }}
+{{- end }}
+{{- $emittedAudience := toString (dig "server" "auth" "proxy" "iap" "audience" "" $doc) }}
+{{- if not (regexReplaceAll "/+$" (trim $emittedAudience) "") }}
+{{- fail "auth.mode is proxy with provider iap, but no IAP audience is set, and the hub refuses to start without one: initHubServer and initWebServer (cmd/server_foreground.go) both fail with \"auth.proxy.iap.audience is required when auth.mode=proxy and provider=iap\", and this chart always enables the web server. Set auth.proxy.iap.audience to the IAP resource path - /projects/<number>/global/backendServices/<id> behind a GKE load balancer, or /projects/<number>/locations/<region>/services/<name> for Cloud Run." }}
+{{- end }}
+{{- if $routes }}
+{{- $problems := list }}
+{{- $normalisedAudience := trim (regexReplaceAll "/+$" (trim $emittedAudience) "") }}
+{{- if not (regexMatch (include "scion-hub.iapAudiencePattern" $root) $normalisedAudience) }}
+{{- $problems = append $problems (printf "auth.proxy.iap.audience is %s, which is not /projects/<number>/global/backendServices/<id> or /projects/<number>/locations/<region>/services/<name> (isSupportedIAPAudience)" (include "scion-hub.diagValue" $emittedAudience)) }}
+{{- end }}
+{{- $transport := dig "server" "auth" "transport" (dict) $doc }}
+{{- if not (kindIs "map" $transport) }}{{- $transport = dict }}{{- end }}
+{{- if ne (toString (dig "mode" "" $transport)) "iap" }}
+{{- $problems = append $problems (printf "server.auth.transport.mode is %s, and must be iap - set auth.transport.mode: iap" (include "scion-hub.diagValue" (dig "mode" "" $transport))) }}
+{{- end }}
+{{- if not (regexReplaceAll "/+$" (trim (toString (dig "oidc_audience" "" $transport))) "") }}
+{{- $problems = append $problems "server.auth.transport.oidc_audience is empty once surrounding whitespace and trailing slashes are removed, as the preflight removes them - set auth.transport.oidcAudience to the IAP OAuth client ID" }}
+{{- end }}
+{{- if not (trim (toString (dig "platform_auth_sa" "" $transport))) }}
+{{- $problems = append $problems "server.auth.transport.platform_auth_sa is empty - set auth.transport.platformAuthSa to the service account email the hub mints transport tokens as" }}
+{{- end }}
+{{- if $problems }}
+{{- fail (printf "This release cannot start the deployment these values describe. %s, so the hub's isHADeployment test is true and its hosted HA preflight (validateHostedHAPreflight, cmd/server_foreground.go) runs before it serves anything. Under auth.mode proxy that preflight refuses this settings.yaml: %s." $routes (join "; " $problems)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- /*
+The transport keys in the spelling a settings file binds. GlobalConfig's
+TransportAuthConfig (pkg/config/hub_config.go) uses oidcAudience and
+platformAuthSA as koanf tags, which is the environment mapper's spelling; the
+settings file is read through V1TransportConfig (pkg/config/settings_v1.go),
+which binds oidc_audience and platform_auth_sa. yaml.v3 drops the other spelling
+without an error, so the hub would start with no transport audience or service
+account. Reachable only through config.extra; the chart's own render is
+snake_case.
+*/}}
+{{- $transportDoc := dig "server" "auth" "transport" (dict) $doc }}
+{{- if kindIs "map" $transportDoc }}
+{{- range $key, $_ := $transportDoc }}
+{{- if has $key (list "oidcAudience" "platformAuthSA" "platformAuthSa") }}
+{{- fail (printf "rendered settings.yaml sets server.auth.transport.%s. That spelling binds nothing in a settings file and fails silently: settings.yaml reads oidc_audience and platform_auth_sa (V1TransportConfig, pkg/config/settings_v1.go), while %s is the environment mapper's spelling (TransportAuthConfig, pkg/config/hub_config.go). Use auth.transport.oidcAudience and auth.transport.platformAuthSa, which the chart renders correctly, or rename the key in config.extra to %s." $key $key (ternary "oidc_audience" "platform_auth_sa" (eq $key "oidcAudience"))) }}
+{{- end }}
+{{- end }}
+{{- end }}
 
 {{- /*
 The oauth client credentials. THIS REPLACED AN ACKNOWLEDGEMENT KEY, and the
@@ -3064,6 +3088,14 @@ real deep merge rather than a text append.
 {{- /* server.hub. hub_name, not name: the koanf tag is hub_name. */}}
 {{- include "scion-hub.assertNoCredential" (dict "value" .Values.hub.name "source" "hub.name") }}
 {{- $hub := dict "hub_id" $hubId "hub_name" .Values.hub.name }}
+{{- /*
+server.hub.admin_emails, the V1ServerHubConfig spelling. Omitted when empty:
+parseAdminEmails (cmd/server_foreground.go) treats an absent list and an empty
+one the same, and an absent key keeps the rendered file free of a no-op line.
+*/}}
+{{- with .Values.hub.adminEmails }}
+{{- $hub = set $hub "admin_emails" (toStrings .) }}
+{{- end }}
 
 {{- /*
 server.database. The key is url, not dsn. Pool settings are here now because they
@@ -3147,15 +3179,134 @@ this is only the render.
 {{- end }}
 {{- end }}
 
+{{- /*
+server.auth.proxy and server.auth.transport: the IAP proxy identity and the
+transport credential for dispatched agents. Snake_case under server.auth, which
+is where V1AuthConfig binds them (pkg/config/settings_v1.go); the camelCase
+spellings bind nothing in this file and are refused in assertSettings.
+
+THE PROXY BLOCK IS NOT OPTIONAL UNDER auth.mode proxy. initWebServer
+(cmd/server_foreground.go) refuses to start with "auth.mode=proxy requires
+auth.proxy configuration" when it is absent, and both initWebServer and
+initHubServer refuse provider iap without an audience. This chart always passes
+--enable-web, so a proxy render without an audience is a release that cannot
+start - refused here, on every shape, not only on HA ones.
+
+ONLY iap IS MODELLED. The hub's jwt provider is refused rather than left to
+config.extra: this define writes server.auth.proxy.provider, and
+assertNoExtraCollision forbids config.extra from overwriting a key the chart
+writes, so jwt is reachable only through config.existingSecret. Saying so at
+render time is better than the collision message, which would not mention the
+route.
+
+The audience is rendered normalised as the HA preflight normalises it -
+surrounding whitespace trimmed, then trailing slashes stripped
+(strings.TrimRight(strings.TrimSpace(aud), "/") in validateHostedHAPreflight),
+then trimmed once more. The last trim is the one isSupportedIAPAudience applies
+inside its own strings.Split; rendering it means a value such as "<path> /"
+reaches the hub as "<path>" rather than "<path> ", so the value the hub
+verifies JWTs against is the value its preflight approved.
+*/}}
+{{- $authOut := dict "mode" $auth.mode }}
+{{- $proxyValues := $auth.proxy | default (dict) }}
+{{- $iapValues := $proxyValues.iap | default (dict) }}
+{{- $audience := trim (regexReplaceAll "/+$" (trim (toString ($iapValues.audience | default ""))) "") }}
+{{- if eq (toString $auth.mode) "proxy" }}
+{{- $provider := toString ($proxyValues.provider | default "iap") }}
+{{- if ne $provider "iap" }}
+{{- fail (printf "auth.proxy.provider is %s, but this chart models only iap. The hub's jwt proxy provider (server.auth.proxy.jwt) is not modelled, and config.extra cannot reach it because the chart writes server.auth.proxy.provider and config.extra may not overwrite a key the chart writes. To run a jwt proxy, supply the whole settings file through config.existingSecret. The header provider is refused by the hub's web server, which this chart always enables (initWebServer, cmd/server_foreground.go)." (include "scion-hub.diagValue" $proxyValues.provider)) }}
+{{- end }}
+{{- $proxyOut := dict "provider" $provider }}
+{{- if $audience }}
+{{- $proxyOut = set $proxyOut "iap" (dict "audience" $audience) }}
+{{- end }}
+{{- $authOut = set $authOut "proxy" $proxyOut }}
+{{- else if $audience }}
+{{- fail (printf "auth.proxy.iap.audience is set (%s) but auth.mode is %s. The chart renders server.auth.proxy only under auth.mode proxy, so the audience would be silently discarded. Remove it, or set auth.mode: proxy." (include "scion-hub.diagValue" $iapValues.audience) (include "scion-hub.diagValue" $auth.mode)) }}
+{{- end }}
+{{- /*
+server.auth.transport. Rendered only when a mode is chosen. The minter in
+initHubServer (cmd/server_foreground.go) refuses to start without
+platform_auth_sa for any mode but none, and without an audience unless the mode
+is cloudrun_invoker, which falls back to the hub endpoint
+(resolveTransportAudience). A value set under an empty or none mode reaches
+nothing, so it is refused rather than discarded.
+*/}}
+{{- $transportValues := $auth.transport | default (dict) }}
+{{- $transportMode := toString ($transportValues.mode | default "") }}
+{{- $oidcAudience := trim (toString ($transportValues.oidcAudience | default "")) }}
+{{- $platformAuthSa := trim (toString ($transportValues.platformAuthSa | default "")) }}
+{{- if not (has $transportMode (list "" "none" "iap" "cloudrun_invoker")) }}
+{{- fail (printf "auth.transport.mode is %s; it must be one of \"\", none, iap, cloudrun_invoker." (include "scion-hub.diagValue" $transportValues.mode)) }}
+{{- end }}
+{{- if has $transportMode (list "" "none") }}
+{{- $inert := list }}
+{{- if $oidcAudience }}{{- $inert = append $inert "auth.transport.oidcAudience" }}{{- end }}
+{{- if $platformAuthSa }}{{- $inert = append $inert "auth.transport.platformAuthSa" }}{{- end }}
+{{- if $inert }}
+{{- fail (printf "%s set while auth.transport.mode is %s. The hub mints no transport tokens in that mode, so the value would reach nothing. Set auth.transport.mode (iap or cloudrun_invoker), or remove it." (join " and " $inert) (include "scion-hub.diagValue" $transportValues.mode)) }}
+{{- end }}
+{{- else }}
+{{- if not $platformAuthSa }}
+{{- fail (printf "auth.transport.mode is %s, which requires auth.transport.platformAuthSa: the hub's transport minter refuses to start without the service account it mints tokens as (initHubServer, cmd/server_foreground.go)." $transportMode) }}
+{{- end }}
+{{- if and (eq $transportMode "iap") (not $oidcAudience) }}
+{{- fail "auth.transport.mode is iap, which requires auth.transport.oidcAudience - the IAP OAuth client ID, not the auth.proxy.iap.audience resource path. The hub's transport minter refuses to start without it (initHubServer, cmd/server_foreground.go)." }}
+{{- end }}
+{{- end }}
+{{- if $transportMode }}
+{{- $transportOut := dict "mode" $transportMode }}
+{{- if $oidcAudience }}{{- $transportOut = set $transportOut "oidc_audience" $oidcAudience }}{{- end }}
+{{- if $platformAuthSa }}{{- $transportOut = set $transportOut "platform_auth_sa" $platformAuthSa }}{{- end }}
+{{- $authOut = set $authOut "transport" $transportOut }}
+{{- end }}
 {{- $server := dict
     "mode" "hosted"
     "hub" $hub
     "database" $database
     "storage" $storage
-    "auth" (dict "mode" $auth.mode)
+    "auth" $authOut
     "broker" (dict "host" "127.0.0.1" "port" (int (include "scion-hub.brokerPort" .)) "auto_provide" true) }}
 {{- if $oauthWeb }}
 {{- $server = set $server "oauth" (dict "web" $oauthWeb) }}
+{{- end }}
+
+{{- /*
+server.secrets: the secret backend. Snake_case, as V1SecretsConfig binds it
+(pkg/config/settings_v1.go). local is the hub's own default (NewBackend treats
+"" and local alike), so it renders nothing.
+
+gcpsm WITHOUT A PROJECT IS REFUSED BECAUSE THE HUB DOES NOT REFUSE IT.
+NewGCPBackend returns "gcpsm backend requires a GCP project ID", and the caller
+in cmd/server_foreground.go logs that as a warning and carries on with a nil
+backend - the hub starts, passes /readyz, and every secret operation fails.
+
+The gcpsm fields under backend local reach nothing, so they are refused rather
+than discarded. gcp_credentials is not rendered: on GKE the hub uses
+Application Default Credentials from Workload Identity, and an inline key does
+not belong in a value. IAM for Secret Manager is not this chart's.
+*/}}
+{{- $secretsValues := .Values.secrets | default (dict) }}
+{{- $secretsBackend := toString ($secretsValues.backend | default "local") }}
+{{- $gcpsmValues := $secretsValues.gcpsm | default (dict) }}
+{{- $gcpProjectId := trim (toString ($gcpsmValues.projectId | default "")) }}
+{{- $gcpLocations := $gcpsmValues.replicationLocations | default (list) }}
+{{- if eq $secretsBackend "gcpsm" }}
+{{- if not $gcpProjectId }}
+{{- fail "secrets.backend is gcpsm, which requires secrets.gcpsm.projectId. The hub does not refuse to start without it: NewGCPBackend fails with \"gcpsm backend requires a GCP project ID\", the server logs that as a warning (cmd/server_foreground.go) and runs with no secret backend, so every secret read and write fails at request time." }}
+{{- end }}
+{{- $secretsOut := dict "backend" "gcpsm" "gcp_project_id" $gcpProjectId }}
+{{- if $gcpLocations }}
+{{- $secretsOut = set $secretsOut "gcp_replication_locations" (toStrings $gcpLocations) }}
+{{- end }}
+{{- $server = set $server "secrets" $secretsOut }}
+{{- else }}
+{{- $inertSecrets := list }}
+{{- if $gcpProjectId }}{{- $inertSecrets = append $inertSecrets "secrets.gcpsm.projectId" }}{{- end }}
+{{- if $gcpLocations }}{{- $inertSecrets = append $inertSecrets "secrets.gcpsm.replicationLocations" }}{{- end }}
+{{- if $inertSecrets }}
+{{- fail (printf "%s set while secrets.backend is %s. The chart renders server.secrets only for backend gcpsm, so the value would reach nothing. Set secrets.backend: gcpsm, or remove it." (join " and " $inertSecrets) $secretsBackend) }}
+{{- end }}
 {{- end }}
 
 {{- /*
@@ -3206,6 +3357,73 @@ was measured doing exactly that, landing in the Secret AND moving the
 checksum/settings digest. The projection cannot enumerate its way out of an
 open-ended surface; this turns the injection into a render failure instead. */}}
 {{- include "scion-hub.assertNoCredentialTree" (dict "value" .Values.config.extra "source" "config.extra") }}
+{{- /*
+AN IMAGE REGISTRY IS REQUIRED, because the hub refuses to start without one.
+This chart always runs the hub with an in-process runtime broker: it renders
+--enable-runtime-broker, which sets cfg.RuntimeBroker.Enabled, and $setByChart
+refuses an --enable-runtime-broker=false in hub.args. With the broker enabled,
+runServerForeground calls requireImageRegistryForBroker
+(cmd/server_foreground.go) before starting it, and that returns "image_registry
+is not configured, but the runtime broker requires it" unless one of these is
+non-empty:
+
+  1. SCION_IMAGE_REGISTRY in the environment
+  2. SCION_MAINTENANCE_IMAGE_REGISTRY in the environment
+  3. image_registry resolved from settings.yaml for the active profile
+     (VersionedSettings.ResolveImageRegistry: profiles.<active>.image_registry,
+     else the top-level image_registry)
+
+Those are the cases accepted here, read off the merged document and
+hub.extraEnv: agents.imageRegistry and config.extra both reach (3), and an
+extraEnv entry of either name with a non-empty value or a valueFrom reaches (1)
+or (2). A valueFrom is accepted unread because the chart cannot see what it
+resolves to.
+
+This is only correct because scion-hub.assertExtraEnv refuses the two env
+entries that would change (3) behind the file's back. The koanf env layer in
+LoadVersionedSettings applies SCION_* variables over settings.yaml, so
+SCION_ACTIVE_PROFILE would change which profile (3) reads, and an empty
+SCION_IMAGE_REGISTRY would overwrite the top-level image_registry with "". The
+chart refuses SCION_ACTIVE_PROFILE in hub.extraEnv outright and refuses either
+registry variable with an empty literal value, rather than modelling the env
+layer's precedence here. The hub's DB-backed settings overlay does not count: startRuntimeBroker
+installs it after this check has run.
+
+Not the check described under --profile in the reserved-flag comments. That
+one, config.RequireImageRegistry in cmd/root.go, is skipped for the server
+subtree and never runs on hub start; this one is in the server itself and
+always does.
+
+Not evaluated under config.existingSecret, where this define is not reached:
+the settings file is the operator's, and the hub's own check still applies.
+Runs after the document assertions so that a more specific refusal about the
+same render is reported first.
+*/}}
+{{- $activeProfile := toString (dig "active_profile" "" $doc) }}
+{{- $registryFromSettings := toString (dig "image_registry" "" $doc) }}
+{{- $profilesDoc := dig "profiles" (dict) $doc }}
+{{- if kindIs "map" $profilesDoc }}
+{{- $profileDoc := index $profilesDoc $activeProfile }}
+{{- if kindIs "map" $profileDoc }}
+{{- $profileRegistry := toString (dig "image_registry" "" $profileDoc) }}
+{{- if $profileRegistry }}{{- $registryFromSettings = $profileRegistry }}{{- end }}
+{{- end }}
+{{- end }}
+{{- $registryFromEnv := false }}
+{{- range $entry := .Values.hub.extraEnv }}
+{{- if has (toString (dig "name" "" $entry)) (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY") }}
+{{- if or (dig "value" "" $entry) (dig "valueFrom" "" $entry) }}
+{{- $registryFromEnv = true }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if not (or $registryFromSettings $registryFromEnv) }}
+{{- /* An extraEnv refusal is the more specific diagnosis when one applies - an
+empty SCION_IMAGE_REGISTRY, or SCION_ACTIVE_PROFILE moving off the profile read
+here - and this Secret renders before the Deployment that runs the guard. */}}
+{{- include "scion-hub.assertExtraEnv" . }}
+{{- fail "agents.imageRegistry is required: this chart always runs the hub with an in-process runtime broker (--enable-runtime-broker), and with the broker enabled the hub refuses to start without an image registry (requireImageRegistryForBroker, cmd/server_foreground.go: \"image_registry is not configured, but the runtime broker requires it\"). Set agents.imageRegistry to the registry prefix agent images are pulled from, for example us-docker.pkg.dev/<project>/<repo>. The hub also accepts image_registry for the active profile through config.extra, or SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv." }}
+{{- end }}
 {{- $rendered }}
 {{- end }}
 

@@ -201,7 +201,31 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # add one probe each in the values walk. Read off the driver's output after all
 # other changes were made, not summed:
 #   bash hack/verify.sh 2>&1 | sed -n 's/^assertions: \([0-9]*\)\/.*/\1/p'
-EXPECTED_TOTAL=364
+#
+# 364 -> 362 for the IAP/transport values and the removal of
+# acknowledgeHAUnlanded. Summed per step against a run of the parent commit,
+# and the run agrees:
+#   -12  "NOTES.txt names every unlanded gate ..." removed
+#    -6  "the gate list is the same list everywhere it is written" removed
+#    +2  the auth-mode diff now excises server.auth.proxy/transport and checks
+#        the proxy arm's excision equals ci/values-settings.yaml, the oauth arm's
+#        is empty
+#   +14  "the walk finds only the session-secret gate ...": 4 walk arms, 5 NOTES
+#        table rows, 1 oauth-NOTES absence, 1 acknowledgeHAUnlanded absence,
+#        2 on-a-route presences, 1 default absence. The positive twin (the
+#        unlanded-work section row) already existed under the same label, so it
+#        is in neither the removed nor the added count.
+# 364 - 12 - 6 + 2 + 14 = 362.
+#
+# 362 -> 361 for the chart-iap-transport review fixes:
+#    -2  the malformed-audience walk arms (settings.yaml, settings-oauth.yaml),
+#        dropped with the arm itself; TestHelmChartIAPAudiencePattern covers the
+#        audience format gate instead
+#    +2  the config.existingSecret + K_SERVICE NOTES rows (on a route with no
+#        rendered settings.yaml; no rendered-settings claims)
+#    -1  the NOT_YET needle for "the session secret", removed from the notes
+# 362 - 2 + 2 - 1 = 361.
+EXPECTED_TOTAL=361
 
 failures=0
 assertions=0
@@ -462,11 +486,26 @@ expect_render_failure() {
 }
 
 # A minimal set of valid values to hang a single bad --set off.
-BASE=(
+#
+# BASE_ES is the same set without the IAP audience, for the renders that set
+# config.existingSecret: the audience is refused there as inert, so carrying it
+# would turn every one of those renders into a refusal about the audience. It is
+# also the mutation probe's base, which supplies its audience another way - see
+# PROBE_CREDS.
+BASE_ES=(
   --set image.repository=example.test/scion-hub-gke
   --set hub.hubId=neg
   --set hub.baseUrl=https://neg.example.com
   --set auth.sessionSecret=neg-session-secret
+)
+# auth.mode defaults to proxy, and a proxy render without an IAP audience is
+# refused (the hub will not start without one). A probe value in the Cloud Run
+# form. --set, not --set-string, so a row's own --set auth.proxy.iap.audience=
+# can clear it: helm applies every --set before any --set-string.
+BASE=(
+  "${BASE_ES[@]}"
+  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg
+  --set agents.imageRegistry=example.test/agents
 )
 
 # --------------------------------------------------------------------------
@@ -1047,9 +1086,20 @@ excise_oauth() {
                           { print }
   ' "$1"
 }
-excise_oauth "$WORK/auth-a-full" "$WORK/auth-a-oauth" >"$WORK/auth-a"
-excise_oauth "$WORK/auth-b-full" "$WORK/auth-b-oauth" >"$WORK/auth-b"
-touch "$WORK/auth-a-oauth" "$WORK/auth-b-oauth"
+# server.auth.proxy and server.auth.transport sit at four spaces, under auth.
+# They are the proxy arm's counterpart of server.oauth: what selecting auth.mode
+# proxy brings with it. Excised the same way and accounted for the same way below.
+excise_iap() {
+  awk -v out="$2" '
+    /^    (proxy|transport):$/   { in_sub = 1; print > out; next }
+    in_sub && /^ {0,4}[^ ]/      { in_sub = 0 }
+    in_sub                       { print > out; next }
+                                 { print }
+  ' "$1"
+}
+excise_oauth "$WORK/auth-a-full" "$WORK/auth-a-oauth" | excise_iap /dev/stdin "$WORK/auth-a-iap" >"$WORK/auth-a"
+excise_oauth "$WORK/auth-b-full" "$WORK/auth-b-oauth" | excise_iap /dev/stdin "$WORK/auth-b-iap" >"$WORK/auth-b"
+touch "$WORK/auth-a-oauth" "$WORK/auth-b-oauth" "$WORK/auth-a-iap" "$WORK/auth-b-iap"
 if diff -u "$WORK/auth-a" "$WORK/auth-b" >"$WORK/auth.diff"; then
   pass "the two auth modes render identical settings.yaml apart from auth.mode"
 else
@@ -1087,6 +1137,32 @@ else
   fail "the oauth arm's excised subtree is not what this check accounts for"
   diff -u <(printf '%s\n' "$oauth_want") "$WORK/auth-b-oauth" || true
 fi
+# The IAP half, both sides. The expected text is read out of the fixture rather
+# than typed, except for the shape, which is the claim.
+_ci_aud="$(awk '$1=="audience:"{print $2; exit}' "$CHART_DIR/ci/values-settings.yaml")"
+_ci_oidc="$(awk '$1=="oidcAudience:"{print $2; exit}' "$CHART_DIR/ci/values-settings.yaml")"
+_ci_sa="$(awk '$1=="platformAuthSa:"{print $2; exit}' "$CHART_DIR/ci/values-settings.yaml")"
+[[ -n "$_ci_aud" && -n "$_ci_oidc" && -n "$_ci_sa" ]] || meta_failure "could not read the IAP and transport values out of ci/values-settings.yaml, so the comparison below is against empty strings."
+iap_want="    proxy:
+      iap:
+        audience: ${_ci_aud}
+      provider: iap
+    transport:
+      mode: iap
+      oidc_audience: ${_ci_oidc}
+      platform_auth_sa: ${_ci_sa}"
+if [[ "$(cat "$WORK/auth-a-iap")" == "$iap_want" ]]; then
+  pass "the proxy arm's excised subtree is exactly server.auth.proxy and server.auth.transport, in snake_case"
+else
+  fail "the proxy arm's excised IAP subtree is not what this check accounts for"
+  diff -u <(printf '%s\n' "$iap_want") "$WORK/auth-a-iap" || true
+fi
+if [[ ! -s "$WORK/auth-b-iap" ]]; then
+  pass "the oauth arm renders no server.auth.proxy or server.auth.transport, so the excision removed nothing from it"
+else
+  fail "the oauth arm rendered an IAP subtree, which the excision then hid from the diff"
+  cat "$WORK/auth-b-iap"
+fi
 if [[ ! -s "$WORK/auth-a-oauth" ]]; then
   pass "the proxy arm renders no server.oauth at all, so the excision removed nothing from it"
 else
@@ -1095,14 +1171,15 @@ else
 fi
 
 # --------------------------------------------------------------------------
-step "NOTES.txt names every unlanded gate the walk found, for a release that acknowledged them"
+step "the walk finds only the session-secret gate, and NOTES names what the chart renders for the rest"
 # --------------------------------------------------------------------------
-# WHY THIS EXISTS. The gate names live in the assertHAUnlanded refusal,
-# and that refusal does not print when acknowledgeHAUnlanded is set. Both of the
-# chart's own settings fixtures set it - so the gates are named to every
-# operator EXCEPT the two who copied a file out of this repository, which is the
-# population most likely to hit them. NOTES.txt prints on every install and is
-# the only prose the operator reliably sees.
+# This step used to check that NOTES, the assertHAUnlanded refusal and a gate
+# table in _helpers.tpl each named every gate the walk found, for a release
+# that set acknowledgeHAUnlanded. The chart now renders auth.proxy and
+# auth.transport, the walk (hack/ha-gates.txt) finds no settings key left to
+# refuse on either HA arm, and the acknowledgement and its refusal are gone.
+# What remains to check is that the walk says so, and that NOTES describes the
+# settings the chart renders instead of a list of gates.
 #
 # RENDERING NOTES.txt WITHOUT A CLUSTER. `helm template` evaluates NOTES.txt but
 # emits nothing for it, and --show-only cannot address it ("could not find
@@ -1140,19 +1217,6 @@ render_notes() { # render_notes <out> <helm args...>
   fi
 }
 
-# THE GATE LIST IS NOT WRITTEN HERE. IT IS READ OUT OF A WALK.
-#
-# It used to be a literal 8 in three places, and the three agreed with each
-# other and with nothing in the hub. gd-p1-rev then walked the same preflight
-# with a malformed IAP audience and got NINE - isSupportedIAPAudience is a
-# separate gate - and no guard in this file could see it, because every guard
-# and every claim shared the constant.
-#
-# hack/ha-gates.txt is produced by TestHelmChartHAGateWalk in cmd/, which drives
-# the real validateHostedHAPreflight over the settings.yaml this chart renders,
-# one gate at a time. When Cloud SQL lands and renders server.database.url the
-# walk returns one fewer gate and everything below follows, with no constant for
-# anyone to decrement.
 GATES_FILE="$CHART_DIR/hack/ha-gates.txt"
 [[ -s "$GATES_FILE" ]] || meta_failure "hack/ha-gates.txt is missing or empty. Every gate assertion below derives from it and would compare two empty lists. Regenerate with: go test ./cmd -run TestHelmChartHAGateWalk -update-chart-contract"
 command -v sha256sum >/dev/null 2>&1 || meta_failure "sha256sum is not on PATH, so the walk cannot be bound to the goldens it claims to have walked. NOTHING BELOW IS EVIDENCE."
@@ -1201,410 +1265,100 @@ canon_block() {
   ' "$GATES_FILE"
 }
 
-# The chart's prose describes the PROXY limb with a well-formed audience, so
-# that arm is the canon. The other three arms are read below, for the keys they
-# add rather than for a count.
-mapfile -t CANON_KEYS < <(canon_block "settings.yaml" "well-formed" | sed -n 's/^KEY   //p')
-mapfile -t CANON_PROSE < <(canon_block "settings.yaml" "well-formed" | sed -n 's/^PROSE //p')
-if [[ ${#CANON_KEYS[@]} -eq 0 ]]; then
-  meta_failure "the canonical arm of hack/ha-gates.txt yielded no gate keys. Either the arm header changed or the extraction is reading the wrong block; every parity comparison below would be between two empty sets."
-fi
-
-# PROSE GATES CANNOT BE MATCHED MECHANICALLY, AND THIS IS THE MECHANISM THAT
-# ADMITS IT. A gate whose refusal names no settings key - the session secret is
-# delivered by environment variable, and the audience FORMAT gate objects to the
-# value of a key it does not re-name - can only be matched against the chart's
-# prose by a human-chosen phrase, because the chart's prose is a paraphrase by
-# construction. So the mapping is declared, and then ASSERTED TO BE TOTAL: a new
-# prose gate appearing in the walk has no entry here and this check fails asking
-# for one. That is the difference between a hand list and a hand list with a
-# tripwire on it.
-prose_marker() { # prose_marker <refusal text> -> the phrase the chart uses, or empty
-  case "$1" in
-    *"durable session/signing secret"*) printf 'durable session' ;;
-    *"supported IAP audience"*)         printf '' ;;   # see PROSE_FORMAT_GATE below
-    *)                                  return 1 ;;
-  esac
-}
-HA_GATE_PATTERNS=()
-for _k in "${CANON_KEYS[@]}"; do
-  # A key that is a proper prefix of another key needs a boundary, or a
-  # substring test for it is satisfied by its own children.
-  _isprefix=0
-  for _o in "${CANON_KEYS[@]}"; do
-    case "$_o" in "$_k".*) _isprefix=1 ;; esac
-  done
-  _esc="$(printf '%s' "$_k" | sed 's/\./\\./g' || true)"
-  if [[ $_isprefix -eq 1 ]]; then
-    HA_GATE_PATTERNS+=("${_esc}([^.[:alnum:]_]|\$)")
+# THE WALK, ARM BY ARM. Every HA arm must stop at the session secret, which the
+# chart delivers by environment variable and the walk grants as an env value.
+# A KEY row here is a settings key the chart fails to render; a second PROSE
+# row is a hub gate this step has not seen.
+# One audience arm: the malformed-audience arm was dropped because every
+# chart proxy shape renders an audience, so the hub never asked for one and the
+# two arms were identical, so _arm is fixed at well-formed rather than looped.
+# TestHelmChartIAPAudiencePattern covers the format gate.
+for _golden in settings.yaml settings-oauth.yaml; do
+  _arm=well-formed
+  canon_block "$_golden" "$_arm" >"$WORK/canon-${_golden}-${_arm}.txt"
+  [[ -s "$WORK/canon-${_golden}-${_arm}.txt" ]] || meta_failure "hack/ha-gates.txt has no CANON block for ${_golden} [audience ${_arm}]. Either the arm header changed or the extraction is reading the wrong block; the assertion below would compare against nothing."
+  _keys="$(grep -c '^KEY ' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
+  _prose="$(grep -c '^PROSE ' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
+  _sess="$(grep -c '^PROSE .*durable session/signing secret' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
+  if [[ "$_keys" -eq 0 && "$_prose" -eq 1 && "$_sess" -eq 1 ]]; then
+    pass "the walk over ${_golden} [audience ${_arm}] stops at the session secret alone"
   else
-    HA_GATE_PATTERNS+=("$_esc")
+    fail "the walk over ${_golden} [audience ${_arm}] records ${_keys} settings-key gates and ${_prose} prose gates (${_sess} of them the session secret); the chart renders every settings key the preflight reads, so only the session secret should remain:"
+    cat "$WORK/canon-${_golden}-${_arm}.txt"
   fi
 done
-for _p in "${CANON_PROSE[@]}"; do
-  if ! _m="$(prose_marker "$_p")"; then
-    meta_failure "the walk records a prose gate this suite has no marker for: '$_p'. Add it to prose_marker(), with the phrase the chart's own text uses. Until then the chart's prose is unchecked for that gate and the count below is short."
-  fi
-  [[ -n "$_m" ]] && HA_GATE_PATTERNS+=("$_m")
-done
-if [[ ${#HA_GATE_PATTERNS[@]} -ne $(( ${#CANON_KEYS[@]} + ${#CANON_PROSE[@]} )) ]]; then
-  meta_failure "derived ${#HA_GATE_PATTERNS[@]} patterns from ${#CANON_KEYS[@]} keys and ${#CANON_PROSE[@]} prose gates. A gate was dropped between the walk and the check."
-fi
-# THE CONTRIBUTION TO EXPECTED_TOTAL IS NOW DERIVED TOO, so a gate landing or
-# arriving moves the arithmetic on its own. Nothing here is allowed to guess:
-# EXPECTED_TOTAL is a committed constant and this is the term that varies.
-HA_GATE_COUNT=${#HA_GATE_PATTERNS[@]}
 
 render_notes "$WORK/notes-ack.txt" -f "$CHART_DIR/ci/values-settings.yaml"
 render_notes "$WORK/notes-plain.txt" -f "$CHART_DIR/ci/values-minimal.yaml"
+render_notes "$WORK/notes-oauth.txt" -f "$CHART_DIR/ci/values-settings-oauth.yaml"
 
-for _p in "${HA_GATE_PATTERNS[@]}"; do
-  if grep -Eq -- "$_p" "$WORK/notes-ack.txt"; then
-    pass "the acknowledged release's NOTES names the gate matching /$_p/"
+# THE PROXY TABLE. Each server.auth key the proxy preflight reads must be named
+# beside the chart value that renders it, on one line, so the operator can map
+# one to the other.
+for _row in \
+  'server.auth.proxy.provider: iap|auth.proxy.provider' \
+  'server.auth.proxy.iap.audience|auth.proxy.iap.audience' \
+  'server.auth.transport.mode: iap|auth.transport.mode' \
+  'server.auth.transport.oidc_audience|auth.transport.oidcAudience' \
+  'server.auth.transport.platform_auth_sa|auth.transport.platformAuthSa'; do
+  _hub="${_row%%|*}"; _chart="${_row##*|}"
+  if grep -F -- "$_hub" "$WORK/notes-ack.txt" | grep -qF -- "$_chart"; then
+    pass "the proxy release's NOTES maps ${_hub} to ${_chart}"
   else
-    fail "the acknowledged release's NOTES does not name the gate matching /$_p/ - an operator who copied ci/values-settings.yaml is told by neither the refusal, which is suppressed, nor here"
+    fail "the proxy release's NOTES has no line naming both ${_hub} and ${_chart}"
   fi
 done
-
-# THE LANDED GATE, replacing the presence arm that server.database.url used to
-# hold in the loop above. Not a deletion: the count is the same and the claim
-# has been inverted rather than dropped. It fails in both useful directions - if
-# NOTES silently drops the sentence, and if NOTES goes back to listing the URL
-# as unlanded while the chart renders one.
-#
-# THIS ARM IS A LITERAL-PROSE ARM and its known failure mode is a re-wording
-# rather than a regression. It fired for exactly that reason during the rebase
-# onto gd-p1-dev's a5551ff9, where the sentence was reworded to drop a gate
-# count. That is the arm working: a sentence this check quotes cannot be edited
-# without the edit being seen. The quoted text is kept in full so the fix is to
-# reconcile two visible strings, not to guess what was meant.
-if grep -qF 'server.database.url headed this list until the Cloud SQL phase, which landed' "$WORK/notes-ack.txt"; then
-  pass "the acknowledged release's NOTES records server.database.url as landed, not as a gate"
+if grep -qE 'server\.auth\.(proxy|transport)' "$WORK/notes-oauth.txt"; then
+  fail "the oauth release's NOTES names server.auth.proxy or server.auth.transport, which the preflight does not read under auth.mode oauth"
 else
-  fail "the acknowledged release's NOTES does not say server.database.url was landed. The chart renders one; an operator reading a seven-gate list with no explanation cannot tell whether the eighth was closed or forgotten."
+  pass "the oauth release's NOTES names no IAP or transport key"
+fi
+_ackhits="$(cat "$WORK/notes-ack.txt" "$WORK/notes-plain.txt" "$WORK/notes-oauth.txt" | grep -c 'acknowledgeHAUnlanded' || true)"
+if [[ "$_ackhits" -eq 0 ]]; then
+  pass "no rendered NOTES mentions acknowledgeHAUnlanded"
+else
+  fail "the rendered NOTES mention acknowledgeHAUnlanded ${_ackhits} times; the value has been removed"
 fi
 
-# --------------------------------------------------------------------------
-# EXCLUSIVITY, WHICH IS THE HALF THAT WAS MISSING, AND THE DEFECT IT LET THROUGH.
-#
-# The loop above asserts NOTES names every gate the walk FOUND. That is
-# completeness, and completeness is structurally blind to an EXTRA. A sentence
-# naming a gate the hub has DELETED is an extra, so it stayed green across
-# 1b3c9418 "fix: do not require IAP for hosted HA preflight": this chart went on
-# telling operators that auth.mode: oauth "refuses on one gate more,
-# server.auth.mode: proxy" after the hub had moved its IAP gates inside
-# `if cfg.Auth.Mode == "proxy"` and stopped checking any of them for oauth.
-# gd-p2-dev found it by rebasing onto this branch. This suite did not find it,
-# and this is the assertion whose absence is why.
-#
-# THIS IS NOT A NEW IDEA, IT IS AN IDEA REACHING ITS SECOND CALL SITE. The same
-# reasoning is already written into _helpers.tpl about the REFUSAL string - "the
-# previous guard only checked that nothing was missing, so this message could
-# name a gate the hub had deleted and stay green". I wrote that and did not
-# carry it here. A rule stated at one call site does not protect the others.
-#
-# BOTH ARMS, AND THE REASON IS NOT SYMMETRY. The proxy arm was never wrong.
-# Checking only the arm that was correct is exactly how this survived.
-#
-# WHY THIS TAKES AN OUT-FILE INSTEAD OF RETURNING ON STDOUT. meta_failure exits,
-# and `exit` inside $( ) leaves only the SUBSHELL: the meta-failure prose becomes
-# the return value and the caller carries on with it as data. I have hit that bug
-# in this branch already, twenty lines below a comment I had just written warning
-# about it. Writing to a path keeps the exit in the caller's shell.
-notes_gate_region() { # notes_gate_region <rendered notes> <out file>
-  local f="$1" out="$2" _a1 _a2
-  _a1="$(grep -cF 'from memory:' "$f" || true)"
-  _a2="$(grep -cF 'You would meet them one at a' "$f" || true)"
-  # A STRING ANCHOR IS A MEASUREMENT ONLY IF ITS UNIQUENESS WAS MEASURED
-  # (gd-p1-rev). Zero anchors yields an empty span, and an empty span names no
-  # extra gate, so every assertion below would pass without reading anything.
-  # Two yields a span neither anchor delimits.
-  if [[ "$_a1" -ne 1 || "$_a2" -ne 1 ]]; then
-    meta_failure "the NOTES gate-table anchors are not unique in $(basename "$f"): 'from memory:' x${_a1}, 'You would meet them one at a' x${_a2}; both must be exactly 1. The extraction would read the wrong span or none at all, and an empty span passes every exclusivity assertion below vacuously."
-  fi
-  awk '/from memory:/{f=1;next} /You would meet them one at a/{f=0} f' "$f" >"$out"
-  [[ -s "$out" ]] || meta_failure "the NOTES gate-table extraction for $(basename "$f") is empty even though both anchors are unique. Nothing below is a measurement."
-}
-
-notes_arm() { # notes_arm <label> <rendered notes> <golden name>
-  local label="$1" notes="$2" golden="$3"
-  local region="$WORK/notes-region-${label}.txt"
-  notes_gate_region "$notes" "$region"
-
-  local -a _canon=() _named=() _extra=() _missing=()
-  mapfile -t _canon < <(canon_block "$golden" "well-formed" | sed -n 's/^KEY   //p' | sort -u)
-  if [[ ${#_canon[@]} -eq 0 ]]; then
-    meta_failure "the ${label} arm of the walk yielded no gate KEY rows from ${golden}, so both assertions below would compare against an empty set and agree with anything."
-  fi
-  mapfile -t _named < <(grep -oE 'server\.[a-z0-9_]+(\.[a-z0-9_]+)*' "$region" | sort -u || true)
-  if [[ ${#_named[@]} -eq 0 ]]; then
-    meta_failure "the ${label} arm's NOTES gate table names no server.* key at all. The table is the operator's only copy of this list; an empty extraction makes the exclusivity assertion below vacuous."
-  fi
-  mapfile -t _extra   < <(comm -23 <(printf '%s\n' "${_named[@]}") <(printf '%s\n' "${_canon[@]}"))
-  mapfile -t _missing < <(comm -13 <(printf '%s\n' "${_named[@]}") <(printf '%s\n' "${_canon[@]}"))
-
-  # THE POSITIVE TWIN. Region-scoped, so it is strictly narrower than the
-  # whole-file loop above: a gate named anywhere else in NOTES no longer
-  # satisfies the table.
-  if [[ ${#_missing[@]} -eq 0 ]]; then
-    pass "the ${label} arm's NOTES gate table names every gate the walk found (${#_canon[@]} keys)"
+# BOTH DIRECTIONS for the on-a-route paragraph, and a positive twin so that an
+# empty or wrong render cannot pass the absence.
+for _n in ack oauth; do
+  if grep -qF 'THESE VALUES ARE ON ONE OF THOSE ROUTES' "$WORK/notes-${_n}.txt"; then
+    pass "the ${_n} release's NOTES says it is on an HA route"
   else
-    fail "the ${label} arm's NOTES gate table omits $(printf '%s ' "${_missing[@]}")- the walk found it and the operator's copy of the list does not have it"
+    fail "the ${_n} release's NOTES does not say it is on an HA route, though its values put it on one"
   fi
-
-  if [[ ${#_extra[@]} -eq 0 ]]; then
-    pass "the ${label} arm's NOTES gate table names no gate the walk did not find (${#_named[@]} named against ${#_canon[@]} walked)"
-  else
-    fail "the ${label} arm's NOTES gate table names $(printf '%s ' "${_extra[@]}")which the hub's preflight does not check under this auth.mode. The operator is being sent to configure something that is never read, and a refusal that is right about the outcome and wrong about the reason is worse than silence. This is the assertion that 1b3c9418 should have tripped."
-  fi
-
-  # THE PLANTED POSITIVE, WHOSE EXPECTATION IS A DELTA AND NOT A PIN.
-  # Pinning the planted result at 1 couples the control to the subject being
-  # clean: on a genuinely dirty subject the control would report an apparatus
-  # fault, which is the one outcome that tells a reader to disregard the
-  # finding. A delta is correct whatever the subject is doing.
-  local _n_before=${#_extra[@]} _n_after
-  _n_after="$(printf '%s\nserver.zzz.control.probe\n' "${_named[@]}" | grep -E . | sort -u \
-              | comm -23 - <(printf '%s\n' "${_canon[@]}") | grep -cE . || true)"
-  if [[ "$_n_after" -ne $(( _n_before + 1 )) ]]; then
-    meta_failure "the ${label} exclusivity differ found ${_n_before} extras on the real table and ${_n_after} with one known-absent key planted. Planting one key must move it by exactly one; it moved by $(( _n_after - _n_before )). The differ is not reading one of its two inputs, so ${_n_before} is not a measurement."
-  fi
-}
-
-render_notes "$WORK/notes-oauth.txt" -f "$CHART_DIR/ci/values-settings-oauth.yaml"
-notes_arm proxy "$WORK/notes-ack.txt"   "settings.yaml"
-# THE OAUTH ARM'S CANON BLOCK HAS NO KEY ENTRIES after 1b3c9418 moved the IAP
-# gates inside `if cfg.Auth.Mode == "proxy"` and the Cloud SQL phase landed
-# server.database.url. The single remaining oauth gate (durable session secret)
-# is a PROSE entry, not a KEY, so notes_arm's KEY-based extraction yields an
-# empty _canon and its exclusivity check becomes vacuous. The gate itself is
-# already verified by the HA_GATE_PATTERNS loop above.
-# notes_arm oauth "$WORK/notes-oauth.txt" "settings-oauth.yaml"
-
-# BOTH DIRECTIONS. The suppressed-refusal paragraph must appear for a release on
-# an HA route and must NOT appear for one that is on none.
-if grep -qF 'THE REFUSAL WAS SUPPRESSED' "$WORK/notes-ack.txt"; then
-  pass "the acknowledged release's NOTES says the refusal was suppressed"
+done
+if grep -qF 'THESE VALUES ARE ON ONE OF THOSE ROUTES' "$WORK/notes-plain.txt"; then
+  fail "the default release's NOTES says it is on an HA route; sqlite and local storage are on none"
 else
-  fail "the acknowledged release's NOTES does not say the refusal was suppressed, so the operator is never told the chart had an objection and stood down"
+  pass "the default release's NOTES does not say it is on an HA route"
 fi
-if grep -qF 'THE REFUSAL WAS SUPPRESSED' "$WORK/notes-plain.txt"; then
-  fail "the default release's NOTES claims a refusal was suppressed, and there was nothing to suppress: it is on none of the three isHADeployment routes"
-else
-  pass "the default release's NOTES does not claim a suppressed refusal"
-fi
-# THE POSITIVE TWIN FOR THAT NEGATIVE. Without it, deleting the whole section -
-# or rendering some other file - passes the line above.
 if grep -qF 'WHAT THIS RELEASE DOES NOT YET DO' "$WORK/notes-plain.txt"; then
   pass "the default release's NOTES still carries the unlanded-work section, so the absence above is an absence and not an empty render"
 else
-  fail "the default release's NOTES has no unlanded-work section at all, so the suppressed-refusal absence above proves nothing"
+  fail "the default release's NOTES has no unlanded-work section at all, so the HA-route absence above proves nothing"
 fi
 
-# --------------------------------------------------------------------------
-step "the gate list is the same list everywhere it is written"
-# --------------------------------------------------------------------------
-# A PARITY GUARD OVER A DERIVED LIST. The list itself comes from the walk in
-# hack/ha-gates.txt; what this step checks is that the three prose copies agree
-# with it and with each other. gd-em ruled the three copies should stay three:
-# they are written for three audiences - a numbered table for
-# whoever maintains the guard, a single-sentence refusal for whoever tripped it,
-# and an operator's table in NOTES - and collapsing them into one shared string
-# would make all three read like whichever audience won. What must not differ is
-# WHICH GATES, so that is what is checked, in both directions:
-#
-#   forward   every canonical gate appears in every copy
-#   backward  no copy names a preflight key the walk did not find, except the
-#             ones this chart already satisfies and the oauth-limb gate, both
-#             of which are themselves derived from the walk
-#
-# The backward half is the one that matters. Without it, adding a gate to
-# one copy is invisible: the forward half stays green because the rest are
-# still there. An unknown token is a FAILURE and not a warning - the author
-# either added a gate and must add it everywhere, or named a key that is not a
-# gate and must say so in ALLOWED_NON_GATES below.
-#
-# The NOTES copy is read out of the RENDER, not out of the template, so a copy
-# that is present in the file but conditioned away for this release counts as
-# absent - which is exactly what it is to the operator.
-#
-# WHICH MUTATION REACHES WHICH HALF, MEASURED, because the answer is not the one
-# a reader would assume from the assertion names:
-#
-#   delete a line from the doc table      -> META-FAILURE (one fewer line than the walk found)
-#   add a line to the NOTES table         -> META-FAILURE (one more line than the walk found)
-#   RENAME a gate in the doc table        -> both parity halves, 2 failures
-#   RENAME a gate in the NOTES table      -> both parity halves, 3 with the presence loop
-#   add a gate to the refusal string      -> the backward half, 1 failure
-#   drop the session gate from the refusal-> the forward half, 1 failure
-#
-# The two table copies are size-asserted, so pure insertions and deletions are
-# caught by the size guard and never reach the parity comparison. That is fine -
-# they are caught, loudly, as META-FAILURES - but do not read "the parity check
-# catches a deleted gate" out of these assertion names. The parity halves are
-# exercised by RENAMES, which is the mutation that keeps the list the right
-# length while changing which gates they are, and it is the one a careless edit
-# actually produces.
-# DERIVED FROM THE WALK, not written here. CANON_KEYS came out of
-# hack/ha-gates.txt above.
-CANON_GATES=("${CANON_KEYS[@]}")
-# The session gate has no key name in any copy - it is prose - so it is carried
-# as a marker rather than pretended into a dotted token. The marker itself is
-# derived: prose_marker() maps the hub's refusal to the chart's phrasing, and
-# fails loudly for a prose gate it has never seen.
-# THE `head -1` THAT WAS HERE IS GONE, AND NOT FOR THE REASON IT LOOKS LIKE.
-# gd-em's third re-check question: did any single value come off the front of a
-# list. This one did. It is NOT a wrapper hazard - the input is a printf over an
-# in-script array, not a traversal, so there is no completion-order instability
-# to eat - but `head -1` answers "which one" with silence when the answer is
-# "two", and a second durable-session line entering CANON_PROSE would have
-# picked one and never said which. Count first, then take the one.
-# `|| true` IS LOAD-BEARING AND IT IS NOT DEFENSIVE CLUTTER. This file runs under
-# `set -euo pipefail`. `grep -c` exits 1 when the count is 0, so without it the
-# assignment fails, the shell aborts mid-run, and the suite exits 1 - "the chart
-# is wrong" - with no summary line and no META-FAILURE, which is the one
-# confusion this file's exit-code contract exists to prevent. That is not
-# hypothetical: the guard below was written before this line existed, in the same
-# pipeline shape, and CONTROL A (needle mutated so nothing matches) exited 1
-# after 'the gate list is the same list everywhere it is written' with no further
-# output. THE META-FAILURE IT ADVERTISES WAS UNREACHABLE FOR AS LONG AS IT HAS
-# EXISTED, and the only reason nobody saw it is that the count has never been 0.
-_session_hits="$(printf '%s\n' "${CANON_PROSE[@]}" | grep -cF 'durable session' || true)"
-if [[ "$_session_hits" -ne 1 ]]; then
-  meta_failure "the walk's canonical arm records $_session_hits prose gates matching 'durable session', not exactly 1. At 0 the SESSION_MARKER below is empty and every 'names all the gates' assertion passes on the strength of an empty string; above 1 the marker is whichever line sorted first, which is a coin toss this suite would not report. Prose gates found: $(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session' | tr '\n' '|')"
+# config.existingSecret ON A ROUTE. K_SERVICE is the one route the chart can see
+# under config.existingSecret, and in that shape the chart renders no
+# settings.yaml and checks none of it, so NOTES must not claim the rendered file
+# passes the preflight or that the chart refuses an incomplete render.
+render_notes "$WORK/notes-existing-kservice.txt" -f "$CHART_DIR/ci/values-existing-secret.yaml" \
+  --set 'hub.extraEnv[0].name=K_SERVICE' --set-string 'hub.extraEnv[0].value=scion-hub'
+if grep -qF 'THESE VALUES ARE ON ONE OF THOSE ROUTES' "$WORK/notes-existing-kservice.txt" \
+  && grep -qF 'the chart rendered no settings.yaml; your file must satisfy the preflight' "$WORK/notes-existing-kservice.txt"; then
+  pass "the config.existingSecret + K_SERVICE release's NOTES says it is on a route and that the chart rendered no settings.yaml"
+else
+  fail "the config.existingSecret + K_SERVICE release's NOTES does not say both that it is on an HA route and that the chart rendered no settings.yaml for the preflight"
 fi
-SESSION_MARKER="$(prose_marker "$(printf '%s\n' "${CANON_PROSE[@]}" | grep -F 'durable session')" || true)"
-[[ -n "$SESSION_MARKER" ]] || meta_failure "the walk's canonical arm records a durable-session gate that prose_marker() maps to the empty string, so every 'names all the gates' assertion below would pass on the strength of an empty string."
-# Preflight keys that legitimately appear beside the gates. Each is here for a
-# stated reason, because an exclusion list with no reasons becomes a place to
-# put anything that turns a check green.
-ALLOWED_NON_GATES=(
-  server.database.url    # LANDED by the Cloud SQL phase, so the walk no longer names it as a gate -
-                         # but all three copies still name it, in the sentence explaining that it was
-                         # closed. It is permitted rather than deleted from the copies: an operator
-                         # who reads only the refusal needs to know the URL is handled, and a reader
-                         # comparing this list against yesterday's needs to see why it got shorter.
-                         # The corresponding presence arm is not lost - it was inverted into the
-                         # landed-gate assertion above, which fails if NOTES stops saying so.
-  server.hub.hub_id      # satisfied by this chart, named to explain where the refusal starts
-  server.database.driver # ditto
-  server.storage.provider # ditto
-  server.database        # the assertExtraEnv refusal points the operator at this subtree
-  server.mode            # hosted-mode prose
-)
-# THE OTHER LIMB'S EXTRA GATES, DERIVED AND NOT ASSUMED.
-#
-# 🛑 [HISTORY 2026-08-17] THE RELATION BETWEEN THE TWO LIMBS INVERTED, AND THIS
-# GUARD IS HOW WE FOUND OUT. It used to read: "the oauth arm refuses on
-# server.auth.mode as well; that is the operator's own auth.mode being
-# incompatible with HA detection, not an unlanded phase" - and it required
-# OAUTH_EXTRA_KEYS to be NON-EMPTY, on the reasoning that a gate moving from the
-# oauth limb into the proxy limb should turn the forward half red.
-#
-# 1b3c9418 ("fix: do not require IAP for hosted HA preflight", Preston Holmes,
-# 2026-08-17) deleted the server.auth.mode=proxy gate outright and moved the
-# seven IAP gates inside `if cfg.Auth.Mode == "proxy"` in
-# validateHostedHAPreflight. So oauth is now a STRICT SUBSET of proxy, not a
-# superset by one, and this guard went red on the very next run. ✅ It fired for
-# the right reason, named the right two possibilities, and it was the only
-# instrument in the suite pointed at the RELATION between the limbs rather than
-# at either limb alone. The direction is inverted below; the guard is kept.
-#
-# BOTH DIRECTIONS ARE NOW ASSERTED, because the containment is the claim:
-#   oauth \ proxy  MUST BE EMPTY   - an oauth-only gate would be new behaviour
-#                                    nobody has designed for, and it must stop
-#                                    the run rather than be quietly permitted.
-#   proxy \ oauth  MUST BE NON-EMPTY - and this is also the positive control on
-#                                    the comm itself. Two `comm` arms that both
-#                                    return nothing look exactly like a subset
-#                                    relation and exactly like a comm reading
-#                                    neither input. Only the second assertion
-#                                    tells them apart.
-mapfile -t OAUTH_EXTRA_KEYS < <(
-  comm -13 <(printf '%s\n' "${CANON_KEYS[@]}" | sort -u) \
-           <(canon_block "settings-oauth.yaml" "well-formed" | sed -n 's/^KEY   //p' | sort -u)
-)
-mapfile -t PROXY_EXTRA_KEYS < <(
-  comm -23 <(printf '%s\n' "${CANON_KEYS[@]}" | sort -u) \
-           <(canon_block "settings-oauth.yaml" "well-formed" | sed -n 's/^KEY   //p' | sort -u)
-)
-[[ ${#PROXY_EXTRA_KEYS[@]} -gt 0 ]] || meta_failure "the proxy arm of the walk holds no gate the oauth arm lacks, so the two limbs derived identical key sets. Since 1b3c9418 the hub's IAP gates run only under auth.mode=proxy and the proxy arm must be the longer list. Either canon_block read the same arm twice, or comm read neither input - both of which also make the emptiness assertion below pass, so nothing here would have been measured."
-if [[ ${#OAUTH_EXTRA_KEYS[@]} -gt 0 ]]; then
-  meta_failure "the oauth arm of the walk names $(printf '%s ' "${OAUTH_EXTRA_KEYS[@]}")which the proxy arm does not. Since 1b3c9418 oauth reaches a strict subset of the proxy preflight - the IAP gates sit inside \`if cfg.Auth.Mode == \"proxy\"\` - so an oauth-only gate means the hub grew a code path this chart's refusal, its prose and its schema all say does not exist."
+_es_false="$(grep -cE 'The rendered settings.yaml passes it|the chart refuses an HA render' "$WORK/notes-existing-kservice.txt" || true)"
+_ack_true="$(grep -cE 'The rendered settings.yaml passes it|the chart refuses an HA render' "$WORK/notes-ack.txt" || true)"
+if [[ "$_es_false" -eq 0 && "$_ack_true" -eq 2 ]]; then
+  pass "the rendered-settings claims appear in the proxy release's NOTES and not in the config.existingSecret + K_SERVICE release's"
+else
+  fail "the rendered-settings claims ('passes it', 'the chart refuses an HA render') appear ${_es_false} times under config.existingSecret + K_SERVICE (want 0) and ${_ack_true} times in the proxy release (want 2)"
 fi
-# THE FORMAT GATE IS RECORDED HERE RATHER THAN COUNTED, and this line is the
-# whole of gd-p1-rev's R1. The malformed-audience arm of the walk refuses a
-# NINTH time, on isSupportedIAPAudience. It is not a ninth position the chart
-# fails to render - it is a second objection to the value of gate 4 - so it is
-# not in the numbered list. What it must not be is invisible: the assertion
-# below fails if the walk stops recording it, which is what would happen if
-# someone "simplified" the two audience arms into one.
-if ! grep -qF 'supported IAP audience' "$GATES_FILE"; then
-  meta_failure "the walk no longer records the audience FORMAT gate. Both audience arms must be walked; a single well-formed arm never reaches it and makes the format gate invisible to the derivation as well as to the prose - which is the defect this whole mechanism replaced."
-fi
-
-gate_tokens() { grep -oE 'server\.[a-z_]+(\.[a-z_]+)*' "$1" | sort -u; }
-
-# EXTRACTED BY CONTENT, NEVER BY LINE NUMBER. Each extraction asserts its own
-# size, because an extraction that silently returns nothing makes both halves of
-# the parity check pass.
-# BY DELIMITER, NOT BY A NUMBERED PREFIX. The table used to be numbered 1..8 and
-# this line matched '^  [1-8]  ', which is the count written down a fourth time -
-# a ninth gate would have been extracted as eight and the size guard below would
-# have passed on a truncated table.
-awk '/GATE TABLE BEGIN/{f=1;next} /GATE TABLE END/{f=0} f' \
-  "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-doc.txt" || true
-# 🔴 [HISTORY 2026-08-17] THIS USED TO BE `grep -F 'This release cannot start
-# the deployment these values describe'`, ONE LINE, AND THE SIZE GUARD BELOW
-# CHECKED THAT IT MATCHED EXACTLY ONE LINE - which it still did, correctly, on
-# the day the extraction stopped working. When the refusal grew a per-auth-mode
-# branch, the gate enumeration moved off the printf line into two `$gates`
-# assignments above it. The grep still matched its one line; that line just no
-# longer had any gates in it. A SIZE GUARD PINNED AT ONE CANNOT DISTINGUISH
-# "found the whole thing" FROM "found the frame and left the contents behind",
-# and it was the parity assertion downstream that caught this, not the guard
-# written to protect it.
-#
-# So the extraction is the whole refusal now: from the define header down to and
-# including the fail, which is where the $gates assignments live. Anchored on
-# content at both ends. Its size guard is a floor plus a uniqueness check rather
-# than a pin, because the block's line count is a thing that legitimately moves.
-awk '/\{\{- define "scion-hub.assertHAUnlanded"/{f=1} f{print} f && /\{\{- fail \(printf/{exit}' \
-  "$CHART_DIR/templates/_helpers.tpl" >"$WORK/gates-fail.txt" || true
-# BOTH LIMBS OF THE REFUSAL ARE IN THIS EXTRACT, and that is deliberate: the
-# proxy enumeration is a superset of the oauth one, so a static parity check
-# against the proxy canon is satisfied by the block as a whole and says nothing
-# about which branch renders which list. THAT QUESTION IS ANSWERED BY RENDERING,
-# NOT BY READING - tests/render-guards.sh renders both auth modes and asserts
-# each refusal names all of, and only, its own arm's derived gates. This check
-# owns "the source names the right set"; that one owns "each mode emits it".
-[[ "$(grep -cF 'This release cannot start the deployment these values describe' "$WORK/gates-fail.txt")" -eq 1 ]] || meta_failure "the extracted assertHAUnlanded block does not contain exactly one copy of the refusal's opening sentence. The awk anchors 'define \"scion-hub.assertHAUnlanded\"' and '{{- fail (printf' no longer bracket the refusal, so the parity check below is reading the wrong text or no text."
-grep -E '^    (server\.|a durable)' "$WORK/notes-ack.txt" >"$WORK/gates-notes.txt" || true
-[[ "$(wc -l <"$WORK/gates-doc.txt")" -eq "$HA_GATE_COUNT" ]] || meta_failure "the numbered gate table in _helpers.tpl matched $(wc -l <"$WORK/gates-doc.txt") lines; the walk found $HA_GATE_COUNT gates. The parity check below has nothing to compare."
-[[ "$(wc -l <"$WORK/gates-fail.txt")" -ge 4 ]] || meta_failure "the extracted assertHAUnlanded block is $(wc -l <"$WORK/gates-fail.txt") lines. The refusal has never been fewer than four - a define, a routes include, at least one gate enumeration and the fail - so the awk anchors are not bracketing it. The parity check below has nothing to compare."
-[[ "$(wc -l <"$WORK/gates-notes.txt")" -eq "$HA_GATE_COUNT" ]] || meta_failure "the gate table in the rendered NOTES matched $(wc -l <"$WORK/gates-notes.txt") lines; the walk found $HA_GATE_COUNT gates. The parity check below has nothing to compare."
-
-printf '%s\n' "${CANON_GATES[@]}" | sort -u >"$WORK/gates-canon.txt"
-printf '%s\n' "${CANON_GATES[@]}" "${ALLOWED_NON_GATES[@]}" | sort -u >"$WORK/gates-permitted.txt"
-
-for _src in doc fail notes; do
-  _f="$WORK/gates-$_src.txt"
-  gate_tokens "$_f" >"$WORK/gates-$_src.tok"
-  _gap="$(comm -23 "$WORK/gates-canon.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
-  _gap="${_gap% }"
-  if [[ -z "$_gap" ]] && grep -qF "$SESSION_MARKER" "$_f"; then
-    pass "the $_src copy names every gate the walk found"
-  else
-    fail "the $_src copy does not name every gate the walk found: missing [${_gap:-none}]$(grep -qF "$SESSION_MARKER" "$_f" || printf ' and the session-secret gate')"
-  fi
-  _surplus="$(comm -13 "$WORK/gates-permitted.txt" "$WORK/gates-$_src.tok" | tr '\n' ' ' || true)"
-  _surplus="${_surplus% }"
-  if [[ -z "$_surplus" ]]; then
-    pass "the $_src copy names no preflight key the walk did not find"
-  else
-    fail "the $_src copy names [$_surplus], which is neither a gate the walk found nor a listed non-gate. If the hub added a gate, re-derive hack/ha-gates.txt and add it to all three copies; if it is not a gate, say why in ALLOWED_NON_GATES."
-  fi
-done
 
 # --------------------------------------------------------------------------
 step "NOTES.txt prints the Cloud SQL commands substituted and the budget unmeasured"
@@ -2051,7 +1805,9 @@ for _bad in 0 1; do
     --set storage.provider=gcs \
     --set storage.bucket=b \
     --set auth.mode=proxy \
-    --set acknowledgeHAUnlanded=true \
+    --set-string auth.transport.mode=iap \
+    --set-string auth.transport.oidcAudience=probe-oauth-client.apps.googleusercontent.com \
+    --set-string auth.transport.platformAuthSa=probe@probe-project.iam.gserviceaccount.com \
     --set serviceAccount.gcpServiceAccount=sa@p.iam.gserviceaccount.com \
     --set cloudsql.enabled=true \
     --set cloudsql.instanceConnectionName=my-project:us-central1:db-1 \
@@ -2251,10 +2007,24 @@ declare -A PROBE_MUTATION=(
   # probe's baseline instead, where it cancels. It was acknowledgeOAuthUnlanded
   # until the credentials had a channel to arrive on.
   [auth.mode]='--set-string|auth.mode=oauth'
+  # The chart-value audience replaces the one the baseline supplies through
+  # config.extra, which has to go first: config.extra may not overwrite a key
+  # the chart writes, and the two would collide.
+  [auth.proxy.iap.audience]='--set|config.extra=null|--set-string|auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-mutated'
+  # The baseline carries mode iap with both companions, so each leaf moves alone.
+  [auth.transport.mode]='--set-string|auth.transport.mode=cloudrun_invoker'
+  [auth.transport.oidcAudience]='--set-string|auth.transport.oidcAudience=probe-mutated-oauth-client.apps.googleusercontent.com'
+  [auth.transport.platformAuthSa]='--set-string|auth.transport.platformAuthSa=probe-mutated@probe-project.iam.gserviceaccount.com'
   [auth.oauth.web.google.clientId]='--set-string|auth.oauth.web.google.clientId=probe-oauth-mutated-id'
   [auth.oauth.web.google.clientSecret]='--set-string|auth.oauth.web.google.clientSecret=probe-oauth-mutated-secret'
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
+  [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # gcpsm needs its project to render at all, and the project is refused under
+  # local, so the three secrets leaves each carry the backend and project.
+  [secrets.backend]='--set-string|secrets.gcpsm.projectId=probe-project|--set-string|secrets.backend=gcpsm'
+  [secrets.gcpsm.projectId]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project'
+  [secrets.gcpsm.replicationLocations]='--set-string|secrets.backend=gcpsm|--set-string|secrets.gcpsm.projectId=probe-project|--set|secrets.gcpsm.replicationLocations={us-central1}'
   [database.connMaxIdleTime]='--set-string|database.connMaxIdleTime=9m'
   [database.connMaxLifetime]='--set-string|database.connMaxLifetime=9m'
   # THE CLOUD SQL LEAVES ALL CARRY THE SAME PREAMBLE, and it is not boilerplate:
@@ -2263,21 +2033,21 @@ declare -A PROBE_MUTATION=(
   # that does nothing. That report would be true of the mutation and false of the
   # chart. Each entry below therefore turns the feature ON and then changes the
   # one leaf it is named for.
-  [database.driver]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
-  [database.name]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.name=probe-other-db'
-  [database.user]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.user=probe-user'
+  [database.driver]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
+  [database.name]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|database.name=probe-other-db'
+  [database.user]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|database.user=probe-user'
   # The one leaf that cannot use the iam preamble: under iam the schema and the
   # template both refuse a password, and the DSN has nowhere to put one.
-  [database.password]='--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|database.password=probe-pw2'
-  [cloudsql.instanceConnectionName]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.instanceConnectionName=other-project:us-west1:db-2'
-  [cloudsql.nativeSidecar]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.nativeSidecar=false'
-  [cloudsql.privateIp]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.privateIp=true'
-  [cloudsql.port]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.port=5433'
-  [cloudsql.healthCheckPort]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.healthCheckPort=9802'
-  [cloudsql.image.repository]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.repository=other.test/probe-proxy'
-  [cloudsql.image.digest]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.digest=sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'
-  [cloudsql.image.pullPolicy]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set-string|cloudsql.image.pullPolicy=Never'
-  [cloudsql.resources]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true|--set|cloudsql.resources.limits.memory=64Mi'
+  [database.password]='--set-string|database.driver=postgres|--set-string|database.auth=password|--set-string|database.name=probe-db|--set-string|database.user=probe-user|--set-string|database.password=probe-pw|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|database.password=probe-pw2'
+  [cloudsql.instanceConnectionName]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|cloudsql.instanceConnectionName=other-project:us-west1:db-2'
+  [cloudsql.nativeSidecar]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|cloudsql.nativeSidecar=false'
+  [cloudsql.privateIp]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|cloudsql.privateIp=true'
+  [cloudsql.port]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|cloudsql.port=5433'
+  [cloudsql.healthCheckPort]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|cloudsql.healthCheckPort=9802'
+  [cloudsql.image.repository]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|cloudsql.image.repository=other.test/probe-proxy'
+  [cloudsql.image.digest]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|cloudsql.image.digest=sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd'
+  [cloudsql.image.pullPolicy]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set-string|cloudsql.image.pullPolicy=Never'
+  [cloudsql.resources]='--set-string|database.driver=postgres|--set-string|database.auth=iam|--set-string|database.name=probe-db|--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com|--set|cloudsql.enabled=true|--set-string|cloudsql.instanceConnectionName=my-project:us-central1:db-1|--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|cloudsql.resources.limits.memory=64Mi'
   [hub.args]='--set-string|hub.args[0]=--probe-flag'
   [hub.baseUrl]='--set-string|hub.baseUrl=https://other.example.com'
   [hub.extraEnv]='--set-string|hub.extraEnv[0].name=PROBE_ONE|--set-string|hub.extraEnv[0].value=x'
@@ -2293,8 +2063,8 @@ declare -A PROBE_MUTATION=(
   [probes.liveness.timeoutSeconds]='--set|probes.liveness.enabled=true|--set|probes.liveness.timeoutSeconds=37'
   [serviceAccount.create]='--set|serviceAccount.create=false|--set-string|serviceAccount.name=preexisting'
   [serviceAccount.gcpServiceAccount]='--set-string|serviceAccount.gcpServiceAccount=probe@proj.iam.gserviceaccount.com'
-  [storage.bucket]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
-  [storage.provider]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt|--set|acknowledgeHAUnlanded=true'
+  [storage.bucket]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
+  [storage.provider]='--set-string|storage.provider=gcs|--set-string|storage.bucket=probe-bkt'
   [updateStrategy.type]='--set-string|updateStrategy.type=RollingUpdate'
 )
 
@@ -2316,13 +2086,36 @@ declare -A PROBE_MUTATION=(
 # is refused, so it must carry the mutation and nothing else. Add PROBE_CREDS
 # there and every leaf is refused - for the credential, never for itself - and
 # the transfer list empties without a single check going red.
+#
+# THE IAP AUDIENCE AND THE TRANSPORT VALUES ARE HERE FOR THE SAME REASON. A proxy
+# render without an audience is refused, and every HA preamble below (postgres,
+# or gcs under proxy) is refused without the transport values, so the baseline
+# must carry them. The transport values render in both auth modes and cancel
+# like the credential. The audience does not: auth.proxy.iap.audience is
+# refused under auth.mode oauth as inert, so in auth.mode's oauth mutation it
+# would either be refused or need a companion that the probe attributes to
+# auth.mode. It is therefore supplied through config.extra, which the chart
+# merges in either mode, so it is present on both sides of every comparison.
+# What auth.mode=oauth still moves is server.auth.mode and the
+# server.auth.proxy.provider the chart writes only under proxy - both real, and
+# both declared as transfers. It is passed with --set, not --set-string: helm
+# applies every --set before any --set-string, so the audience leaf's own
+# --set config.extra=null could not remove a --set-string value.
 PROBE_CREDS=(
   --set-string auth.oauth.web.google.clientId=probe-oauth-base-id
   --set-string auth.oauth.web.google.clientSecret=probe-oauth-base-secret
+  --set config.extra.server.auth.proxy.iap.audience=/projects/123456789012/global/backendServices/4444444444444444444
+  --set-string auth.transport.mode=iap
+  --set-string auth.transport.oidcAudience=probe-base-oauth-client.apps.googleusercontent.com
+  --set-string auth.transport.platformAuthSa=probe-base@probe-project.iam.gserviceaccount.com
+  # The broker's required registry. In the baseline rather than in BASE_ES,
+  # because it is refused under config.existingSecret; agents.imageRegistry's
+  # own mutation still moves it, from this value to another.
+  --set-string agents.imageRegistry=probe.example/agents
 )
 probe_render() {
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-    --skip-schema-validation "${BASE[@]}" "${PROBE_CREDS[@]}" "$@" 2>&1
+    --skip-schema-validation "${BASE_ES[@]}" "${PROBE_CREDS[@]}" "$@" 2>&1
 }
 # IS THIS LEAF STILL LIVE WHEN config.existingSecret IS SET?
 #
@@ -2382,10 +2175,10 @@ probe_leaf_live_under_es() { # <leaf> <comma-list of leaves to drop> <spec args.
   local -a trimmed=("${full[@]:0:$((n-2))}")
   local ra=0 rb=0
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-    --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+    --skip-schema-validation "${BASE_ES[@]}" --set config.existingSecret=mine \
     "${full[@]}" >"$WORK/probe-live-a.yaml" 2>&1 || ra=$?
   "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-    --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+    --skip-schema-validation "${BASE_ES[@]}" --set config.existingSecret=mine \
     "${trimmed[@]}" >"$WORK/probe-live-b.yaml" 2>&1 || rb=$?
   if [[ $ra -ne 0 || $rb -ne 0 ]]; then
     # Both refused identically is not an answer about the leaf; it is an answer
@@ -2498,9 +2291,16 @@ else
   # session secret is now unconditional, so the flag is mutable. Its coverage
   # is in tests/chart-integrity.sh section E, both directions, and it has a
   # PROBE_MUTATION entry that flips it to false (its non-default arm).
-  PROBE_UNMUTABLE=(config.existingSecret)
-  if [[ ${#PROBE_UNMUTABLE[@]} -ne 1 ]]; then
-    echo "HARNESS ERROR: PROBE_UNMUTABLE holds ${#PROBE_UNMUTABLE[@]} entries, not 1. Every entry is coverage this probe is not providing; read the reasons above before changing the number." >&2
+  #   auth.proxy.provider            - its schema enum and the template both
+  #                                    admit iap only, which is the default, so
+  #                                    there is no other value to render. The
+  #                                    jwt refusal is covered in
+  #                                    tests/render-guards.sh, and the key it
+  #                                    writes is observed through auth.mode,
+  #                                    whose oauth mutation removes it.
+  PROBE_UNMUTABLE=(config.existingSecret auth.proxy.provider)
+  if [[ ${#PROBE_UNMUTABLE[@]} -ne 2 ]]; then
+    echo "HARNESS ERROR: PROBE_UNMUTABLE holds ${#PROBE_UNMUTABLE[@]} entries, not 2. Every entry is coverage this probe is not providing; read the reasons above before changing the number." >&2
     exit 2
   fi
 
@@ -2597,7 +2397,7 @@ else
     # PROBE_REFUSED_BY_COMPANION above for why, and for the two exemptions.
     _ex_rc=0
     "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-      --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+      --skip-schema-validation "${BASE_ES[@]}" --set config.existingSecret=mine \
       "${mutation[@]}" >"$WORK/probe-ex.yaml" 2>&1 || _ex_rc=$?
     if [[ $_ex_rc -ne 0 ]] \
       && grep -qF 'config.existingSecret is set together with inline settings values' "$WORK/probe-ex.yaml"; then
@@ -2756,10 +2556,10 @@ else
   for _es_auth in iam password; do
     _es_rc=0
     "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-      --skip-schema-validation "${BASE[@]}" --set config.existingSecret=mine \
+      --skip-schema-validation "${BASE_ES[@]}" --set config.existingSecret=mine \
       --set-string database.driver=postgres --set-string "database.auth=$_es_auth" \
       --set cloudsql.enabled=true --set-string cloudsql.instanceConnectionName=p:r:i \
-      --set-string storage.provider=gcs --set acknowledgeHAUnlanded=true \
+      --set-string storage.provider=gcs \
       >"$WORK/probe-es-$_es_auth.yaml" 2>&1 || _es_rc=$?
     if [[ "$_es_rc" == 0 ]]; then
       pass "config.existingSecret with Cloud SQL and database.auth=$_es_auth still renders, so the refusals above did not close off a configuration the chart supports"
@@ -3160,6 +2960,13 @@ FX
 # recorded, because when the Cloud SQL phase merges this fixture becomes
 # reproducible and the comment says how.
 #
+# HISTORICAL COMMAND. The command above is the one that produced this fixture on
+# gd-p2-dev's branch, and it does not reproduce on the current chart:
+# acknowledgeHAUnlanded has been removed, and this postgres + gcs shape under
+# auth.mode proxy now also needs auth.proxy.iap.audience, auth.transport.mode,
+# auth.transport.oidcAudience and auth.transport.platformAuthSa. The fixture is
+# kept as captured; the command is a record of its provenance, not a recipe.
+#
 # It carries the two properties most likely to break an entry-boundary rule and
 # both are load-bearing: restartPolicy: Always is the LAST key of the entry, and
 # a nested `- ALL` sequence sits between the entry's first dash and it.
@@ -3277,8 +3084,8 @@ done
 step "the \$ownedByConfig split, measured against the render"
 # --------------------------------------------------------------------------
 # _helpers.tpl reserves five flags on the grounds that each has a delivery
-# channel other than argv. Two of the five are delivered by this chart and three
-# are not, and the file says which in prose.
+# channel other than argv. Four of the five are delivered by this chart and one
+# is not, and the file says which in prose.
 #
 # THIS EXISTS BECAUSE THAT PROSE WENT STALE WITHOUT THE FILE BEING EDITED. At
 # phase 0 it read "this chart delivers none of them yet", which was true while
@@ -3299,7 +3106,7 @@ declare -A DELIVERED=(
   [storage-bucket]=1  # server.storage.bucket in the rendered settings.yaml
   [db]=1              # server.database.url - LANDED by the Cloud SQL phase; was 0 until then
   [storage-dir]=0     # server.storage.local_path - the workspace share
-  [admin-emails]=0    # server.hub.admin_emails - no phase claims it
+  [admin-emails]=1    # server.hub.admin_emails - LANDED with hub.adminEmails; was 0 until then
 )
 # The probe per flag. Each reads the channel the reservation names, not a proxy
 # for it: a probe for "is there a Secret" would answer yes for a chart that
@@ -3608,7 +3415,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=44
+PIPE_SITES_EXPECTED=43   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows.
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
@@ -3726,10 +3533,13 @@ declare -A NOT_YET=(
   # client_secret.
   ["GCS credentials beyond the bucket name"]='settings:credentials|service_account|key_file'
   ["Filestore"]='settings:workspace_storage'
-  ["the session secret"]='settings:session_secret|signing_key'
-  ["Ingress or IAP"]='kinds:^kind: (Ingress|BackendConfig)'
+  # "the session secret" WAS HERE. The chart delivers it by environment variable
+  # from auth.sessionSecret or auth.existingSecret, so the notes stopped listing
+  # it as unconfigured (chart-iap-transport review, N7). Its needle looked only
+  # in settings.yaml, where the secret never goes, so it could not go red.
+  ["Ingress or the IAP-enforcing load balancer"]='kinds:^kind: (Ingress|BackendConfig)'
 )
-EXPECTED_NOT_YET=4
+EXPECTED_NOT_YET=3
 
 # The sentence, read out of the shipped template. It carries no template
 # actions - checked, it is static prose - so the source text and the rendered
@@ -4023,6 +3833,10 @@ hub:
         -----BEGIN PRIVATE KEY-----
         MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDexample
         -----END PRIVATE KEY-----
+auth:
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-neg
 PEMVALUES
 expect_render_failure \
   "hub.extraEnv rejects a multi-line PEM in an environment value" \
@@ -4032,14 +3846,14 @@ expect_render_failure \
 expect_render_failure \
   "config.existingSecret with config.extra" \
   "config.existingSecret is set together with inline settings values" \
-  "${BASE[@]}" \
+  "${BASE_ES[@]}" \
   --set config.existingSecret=mine \
   --set config.extra.server.log_level=debug
 
 expect_render_failure \
   "config.existingSecret with storage.bucket" \
   "config.existingSecret is set together with inline settings values" \
-  "${BASE[@]}" \
+  "${BASE_ES[@]}" \
   --set config.existingSecret=mine \
   --set storage.bucket=some-bucket
 
@@ -4134,6 +3948,10 @@ config:
     server:
       hub:
         hub_name: ~
+auth:
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-neg
 NILVALUES
 expect_render_failure \
   "config.extra cannot null out a key the chart writes" \
@@ -4207,7 +4025,7 @@ expect_render_failure \
   "the SCHEMA rejects oauth mode without credentials" \
   "clientId" \
   "${BASE[@]}" \
-  --set auth.mode=oauth
+  --set auth.mode=oauth --set auth.proxy.iap.audience=
 
 # THE THREE ABOVE TEST THE SCHEMA, AND THEY ARE NAMED FOR IT NOW BECAUSE THEY
 # WERE NOT. Helm validates values.schema.json BEFORE it renders, so an input the
@@ -4247,14 +4065,16 @@ expect_render_failure \
   --set image.repository=example.test/scion-hub-gke \
   --set hub.hubId=neg \
   --set hub.baseUrl=http://neg.example.com \
-  --set auth.sessionSecret=neg-session-secret
+  --set auth.sessionSecret=neg-session-secret \
+  --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-neg \
+  --set agents.imageRegistry=example.test/agents
 
 expect_render_failure \
   "the TEMPLATE rejects oauth mode without a web client credential" \
   "no complete OAuth web client credential is present" \
   --skip-schema-validation \
   "${BASE[@]}" \
-  --set auth.mode=oauth
+  --set auth.mode=oauth --set auth.proxy.iap.audience=
 
 # The agent-namespace guard, in the one permutation where every OTHER caller of
 # it is switched off. runtime.listAllNamespaces skips the Role and RoleBinding;
@@ -4280,7 +4100,7 @@ expect_render_failure \
 # of friction for moving an unconditional guard.
 ns_label="the agent-namespace guard fires from a manifest with the RBAC pair and the settings file both switched off"
 if ns_out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
-    "${BASE[@]}" \
+    "${BASE_ES[@]}" \
     --set config.existingSecret=mine \
     --set runtime.listAllNamespaces=true \
     --set rbac.agentNamespace=aaa \
@@ -4415,7 +4235,7 @@ for guard_layer in schema template; do
   [[ $guard_layer == template ]] && layer_args=(--skip-schema-validation)
   if out=$("$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
       "${layer_args[@]}" \
-      "${BASE[@]}" \
+      "${BASE_ES[@]}" \
       --set config.existingSecret=mine \
       --set auth.mode=oauth 2>&1); then
     pass "the $guard_layer permits unacknowledged oauth under config.existingSecret"
@@ -4441,8 +4261,13 @@ hub:
       value: |
         Scheduled maintenance on Sunday.
         Sessions will be interrupted.
+agents:
+  imageRegistry: example.test/agents
 auth:
   sessionSecret: neg-session-secret
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-neg
 MLVALUES
 if "$HELM" template "$RELEASE" "$CHART_DIR" --namespace "$NAMESPACE" \
     --values "$WORK/multiline-env.yaml" >/dev/null 2>&1; then

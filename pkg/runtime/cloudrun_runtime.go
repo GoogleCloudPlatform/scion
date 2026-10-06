@@ -203,6 +203,17 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 	return cloudrun.NewInstancesClient(ctx)
 }
 
+// cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
+// as and owns its NFS workspace with: the broker's own ids for a
+// non-NFS backend, otherwise the configured NFS ids with 0 (unset)
+// meaning 1000, as in buildCommonRunArgs.
+func cloudRunOwnerIDs(cfg RunConfig) (uid, gid int) {
+	if cfg.WorkspaceBackendName != "nfs" {
+		return os.Getuid(), os.Getgid()
+	}
+	return nfsOwnerIDs(cfg.NFSUID, cfg.NFSGID)
+}
+
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	// Checked before anything is resolved or provisioned: this runtime
 	// always mounts the project's shared NFS workspace (see
@@ -220,15 +231,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 	instanceID := cloudRunInstanceID(agentID)
 
-	uid := 1000
-	gid := 1000
-	if cfg.WorkspaceBackendName != "nfs" {
-		uid = os.Getuid()
-		gid = os.Getgid()
-	} else if cfg.NFSUID != 0 {
-		uid = cfg.NFSUID
-		gid = cfg.NFSGID
-	}
+	uid, gid := cloudRunOwnerIDs(cfg)
 
 	nfsPaths, err := r.provisionCloudRunNFS(ctx, cfg, agentID, uid, gid)
 	if err != nil {
@@ -479,6 +482,9 @@ type cloudRunNFSProvisionPaths struct {
 	secretsHostPath     string
 }
 
+// provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
+// must already be defaulted by the caller (cloudRunOwnerIDs); they are
+// used as given.
 func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
@@ -486,7 +492,7 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	if r.config.NFSServer == "" {
 		return nil, fmt.Errorf("cloudrun: nfs_server must be non-empty when workspace backend is NFS")
 	}
-	paths, err := cloudRunNFSExportPaths(r.config.NFSExport, cfg.ProjectID, agentID)
+	paths, err := cloudRunNFSExportPaths(r.config.NFSExport, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +501,7 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 			"mount the Filestore export into the Hub/Broker and pass the resolved host path for %s, "+
 			"or run an external provisioner before creating Cloud Run instances", paths.workspaceExportPath)
 	}
-	hostPaths, err := cloudRunNFSHostPaths(cfg.Workspace, cfg.ProjectID, agentID)
+	hostPaths, err := cloudRunNFSHostPaths(cfg.Workspace, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -508,15 +514,9 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		return nil, err
 	}
 
-	if gid == 0 {
-		gid = 1000
-	}
-	if uid == 0 {
-		uid = 1000
-	}
 	resolved := ResolvedWorkspace{
 		HostPath:           hostPaths.workspaceHostPath,
-		ServerRelativePath: path.Join("projects", cfg.ProjectID, "workspace"),
+		ServerRelativePath: hostPaths.serverRelativePath,
 		HostBase:           hostPaths.hostBase,
 		Backend:            "nfs",
 		SharedDirs:         map[string]ResolvedSharedDir{},
@@ -548,7 +548,11 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	return paths, nil
 }
 
-func cloudRunNFSExportPaths(nfsExport, projectID, agentID string) (*cloudRunNFSProvisionPaths, error) {
+// cloudRunNFSExportPaths builds the server-side export paths of an agent's
+// workspace, home and secrets under <nfs_export>/<subpath_root>/<project>.
+// subPathRoot is workspace_storage.nfs.subpath_root as configured (empty
+// means the default); it is validated before any path is built from it.
+func cloudRunNFSExportPaths(nfsExport, subPathRoot, projectID, agentID string) (*cloudRunNFSProvisionPaths, error) {
 	if nfsExport == "" {
 		return nil, fmt.Errorf("cloudrun: nfs_export must be non-empty when workspace backend is NFS")
 	}
@@ -562,11 +566,17 @@ func cloudRunNFSExportPaths(nfsExport, projectID, agentID string) (*cloudRunNFSP
 	if err := validateCloudRunNFSElement("agent_id", agentID); err != nil {
 		return nil, err
 	}
+	root, err := config.ResolveSubPathRoot(subPathRoot)
+	if err != nil {
+		return nil, fmt.Errorf("cloudrun: invalid NFS %w", err)
+	}
+	// Export paths are always slash-separated server paths, hence path.Join.
+	root = filepath.ToSlash(root)
 
 	paths := &cloudRunNFSProvisionPaths{
-		workspaceExportPath: path.Join(exportRoot, "projects", projectID, "workspace"),
-		homeExportPath:      path.Join(exportRoot, "projects", projectID, "agents", agentID, "home"),
-		secretsExportPath:   path.Join(exportRoot, "projects", projectID, "agents", agentID, "secrets"),
+		workspaceExportPath: path.Join(exportRoot, root, projectID, "workspace"),
+		homeExportPath:      path.Join(exportRoot, root, projectID, "agents", agentID, "home"),
+		secretsExportPath:   path.Join(exportRoot, root, projectID, "agents", agentID, "secrets"),
 	}
 	for name, p := range map[string]string{
 		"workspace": paths.workspaceExportPath,
@@ -581,13 +591,21 @@ func cloudRunNFSExportPaths(nfsExport, projectID, agentID string) (*cloudRunNFSP
 }
 
 type cloudRunNFSHostProvisionPaths struct {
-	hostBase          string
-	workspaceHostPath string
-	homeHostPath      string
-	secretsHostPath   string
+	// serverRelativePath is <subpath_root>/<project>/workspace, relative to
+	// hostBase (and to the export root).
+	serverRelativePath string
+	hostBase           string
+	workspaceHostPath  string
+	homeHostPath       string
+	secretsHostPath    string
 }
 
-func cloudRunNFSHostPaths(workspaceHostPath, projectID, agentID string) (*cloudRunNFSHostProvisionPaths, error) {
+// cloudRunNFSHostPaths derives the Hub-mounted host paths of an agent from
+// the resolved workspace host path, which must end with
+// <subpath_root>/<project>/workspace. subPathRoot is
+// workspace_storage.nfs.subpath_root as configured (empty means the
+// default); it is validated before any path is built from it.
+func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, agentID string) (*cloudRunNFSHostProvisionPaths, error) {
 	if err := validateCloudRunNFSElement("project_id", projectID); err != nil {
 		return nil, err
 	}
@@ -595,28 +613,39 @@ func cloudRunNFSHostPaths(workspaceHostPath, projectID, agentID string) (*cloudR
 		return nil, err
 	}
 
+	root, err := config.ResolveSubPathRoot(subPathRoot)
+	if err != nil {
+		return nil, fmt.Errorf("cloudrun: invalid NFS %w", err)
+	}
+
 	workspaceHostPath = filepath.Clean(workspaceHostPath)
 	if !filepath.IsAbs(workspaceHostPath) {
 		return nil, fmt.Errorf("cloudrun: NFS workspace host path must be absolute, got %q", workspaceHostPath)
 	}
-	expectedSuffix := filepath.Join("projects", projectID, "workspace")
+	expectedSuffix := filepath.Join(root, projectID, "workspace")
 	hostSlash := filepath.ToSlash(workspaceHostPath)
 	suffixSlash := filepath.ToSlash(expectedSuffix)
-	if hostSlash != suffixSlash && !strings.HasSuffix(hostSlash, "/"+suffixSlash) {
-		return nil, fmt.Errorf("cloudrun: NFS workspace host path %q must end with %q so it maps to <export>/projects/<project-id>/workspace",
-			workspaceHostPath, expectedSuffix)
+	if !strings.HasSuffix(hostSlash, "/"+suffixSlash) {
+		return nil, fmt.Errorf("cloudrun: NFS workspace host path %q must end with %q so it maps to <export>/%s/<project-id>/workspace",
+			workspaceHostPath, expectedSuffix, filepath.ToSlash(root))
 	}
 
 	projectRoot := filepath.Dir(workspaceHostPath)
-	hostBase := filepath.Dir(filepath.Dir(projectRoot))
+	// The host base is what remains once the <subpath_root>/<project>/workspace
+	// suffix is removed; subpath_root may span several path segments.
+	hostBase := filepath.Clean(filepath.FromSlash(strings.TrimSuffix(hostSlash, "/"+suffixSlash)))
+	if hostBase == "" || hostBase == "." {
+		hostBase = string(filepath.Separator)
+	}
 	if err := ValidateNotExportRoot(workspaceHostPath, hostBase); err != nil {
 		return nil, fmt.Errorf("cloudrun: invalid NFS workspace host path: %w", err)
 	}
 	return &cloudRunNFSHostProvisionPaths{
-		hostBase:          hostBase,
-		workspaceHostPath: workspaceHostPath,
-		homeHostPath:      filepath.Join(projectRoot, "agents", agentID, "home"),
-		secretsHostPath:   filepath.Join(projectRoot, "agents", agentID, "secrets"),
+		serverRelativePath: path.Join(filepath.ToSlash(root), projectID, "workspace"),
+		hostBase:           hostBase,
+		workspaceHostPath:  workspaceHostPath,
+		homeHostPath:       filepath.Join(projectRoot, "agents", agentID, "home"),
+		secretsHostPath:    filepath.Join(projectRoot, "agents", agentID, "secrets"),
 	}, nil
 }
 
@@ -654,7 +683,11 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 	return nil
 }
 
-func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
+// Stop stops the Cloud Run instance ref.ID.
+// TODO(ptone/scion#2550 P2/P4): enforce ref.RunID. The instance ID is
+// deterministic per agent name, so this is still name-scoped today.
+func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
@@ -681,7 +714,11 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
 	return nil
 }
 
-func (r *CloudRunRuntime) Delete(ctx context.Context, id string) error {
+// Delete removes the Cloud Run instance ref.ID.
+// P2/P4: enforce ref.RunID (ptone/scion#2550). The instance ID is
+// deterministic per agent name, so this is still name-scoped today.
+func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
@@ -754,6 +791,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 		agents = append(agents, api.AgentInfo{
 			ID:              inst.Labels["agent_id"],
 			ContainerID:     cloudRunShortInstanceID(inst.Name),
+			RunID:           inst.Labels[sanitizeGCPLabelKey(api.LabelRunID)], // Run stored scion.run_id under its GCP-sanitized key
 			Name:            inst.Name,
 			ContainerStatus: status,
 			Labels:          inst.Labels,

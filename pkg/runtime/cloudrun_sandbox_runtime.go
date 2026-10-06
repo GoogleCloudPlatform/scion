@@ -1060,13 +1060,18 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	return slug, nil
 }
 
-func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, id string) error {
+// TODO(ptone/scion#2550 P2/P4): enforce ref.RunID. The sandbox name is
+// reused across runs, so this is still name-scoped today.
+func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, ref RunRef) error {
 	// sandbox delete requires --force for running sandboxes.
 	// There is no stop/pause verb; Stop == Delete.
-	return r.deleteOrWorkaround(ctx, id)
+	return r.deleteOrWorkaround(ctx, ref.ID)
 }
 
-func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, id string) error {
+// P2/P4: enforce ref.RunID (ptone/scion#2550). The sandbox name is reused
+// across runs, so this is still name-scoped today.
+func (r *CloudRunSandboxRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	// Always use --force: sandbox delete without it silently fails for
 	// running sandboxes. NEVER fall back to plain delete (without --force) --
 	// it refuses AND kills the sandbox anyway, leaving orphaned
@@ -1158,6 +1163,7 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 		// so it is available when the above conditions are met.
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     entry.SandboxName,
+			RunID:           entry.Labels[api.LabelRunID],
 			Name:            entry.AgentID,
 			ContainerStatus: statusStr,
 			Phase:           phase,

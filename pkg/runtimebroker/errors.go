@@ -17,11 +17,15 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -77,6 +81,12 @@ const (
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
 
+	// ErrCodeStaleDispatch marks a delete refused because it arrived after
+	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
+	// hub's claim on the delete may have lapsed, so acting could remove an
+	// agent the user started again. Nothing was done.
+	ErrCodeStaleDispatch = "stale_dispatch"
+
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
 	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
@@ -116,6 +126,71 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// startAttemptedDetails returns the error details for a failure inside
+// Manager.Start, so the hub knows the broker acted on the request (see
+// api.BrokerErrorDetailStartAttempted).
+func startAttemptedDetails(runID string) map[string]interface{} {
+	d := map[string]interface{}{api.BrokerErrorDetailStartAttempted: true}
+	if runID != "" {
+		d[api.BrokerErrorDetailRunID] = runID
+	}
+	return d
+}
+
+// startFailureDetails is startAttemptedDetails plus the run the runtime
+// holds for the agent now (api.BrokerErrorDetailCurrentRunID), when
+// currentRunID can report one. mgr is the manager the start went to.
+func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id, projectID, runID string) map[string]interface{} {
+	d := startAttemptedDetails(runID)
+	if current, ok := s.currentRunID(ctx, mgr, id, projectID); ok {
+		d[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	return d
+}
+
+// currentRunID reports the scion.run_id of the agent's runtime entry after
+// a failed start. It re-lists, under the request's ctx, allManagers(ctx)
+// plus mgr (the one the start went to), scoped to projectID the way a
+// delete resolves its target (collectAgentCandidates). allManagers honours
+// a recorded runtime type on ctx (ptone/scion#2748): a restart carries one,
+// so the list is limited to runtimes of the recorded type plus mgr; a
+// start carries none, so every registered runtime is listed. Either way it
+// sees what a later delete under the same ctx rules would see, including a
+// previous entry left on another listed runtime.
+//
+//   - One container entry: its run, or "" when it carries no run label.
+//   - Entries of more than one run: "", so the hub's next delete resolves
+//     by name, as before run IDs. Name resolution fails closed (409) only
+//     on ambiguity among the runtimes that delete itself lists; an entry
+//     on a runtime outside its recorded type is not seen.
+//   - No container entry on any runtime (file-only entries do not count):
+//     ok is false. The hub then keeps the run it minted, so a delayed delete
+//     cannot remove a same-name agent created later.
+//   - Any List failure: ok is false; the hub falls back as for an older
+//     broker.
+func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projectID string) (string, bool) {
+	managers := s.allManagers(ctx)
+	if mgr != nil && !slices.Contains(managers, mgr) {
+		managers = append(managers, mgr)
+	}
+	cands, err := s.collectAgentCandidates(ctx, managers, id, projectID,
+		"Agent start failed: could not re-list the agent to report its current run")
+	if err != nil {
+		return "", false
+	}
+	current, found := "", false
+	for _, c := range cands {
+		if c.entry.ContainerID == "" {
+			continue
+		}
+		if found && c.entry.RunID != current {
+			return "", true
+		}
+		current, found = c.entry.RunID, true
+	}
+	return current, found
+}
+
 // NotFound writes a 404 Not Found response.
 func NotFound(w http.ResponseWriter, resource string) {
 	code := ErrCodeNotFound
@@ -123,6 +198,20 @@ func NotFound(w http.ResponseWriter, resource string) {
 		code = ErrCodeAgentNotFound
 	}
 	writeError(w, http.StatusNotFound, code, resource+" not found", nil)
+}
+
+// StopRunMismatch writes the 404 for a stop naming run runID when another
+// run holds the agent's name (ptone/scion#2550). The code
+// (api.BrokerErrorCodeRunMismatch) lets the hub tell it apart from any
+// other 404; the details name the requested run and the run that holds
+// the name (current, omitted when unknown), so a hub/broker run drift is
+// diagnosable.
+func StopRunMismatch(w http.ResponseWriter, runID, current string) {
+	details := map[string]interface{}{api.BrokerErrorDetailRunID: runID}
+	if current != "" {
+		details[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	writeError(w, http.StatusNotFound, api.BrokerErrorCodeRunMismatch, "Agent not found for the requested run", details)
 }
 
 // BadRequest writes a 400 Bad Request response.
@@ -147,8 +236,14 @@ func Forbidden(w http.ResponseWriter) {
 		"Insufficient permissions", nil)
 }
 
-// MethodNotAllowed writes a 405 Method Not Allowed response.
-func MethodNotAllowed(w http.ResponseWriter) {
+// MethodNotAllowed writes a 405 Method Not Allowed response. RFC 9110
+// section 15.5.6 requires a 405 to carry an Allow header listing the methods
+// the target resource supports. The signature requires at least one method,
+// so a bare call does not compile; hack/check-method-not-allowed.sh remains
+// as a backstop for helpers that keep a variadic-only signature.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed,
 		"Method not allowed", nil)
 }
@@ -156,6 +251,12 @@ func MethodNotAllowed(w http.ResponseWriter) {
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// StaleDispatch writes a 409 Conflict response with the stable
+// ErrCodeStaleDispatch code.
+func StaleDispatch(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeStaleDispatch, message, nil)
 }
 
 // AgentIdentityUnknown writes a 409 Conflict response with the stable
@@ -343,6 +444,8 @@ func Unprocessable(w http.ResponseWriter, message string) {
 //   - upstream_unavailable: 502, GitHub itself returned repeated 5xx.
 //   - unreachable: 502, a network-level failure (DNS, connection refused,
 //     TLS) rather than a response GitHub chose to send.
+//   - forbidden: 403, the Hub's per-URI code for a gh:// ref the caller may
+//     not resolve GitHub skills for in this project.
 //   - anything else — including an uncategorized local failure and the Hub's
 //     own per-URI codes for PreResolvedSkills (storage_error, internal_error,
 //     federation_error) — keeps the existing 500, not a client error: the
@@ -352,6 +455,8 @@ func skillResolutionHTTPStatus(code string) int {
 	switch code {
 	case agent.SkillErrCodeNotFound:
 		return http.StatusNotFound
+	case agent.SkillErrCodeForbidden:
+		return http.StatusForbidden
 	case agent.SkillErrCodeRateLimited:
 		return http.StatusTooManyRequests
 	case agent.SkillErrCodeTimeout:
@@ -369,12 +474,24 @@ func skillResolutionHTTPStatus(code string) int {
 // mapped status gets the same {skill, cause} detail payload so the response
 // is actionable without broker logs, including the uncategorized/5xx default.
 func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
+	skillResolutionFailedWithDetails(w, err, nil)
+}
+
+// skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
+// details (for example the start markers from startFailureDetails) merged
+// alongside the skill and cause.
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, extra map[string]interface{}) {
 	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
 		w.Header().Set("Retry-After", err.RetryAfter)
 	}
+	details := make(map[string]interface{}, len(extra)+2)
+	for k, v := range extra {
+		details[k] = v
+	}
+	details["skill"] = err.URI
+	details["cause"] = err.Code
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
-		"Failed to provision agent: "+err.Error(),
-		map[string]interface{}{"skill": err.URI, "cause": err.Code})
+		"Failed to provision agent: "+err.Error(), details)
 }
 
 // writeStartContextError writes the HTTP response for an error returned by
@@ -392,7 +509,10 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior.
+// behavior. The one exception is errSavedProfileUnresolved (a saved profile
+// that no longer resolves), which is checked ahead of every other case and
+// written as the retryable 503 from writeSavedProfileUnresolved; its text is
+// client-safe by construction.
 //
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
@@ -413,6 +533,12 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // so the detail reaches the broker's own diagnostics before being redacted
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
+	// errSavedProfileUnresolved's text names only the agent, the profile
+	// and a fixed or ResolveRuntime cause, and is client-safe as is.
+	if errors.Is(err, errSavedProfileUnresolved) {
+		writeSavedProfileUnresolved(w, err)
+		return http.StatusServiceUnavailable
+	}
 	sce, ok := err.(*startContextError)
 	if !ok {
 		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", err)

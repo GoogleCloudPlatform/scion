@@ -283,10 +283,10 @@ func TestSubstrateRestart_NewAgentAfterWipe_FullyManageable(t *testing.T) {
 	}
 
 	before := len(rec.list())
-	if err := rt.Delete(context.Background(), deleteID); err != nil {
+	if err := rt.Delete(context.Background(), RunRef{ID: deleteID}); err != nil {
 		t.Errorf("Delete(%q) error = %v, want a post-restart agent to delete cleanly", deleteID, err)
 	}
-	if err := rt.Stop(context.Background(), stopID); err != nil {
+	if err := rt.Stop(context.Background(), RunRef{ID: stopID}); err != nil {
 		t.Errorf("Stop(%q) error = %v, want a post-restart agent to stop cleanly", stopID, err)
 	}
 	after := rec.list()

@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -112,6 +111,7 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 	if projectID != "" {
 		path += "?projectId=" + url.QueryEscape(projectID)
 	}
+	path = withRunIDURL(path, extras.RunID)
 
 	payload := map[string]interface{}{}
 	if task != "" {
@@ -178,26 +178,23 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 }
 
 // StopAgent stops an agent via control channel.
-func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/stop", url.PathEscape(agentID))
-	query := ""
-	if projectID != "" {
-		query = "projectId=" + url.QueryEscape(projectID)
-	}
-	query = withRecordedRuntimeQuery(ctx, query)
+	query := stopAgentQuery(ctx, projectID, runID)
 	_, err := c.doRequest(ctx, brokerID, "POST", path, query, nil)
-	return err
+	return stopAgentError(err, runID)
 }
 
 // RestartAgent restarts an agent via control channel.
-func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s/restart", url.PathEscape(agentID))
 	query := ""
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRunIDQuery(query, extras.RunID)
 	query = withRecordedRuntimeQuery(ctx, query)
 	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
@@ -212,11 +209,19 @@ func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID,
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
-			return fmt.Errorf("failed to marshal restart request: %w", err)
+			return nil, fmt.Errorf("failed to marshal restart request: %w", err)
 		}
 	}
-	_, err := c.doRequest(ctx, brokerID, "POST", path, query, body)
-	return err
+	resp, err := c.doRequest(ctx, brokerID, "POST", path, query, body)
+	if err != nil {
+		return nil, err
+	}
+	// As on HTTP: an undecodable body is not an error.
+	var result RemoteAgentResponse
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return nil, nil
+	}
+	return &result, nil
 }
 
 // ResetAuthAgent injects a fresh auth token into a running agent via the control channel.
@@ -237,18 +242,10 @@ func (c *ControlChannelBrokerClient) ResetAuthAgent(ctx context.Context, brokerI
 }
 
 // DeleteAgent deletes an agent via control channel.
-func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	_ = brokerEndpoint
 	path := fmt.Sprintf("/api/v1/agents/%s", url.PathEscape(agentID))
-	query := fmt.Sprintf("deleteFiles=%t&removeBranch=%t", deleteFiles, removeBranch)
-	if projectID != "" {
-		query += "&projectId=" + url.QueryEscape(projectID)
-	}
-	query += deleteProjectPathQuery(ctx)
-	if softDelete {
-		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.UTC().Format(time.RFC3339)))
-	}
-	query = withRecordedRuntimeQuery(ctx, query)
+	query := deleteAgentQuery(ctx, projectID, opts)
 	_, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)
 	if err != nil {
 		// A 404 means the broker has no such agent in this project; treat
@@ -816,12 +813,12 @@ func (c *HybridBrokerClient) StartAgent(ctx context.Context, brokerID, brokerEnd
 // StopAgent stops an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+		return c.controlChannel.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 	case routeHTTP:
-		return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
+		return c.httpClient.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, runID)
 	default:
 		return ErrLifecycleDeferred
 	}
@@ -830,14 +827,14 @@ func (c *HybridBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndp
 // RestartAgent restarts an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (c *HybridBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
 		return c.controlChannel.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 	case routeHTTP:
 		return c.httpClient.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 	default:
-		return ErrLifecycleDeferred
+		return nil, ErrLifecycleDeferred
 	}
 }
 
@@ -857,12 +854,12 @@ func (c *HybridBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, broke
 // DeleteAgent deletes an agent, using route() to decide the delivery path.
 // routeLocal uses the control-channel tunnel, routeHTTP falls back to HTTP,
 // and routeForward/routeUndeliverable return ErrLifecycleDeferred.
-func (c *HybridBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (c *HybridBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	switch c.route(ctx, brokerID, brokerEndpoint) {
 	case routeLocal:
-		return c.controlChannel.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
+		return c.controlChannel.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, opts)
 	case routeHTTP:
-		return c.httpClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
+		return c.httpClient.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, opts)
 	default:
 		return ErrLifecycleDeferred
 	}

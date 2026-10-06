@@ -27,10 +27,12 @@
 
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
+import { shouldApplyAcceptedDeletion } from '../shared/agent-deletion.js';
 import type {
   Agent,
   AgentActivity,
   AgentDetail,
+  DeletionInfo,
   ExposedPort,
   Project,
   RuntimeBroker,
@@ -41,8 +43,8 @@ const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exc
 
 /**
  * Two agent objects are shallow-equal iff every field matches by reference,
- * except `detail` and `exposedPorts`, which are freshly reconstructed on
- * every merge and so are compared by value instead (§7).
+ * except `detail`, `exposedPorts` and `deletion`, which are freshly
+ * reconstructed on every merge and so are compared by value instead (§7).
  *
  * Every other array/object field (`labels`, `_capabilities`,
  * `appliedConfig`, `ancestry`, ...) is still reference-compared: a delta
@@ -66,6 +68,10 @@ function agentsShallowEqual(a: Agent, b: Agent): boolean {
     }
     if (key === 'exposedPorts') {
       if (!exposedPortsEqual(a.exposedPorts, b.exposedPorts)) return false;
+      continue;
+    }
+    if (key === 'deletion') {
+      if (!deletionEqual(a.deletion, b.deletion)) return false;
       continue;
     }
     if (ar[key] !== br[key]) {
@@ -92,6 +98,23 @@ function shallowObjectEqual<T extends object>(a: T, b: T): boolean {
     if (a[key] !== b[key]) return false;
   }
   return true;
+}
+
+/**
+ * Value comparison for `Agent.deletion`, whose fields are all scalars. Every
+ * SSE delta carries a fresh object, and the hub republishes an unchanged
+ * view (for example, once per broker stop report), so comparing by
+ * reference would turn each republish into a re-render. `null` and
+ * `undefined` stay distinct from an object, so `deletion: null` still
+ * registers as a change and clears the view.
+ */
+function deletionEqual(
+  a: DeletionInfo | null | undefined,
+  b: DeletionInfo | null | undefined
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return shallowObjectEqual(a, b);
 }
 
 /** Value comparison for `AgentDetail`, whose fields are all scalars. */
@@ -359,7 +382,12 @@ export type ViewScope =
   | { type: 'agent-detail'; projectId: string; agentId: string }
   | { type: 'brokers-list' }
   | { type: 'broker-detail'; brokerId: string }
-  | { type: 'chat'; spaceIds: string[]; userId: string };
+  | { type: 'chat'; spaceIds: string[]; userId: string }
+  /**
+   * Hub-wide agent feed. Carries agent events from every project the session
+   * may read and nothing else: no notifications, no chat, no broker events.
+   */
+  | { type: 'agent-feed' };
 
 /**
  * Resource a scope-level capability set was computed for.
@@ -485,6 +513,9 @@ export class StateManager extends EventTarget {
 
   /** IDs that received a `created` event since the last flush (§7). */
   private pendingCreatedIds = new Set<string>();
+
+  /** IDs among {@link pendingCreatedIds} whose `created` marked a restore. */
+  private pendingRestoredIds = new Set<string>();
 
   private flushScheduled = false;
   private flushRafHandle: number | null = null;
@@ -621,6 +652,11 @@ export class StateManager extends EventTarget {
     }
   }
 
+  /** The signed-in user's id, or '' before it is known. */
+  getCurrentUserId(): string {
+    return this.currentUserId;
+  }
+
   /**
    * Record the signed-in user so scoped subscriptions can include the
    * per-user notification subject. Called by the app bootstrap once the
@@ -675,6 +711,7 @@ export class StateManager extends EventTarget {
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.seedEpochs.clear();
     this.completeFlag = null;
     this.generation++;
@@ -703,6 +740,9 @@ export class StateManager extends EventTarget {
    * the browser's 6-connection-per-origin HTTP/1.1 limit).
    */
   private subjectsForScope(scope: ViewScope): string[] {
+    // The agent feed is a dedicated connection for agent rows only; it must
+    // not duplicate the notification subscription the view connection holds.
+    if (scope.type === 'agent-feed') return ['project.*.agent.>'];
     const subs = ((): string[] => {
       switch (scope.type) {
         case 'dashboard':
@@ -749,6 +789,7 @@ export class StateManager extends EventTarget {
   private scopeEquals(a: ViewScope, b: ViewScope): boolean {
     if (a.type !== b.type) return false;
     if (a.type === 'dashboard' && b.type === 'dashboard') return true;
+    if (a.type === 'agent-feed' && b.type === 'agent-feed') return true;
     if (a.type === 'brokers-list' && b.type === 'brokers-list') return true;
     if (a.type === 'broker-detail' && b.type === 'broker-detail') return a.brokerId === b.brokerId;
     if (a.type === 'project' && b.type === 'project') return a.projectId === b.projectId;
@@ -904,6 +945,7 @@ export class StateManager extends EventTarget {
       this.dirty.upserted.delete(agentId);
       this.dirty.unknown.delete(agentId);
       this.pendingCreatedIds.delete(agentId);
+      this.pendingRestoredIds.delete(agentId);
       this.dirty.deleted.add(agentId);
       this.scheduleFlush();
       return;
@@ -932,6 +974,38 @@ export class StateManager extends EventTarget {
       this.dirty.upserted.add(agentId);
       this.scheduleFlush();
       return;
+    }
+
+    // A `created` for a tombstoned ID is stale unless it is marked as a
+    // restore. The hub never publishes an unmarked `created` for a deleted
+    // or delete-claimed agent (ptone/scion#2972), but an older `created`
+    // can still be delivered after the `deleted` that removed the agent
+    // (e.g. replayed by a lagging hub instance after an SSE reconnect).
+    // Drop it like any other late delta, so it cannot re-add the agent
+    // (ptone/scion#2886). A new agent with the same *name* has a new ID
+    // and is unaffected.
+    //
+    // A restore of a soft-deleted agent reuses its ID, and its `created`
+    // carries `restoredAt` (ptone/scion#2951): that one clears the
+    // tombstone and re-adds the agent. Known limit: a stale *restore*
+    // `created` replayed after a later `deleted` would still re-add it;
+    // closing that needs SSE replay ordering (Last-Event-ID), out of scope.
+    if (eventType === 'created' && this.state.deletedAgentIds.has(agentId)) {
+      const restoredAt = (data as { restoredAt?: unknown } | null)?.restoredAt;
+      if (typeof restoredAt !== 'string' || restoredAt === '') {
+        return;
+      }
+      this.state.deletedAgentIds.delete(agentId);
+      this.dirty.deleted.delete(agentId);
+    }
+    let restored = false;
+    if (eventType === 'created' && data && typeof data === 'object' && 'restoredAt' in data) {
+      const restoredAt = (data as { restoredAt?: unknown }).restoredAt;
+      restored = typeof restoredAt === 'string' && restoredAt !== '';
+      // Event metadata, not an agent field.
+      const rest = { ...(data as Record<string, unknown>) };
+      delete rest.restoredAt;
+      data = rest;
     }
 
     const existing = this.state.agents.get(agentId);
@@ -1003,11 +1077,6 @@ export class StateManager extends EventTarget {
       this.state.agents.set(agentId, updated);
       this.dirty.upserted.add(agentId);
       this.dirty.unknown.delete(agentId);
-      // A `created` for an ID whose `deleted` arrived earlier in the same
-      // flush window must not report it as still deleted — the create is
-      // fresher. IDs are UUIDs, so a real reuse is not reachable in
-      // practice; this only matters within one coalescing window.
-      this.dirty.deleted.delete(agentId);
     }
     if (eventType === 'created') {
       // A legitimate SSE creation for this ID. Signalled separately from
@@ -1015,6 +1084,7 @@ export class StateManager extends EventTarget {
       // server-omitted agent (see chat.ts loop guard) know the suppression
       // no longer applies to this ID.
       this.pendingCreatedIds.add(agentId);
+      if (restored) this.pendingRestoredIds.add(agentId);
     }
     if (changed || eventType === 'created') {
       this.scheduleFlush();
@@ -1224,24 +1294,31 @@ export class StateManager extends EventTarget {
   /**
    * Emit the coalesced notifications for everything dirtied since the last
    * flush, in order: `agent-created` per created ID, `agents-changed`, then
-   * the legacy `agents-updated` once for the whole flush (§7).
+   * the legacy `agents-updated` once for the whole flush (§7). The
+   * `agent-created` of an agent restored with its old ID carries
+   * `restored: true`.
    */
   private flush(): void {
     if (!this.flushScheduled) return;
     this.cancelScheduledFlush();
 
     const createdIds = Array.from(this.pendingCreatedIds);
+    const restoredIds = new Set(this.pendingRestoredIds);
     const upserted = Array.from(this.dirty.upserted);
     const deleted = Array.from(this.dirty.deleted);
     const unknown = new Map(this.dirty.unknown);
 
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.dirty.upserted.clear();
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
 
     for (const agentId of createdIds) {
-      this.notifyWithData('agent-created', { agentId });
+      this.notifyWithData(
+        'agent-created',
+        restoredIds.has(agentId) ? { agentId, restored: true } : { agentId }
+      );
     }
 
     const changed: AgentsChangedDetail = {
@@ -1323,6 +1400,16 @@ export class StateManager extends EventTarget {
     if (token !== undefined) {
       this.endSeedEpoch(token);
     }
+  }
+
+  /**
+   * `agent` as `seedAgents` with `token` would apply the deltas recorded
+   * for it so far, without storing it: for showing REST rows read while
+   * the epoch is open. Returns `agent` itself when none were recorded.
+   */
+  withSeedEpochDeltas(token: SeedEpochToken, agent: Agent): Agent {
+    const recorded = this.seedEpochs.get(token)?.deltas.get(agent.id);
+    return recorded ? applyCompactedDelta(agent, recorded, agent.id) : agent;
   }
 
   /**
@@ -1448,6 +1535,28 @@ export class StateManager extends EventTarget {
     for (const w of waiters) {
       w.reject(new Error(reason));
     }
+  }
+
+  /**
+   * Apply the `deletion` view from a DELETE 202 response (ptone/scion#2483
+   * phase 1b) so every view shows "Deleting…" at once. The agent is *not*
+   * removed: the SSE `deleted` event removes it later, in place, for every
+   * browser alike.
+   *
+   * Routed through the same merge as an SSE status delta, so held lists,
+   * the paged window and agent-detail all pick it up from the next flush.
+   * Skipped for an unknown or tombstoned ID, and when the SSE view already
+   * holds the same or a newer claim (a renewal or failure that beat the
+   * response). Returns whether the view was applied.
+   */
+  applyDeleteAccepted(id: string, deletion: DeletionInfo | null | undefined): boolean {
+    if (!deletion) return false;
+    const existing = this.state.agents.get(id);
+    // Tombstone check is defensive: tombstoned IDs are never in state.agents.
+    if (!existing || this.state.deletedAgentIds.has(id)) return false;
+    if (!shouldApplyAcceptedDeletion(existing.deletion, deletion)) return false;
+    this.handleAgentEvent(id, 'status', { deletion });
+    return true;
   }
 
   /**

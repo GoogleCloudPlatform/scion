@@ -28,7 +28,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -169,6 +168,9 @@ type Client struct {
 	retryMaxDelay  time.Duration
 	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
 	oidcMode       transportauth.HeaderMode  // header carrying the transport token
+	// oidcLate is true when oidcSource is the file-backed source installed
+	// in proxy mode for an agent that started without a transport token.
+	oidcLate bool
 	// tokenChownUID and tokenChownGID are the ownership StartTokenRefresh
 	// applies (via WriteTokenFile) to the token file after every refresh.
 	// Guarded by tokenMu alongside token itself. Set once, before the
@@ -260,6 +262,16 @@ func (c *Client) HubURL() string {
 		return ""
 	}
 	return c.hubURL
+}
+
+// HTTPClient returns the client's HTTP client, which carries the hub
+// transport settings (timeout and transport credential), so other hub
+// callers share them.
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	return c.client
 }
 
 func (c *Client) AgentID() string {
@@ -1615,6 +1627,13 @@ func TransportTokenFilePath() string {
 	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
 }
 
+// NewTransportTokenFileSource returns a file-backed transport source on
+// TransportTokenFilePath() that reads with the same guarded, no-follow
+// reader as the agent token file. It has no bootstrap value.
+func NewTransportTokenFileSource() *transportauth.FileSource {
+	return transportauth.NewFileSource(TransportTokenFilePath(), ReadTransportTokenFileGuarded)
+}
+
 // WriteTransportTokenFile persists the hub-provided transport token to the
 // transport token file, mode 0600, through the same fchown-then-rename
 // path WriteTokenFile uses. uid <= 0 skips the chown.
@@ -1643,7 +1662,7 @@ func WriteTransportTokenFile(token string, uid, gid int) error {
 // the bootstrap value is older than the last refresh). Returns the path.
 func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 	path := TransportTokenFilePath()
-	if existing, err := readTransportTokenFile(path); err == nil {
+	if existing, err := ReadTransportTokenFileGuarded(path); err == nil {
 		existing = strings.TrimSpace(existing)
 		if existing != "" {
 			fileExp, ferr := transportauth.ParseTokenExpiry(existing)
@@ -1668,7 +1687,7 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if !c.hasHubProvidedTransport() {
 		return false, nil
 	}
-	tok, err := readTransportTokenFile(TransportTokenFilePath())
+	tok, err := ReadTransportTokenFileGuarded(TransportTokenFilePath())
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -1716,13 +1735,21 @@ const transportResetUnparseableMessage = "reset-auth delivered a transport token
 // restoreTransportTokenFile rewrites the transport token file with the
 // credential this client currently uses, when that credential parses. The
 // source gives an unparseable file value zero expiry, so a valid in-memory
-// or bootstrap value is what Token returns here.
+// or bootstrap value is what Token returns here. A client in proxy mode
+// that started without a transport token may have no valid credential to
+// restore; the unparseable file is then removed, so other processes do not
+// pick it up.
 func (c *Client) restoreTransportTokenFile(uid, gid int) {
 	cur, err := c.oidcSource.Token()
 	if err != nil || cur == "" {
 		return
 	}
 	if _, err := transportauth.ParseTokenExpiry(cur); err != nil {
+		if c.oidcLate {
+			if _, rerr := removeFileNoFollow(TransportTokenFilePath()); rerr != nil {
+				log.Error("Failed to remove unusable transport token file: %v", rerr)
+			}
+		}
 		return
 	}
 	if err := WriteTransportTokenFile(cur, uid, gid); err != nil {
@@ -1834,14 +1861,16 @@ func ReadTransportRefreshStatus() (TransportRefreshStatus, bool) {
 	return st, true
 }
 
-// readTransportTokenFile reads the transport token file through the same
-// symlink-safe, single-link-regular-file guard ReadTokenFile uses, since
-// sciontool init (root) reads it from a directory the workload owns.
+// ReadTransportTokenFileGuarded reads the transport token file through the
+// same symlink-safe, single-link-regular-file guard ReadTokenFile uses,
+// since sciontool init (root) reads it from a directory the workload owns.
+// It is a transportauth.FileReadFunc; pass it to
+// transportauth.FromEnvWithReader from processes that may run as root.
 //
 // Under go test without SetTokenHome it refuses to read the default path,
 // because the token home resolves to the real agent user's home (not
 // $HOME) and tests must never pick up a live transport token.
-func readTransportTokenFile(path string) (string, error) {
+func ReadTransportTokenFileGuarded(path string) (string, error) {
 	if testing.Testing() && !tokenHomeOverridden && path == TransportTokenFilePath() {
 		return "", fmt.Errorf("scion/hub: refusing to read %s during a test without SetTokenHome()", path)
 	}
@@ -1980,143 +2009,14 @@ func readTokenFileGuarded(path string) (string, error) {
 	return string(data), nil
 }
 
-// OutboundMessage is the payload for sending an outbound message from an agent.
-type OutboundMessage struct {
-	Recipient   string            `json:"recipient,omitempty"`
-	RecipientID string            `json:"recipient_id,omitempty"`
-	Msg         string            `json:"msg"`
-	Type        string            `json:"type,omitempty"`
-	Urgent      bool              `json:"urgent,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	// Wake requests that a suspended target agent be resumed before
-	// delivering the message. Ignored for non-agent recipients.
-	Wake bool `json:"wake,omitempty"`
-}
-
-// SendOutboundMessage sends an outbound message from the agent via the hub.
-// The recipient may be a human user or another agent; the hub determines the
-// delivery path. Posts to POST /api/v1/agents/{agentID}/outbound-message using
-// the agent token. Single attempt: a non-2xx answer is returned as an
-// *HTTPStatusError so the caller can decide whether to retry.
-func (c *Client) SendOutboundMessage(ctx context.Context, msg OutboundMessage) error {
-	if !c.IsConfigured() {
-		return fmt.Errorf("hub client not configured")
-	}
-
-	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/outbound-message",
-		strings.TrimSuffix(c.hubURL, "/"), c.agentID)
-
-	body, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("failed to marshal outbound message: %w", err)
-	}
-
-	c.tokenMu.RLock()
-	currentToken := c.token
-	c.tokenMu.RUnlock()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Scion-Agent-Token", currentToken)
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send outbound message: %w", err)
-	}
-	respBody, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		statusErr := &HTTPStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			statusErr.RetryAfter, statusErr.HasRetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-		}
-		return statusErr
-	}
-	return nil
-}
-
-// HTTPStatusError is returned by SendOutboundMessage when the hub answers
-// with a status >= 400. For a 429, RetryAfter carries the parsed
-// Retry-After header when HasRetryAfter is set.
-type HTTPStatusError struct {
-	StatusCode    int
-	Body          string
-	RetryAfter    time.Duration
-	HasRetryAfter bool
-}
-
-func (e *HTTPStatusError) Error() string {
-	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
-}
-
-// Code returns the hub API error code from a JSON error body
-// ({"error":{"code":"..."}}), or "" when the body carries none.
-func (e *HTTPStatusError) Code() string {
-	var body struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	if json.Unmarshal([]byte(e.Body), &body) != nil {
-		return ""
-	}
-	return body.Error.Code
-}
-
-// maxRetryAfter caps a parsed Retry-After. It bounds the seconds value
-// before conversion (so a huge value cannot overflow time.Duration into a
-// negative wait) and is far beyond any caller's retry budget.
-const maxRetryAfter = 24 * time.Hour
-
-// parseRetryAfter parses a Retry-After header value: either delay-seconds
-// (one or more ASCII digits, RFC 9110 §10.2.3) or an HTTP-date. A date in
-// the past yields zero; values above maxRetryAfter are capped to it.
-func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0, false
-	}
-	if v[0] >= '0' && v[0] <= '9' {
-		secs, err := strconv.ParseUint(v, 10, 64)
-		if err != nil {
-			// All digits but out of range for uint64: still a valid,
-			// enormous delay.
-			if errors.Is(err, strconv.ErrRange) {
-				return maxRetryAfter, true
-			}
-			return 0, false
-		}
-		if secs > uint64(maxRetryAfter/time.Second) {
-			return maxRetryAfter, true
-		}
-		return time.Duration(secs) * time.Second, true
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		d := t.Sub(now)
-		switch {
-		case d <= 0:
-			return 0, true
-		case d > maxRetryAfter:
-			return maxRetryAfter, true
-		}
-		return d, true
-	}
-	return 0, false
-}
-
 // selfMessageRequest is the payload for delivering a message to the current agent
 // via the hub's inbound agent message endpoint (POST /api/v1/agents/{id}/message).
 type selfMessageRequest struct {
 	StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 }
 
-// SendSelfMessage delivers a structured message to the current agent via the
-// hub's inbound message endpoint. Unlike SendOutboundMessage (which targets
-// a human inbox), this delivers a message into the agent's own harness input.
+// SendSelfMessage delivers a structured message into the current agent's own
+// harness input via the hub's inbound message endpoint.
 // No retries — this is a best-effort fire-and-forget call.
 func (c *Client) SendSelfMessage(ctx context.Context, msg *messages.StructuredMessage) error {
 	if !c.IsConfigured() {

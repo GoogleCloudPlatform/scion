@@ -6,10 +6,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-if ! command -v rg >/dev/null 2>&1; then
-  echo "Warning: ripgrep (rg) not found — skipping compat-literals check" >&2
-  exit 0
-fi
+# Dependency check: a missing rg exits 3 (nothing was analysed), never 0.
+# shellcheck source=SCRIPTDIR/lib/require-tool.sh
+source hack/lib/require-tool.sh
+require_tool rg compat-literals "ripgrep (rg)"
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -185,6 +185,13 @@ allowed_paths=(
   # Accepts the legacy "grove" template-list scope query value and maps it to
   # "project" before it drives the scope switch or the store filter.
   "^pkg/hub/template_handlers.go$"
+  # isHubManagedWorktreeBase distinguishes a hub-native worktree-per-agent
+  # base (under ~/.scion/projects/<slug> or the legacy
+  # ~/.scion/groves/<slug>) from a linked project (the user's own checkout),
+  # mirroring config.ProjectsDir/legacyProjectsDirName (pkg/config/paths.go,
+  # already allowlisted above) so the read-only admin-dir mount narrowing
+  # applies to both current and pre-migration hub-native project layouts.
+  "^pkg/runtime/common.go$"
   "^pkg/runtimebroker/handlers.go$"
   # Reserved-identity-attribute denylist: the three retired grove-named
   # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept

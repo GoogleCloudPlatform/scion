@@ -185,11 +185,16 @@ func TestCodexUsageRuleMatchesFixtureResponseCompleted(t *testing.T) {
 			t.Errorf("tokens[%q] = %d, want %d", k, increment.Tokens[k], v)
 		}
 	}
-	// cache_write is not part of design §5's codex mapping (see the
-	// codexUsageRule doc comment), even though the source event also
-	// carries cache_write_token_count.
+	// The 0.158.0 capture carries cache_write_token_count=0, and a zero
+	// count is never emitted as a token point. The nonzero cache_write
+	// mapping (ptone/scion#2245) is pinned by
+	// TestCodexUsageRuleMapsCacheWriteFromFixture against the 0.160.0
+	// capture.
+	if !logAttrPresent(record.Attributes, "cache_write_token_count") {
+		t.Fatal("fixture is expected to carry cache_write_token_count (0)")
+	}
 	if _, ok := increment.Tokens[telemetrycontract.TokenTypeCacheWrite]; ok {
-		t.Error("cache_write must not appear: design §5's codex row has no mapping for it")
+		t.Error("a zero cache_write_token_count must not produce a cache_write token point")
 	}
 }
 
@@ -390,6 +395,7 @@ func TestNewUsageDeriverBuildsCodexRuleForCodexHarness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { shutdownTestDeriver(d) })
 	if len(d.rules) != 1 {
 		t.Fatalf("codex deriver rules = %d, want 1", len(d.rules))
 	}
@@ -413,10 +419,59 @@ func TestNewUsageDeriverBuildsCodexRuleForCodexHarness(t *testing.T) {
 // but without that test's golden-file and replay-dedup assertions, which
 // are harness-agnostic and already covered there.
 func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
-	t.Setenv("SCION_AGENT_ID", "agent-codex-pipeline-1")
-	t.Setenv("SCION_AGENT_SLUG", "codex-agent-slug")
-	t.Setenv("SCION_PROJECT_ID", "project-codex-pipeline-1")
-	t.Setenv("SCION_HARNESS", "codex")
+	result := deriveUsageThroughPipeline(t, "codex", loadCodexUsageFixture(t))
+
+	// The delta frame and the per-frame response.completed marker must not
+	// add a second call for the one successful response -- Derived counts
+	// one increment per matched record, so this is 2 (one success, one
+	// error), not 3 or 4.
+	if result.diag.Derived != 2 || result.diag.Malformed != 0 {
+		t.Fatalf("diagnostics = %+v, want Derived=2 Malformed=0 (no per-frame double count)", result.diag)
+	}
+	// Exactly one success call and one error call, not two successes
+	// (which is what a per-frame double count plus a mis-mapped error
+	// status would produce together).
+	if len(result.callsByStatus) != 2 || result.callsByStatus["success"] != 1 || result.callsByStatus["error"] != 1 {
+		t.Fatalf("calls by status = %+v, want success=1 error=1", result.callsByStatus)
+	}
+	assertTokensByType(t, result.tokensByType, map[string]int64{
+		telemetrycontract.TokenTypeInput:     300,
+		telemetrycontract.TokenTypeOutput:    80,
+		telemetrycontract.TokenTypeCacheRead: 1200,
+		telemetrycontract.TokenTypeReasoning: 20,
+	})
+	for _, labels := range result.tokenLabels {
+		if labels["harness"] != "codex" || labels["model"] != "gpt-5.1-codex" {
+			t.Errorf("unexpected tokens series labels: %+v", labels)
+		}
+	}
+}
+
+// pipelineUsageResult is what deriveUsageThroughPipeline observed at the
+// GCP exporter: calls summed per status label, tokens summed per
+// token_type label, plus every scion.usage.tokens series' labels.
+type pipelineUsageResult struct {
+	diag          UsageDiagnostics
+	callsByStatus map[string]int64
+	tokensByType  map[string]int64
+	tokenLabels   []map[string]string
+}
+
+// deriveUsageThroughPipeline is the end-to-end harness the per-harness
+// pipeline tests share: it builds a real Pipeline with a native-source
+// usage deriver for harness, feeds resourceLogs through handleLogs (so
+// validateLogs and the pre-filter derivation both run), flushes the
+// loopback metrics through metricStreams to a fake Cloud Monitoring
+// server, and returns the canonical counters it captured. It also asserts
+// the exact §3.2 point label keys on every gen_ai.api.calls and
+// scion.usage.tokens series, and the canonical identity labels on the
+// tokens series, so each caller only asserts its own values.
+func deriveUsageThroughPipeline(t *testing.T, harness string, resourceLogs []*logspb.ResourceLogs) pipelineUsageResult {
+	t.Helper()
+	t.Setenv("SCION_AGENT_ID", "agent-"+harness+"-pipeline-1")
+	t.Setenv("SCION_AGENT_SLUG", harness+"-agent-slug")
+	t.Setenv("SCION_PROJECT_ID", "project-"+harness+"-pipeline-1")
+	t.Setenv("SCION_HARNESS", harness)
 	t.Setenv("SCION_MODEL", "")
 	t.Setenv("SCION_BROKER_ID", "")
 	t.Setenv("SCION_BROKER_NAME", "")
@@ -427,31 +482,30 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = listener.Close() }()
+	t.Cleanup(func() { _ = listener.Close() })
 	capture := &monitoringCapture{}
 	server := grpc.NewServer()
 	monitoringpb.RegisterMetricServiceServer(server, capture)
 	go func() { _ = server.Serve(listener) }()
-	defer server.Stop()
+	t.Cleanup(server.Stop)
 	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
+	t.Cleanup(func() { _ = conn.Close() })
 	sdkExporter, err := mexporter.New(mexporter.WithProjectID("test-project"), mexporter.WithMonitoringClientOptions(option.WithGRPCConn(conn)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = sdkExporter.Shutdown(context.Background()) }()
+	t.Cleanup(func() { _ = sdkExporter.Shutdown(context.Background()) })
 
 	cfg := &Config{
 		Enabled: true, CloudProvider: "gcp", GRPCPort: availableTCPPort(t), HTTPPort: 0,
-		// No real event name is included, so every raw codex log record is
+		// No real event name is included, so every raw native log record is
 		// dropped by the filter and handleLogs returns before attempting a
 		// (here unconfigured) raw-log export. The derived usage metrics,
 		// which run before the filter (design §3.3, AC-1.4), must still
-		// appear -- this is also the pre-filter-derivation guarantee the
-		// callsite-EventName exemption must not break.
+		// appear.
 		Filter: FilterConfig{Include: []string{"nonexistent_event"}},
 	}
 	p := NewWithConfig(cfg)
@@ -463,96 +517,323 @@ func TestPipelineDerivesCodexUsageThroughValidation(t *testing.T) {
 	if err := receiver.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = receiver.Stop(context.Background()) }()
+	t.Cleanup(func() { _ = receiver.Stop(context.Background()) })
 
 	deriver, err := NewUsageDeriver(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(deriver.rules) == 0 {
-		t.Fatal("expected the codex usage rule to be active")
+		t.Fatalf("expected a usage rule to be active for harness %q", harness)
 	}
 	p.usageDeriver.Store(deriver)
-	defer func() { _ = deriver.Shutdown(context.Background()) }()
+	t.Cleanup(func() { _ = deriver.Shutdown(context.Background()) })
 
-	// Without the callsite-EventName exemption, this returns the
-	// InvalidArgument "conflicting event name representations"
-	// policy-rejection error, and nothing below ever runs.
-	if err := p.handleLogs(context.Background(), loadCodexUsageFixture(t)); err != nil {
-		t.Fatalf("handleLogs rejected a realistic codex fixture: %v", err)
+	// For codex, without the callsite-EventName exemption in
+	// normalizedLogEventName this returns the InvalidArgument "conflicting
+	// event name representations" policy-rejection error, and nothing
+	// below ever runs.
+	if err := p.handleLogs(context.Background(), resourceLogs); err != nil {
+		t.Fatalf("handleLogs rejected a realistic %s fixture: %v", harness, err)
 	}
 	now = now.Add(10 * time.Millisecond)
 	if !p.flushMetricBuffer(context.Background(), true) {
 		t.Fatal("metric flush not confirmed")
 	}
 
-	diag := p.UsageDiagnostics()
-	// The delta frame and the per-frame response.completed marker must not
-	// add a second call for the one successful response -- Derived counts
-	// one increment per matched record, so this is 2 (one success, one
-	// error), not 3 or 4.
-	if diag.Derived != 2 || diag.Malformed != 0 {
-		t.Fatalf("diagnostics = %+v, want Derived=2 Malformed=0 (no per-frame double count)", diag)
+	result := pipelineUsageResult{
+		diag:          p.UsageDiagnostics(),
+		callsByStatus: map[string]int64{},
+		tokensByType:  map[string]int64{},
 	}
-
-	series := allCapturedSeries(capture)
-	var calls, tokens []*monitoringpb.TimeSeries
-	for _, ts := range series {
+	for _, ts := range allCapturedSeries(capture) {
 		switch ts.Metric.Type {
 		case "workload.googleapis.com/gen_ai.api.calls":
-			calls = append(calls, ts)
+			assertLabelKeys(t, ts.Metric.Labels, "agent_id", "project_id", "harness", "model", "status",
+				"scion_metric_resource_id", "scion_metric_scope_id", "scion_metric_point_id",
+				"scion_agent_id", "scion_project_id", "scion_agent_slug",
+				"service_name", "service_instance_id")
+			result.callsByStatus[ts.Metric.Labels["status"]] += ts.Points[0].Value.GetInt64Value()
 		case "workload.googleapis.com/scion.usage.tokens":
-			tokens = append(tokens, ts)
+			// Exactly {harness, model, token_type} plus the exporter-stamped
+			// canonical identity labels -- nothing else (design §3.2).
+			assertLabelKeys(t, ts.Metric.Labels, "harness", "model", "token_type",
+				"scion_metric_resource_id", "scion_metric_scope_id", "scion_metric_point_id",
+				"scion_agent_id", "scion_project_id", "scion_agent_slug",
+				"service_name", "service_instance_id")
+			if ts.Metric.Labels["scion_agent_id"] != "agent-"+harness+"-pipeline-1" ||
+				ts.Metric.Labels["scion_project_id"] != "project-"+harness+"-pipeline-1" ||
+				ts.Metric.Labels["scion_agent_slug"] != harness+"-agent-slug" {
+				t.Errorf("unexpected canonical identity labels: %+v", ts.Metric.Labels)
+			}
+			result.tokensByType[ts.Metric.Labels["token_type"]] += ts.Points[0].Value.GetInt64Value()
+			result.tokenLabels = append(result.tokenLabels, ts.Metric.Labels)
 		}
 	}
+	return result
+}
 
-	// Exactly one success call and one error call, not two successes
-	// (which is what a per-frame double count plus a mis-mapped error
-	// status would produce together).
-	if len(calls) != 2 {
-		t.Fatalf("gen_ai.api.calls series = %d, want 2 (success, error)", len(calls))
+// assertTokensByType requires got to hold exactly the token types in want,
+// with the same values.
+func assertTokensByType(t *testing.T, got, want map[string]int64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("token types = %+v, want %+v", got, want)
 	}
-	byStatus := map[string]int64{}
-	for _, ts := range calls {
-		assertLabelKeys(t, ts.Metric.Labels, "agent_id", "project_id", "harness", "model", "status",
-			"scion_metric_resource_id", "scion_metric_scope_id", "scion_metric_point_id",
-			"scion_agent_id", "scion_project_id", "scion_agent_slug",
-			"service_name", "service_instance_id")
-		byStatus[ts.Metric.Labels["status"]] = ts.Points[0].Value.GetInt64Value()
+	for tokenType, n := range want {
+		if got[tokenType] != n {
+			t.Errorf("tokens[%q] = %d, want %d", tokenType, got[tokenType], n)
+		}
 	}
-	if byStatus["success"] != 1 || byStatus["error"] != 1 {
-		t.Fatalf("calls by status = %+v, want success=1 error=1", byStatus)
-	}
+}
 
-	// Assert the exported scion.usage.tokens point label keys are exactly
-	// {harness, model, token_type} plus the exporter-stamped canonical
-	// identity labels -- nothing else (design §3.2).
-	wantTokens := map[string]int64{
-		telemetrycontract.TokenTypeInput:     300,
-		telemetrycontract.TokenTypeOutput:    80,
-		telemetrycontract.TokenTypeCacheRead: 1200,
-		telemetrycontract.TokenTypeReasoning: 20,
+const codex160UsageFixturePath = "testdata/usage/codex-0.160.0.pb.json"
+
+// loadCodex160UsageFixture loads the codex 0.160.0 capture, made the same
+// way as loadCodexUsageFixture's (npm-installed @openai/codex@0.160.0, run
+// as `codex exec` against a local mock Responses-API server, no network
+// calls and no real credentials), but exported over OTLP/gRPC to a local
+// sink -- the protocol harnesses/codex's provision.py configures
+// (exporter."otlp-grpc") -- rather than OTLP/HTTP. It pins the two
+// behaviours added in 0.160.0's rule (ptone/scion#2245, #2246). It holds
+// three ResourceLogs, one per run:
+//
+//  1. The mock returns HTTP 500 for the first /responses attempt, and codex
+//     retries (request_max_retries) to a successful stream: an api_request
+//     with http.response.status_code=500 and error.message="http 500", an
+//     api_request with status 200, the per-frame response.completed marker,
+//     and sse_event_completed with the mock's usage block
+//     (input/cached/cache_write/output/reasoning/total =
+//     1500/1000/300/80/20/1580; codex printed "tokens used 580").
+//  2. The mock answers the first attempt with HTTP 200 and an SSE body cut
+//     after response.created, and codex retries the stream
+//     (stream_max_retries) to success: api_request status 200 (no
+//     error.message), see_event_completed_failed ("stream closed before
+//     response.completed"), then api_request 200, the per-frame marker and
+//     sse_event_completed again. This is the no-double-count case: the
+//     failed stream's api_request is a 2xx.
+//  3. base_url points at a closed port: an api_request with no
+//     http.response.status_code and error.message="error sending request".
+//     codex keeps retrying ("Reconnecting... waiting for network"); the
+//     fixture keeps only the first of those identical records.
+//
+// Records unrelated to usage (conversation_starts, startup_phase,
+// user_prompt, turn_ttft, the non-completed SSE frames, and the
+// codex_otel::metrics::client scope, which carried no records) are omitted.
+// Scrubbed: resource host.name ("scrubbed-host") and every record's
+// conversation.id ("scrubbed-conversation-id"). Everything else -- attribute
+// keys, value types, model ("gpt-5.1-codex", set in the capture's
+// config.toml), originator and service.name ("codex_exec", the `codex exec`
+// subcommand's real values, not normalized to interactive mode), scope
+// name, timestamps and LogRecord.EventName callsites -- is exactly what the
+// capture produced.
+func loadCodex160UsageFixture(t *testing.T) []*logspb.ResourceLogs {
+	t.Helper()
+	data, err := os.ReadFile(codex160UsageFixturePath)
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
 	}
-	if len(tokens) != len(wantTokens) {
-		t.Fatalf("scion.usage.tokens series = %d, want %d", len(tokens), len(wantTokens))
+	var req collogspb.ExportLogsServiceRequest
+	if err := protojson.Unmarshal(data, &req); err != nil {
+		t.Fatalf("unmarshaling fixture: %v", err)
 	}
-	byType := map[string]int64{}
-	for _, ts := range tokens {
-		assertLabelKeys(t, ts.Metric.Labels, "harness", "model", "token_type",
-			"scion_metric_resource_id", "scion_metric_scope_id", "scion_metric_point_id",
-			"scion_agent_id", "scion_project_id", "scion_agent_slug",
-			"service_name", "service_instance_id")
-		if ts.Metric.Labels["harness"] != "codex" || ts.Metric.Labels["model"] != "gpt-5.1-codex" {
-			t.Errorf("unexpected tokens series labels: %+v", ts.Metric.Labels)
+	if len(req.ResourceLogs) != 3 {
+		t.Fatalf("fixture resource logs = %d, want 3 (one per capture run)", len(req.ResourceLogs))
+	}
+	return req.ResourceLogs
+}
+
+// codex160Records returns run's (0-based) log records whose event.name is
+// eventName, in capture order.
+func codex160Records(t *testing.T, run int, eventName string) []*logspb.LogRecord {
+	t.Helper()
+	var out []*logspb.LogRecord
+	for _, sl := range loadCodex160UsageFixture(t)[run].ScopeLogs {
+		for _, record := range sl.LogRecords {
+			if logAttrString(record.Attributes, "event.name") == eventName {
+				out = append(out, record)
+			}
 		}
-		if ts.Metric.Labels["scion_agent_id"] != "agent-codex-pipeline-1" || ts.Metric.Labels["scion_project_id"] != "project-codex-pipeline-1" || ts.Metric.Labels["scion_agent_slug"] != "codex-agent-slug" {
-			t.Errorf("unexpected canonical identity labels: %+v", ts.Metric.Labels)
-		}
-		byType[ts.Metric.Labels["token_type"]] = ts.Points[0].Value.GetInt64Value()
 	}
-	for tokenType, want := range wantTokens {
-		if byType[tokenType] != want {
-			t.Errorf("tokens[%q] = %d, want %d", tokenType, byType[tokenType], want)
+	return out
+}
+
+func TestCodexUsageRuleMapsCacheWriteFromFixture(t *testing.T) {
+	var completion *logspb.LogRecord
+	for _, record := range codex160Records(t, 0, codexUsageEventName) {
+		if record.GetEventName() == codexFixtureCompletedEventName {
+			completion = record
 		}
 	}
+	if completion == nil {
+		t.Fatal("run 1 has no sse_event_completed record")
+	}
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, completion, ""), completion)
+	if !matched || err != nil {
+		t.Fatalf("matched=%v err=%v, want matched=true err=nil", matched, err)
+	}
+	if increment.Calls != 1 || increment.Status != telemetrycontract.StatusSuccess || increment.Model != "gpt-5.1-codex" {
+		t.Fatalf("increment = %+v", increment)
+	}
+	// input_token_count=1500 includes both cached_token_count=1000 and
+	// cache_write_token_count=300 (both come from the Responses API's
+	// usage.input_tokens_details), so canonical input is 1500-1000-300 and
+	// input+cache_read+cache_write == input_token_count (design §3.2).
+	assertTokensByType(t, increment.Tokens, map[string]int64{
+		telemetrycontract.TokenTypeInput:      200,
+		telemetrycontract.TokenTypeOutput:     80,
+		telemetrycontract.TokenTypeCacheRead:  1000,
+		telemetrycontract.TokenTypeCacheWrite: 300,
+		telemetrycontract.TokenTypeReasoning:  20,
+	})
+}
+
+// TestCodexUsageRuleCacheReadPlusWriteExceedsInputIsMalformed pins the
+// extended bound: cached and cache_write are each within input, but their
+// sum is not, which would make canonical input negative.
+func TestCodexUsageRuleCacheReadPlusWriteExceedsInputIsMalformed(t *testing.T) {
+	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventName}}},
+		{Key: "event.kind", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventKind}}},
+		{Key: "input_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "100"}}},
+		{Key: "cached_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 60}}},
+		{Key: "cache_write_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 50}}},
+	}}
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
+	if !matched || err == nil {
+		t.Fatalf("matched=%v err=%v, want matched=true err!=nil", matched, err)
+	}
+	if increment.Calls != 1 || len(increment.Tokens) != 0 {
+		t.Fatalf("increment = %+v, want Calls=1 and no tokens", increment)
+	}
+}
+
+func TestCodexUsageRuleMalformedCacheWriteField(t *testing.T) {
+	record := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventName}}},
+		{Key: "event.kind", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexUsageEventKind}}},
+		{Key: "input_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "100"}}},
+		{Key: "cache_write_token_count", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "lots"}}},
+	}}
+	increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
+	if !matched || err == nil || increment.Calls != 1 || len(increment.Tokens) != 0 {
+		t.Fatalf("matched=%v err=%v increment=%+v, want a counted call with no tokens and a malformed error", matched, err, increment)
+	}
+}
+
+// TestCodexUsageRuleAPIRequestFromFixture walks every captured
+// codex.api_request record and pins which ones count: only run 1's HTTP 500
+// attempt and run 3's transport error (no status code). Both 2xx attempts
+// in run 2 -- including the one whose stream then failed and was counted by
+// see_event_completed_failed -- and run 1's retried 2xx attempt must not
+// match.
+func TestCodexUsageRuleAPIRequestFromFixture(t *testing.T) {
+	cases := []struct {
+		run       int
+		wantError []bool // per api_request record, in capture order
+	}{
+		{run: 0, wantError: []bool{true, false}},
+		{run: 1, wantError: []bool{false, false}},
+		{run: 2, wantError: []bool{true}},
+	}
+	for _, tc := range cases {
+		records := codex160Records(t, tc.run, codexAPIRequestEventName)
+		if len(records) != len(tc.wantError) {
+			t.Fatalf("run %d api_request records = %d, want %d", tc.run+1, len(records), len(tc.wantError))
+		}
+		for i, record := range records {
+			increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
+			if err != nil {
+				t.Fatalf("run %d api_request %d: MatchLog error: %v", tc.run+1, i, err)
+			}
+			if matched != tc.wantError[i] {
+				t.Fatalf("run %d api_request %d: matched=%v, want %v", tc.run+1, i, matched, tc.wantError[i])
+			}
+			if matched && (increment.Calls != 1 || increment.Status != telemetrycontract.StatusError || len(increment.Tokens) != 0 || increment.Model != "gpt-5.1-codex") {
+				t.Fatalf("run %d api_request %d: increment = %+v, want one tokenless error call", tc.run+1, i, increment)
+			}
+		}
+	}
+}
+
+func codexAPIRequestRecord(extra ...*commonpb.KeyValue) *logspb.LogRecord {
+	attrs := []*commonpb.KeyValue{
+		{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: codexAPIRequestEventName}}},
+		{Key: "duration_ms", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "12"}}},
+		{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "gpt-5.1-codex"}}},
+	}
+	return &logspb.LogRecord{Attributes: append(attrs, extra...)}
+}
+
+func TestCodexUsageRuleAPIRequestCases(t *testing.T) {
+	str := func(k, v string) *commonpb.KeyValue {
+		return &commonpb.KeyValue{Key: k, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: v}}}
+	}
+	num := func(k string, v int64) *commonpb.KeyValue {
+		return &commonpb.KeyValue{Key: k, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: v}}}
+	}
+	cases := []struct {
+		name      string
+		attrs     []*commonpb.KeyValue
+		wantError bool
+	}{
+		{"2xx success is the sse completion's call, not counted here", []*commonpb.KeyValue{num("http.response.status_code", 200), str("endpoint", "/responses")}, false},
+		{"204 is still success", []*commonpb.KeyValue{num("http.response.status_code", 204)}, false},
+		{"429 without error.message", []*commonpb.KeyValue{num("http.response.status_code", 429), str("endpoint", "/responses")}, true},
+		{"string-encoded 503", []*commonpb.KeyValue{str("http.response.status_code", "503")}, true},
+		{"3xx is not 2xx", []*commonpb.KeyValue{num("http.response.status_code", 302)}, true},
+		{"error.message with no status (transport error)", []*commonpb.KeyValue{str("error.message", "error sending request")}, true},
+		{"error.message with a 2xx status", []*commonpb.KeyValue{num("http.response.status_code", 200), str("error.message", "boom")}, true},
+		{"no endpoint attribute is treated as /responses", []*commonpb.KeyValue{num("http.response.status_code", 500)}, true},
+		{"other endpoint failure is not counted", []*commonpb.KeyValue{num("http.response.status_code", 500), str("endpoint", "/memories/trace_summarize")}, false},
+		{"malformed status alone is not a failure", []*commonpb.KeyValue{str("http.response.status_code", "teapot")}, false},
+		{"no status and no error is not a failure", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			record := codexAPIRequestRecord(tc.attrs...)
+			increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
+			if err != nil {
+				t.Fatalf("MatchLog error: %v", err)
+			}
+			if matched != tc.wantError {
+				t.Fatalf("matched=%v, want %v", matched, tc.wantError)
+			}
+			if matched && (increment.Calls != 1 || increment.Status != telemetrycontract.StatusError || len(increment.Tokens) != 0) {
+				t.Fatalf("increment = %+v, want one tokenless error call", increment)
+			}
+		})
+	}
+}
+
+// TestPipelineDerivesCodex160UsageEndToEnd runs the whole 0.160.0 capture
+// through the pipeline: two successful responses (with cache_write) and
+// three failed attempts -- an HTTP 500 api_request, a stream cut after a
+// 2xx (counted once, by see_event_completed_failed, not again by its 2xx
+// api_request), and a transport-error api_request.
+func TestPipelineDerivesCodex160UsageEndToEnd(t *testing.T) {
+	result := deriveUsageThroughPipeline(t, "codex", loadCodex160UsageFixture(t))
+	if result.diag.Derived != 5 || result.diag.Malformed != 0 || result.diag.Duplicate != 0 {
+		t.Fatalf("diagnostics = %+v, want Derived=5 Malformed=0 Duplicate=0", result.diag)
+	}
+	if len(result.callsByStatus) != 2 || result.callsByStatus["success"] != 2 || result.callsByStatus["error"] != 3 {
+		t.Fatalf("calls by status = %+v, want success=2 error=3", result.callsByStatus)
+	}
+	assertTokensByType(t, result.tokensByType, map[string]int64{
+		telemetrycontract.TokenTypeInput:      400,
+		telemetrycontract.TokenTypeOutput:     160,
+		telemetrycontract.TokenTypeCacheRead:  2000,
+		telemetrycontract.TokenTypeCacheWrite: 600,
+		telemetrycontract.TokenTypeReasoning:  40,
+	})
+}
+
+// shutdownTestDeriver releases a test deriver's loopback providers. The
+// bounded context keeps a test whose Config points at no listening OTLP
+// endpoint from waiting out the exporter's own shutdown timeout; the
+// providers are released either way.
+func shutdownTestDeriver(d *UsageDeriver) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = d.Shutdown(ctx)
 }

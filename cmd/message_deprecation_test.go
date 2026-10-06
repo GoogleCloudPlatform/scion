@@ -37,7 +37,6 @@ func resetMessageFlags() func() {
 		in        string
 		at        string
 		plain     bool
-		raw       bool
 		attach    []string
 		notify    bool
 		wake      bool
@@ -46,7 +45,7 @@ func resetMessageFlags() func() {
 		cc        []string
 	}{
 		msgInterrupt, msgIn, msgAt, msgPlain,
-		msgRaw, msgAttach, msgNotify, msgWake, msgChannel, msgThreadID,
+		msgAttach, msgNotify, msgWake, msgChannel, msgThreadID,
 		msgCC,
 	}
 
@@ -54,13 +53,14 @@ func resetMessageFlags() func() {
 	// but no longer bound to Go variables).
 	bcastChanged := messageCmd.Flags().Lookup("broadcast").Changed
 	allChanged := messageCmd.Flags().Lookup("all").Changed
+	rawFlag := messageCmd.Flags().Lookup("raw")
+	rawChanged, rawValue := rawFlag.Changed, rawFlag.Value.String()
 
 	// Reset all
 	msgInterrupt = false
 	msgIn = ""
 	msgAt = ""
 	msgPlain = false
-	msgRaw = false
 	msgAttach = nil
 	msgNotify = false
 	msgWake = false
@@ -69,13 +69,14 @@ func resetMessageFlags() func() {
 	msgCC = nil
 	messageCmd.Flags().Lookup("broadcast").Changed = false
 	messageCmd.Flags().Lookup("all").Changed = false
+	_ = rawFlag.Value.Set("false")
+	rawFlag.Changed = false
 
 	return func() {
 		msgInterrupt = orig.interrupt
 		msgIn = orig.in
 		msgAt = orig.at
 		msgPlain = orig.plain
-		msgRaw = orig.raw
 		msgAttach = orig.attach
 		msgNotify = orig.notify
 		msgWake = orig.wake
@@ -84,6 +85,8 @@ func resetMessageFlags() func() {
 		msgCC = orig.cc
 		messageCmd.Flags().Lookup("broadcast").Changed = bcastChanged
 		messageCmd.Flags().Lookup("all").Changed = allChanged
+		_ = rawFlag.Value.Set(rawValue)
+		rawFlag.Changed = rawChanged
 	}
 }
 
@@ -255,22 +258,30 @@ func TestDeprecatedFlag_All_AgentMode(t *testing.T) {
 		"agent-mode refusal must not recommend scion broadcast --all (not in agentAllowed)")
 }
 
-// TestDeprecatedFlag_Raw tests that --raw emits a deprecation warning
-// and still succeeds.
-func TestDeprecatedFlag_Raw(t *testing.T) {
-	orig := saveMessageTestState()
-	defer orig.restore()
-	restore := resetMessageFlags()
-	defer restore()
+// TestRemovedFlag_Raw tests that --raw, with any value, is refused by the
+// argument validator with guidance naming 'scion keys', and is no longer
+// treated as a deprecated-but-working flag.
+func TestRemovedFlag_Raw(t *testing.T) {
+	for _, value := range []string{"true", "false"} {
+		t.Run(value, func(t *testing.T) {
+			orig := saveMessageTestState()
+			defer orig.restore()
+			restore := resetMessageFlags()
+			defer restore()
 
-	msgRaw = true
-	require.NoError(t, messageCmd.Flags().Set("raw", "true"))
+			require.NoError(t, messageCmd.Flags().Set("raw", value))
 
-	stderr := captureStderr(t, func() {
-		emitDeprecationWarnings(messageCmd)
-	})
-	assert.Contains(t, stderr, "Warning: --raw is deprecated")
-	assert.Contains(t, stderr, "scion keys")
+			err := messageCmd.Args(messageCmd, []string{"my-agent", "Escape"})
+			require.ErrorIs(t, err, errRawFlagRemoved)
+			assert.Contains(t, err.Error(), "--raw has been removed")
+			assert.Contains(t, err.Error(), "scion keys")
+
+			stderr := captureStderr(t, func() {
+				emitDeprecationWarnings(messageCmd)
+			})
+			assert.NotContains(t, stderr, "--raw", "--raw is removed, not deprecated")
+		})
+	}
 }
 
 // TestDeprecatedFlag_Plain tests that --plain emits a deprecation warning
@@ -396,7 +407,10 @@ func TestDeprecatedFlag_Channel(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --channel is deprecated")
-	assert.Contains(t, stderr, "@<agent-name>")
+	// #2026: --channel is used for user: recipients too, so the guidance
+	// must name conversation addressing, not only @<agent>.
+	assert.Contains(t, stderr, "conv:<uuid>")
+	assert.Contains(t, stderr, "@<name>")
 }
 
 // TestDeprecatedFlag_ThreadID tests that --thread-id emits a deprecation
@@ -414,7 +428,12 @@ func TestDeprecatedFlag_ThreadID(t *testing.T) {
 		emitDeprecationWarnings(messageCmd)
 	})
 	assert.Contains(t, stderr, "Warning: --thread-id is deprecated")
-	assert.Contains(t, stderr, "@<agent-name>")
+	assert.Contains(t, stderr, "conv:<uuid>")
+	assert.Contains(t, stderr, "for user: recipients on the web channel",
+		"#2026: the rejection applies only to native (web) user: sends")
+	assert.NotContains(t, stderr, "project", "#2026: no scope claim")
+	assert.NotContains(t, stderr, "@<agent-name>",
+		"#2026: --thread-id guidance must not point user: senders at @<agent-name>")
 }
 
 // TestDeprecatedFlag_CC tests that --cc emits a deprecation warning
@@ -616,15 +635,19 @@ func TestDeprecatedFlags_MultipleWarnings(t *testing.T) {
 	restore := resetMessageFlags()
 	defer restore()
 
-	require.NoError(t, messageCmd.Flags().Set("raw", "true"))
+	require.NoError(t, messageCmd.Flags().Set("notify", "true"))
 	require.NoError(t, messageCmd.Flags().Set("plain", "true"))
-	msgRaw = true
+	defer func() {
+		messageCmd.Flags().Lookup("notify").Changed = false
+		messageCmd.Flags().Lookup("plain").Changed = false
+	}()
+	msgNotify = true
 	msgPlain = true
 
 	stderr := captureStderr(t, func() {
 		emitDeprecationWarnings(messageCmd)
 	})
-	assert.Contains(t, stderr, "Warning: --raw is deprecated")
+	assert.Contains(t, stderr, "Warning: --notify is deprecated")
 	assert.Contains(t, stderr, "Warning: --plain is deprecated")
 }
 
@@ -766,12 +789,24 @@ func TestDeprecationWarnings_ReplacementsExist(t *testing.T) {
 	for _, p := range problems {
 		t.Error(p)
 	}
-	// Four of the eight warnings name a 'scion ...' command; assert a floor.
-	// (broadcast and all were removed, not deprecated — their warnings no longer fire.)
-	// Raise this floor when adding replacement references; never lower it.
-	require.GreaterOrEqual(t, checked, 4,
-		"expected at least 4 replacement references in deprecation warnings; got %d — "+
+	// Three of the seven warnings name a 'scion ...' command; assert a floor.
+	// (broadcast, all and raw were removed, not deprecated — their warnings
+	// no longer fire. raw's 'scion keys' reference moved into
+	// errRawFlagRemoved, which is checked by the same extractor below.)
+	// Raise this floor when adding replacement references; never lower it
+	// except when a deprecated flag is removed outright.
+	require.GreaterOrEqual(t, checked, 3,
+		"expected at least 3 replacement references in deprecation warnings; got %d — "+
 			"the extractor may be broken or warnings were removed", checked)
+
+	// The removal error names 'scion keys'; check that command resolves
+	// with the same extractor.
+	require.Contains(t, errRawFlagRemoved.Error(), "'scion keys <agent-name> <keystrokes>'")
+	rawProblems, rawChecked := findReplacementProblems("Warning: --raw has been removed, use 'scion keys' instead")
+	for _, p := range rawProblems {
+		t.Error(p)
+	}
+	require.Equal(t, 1, rawChecked, "the --raw replacement must be checked")
 
 	// Rule 10: prove findReplacementProblems catches bad replacements.
 	// These call the same function used by the main body (Rule 13).

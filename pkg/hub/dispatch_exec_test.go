@@ -269,18 +269,18 @@ func (c *deferredTestClient) StartAgent(_ context.Context, brokerID, _, _, _, _,
 	return &RemoteAgentResponse{}, nil
 }
 
-func (c *deferredTestClient) StopAgent(_ context.Context, brokerID, _, _, _ string) error {
+func (c *deferredTestClient) StopAgent(_ context.Context, brokerID, _, _, _, _ string) error {
 	if brokerID != c.localBroker {
 		return ErrLifecycleDeferred
 	}
 	return nil
 }
 
-func (c *deferredTestClient) RestartAgent(_ context.Context, brokerID, _, _, _ string, _ map[string]string, _ StartExtras) error {
+func (c *deferredTestClient) RestartAgent(_ context.Context, brokerID, _, _, _ string, _ map[string]string, _ StartExtras) (*RemoteAgentResponse, error) {
 	if brokerID != c.localBroker {
-		return ErrLifecycleDeferred
+		return nil, ErrLifecycleDeferred
 	}
-	return nil
+	return nil, nil
 }
 
 func TestDeferredStart_WritesIntentAndWaits(t *testing.T) {
@@ -320,6 +320,9 @@ func TestDeferredStart_WritesIntentAndWaits(t *testing.T) {
 }
 
 func TestDeferredStart_ReturnsErrorOnErrorPhase(t *testing.T) {
+	// No owner fails the row, so the error phase ends the wait after the
+	// grace for a failed row.
+	setLifecycleTimings(t, 0, 0, 50*time.Millisecond)
 	ctx := context.Background()
 	client := enttest.NewClient(t)
 	cs := entadapter.NewCompositeStore(client)
@@ -690,7 +693,7 @@ type deferredDataOpTestClient struct {
 	localBroker string
 }
 
-func (c *deferredDataOpTestClient) DeleteAgent(_ context.Context, brokerID, _, _, _ string, _, _, _ bool, _ time.Time) error {
+func (c *deferredDataOpTestClient) DeleteAgent(_ context.Context, brokerID, _, _, _ string, _ DeleteAgentOptions) error {
 	if brokerID != c.localBroker {
 		return ErrLifecycleDeferred
 	}

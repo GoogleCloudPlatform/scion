@@ -18,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // eval resolves symlinks so comparisons hold on platforms (e.g. macOS) where
@@ -128,4 +130,20 @@ func TestDetectRepoRoot_NoGitAnywhere(t *testing.T) {
 	if got := detectRepoRoot(false, ws, proj); got != "" {
 		t.Fatalf("no git anywhere: got repoRoot %q, want \"\"", got)
 	}
+}
+
+// createRealWorktree creates root/worktrees/<name> as a genuine git worktree
+// of root (via util.CreateWorktree, the same helper production code uses),
+// and returns its path. root must already be a git repo (setupGitRepo).
+func createRealWorktree(t *testing.T, root, name string) string {
+	t.Helper()
+	worktreesDir := filepath.Join(root, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatalf("mkdir worktrees dir: %v", err)
+	}
+	worktree := filepath.Join(worktreesDir, name)
+	if err := util.CreateWorktree(worktree, name); err != nil {
+		t.Fatalf("CreateWorktree: %v", err)
+	}
+	return worktree
 }

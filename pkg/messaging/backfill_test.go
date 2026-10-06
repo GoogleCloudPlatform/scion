@@ -143,6 +143,38 @@ func (m *mockMessageStore) ListMessages(_ context.Context, filter store.MessageF
 	return result, nil
 }
 
+func (m *mockMessageStore) LatestMessagesByThreadIDs(_ context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	return m.latestBy(ids, opts, func(msg *store.Message) string { return msg.ThreadID }), nil
+}
+
+func (m *mockMessageStore) LatestMessagesByConversationIDs(_ context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
+	return m.latestBy(ids, opts, func(msg *store.Message) string { return msg.ConversationID }), nil
+}
+
+func (m *mockMessageStore) latestBy(ids []string, opts store.LatestMessageOptions, key func(*store.Message) string) map[string]*store.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	out := make(map[string]*store.Message)
+	for i := range m.messages {
+		msg := m.messages[i]
+		k := key(&msg)
+		if !want[k] || (opts.Channel != "" && msg.Channel != opts.Channel) ||
+			(opts.ExcludeType != "" && msg.Type == opts.ExcludeType) {
+			continue
+		}
+		cur := out[k]
+		if cur == nil || msg.CreatedAt.After(cur.CreatedAt) ||
+			(msg.CreatedAt.Equal(cur.CreatedAt) && msg.ID > cur.ID) {
+			out[k] = &msg
+		}
+	}
+	return out
+}
+
 func (m *mockMessageStore) MarkMessageRead(_ context.Context, _ string) error { return nil }
 
 func (m *mockMessageStore) MarkAllMessagesRead(_ context.Context, _ string) error { return nil }
@@ -297,6 +329,16 @@ func (m *mockConversationStore) GetConversationByExternalRef(_ context.Context, 
 		}
 	}
 	return nil, store.ErrNotFound
+}
+
+func (m *mockConversationStore) GetConversationsByExternalRefs(ctx context.Context, surface string, refs []string) (map[string]*store.Conversation, error) {
+	out := make(map[string]*store.Conversation, len(refs))
+	for _, ref := range refs {
+		if c, err := m.GetConversationByExternalRef(ctx, surface, ref); err == nil {
+			out[ref] = c
+		}
+	}
+	return out, nil
 }
 
 func (m *mockConversationStore) AddParticipant(_ context.Context, p *store.ConversationParticipant) error {

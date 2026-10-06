@@ -524,6 +524,7 @@ func TestParseDefaultBranch_EmptyOutput(t *testing.T) {
 // since the behavior depends on cobra's command-resolution path through
 // the actual tree, not a synthetic one.
 func TestHubUnknownSubcommand_RejectsRemovedGroveAlias(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	var buf bytes.Buffer
 	rootCmd.SetArgs([]string{"hub", "groves", "list"})
 	rootCmd.SetOut(&buf)
@@ -555,6 +556,7 @@ func TestHubUnknownSubcommand_RejectsRemovedGroveAlias(t *testing.T) {
 // that only special-cases zero args (dropping the "help" branch) passes
 // unless the "help" sub-case below is present.
 func TestHubBareInvocation_PrintsHelpOutsideProject(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	cases := []struct {
 		name string
 		args []string

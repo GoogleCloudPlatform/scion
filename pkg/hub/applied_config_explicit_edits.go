@@ -149,32 +149,16 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 	}
 
 	// Env, per key: nil means the request didn't touch env at all (same
-	// guard as the live write, which skips the whole map in that case). A
-	// key added or changed against the PAGE-VISIBLE baseline (see
-	// diffExplicitEnvKeys: old.Env, falling back to old.InlineConfig.Env for
-	// a key old.Env lacks -- ptone/scion#2493 R5-1) is set. A key the live
-	// old.Env had that the request's Env no longer has is deleted -- UNLESS
-	// canAttachEnv is false: the GET response withholds Env entirely from a
-	// viewer without attach-equivalent access (canViewAgentEnv,
-	// ResponseView), so that viewer's client can only ever load an empty
-	// env and echo it back empty. Treating every one of its absent keys as
-	// "removed" would read a response-redaction artifact as the user
-	// deleting every explicit env key, turning a recoverable live-only loss
-	// into a permanent one in CreateInputs. Additions are unaffected by this
-	// gate: those can only come from someone typing a new key/value, which
-	// is unambiguous regardless of what the viewer can see.
-	//
-	// The "removed" half stays old.Env-only (never falls back to
-	// old.InlineConfig.Env): old.Env is the one live map every removal
-	// candidate must already be absent from to count as removed at all, and
-	// widening that check would change the R1-3/GITHUB_TOKEN behavior this
-	// block does not otherwise touch.
+	// guard as the live write, which skips the whole map in that case). See
+	// diffExplicitEnvKeys for which keys count as added or removed. A
+	// removed key is deleted only when canAttachEnv: the GET response
+	// withholds Env entirely from a viewer without attach-equivalent access
+	// (canViewAgentEnv, ResponseView), so that viewer's client can only load
+	// an empty env and echo it back empty, and its absent keys are a
+	// redaction artifact, not deletions. Additions are unaffected by this
+	// gate: they can only come from someone typing a new key/value.
 	if cfg.Env != nil {
-		var oldInlineEnv map[string]string
-		if old.InlineConfig != nil {
-			oldInlineEnv = old.InlineConfig.Env
-		}
-		added, removed := diffExplicitEnvKeys(old.Env, oldInlineEnv, cfg.Env)
+		added, removed := diffExplicitEnvKeys(old.Env, explicitEnvOf(old), cfg.Env)
 		if !canAttachEnv {
 			removed = nil
 		}
@@ -216,13 +200,10 @@ func thinkingLevelEqual(a, b *int) bool {
 }
 
 // autoExposeEnvKeys mirrors AUTO_EXPOSE_ENV_KEYS in agent-configure.ts: the
-// four env keys the dedicated auto-expose UI controls own. populateForm
-// reads these per key with InlineConfig.Env taking precedence over
-// AppliedConfig.Env (R4-2) -- the OPPOSITE precedence from every other env
-// key, which the page reads from AppliedConfig.Env first and falls back to
-// InlineConfig.Env only when AppliedConfig.Env is entirely empty. See
-// pageVisibleEnvValue, which this diff-baseline precedence mirrors
-// (ptone/scion#2493 R6-1).
+// four env keys the dedicated auto-expose control owns. The configure page
+// sends them only when the user changed that control, so in a PATCH env map
+// an absent auto-expose key means "untouched", never "removed"
+// (diffExplicitEnvKeys, applyPatchAutoExposeEnv).
 var autoExposeEnvKeys = map[string]bool{
 	"SCION_AUTO_EXPOSE_PORTS":      true,
 	"SCION_AUTO_EXPOSE_MODE":       true,
@@ -230,74 +211,41 @@ var autoExposeEnvKeys = map[string]bool{
 	"SCION_AUTO_EXPOSE_INTERVAL":   true,
 }
 
-// pageVisibleEnvValue returns the value (and whether one exists at all)
-// that agent-configure.ts's populateForm would have read for env key k,
-// given the live AppliedConfig.Env (oldEnv) and InlineConfig.Env
-// (oldInlineEnv) -- the same two maps diffExplicitEnvKeys' caller already
-// has. The rule of thumb this and diffExplicitEnvKeys exist to uphold: a
-// diff's baseline must always equal whatever the page actually read the
-// value from (R5-1's framing, sharpened by R6-1).
+// diffExplicitEnvKeys compares a PATCH request's env map (newEnv) against
+// the env it replaces, per key:
 //
-// Two different precedence orders apply, because the page itself reads env
-// two different ways:
-//   - The four autoExposeEnvKeys are read per key by the dedicated
-//     auto-expose controls: InlineConfig.Env (the requester's explicit
-//     value) first, then AppliedConfig.Env (the project- or
-//     template-derived value resolveDerivedConfig writes there).
-//   - Every other key is read by the custom env-row editor as a whole map,
-//     ac.env || ic.env: AppliedConfig.Env wins outright whenever it is
-//     non-empty, and InlineConfig.Env is consulted per key only as a
-//     fallback for a key AppliedConfig.Env doesn't have at all (R5-1) --
-//     this is not a literal model of "ac.env entirely, else ic.env
-//     entirely" (reproducing that exactly would need the full key sets, not
-//     a per-key decision), but it gives the identical answer for every key
-//     ac.env actually holds, which is the only case the page's own
-//     all-or-nothing read can ever disagree with a naive oldEnv-only
-//     baseline about.
-func pageVisibleEnvValue(k string, oldEnv, oldInlineEnv map[string]string) (string, bool) {
-	first, second := oldEnv, oldInlineEnv
-	if autoExposeEnvKeys[k] {
-		first, second = oldInlineEnv, oldEnv
-	}
-	if v, ok := first[k]; ok {
-		return v, true
-	}
-	v, ok := second[k]
-	return v, ok
-}
-
-// diffExplicitEnvKeys compares a request's env map against the live env it
-// would replace, per §5 of ptone/scion#2493's options.md, as refined by
-// review rounds 5 and 6 (R5-1, R6-1): added returns every key in newEnv
-// that is missing from, or whose value differs from, pageVisibleEnvValue's
-// answer for that key -- the value (if any) the configure page would
-// actually have loaded and therefore could legitimately echo back
-// unedited.
+//   - added holds every key in newEnv whose value is missing from, or
+//     differs from, its baseline. For the autoExposeEnvKeys the baseline is
+//     explicitEnv (the CreateInputs record, explicitEnvOf), not
+//     InlineConfig.Env, which can still hold a hub-stamped value on older
+//     agents. Sending the auto-expose control records it as explicit unless
+//     it already was, with that value, even when it equals a
+//     project-derived or hub-stamped value. For every
+//     other key the baseline is oldEnv (AppliedConfig.Env), the map the
+//     custom env rows load from, so an unedited row echoed back is never
+//     recorded.
+//   - removed holds every key oldEnv has that newEnv lacks, except
+//     GITHUB_TOKEN and the autoExposeEnvKeys. GITHUB_TOKEN is stripped from
+//     every API response (store.AgentAppliedConfig's MarshalJSON, see
+//     ResponseView), so no client can echo it back and its absence is never
+//     evidence of a deletion. An absent auto-expose key means the control
+//     was untouched.
 //
-// removed returns every key oldEnv has that newEnv does not, EXCEPT
-// GITHUB_TOKEN, which is never reported as removed: store.AgentAppliedConfig's
-// MarshalJSON strips it from every API response unconditionally, even for an
-// attach-capable viewer (see ResponseView's doc comment), so no caller's
-// client can ever legitimately echo it back -- its absence from a request is
-// therefore never evidence that the user removed it, only that the response
-// never contained it to begin with. removed is deliberately NOT given the
-// oldInlineEnv fallback and does not use pageVisibleEnvValue: every removal
-// candidate must already be absent from oldEnv to be considered at all, and
-// oldEnv is also the map the live write (`agent.AppliedConfig.Env =
-// cfg.Env`) actually replaces, so it is already the correct single baseline
-// for "did the user delete this" -- unaffected by either round's fix.
-//
-// A key present in both maps with an unchanged page-visible value appears
-// in neither return.
+// A key present in both maps with an unchanged baseline value appears in
+// neither return.
 //
 // Deliberately separate from reincarnate_config.go's diffEnvKeys, which
 // compares key names only (never values, since it feeds a user-facing plan
 // and env values may be secrets) and returns a different shape (KeyDiff).
 // This one needs values, to tell an unchanged echoed key apart from an
 // edited one.
-func diffExplicitEnvKeys(oldEnv, oldInlineEnv, newEnv map[string]string) (added map[string]string, removed []string) {
+func diffExplicitEnvKeys(oldEnv, explicitEnv, newEnv map[string]string) (added map[string]string, removed []string) {
 	for k, v := range newEnv {
-		if b, ok := pageVisibleEnvValue(k, oldEnv, oldInlineEnv); ok && b == v {
+		baseline := oldEnv
+		if autoExposeEnvKeys[k] {
+			baseline = explicitEnv
+		}
+		if b, ok := baseline[k]; ok && b == v {
 			continue
 		}
 		if added == nil {
@@ -306,7 +254,7 @@ func diffExplicitEnvKeys(oldEnv, oldInlineEnv, newEnv map[string]string) (added 
 		added[k] = v
 	}
 	for k := range oldEnv {
-		if k == "GITHUB_TOKEN" {
+		if k == "GITHUB_TOKEN" || autoExposeEnvKeys[k] {
 			continue
 		}
 		if _, ok := newEnv[k]; !ok {
@@ -314,6 +262,66 @@ func diffExplicitEnvKeys(oldEnv, oldInlineEnv, newEnv map[string]string) (added 
 		}
 	}
 	return added, removed
+}
+
+// applyPatchAutoExposeEnv resolves the autoExposeEnvKeys for a PATCH that
+// carries an env map (patchEnv, the request's cfg.Env, which becomes the new
+// InlineConfig.Env). ac is the live config whose Env has just been set to a
+// copy of patchEnv; old is the pre-PATCH snapshot (a shallow copy, so its
+// CreateInputs is the record recordExplicitEdits has already updated);
+// project may be nil.
+//
+// A key in patchEnv is the user's explicit value (tier 1) and is left as is.
+// A key absent from patchEnv was untouched, so:
+//   - ac.Env keeps the previous AppliedConfig.Env value, if any. This is the
+//     one cross-tier read on PATCH: a project-derived value cannot be told
+//     apart from a stale one without re-reading the project, and the
+//     template tier is never in ac.Env (it rides in scion-agent.json and is
+//     re-applied by the broker), so nothing is lost by keeping it;
+//   - patchEnv keeps the previous InlineConfig.Env value, if any, so an
+//     explicit value survives into the new InlineConfig.Env.
+//
+// SCION_AUTO_EXPOSE_PORTS is then resolved by resolveAutoExposeEnv. Its
+// explicit tier is the request's own env, taken before the InlineConfig.Env
+// carry, plus, when the request did not send the key, the previous explicit
+// value from explicitEnvOf(old). That is CreateInputs when the agent has it,
+// since InlineConfig.Env can still hold a hub-stamped value on older agents.
+// Reading the already-updated CreateInputs is equivalent to reading the
+// pre-PATCH one here: this read happens only when the request did not send
+// SCION_AUTO_EXPOSE_PORTS, and an unsent auto-expose key is never added to
+// or removed from CreateInputs.
+// The project tier therefore overwrites a kept or carried non-explicit value,
+// and never an explicit one. The hub default is never written; the broker
+// applies it.
+func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.Project, patchEnv map[string]string) {
+	if ac == nil || old == nil || patchEnv == nil {
+		return
+	}
+	var oldInlineEnv map[string]string
+	if old.InlineConfig != nil {
+		oldInlineEnv = old.InlineConfig.Env
+	}
+	if ac.Env == nil {
+		ac.Env = make(map[string]string)
+	}
+	explicit := maps.Clone(patchEnv)
+	if _, sentPorts := patchEnv[api.EnvAutoExposePorts]; !sentPorts {
+		if v, ok := explicitEnvOf(old)[api.EnvAutoExposePorts]; ok {
+			explicit[api.EnvAutoExposePorts] = v
+		}
+	}
+	for k := range autoExposeEnvKeys {
+		if _, sent := patchEnv[k]; sent {
+			continue
+		}
+		if v, ok := old.Env[k]; ok {
+			ac.Env[k] = v
+		}
+		if v, ok := oldInlineEnv[k]; ok {
+			patchEnv[k] = v
+		}
+	}
+	resolveAutoExposeEnv(ac, project, explicit)
 }
 
 // recordOtherInlineFieldEdits implements the generic "other inline fields"
@@ -399,8 +407,8 @@ func recordOtherInlineFieldEdits(ensureInline func() *api.ScionConfig, oldInline
 //
 // It must be called from applyAgentUpdate AFTER recordExplicitEdits (so
 // CreateInputs has already correctly recorded these fields as untouched)
-// and AFTER the field's own live-AppliedConfig write (e.g. `if cfg.Env !=
-// nil { agent.AppliedConfig.Env = cfg.Env }`), but BEFORE the wholesale
+// and AFTER the field's own live-AppliedConfig write (e.g. the `cfg.Env !=
+// nil` block that copies cfg.Env into agent.AppliedConfig.Env), but BEFORE the wholesale
 // `agent.AppliedConfig.InlineConfig = cfg` assignment it exists to patch.
 // present is the same lower-cased, raw-JSON-derived presence set
 // recordExplicitEdits uses; old is the pre-PATCH snapshot.
@@ -413,13 +421,12 @@ func recordOtherInlineFieldEdits(ensureInline func() *api.ScionConfig, oldInline
 //
 // Covered fields and why each needs it (the sweep review round 4 asked for,
 // confirmed against base e572e72's buildConfig):
-//   - Env: resolveDerivedConfig's auto-expose/hub-default env stamps, and
-//     any create-time explicit env on a LEGACY agent (CreateInputs == nil),
-//     live only in InlineConfig.Env. legacyCreateInputsFromAppliedConfig
-//     (reincarnate_config.go) reads exactly that field to reconstruct a
-//     legacy agent's explicit inputs at reincarnate -- a nil InlineConfig.Env
-//     silently drops every one of its env keys, with no CreateInputs record
-//     to fall back on (R4-1).
+//   - Env: InlineConfig.Env holds the requester's explicit env. For a LEGACY
+//     agent (CreateInputs == nil) it is the only record of it:
+//     legacyCreateInputsFromAppliedConfig (reincarnate_config.go) reads
+//     exactly that field to reconstruct the agent's explicit inputs at
+//     reincarnate, so a nil InlineConfig.Env would silently drop every one
+//     of its env keys.
 //   - Telemetry: project/hub telemetry defaults and an explicit opt-out live
 //     only in InlineConfig.Telemetry; a nil value lets the broker's
 //     settings/template fallback silently override it (R3-1).
@@ -472,4 +479,42 @@ func deepCopyTelemetryConfig(cfg *api.TelemetryConfig) *api.TelemetryConfig {
 		return nil
 	}
 	return &out
+}
+
+// recordReincarnatePatchEdits records a `scion reincarnate` patch
+// (ptone/scion#3302) into CreateInputs: the same fields, written the same
+// way, as recordExplicitEdits writes for a PATCH, so a later reincarnation
+// without the flag replays the value. Unlike a PATCH body, a reincarnate
+// flag is never an echo of the live config, so each set field is recorded
+// unconditionally, even when it equals the live value: the requester asked
+// for it explicitly, and it must not drift with a later template change.
+// The model is recorded as given (not alias-resolved), like create's own
+// CreateInputs; deriveAgentConfig resolves it against the current harness
+// config each generation.
+func recordReincarnatePatchEdits(ci *store.AgentCreateInputs, p *reincarnatePatch) {
+	if ci == nil || p == nil {
+		return
+	}
+	ensureInline := func() *api.ScionConfig {
+		if ci.InlineConfig == nil {
+			ci.InlineConfig = &api.ScionConfig{}
+		}
+		return ci.InlineConfig
+	}
+	if p.Image != "" {
+		ensureInline().Image = p.Image
+	}
+	if p.Model != "" {
+		ensureInline().Model = p.Model
+	}
+	if p.ThinkingLevel != nil {
+		tl := *p.ThinkingLevel
+		ci.ThinkingLevel = &tl
+		inlineTL := tl
+		ensureInline().ThinkingLevel = &inlineTL
+	}
+	if p.HarnessAuth != "" {
+		ci.HarnessAuth = p.HarnessAuth
+		ensureInline().AuthSelectedType = p.HarnessAuth
+	}
 }

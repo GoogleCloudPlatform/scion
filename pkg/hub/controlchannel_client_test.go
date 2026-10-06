@@ -22,7 +22,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -86,7 +85,7 @@ func TestControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T
 		signer:  signer,
 	}
 
-	err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "", DeleteAgentOptions{DeleteFiles: true})
 	if err != nil {
 		t.Fatalf("DeleteAgent returned error: %v", err)
 	}
@@ -245,7 +244,7 @@ func TestControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero(t *
 		signer:  signer,
 	}
 
-	err := client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "project-id-1", nil, StartExtras{HubEndpoint: "https://hub.example.com"})
+	_, err := client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "project-id-1", nil, StartExtras{HubEndpoint: "https://hub.example.com"})
 	if err != nil {
 		t.Fatalf("RestartAgent returned error: %v", err)
 	}
@@ -280,7 +279,7 @@ func TestControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing
 	tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusNotFound}
 	client := &ControlChannelBrokerClient{manager: tunnel}
 
-	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
 		t.Fatalf("expected nil error for broker 404 on delete, got %v", err)
 	}
 }
@@ -295,7 +294,7 @@ func TestControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T
 		tunnel := &mockControlChannelTunnel{connected: true, status: status}
 		client := &ControlChannelBrokerClient{manager: tunnel}
 
-		err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{})
+		err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true})
 		if err == nil {
 			t.Fatalf("status %d: expected error, got nil", status)
 		}
@@ -312,7 +311,7 @@ func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T)
 	client := &ControlChannelBrokerClient{manager: tunnel}
 
 	ctx := withDeleteProjectPath(context.Background(), "/home/u/my repo")
-	if err := client.DeleteAgent(ctx, "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+	if err := client.DeleteAgent(ctx, "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
 		t.Fatal(err)
 	}
 	q, err := url.ParseQuery(tunnel.lastRequest.Query)
@@ -323,7 +322,7 @@ func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T)
 		t.Errorf("projectPath = %q, want %q (query %q)", got, "/home/u/my repo", tunnel.lastRequest.Query)
 	}
 
-	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
 		t.Fatal(err)
 	}
 	if q, _ := url.ParseQuery(tunnel.lastRequest.Query); q.Has("projectPath") {
@@ -368,5 +367,37 @@ func TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *
 	}
 	if !strings.Contains(se.brokerErrorMessage(), "gh://owner/repo/my-skill@main") {
 		t.Errorf("expected broker error message to name the ref, got: %s", se.brokerErrorMessage())
+	}
+}
+
+// TestControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter checks
+// that a broker error on start keeps its status and Retry-After header, so
+// the hub can relay a rate-limited skill resolution failure unchanged.
+func TestControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: rate limited","details":{"skill":"gh://owner/repo/my-skill@main","cause":"rate_limited"}}}`)
+	tunnel := &mockControlChannelTunnel{
+		connected: true,
+		status:    http.StatusTooManyRequests,
+		body:      body,
+		headers:   map[string]string{"Retry-After": "90"},
+	}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	_, err := client.StartAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
+	if err == nil {
+		t.Fatal("expected an error for the broker's 429 response")
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected a *brokerStatusError, got %T: %v", err, err)
+	}
+	if se.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected status %d, got %d", http.StatusTooManyRequests, se.StatusCode)
+	}
+	if se.RetryAfter != "90" {
+		t.Errorf("expected RetryAfter %q, got %q", "90", se.RetryAfter)
+	}
+	if se.brokerErrorCode() != skillResolutionErrorCode {
+		t.Errorf("expected broker error code %q, got %q", skillResolutionErrorCode, se.brokerErrorCode())
 	}
 }

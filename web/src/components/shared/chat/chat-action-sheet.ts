@@ -17,6 +17,7 @@
 import { LitElement, css, html, nothing } from 'lit';
 import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, query } from 'lit/decorators.js';
+import { withFocusMove } from '../focus-moved.js';
 
 /** One row of an action sheet. */
 export interface ActionSheetItem {
@@ -74,7 +75,12 @@ export class ScionActionSheet extends LitElement {
       max-height: 70vh;
       max-height: 70dvh;
       box-sizing: border-box;
-      padding: 0 0 env(safe-area-inset-bottom, 0px);
+      /* Clear the home indicator, and in landscape the notch and rounded
+         corners (the page uses viewport-fit=cover). The bottom inset stays
+         even with the keyboard up: opening the modal sheet moves focus
+         into it, which closes the keyboard. */
+      padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
+        env(safe-area-inset-left, 0px);
       border: none;
       border-radius: 0.875rem 0.875rem 0 0;
       background: var(--scion-surface, #ffffff);
@@ -212,12 +218,14 @@ export class ScionActionSheet extends LitElement {
     super.updated(changed);
     if (!changed.has('open') || !this.dialog) return;
     if (this.open && !this.dialog.open) {
-      this.dialog.showModal();
+      const dialog = this.dialog;
+      withFocusMove(() => dialog.showModal());
       // Start every opening at the top of the list.
       const list = this.renderRoot.querySelector('.items');
       if (list) list.scrollTop = 0;
     } else if (!this.open && this.dialog.open) {
-      this.dialog.close();
+      const dialog = this.dialog;
+      withFocusMove(() => dialog.close());
     }
   }
 

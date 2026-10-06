@@ -116,6 +116,16 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 	return !now.Before(t.AddDate(0, 0, 1))
 }
 
+// K8sNFSHome gates the persistent NFS agent home on the Kubernetes runtime.
+// The hub resolves it at each agent dispatch and sends it to the broker,
+// which uses an NFS home only when it is on.
+const K8sNFSHome = "hub.k8s_nfs_home"
+
+// Artifacts gates the artifact service (pkg/artifacts): the hub's
+// /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
+// every artifact surface.
+const Artifacts = "hub.artifacts"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -141,6 +151,39 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#2545",
 		Owner:       "native-chat",
 		ReviewBy:    "2026-12-30",
+	},
+	{
+		Name:        K8sNFSHome,
+		Title:       "Persistent agent home on Kubernetes",
+		Description: "Lets Kubernetes agents keep their home directory on the NFS export of their profile's shared-dir storage, across stops and restarts. Takes effect only where server.home_storage, or a profile or runtime home_storage_backend, selects nfs. Agents keep the home storage they were created with.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2615",
+		Owner:       "k8s-runtime",
+		ReviewBy:    "2027-01-04",
+	},
+	{
+		Name:        Artifacts,
+		Title:       "Artifacts",
+		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates both the web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off. In development: the routes have no behaviour yet.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3202",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-05",
+	},
+	{
+		Name:        "hub.conduit",
+		Title:       "Conduit connection layer",
+		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants, the GET /api/v1/conduit/grant-keys endpoint, the agent conduit session endpoint GET /api/v1/conduit and the in-process relay (read at startup; turning it on or off for the relay needs a restart). No existing connection path changes.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2774",
+		Owner:       "conduit",
+		ReviewBy:    "2027-03-31",
 	},
 }
 

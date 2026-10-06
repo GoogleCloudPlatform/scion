@@ -206,6 +206,56 @@ func writeSavedAgentProfile(t *testing.T, dotScionDir, agentName, profile string
 	}
 }
 
+// TestBuildStartContext_LaunchIDEnv pins SCION_LAUNCH_ID as broker-owned:
+// a resolved-env value and its classification are always dropped, because
+// Manager.Start sets the variable from the run ID it labels the container
+// with.
+func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
+	tests := []struct {
+		name        string
+		resolvedEnv map[string]string
+		envCls      map[string]api.EnvKind
+	}{
+		{name: "absent"},
+		{name: "resolved env value dropped", resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"}},
+		{
+			name:        "resolved env value and classification dropped",
+			resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"},
+			envCls:      map[string]api.EnvKind{"SCION_LAUNCH_ID": api.EnvKindPlain},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:               "my-agent",
+				AgentID:            "uuid-1",
+				RunID:              "run-1",
+				ProjectPath:        filepath.Join(t.TempDir(), "my-project"),
+				ResolvedEnv:        tt.resolvedEnv,
+				EnvClassifications: tt.envCls,
+				HTTPRequest:        httptest.NewRequest("POST", "/api/v1/agents", nil),
+				Operation:          opCreate,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := sc.Opts.Env["SCION_LAUNCH_ID"]; ok {
+				t.Errorf("SCION_LAUNCH_ID = %q, want it unset in the start options", got)
+			}
+			if _, ok := sc.EnvClassifications["SCION_LAUNCH_ID"]; ok {
+				t.Errorf("SCION_LAUNCH_ID classification kept")
+			}
+			if sc.Opts.RunID != "run-1" {
+				t.Errorf("RunID = %q, want %q", sc.Opts.RunID, "run-1")
+			}
+		})
+	}
+}
+
 func TestBuildStartContext_BasicFields(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
@@ -811,7 +861,7 @@ func TestTryProvisionWorktree_FallbackFailureLogNeverContainsCredentials(t *test
 	defer slog.SetDefault(oldLogger)
 
 	opts := &api.StartOptions{}
-	_, _ = srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	_, _, _ = srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "agent-a",
 		AgentID:       "agent-a",
 		ProjectID:     "p1",
@@ -1006,7 +1056,7 @@ func TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact(t *testing.T)
 			invalidGitClone := &api.GitCloneConfig{URL: filepath.Join(t.TempDir(), "does-not-exist.git")}
 
 			opts := &api.StartOptions{}
-			ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+			ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 				Name: "agent-x", AgentID: agentID,
 				ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1038,7 +1088,7 @@ func TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact(t *testing.T)
 func setUpAgent1SharedBase(t *testing.T, srv *Server, projectPath, bare string) {
 	t.Helper()
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-1", AgentID: "agent-1",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1080,7 +1130,7 @@ func TestTryProvisionWorktree_SymlinkedOwnWorktreeRejected(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-2", AgentID: "agent-2",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1133,7 +1183,7 @@ func TestTryProvisionWorktree_SymlinkedWorktreesDirRejected(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-2", AgentID: "agent-2",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1176,12 +1226,12 @@ func TestTryProvisionWorktree_SharerRegistryOutsidePathRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := provision.RegisterSharer(base, "agent-3", outsideDir, "some-other-agent"); err != nil {
+	if err := provision.RegisterSharer(base, "", "agent-3", outsideDir, "some-other-agent"); err != nil {
 		t.Fatalf("plant sharer marker: %v", err)
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-3", AgentID: "agent-3",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1233,12 +1283,12 @@ func TestTryProvisionWorktree_SharerRegistryFakeGitfileStillRejected(t *testing.
 		t.Fatal(err)
 	}
 
-	if err := provision.RegisterSharer(base, "agent-3", outsideDir, "some-other-agent"); err != nil {
+	if err := provision.RegisterSharer(base, "", "agent-3", outsideDir, "some-other-agent"); err != nil {
 		t.Fatalf("plant sharer marker: %v", err)
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-3", AgentID: "agent-3",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1388,12 +1438,12 @@ func TestTryProvisionWorktree_SharerRegistryNestedMarkerRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := provision.RegisterSharer(base, "agent-4", nested, "agent-1"); err != nil {
+	if err := provision.RegisterSharer(base, "", "agent-4", nested, "agent-1"); err != nil {
 		t.Fatalf("plant sharer marker: %v", err)
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-4", AgentID: "agent-4",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1451,12 +1501,12 @@ func TestTryProvisionWorktree_SharerRegistryIntermediateSymlinkRejected(t *testi
 	}
 	marker := filepath.Join(lnk, "sub")
 
-	if err := provision.RegisterSharer(base, "agent-5", marker, "agent-1"); err != nil {
+	if err := provision.RegisterSharer(base, "", "agent-5", marker, "agent-1"); err != nil {
 		t.Fatalf("plant sharer marker: %v", err)
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-5", AgentID: "agent-5",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1529,12 +1579,12 @@ func TestTryProvisionWorktree_SharerRegistryNonCanonicalPathRejected(t *testing.
 	// it is not resolved by anything until it is used downstream.
 	marker := lnk + string(filepath.Separator) + ".." + string(filepath.Separator) + "agent-1"
 
-	if err := provision.RegisterSharer(base, "agent-9", marker, "agent-1"); err != nil {
+	if err := provision.RegisterSharer(base, "", "agent-9", marker, "agent-1"); err != nil {
 		t.Fatalf("plant sharer marker: %v", err)
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-9", AgentID: "agent-9",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -1575,7 +1625,7 @@ func TestTryProvisionWorktree_SymlinkedProjectParentAccepted(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-1", AgentID: "agent-1",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -4472,7 +4522,7 @@ func TestResolveWorktreeProvision_Eligible(t *testing.T) {
 		if result.ShouldProvision {
 			t.Fatal("expected ShouldProvision=false when git is too old")
 		}
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	if !result.ShouldProvision {
@@ -4511,7 +4561,7 @@ func TestResolveWorktreeProvision_BranchOverridesAgentName(t *testing.T) {
 	projectDir := t.TempDir()
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	result := resolveWorktreeProvision(worktreeProvisionInput{
@@ -4682,7 +4732,7 @@ func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
 	}
 
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "some-agent",
 		AgentID:       "", // missing
 		ProjectID:     "p1",
@@ -4704,7 +4754,7 @@ func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
 
 	// The same missing-identity case on a create dispatch still falls back.
 	opts2 := &api.StartOptions{}
-	ok2, err2 := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok2, _, err2 := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:          "some-agent",
 		AgentID:       "",
 		ProjectID:     "p1",
@@ -4737,15 +4787,15 @@ func TestResolveWorktreeProvision_GitTooOld_Fallback(t *testing.T) {
 		AgentID:     "agent-1",
 		AgentName:   "test-agent",
 		eligibilityOverride: func() (bool, string) {
-			return false, "git >= 2.47.0 required for worktree-per-agent mode (--relative-paths), found 2.39.0"
+			return false, "git >= 2.48.0 required for worktree-per-agent mode (--relative-paths), found 2.39.0"
 		},
 	})
 
 	if result.ShouldProvision {
 		t.Fatal("expected ShouldProvision=false when git is too old")
 	}
-	if !strings.Contains(result.Reason, "2.47") {
-		t.Errorf("expected reason to mention git 2.47 requirement, got %q", result.Reason)
+	if !strings.Contains(result.Reason, "2.48") {
+		t.Errorf("expected reason to mention git 2.48 requirement, got %q", result.Reason)
 	}
 	if result.ProvisionInput.ProjectID != "" {
 		t.Error("expected empty ProvisionInput when ineligible")
@@ -4816,7 +4866,7 @@ func TestResolveWorktreeProvision_KubernetesAliases_Rejected(t *testing.T) {
 func TestResolveWorktreeProvision_DockerRuntime_NotRejected(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	projectDir := t.TempDir()
@@ -4843,7 +4893,7 @@ func TestResolveWorktreeProvision_DockerRuntime_NotRejected(t *testing.T) {
 func TestResolveWorktreeProvision_EmptyRuntime_NotRejected(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	projectDir := t.TempDir()
@@ -4868,7 +4918,7 @@ func TestResolveWorktreeProvision_EmptyRuntime_NotRejected(t *testing.T) {
 func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {
-		t.Skip("git < 2.47, worktree mode not eligible on this host")
+		t.Skip("git < 2.48, worktree mode not eligible on this host")
 	}
 
 	projectDir := t.TempDir()
@@ -4979,7 +5029,7 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 
 	// Provision agent-b with --branch "agent-a" → should JOIN, not fail.
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, repoRoot, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-b", AgentID: "agent-b",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -4991,6 +5041,9 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 
 	if !ok {
 		t.Fatal("expected JOIN to succeed, got ok=false (fell back to clone-per-agent)")
+	}
+	if repoRoot != base {
+		t.Errorf("repoRoot = %q, want %q (the shared base)", repoRoot, base)
 	}
 
 	// opts.Workspace must point to agent-a's worktree (the shared path).
@@ -5005,7 +5058,7 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	}
 
 	// Both agents registered as sharers.
-	sharers, wtPath, err := provision.ListSharers(base, "agent-a")
+	sharers, wtPath, err := provision.ListSharers(base, "", "agent-a")
 	if err != nil {
 		t.Fatalf("ListSharers: %v", err)
 	}
@@ -5093,7 +5146,7 @@ func TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback(t *te
 
 	// Agent-b attempts to JOIN branch "agent-a": must fail outright.
 	opts := &api.StartOptions{}
-	ok, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	ok, _, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name: "agent-b", AgentID: "agent-b",
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
@@ -5358,7 +5411,7 @@ func TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemoves
 // provision.ProvisionShared's own self-heal expects for a first-time
 // provision), but this agent's worktree already exists on disk with
 // un-pushed work, the start must fail with a clear error instead of letting
-// ProvisionShared's gitCloneWorkspace -> removeDirContents wipe the shared
+// ProvisionShared re-clone over the shared
 // base — and everything under it, including this worktree — while still
 // returning success.
 func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSelfHeal(t *testing.T) {
@@ -5420,7 +5473,7 @@ func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSel
 	}
 
 	// The worktree and its un-pushed file must survive: ProvisionShared's
-	// self-heal (removeDirContents on the shared base) must never have run.
+	// clone step on the shared base must never have run.
 	if _, statErr := os.Stat(worktreePath); statErr != nil {
 		t.Errorf("expected the existing worktree to survive, stat error: %v", statErr)
 	}
@@ -5603,6 +5656,45 @@ func TestBuildStartContext_WorktreePerAgentCreate_ProvisioningFailureCleansUpPar
 	worktreePath := filepath.Join(base, "worktrees", "agent-a")
 	if _, statErr := os.Stat(worktreePath); !os.IsNotExist(statErr) {
 		t.Errorf("expected the partial worktree created by this call to be cleaned up, stat error: %v", statErr)
+	}
+}
+
+// TestResolveActualWorkspace_RejectsPathFailingRelationshipValidation covers
+// acceptance criterion 2 (hub read path): resolveActualWorkspace — the
+// helper tryProvisionWorktree calls to pick the mounted workspace after
+// ProvisionShared has already run — must not take the registry's recorded
+// path at face value. A registered path that is lexically in-tree-shaped
+// (passes the registry read boundary) but is not a genuine worktree (an
+// in-tree decoy directory, no real git admin metadata) must be rejected by
+// the full relationship check, falling back to the agent's own freshly-
+// provisioned path instead.
+func TestResolveActualWorkspace_RejectsPathFailingRelationshipValidation(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+
+	base := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(base, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	branch := "shared-branch"
+
+	// Register a decoy directly: lexically in-tree (base/worktrees/decoy,
+	// passing the registry read-boundary shape check) but backed by nothing —
+	// no real git worktree was ever created there. A brand-new branch with no
+	// prior registration is used so RegisterSharer's write-side immutability
+	// (see its doc comment) doesn't apply here; that protection is exercised
+	// elsewhere (pkg/provision's registry tests) and isn't what this test is about.
+	decoy := provision.WorktreePath(base, "decoy")
+	if err := provision.RegisterSharer(base, "", branch, decoy, "agent-c"); err != nil {
+		t.Fatalf("RegisterSharer: %v", err)
+	}
+
+	fallback := provision.WorktreePath(base, "agent-x")
+	got := resolveActualWorkspace(base, branch, fallback, "agent-x")
+	if got != fallback {
+		t.Errorf("resolveActualWorkspace = %q, want fallback %q (decoy must be rejected)", got, fallback)
+	}
+	if got == decoy {
+		t.Error("resolveActualWorkspace must never return the unvalidated decoy path")
 	}
 }
 
@@ -6007,3 +6099,53 @@ func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
 }
 
 func intPtr(i int) *int { return &i }
+
+// worktreeBaseIsProvisioned checks exactly the directories ProvisionShared
+// checks (ProvisionInput.SentinelDirs): the base's parent by default, plus
+// LegacyDir when set. It still requires the base's .git.
+func TestWorktreeBaseIsProvisioned_SentinelLocations(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dirOf     func(base string) string
+		legacyDir bool
+		want      bool
+	}{
+		{name: "parent", dirOf: filepath.Dir, want: true},
+		{name: "state dir not checked by ProvisionShared", dirOf: provision.ProjectStateDir, want: false},
+		{name: "base without LegacyDir", dirOf: func(base string) string { return base }, want: false},
+		{name: "base as LegacyDir", dirOf: func(base string) string { return base }, legacyDir: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := filepath.Join(t.TempDir(), "workspace")
+			if err := os.MkdirAll(filepath.Join(base, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			in := provision.ProvisionInput{Resolved: provision.ResolvedWorkspace{HostPath: base}}
+			if tc.legacyDir {
+				in.LegacyDir = base
+			}
+			if worktreeBaseIsProvisioned(in) {
+				t.Fatal("provisioned without a sentinel")
+			}
+			dir := tc.dirOf(base)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, provision.ProvisionSentinelFile), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := worktreeBaseIsProvisioned(in); got != tc.want {
+				t.Fatalf("sentinel in %s: got %v, want %v", dir, got, tc.want)
+			}
+			if !tc.want {
+				return
+			}
+			if err := os.RemoveAll(filepath.Join(base, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			if worktreeBaseIsProvisioned(in) {
+				t.Error("provisioned without the base's .git")
+			}
+		})
+	}
+}
