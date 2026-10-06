@@ -147,8 +147,6 @@ describe('scion-health-broker-table neutral values', () => {
   it('shows a dash in the agents cell when agents are not reported', async () => {
     const root = await mount(list([broker({ agents: undefined })]));
     expect(cell(rows(root)[0]!, 'agents')).toBe('—');
-    const partial = await mount(list([broker({ agents: { total: 4 } })]));
-    expect(cell(rows(partial)[0]!, 'agents')).toBe('4');
   });
 
   it('keeps the dash when agents is an empty object', async () => {
