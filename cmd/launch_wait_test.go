@@ -329,7 +329,7 @@ type launchMockHub struct {
 	t            *testing.T
 	createStatus int
 	createBody   interface{}
-	afterCreate  []interface{} // GET responses after the create; the last repeats
+	afterCreate  []interface{} // GET responses after the create (an int is an error status); the last repeats
 
 	mu          sync.Mutex
 	created     bool
@@ -370,6 +370,11 @@ func (h *launchMockHub) serve(projectID, agentName string) *httptest.Server {
 			if i >= len(h.afterCreate) {
 				i = len(h.afterCreate) - 1
 			}
+			if code, ok := h.afterCreate[i].(int); ok { // an error status
+				w.WriteHeader(code)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]string{"code": "not_found", "message": "agent not found"}})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(h.afterCreate[i])
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -380,16 +385,21 @@ func (h *launchMockHub) serve(projectID, agentName string) *httptest.Server {
 }
 
 // shortenLaunchWaitTimings makes polling immediate and the derived wait
-// budgets short: slack 20ms, fallback 5s.
+// budgets short: slack 20ms, fallback 5s, unreadable-status grace 200ms.
 func shortenLaunchWaitTimings(t *testing.T) {
 	t.Helper()
 	origPoll, origSlack, origFallback := launchPollInterval, launchWaitSlack, launchWaitFallback
+	origGrace, origBackoff, origBackoffMax := launchUnreadableGrace, launchUnreadableBackoff, launchUnreadableBackoffMax
 	t.Cleanup(func() {
 		launchPollInterval, launchWaitSlack, launchWaitFallback = origPoll, origSlack, origFallback
+		launchUnreadableGrace, launchUnreadableBackoff, launchUnreadableBackoffMax = origGrace, origBackoff, origBackoffMax
 	})
 	launchPollInterval = time.Millisecond
 	launchWaitSlack = 20 * time.Millisecond
 	launchWaitFallback = 5 * time.Second
+	launchUnreadableGrace = 200 * time.Millisecond
+	launchUnreadableBackoff = 5 * time.Millisecond
+	launchUnreadableBackoffMax = 40 * time.Millisecond
 }
 
 func setupLaunchStartTest(t *testing.T, hub *launchMockHub) *HubContext {
@@ -959,4 +969,131 @@ func TestWaitForAgentLaunch_RetryableErrorsKeepPolling(t *testing.T) {
 			assert.Equal(t, 2, seq.calls)
 		})
 	}
+}
+
+// Status reads for an accepted launch (ptone/scion#3418). An agent caller
+// gets the same 404 for an agent it may not read as for a missing agent.
+
+const unreadableMessage = "agent 'a1': launch accepted; status not readable with this credential's scope (launch launch-1); the launch continues on the Hub"
+
+func TestWaitForAgentLaunch_AcceptedLaunchStatusNotReadable(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			shortenLaunchWaitTimings(t)
+			t.Setenv("SCION_AGENT_ID", "agent-launcher")
+			apiErr := &apiclient.APIError{StatusCode: status, Code: "not_found", Message: "agent not found"}
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){errResult(apiErr)}}
+			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+				AgentName: "a1", LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+			})
+			var unreadable *launchStatusUnreadableError
+			require.ErrorAs(t, err, &unreadable)
+			assert.Equal(t, unreadableMessage, err.Error())
+			assert.NotContains(t, err.Error(), "no longer exists")
+			assert.ErrorIs(t, err, apiErr, "the Hub's error is kept")
+			assert.Greater(t, seq.calls, 2, "the read is retried within the grace")
+			assert.Equal(t, 1, exitCodeFor(err))
+		})
+	}
+}
+
+func TestWaitForAgentLaunch_BrieflyUnreadableThenProgress(t *testing.T) {
+	shortenLaunchWaitTimings(t)
+	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+	notFound := errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "agent not found"})
+	seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+		notFound, notFound, notFound,
+		agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)}),
+		agentResult(&hubclient.Agent{Phase: "running"}),
+	}}
+	var out bytes.Buffer
+	a, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+		AgentName: "a1", LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second, Progress: &out,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, a)
+	assert.Equal(t, "running", a.Phase)
+	assert.Equal(t, "  a1: provisioning (pod_create)\n  a1: running\n", out.String())
+	assert.Equal(t, 5, seq.calls)
+}
+
+func TestWaitForAgentLaunch_ReadableLauncherSeesDeletion(t *testing.T) {
+	for _, agentID := range []string{"agent-launcher", ""} {
+		t.Run("agent="+agentID, func(t *testing.T) {
+			shortenLaunchWaitTimings(t)
+			t.Setenv("SCION_AGENT_ID", agentID)
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				agentResult(&hubclient.Agent{Phase: "provisioning", Launch: activeLaunch("", 2, nil)}),
+				errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "agent not found"}),
+			}}
+			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+				AgentName: "a1", LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+			})
+			require.Error(t, err)
+			assert.Equal(t, "agent 'a1' no longer exists; it was deleted while launching", err.Error())
+			assert.Equal(t, 2, seq.calls, "a not-found after the agent was read is not retried")
+		})
+	}
+}
+
+func TestWaitForAgentLaunch_UserCallerAcceptedLaunch(t *testing.T) {
+	// A user caller is refused with 403, so its 404 is a definite
+	// not-found once it outlasts the grace, and its 403 keeps the login hint.
+	shortenLaunchWaitTimings(t)
+	t.Setenv("SCION_AGENT_ID", "")
+	cases := []struct {
+		status int
+		want   string
+	}{
+		{http.StatusNotFound, "agent 'a1' no longer exists; it was deleted while launching"},
+		{http.StatusForbidden, "scion hub auth login"},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				errResult(&apiclient.APIError{StatusCode: tc.status, Code: "x", Message: "no"}),
+			}}
+			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+				AgentName: "a1", LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.NotContains(t, err.Error(), "status not readable")
+			assert.Greater(t, seq.calls, 1, "a brief failure after accept is retried")
+		})
+	}
+}
+
+func TestStartAgentViaHub_AgentLauncherCannotReadStatus(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{http.StatusNotFound}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	var err error
+	_ = captureStderr(t, func() {
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	require.Error(t, err)
+	assert.Equal(t, unreadableMessage, err.Error())
+	assert.Equal(t, 1, exitCodeFor(err))
+}
+
+func TestStartAgentViaHub_AgentLauncherBrieflyUnreadable(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{
+			http.StatusNotFound, http.StatusNotFound,
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "provisioning", Launch: activeLaunch("pod_create", 2, nil)},
+			hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running", Activity: "working"},
+		}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	var err error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "  a1: provisioning (pod_create)")
+	assert.Contains(t, stderr, "Agent 'a1' started via Hub.")
+	assert.NotContains(t, stderr, "no longer exists")
+	assert.NotContains(t, stderr, "not readable")
 }

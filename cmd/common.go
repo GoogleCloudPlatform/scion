@@ -1534,9 +1534,14 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		}
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
+		launchID := ""
+		if resp.Agent != nil && resp.Agent.Launch != nil {
+			launchID = resp.Agent.Launch.ID
+		}
 		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
+			LaunchID:   launchID,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
 				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 			},
