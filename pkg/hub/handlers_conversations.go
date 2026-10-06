@@ -34,6 +34,21 @@ import (
 type conversationResponse struct {
 	store.Conversation
 	Participants []store.ConversationParticipant `json:"participants,omitempty"`
+	// DMPeer is the other party of a direct conversation, relative to the
+	// caller, resolved from the canonical DM key. Set on list responses
+	// only, so clients can label DMs that carry no display name.
+	DMPeer *conversationPeer `json:"dmPeer,omitempty"`
+	// ThreadName is the name of the webchat topic linked to a native group
+	// conversation that has no display name of its own. Set on list
+	// responses only.
+	ThreadName string `json:"threadName,omitempty"`
+}
+
+// conversationPeer identifies the other principal of a direct conversation.
+type conversationPeer struct {
+	Kind string `json:"kind"`           // user | agent
+	ID   string `json:"id"`             // principal UUID
+	Name string `json:"name,omitempty"` // agent name or user display name/email; empty if unresolved
 }
 
 // conversationListResponse is the response for listing conversations.
@@ -201,8 +216,100 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 			Conversation: conv,
 		})
 	}
+	s.labelListedConversations(ctx, result.Conversations, principalKind, principalID)
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// labelListedConversations fills the list-only labels of each response:
+// DMPeer for direct conversations and ThreadName for unnamed native groups
+// linked to a webchat topic (ptone/scion#3499). Native conversations minted
+// on the message path carry no display name, so without these a client has
+// nothing to show. Names are best-effort: lookup failures are logged and
+// leave the label without a name rather than failing the list. Peer names
+// are fetched with one batched lookup per principal kind.
+func (s *Server) labelListedConversations(ctx context.Context, convs []conversationResponse, callerKind, callerID string) {
+	var agentIDs, userIDs []string
+	for i := range convs {
+		c := &convs[i]
+		switch c.Kind {
+		case "direct":
+			peer := dmPeerOf(c.ExternalRef, callerKind, callerID)
+			if peer == nil {
+				continue
+			}
+			c.DMPeer = peer
+			switch peer.Kind {
+			case "agent":
+				agentIDs = append(agentIDs, peer.ID)
+			case "user":
+				userIDs = append(userIDs, peer.ID)
+			}
+		case "group":
+			if c.DisplayName != "" || c.Surface != "native" {
+				continue
+			}
+			topic, err := s.linkedTopic(ctx, &c.Conversation)
+			if err != nil {
+				slog.WarnContext(ctx, "conversation list: thread name lookup failed",
+					"conversationID", c.ID, "error", err)
+				continue
+			}
+			if topic != nil {
+				c.ThreadName = topic.Name
+			}
+		}
+	}
+
+	var agents map[string]*store.Agent
+	if len(agentIDs) > 0 {
+		var err error
+		if agents, err = s.store.GetAgentsByIDs(ctx, agentIDs); err != nil {
+			slog.WarnContext(ctx, "conversation list: DM peer agent lookup failed", "error", err)
+		}
+	}
+	var users map[string]*store.User
+	if len(userIDs) > 0 {
+		var err error
+		if users, err = s.store.GetUsersByIDs(ctx, userIDs); err != nil {
+			slog.WarnContext(ctx, "conversation list: DM peer user lookup failed", "error", err)
+		}
+	}
+	for i := range convs {
+		peer := convs[i].DMPeer
+		if peer == nil {
+			continue
+		}
+		switch peer.Kind {
+		case "agent":
+			if a := agents[peer.ID]; a != nil {
+				peer.Name = a.Name
+				if peer.Name == "" {
+					peer.Name = a.Slug
+				}
+			}
+		case "user":
+			if u := users[peer.ID]; u != nil {
+				peer.Name = u.DisplayName
+				if peer.Name == "" {
+					peer.Name = u.Email
+				}
+			}
+		}
+	}
+}
+
+// dmPeerOf returns the principal of the canonical DM key that is not the
+// caller, or nil if the key does not parse. A self-DM yields the caller.
+func dmPeerOf(externalRef, callerKind, callerID string) *conversationPeer {
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(externalRef)
+	if err != nil {
+		return nil
+	}
+	if kindA == callerKind && idA == callerID {
+		return &conversationPeer{Kind: kindB, ID: idB}
+	}
+	return &conversationPeer{Kind: kindA, ID: idA}
 }
 
 // handleConversationRoutes handles requests under /api/v1/conversations/.

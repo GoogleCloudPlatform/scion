@@ -322,7 +322,7 @@ func runConversationList(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintln(tw, "ID\tKIND\tSURFACE\tNAME\tDEFAULT AGENT\tLAST ACTIVITY")
 	for _, conv := range result.Conversations {
 		shortID := truncateRunes(conv.ID, 12, false)
-		name := truncateRunes(conv.DisplayName, 20, true)
+		name := truncateRunes(conversationListName(conv), 20, true)
 		defaultAgent := ""
 		if conv.DefaultAgentID != nil {
 			defaultAgent = truncateRunes(*conv.DefaultAgentID, 12, false)
@@ -762,6 +762,22 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 }
 
 // resolveConversationRef resolves a conversation reference string to a conversation ID.
+// conversationListName is the NAME column of conversation list
+// (ptone/scion#3499): DM:<peer> for a direct conversation whose peer the hub
+// resolved, else the display name, else the linked thread name, else "-".
+func conversationListName(conv hubclient.ConversationDetail) string {
+	if conv.Kind == "direct" && conv.DMPeer != nil && conv.DMPeer.Name != "" {
+		return "DM:" + conv.DMPeer.Name
+	}
+	if conv.DisplayName != "" {
+		return conv.DisplayName
+	}
+	if conv.ThreadName != "" {
+		return conv.ThreadName
+	}
+	return "-"
+}
+
 // Supports conv:<uuid> directly. For @agent and #thread, it first lists the caller's
 // conversations and tries to match.
 func resolveConversationRef(ctx context.Context, client hubclient.Client, refStr string) (string, error) {

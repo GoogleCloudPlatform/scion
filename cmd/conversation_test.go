@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -795,4 +796,68 @@ func TestRunConversationCatchUp_AgentHubContext_ForbiddenForNonParticipant(t *te
 	assert.NotContains(t, err.Error(), "requires Hub mode",
 		"a permission denial must not be misreported as the F4 hub-mode-detection bug")
 	assert.Contains(t, err.Error(), "not a participant in this conversation")
+}
+
+// TestRunConversationList_NameColumn covers ptone/scion#3499: native
+// conversations carry no display name, so the NAME column must fall back to
+// DM:<peer> for direct conversations and the linked thread name for groups,
+// and "-" when the hub supplied neither. JSON output must pass the hub's
+// dmPeer/threadName fields through unchanged.
+func TestRunConversationList_NameColumn(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"conversations":[
+			{"id":"conv-dm-agent","kind":"direct","surface":"native","driftState":"active",
+			 "dmPeer":{"kind":"agent","id":"11111111-1111-1111-1111-111111111111","name":"reviewer"}},
+			{"id":"conv-thread","kind":"group","surface":"native","driftState":"active","threadName":"design-chat"},
+			{"id":"conv-named","kind":"group","surface":"native","driftState":"active","displayName":"release"},
+			{"id":"conv-dm-unknown","kind":"direct","surface":"native","driftState":"active",
+			 "dmPeer":{"kind":"agent","id":"22222222-2222-2222-2222-222222222222"}}
+		]}`))
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+
+	run := func() string {
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		return captureStdout(t, func() { require.NoError(t, runConversationList(cmd, nil)) })
+	}
+
+	convJSON = false
+	outputFormat = ""
+	names := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(run()), "\n")[1:] {
+		fields := strings.Fields(line)
+		require.GreaterOrEqual(t, len(fields), 4, "row: %q", line)
+		names[fields[0]] = fields[3]
+	}
+	assert.Equal(t, map[string]string{
+		"conv-dm-agen": "DM:reviewer",
+		"conv-thread":  "design-chat",
+		"conv-named":   "release",
+		"conv-dm-unkn": "-",
+	}, names)
+
+	convJSON = true
+	var got struct {
+		Conversations []map[string]any `json:"conversations"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(run()), &got))
+	require.Len(t, got.Conversations, 4)
+	assert.Equal(t, "reviewer", got.Conversations[0]["dmPeer"].(map[string]any)["name"])
+	assert.Equal(t, "design-chat", got.Conversations[1]["threadName"])
+	assert.NotContains(t, got.Conversations[2], "dmPeer")
 }
