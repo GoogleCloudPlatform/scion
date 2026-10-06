@@ -71,6 +71,7 @@ func setUserStatus(t *testing.T, s store.Store, id, status string) {
 func TestRelationshipRules_UnlistedPermissionDenied(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-owner"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relrule-proj"))
 	agent := agentResource(&store.Agent{ID: tid("relrule-agent"), ProjectID: tid("relrule-proj"), OwnerID: owner.ID()})
 	tpl := templateResource(&store.Template{ID: tid("relrule-tpl"), OwnerID: owner.ID(), Scope: store.TemplateScopeUser, ScopeID: owner.ID()})
 
@@ -147,6 +148,7 @@ func TestRelationshipRules_AttachOnlyTokenCannotReachLifecycle(t *testing.T) {
 func TestRelationshipRules_AccessConstraintRestrictsOwner(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-ac-owner"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relrule-ac-proj"))
 	agent := agentResource(&store.Agent{ID: tid("relrule-ac-agent"), ProjectID: tid("relrule-ac-proj"), OwnerID: owner.ID()})
 
 	userType, userID := "user", owner.ID()
@@ -181,7 +183,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 	})
 	assert.False(t, decidePerm(authz, fed, desc, Action("notify"), "agent.notify", false).Allowed)
 
-	out := authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), desc, Action("notify"), "agent.notify", nil, false)
+	out := authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), desc, Action("notify"), "agent.notify", nil, false, nil)
 	assert.Nil(t, out.accepted)
 	require.Len(t, out.results, 1)
 	assert.Equal(t, RelationshipRuleAncestor, out.results[0].Rule)
@@ -193,7 +195,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 		ID: tid("relrule-fed-user-desc"), ProjectID: tid("relrule-fed-proj"),
 		Ancestry: []string{fedUser.ID()},
 	})
-	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fedUser), userDesc, ActionRead, "agent.read", nil, false)
+	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fedUser), userDesc, ActionRead, "agent.read", nil, false, nil)
 	assert.Nil(t, out.accepted)
 	require.NotEmpty(t, out.results)
 	assert.Equal(t, RelationshipRuleAncestor, out.results[0].Rule)
@@ -202,7 +204,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 	// The same shape with a hub-attested agent is accepted by the stage.
 	local := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("relrule-local")}, Scopes: allRegisteredAgentScopes()}}
 	localDesc := agentResource(&store.Agent{ID: tid("relrule-local-desc"), Ancestry: []string{tid("relrule-fed-root"), local.ID()}})
-	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(local), localDesc, Action("notify"), "agent.notify", nil, false)
+	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(local), localDesc, Action("notify"), "agent.notify", nil, false, nil)
 	require.NotNil(t, out.accepted)
 	assert.Equal(t, "relationship grant: ancestor access", out.accepted.Reason)
 }
@@ -260,7 +262,7 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			out := f.authz.evaluateRelationshipCandidates(ctx, principal, tc.resource, tc.action, tc.perm, nil, false)
+			out := f.authz.evaluateRelationshipCandidates(ctx, principal, tc.resource, tc.action, tc.perm, nil, false, nil)
 			assert.Nil(t, out.accepted)
 			found := false
 			for _, r := range out.results {
@@ -926,7 +928,8 @@ func (s *actorPathFailingStore) GetRoleDefinitionsByIDs(ctx context.Context, ids
 // without explain), a token project mismatch before the kernel, a
 // principal resolution error, a role-binding lookup error, a role
 // definition lookup error, a kernel role-binding allow, a relationship
-// allow with and without explain, and a deny with explain.
+// allow with and without explain, a relationship deny at the project-access
+// stage, and a deny with explain.
 func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-actor-path-owner"))
@@ -941,6 +944,12 @@ func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 	roleDefsFail := NewAuthzService(&actorPathFailingStore{Store: s, failRoleDefs: lookupErr}, authz.logger)
 	projectID := tid("relrule-actor-path-proj")
 	agent := agentResource(&store.Agent{ID: tid("relrule-actor-path-agent"), ProjectID: projectID, OwnerID: owner.ID()})
+	// The owner relationship requires active project access
+	// (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, owner.ID(), projectID)
+	// An owner without project access is denied at the project-access stage.
+	formerOwner := createCharacterizationUser(t, s, tid("relrule-actor-path-former-owner"))
+	formerAgent := agentResource(&store.Agent{ID: tid("relrule-actor-path-former-agent"), ProjectID: projectID, OwnerID: formerOwner.ID()})
 	otherProjectToken := NewScopedUserIdentity(owner, tid("relrule-actor-path-other-proj"), []string{"agent:read"})
 	actor := &DecisionActor{Kind: PrincipalKindAgent, ID: tid("relrule-actor-path-actor")}
 
@@ -975,6 +984,8 @@ func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 		{"relationship allow", nil, request(owner, agent, ActionRead, "agent.read", false), true, "relationship grant: resource owner"},
 		{"relationship allow explain", nil, request(owner, agent, ActionRead, "agent.read", true), true, "relationship grant: resource owner"},
 		{"relationship deny explain", nil, request(owner, agent, ActionUpdate, "hub.config.update", true), false, ""},
+		{"relationship project-access deny", nil, request(formerOwner, formerAgent, ActionRead, "agent.read", false), false, "relationship grant restricted by " + RelationshipRejectProjectAccess},
+		{"relationship project-access deny explain", nil, request(formerOwner, formerAgent, ActionRead, "agent.read", true), false, "relationship grant restricted by " + RelationshipRejectProjectAccess},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := authz

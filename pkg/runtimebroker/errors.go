@@ -60,7 +60,14 @@ const (
 	ErrCodeRuntimeUnavailable = "runtime_unavailable"
 	ErrCodeHubUnreachable     = "hub_unreachable"
 	ErrCodeTemplateError      = "template_error"
-	ErrCodeSkillResolution    = "skill_resolution_failed"
+	ErrCodeSkillResolution    = api.BrokerErrCodeSkillResolution
+
+	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
+	// uploaded to bucket storage (workspaceStoragePath set) when neither the
+	// request nor this broker names the bucket to download it from. It is
+	// answered with 422 before anything is provisioned, and the hub relays
+	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
+	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
 	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
 	// verified as safe because a runtime process restart dropped the
