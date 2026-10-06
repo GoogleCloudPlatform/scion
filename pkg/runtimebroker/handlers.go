@@ -1681,8 +1681,8 @@ var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
 
 // syncWorkspaceFromGCS downloads a workspace upload (the create-time
-// bootstrap and handleWorkspaceApply); a variable so tests can substitute a
-// fake for real GCS.
+// bootstrap and handleWorkspaceApply, through Server.workspaceDownloader);
+// a variable so tests can substitute a fake for real GCS.
 var syncWorkspaceFromGCS = gcp.SyncFromGCS
 
 // workspaceStorageUnconfiguredMessage is the user-facing text for
@@ -6117,10 +6117,6 @@ const (
 	opRemoveProjectDir       = "remove project directory"
 )
 
-// deleteProjectAbs is deleteProject's filepath.Abs; a variable so tests
-// can make it fail, which it cannot for the absolute paths it is given.
-var deleteProjectAbs = filepath.Abs
-
 // deleteProject removes the local hub-managed project directory for the given
 // slug, together with its shared-dir storage when that lives under
 // ~/.scion/project-configs (see hubManagedProjectSharedDirsBase).
@@ -6137,12 +6133,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// Path traversal protection: ensure the resolved path stays inside the
 	// projects base directory.
 	projectsBase := filepath.Join(globalDir, "projects")
-	absProject, err := deleteProjectAbs(projectPath)
+	absProject, err := s.projectAbs()(projectPath)
 	if err != nil {
 		s.writeRuntimeOpError(w, r.Context(), opResolveProjectPath, err, "project_slug", slug)
 		return
 	}
-	absProjectsBase, err := deleteProjectAbs(projectsBase)
+	absProjectsBase, err := s.projectAbs()(projectsBase)
 	if err != nil {
 		s.writeRuntimeOpError(w, r.Context(), opResolveProjectsBase, err, "project_slug", slug)
 		return

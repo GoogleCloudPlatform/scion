@@ -341,38 +341,29 @@ type fakeWorkspaceTransfers struct {
 	toErr, fromErr, manifestErr error
 }
 
-// installWorkspaceTransfers substitutes f's errors for the GCS upload,
-// download and manifest upload for the test.
-func installWorkspaceTransfers(t *testing.T, f fakeWorkspaceTransfers) {
-	t.Helper()
-	prevTo, prevFrom, prevManifest := syncWorkspaceToGCS, syncWorkspaceFromGCS, uploadWorkspaceManifest
-	syncWorkspaceToGCS = func(context.Context, string, string, string) error { return f.toErr }
-	syncWorkspaceFromGCS = func(context.Context, string, string, string) error { return f.fromErr }
-	uploadWorkspaceManifest = func(context.Context, string, string, *transfer.Manifest) error { return f.manifestErr }
-	t.Cleanup(func() {
-		syncWorkspaceToGCS, syncWorkspaceFromGCS, uploadWorkspaceManifest = prevTo, prevFrom, prevManifest
-	})
+// installWorkspaceTransfers substitutes f's errors for srv's GCS upload,
+// download and manifest upload.
+func installWorkspaceTransfers(srv *Server, f fakeWorkspaceTransfers) {
+	srv.setWorkspaceUploader(func(context.Context, string, string, string) error { return f.toErr })
+	srv.SetWorkspaceDownloader(func(context.Context, string, string, string) error { return f.fromErr })
+	srv.setManifestUploader(func(context.Context, string, string, *transfer.Manifest) error { return f.manifestErr })
 }
 
-// installFailingWorkspaceTransfers fails the test if a handler reaches any
-// GCS call.
-func installFailingWorkspaceTransfers(t *testing.T) {
+// installFailingWorkspaceTransfers fails the test if srv reaches any GCS
+// call.
+func installFailingWorkspaceTransfers(t *testing.T, srv *Server) {
 	t.Helper()
-	prevTo, prevFrom, prevManifest := syncWorkspaceToGCS, syncWorkspaceFromGCS, uploadWorkspaceManifest
-	syncWorkspaceToGCS = func(context.Context, string, string, string) error {
+	srv.setWorkspaceUploader(func(context.Context, string, string, string) error {
 		t.Error("unexpected GCS upload")
 		return nil
-	}
-	syncWorkspaceFromGCS = func(context.Context, string, string, string) error {
+	})
+	srv.SetWorkspaceDownloader(func(context.Context, string, string, string) error {
 		t.Error("unexpected GCS download")
 		return nil
-	}
-	uploadWorkspaceManifest = func(context.Context, string, string, *transfer.Manifest) error {
+	})
+	srv.setManifestUploader(func(context.Context, string, string, *transfer.Manifest) error {
 		t.Error("unexpected manifest upload")
 		return nil
-	}
-	t.Cleanup(func() {
-		syncWorkspaceToGCS, syncWorkspaceFromGCS, uploadWorkspaceManifest = prevTo, prevFrom, prevManifest
 	})
 }
 
@@ -458,7 +449,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, errors.New("docker ps: /var/run/docker.sock: permission denied"))
 				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t)
+				installFailingWorkspaceTransfers(t, srv)
 				return upload(srv), logs, "/var/run/docker.sock"
 			},
 		},
@@ -468,7 +459,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, ws := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t)
+				installFailingWorkspaceTransfers(t, srv)
 				locked := unreadableSubdir(t, ws)
 				return upload(srv), logs, filepath.Base(locked)
 			},
@@ -479,7 +470,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(t, fakeWorkspaceTransfers{toErr: gcsErr})
+				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{toErr: gcsErr})
 				return upload(srv), logs, bootstrapDetail
 			},
 		},
@@ -489,7 +480,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(t, fakeWorkspaceTransfers{manifestErr: gcsErr})
+				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{manifestErr: gcsErr})
 				return upload(srv), logs, bootstrapDetail
 			},
 		},
@@ -499,7 +490,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, errors.New("docker ps: /var/run/docker.sock: permission denied"))
 				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t)
+				installFailingWorkspaceTransfers(t, srv)
 				return apply(srv), logs, "/var/run/docker.sock"
 			},
 		},
@@ -509,7 +500,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(t, fakeWorkspaceTransfers{fromErr: gcsErr})
+				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{fromErr: gcsErr})
 				return apply(srv), logs, bootstrapDetail
 			},
 		},
@@ -519,11 +510,9 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t)
+				installFailingWorkspaceTransfers(t, srv)
 				const statDetail = "stat /srv/broker-7/projects/secret: permission denied"
-				prev := statProjectWorkspace
-				statProjectWorkspace = func(string) (os.FileInfo, error) { return nil, errors.New(statDetail) }
-				t.Cleanup(func() { statProjectWorkspace = prev })
+				srv.setProjectWorkspaceStatter(func(string) (os.FileInfo, error) { return nil, errors.New(statDetail) })
 				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
 					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
 				}), logs, statDetail
@@ -535,7 +524,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t)
+				installFailingWorkspaceTransfers(t, srv)
 				ws := t.TempDir()
 				locked := unreadableSubdir(t, ws)
 				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
@@ -549,7 +538,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(t, fakeWorkspaceTransfers{toErr: gcsErr})
+				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{toErr: gcsErr})
 				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
 					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
 				}), logs, bootstrapDetail
@@ -561,7 +550,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
 				srv, _ := agentServer(t, nil)
 				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(t, fakeWorkspaceTransfers{manifestErr: gcsErr})
+				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{manifestErr: gcsErr})
 				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
 					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
 				}), logs, bootstrapDetail

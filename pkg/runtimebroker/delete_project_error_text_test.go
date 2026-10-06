@@ -30,16 +30,15 @@ import (
 func TestDeleteProjectErrors_FixedText(t *testing.T) {
 	const slug = "proj-a"
 
-	// failAbs makes deleteProjectAbs fail for paths with suffix.
-	failAbs := func(t *testing.T, suffix, detail string) {
-		prev := deleteProjectAbs
-		deleteProjectAbs = func(p string) (string, error) {
+	// failAbs makes srv's deleteProject filepath.Abs fail for paths with
+	// suffix.
+	failAbs := func(srv *Server, suffix, detail string) {
+		srv.setProjectAbs(func(p string) (string, error) {
 			if strings.HasSuffix(p, suffix) {
 				return "", errors.New(detail)
 			}
-			return prev(p)
-		}
-		t.Cleanup(func() { deleteProjectAbs = prev })
+			return filepath.Abs(p)
+		})
 	}
 	// lock chmods dir to mode for the test; the rows that use it skip
 	// under root, which permission bits do not stop.
@@ -59,28 +58,28 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 		// setup arranges the failure and returns the detail that must
 		// reach the log, plus any log fields beyond project_slug it must
 		// carry.
-		setup func(t *testing.T, home, ext string) (string, map[string]string)
+		setup func(t *testing.T, srv *Server, home, ext string) (string, map[string]string)
 	}{
 		{
 			name: "resolve-project-path", op: opResolveProjectPath, wantText: "Failed to resolve project path",
-			setup: func(t *testing.T, home, _ string) (string, map[string]string) {
+			setup: func(t *testing.T, srv *Server, home, _ string) (string, map[string]string) {
 				d := "getwd: " + filepath.Join(home, "secret")
-				failAbs(t, "/projects/"+slug, d)
+				failAbs(srv, "/projects/"+slug, d)
 				return d, nil
 			},
 		},
 		{
 			name: "resolve-base-path", op: opResolveProjectsBase, wantText: "Failed to resolve base path",
-			setup: func(t *testing.T, home, _ string) (string, map[string]string) {
+			setup: func(t *testing.T, srv *Server, home, _ string) (string, map[string]string) {
 				d := "getwd: " + filepath.Join(home, "secret")
-				failAbs(t, "/projects", d)
+				failAbs(srv, "/projects", d)
 				return d, nil
 			},
 		},
 		{
 			name: "check-shared-dir", op: opCheckSharedDirStorage, wantText: "Failed to check project shared-dir storage",
 			projectID: true,
-			setup: func(t *testing.T, _, ext string) (string, map[string]string) {
+			setup: func(t *testing.T, _ *Server, _, ext string) (string, map[string]string) {
 				lock(t, filepath.Dir(seedSharedDir(t, ext, "scratch")), 0o600)
 				return "permission denied", map[string]string{"project_id": scopeProjA}
 			},
@@ -88,7 +87,7 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 		{
 			name: "remove-shared-dir", op: opRemoveSharedDirStorage, wantText: "Failed to remove project shared-dir storage",
 			projectID: true,
-			setup: func(t *testing.T, _, ext string) (string, map[string]string) {
+			setup: func(t *testing.T, _ *Server, _, ext string) (string, map[string]string) {
 				base := seedSharedDir(t, ext, "scratch")
 				lock(t, filepath.Join(base, "scratch"), 0o555)
 				return "permission denied", map[string]string{"project_id": scopeProjA, "path": base}
@@ -96,7 +95,7 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 		},
 		{
 			name: "remove-project-dir", op: opRemoveProjectDir, wantText: "Failed to remove project directory",
-			setup: func(t *testing.T, home, _ string) (string, map[string]string) {
+			setup: func(t *testing.T, srv *Server, home, _ string) (string, map[string]string) {
 				locked := filepath.Join(home, ".scion", "projects", slug, "locked")
 				if err := os.MkdirAll(locked, 0o755); err != nil {
 					t.Fatal(err)
@@ -114,7 +113,7 @@ func TestDeleteProjectErrors_FixedText(t *testing.T) {
 			srv, home := newScopeTestServer(t, &filteringMockManager{})
 			ext, _ := makeHubMarkerProject(t, home, slug, scopeProjA, "dev")
 			logs := captureLifecycleJSONLog(srv)
-			detail, extra := tc.setup(t, home, ext)
+			detail, extra := tc.setup(t, srv, home, ext)
 			projectID := ""
 			if tc.projectID {
 				projectID = scopeProjA

@@ -321,7 +321,7 @@ func TestWorkspaceUploadRejectsUnsafeWorkspacePath(t *testing.T) {
 	}
 	srv := New(cfg, mgr, rt)
 	logs := captureLifecycleJSONLog(srv)
-	installFailingWorkspaceTransfers(t)
+	installFailingWorkspaceTransfers(t, srv)
 
 	body := WorkspaceUploadRequest{
 		Slug:        "test-agent",
@@ -409,7 +409,7 @@ func TestWorkspaceApplyRejectsUnsafeWorkspacePath(t *testing.T) {
 	}
 	srv := New(cfg, mgr, rt)
 	logs := captureLifecycleJSONLog(srv)
-	installFailingWorkspaceTransfers(t)
+	installFailingWorkspaceTransfers(t, srv)
 
 	body := WorkspaceApplyRequest{
 		Slug:        "test-agent",
