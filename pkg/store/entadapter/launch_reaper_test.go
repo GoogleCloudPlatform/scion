@@ -904,8 +904,12 @@ func TestReaper_H2_OutageRecovery_ResumingAndSilentBroker(t *testing.T) {
 	assert.Equal(t, time.Duration(0), result.DisarmedFor, "armed_since was just reset to this tick's storeNow")
 	assert.Empty(t, result.Reaped, "neither agent may be marked lost on the recovery tick itself")
 
-	// The resuming broker starts reporting again right after recovery.
-	setAgentLastReportAt(t, ctx, s, resuming.ID, time.Now())
+	// The resuming broker starts reporting again right after recovery. Every
+	// timestamp this test writes is anchored to the store clock
+	// (readStoreNow), the same clock the ticks compare against, so neither
+	// host/Postgres clock skew nor how long the test takes to reach a tick
+	// can move an agent across the staleness boundary (ptone/scion#3515).
+	setAgentLastReportAt(t, ctx, s, resuming.ID, readStoreNow(t, ctx, s))
 
 	// A tick halfway through the post-recovery staleness window must still
 	// not reap the silent agent: it is not "earlier" relief from the outage,
@@ -913,7 +917,7 @@ func TestReaper_H2_OutageRecovery_ResumingAndSilentBroker(t *testing.T) {
 	// by shifting the recovery tick's armed_since back 4 minutes, so the
 	// check does not depend on how long this test takes to reach the tick.
 	partwayArmedSince := shiftLaunchReaperArmedSince(t, ctx, s, 4*time.Minute)
-	setAgentLastReportAt(t, ctx, s, resuming.ID, time.Now()) // the resumed broker keeps reporting on schedule
+	setAgentLastReportAt(t, ctx, s, resuming.ID, readStoreNow(t, ctx, s)) // the resumed broker keeps reporting on schedule
 	result, err = s.RunLaunchReaperTick(ctx, p)
 	require.NoError(t, err)
 	require.Equal(t, store.ReaperTickCompleted, result.Outcome)
@@ -928,9 +932,11 @@ func TestReaper_H2_OutageRecovery_ResumingAndSilentBroker(t *testing.T) {
 	// Past the full post-recovery staleness window (4 + 5 = 9 minutes > 8):
 	// the cluster is armed again, and only the silent agent (last report
 	// still from before the outage) is reaped. The resuming agent's fresh
-	// reports keep it safe.
+	// reports keep it safe. The only wall-clock bound left is the 65s
+	// stale-ok_at window (ReaperInterval + 5s margin) between the partway
+	// tick and this one, far beyond any CI scheduling delay.
 	shiftLaunchReaperArmedSince(t, ctx, s, 5*time.Minute)
-	setAgentLastReportAt(t, ctx, s, resuming.ID, time.Now()) // still on schedule right up to this tick
+	setAgentLastReportAt(t, ctx, s, resuming.ID, readStoreNow(t, ctx, s)) // still on schedule right up to this tick
 	result, err = s.RunLaunchReaperTick(ctx, p)
 	require.NoError(t, err)
 	assert.True(t, result.Armed, "the cluster must be armed again a full staleness window after recovery")
@@ -960,7 +966,7 @@ func TestReaper_H2_TwoReplicas_NotAcquiredDoesNotAdvanceLossClock(t *testing.T) 
 
 	_, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	staleReportAt := time.Now().Add(-time.Hour)
+	staleReportAt := readStoreNow(t, ctx, s).Add(-time.Hour)
 	setAgentLastReportAt(t, ctx, s, a.ID, staleReportAt)
 
 	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams) // creates the arming row
@@ -970,7 +976,7 @@ func TestReaper_H2_TwoReplicas_NotAcquiredDoesNotAdvanceLossClock(t *testing.T) 
 	// Simulate replica A stuck holding the tick's lock for far longer than a
 	// real 60s: back-date ok_at so the eventual recovery tick disarms, then
 	// grab the real advisory lock on a separate connection and hold it open.
-	setLaunchReaperOkAt(t, ctx, s, time.Now().Add(-time.Hour))
+	setLaunchReaperOkAt(t, ctx, s, readStoreNow(t, ctx, s).Add(-time.Hour))
 
 	db := s.sqlDB()
 	require.NotNil(t, db)
