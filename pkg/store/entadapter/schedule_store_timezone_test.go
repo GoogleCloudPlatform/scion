@@ -25,6 +25,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,10 +74,13 @@ func TestCreateScheduledEvent_OffsetFireAtRoundTrips(t *testing.T) {
 	require.NoError(t, s.CreateScheduledEvent(ctx, evt))
 
 	// The raw column must hold a UTC-normalised value, not the offset zone's
-	// numeric abbreviation.
-	typ, val := rawTimeColumn(t, s, "scheduled_events", "fire_at", evt.ID)
-	assert.Equal(t, "text", typ)
-	assert.Equal(t, "'2026-10-02 08:00:00 +0000 UTC'", val)
+	// numeric abbreviation. SQLite only: Postgres stores timestamptz, so there
+	// is no zone text to inspect; the round trips below run on both.
+	if !enttest.Active() {
+		typ, val := rawTimeColumn(t, s, "scheduled_events", "fire_at", evt.ID)
+		assert.Equal(t, "text", typ)
+		assert.Equal(t, "'2026-10-02 08:00:00 +0000 UTC'", val)
+	}
 
 	got, err := s.GetScheduledEvent(ctx, evt.ID)
 	require.NoError(t, err)
@@ -149,9 +153,15 @@ func TestListDueSchedules_NonUTCLocal(t *testing.T) {
 	})
 }
 
-// assertUTCColumn asserts that a time column holds UTC-normalised text.
+// assertUTCColumn asserts that a time column holds UTC-normalised text. It
+// is a no-op on Postgres, whose timestamptz columns hold instants with no
+// stored zone text (rawTimeColumn's typeof()/quote() are SQLite functions);
+// the callers' read-back assertions still run there.
 func assertUTCColumn(t *testing.T, s *ScheduleStore, table, column, id string) {
 	t.Helper()
+	if enttest.Active() {
+		return
+	}
 	typ, val := rawTimeColumn(t, s, table, column, id)
 	assert.Equal(t, "text", typ, "%s.%s storage type", table, column)
 	assert.True(t, strings.HasSuffix(val, " +0000 UTC'"),

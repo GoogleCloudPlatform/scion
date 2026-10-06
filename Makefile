@@ -173,9 +173,11 @@ test-fixture-coverage:
 # not Postgres-availability skips. They are excluded by name so a genuine
 # new skip in that package still fails the target.
 #
-# In the entadapter run, TestListSchedulesLegacyText_* are the mirror image:
-# they exercise SQLite-only legacy text timestamps and skip by design when
-# enttest.Active() is true, so they are excluded from the skip check by name.
+# In the entadapter run, a test that is SQLite-only by design skips through
+# enttest.SkipOnPostgres, whose skip message is
+# "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
+# if its own skip message carries that marker, so there is no name list here
+# and any other skip still fails the target.
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -197,9 +199,14 @@ test-launch-store-postgres:
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
-	if grep -E '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log \
-		| grep -qvE 'TestListSchedulesLegacyText_'; then \
-		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
+	sed -nE 's/^[[:space:]]*--- SKIP: ([^ ]+).*/\1/p' /tmp/test-launch-store-postgres.log | sort -u \
+		> /tmp/test-launch-store-postgres.skipped; \
+	grep -oE 'enttest-sqlite-only: [^ ]+' /tmp/test-launch-store-postgres.log | awk '{print $$2}' | sort -u \
+		> /tmp/test-launch-store-postgres.sqlite-only; \
+	unexpected=$$(grep -vxF -f /tmp/test-launch-store-postgres.sqlite-only /tmp/test-launch-store-postgres.skipped); \
+	if [ -n "$$unexpected" ]; then \
+		echo "ERROR: these entadapter tests were skipped on Postgres without enttest.SkipOnPostgres:" >&2; \
+		echo "$$unexpected" >&2; \
 		exit 1; \
 	fi
 

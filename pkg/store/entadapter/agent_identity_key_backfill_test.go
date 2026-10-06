@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -56,13 +55,8 @@ func setAgentCreated(t *testing.T, cs *CompositeStore, agentID string, created t
 	t.Helper()
 	db := cs.DB()
 	require.NotNil(t, db)
-	// Placeholder syntax is dialect-specific: Postgres rejects "?" (it
-	// reports a syntax error at the next token), SQLite accepts it.
-	query := "UPDATE agents SET created = ? WHERE id = ?"
-	if cs.client.Driver().Dialect() == dialect.Postgres {
-		query = "UPDATE agents SET created = $1 WHERE id = $2"
-	}
-	_, err := db.ExecContext(context.Background(), query, created, agentID)
+	_, err := db.ExecContext(context.Background(),
+		rebindForDialect(cs.Dialect(), "UPDATE agents SET created = ? WHERE id = ?"), created, agentID)
 	require.NoError(t, err)
 }
 

@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -243,6 +244,7 @@ func TestCountAgentsByPhaseIDs_MatchesFilterAndPhases(t *testing.T) {
 // reading can only come from an actual time.Now() call.
 func setRawCreatedUpdatedText(t *testing.T, s *AgentStore, id, createdText, updatedText string) {
 	t.Helper()
+	enttest.SkipOnPostgres(t, "writes SQLite TEXT timestamps (with a monotonic suffix) that only the SQLite driver produces")
 	err := s.client.Driver().Exec(context.Background(),
 		"UPDATE agents SET created = ?, updated = ? WHERE id = ?",
 		[]any{createdText, updatedText, id}, nil)
