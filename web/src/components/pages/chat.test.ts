@@ -1936,7 +1936,7 @@ describe('chat page — startup after the page is removed', () => {
     };
     return {
       count: () => startups.length,
-      settled: async () => {
+      settled: async (): Promise<void> => {
         await Promise.all(startups);
       },
     };
