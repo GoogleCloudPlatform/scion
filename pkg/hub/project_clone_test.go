@@ -405,7 +405,7 @@ func TestProjectClone_GitRemoteOverride_RederivesSourceLabels(t *testing.T) {
 
 	// Agent create resolves the overridden repository, not the template's.
 	agent := &store.Agent{ID: api.NewUUID(), AppliedConfig: &store.AgentAppliedConfig{}}
-	srv.populateAgentConfig(ctx, agent, stored, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, agent, stored, nil))
 	require.NotNil(t, agent.AppliedConfig.GitClone)
 	assert.Equal(t, "https://github.com/other-org/other-repo.git", agent.AppliedConfig.GitClone.URL)
 	assert.Equal(t, "main", agent.AppliedConfig.GitClone.Branch)

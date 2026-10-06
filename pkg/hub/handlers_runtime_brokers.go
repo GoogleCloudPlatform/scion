@@ -648,6 +648,65 @@ type brokerHeartbeatRequest struct {
 	// by an older broker, in which case the stored descriptor is left
 	// unchanged.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// ProfileAttach refreshes the Attach field of the broker's stored
+	// profiles (see hubclient.BrokerHeartbeat.ProfileAttach). Omitted by
+	// an older broker, in which case the stored profiles are left
+	// unchanged.
+	ProfileAttach []brokerProfileAttach `json:"profileAttach,omitempty"`
+	// StartsInFlight lists the agent starts still running on the broker
+	// (see hubclient.BrokerHeartbeat.StartsInFlight). Trusted to be complete
+	// only when Capabilities.StartsInFlight is set.
+	StartsInFlight []brokerStartInFlight `json:"startsInFlight,omitempty"`
+	// DefaultProfile refreshes the broker's stored default profile name
+	// (see hubclient.BrokerHeartbeat.DefaultProfile). Omitted by an older
+	// broker, in which case the stored value is left unchanged.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
+}
+
+// brokerStartInFlight mirrors hubclient.StartInFlight.
+type brokerStartInFlight struct {
+	ProjectID string `json:"projectId"`
+	Slug      string `json:"slug"`
+}
+
+// brokerProfileAttach is one profile's attach capability in a heartbeat.
+type brokerProfileAttach struct {
+	Name   string `json:"name"`
+	Attach bool   `json:"attach"`
+}
+
+// applyProfileAttach sets the Attach field of each stored profile named in
+// reported to the reported value, and reports whether any stored value
+// changed. Only profiles already registered are updated: a reported name
+// with no stored profile is ignored (the profile set itself is still
+// recorded at registration), and a stored profile the heartbeat does not
+// name keeps its value, which may be nil (read as supported).
+func applyProfileAttach(profiles []store.BrokerProfile, reported []brokerProfileAttach) bool {
+	if len(reported) == 0 || len(profiles) == 0 {
+		return false
+	}
+	byName := make(map[string]bool, len(reported))
+	for _, r := range reported {
+		byName[r.Name] = r.Attach
+	}
+	changed := false
+	for i := range profiles {
+		v, ok := byName[profiles[i].Name]
+		if !ok {
+			continue
+		}
+		if profiles[i].Attach != nil && *profiles[i].Attach == v {
+			continue
+		}
+		profiles[i].Attach = boolPtr(v)
+		changed = true
+	}
+	return changed
+}
+
+// boolPtr returns a pointer to a copy of b.
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
@@ -755,9 +814,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// --force re-registration. An old broker sends no Capabilities field at
 	// all, and the store keeps whatever it already had (nil-safe: a missing
 	// field, not an empty struct, is the "don't touch" signal).
-	// WorkspaceStorage follows the same rule, so the hub sees share health
-	// changes within one heartbeat. Both are persisted in a single update,
-	// and only when something changed.
+	// WorkspaceStorage and DefaultProfile follow the same rule, so the hub
+	// sees share health and default-profile changes within one heartbeat.
+	// All are persisted in a single update, and only when something
+	// changed.
 	//
 	// Keeping an omitted descriptor means a broker downgraded to a version
 	// that does not report one keeps its last descriptor, Healthy included,
@@ -765,9 +825,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// the descriptor alone: the capability check reads AgentMove from the
 	// Capabilities every heartbeat refreshes (an old broker reports none),
 	// and the target health check also probes live reachability.
-	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil {
+	// ProfileAttach follows the same rule: only profiles the heartbeat
+	// names are updated, and only when their stored Attach differs.
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
-			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",
+			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
 		} else {
 			changed := false
@@ -779,9 +841,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				broker.WorkspaceStorage = heartbeat.WorkspaceStorage
 				changed = true
 			}
+			if heartbeat.DefaultProfile != nil && broker.DefaultProfile != *heartbeat.DefaultProfile {
+				broker.DefaultProfile = *heartbeat.DefaultProfile
+				changed = true
+			}
+			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
+				changed = true
+			}
 			if changed {
 				if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed capabilities",
+					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
 						"broker_id", id, "error", err)
 				}
 			}
@@ -812,6 +881,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				continue
 			}
 			report.present[agent.ID] = true
+			report.observed[agent.ID] = observedAgent{target: agentHB.RuntimeTarget, state: heartbeatObservedState(agentHB)}
 
 			// Build status update with agent status and container status.
 			// When the broker sends structured Phase/Activity fields, use
@@ -1175,6 +1245,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			}
 			s.recordHeartbeatRuntimeTarget(ctx, agent, agentHB.RuntimeTarget)
 
+			// While a lifecycle dispatch runs, keep the phase the lifecycle
+			// path owns; the rest of the report still applies
+			// (ptone/scion#2014).
+			if s.heartbeatPhaseGuarded(agent, statusUpdate.Phase) {
+				statusUpdate.Phase = ""
+			}
+
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an
 			// observed crash/exit, or best-effort re-reserve on an observed
@@ -1204,6 +1281,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// reports (their container is gone). Gated on a complete inventory and a
 	// fresh broker; see broker_heartbeat_reconcile.go.
 	s.reconcileMissingAgents(ctx, id, prevBroker, &heartbeat, report)
+
+	// Record runtime observations for start claims, once, outside the
+	// per-agent loop and in a single store transaction.
+	s.recordRecoveryObservations(ctx, id, prevBroker, &heartbeat, report)
 
 	w.WriteHeader(http.StatusOK)
 }

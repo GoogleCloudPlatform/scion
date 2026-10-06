@@ -40,7 +40,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | `default_max_turns` | int | Default maximum number of turns an agent can take before termination. |
 | `default_max_model_calls` | int | Default maximum number of LLM model calls an agent can make. |
 | `default_max_duration` | string | Default maximum execution time (e.g., `"2h"`, `"45m"`) for an agent. |
-| `default_resources` | object | Default resource constraints (CPU, memory, disk). See [Resource Specification](#resource-specification-resources) below. |
+| `default_resources` | object | Default resource requests and limits (`requests`, `limits`, `disk`). See [Resource Specification](#resource-specification-resources) below. |
 | `default_gcp_identity_mode` | string | Hub server only. Hub-wide fallback GCP metadata mode for new agents: `block`, `passthrough`, or `assign`. Applied when neither the create request nor the project's default GCP identity names one. See [Hub-Default GCP Identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity). |
 | `default_gcp_identity_service_account_id` | string | Hub server only. ID of the verified, hub-scoped service account assigned when `default_gcp_identity_mode` is `assign`. |
 
@@ -56,7 +56,7 @@ cli:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `autohelp` | bool | Whether to print usage help on every error. Default: `true`. |
+| `autohelp` | bool | Whether to print the usage block after an argument or flag error. Default: `true`. |
 | `interactive_disabled` | bool | If `true`, disables all interactive prompts (useful for scripts). |
 
 ## Hub Client Configuration (`hub`)
@@ -118,6 +118,7 @@ runtimes:
 | `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a positive Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
 | `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and a template or agent `kubernetes.safeToEvict` wins over both. Ignored, with a validation warning, on other runtime types. |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents whose profile uses this runtime. A profile's value wins over this. Read from global settings only. |
+| `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents whose profile uses this runtime. A directory it does not name uses `shared_dir_storage_backend`. A profile's values, single or per directory, win over this. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
 | `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents whose profile uses this runtime. A profile's value wins over this. Ignored, with a validation warning, on other runtime types. Read from global settings only. |
 | `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents whose profile uses this runtime. A profile's value wins over this. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Map of lowercase GCP service account email to Kubernetes ServiceAccount name, used by GCP identity mode `assign`: the agent pod runs as the mapped ServiceAccount through GKE Workload Identity. The ServiceAccount must already exist in this entry's namespace and be bound to the service account; Scion does not create or bind it. A profile's entry for the same email wins over this. Read from global settings only; a project's `settings.yaml` value is ignored. See [GCP identity mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
@@ -158,26 +159,38 @@ harness_configs:
 | `volumes` | list | Volume mounts. |
 | `auth_selected_type` | string | Authentication method selection (harness-specific). |
 | `secrets` | list | Required secrets for this harness configuration (see below). |
-| `resources` | object | Resource limits (CPU, memory, disk) for this harness. |
 
 ### Resource Specification (`resources`)
 
-Defines the hardware constraints for an agent's execution environment.
+Defines the compute and disk constraints for an agent's container. The same shape is used by `default_resources`, `profiles.<name>.resources`, `profiles.<name>.harness_overrides.<harness-config>.resources`, and the template or agent `resources` field. Harness configs themselves (`harness_configs.<name>`) have no `resources` field.
 
 ```yaml
 resources:
-  cpu: "2"
-  memory: "4Gi"
-  disk: "20Gi"
-  gpu: 0
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "8Gi"
+  disk: "40Gi"
 ```
 
-| Field | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `cpu` | string | `"1"` | CPU cores (can be fractional, e.g., `"0.5"`). |
-| `memory` | string | `"2Gi"` | Memory limit (e.g., `"1Gi"`, `"512Mi"`). |
-| `disk` | string | `"10Gi"` | Ephemeral disk space request. |
-| `gpu` | int | `0` | Number of GPUs to request (requires compatible runtime). |
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `requests.cpu` | string | CPU request (for example `"500m"` or `"1"`). Kubernetes only. |
+| `requests.memory` | string | Memory request (for example `"1Gi"`). Docker/Podman: `--memory-reservation`. Kubernetes: memory request. |
+| `limits.cpu` | string | CPU limit. Docker/Podman: `--cpus`. Kubernetes: CPU limit. |
+| `limits.memory` | string | Memory limit. Docker/Podman: `--memory`. Kubernetes: memory limit. Exceeding it OOM-kills a process in the container. |
+| `disk` | string | Kubernetes only. Sets the pod's `ephemeral-storage` request **and** limit to this value. Ignored by Docker/Podman. |
+
+Tiers merge field by field: a field set at a higher tier wins, and fields it leaves empty come from lower tiers. See [Settings Precedence](/scion/reference/settings-precedence/).
+
+**Defaults.**
+
+- All runtimes: `limits.cpu: "2"` is applied when no tier sets a CPU limit, unless `runtime.enforce_resource_defaults` is `false` (default `true`). There is no default memory limit.
+- Kubernetes only: `cpu`, `memory` and `ephemeral-storage` each get a default **request** (`250m`, `512Mi` and `10Gi`) only when neither a request nor a limit is set for that resource, in `resources` or in `kubernetes.resources`. When a limit is set without a request, the request is left unset and Kubernetes sets it equal to the limit. So with the built-in CPU limit a pod requests and is limited to 2 CPU, and a profile that sets only `limits.memory` is scheduled at that limit.
+- Kubernetes never adds a default memory or ephemeral-storage limit. Those limits apply only when you set `limits.memory` or `disk` (or the same key in `kubernetes.resources.limits`). With `runtime.enforce_resource_defaults: false` and no resources set, a Kubernetes pod gets the three default requests and no limits.
+- A CPU request above `2` (in `resources` or `kubernetes.resources`) needs an explicit CPU limit; otherwise it exceeds the built-in CPU limit and the pod is rejected. A `kubernetes.resources.limits.cpu` also works, since it overrides the built-in limit at the pod level.
 
 ### Required Secrets
 
@@ -225,10 +238,12 @@ profiles:
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
+| `resources` | object | Resource requests and limits for agents created under this profile. See [Resource Specification](#resource-specification-resources). |
 | `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
+| `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents using this profile. A directory it does not name uses `shared_dir_storage_backend`. Wins over the runtime entry's values. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
 | `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
 | `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents using this profile. Wins over the runtime entry's value. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_service_account_mappings`: for each service account email listed here, this ServiceAccount name wins over the runtime entry's. Other emails fall through to the runtime entry. Read from global settings only. |

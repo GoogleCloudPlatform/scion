@@ -36,15 +36,13 @@ import {
   canLifecycle,
   canMessageAgent,
   isTerminalAvailable,
-  getAgentDisplayStatus,
   isAgentRunning,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
-import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
@@ -436,16 +434,17 @@ export class ScionPageAgents extends LitElement {
         color: var(--scion-primary-600, #2563eb);
       }
 
-      /* On the narrowest phones the status group is wider than the page;
-         it scrolls sideways rather than clipping its last buttons. */
+      /* On a narrow phone the buttons wrap onto a second row rather than
+         run past the screen edge. overflow: hidden only clips the active
+         button's background to the rounded corners; the buttons wrap, so
+         none is cut off. */
       .scope-toggle {
         display: inline-flex;
+        flex-wrap: wrap;
         max-width: 100%;
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius, 0.5rem);
-        overflow-x: auto;
-        overflow-y: hidden;
-        scrollbar-width: none;
+        overflow: hidden;
       }
 
       .scope-toggle button {
@@ -479,6 +478,14 @@ export class ScionPageAgents extends LitElement {
 
       .scope-toggle button sl-icon {
         font-size: 0.875rem;
+      }
+
+      /* Tighter buttons on narrow phones, so the status filter wraps less.
+         It may still wrap to a second row there. */
+      @media (max-width: 400px) {
+        .scope-toggle button {
+          padding: 0 0.4375rem;
+        }
       }
 
       .project-link {
@@ -2014,12 +2021,7 @@ export class ScionPageAgents extends LitElement {
                 : ''}
             </div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          >
-          </scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"
@@ -2112,11 +2114,7 @@ export class ScionPageAgents extends LitElement {
         </td>
         <td class="hide-mobile">${agent.template}</td>
         <td>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"

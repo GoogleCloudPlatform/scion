@@ -97,7 +97,7 @@ During startup in Hosted HA mode, Scion performs strict preflight checks to vali
 2. **Format Enforcement**: The audience path must follow either the Cloud Run format or the GCLB/GKE backend service format. Other formats are rejected (fail-closed) with a detailed startup error.
 3. **Endpoint Derivation Warning**:
    - For **Cloud Run** audiences, Scion can automatically derive the Hub's public URL format from the audience.
-   - For **GCLB/GKE** backend-service audiences, Scion *cannot* automatically derive the public endpoint URL because a backend service ID does not contain regional or routing information. You **must explicitly configure the public URL** using the `SCION_SERVER_BASE_URL` environment variable (or `server.hub.public_url` / `SCION_SERVER_HUB_PUBLIC_URL`). If missing, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents:
+   - For **GCLB/GKE** backend-service audiences, Scion *cannot* automatically derive the public endpoint URL because a backend service ID does not contain regional or routing information. You **must explicitly configure the public URL** using the `SCION_SERVER_BASE_URL` environment variable (or `server.hub.public_url` / `SCION_SERVER_HUB_ENDPOINT`). If missing, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents:
      ```
      Warning: hosted HA deployment has no explicit hub base URL; falling back to http://localhost:8080, which is unreachable from dispatched agents. Set SCION_SERVER_BASE_URL or server.hub.public_url.
      ```
@@ -593,7 +593,7 @@ env:
 
 #### Credentials-file fields
 
-The broker credentials file (written by `scion runtime-broker register`) can also store transport settings per hub connection:
+The broker credentials file (`~/.scion/hub-credentials/<name>.json`, written by `scion runtime-broker register`) can also store transport settings per hub connection:
 
 ```json
 {
@@ -625,62 +625,22 @@ This retires the manual `install-broker.sh` curl-from-a-pod workaround.
 
 The `register` command also persists `transportMode` and `transportAudience` into the credentials file automatically, so the broker daemon inherits them on startup.
 
-### Registration Job manifest
+### Registering the broker Deployment
 
-Instead of manual shell scripts, use a Kubernetes Job to register the broker. The Job runs with the broker's KSA (which has Workload Identity configured) and the transport environment variables:
+Instead of manual shell scripts, run the registration in the broker pod itself. `scion runtime-broker register` first checks that the broker server answers on its local port, so it has to run where the broker is reachable on `localhost`. The broker pod already has the broker's KSA (with Workload Identity) and the transport environment variables, and writes the credentials to the broker's own `~/.scion` volume:
 
-```yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: register-broker
-  namespace: scion
-spec:
-  template:
-    metadata:
-      labels:
-        app: scion-broker-register
-    spec:
-      serviceAccountName: scion-broker  # KSA with Workload Identity annotation
-      restartPolicy: Never
-      containers:
-        - name: register
-          image: YOUR_SCION_IMAGE
-          env:
-            # Env vars enable the scion binary to traverse IAP for the
-            # registration HTTP request itself.
-            - name: SCION_TRANSPORT_MODE
-              value: "iap"
-            - name: SCION_TRANSPORT_AUDIENCE
-              value: "1234567890-abc.apps.googleusercontent.com"
-          volumeMounts:
-            - name: broker-credentials
-              mountPath: /home/scion/.scion
-          command:
-            - scion
-            - hub
-            - brokers
-            - register
-            - --name
-            - my-broker
-            # CLI flags ensure transport values are persisted to the
-            # credentials file for the broker daemon to inherit.
-            - --transport-mode
-            - iap
-            - --transport-audience
-            - "1234567890-abc.apps.googleusercontent.com"
-            - https://hub.example.com
-      volumes:
-        # The credentials file must persist beyond the Job pod so the
-        # broker Deployment can read it. Use a PVC, a Secret, or any
-        # shared volume accessible to the broker Deployment.
-        - name: broker-credentials
-          persistentVolumeClaim:
-            claimName: broker-credentials  # replace with your PVC
-  backoffLimit: 2
+```bash
+kubectl -n scion exec -it deploy/scion-broker -- \
+  scion runtime-broker register --global \
+    --hub https://hub.example.com \
+    --name my-broker \
+    --transport-mode iap \
+    --transport-audience "1234567890-abc.apps.googleusercontent.com"
 ```
 
-After the Job completes, the credentials file is written to the shared volume. The broker Deployment (mounting the same volume, with the same KSA and transport env vars) picks up the credentials on startup.
+Answer the confirmation prompts in the terminal. (`--yes` accepts every prompt, including adding the broker as a provider for a Hub project named `global`, which is created if it does not exist.) The CLI flags persist the transport values to the credentials file, so the broker inherits them on later starts. Add `--port <port>` if the broker does not listen on 9800.
+
+Keep the broker's `~/.scion` on a persistent volume, so the credentials survive pod restarts. If the broker started without a Hub endpoint configured, restart it after registering (`kubectl -n scion rollout restart deploy/scion-broker`) so it connects with the new credentials.
 
 ### GKE deployment summary
 
@@ -690,4 +650,4 @@ After the Job completes, the credentials file is written to the shared volume. T
 | 2 | Create a broker GSA; grant `roles/iap.httpsResourceAccessor` on the Hub backend service |
 | 3 | Bind KSA ↔ GSA via Workload Identity annotation on the broker's Kubernetes service account |
 | 4 | Broker Deployment env: `SCION_TRANSPORT_MODE=iap`, `SCION_TRANSPORT_AUDIENCE=<custom client id>` |
-| 5 | One-time registration Job (same KSA) runs `scion runtime-broker register` — no curl scripts |
+| 5 | One-time `scion runtime-broker register` in the broker pod (same KSA) — no curl scripts |

@@ -119,7 +119,7 @@ set -u -o pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 EXPECTED_SCRIPTS=5
-EXPECTED_ASSERTIONS=268   # 49 chart-integrity + 130 render-guards + 39 reserved-flags + 4 update-strategy + 46 rbac-collision.
+EXPECTED_ASSERTIONS=325   # 49 chart-integrity + 187 render-guards + 39 reserved-flags + 4 update-strategy + 46 rbac-collision.
 EXPECTED_FILES=8        # SCRIPTS + NOT_RUN_HERE + NOT_EXECUTABLE + this file.
 # 🛑 [HISTORY 2026-08-17] EXPECTED_FILES SHIPPED WRONG FOR AN HOUR BECAUSE A
 # CONFLICT RESOLUTION TOOK BOTH LINES AS A UNIT. The rebase onto main deleted
@@ -344,7 +344,7 @@ done
 # gets its own committed number, failing in both directions like the others.
 # Phase 6 owns CI wiring and may move this; it must not delete it without
 # replacing the coverage.
-EXPECTED_VERIFY_ASSERTIONS=364
+EXPECTED_VERIFY_ASSERTIONS=361
 # hack/ IS OUTSIDE THIS DIRECTORY, SO THE FILE SCAN BELOW CANNOT SEE IT, AND
 # NAMING ITS CONTENTS HERE IS THE ONLY THING THAT MAKES THEM DISCOVERABLE. Five
 # entries, all stated: verify.sh, gated below; check-secret-placement.sh, gated

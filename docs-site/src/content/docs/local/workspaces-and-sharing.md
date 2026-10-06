@@ -31,7 +31,7 @@ Every agent operates on the same repository history but has an independent worki
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** supported in **local mode** and on **Hub-managed git projects** created with workspace mode `worktree-per-agent`. On Kubernetes it requires NFS workspace storage.
+- **Availability:** supported in **local mode** and on **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker). On Kubernetes it requires NFS workspace storage.
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent
@@ -100,7 +100,7 @@ scion hub projects create --name scratch --workspace-mode per-agent
 scion hub projects create https://github.com/acme/widgets.git --workspace-mode worktree-per-agent
 ```
 
-The Hub rejects unknown values with `400`. The mode is stored in the server-owned `scion.dev/workspace-mode` label: you cannot set or change that label directly, on create or later with an update. Creating or starting an Empty-per-agent agent on a Runtime Broker that does not support this mode fails with `412 Precondition Failed`; upgrade the Runtime Broker. See [`scion hub projects create`](/scion/reference/cli/#scion-hub) and the [Projects API](/scion/reference/api/#projects-apiv1projects).
+The Hub rejects unknown values with `400`. The mode is stored in the server-owned `scion.dev/workspace-mode` label: you cannot set or change that label directly, on create or later with an update. Creating or starting an Empty-per-agent agent on a Runtime Broker that does not support this mode fails with `412 Precondition Failed` (`unsupported_capability`). The error names the Runtime Broker and says which ones work: Docker, Podman, Apple, and Kubernetes Runtime Brokers. Upgrade an older Runtime Broker, or pick one of those; upgrading does not help a Cloud Run or Substrate Runtime Broker. See [`scion hub projects create`](/scion/reference/cli/#scion-hub) and the [Projects API](/scion/reference/api/#projects-apiv1projects).
 
 ## Runtime environment variables
 

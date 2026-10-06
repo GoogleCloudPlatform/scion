@@ -761,8 +761,8 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping, blocked by credential scope restriction")
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping, so the denial is answered as a missing agent")
 	})
 
 	t.Run("Agent cannot GET details of agents in different project", func(t *testing.T) {
@@ -5122,6 +5122,53 @@ func TestBrokerHeartbeat_RejectsPhaseRegression(t *testing.T) {
 		"heartbeat should not regress phase from running to starting")
 }
 
+// TestBrokerHeartbeat_RejectsRunningToCreatedRegression pins ptone/scion#494:
+// a heartbeat reporting phase=created for an agent the hub has as running
+// must not regress it. PhaseCreated has ordinal 1, so it counts as active
+// and the heartbeat's ordinal guard suppresses the downgrade.
+func TestBrokerHeartbeat_RejectsRunningToCreatedRegression(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-hb-created"), Name: "HB Created Project", Slug: "hb-created-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hb-created"), Name: "HB Created Broker", Slug: "hb-created-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: tid("agent-hb-created"), Slug: "hb-created-slug", Name: "HB Created Agent",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:  project.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				Phase:           string(state.PhaseCreated),
+				ContainerStatus: "created",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), updated.Phase,
+		"heartbeat should not regress phase from running to created")
+}
+
 // TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost verifies that a
 // dying container's async sciontool /status POST (phase=stopped,
 // activity=crashed) cannot clobber a suspended agent's phase. If it did, a
@@ -5166,6 +5213,214 @@ func TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost(t *testing.T) {
 		"suspended phase must be sticky against async status POST")
 	assert.NotEqual(t, string(state.ActivityCrashed), updated.Activity,
 		"crashed activity must not stick on a suspended agent")
+}
+
+// postAgentStatusAsAgent POSTs a status update for agent using an agent
+// token with ScopeAgentStatusUpdate, the way sciontool does.
+func postAgentStatusAsAgent(t *testing.T, srv *Server, agent *store.Agent, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	tokenSvc := srv.GetAgentTokenService()
+	require.NotNil(t, tokenSvc)
+	token, err := tokenSvc.GenerateAgentToken(agent.ID, agent.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/status", bytes.NewReader([]byte(body)))
+	req.Header.Set("X-Scion-Agent-Token", token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied
+// pins ptone/scion#2267: Guard 0b (reincarnation-sticky) must apply to a
+// status POST that carries only a message or only exit fields, not just to
+// phase/activity reports. The dropped report is not written and the
+// response says so.
+func TestAgentStatusUpdate_ReincarnationInFlight_MessageOnlyPostNotApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		phase      state.Phase
+		reincState string
+		body       string
+	}{
+		{"message only", state.PhaseStarting, store.ReincarnationStateStopping, `{"message":"x"}`},
+		{"exit code only", state.PhaseStarting, store.ReincarnationStateStopping, `{"exitCode":137}`},
+		{"exit reason only", state.PhaseStarting, store.ReincarnationStateStopping, `{"exitReason":"crashed"}`},
+		// A suspended agent whose reincarnation is pending (the worker has
+		// not written its first step yet): Guard 0b must win over Guard 0
+		// (suspended), which would only blank Phase/Activity.
+		{"suspended, reincarnation pending, message only", state.PhaseSuspended, store.ReincarnationStatePending, `{"message":"x"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-reinc-msg"), Name: "Reinc Msg Project", Slug: "reinc-msg-project"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			agent := &store.Agent{
+				ID: tid("agent-reinc-msg"), Slug: "reinc-msg-slug", Name: "Reinc Msg Agent",
+				ProjectID: project.ID, Phase: string(tc.phase),
+				Message: "Reincarnating",
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			agent.ReincarnationState = tc.reincState
+			require.NoError(t, s.UpdateAgent(ctx, agent))
+			past := backdateAgentWriteTimestamps(t, s, agent.ID)
+			before, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.Equal(t, tc.reincState, before.ReincarnationState)
+
+			rec := postAgentStatusAsAgent(t, srv, agent, tc.body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+			assert.Equal(t, false, resp["applied"])
+			assert.Equal(t, "reincarnation_in_flight", resp["reason"])
+
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "Reincarnating", after.Message, "message must not change while a reincarnation is in flight")
+			assert.Equal(t, before.ExitCode, after.ExitCode)
+			assert.Equal(t, before.ExitReason, after.ExitReason)
+			assert.Equal(t, string(tc.phase), after.Phase)
+			assertAgentWriteTimestampsAt(t, after, past)
+		})
+	}
+}
+
+// backdateAgentWriteTimestamps sets the agent's last_seen and updated
+// columns to a fixed time an hour in the past and returns it, so a test can
+// tell "no store write happened" from "a write happened within the
+// timestamp resolution".
+func backdateAgentWriteTimestamps(t *testing.T, s store.Store, agentID string) time.Time {
+	t.Helper()
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err := db.ExecContext(context.Background(),
+		"UPDATE agents SET last_seen = ?, updated = ? WHERE id = ?", past, past, agentID)
+	require.NoError(t, err)
+	got, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	require.True(t, got.LastSeen.Equal(past) && got.Updated.Equal(past),
+		"sanity: backdated timestamps must be stored (last_seen=%v updated=%v want %v)", got.LastSeen, got.Updated, past)
+	return past
+}
+
+// assertAgentWriteTimestampsAt asserts that no store write has touched the
+// agent since backdateAgentWriteTimestamps set its timestamps to past.
+func assertAgentWriteTimestampsAt(t *testing.T, agent *store.Agent, past time.Time) {
+	t.Helper()
+	assert.True(t, agent.LastSeen.Equal(past) && agent.Updated.Equal(past),
+		"a dropped report must skip the store write (last_seen=%v updated=%v want %v)", agent.LastSeen, agent.Updated, past)
+}
+
+// TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied: a status
+// POST that Guard 0c (a delete in progress, or a soft-deleted row) blanks
+// completely is not written, and the response says
+// {"applied":false,"reason":"delete_in_progress"} — the same guarded-no-op
+// signal as a reincarnation (ptone/scion#2267).
+func TestAgentStatusUpdate_DeleteGuard_MessageOnlyPostNotApplied(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mark func(t *testing.T, s store.Store, agent *store.Agent)
+	}{
+		{"live delete", func(t *testing.T, s store.Store, agent *store.Agent) {
+			seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
+		}},
+		{"soft deleted", func(t *testing.T, s store.Store, agent *store.Agent) {
+			agent.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(context.Background(), agent))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{ID: tid("proj-del-msg"), Name: "Del Msg Project", Slug: "del-msg-project"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			agent := &store.Agent{
+				ID: tid("agent-del-msg"), Slug: "del-msg-slug", Name: "Del Msg Agent",
+				ProjectID: project.ID, Phase: string(state.PhaseRunning), Message: "old",
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			tc.mark(t, s, agent)
+			past := backdateAgentWriteTimestamps(t, s, agent.ID)
+
+			rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x","exitCode":1}`)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+			assert.Equal(t, false, resp["applied"])
+			assert.Equal(t, "delete_in_progress", resp["reason"])
+
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "old", after.Message)
+			assert.Nil(t, after.ExitCode)
+			assertAgentWriteTimestampsAt(t, after, past)
+		})
+	}
+}
+
+// TestAgentStatusUpdate_ReincarnationInFlight_PartialApply pins the
+// documented partial-apply behaviour: a report that mixes guarded fields
+// with fields the guards do not own has the guarded fields dropped, the
+// rest written, and is reported as applied.
+func TestAgentStatusUpdate_ReincarnationInFlight_PartialApply(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-reinc-partial"), Name: "Reinc Partial Project", Slug: "reinc-partial-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-reinc-partial"), Slug: "reinc-partial-slug", Name: "Reinc Partial Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseStarting), Message: "Reincarnating",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	agent.ReincarnationState = store.ReincarnationStateProvisioning
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x","taskSummary":"summary"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, true, resp["applied"])
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Reincarnating", after.Message, "the guarded message must be dropped")
+	assert.Equal(t, "summary", after.TaskSummary, "the unguarded field must be written")
+}
+
+// TestAgentStatusUpdate_MessageOnlyPostApplied is the counterpart to the
+// test above: with no reincarnation in flight a message-only POST is
+// written and reported as applied.
+func TestAgentStatusUpdate_MessageOnlyPostApplied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-msg-only"), Name: "Msg Only Project", Slug: "msg-only-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-msg-only"), Slug: "msg-only-slug", Name: "Msg Only Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), Activity: string(state.ActivityWorking),
+		Message: "old",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	rec := postAgentStatusAsAgent(t, srv, agent, `{"message":"x"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, true, resp["applied"])
+	_, hasReason := resp["reason"]
+	assert.False(t, hasReason)
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "x", after.Message)
+	assert.Equal(t, string(state.PhaseRunning), after.Phase)
+	assert.Equal(t, string(state.ActivityWorking), after.Activity)
 }
 
 // TestBrokerHeartbeat_DoesNotRevertSuspendedAgent verifies that a racing broker

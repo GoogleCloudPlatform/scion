@@ -31,6 +31,7 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -76,6 +77,14 @@ export class ScionPageBrokers extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 1rem;
+      }
+
+      /* The header's first child holds the name and version. As a flex item
+         it defaults to min-width:auto and grows to fit a long unbroken name,
+         pushing it past the card edge; min-width:0 lets it shrink so the
+         shared wrapping rules can break the name instead. */
+      .broker-header > div {
+        min-width: 0;
       }
 
       .broker-version {
@@ -352,7 +361,7 @@ export class ScionPageBrokers extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="hdd-rack"></sl-icon>
-              ${broker.name} ${this.renderBrokerTypeBadge(broker)}
+              <span>${broker.name} ${this.renderBrokerTypeBadge(broker)}</span>
             </h3>
             ${broker.version ? html`<div class="broker-version">v${broker.version}</div>` : ''}
           </div>
@@ -436,8 +445,7 @@ export class ScionPageBrokers extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/brokers/${broker.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/brokers/${broker.id}`);
         }}
       >
         <td>

@@ -94,7 +94,7 @@ export interface Fake {
 /**
  * A fake global agents endpoint: sorted fit requests (complete when the set
  * fits), sorted cursor pages, `stats` (IDs omitted above 2,000), scope,
- * k=v label and phase; legacy (unsorted) cursor pages of `limit` rows
+ * projectId, k=v label and phase; legacy (unsorted) cursor pages of `limit` rows
  * (500 by default).
  */
 export function fakeFetch(fake: Fake) {
@@ -152,6 +152,8 @@ export function fakeFetch(fake: Fake) {
     let list = fake.agents;
     if (scope === 'mine') list = list.filter(isMine);
     if (scope === 'shared') list = list.filter(isShared);
+    const projectId = u.searchParams.get('projectId');
+    if (projectId) list = list.filter((a) => a.projectId === projectId);
     if (label.includes('=')) {
       const [k, v] = [label.slice(0, label.indexOf('=')), label.slice(label.indexOf('=') + 1)];
       list = list.filter((a) => a.labels?.[k] === v);

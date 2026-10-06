@@ -21,6 +21,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -605,6 +606,57 @@ func TestSendKeys_DeadlineExpiredWhileWaitingForLock(t *testing.T) {
 	defer mu.Unlock()
 	if len(capturedCmd) != 0 {
 		t.Fatalf("expected no Exec calls once the admission deadline expired before the lock was acquired, got %v", capturedCmd)
+	}
+}
+
+// TestSendKeys_CancelledWhileWaitingForLock covers ptone/scion#2877's
+// target-lock half: an explicit cancel (the broker's per-request ctx, which
+// a Hub "cancel" frame cancels) while SendKeys waits for the target's
+// injection lock must end the wait at once, report ErrKeysNotStarted, and
+// run no Exec — even though the deadline is still far away and the lock
+// later becomes free.
+func TestSendKeys_CancelledWhileWaitingForLock(t *testing.T) {
+	agent := runningAgent()
+
+	var execCalls atomic.Int32
+	mock := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{agent}, nil
+		},
+		ExecFunc: func(ctx context.Context, id string, cmd []string) (string, error) {
+			execCalls.Add(1)
+			return "", nil
+		},
+	}
+	mgr := &AgentManager{Runtime: mock}
+
+	lock := mgr.injectionLock(agent.ContainerID)
+	if err := lock.Lock(context.Background()); err != nil {
+		t.Fatalf("failed to seed the lock: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- mgr.SendKeys(ctx, "proj-1", "test-agent", "agent-abc", "C-c") }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendKeys did not return after its ctx was cancelled during the lock wait")
+	}
+	lock.Unlock()
+
+	if !errors.Is(err, ErrKeysNotStarted) {
+		t.Fatalf("SendKeys error = %v, want an error wrapping ErrKeysNotStarted", err)
+	}
+	if got := execCalls.Load(); got != 0 {
+		t.Fatalf("Exec called %d times, want 0 after a cancel during the lock wait", got)
 	}
 }
 

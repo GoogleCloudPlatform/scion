@@ -74,6 +74,11 @@ type Agent struct {
 	// Launch describes the agent's current or most recent launch. It is
 	// absent when the Hub does not report launches or the agent has none.
 	Launch *AgentLaunch `json:"launch,omitempty"`
+	// ProvisionedOnly is true when the agent was provisioned but not
+	// started (ptone/scion#2929). Absent from Hubs that predate it (decodes
+	// as false). No omitempty: re-encoding keeps an explicit false so a
+	// merging consumer clears a previously seen true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.
@@ -188,7 +193,11 @@ type ProjectProvider struct {
 
 // ProjectSettings represents project configuration settings.
 type ProjectSettings struct {
-	ActiveProfile          string                 `json:"activeProfile,omitempty"`
+	// ActiveProfile names the broker profile new agents in the project run
+	// under when the request names none. On PUT, an absent (null) field
+	// keeps the stored value and an empty string clears it, so a client that
+	// does not manage the profile (the web settings page) cannot wipe it.
+	ActiveProfile          *string                `json:"activeProfile,omitempty"`
 	DefaultTemplate        string                 `json:"defaultTemplate,omitempty"`
 	DefaultHarnessConfig   string                 `json:"defaultHarnessConfig,omitempty"`
 	DefaultHarnessAuth     string                 `json:"defaultHarnessAuth,omitempty"`
@@ -210,6 +219,14 @@ type ProjectSettings struct {
 	// Default GCP identity for new agents
 	DefaultGCPIdentityMode             string `json:"defaultGCPIdentityMode,omitempty"`             // "block", "passthrough", or "assign"
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
+	// DefaultGCPIdentityServiceAccountIDByProfile maps a broker profile name
+	// to a registered GCP service account ID. When an agent is created with
+	// no explicit GCP identity, the entry for the profile the agent runs
+	// under assigns that service account, ahead of DefaultGCPIdentityMode and
+	// DefaultGCPIdentityServiceAccountID. On PUT, an absent (null) field
+	// keeps the stored map and an empty object clears it. No omitempty: a
+	// nil map marshals to null (keep) and an empty map to {} (clear).
+	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile"`
 
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
@@ -336,6 +353,11 @@ type BrokerCapabilities struct {
 	// AgentMove indicates the broker can take part in a cross-broker agent
 	// move (store.BrokerCapabilities.AgentMove is its counterpart).
 	AgentMove bool `json:"agentMove"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

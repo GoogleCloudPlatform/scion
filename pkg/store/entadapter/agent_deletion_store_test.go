@@ -311,7 +311,7 @@ func TestBrokerDispatch_DeleteIntentQueries(t *testing.T) {
 	require.NoError(t, ds.InsertBrokerDispatch(ctx, d2))
 	_, err = ds.ClaimBrokerDispatch(ctx, d2.ID, "hub-1")
 	require.NoError(t, err)
-	require.NoError(t, ds.FailBrokerDispatch(ctx, d2.ID, "boom"))
+	require.NoError(t, ds.FailBrokerDispatch(ctx, d2.ID, "boom", ""))
 	has, err = ds.HasOutstandingBrokerDispatch(ctx, other.ID, "delete")
 	require.NoError(t, err)
 	assert.False(t, has)

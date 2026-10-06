@@ -16,7 +16,7 @@ Scion operates in multiple contexts, each with specific security requirements. A
 | **Web Dashboard** | Browser | OAuth 2.0 + Session Cookie | HTTP-only cookie |
 | **CLI (Hub Commands)** | Terminal | OAuth 2.0 + Device Flow | `~/.scion/credentials.json` |
 | **Agent (sciontool)** | Container | Hub-issued JWT | Env Var (`SCION_HUB_TOKEN`) |
-| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/broker-credentials.json` |
+| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/hub-credentials/<name>.json` |
 | **Development** | Any | Developer Token (Bearer) | `~/.scion/dev-token` |
 
 ### 1.2 User Authentication (OAuth 2.0)
@@ -43,6 +43,7 @@ Agents running inside containers must report status back to the Hub without poss
 
 - **Role-Based Scopes**: Instead of raw template scopes (which are deprecated), an agent's scopes are governed by its assigned **Tiered Agent Role** (`none`, `readonly`, `baseline`, or `full`). An empty or unspecified agent role is securely enforced to resolve to the least-privilege role (`AgentRoleNone`) across all authorization paths. Scheduled dispatch children automatically persist this explicit role, and dispatches lacking a creator are refused.
     - `project:read` (Readonly): Allows reading project state (agents, templates, etc.).
+    - `project:artifact:read` (Readonly): Allows the agent to use the artifact service to read artifacts (`artifact.read`) when the `hub.artifacts` experiment is on; which artifacts it can read is decided by its project and by artifact grants. Artifact access uses dedicated agent scopes. Agents created from a credential issued before artifacts existed, and some agents created before then, do not carry it; refreshing such an agent's token is not enough. Recreate the agent from a current credential (for example a newly issued access token or a session) to give it artifact access.
     - `agent:status:update`, `agent:token:refresh`, `project:agent:notify`, `agent:port:forward` (Baseline): Standard operational scopes allowing the agent to report progress, refresh its token, and hold port tunnels.
     - `project:agent:create`, `project:agent:sa_assign`, `project:agent:lifecycle`, `project:secret:read`, `project:template:write` (Full): Complete programmatic control allowing the agent to spawn sub-agents, assign GCP service accounts to agents, manage their phases, retrieve project secrets dynamically, and create or update templates within the project.
 - **Transmission**: The token is injected into the container via the `SCION_HUB_TOKEN` environment variable and is used by `sciontool` for all API calls.

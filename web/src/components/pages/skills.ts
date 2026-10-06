@@ -31,6 +31,7 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /** Skills requested per page; the server's maximum list limit. */
 const SKILLS_PAGE_SIZE = 200;
@@ -44,6 +45,13 @@ export class ScionPageSkills extends LitElement {
   pageData: PageData | null = null;
 
   @state() private loading = true;
+  /**
+   * True once any load has settled (or the server prefetch was used). After
+   * that, reloads keep the current UI rendered with an inline spinner rather
+   * than swapping it for the full-page one, so the focused control (search
+   * input, Retry button) is not removed (ptone/scion#2948).
+   */
+  @state() private hasLoaded = false;
   @state() private error: string | null = null;
   @state() private skills: Skill[] = [];
   @state() private scopeCapabilities: Capabilities | undefined;
@@ -84,6 +92,14 @@ export class ScionPageSkills extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.5rem;
+      }
+
+      /* The header's only child holds the name and scope. As a flex item it
+         defaults to min-width:auto and grows to fit a long unbroken name,
+         pushing it past the card edge; min-width:0 lets it shrink so the
+         shared wrapping rules can break the name instead. */
+      .skill-header > div {
+        min-width: 0;
       }
 
       .skill-meta {
@@ -151,6 +167,10 @@ export class ScionPageSkills extends LitElement {
 
       .filter-bar .search-input {
         min-width: 200px;
+      }
+
+      .filter-bar .inline-loading {
+        font-size: 1rem;
       }
 
       th.sortable {
@@ -221,6 +241,7 @@ export class ScionPageSkills extends LitElement {
       this.skills = ssrData.skills;
       this.scopeCapabilities = ssrData._capabilities;
       this.loading = false;
+      this.hasLoaded = true;
     } else {
       void this.loadSkills();
     }
@@ -229,8 +250,9 @@ export class ScionPageSkills extends LitElement {
   private async loadSkills(): Promise<void> {
     const generation = ++this.loadGeneration;
     this.loading = true;
-    this.error = null;
-    this.partialLoadError = null;
+    // The current error or partial-load notice stays up (with its Retry
+    // button) until this load settles, so focus on Retry is not lost.
+    const focusWasInside = this.shadowRoot?.activeElement != null;
 
     // Pages are collected here as they arrive, so a failure after the first
     // page can still show what was loaded (ptone/scion#1949).
@@ -269,24 +291,58 @@ export class ScionPageSkills extends LitElement {
       if (generation !== this.loadGeneration) return;
       this.skills = loaded;
       this.scopeCapabilities = capabilities;
+      this.error = null;
+      this.partialLoadError = null;
     } catch (err) {
       if (generation !== this.loadGeneration || err instanceof PaginationStoppedError) return;
       console.error('Failed to load skills:', err);
       const message = err instanceof Error ? err.message : 'Failed to load skills';
+      // Lead with the hub's explanation when it sent one (ptone/scion#2949).
+      const hubMessage = err instanceof PaginationError ? err.hubMessage : undefined;
       if (firstPage) {
         // paginateAll's errors are terse ("Skills request failed: 403"), so
         // say what failed; other errors (e.g. network) read as they are.
         this.error =
-          err instanceof PaginationError ? `Failed to load skills (${message})` : message;
+          err instanceof PaginationError
+            ? hubMessage
+              ? `Failed to load skills: ${hubMessage} (${message})`
+              : `Failed to load skills (${message})`
+            : message;
+        this.partialLoadError = null;
       } else {
         // A later page failed: keep the pages that loaded and say so.
         this.skills = loaded;
         this.scopeCapabilities = capabilities;
-        this.partialLoadError = message;
+        this.error = null;
+        this.partialLoadError = hubMessage ? `${hubMessage}; ${message}` : message;
       }
     } finally {
-      if (generation === this.loadGeneration) this.loading = false;
+      if (generation === this.loadGeneration) {
+        this.loading = false;
+        this.hasLoaded = true;
+        if (focusWasInside) void this.restoreFocus();
+      }
     }
+  }
+
+  /**
+   * After a load that started with focus inside the page: if the re-render
+   * removed the focused control (e.g. Retry, once the error or notice
+   * clears) so that focus fell to the document body, move it to the search
+   * input (ptone/scion#2948). Focus the user moved elsewhere during the
+   * load is left alone. The filter bar is always rendered after the first
+   * load, so the Retry selectors are only a defensive fallback in case
+   * that ever changes.
+   */
+  private async restoreFocus(): Promise<void> {
+    await this.updateComplete;
+    if (!this.isConnected || this.shadowRoot?.activeElement) return;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    const target = ['.search-input', '.error-retry', '.partial-load-retry']
+      .map((selector) => this.shadowRoot?.querySelector<HTMLElement>(selector))
+      .find((el) => el != null);
+    target?.focus();
   }
 
   private get displaySkills(): Skill[] {
@@ -376,13 +432,14 @@ export class ScionPageSkills extends LitElement {
         </div>
       </div>
 
-      ${this.loading
+      ${this.loading && !this.hasLoaded
         ? this.renderLoading()
-        : this.error
-          ? this.renderError()
-          : html`
-              ${this.renderFilterBar()} ${this.renderPartialLoadNotice()} ${this.renderSkills()}
-            `}
+        : html`
+            ${this.renderFilterBar()}
+            ${this.error
+              ? this.renderError()
+              : html`${this.renderPartialLoadNotice()} ${this.renderSkills()}`}
+          `}
     `;
   }
 
@@ -439,6 +496,9 @@ export class ScionPageSkills extends LitElement {
               </sl-dropdown>
             `
           : nothing}
+        ${this.loading
+          ? html`<sl-spinner class="inline-loading" aria-label="Loading skills"></sl-spinner>`
+          : nothing}
       </div>
     `;
   }
@@ -454,6 +514,7 @@ export class ScionPageSkills extends LitElement {
           size="small"
           variant="text"
           class="partial-load-retry"
+          ?loading=${this.loading}
           @click=${() => this.loadSkills()}
           >Retry</sl-button
         >
@@ -477,7 +538,12 @@ export class ScionPageSkills extends LitElement {
         <h2>Failed to Load Skills</h2>
         <p>There was a problem connecting to the API.</p>
         <div class="error-details">${this.error}</div>
-        <sl-button variant="primary" @click=${() => this.loadSkills()}>
+        <sl-button
+          variant="primary"
+          class="error-retry"
+          ?loading=${this.loading}
+          @click=${() => this.loadSkills()}
+        >
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
         </sl-button>
@@ -544,7 +610,7 @@ export class ScionPageSkills extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="lightning-charge"></sl-icon>
-              ${skill.name}
+              <span>${skill.name}</span>
             </h3>
             <div class="skill-meta">
               <span class="scope-badge">${skill.scope}</span>
@@ -603,8 +669,7 @@ export class ScionPageSkills extends LitElement {
       <tr
         class="clickable"
         @click=${() => {
-          window.history.pushState({}, '', `/skills/${skill.id}`);
-          window.dispatchEvent(new PopStateEvent('popstate'));
+          navigateTo(`/skills/${skill.id}`);
         }}
       >
         <td>

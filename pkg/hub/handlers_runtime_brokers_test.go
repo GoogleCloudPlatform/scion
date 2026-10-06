@@ -1093,11 +1093,20 @@ func TestBrokerHeartbeat_RuntimeNotOverwrittenWhenProfileFirstBackfilledSamePass
 // (non-nil but unreliable) value in the same breath as an error. This proves
 // a caller actually gates on the error rather than trusting whatever value
 // came back whenever one happens to be present.
+//
+// updateRuntimeBrokerCalls counts broker row writes, so a test can prove the
+// heartbeat handler writes the row only when the refreshed state changed.
 type countingBrokerLoadStore struct {
 	store.Store
 	getRuntimeBrokerCalls     int
 	getRuntimeBrokerErr       error
 	getRuntimeBrokerErrBroker *store.RuntimeBroker
+	updateRuntimeBrokerCalls  int
+}
+
+func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broker *store.RuntimeBroker) error {
+	s.updateRuntimeBrokerCalls++
+	return s.Store.UpdateRuntimeBroker(ctx, broker)
 }
 
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {

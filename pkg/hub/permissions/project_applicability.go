@@ -149,6 +149,12 @@ var ProjectTargetApplicability = map[string]bool{
 	// true for the same reason as role_binding.
 	"access_constraint.admin": true, "access_constraint.read": true,
 
+	// artifact.* — every artifact is homed in a project, and the hub's
+	// artifacts.Host checks each permission against that project
+	// (Resource{Type: artifact, ParentType: project}).
+	"artifact.read": true, "artifact.create": true, "artifact.update": true,
+	"artifact.delete": true, "artifact.manage": true,
+
 	// scheduled_event.* — always scoped to a project.
 	"scheduled_event.read": true, "scheduled_event.list": true, "scheduled_event.create": true,
 	"scheduled_event.delete": true, "scheduled_event.update": true,
@@ -196,6 +202,9 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
+	"artifact.read": {BoundaryKindProject, BoundaryKindHub}, "artifact.create": {BoundaryKindProject, BoundaryKindHub},
+	"artifact.update": {BoundaryKindProject, BoundaryKindHub}, "artifact.delete": {BoundaryKindProject, BoundaryKindHub},
+	"artifact.manage": {BoundaryKindProject, BoundaryKindHub},
 	"template.create": {BoundaryKindProject, BoundaryKindHub}, "template.read": {BoundaryKindProject, BoundaryKindHub},
 	"template.update": {BoundaryKindProject, BoundaryKindHub}, "template.delete": {BoundaryKindProject, BoundaryKindHub},
 	"template.list":         {BoundaryKindProject, BoundaryKindHub},
@@ -294,6 +303,11 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
 	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource},
+
+	// artifact.* — project-homed, no scope-kind split and no global catalog.
+	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},
+	"artifact.update": {TargetClassKindProjectScoped}, "artifact.delete": {TargetClassKindProjectScoped},
+	"artifact.manage": {TargetClassKindProjectScoped},
 
 	// skill.* — read/list support both project and global catalog classes;
 	// create/update/delete are project-scoped only; register is a hub-level

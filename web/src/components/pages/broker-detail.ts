@@ -31,9 +31,7 @@ import type {
   BrokerSettingsResponse,
   InheritedSetting,
 } from '../../shared/types.js';
-import { getAgentDisplayStatus } from '../../shared/types.js';
-import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -135,21 +133,37 @@ export class ScionPageBrokerDetail extends LitElement {
 
       .header-title {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         gap: 0.75rem;
         margin-bottom: 0.5rem;
       }
 
-      .header-title sl-icon {
+      .header-title > sl-icon {
+        flex-shrink: 0;
         color: var(--scion-primary, #3b82f6);
         font-size: 1.5rem;
+        /* Centre the icon on the first line of the name: (1.95rem h1 line box
+           - 1.5rem icon) / 2. */
+        margin-top: 0.225rem;
+      }
+      /* A long name wraps on its own line; the badges then follow on the next
+         line instead of floating beside a multi-line name. */
+      .header-title-text {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 0.75rem;
+        min-width: 0;
       }
 
       .header h1 {
         font-size: 1.5rem;
         font-weight: 700;
+        line-height: 1.3;
         color: var(--scion-text, #1e293b);
         margin: 0;
+        min-width: 0;
+        overflow-wrap: anywhere;
       }
 
       .header-actions {
@@ -611,8 +625,9 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
-  private formatDate(dateString: string): string {
-    return formatInstantWithZone(dateString) || dateString;
+  /** Formats a timestamp for the header stats; "—" when missing or invalid. */
+  private formatDate(dateString: string | undefined): string {
+    return (dateString && formatInstantWithZone(dateString)) || '—';
   }
 
   private get isAdmin(): boolean {
@@ -690,13 +705,15 @@ export class ScionPageBrokerDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             <sl-icon name="hdd-rack"></sl-icon>
-            <h1>${this.broker.name}</h1>
-            ${this.renderBrokerTypeBadge()}
-            <scion-status-badge
-              status=${this.getBrokerStatusVariant(this.broker.status)}
-              label=${this.broker.status}
-              size="small"
-            ></scion-status-badge>
+            <div class="header-title-text">
+              <h1>${this.broker.name}</h1>
+              ${this.renderBrokerTypeBadge()}
+              <scion-status-badge
+                status=${this.getBrokerStatusVariant(this.broker.status)}
+                label=${this.broker.status}
+                size="small"
+              ></scion-status-badge>
+            </div>
           </div>
           ${subtitleParts.length > 0
             ? html`<div class="header-subtitle">${subtitleParts.join(' · ')}</div>`
@@ -731,7 +748,9 @@ export class ScionPageBrokerDetail extends LitElement {
         </div>
         <div class="stat">
           <span class="stat-label">Created</span>
-          <span class="stat-value-sm">${this.formatDate(this.broker.createdAt)}</span>
+          <span class="stat-value-sm"
+            >${this.formatDate(this.broker.created || this.broker.createdAt)}</span
+          >
         </div>
         <div class="stat">
           <span class="stat-label">Last Heartbeat</span>
@@ -1092,11 +1111,7 @@ export class ScionPageBrokerDetail extends LitElement {
             </h3>
             <div class="agent-meta"><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
         </div>
         ${agent.taskSummary ? html`<div class="agent-task">${agent.taskSummary}</div>` : ''}
       </a>

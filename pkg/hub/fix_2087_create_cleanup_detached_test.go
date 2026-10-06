@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -140,7 +141,7 @@ type cancelingCreateDispatcher struct {
 	createErr     error
 
 	heldBeforeCleanup reservationsHeld
-	ctxNotCanceled    bool
+	dispatchCtxErr    error
 	delete            ctxObservation
 	// credJTI is a credential the mock records for the agent, standing in
 	// for the one a real dispatcher mints, so the test can observe whether
@@ -161,7 +162,9 @@ func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Co
 		ExpiresAt:    now.Add(time.Hour),
 	}))
 	d.cancelRequest()
-	d.ctxNotCanceled = !awaitCanceled(ctx) // the handler's ctx is the request's
+	// Since ptone/scion#1961 the dispatch runs detached from the request:
+	// the request is canceled, but the dispatch ctx must stay live.
+	d.dispatchCtxErr = ctx.Err()
 	if d.createErr != nil {
 		return nil, d.createErr
 	}
@@ -222,7 +225,7 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 			serve()
 
 			require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
-			require.False(t, disp.ctxNotCanceled, "the dispatcher must see the request ctx canceled")
+			require.NoError(t, disp.dispatchCtxErr, "the dispatch ctx must not follow the canceled request (ptone/scion#1961)")
 			agentID := disp.capturedAgent.ID
 			assertReservationsHeldBeforeCleanup(t, disp.heldBeforeCleanup)
 
@@ -340,9 +343,15 @@ func TestCleanupFailedCreate_CanceledCtx_EveryStepRunsDetached(t *testing.T) {
 	cancel()
 
 	var runtimeDelete ctxObservation
-	srv.cleanupFailedCreate(canceled, agent, agent.RuntimeBrokerID, cleanupSkipRevoke, func(cctx context.Context) error {
-		runtimeDelete = observeCtx(cctx)
-		return nil
+	srv.cleanupFailedCreate(canceled, createRollback{
+		Agent:           agent,
+		RuntimeBrokerID: agent.RuntimeBrokerID,
+		Stage:           createStageDispatch,
+		Cause:           errors.New("dispatch failed"),
+		DeleteRuntime: func(cctx context.Context) error {
+			runtimeDelete = observeCtx(cctx)
+			return nil
+		},
 	})
 
 	assertLiveBoundedCtx(t, runtimeDelete, "runtime delete", dispatchDeleteTimeout)
@@ -366,6 +375,38 @@ func (c *cancelAfterDeleteStore) DeleteAgent(ctx context.Context, id string) err
 	if err == nil && id == c.targetID {
 		c.deleted = true
 		c.cancelRequest()
+	}
+	return err
+}
+
+// WithTx cancels the request once a transaction that deleted targetID has
+// committed: the row is gone only at commit.
+func (c *cancelAfterDeleteStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	tx := &deleteRecordingTx{targetID: c.targetID}
+	if err := c.Store.WithTx(ctx, func(inner store.Store) error {
+		tx.Store = inner
+		return fn(tx)
+	}); err != nil {
+		return err
+	}
+	if tx.deleted {
+		c.deleted = true
+		c.cancelRequest()
+	}
+	return nil
+}
+
+// deleteRecordingTx records whether DeleteAgent of targetID succeeded.
+type deleteRecordingTx struct {
+	store.Store
+	targetID string
+	deleted  bool
+}
+
+func (d *deleteRecordingTx) DeleteAgent(ctx context.Context, id string) error {
+	err := d.Store.DeleteAgent(ctx, id)
+	if err == nil && id == d.targetID {
+		d.deleted = true
 	}
 	return err
 }
@@ -439,4 +480,11 @@ func TestCreateAgent_WorkspaceBootstrapNoStorage_CleansUp(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 0, projectReservations,
 		"a failed workspace-bootstrap create must release the per-project reservation")
+
+	failed, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+	require.NoError(t, err)
+	require.Len(t, failed, 1, "the rolled-back create is recorded once")
+	var sum compensationSummary
+	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
+	assert.Equal(t, createStageStorage, sum.Stage, "the record names the pre-dispatch stage that failed")
 }

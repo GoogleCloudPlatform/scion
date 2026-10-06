@@ -70,7 +70,7 @@ The **receiving project's inbound policy** is directional:
 | Policy | Meaning |
 |--------|---------|
 | `none` | Accept no agent messages from other projects. |
-| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project. |
+| `members` | Accept an external agent only when its Hub-attested originating human is currently an active member of this receiving project (any active project role binding, built-in or custom). |
 | `any` | Accept an eligible agent from any project on this Hub. |
 
 All policies require the external **sender** to use `hub` mode. The
@@ -394,7 +394,8 @@ The error message names `scion keys`; `details` carries `operation_id`,
 (`raw_combination_unsupported`) and `unsupported_capability` reasons
 (`raw_plain_conflict`, `raw_broadcast_unsupported`,
 `raw_scheduling_unsupported`, `raw_broker_ingress_unsupported`) are no longer
-returned. See [API Reference](/scion/reference/api/#agents-apiv1agents).
+returned. See [API Reference](/scion/reference/api/#agents-apiv1agents) and
+[Migrating from raw message delivery](/scion/reference/raw-message-removal/).
 
 ---
 

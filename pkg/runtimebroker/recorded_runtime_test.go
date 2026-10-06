@@ -68,9 +68,14 @@ type rrManager struct {
 
 func (m *rrManager) acted() int32 { return m.acts.Load() }
 
-func (m *rrManager) Stop(ctx context.Context, agentID, projectPath string) error {
+func (m *rrManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
 	m.acts.Add(1)
-	return m.listCountingManager.Stop(ctx, agentID, projectPath)
+	return m.listCountingManager.Stop(ctx, agentID, projectPath, runID)
+}
+
+func (m *rrManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
+	m.acts.Add(1)
+	return m.listCountingManager.StopTarget(ctx, ref)
 }
 
 func (m *rrManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
@@ -98,7 +103,7 @@ func (m *rrManager) SendKeys(ctx context.Context, projectID, agentSlug, expected
 func newRRRuntime(name string, m *rrManager) *runtime.MockRuntime {
 	return &runtime.MockRuntime{
 		NameFunc:    func() string { return name },
-		StopFunc:    func(context.Context, string) error { m.acts.Add(1); return nil },
+		StopFunc:    func(context.Context, runtime.RunRef) error { m.acts.Add(1); return nil },
 		DeleteFunc:  func(context.Context, runtime.RunRef) error { m.acts.Add(1); return nil },
 		GetLogsFunc: func(context.Context, string) (string, error) { m.acts.Add(1); return "log", nil },
 		ExecFunc:    func(context.Context, string, []string) (string, error) { m.acts.Add(1); return "", nil },
@@ -548,7 +553,7 @@ func TestRecordedRuntime_SignatureCoversParam(t *testing.T) {
 				log:         slog.Default(),
 				streams:     make(map[string]*StreamHandler),
 				dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-				cancels:     make(map[string]context.CancelFunc),
+				cancels:     make(map[string]*requestCancel),
 				ctx:         ctx,
 				cancel:      cancel,
 			}

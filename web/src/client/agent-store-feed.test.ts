@@ -28,6 +28,7 @@ import {
   AGENT_READ_BURST_LIMIT,
   AGENT_READ_CONCURRENCY,
   AGENT_READ_TIMEOUT_MS,
+  listedWithoutActiveDelete,
   type AgentListSnapshot,
 } from './agent-store.js';
 import type { Agent } from '../shared/types.js';
@@ -1023,5 +1024,175 @@ describe('AgentStore tombstones across feeds', () => {
     await h.connect();
 
     expect(ids(await again)).toEqual(['a1', 'a2']);
+  });
+});
+
+describe('AgentStore tombstones and restored agents', () => {
+  const deleting = {
+    state: 'deleting',
+    soft: false,
+    claim: 1,
+    startedAt: '2026-01-01T00:00:00Z',
+    leaseExpiresAt: '2026-01-01T00:00:20Z',
+  } as const;
+
+  /** Load the hub list, delete a2 over SSE, release the list and let the feed close idle. */
+  async function deleteThenIdleClose(h: ReturnType<typeof createHarness>): Promise<void> {
+    const release = h.store.retain(HUB, () => {});
+    const first = h.store.ensure(HUB);
+    await h.connect();
+    await first;
+    await h.emitAgent('deleted', { agentId: 'a2' });
+    expect(ids(h.store.peek(HUB))).not.toContain('a2');
+    release();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.feeds[0]?.isConnected).toBe(false);
+  }
+
+  it('shows an agent restored while no feed was open once a later listing shows it with no delete', async () => {
+    const h = createHarness([agent('a1', { deletion: null }), agent('a2', { deletion: null })]);
+    await deleteThenIdleClose(h);
+    // Deleted on the server, then restored while the store had no feed.
+    h.server.agents = h.server.agents.filter((a) => a.id !== 'a2');
+    h.server.agents.push(agent('a2', { deletion: null }));
+
+    const seen: AgentListSnapshot[] = [];
+    h.store.retain(HUB, (s) => seen.push(s));
+    const again = h.store.ensure(HUB);
+    expect(h.feeds).toHaveLength(2);
+    await h.connect();
+
+    expect(ids(await again)).toEqual(['a1', 'a2']);
+    expect(h.feeds[1]?.getAgent('a2')).toBeDefined();
+    // The tombstone is gone, not just skipped once: a later walk keeps it.
+    h.events.dispatchEvent(new CustomEvent('scion:membership-changed'));
+    await h.connect();
+    expect(h.server.walks()).toBe(3);
+    expect(ids(h.store.peek(HUB))).toEqual(['a1', 'a2']);
+  });
+
+  it('shows a restored agent in the progress snapshots of a first load, before the walk ends', async () => {
+    const h = createHarness(
+      [agent('a1', { deletion: null }), agent('a2', { deletion: null }), agent('a3')],
+      { pageSize: 1 }
+    );
+    await deleteThenIdleClose(h);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(h.store.peek(HUB)).toBeUndefined();
+
+    const loading: string[][] = [];
+    h.store.retain(HUB, (s) => {
+      if (s.status === 'loading') loading.push(ids(s));
+    });
+    const again = h.store.ensure(HUB);
+    await h.connect();
+
+    expect(ids(await again)).toEqual(['a1', 'a2', 'a3']);
+    expect(loading).toContainEqual(['a1', 'a2']);
+  });
+
+  it('shows a restored agent whose later delete failed, since the row is listed with a failed delete', async () => {
+    const h = createHarness([agent('a1', { deletion: null }), agent('a2', { deletion: null })]);
+    await deleteThenIdleClose(h);
+    h.server.agents = [
+      agent('a1', { deletion: null }),
+      agent('a2', {
+        deletion: { state: 'failed', soft: false, claim: 2, startedAt: '2026-01-02T00:00:00Z' },
+      }),
+    ];
+
+    const again = h.store.ensure(HUB);
+    await h.connect();
+
+    expect(ids(await again)).toEqual(['a1', 'a2']);
+  });
+
+  it('keeps an agent hidden when the next feed lists it with its delete still running', async () => {
+    const h = createHarness([agent('a1', { deletion: null }), agent('a2', { deletion: null })]);
+    await deleteThenIdleClose(h);
+    // The hard delete is still completing: the row is listed, deleting.
+    h.server.agents = [agent('a1', { deletion: null }), agent('a2', { deletion: { ...deleting } })];
+
+    h.store.retain(HUB, () => {});
+    const again = h.store.ensure(HUB);
+    await h.connect();
+    expect(ids(await again)).toEqual(['a1']);
+    expect(h.feeds[1]?.getAgent('a2')).toBeUndefined();
+
+    // The row is gone now; the tombstone still hides any stale copy.
+    h.server.agents = [agent('a1', { deletion: null }), agent('a2')];
+    h.events.dispatchEvent(new CustomEvent('scion:membership-changed'));
+    await h.connect();
+    expect(h.server.walks()).toBe(3);
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+  });
+
+  it('keeps an agent hidden in progress snapshots of a first load while its delete runs', async () => {
+    const h = createHarness(
+      [agent('a1', { deletion: null }), agent('a2', { deletion: null }), agent('a3')],
+      { pageSize: 1 }
+    );
+    await deleteThenIdleClose(h);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(h.store.peek(HUB)).toBeUndefined();
+    h.server.agents = [
+      agent('a1', { deletion: null }),
+      agent('a2', { deletion: { ...deleting } }),
+      agent('a3'),
+    ];
+
+    const progress: string[][] = [];
+    h.store.retain(HUB, (s) => progress.push(ids(s)));
+    const again = h.store.ensure(HUB);
+    await h.connect();
+
+    expect(ids(await again)).toEqual(['a1', 'a3']);
+    expect(progress.some((p) => p.includes('a2'))).toBe(false);
+  });
+
+  it('a walk that starts while a delete completes on the same feed never shows the agent', async () => {
+    const h = createHarness([
+      agent('a1', { deletion: null }),
+      agent('a2', { deletion: { ...deleting } }),
+    ]);
+    h.store.retain(HUB, () => {});
+    const release = h.server.pause();
+    const loading = h.store.ensure(HUB);
+    await h.connect();
+
+    // The delete completes while the page is in flight, then a late
+    // created event for the same agent arrives.
+    await h.emitAgent('deleted', { agentId: 'a2' });
+    await h.emitAgent('created', created('a2'));
+    h.server.agents = [agent('a1', { deletion: null }), agent('a2', { deletion: null })];
+    release();
+
+    expect(ids(await loading)).toEqual(['a1']);
+    await h.emitAgent('status', { agentId: 'a2', phase: 'running' });
+    expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+    expect(h.feeds[0]?.getAgent('a2')).toBeUndefined();
+  });
+});
+
+describe('listedWithoutActiveDelete', () => {
+  const base = { soft: false, claim: 1, startedAt: '2026-01-01T00:00:00Z' };
+
+  it('reads an explicit null or a failed delete as present, and a running delete, an unknown state or a missing key as not', () => {
+    expect(listedWithoutActiveDelete(agent('a', { deletion: null }))).toBe(true);
+    expect(listedWithoutActiveDelete(agent('a', { deletion: { ...base, state: 'failed' } }))).toBe(
+      true
+    );
+    expect(
+      listedWithoutActiveDelete(agent('a', { deletion: { ...base, state: 'deleting' } }))
+    ).toBe(false);
+    expect(
+      listedWithoutActiveDelete(
+        agent('a', { deletion: { ...base, state: 'deleting', stage: 'finalizing' } })
+      )
+    ).toBe(false);
+    expect(listedWithoutActiveDelete(agent('a'))).toBe(false);
+    // A state this client does not know yet keeps the tombstone.
+    const unknown = { ...base, state: 'purging' } as unknown as NonNullable<Agent['deletion']>;
+    expect(listedWithoutActiveDelete(agent('a', { deletion: unknown }))).toBe(false);
   });
 });
