@@ -77,7 +77,8 @@ func ReadWorkspaceRecord(path string) (string, error) {
 // ConfinedProjectConfigRoot returns the project config directory
 // ~/.scion/project-configs/<slug>__<id8> for slug and projectID. ok is false
 // unless slug and projectID are single path elements (non-empty, not ".",
-// no "..", no path separator; this includes the hub's project slug rules)
+// no "..", no path separator, no NUL byte; this includes the hub's project
+// slug rules)
 // and the result is a direct child of the project-configs directory named
 // exactly <slug>__<id8>. Callers apply the project ID grammar themselves.
 func ConfinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
@@ -97,9 +98,11 @@ func ConfinedProjectConfigRoot(slug, projectID string) (root string, ok bool) {
 	return root, true
 }
 
-// isSinglePathElement reports whether s is usable as one path element.
+// isSinglePathElement reports whether s is a single clean path element: a
+// non-empty component other than "." that contains no "..", no path
+// separator and no NUL byte.
 func isSinglePathElement(s string) bool {
-	return s != "" && s != "." && !strings.Contains(s, "..") && !strings.ContainsAny(s, `/\`)
+	return s != "" && s != "." && !strings.Contains(s, "..") && !strings.ContainsAny(s, "/\\\x00")
 }
 
 // WorkspaceIdentity is the project identity recorded in a workspace's .scion
