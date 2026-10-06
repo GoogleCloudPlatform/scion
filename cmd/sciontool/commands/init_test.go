@@ -3513,15 +3513,16 @@ func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.
 // Observation: the workload uid/gid (4242) differs from the test process and
 // both write into a 0700 t.TempDir owned by the test process. A dropped
 // child therefore never produces its file: as non-root, the Credential exec
-// itself fails with EPERM; as root, the dropped child cannot write into the
-// directory. An undropped child always can. getuid is stubbed to 0 for
+// itself fails with EPERM, or with EINVAL in a rootless container or user
+// namespace where 4242 is unmapped (see isUIDMapped in init.go); as root, the
+// dropped child cannot write into the directory. An undropped child always can. getuid is stubbed to 0 for
 // configureGitCommand so a non-root test process takes the same root-init
 // path production does.
 //
 // On the supervisor side, "drop" is only inferred from that expected failure
-// (EPERM at start, or a nonzero exit as root); any other outcome fails the
-// test. On the git side, init only logs git failures, so "drop" is inferred
-// from a missing .gitconfig. That cannot tell a dropped write from a skipped
+// (EPERM or EINVAL at start as non-root, or a nonzero exit as root); any
+// other outcome fails the test. On the git side, init only logs git
+// failures, so "drop" is inferred from a missing .gitconfig. That cannot tell a dropped write from a skipped
 // one; TestConfigureSharedWorkspaceGit_UsablePairWritesConfig and
 // TestConfigureGitCommand_RootInitSetsWorkloadCredential cover that half.
 func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T) {
@@ -3568,9 +3569,10 @@ func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T)
 				supGot = refuse
 			case supErr == nil && exit == 0 && fileExists(marker):
 				supGot = self
-			case !runningAsRoot && errors.Is(supErr, syscall.EPERM):
+			case !runningAsRoot && (errors.Is(supErr, syscall.EPERM) || errors.Is(supErr, syscall.EINVAL)):
 				// Non-root cannot set a Credential: the drop is the
-				// start failure itself.
+				// start failure itself. That is EPERM, or EINVAL when
+				// the workload uid is unmapped in a user namespace.
 				supGot = drop
 			case runningAsRoot && supErr == nil && exit != 0 && !fileExists(marker):
 				// Root can drop; the dropped child then cannot write
