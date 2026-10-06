@@ -336,7 +336,7 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 
 	// Safe to be specific: this service account is already readable by this
 	// caller, so naming its state discloses nothing they cannot already see.
-	if !sa.Verified {
+	if !gcpServiceAccountVerified(sa) {
 		BadRequest(w, "GCP service account is not verified; verify it before setting it as the project default")
 		return false
 	}

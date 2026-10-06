@@ -70,7 +70,7 @@ vi.mock('../../../client/api.js', () => ({
   extractApiError: (res: unknown, fallback: string) => extractApiErrorMock(res, fallback),
 }));
 
-await import('./chat-thread.js');
+const { pinnedAfterScroll } = await import('./chat-thread.js');
 // Registers <sl-textarea> so the composer's shadow root actually contains it
 // (and its own shadow root) instead of an unupgraded, shadow-less stand-in —
 // needed for the reply-focus tests below to walk into the native <textarea>.
@@ -792,6 +792,64 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.dispatchState).toBe('failed');
     expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
     expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
+  });
+
+  // A replayed send response without dispatchState (an idempotency hit
+  // returns only id/content/sender) defaults to dispatched; it must not
+  // overwrite an SSE-delivered terminal no_recipient.
+  it('never downgrades an SSE-delivered no_recipient when the HTTP response omits dispatchState', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'thanks',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    internals.messageMap.set('server-sse-no-recipient', {
+      id: 'server-sse-no-recipient',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'thread:t1',
+      recipientId: 't1',
+      msg: 'thanks',
+      type: 'chat',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'no_recipient',
+    });
+
+    resolveSend({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'server-sse-no-recipient', content: 'thanks' }),
+    } as unknown as Response);
+
+    await sendPromise;
+
+    expect(internals.messageMap.get('server-sse-no-recipient')?.dispatchState).toBe('no_recipient');
   });
 
   // Review R2: PublishUserMessage now carries dispatchFailureReason/Code on
@@ -1874,6 +1932,238 @@ describe('scion-chat-thread initial scroll position', () => {
     await Promise.resolve();
 
     expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
+  });
+
+  it('stays at the bottom when the list grows under a pinned reader', async () => {
+    const el = await mountWithHistory();
+    scrollWrites = [];
+
+    // An image further up finishes loading and the list grows.
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
+  });
+
+  it('leaves a reader who scrolled away where they are when the list grows', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites).toEqual([]);
+  });
+
+  it('keeps the pin when a scroll event trails the list growing beneath the reader', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    // At the bottom: 1000 - 700 - 300 = 0.
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+
+    // An image box renders and the list grows by 484px before the scroll
+    // event queued by the last pin write is dispatched. The position did
+    // not move up, so this is not the reader scrolling away.
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => SCROLL_HEIGHT + 484,
+    });
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT + 484);
+  });
+
+  it('keeps the pin when the list shrinks and then grows before the scroll event', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+
+    // Clamp scrollTop to the scroll range, as a browser does.
+    let height = SCROLL_HEIGHT;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => height,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return Math.min(scrollTops.get(this) ?? 0, Math.max(0, height - CLIENT_HEIGHT));
+      },
+      set(this: HTMLElement, value: number) {
+        scrollTops.set(this, Math.min(value, Math.max(0, height - CLIENT_HEIGHT)));
+        if (this.classList.contains('messages-scroll') && this.isConnected) {
+          scrollWrites.push({ top: value, messagesRendered: 0, renderPending: false });
+        }
+      },
+    });
+
+    // A reserved image box is taller than the image: the list shrinks, the
+    // offset is pulled up, and the resize catch-up runs.
+    height = SCROLL_HEIGHT - 171;
+    el.keepPinnedToBottom();
+    // Then the list grows before the clamp's scroll event is dispatched.
+    height = SCROLL_HEIGHT + 101;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT + 101);
+  });
+
+  it('drops the pin when the reader scrolls up past the threshold', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT - 200;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites).toEqual([]);
+  });
+
+  for (const step of [0.5, 0.9]) {
+    it(`drops the pin when the reader drags up slowly, ${step}px at a time`, async () => {
+      const el = await mountWithHistory();
+      const container = scrollContainer(el);
+      container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+      container.dispatchEvent(new Event('scroll'));
+      await el.updateComplete;
+
+      // Each frame moves less than a pixel, but together they carry the
+      // reader well past the threshold.
+      let top = SCROLL_HEIGHT - CLIENT_HEIGHT;
+      while (top > SCROLL_HEIGHT - CLIENT_HEIGHT - 200) {
+        top -= step;
+        container.scrollTop = top;
+        container.dispatchEvent(new Event('scroll'));
+      }
+      await el.updateComplete;
+      scrollWrites = [];
+
+      el.keepPinnedToBottom();
+
+      expect(scrollWrites).toEqual([]);
+    });
+  }
+
+  describe('steps aside for the other scroll owners', () => {
+    const owners: Array<[string, (el: Record<string, unknown>) => void]> = [
+      ['the unread anchor', (el) => (el._unreadAnchorActive = true)],
+      ['a jump to a message', (el) => (el._jumpScrollCleanup = () => {})],
+      ['a view around an older message', (el) => (el.viewingAroundMessage = true)],
+    ];
+    for (const [owner, claim] of owners) {
+      it(`writes no scroll while ${owner} is steering`, async () => {
+        const el = await mountWithHistory();
+        const internals = el as unknown as Record<string, unknown>;
+        expect(internals.pinnedToBottom, 'the reader starts at the bottom').toBe(true);
+        claim(internals);
+        scrollWrites = [];
+
+        el.keepPinnedToBottom();
+
+        expect(scrollWrites).toEqual([]);
+      });
+    }
+  });
+
+  it('watches the message list for size changes while open', async () => {
+    const observed: Element[] = [];
+    const callbacks: ResizeObserverCallback[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(cb: ResizeObserverCallback) {
+        callbacks.push(cb);
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      const el = await mountWithHistory();
+      expect(observed.some((t) => t.classList.contains('messages-list'))).toBe(true);
+      scrollWrites = [];
+      for (const cb of callbacks) cb([], {} as ResizeObserver);
+      expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
+
+  it('stops watching the message list once removed', async () => {
+    const instances: { targets: Element[]; disconnects: number }[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly record = { targets: [] as Element[], disconnects: 0 };
+      constructor() {
+        instances.push(this.record);
+      }
+      observe(target: Element): void {
+        this.record.targets.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {
+        this.record.disconnects++;
+      }
+    } as unknown as typeof ResizeObserver;
+    try {
+      const el = await mountWithHistory();
+      const watch = instances.find((r) =>
+        r.targets.some((t) => t.classList.contains('messages-list'))
+      );
+      expect(watch, 'the list is watched while open').toBeDefined();
+      const before = watch!.disconnects;
+
+      el.remove();
+
+      expect(watch!.disconnects).toBe(before + 1);
+      expect((el as unknown as Record<string, unknown>)._bottomPinTarget).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
+});
+
+describe('pinnedAfterScroll', () => {
+  it('pins near the bottom whatever came before', () => {
+    expect(pinnedAfterScroll(false, 0, true, true)).toBe(true);
+    expect(pinnedAfterScroll(false, 79, false, false)).toBe(true);
+  });
+
+  it('keeps a pin when the list grew without the reader scrolling up', () => {
+    expect(pinnedAfterScroll(true, 484, false, false)).toBe(true);
+  });
+
+  it('drops the pin when the reader scrolled up', () => {
+    expect(pinnedAfterScroll(true, 200, true, false)).toBe(false);
+  });
+
+  it('drops the pin while another scroll owner is steering', () => {
+    expect(pinnedAfterScroll(true, 200, false, true)).toBe(false);
+  });
+
+  it('never pins a reader away from the bottom who was not pinned', () => {
+    expect(pinnedAfterScroll(false, 200, false, false)).toBe(false);
   });
 });
 
@@ -4422,6 +4712,17 @@ describe('scion-chat-thread deliveryStateFor visibility (O1, p2a-r3 review)', ()
       expect(internals.deliveryStateFor(older, 'a-newer-message-id', false)).toBe(dispatchState);
     }
   );
+
+  // no_recipient is shown like dispatched: only on the newest own message.
+  it('shows no_recipient only on the newest own message', () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    document.body.appendChild(el);
+    const internals = el as unknown as DeliveryStateInternals;
+    const msg = makeDeliveryMessage('no_recipient');
+    expect(internals.deliveryStateFor(msg, msg.id, false)).toBe('no_recipient');
+    expect(internals.deliveryStateFor(msg, 'a-newer-message-id', false)).toBe('');
+    expect(internals.deliveryStateFor(msg, 'a-newer-message-id', true)).toBe('');
+  });
 
   it('hides an ordinary dispatched state once it is no longer the last own message', () => {
     // Control: proves the test above is actually exercising the
