@@ -261,6 +261,17 @@ interface V1CloudRunConfig {
   location?: string;
 }
 
+// Keys match V1CloudRunInstancesConfig JSON tags in
+// pkg/config/settings_v1.go.
+interface V1CloudRunInstancesConfig {
+  project_id?: string;
+  region?: string;
+}
+
+// The two Cloud Run fields the runtime editor shows. Each maps to a
+// different block and key depending on the runtime type.
+type CloudRunEditorField = 'project' | 'region';
+
 interface V1RuntimeConfig {
   type?: string;
   host?: string;
@@ -271,6 +282,7 @@ interface V1RuntimeConfig {
   list_all_namespaces?: boolean;
   env?: Record<string, string>;
   cloudrun?: V1CloudRunConfig;
+  cloudrun_instances?: V1CloudRunInstancesConfig;
   safe_to_evict?: boolean;
   shared_dir_storage_backend?: string;
   home_storage_backend?: string;
@@ -4509,12 +4521,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Project</label>
                   <sl-input
-                    value=${rt.cloudrun?.project_id || ''}
+                    value=${this.cloudRunFieldValue(rt, 'project')}
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
                       this.updateRuntimeCloudRun(
                         name,
-                        'project_id',
+                        'project',
                         (e.target as HTMLInputElement).value
                       );
                     }}
@@ -4523,13 +4535,13 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Region</label>
                   <sl-input
-                    value=${rt.cloudrun?.location || ''}
+                    value=${this.cloudRunFieldValue(rt, 'region')}
                     placeholder="e.g. us-central1"
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
                       this.updateRuntimeCloudRun(
                         name,
-                        'location',
+                        'region',
                         (e.target as HTMLInputElement).value
                       );
                     }}
@@ -4561,9 +4573,16 @@ export class ScionPageAdminServerConfig extends LitElement {
         delete rt.gke;
         delete rt.list_all_namespaces;
         delete rt.safe_to_evict;
+        // Each Cloud Run type reads its own block; drop the other one.
+        if (value === 'cloudrun-instances') {
+          delete rt.cloudrun;
+        } else {
+          delete rt.cloudrun_instances;
+        }
       } else {
-        // Switching away from Cloud Run — clear cloudrun sub-object
+        // Switching away from Cloud Run — clear both Cloud Run blocks
         delete rt.cloudrun;
+        delete rt.cloudrun_instances;
       }
     }
     updated[name] = rt;
@@ -4649,19 +4668,47 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.runtimes = updated;
   }
 
-  private updateRuntimeCloudRun(name: string, field: keyof V1CloudRunConfig, value: string): void {
+  // The hub reads cloudrun-instances runtimes from cloudrun_instances
+  // (project_id, region) and cloudrun runtimes from cloudrun
+  // (project_id, location).
+  private cloudRunFieldValue(rt: V1RuntimeConfig, field: CloudRunEditorField): string {
+    if (rt.type === 'cloudrun-instances') {
+      const ci = rt.cloudrun_instances;
+      return (field === 'project' ? ci?.project_id : ci?.region) || '';
+    }
+    const cr = rt.cloudrun;
+    return (field === 'project' ? cr?.project_id : cr?.location) || '';
+  }
+
+  private updateRuntimeCloudRun(name: string, field: CloudRunEditorField, value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
-    const cr = { ...(rt.cloudrun || {}) };
-    if (value) {
-      cr[field] = value;
+    if (rt.type === 'cloudrun-instances') {
+      const ci = { ...(rt.cloudrun_instances || {}) };
+      const key: keyof V1CloudRunInstancesConfig = field === 'project' ? 'project_id' : 'region';
+      if (value) {
+        ci[key] = value;
+      } else {
+        delete ci[key];
+      }
+      if (Object.keys(ci).length > 0) {
+        rt.cloudrun_instances = ci;
+      } else {
+        delete rt.cloudrun_instances;
+      }
     } else {
-      delete cr[field];
-    }
-    if (Object.keys(cr).length > 0) {
-      rt.cloudrun = cr;
-    } else {
-      delete rt.cloudrun;
+      const cr = { ...(rt.cloudrun || {}) };
+      const key: keyof V1CloudRunConfig = field === 'project' ? 'project_id' : 'location';
+      if (value) {
+        cr[key] = value;
+      } else {
+        delete cr[key];
+      }
+      if (Object.keys(cr).length > 0) {
+        rt.cloudrun = cr;
+      } else {
+        delete rt.cloudrun;
+      }
     }
     updated[name] = rt;
     this.runtimes = updated;

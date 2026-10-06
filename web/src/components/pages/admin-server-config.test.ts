@@ -2061,16 +2061,14 @@ describe('scion-page-admin-server-config', () => {
   });
 
   describe('Cloud Run runtime editor field names (ptone/scion#3475)', () => {
-    function cloudRunConfig(tier: Record<string, unknown>) {
-      return makeBaseConfig({
-        ...tier,
-        runtimes: {
-          crun: {
-            type: 'cloudrun',
-            cloudrun: { project_id: 'proj-a', location: 'us-central1' },
-          },
-        },
-      });
+    function cloudRunConfig(
+      tier: Record<string, unknown>,
+      runtime: Record<string, unknown> = {
+        type: 'cloudrun',
+        cloudrun: { project_id: 'proj-a', location: 'us-central1' },
+      }
+    ) {
+      return makeBaseConfig({ ...tier, runtimes: { crun: runtime } });
     }
 
     function cloudRunInputs(el: HTMLElement): {
@@ -2131,6 +2129,50 @@ describe('scion-page-admin-server-config', () => {
           project_id: 'proj-b',
           location: 'europe-west1',
         });
+        expect('cloudrun_instances' in capturedPayload!.runtimes.crun).toBe(false);
+      });
+
+      it(`${mode} mode: cloudrun-instances reads and sends the cloudrun_instances block`, async () => {
+        let capturedPayload: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(
+            cloudRunConfig(tier, {
+              type: 'cloudrun-instances',
+              cloudrun_instances: { project_id: 'proj-a', region: 'us-central1' },
+            }),
+            {
+              schemaResponse: {
+                sections: {
+                  ...SCHEMA_RESPONSE.sections,
+                  runtimes: { koanf_paths: ['runtimes'] },
+                },
+              },
+              putHandler: (body) => {
+                if ('runtimes' in body) capturedPayload = body;
+                return { status: 200, body: { reload: { applied: [] } } };
+              },
+            }
+          )
+        );
+
+        const { project, location } = cloudRunInputs(element);
+        expect(project).toBeDefined();
+        expect(location).toBeDefined();
+        expect(project.getAttribute('value')).toBe('proj-a');
+        expect(location.getAttribute('value')).toBe('us-central1');
+
+        project.value = 'proj-b';
+        project.dispatchEvent(new Event('sl-input'));
+        location.value = 'europe-west1';
+        location.dispatchEvent(new Event('sl-input'));
+        await saveAndCapture(element);
+
+        expect(capturedPayload).not.toBeNull();
+        expect(capturedPayload!.runtimes.crun.cloudrun_instances).toEqual({
+          project_id: 'proj-b',
+          region: 'europe-west1',
+        });
+        expect('cloudrun' in capturedPayload!.runtimes.crun).toBe(false);
       });
     }
   });
