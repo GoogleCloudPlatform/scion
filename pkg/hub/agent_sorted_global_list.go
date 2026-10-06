@@ -169,8 +169,9 @@ const globalAgentStatsCap = 2000
 // endpoint over the readable agents of statsFilter, under the same
 // agent-list rule as the items. The candidates are read as narrow members,
 // bounded by authorizedListMaxCandidates; past that bound the counts are a
-// lower bound and the [id,phase] list is omitted. The list is also
-// omitted above globalAgentStatsCap readable agents.
+// lower bound and the [id,phase] list is omitted. Otherwise at most
+// authorizedListMaxCandidates (== globalAgentStatsCap) agents are
+// readable, so the list is always sent.
 func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, statsFilter store.AgentFilter, p agentListParams) (*ListAgentsStats, error) {
 	if !agentListAppliesReadRule(ctx) {
 		return buildUnfilteredGlobalAgentStats(ctx, s, statsFilter)
@@ -193,7 +194,7 @@ func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, s
 			stats.Running++
 		}
 	}
-	if !truncated && stats.Total <= globalAgentStatsCap {
+	if !truncated {
 		agentsOut := make([][2]string, len(readable))
 		for i, m := range readable {
 			agentsOut[i] = [2]string{m.ID, m.Phase}

@@ -48,7 +48,7 @@ import (
 // candidate, the paged cost of its one returned row (one read decision per
 // candidate for the readable count, one 50-row fill batch, 9 capability
 // decisions for the row) and 4 scope decisions.
-func TestListAgentsSorted_StatsWithIncompleteFitCostsNoExtraDecisions(t *testing.T) {
+func TestListAgentsSorted_StatsWithIncompleteFitDecisionCount(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 1200, "statscost", "stopped")
 	f.createAgent(t, "statscost-run", "running")

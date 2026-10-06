@@ -400,13 +400,13 @@ func TestListAgentsSorted_NoneScopeEchoesSortDir(t *testing.T) {
 
 // --- decision counts --------------------------------------------------------
 
-// TestListAgentsSorted_PagedDecisionCount_AtCeiling asserts the exact
-// decision count at the ceiling for the global endpoint: paged at limit=500
-// with 501 authorized agents costs one read decision per candidate for the
+// TestListAgentsSorted_PagedDecisionCount_Limit500 asserts the exact
+// decision count of a full limit=500 page on the global endpoint: paged
+// with 501 authorized agents, it costs one read decision per candidate for the
 // readable count (501), the fill pass's reads up to the first row past the
 // page (501), 9 decisions per returned row and 4 fixed scope-capability
 // decisions.
-func TestListAgentsSorted_PagedDecisionCount_AtCeiling(t *testing.T) {
+func TestListAgentsSorted_PagedDecisionCount_Limit500(t *testing.T) {
 	f := globalSortedSetup(t)
 	f.createAgentsBulk(t, 501, "ceiling", "stopped")
 

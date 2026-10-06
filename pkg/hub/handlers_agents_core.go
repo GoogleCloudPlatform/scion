@@ -192,8 +192,10 @@ type ListAgentsResponse struct {
 
 // ListAgentsStats is the sorted-mode "stats" response block.
 type ListAgentsStats struct {
-	// Total is the exact readable, label(k=v)-filtered count, phase NOT
-	// applied.
+	// Total is the readable, label(k=v)-filtered count, phase NOT
+	// applied. It is exact unless TotalApproximate is set. For a user
+	// caller on the global endpoint it is capped at 2,000: only the first
+	// authorizedListMaxCandidates candidates are read.
 	Total int `json:"total"`
 	// Running is the count of phase == "running" among the same population,
 	// always present regardless of the request's own phase filter.
@@ -202,17 +204,18 @@ type ListAgentsStats struct {
 	// global endpoint read only the first authorizedListMaxCandidates
 	// candidates (see buildGlobalAgentStats).
 	TotalApproximate bool `json:"totalApproximate,omitempty"`
-	// Agents is exactly the counted population as [id, phase] pairs, EXCEPT
-	// on the global endpoint when Total exceeds 2,000, where it is nil and
-	// so omitted from the response entirely. The project
-	// endpoint is already bounded by the 2,000 candidate ceiling,
-	// so it is never omitted there.
+	// Agents is exactly the counted population as [id, phase] pairs. On
+	// the global endpoint it is nil, and so omitted from the response,
+	// when TotalApproximate is set (a user caller with more than 2,000
+	// candidates), and for an agent caller when Total exceeds 2,000. The
+	// project endpoint is already bounded by the 2,000 candidate
+	// ceiling, so it is never omitted there.
 	//
 	// A *slice, not a slice: encoding/json's omitempty on a plain slice
 	// can't distinguish "intentionally empty" (Total == 0, an empty but
-	// present array) from "omitted" (Total > 2000) — both have len 0.
-	// omitempty on a pointer checks only nilness, which is exactly the
-	// distinction this field needs.
+	// present array) from "omitted" — both have len 0. omitempty on a
+	// pointer checks only nilness, which is exactly the distinction this
+	// field needs.
 	Agents *[][2]string `json:"agents,omitempty"`
 }
 
@@ -483,9 +486,10 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		// Sorted mode: the SQL scope predicate baked into filter above
 		// (AuthorizedProjectIDs, classification, etc.) narrows the
 		// candidates, and listAgentsSorted applies the same per-agent read
-		// rule as the legacy branch below. Dispatched after every gate and filter-building step above, so
-		// caps/messageability for returned rows run through the same
-		// identity and filter the legacy branch uses.
+		// rule as the legacy branch below. Dispatched after every gate and
+		// filter-building step above, so caps/messageability for returned
+		// rows run through the same identity and filter the legacy branch
+		// uses.
 		// sort and dir were already validated above; only the remaining
 		// parameters are parsed here, at the same point in the request as
 		// before, so the order of 400s is unchanged.
