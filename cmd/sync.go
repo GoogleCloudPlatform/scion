@@ -102,12 +102,12 @@ func runSync(cmd *cobra.Command, args []string) error {
 	switch direction {
 	case "push":
 		if len(args) > 1 {
-			return fmt.Errorf("'push' does not take an agent name; use 'scion sync to <agent>' for agent-level sync")
+			return newUsageError("'push' does not take an agent name; use 'scion sync to <agent>' for agent-level sync")
 		}
 		return runProjectSync(projectsync.DirPush)
 	case "pull":
 		if len(args) > 1 {
-			return fmt.Errorf("'pull' does not take an agent name; use 'scion sync from <agent>' for agent-level sync")
+			return newUsageError("'pull' does not take an agent name; use 'scion sync from <agent>' for agent-level sync")
 		}
 		return runProjectSync(projectsync.DirPull)
 	}
@@ -115,7 +115,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Agent-level subcommands: to, from
 	if direction == "to" || direction == "from" {
 		if len(args) < 2 {
-			return fmt.Errorf("agent-level sync requires an agent name: scion sync %s <agent-name>", direction)
+			return newUsageError("agent-level sync requires an agent name: scion sync %s <agent-name>", direction)
 		}
 		return runAgentSync(args)
 	}
@@ -233,7 +233,7 @@ func runAgentSync(args []string) error {
 	if len(args) == 2 {
 		dirStr := args[0]
 		if dirStr != "to" && dirStr != "from" {
-			return fmt.Errorf("invalid direction '%s', must be 'to' or 'from'", dirStr)
+			return newUsageError("invalid direction '%s', must be 'to' or 'from'", dirStr)
 		}
 		direction = runtime.SyncDirection(dirStr)
 		agentName = api.Slugify(args[1])

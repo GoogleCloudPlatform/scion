@@ -44,6 +44,8 @@ import { showToast } from '../../../utils/toast.js';
 import { LongPressController } from './long-press.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 
 /** The touch presentation of the send button's right-click menu. */
 const SEND_SHEET_ITEMS: ActionSheetItem[] = [
@@ -294,6 +296,15 @@ export class ScionChatComposer extends LitElement {
 
   /** Debounce timer for saving drafts to localStorage. */
   private _draftTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The draft text this composer last read from or wrote to storage for its
+   * conversation ('' for none). A flush only writes when `text` differs from
+   * it, so an entry written elsewhere (e.g. text handed over from the quick
+   * message dialog) is not overwritten or removed by a composer that never
+   * changed its draft.
+   */
+  private _persistedText = '';
 
   static override styles = css`
     :host {
@@ -636,6 +647,31 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-primary-50, #eff6ff);
     }
 
+    /* In a narrow composer the chip keeps to one line: a long agent name is
+       cut with an ellipsis (the full name is in its title) rather than
+       wrapping the tab into a block over the messages. */
+    @media (max-width: 768px) {
+      :host > sl-dropdown {
+        max-width: 100%;
+      }
+
+      .destination-chip {
+        min-width: 0;
+        white-space: nowrap;
+      }
+
+      .destination-chip > * {
+        flex: none;
+      }
+
+      .destination-chip > .agent-name {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+
     /* W7: File upload styles */
     .attach-btn {
       flex-shrink: 0;
@@ -952,10 +988,12 @@ export class ScionChatComposer extends LitElement {
 
   /** Restore a draft from localStorage for the current conversationKey. */
   private restoreDraft(): void {
+    this._persistedText = '';
     if (!this.conversationKey) return;
     try {
-      const key = `scion-chat-draft-${this.conversationKey}`;
+      const key = chatDraftStorageKey(this.conversationKey);
       const saved = localStorage.getItem(key);
+      this._persistedText = saved ?? '';
       if (saved !== null) {
         this.text = saved;
         this.runeCount = countRunes(this.text);
@@ -971,12 +1009,13 @@ export class ScionChatComposer extends LitElement {
     if (this._draftTimer !== null) clearTimeout(this._draftTimer);
     this._draftTimer = setTimeout(() => {
       try {
-        const key = `scion-chat-draft-${this.conversationKey}`;
+        const key = chatDraftStorageKey(this.conversationKey);
         if (this.text) {
           localStorage.setItem(key, this.text);
         } else {
           localStorage.removeItem(key);
         }
+        this._persistedText = this.text;
       } catch {
         // localStorage may throw in private browsing mode — silently ignore.
       }
@@ -992,7 +1031,8 @@ export class ScionChatComposer extends LitElement {
     }
     if (!this.conversationKey) return;
     try {
-      localStorage.removeItem(`scion-chat-draft-${this.conversationKey}`);
+      localStorage.removeItem(chatDraftStorageKey(this.conversationKey));
+      this._persistedText = '';
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -1001,6 +1041,11 @@ export class ScionChatComposer extends LitElement {
   /**
    * Immediately persist the current draft text under the given key.
    * Cancels any pending debounced save so it is not double-written. (#1152)
+   *
+   * Writes only when `text` differs from what this composer last persisted
+   * (see `_persistedText`): an unchanged composer leaves the stored entry
+   * alone, while a composer whose text was cleared (sent, edit saved or
+   * cancelled) still removes it.
    */
   private flushDraft(key: string): void {
     if (this._draftTimer !== null) {
@@ -1009,12 +1054,14 @@ export class ScionChatComposer extends LitElement {
     }
     if (!key) return;
     try {
-      const storageKey = `scion-chat-draft-${key}`;
+      if (this.text === this._persistedText) return;
+      const storageKey = chatDraftStorageKey(key);
       if (this.text) {
         localStorage.setItem(storageKey, this.text);
       } else {
         localStorage.removeItem(storageKey);
       }
+      this._persistedText = this.text;
     } catch {
       // localStorage may throw in private browsing mode — silently ignore.
     }
@@ -1222,7 +1269,7 @@ export class ScionChatComposer extends LitElement {
       return html`
         <div class="destination-chip dm">
           <span class="arrow">&rarr;</span>
-          <span class="agent-name">@${this.peerName}</span>
+          <span class="agent-name" title=${'@' + this.peerName}>@${this.peerName}</span>
         </div>
       `;
     }
@@ -1237,7 +1284,7 @@ export class ScionChatComposer extends LitElement {
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
             <span style="font-size: var(--chat-fs-base)">🤖</span>
-            <span class="agent-name">${this.defaultAgent}</span>
+            <span class="agent-name" title=${this.defaultAgent}>${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
               ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
@@ -1921,6 +1968,20 @@ export class ScionChatComposer extends LitElement {
   private blurTextarea(): void {
     const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
     blurElement(slTextarea as HTMLElement | null);
+  }
+
+  /**
+   * Whether the user is mid-composition, used to hold off server-pushed
+   * navigation that would pull the conversation out from under them: there
+   * is draft text, or — on a touch-primary device only — focus is inside the
+   * composer, which there means the on-screen keyboard is up. On desktop the
+   * textarea keeps focus after every send, so focus alone says nothing.
+   */
+  get isComposing(): boolean {
+    if (this.text.trim().length > 0) return true;
+    const touchPrimary =
+      typeof window !== 'undefined' && !!window.matchMedia?.(TOUCH_PRIMARY_QUERY).matches;
+    return touchPrimary && this.shadowRoot?.activeElement != null;
   }
 
   /** Focus the textarea after send/cancel. */

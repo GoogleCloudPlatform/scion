@@ -61,6 +61,10 @@ import { apiFetch } from '../../client/api.js';
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
   stateManager: {
     getAgents: () => [],
     getDeletedAgentIds: () => new Set<string>(),

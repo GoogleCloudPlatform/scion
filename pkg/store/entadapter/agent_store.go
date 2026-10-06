@@ -139,6 +139,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
 		RunID:               a.RunID,
+		PreviousRunIDs:      append([]string(nil), a.PreviousRunIds...),
 		WorkspacePlacement:  a.WorkspacePlacement,
 		DeletionState:       a.DeletionState,
 		DeletionClaim:       a.DeletionClaim,
@@ -146,6 +147,9 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionError:       a.DeletionError,
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
+	}
+	if a.SoftDeleteOpID != nil {
+		sa.SoftDeleteOpID = *a.SoftDeleteOpID
 	}
 	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
 	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
@@ -236,8 +240,9 @@ func validGCPMetadataMode(mode string) bool {
 // The mode check exists because an empty MetadataMode on a non-nil GCPIdentity
 // is worse than no GCPIdentity at all: it asserts that a GCP identity decision
 // was made while naming no decision, and there is no safe default to read from
-// it. Dropping just that field lets the agent fall back to the secure "block"
-// default the broker applies when no mode is supplied, while keeping the rest of
+// it. Dropping just that field lets the agent fall back to the runtime default
+// the broker applies when no mode is supplied ("block" on every runtime except
+// Kubernetes, "passthrough" on Kubernetes), while keeping the rest of
 // the applied config — image, template, harness — which is unrelated and
 // probably fine. Discarding the whole config over one bad field would turn a
 // metadata-mode problem into an agent-wide one.
@@ -251,7 +256,7 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 		cfg.GCPIdentity = nil
 		return &cfg, fmt.Errorf(
 			"applied_config has GCP metadata mode %q, which is not one of %q/%q/%q; "+
-				"dropping the GCP identity so the agent falls back to the secure default",
+				"dropping the GCP identity so the agent falls back to the runtime default",
 			bad, store.GCPMetadataModeAssign, store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough)
 	}
 	return &cfg, nil
@@ -432,6 +437,26 @@ func (s *AgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[stri
 	}
 
 	return result, nil
+}
+
+// SetAgentSoftDeleteOpID sets soft_delete_op_id, or clears it when opID is
+// empty. It is the column's only writer; it neither checks nor bumps
+// state_version.
+func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	update := s.client.Agent.UpdateOneID(uid)
+	if opID == "" {
+		update.ClearSoftDeleteOpID()
+	} else {
+		update.SetSoftDeleteOpID(opID)
+	}
+	if err := update.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
 }
 
 // UpdateAgent updates an existing agent using optimistic locking on
@@ -1370,6 +1395,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.IfPhase != "" && current.Phase != su.IfPhase {
 		return store.ErrPhaseMismatch
 	}
+	if su.IfRunID != "" && current.RunID != su.IfRunID {
+		return store.ErrRunChanged
+	}
 
 	now := time.Now()
 
@@ -2302,6 +2330,14 @@ const setAgentRunIDAttempts = 8
 // this write replaced. That needs no transaction or row lock, and so works
 // the same on every dialect.
 //
+// The same write appends the replaced run to previous_run_ids
+// (store.AppendPreviousRunID, ptone/scion#3097): until the new run settles,
+// the replaced run's runtime entry may still exist, and a delete must name
+// it too. The swap is keyed on run_id only, so a concurrent settle that
+// cleared the list without changing run_id can see it rewritten with the
+// runs it cleared; that costs a later delete an extra 404, never a missed
+// run.
+//
 // The swap also requires that no delete holds the row (runIDWritable), and
 // a row that a delete holds returns store.ErrDeleteInProgress. The delete
 // claim is itself a single-row write, so the database orders the two: a
@@ -2315,7 +2351,7 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (
 	for attempt := 0; attempt < setAgentRunIDAttempts; attempt++ {
 		row, err := s.client.Agent.Query().
 			Where(agent.IDEQ(uid)).
-			Select(agent.FieldRunID, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
+			Select(agent.FieldRunID, agent.FieldPreviousRunIds, agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).
 			Only(ctx)
 		if err != nil {
 			return "", mapError(err)
@@ -2327,14 +2363,24 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (
 		if s.afterRunIDRead != nil {
 			s.afterRunIDRead(agentID)
 		}
-		n, err := s.client.Agent.Update().
+		previous, dropped := store.AppendPreviousRunID(row.PreviousRunIds, row.RunID, runID)
+		upd := s.client.Agent.Update().
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
-			SetRunID(runID).
-			Save(ctx)
+			SetRunID(runID)
+		if len(previous) > 0 {
+			upd = upd.SetPreviousRunIds(previous)
+		} else {
+			upd = upd.ClearPreviousRunIds()
+		}
+		n, err := upd.Save(ctx)
 		if err != nil {
 			return "", mapError(err)
 		}
 		if n > 0 {
+			if len(dropped) > 0 {
+				slog.Warn("agent store: too many unsettled runs; no longer tracking the oldest",
+					"agent_id", agentID, "dropped_run_ids", dropped, "cap", store.MaxPreviousRunIDs)
+			}
 			return row.RunID, nil
 		}
 	}
@@ -2359,15 +2405,29 @@ func runIDWritable(now time.Time) predicate.Agent {
 }
 
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
+// The swap also clears previous_run_ids: the run has settled.
 func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true)
+}
+
+// RevertAgentRunID implements store.AgentStore.RevertAgentRunID: the same
+// swap, leaving previous_run_ids as they are.
+func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false)
+}
+
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
 	}
-	n, err := s.client.Agent.Update().
+	upd := s.client.Agent.Update().
 		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
-		SetRunID(newRunID).
-		Save(ctx)
+		SetRunID(newRunID)
+	if clearPrevious {
+		upd = upd.ClearPreviousRunIds()
+	}
+	n, err := upd.Save(ctx)
 	if err != nil {
 		return false, mapError(err)
 	}

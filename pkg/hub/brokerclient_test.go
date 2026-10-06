@@ -518,7 +518,7 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 		t.Errorf("StartAgent failed: %v", err)
 	}
 
-	err = client.StopAgent(ctx, brokerID, server.URL, "test-agent", "")
+	err = client.StopAgent(ctx, brokerID, server.URL, "test-agent", "", "")
 	if err != nil {
 		t.Errorf("StopAgent failed: %v", err)
 	}

@@ -199,6 +199,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRunIDURL(endpoint, extras.RunID)
 	payload := map[string]interface{}{}
 	if task != "" {
 		payload["task"] = task
@@ -266,19 +267,18 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 	return &result, nil
 }
 
-func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/stop", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
-	if projectID != "" {
-		endpoint += "?projectId=" + url.QueryEscape(projectID)
+	if query := stopAgentQuery(ctx, projectID, runID); query != "" {
+		endpoint += "?" + query
 	}
-	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
-		return brokerHTTPError(resp)
+		return stopAgentError(brokerHTTPError(resp), runID)
 	}
 	return nil
 }
@@ -288,6 +288,7 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRunIDURL(endpoint, extras.RunID)
 	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
