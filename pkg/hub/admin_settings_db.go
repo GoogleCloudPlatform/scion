@@ -1212,7 +1212,7 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 		return false
 	}
 
-	if !sa.Verified {
+	if !gcpServiceAccountVerified(sa) {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 			"GCP service account is not verified; verify it before setting it as the hub default", nil)
 		return false

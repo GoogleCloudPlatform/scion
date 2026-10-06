@@ -33,6 +33,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -63,6 +64,25 @@ type PeerClient struct {
 	Auth PeerAuth
 	// RPCTimeout caps one internal RPC (default 120s).
 	RPCTimeout time.Duration
+	// Clock and CloseWait cap how long a stream hop this client closed
+	// waits for the owner relay to close the link (defaults: the real
+	// clock and conduit.DefaultHandshakeTimeout).
+	Clock     clock.Clock
+	CloseWait time.Duration
+}
+
+func (c *PeerClient) hopClock() clock.Clock {
+	if c.Clock != nil {
+		return c.Clock
+	}
+	return clock.Real()
+}
+
+func (c *PeerClient) closeWait() time.Duration {
+	if c.CloseWait > 0 {
+		return c.CloseWait
+	}
+	return conduit.DefaultHandshakeTimeout
 }
 
 func (c *PeerClient) httpClient() *http.Client {
@@ -117,7 +137,7 @@ func (r *Relay) probe(ctx context.Context, endpoint string) (string, error) {
 }
 
 func (r *Relay) peerClient() *PeerClient {
-	return &PeerClient{HTTP: r.cfg.HTTPClient, Auth: r.cfg.PeerAuth, RPCTimeout: r.cfg.RPCTimeout}
+	return &PeerClient{HTTP: r.cfg.HTTPClient, Auth: r.cfg.PeerAuth, RPCTimeout: r.cfg.RPCTimeout, Clock: r.clk, CloseWait: r.handshakeTimeout()}
 }
 
 // RemoteSession is a conduit.Session held by another relay, reached over
@@ -315,7 +335,7 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 		}
 		switch body := res.f.GetBody().(type) {
 		case *conduitv1.Frame_StreamAccept:
-			return newWSStream(conn, body.StreamAccept.GetInitialWindow(), win), nil
+			return newWSStream(conn, body.StreamAccept.GetInitialWindow(), win, s.client.hopClock(), s.client.closeWait()), nil
 		case *conduitv1.Frame_StreamClose:
 			_ = conn.Close()
 			return nil, &conduit.CloseError{Code: body.StreamClose.GetCode(), Reason: body.StreamClose.GetReason()}
