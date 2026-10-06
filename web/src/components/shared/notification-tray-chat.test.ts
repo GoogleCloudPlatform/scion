@@ -37,7 +37,9 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render } from 'lit';
 
+import { apiFetch } from '../../client/api.js';
 import { PUSH_PREFERENCE_EVENT, PUSH_STORAGE_KEY } from '../../client/push-preference.js';
+import { stateManager } from '../../client/state.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -240,5 +242,200 @@ describe('notification tray: desktop notification toggle', () => {
     render(tray.renderPushToggle(), host);
 
     expect(host.querySelector('button')).toBeNull();
+  });
+});
+
+describe('notification tray: loading for the signed-in user', () => {
+  const POLL_MS = 5 * 60_000;
+  const LIST_URL = '/api/v1/notifications?acknowledged=false';
+  const fetchMock = apiFetch as unknown as ReturnType<typeof vi.fn>;
+  let server: any[] = [];
+  let trays: any[] = [];
+
+  function user(id: string): any {
+    return { id, email: `${id}@example.com`, name: id };
+  }
+
+  function listRequests(): number {
+    return fetchMock.mock.calls.filter((c) => c[0] === LIST_URL).length;
+  }
+
+  async function mount(initialUser: any): Promise<any> {
+    const tray = createTray();
+    tray.user = initialUser;
+    document.body.appendChild(tray);
+    trays.push(tray);
+    await tray.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+    return tray;
+  }
+
+  async function setUser(tray: any, u: any): Promise<void> {
+    tray.user = u;
+    await tray.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  beforeAll(async () => {
+    await import('./notification-tray.js');
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    server = [];
+    trays = [];
+    popups = [];
+    FakeNotification.permission = 'granted';
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify(server), { status: 200 }))
+    );
+  });
+
+  afterEach(() => {
+    for (const t of trays) t.remove();
+    localStorage.clear();
+    vi.useRealTimers();
+  });
+
+  it('sends one request when mounted with a user', async () => {
+    const tray = await mount(user('u1'));
+
+    expect(listRequests()).toBe(1);
+    // One polling timer.
+    expect(vi.getTimerCount()).toBe(1);
+    // One SSE listener: one event, one refetch.
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listRequests()).toBe(2);
+    expect(tray.pollTimer).not.toBeNull();
+  });
+
+  it('sends one request when the user arrives after mount', async () => {
+    const tray = await mount(null);
+    expect(listRequests()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await setUser(tray, user('u1'));
+
+    expect(listRequests()).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listRequests()).toBe(2);
+  });
+
+  it('does not refetch for a new object of the same user', async () => {
+    const tray = await mount(user('u1'));
+    const timer = tray.pollTimer;
+
+    await setUser(tray, user('u1'));
+
+    expect(listRequests()).toBe(1);
+    // Polling was not restarted either.
+    expect(tray.pollTimer).toBe(timer);
+  });
+
+  it('refetches once when a different user signs in', async () => {
+    const tray = await mount(user('u1'));
+
+    await setUser(tray, user('u2'));
+
+    expect(listRequests()).toBe(2);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('clears the list and stops loading when the user signs out', async () => {
+    server = [notification('COMPLETED', 'agent-1')];
+    const tray = await mount(user('u1'));
+    expect(tray.notifications).toHaveLength(1);
+
+    await setUser(tray, null);
+
+    expect(tray.notifications).toEqual([]);
+    expect(tray.pollTimer).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    expect(listRequests()).toBe(1);
+  });
+
+  it('loads again after being removed and re-added', async () => {
+    const tray = await mount(user('u1'));
+    tray.remove();
+    expect(vi.getTimerCount()).toBe(0);
+
+    document.body.appendChild(tray);
+    await tray.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(listRequests()).toBe(2);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('loads again when the same user signs back in after signing out', async () => {
+    const tray = await mount(user('u1'));
+    await setUser(tray, null);
+
+    await setUser(tray, user('u1'));
+
+    expect(listRequests()).toBe(2);
+    expect(vi.getTimerCount()).toBe(1);
+    // One SSE listener: one event, one refetch.
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listRequests()).toBe(3);
+  });
+
+  it('does not load for a user change while removed, and loads on re-add', async () => {
+    const tray = await mount(user('u1'));
+    tray.remove();
+
+    await setUser(tray, user('u2'));
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(listRequests()).toBe(1);
+
+    document.body.appendChild(tray);
+    await tray.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(listRequests()).toBe(2);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('polls on the fallback interval', async () => {
+    await mount(user('u1'));
+
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(listRequests()).toBe(2);
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(listRequests()).toBe(3);
+  });
+
+  it('refetches when the panel opens', async () => {
+    const tray = await mount(user('u1'));
+
+    tray.toggle();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(listRequests()).toBe(2);
+  });
+
+  it('pops only for notifications that arrive after the first load', async () => {
+    server = [{ ...notification('COMPLETED', 'agent-1'), id: 'old' }];
+    await mount(user('u1'));
+    expect(popups).toHaveLength(0);
+
+    server = [
+      { ...notification('COMPLETED', 'agent-1'), id: 'old' },
+      { ...notification('WAITING_FOR_INPUT', 'agent-2'), id: 'new' },
+    ];
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(popups.map((p) => p.title)).toEqual(['Agent Needs Input']);
   });
 });

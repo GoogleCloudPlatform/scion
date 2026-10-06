@@ -4548,6 +4548,7 @@ type AgentMutation struct {
 	detached                   *bool
 	runtime                    *string
 	runtime_broker_id          *string
+	workspace_placement        *string
 	web_pty_enabled            *bool
 	exposed_ports              *[]store.ExposedPort
 	appendexposed_ports        []store.ExposedPort
@@ -4572,6 +4573,8 @@ type AgentMutation struct {
 	launch_async_opt_in        *bool
 	launch_id                  *string
 	run_id                     *string
+	previous_run_ids           *[]string
+	appendprevious_run_ids     []string
 	launch_state               *string
 	launch_end_reason          *string
 	launch_kind                *string
@@ -4604,6 +4607,7 @@ type AgentMutation struct {
 	start_claim_unconfirmed_at *time.Time
 	start_claim_hold_until     *time.Time
 	start_claim_launch_id      *string
+	soft_delete_op_id          *string
 	clearedFields              map[string]struct{}
 	project                    *uuid.UUID
 	clearedproject             bool
@@ -5940,6 +5944,55 @@ func (m *AgentMutation) ResetRuntimeBrokerID() {
 	delete(m.clearedFields, agent.FieldRuntimeBrokerID)
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (m *AgentMutation) SetWorkspacePlacement(s string) {
+	m.workspace_placement = &s
+}
+
+// WorkspacePlacement returns the value of the "workspace_placement" field in the mutation.
+func (m *AgentMutation) WorkspacePlacement() (r string, exists bool) {
+	v := m.workspace_placement
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkspacePlacement returns the old "workspace_placement" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldWorkspacePlacement(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkspacePlacement is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkspacePlacement requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkspacePlacement: %w", err)
+	}
+	return oldValue.WorkspacePlacement, nil
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (m *AgentMutation) ClearWorkspacePlacement() {
+	m.workspace_placement = nil
+	m.clearedFields[agent.FieldWorkspacePlacement] = struct{}{}
+}
+
+// WorkspacePlacementCleared returns if the "workspace_placement" field was cleared in this mutation.
+func (m *AgentMutation) WorkspacePlacementCleared() bool {
+	_, ok := m.clearedFields[agent.FieldWorkspacePlacement]
+	return ok
+}
+
+// ResetWorkspacePlacement resets all changes to the "workspace_placement" field.
+func (m *AgentMutation) ResetWorkspacePlacement() {
+	m.workspace_placement = nil
+	delete(m.clearedFields, agent.FieldWorkspacePlacement)
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (m *AgentMutation) SetWebPtyEnabled(b bool) {
 	m.web_pty_enabled = &b
@@ -6912,6 +6965,71 @@ func (m *AgentMutation) RunIDCleared() bool {
 func (m *AgentMutation) ResetRunID() {
 	m.run_id = nil
 	delete(m.clearedFields, agent.FieldRunID)
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (m *AgentMutation) SetPreviousRunIds(s []string) {
+	m.previous_run_ids = &s
+	m.appendprevious_run_ids = nil
+}
+
+// PreviousRunIds returns the value of the "previous_run_ids" field in the mutation.
+func (m *AgentMutation) PreviousRunIds() (r []string, exists bool) {
+	v := m.previous_run_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPreviousRunIds returns the old "previous_run_ids" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPreviousRunIds(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPreviousRunIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPreviousRunIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPreviousRunIds: %w", err)
+	}
+	return oldValue.PreviousRunIds, nil
+}
+
+// AppendPreviousRunIds adds s to the "previous_run_ids" field.
+func (m *AgentMutation) AppendPreviousRunIds(s []string) {
+	m.appendprevious_run_ids = append(m.appendprevious_run_ids, s...)
+}
+
+// AppendedPreviousRunIds returns the list of values that were appended to the "previous_run_ids" field in this mutation.
+func (m *AgentMutation) AppendedPreviousRunIds() ([]string, bool) {
+	if len(m.appendprevious_run_ids) == 0 {
+		return nil, false
+	}
+	return m.appendprevious_run_ids, true
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (m *AgentMutation) ClearPreviousRunIds() {
+	m.previous_run_ids = nil
+	m.appendprevious_run_ids = nil
+	m.clearedFields[agent.FieldPreviousRunIds] = struct{}{}
+}
+
+// PreviousRunIdsCleared returns if the "previous_run_ids" field was cleared in this mutation.
+func (m *AgentMutation) PreviousRunIdsCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPreviousRunIds]
+	return ok
+}
+
+// ResetPreviousRunIds resets all changes to the "previous_run_ids" field.
+func (m *AgentMutation) ResetPreviousRunIds() {
+	m.previous_run_ids = nil
+	m.appendprevious_run_ids = nil
+	delete(m.clearedFields, agent.FieldPreviousRunIds)
 }
 
 // SetLaunchState sets the "launch_state" field.
@@ -8398,6 +8516,55 @@ func (m *AgentMutation) ResetStartClaimLaunchID() {
 	delete(m.clearedFields, agent.FieldStartClaimLaunchID)
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (m *AgentMutation) SetSoftDeleteOpID(s string) {
+	m.soft_delete_op_id = &s
+}
+
+// SoftDeleteOpID returns the value of the "soft_delete_op_id" field in the mutation.
+func (m *AgentMutation) SoftDeleteOpID() (r string, exists bool) {
+	v := m.soft_delete_op_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSoftDeleteOpID returns the old "soft_delete_op_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldSoftDeleteOpID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSoftDeleteOpID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSoftDeleteOpID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSoftDeleteOpID: %w", err)
+	}
+	return oldValue.SoftDeleteOpID, nil
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (m *AgentMutation) ClearSoftDeleteOpID() {
+	m.soft_delete_op_id = nil
+	m.clearedFields[agent.FieldSoftDeleteOpID] = struct{}{}
+}
+
+// SoftDeleteOpIDCleared returns if the "soft_delete_op_id" field was cleared in this mutation.
+func (m *AgentMutation) SoftDeleteOpIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldSoftDeleteOpID]
+	return ok
+}
+
+// ResetSoftDeleteOpID resets all changes to the "soft_delete_op_id" field.
+func (m *AgentMutation) ResetSoftDeleteOpID() {
+	m.soft_delete_op_id = nil
+	delete(m.clearedFields, agent.FieldSoftDeleteOpID)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -8567,7 +8734,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 76)
+	fields := make([]string, 0, 79)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8646,6 +8813,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.runtime_broker_id != nil {
 		fields = append(fields, agent.FieldRuntimeBrokerID)
 	}
+	if m.workspace_placement != nil {
+		fields = append(fields, agent.FieldWorkspacePlacement)
+	}
 	if m.web_pty_enabled != nil {
 		fields = append(fields, agent.FieldWebPtyEnabled)
 	}
@@ -8705,6 +8875,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.run_id != nil {
 		fields = append(fields, agent.FieldRunID)
+	}
+	if m.previous_run_ids != nil {
+		fields = append(fields, agent.FieldPreviousRunIds)
 	}
 	if m.launch_state != nil {
 		fields = append(fields, agent.FieldLaunchState)
@@ -8796,6 +8969,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.start_claim_launch_id != nil {
 		fields = append(fields, agent.FieldStartClaimLaunchID)
 	}
+	if m.soft_delete_op_id != nil {
+		fields = append(fields, agent.FieldSoftDeleteOpID)
+	}
 	return fields
 }
 
@@ -8856,6 +9032,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.Runtime()
 	case agent.FieldRuntimeBrokerID:
 		return m.RuntimeBrokerID()
+	case agent.FieldWorkspacePlacement:
+		return m.WorkspacePlacement()
 	case agent.FieldWebPtyEnabled:
 		return m.WebPtyEnabled()
 	case agent.FieldExposedPorts:
@@ -8896,6 +9074,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchID()
 	case agent.FieldRunID:
 		return m.RunID()
+	case agent.FieldPreviousRunIds:
+		return m.PreviousRunIds()
 	case agent.FieldLaunchState:
 		return m.LaunchState()
 	case agent.FieldLaunchEndReason:
@@ -8956,6 +9136,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.StartClaimHoldUntil()
 	case agent.FieldStartClaimLaunchID:
 		return m.StartClaimLaunchID()
+	case agent.FieldSoftDeleteOpID:
+		return m.SoftDeleteOpID()
 	}
 	return nil, false
 }
@@ -9017,6 +9199,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRuntime(ctx)
 	case agent.FieldRuntimeBrokerID:
 		return m.OldRuntimeBrokerID(ctx)
+	case agent.FieldWorkspacePlacement:
+		return m.OldWorkspacePlacement(ctx)
 	case agent.FieldWebPtyEnabled:
 		return m.OldWebPtyEnabled(ctx)
 	case agent.FieldExposedPorts:
@@ -9057,6 +9241,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchID(ctx)
 	case agent.FieldRunID:
 		return m.OldRunID(ctx)
+	case agent.FieldPreviousRunIds:
+		return m.OldPreviousRunIds(ctx)
 	case agent.FieldLaunchState:
 		return m.OldLaunchState(ctx)
 	case agent.FieldLaunchEndReason:
@@ -9117,6 +9303,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldStartClaimHoldUntil(ctx)
 	case agent.FieldStartClaimLaunchID:
 		return m.OldStartClaimLaunchID(ctx)
+	case agent.FieldSoftDeleteOpID:
+		return m.OldSoftDeleteOpID(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9308,6 +9496,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRuntimeBrokerID(v)
 		return nil
+	case agent.FieldWorkspacePlacement:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkspacePlacement(v)
+		return nil
 	case agent.FieldWebPtyEnabled:
 		v, ok := value.(bool)
 		if !ok {
@@ -9447,6 +9642,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRunID(v)
+		return nil
+	case agent.FieldPreviousRunIds:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPreviousRunIds(v)
 		return nil
 	case agent.FieldLaunchState:
 		v, ok := value.(string)
@@ -9658,6 +9860,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetStartClaimLaunchID(v)
 		return nil
+	case agent.FieldSoftDeleteOpID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSoftDeleteOpID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9826,6 +10035,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRuntimeBrokerID) {
 		fields = append(fields, agent.FieldRuntimeBrokerID)
 	}
+	if m.FieldCleared(agent.FieldWorkspacePlacement) {
+		fields = append(fields, agent.FieldWorkspacePlacement)
+	}
 	if m.FieldCleared(agent.FieldExposedPorts) {
 		fields = append(fields, agent.FieldExposedPorts)
 	}
@@ -9867,6 +10079,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(agent.FieldRunID) {
 		fields = append(fields, agent.FieldRunID)
+	}
+	if m.FieldCleared(agent.FieldPreviousRunIds) {
+		fields = append(fields, agent.FieldPreviousRunIds)
 	}
 	if m.FieldCleared(agent.FieldLaunchState) {
 		fields = append(fields, agent.FieldLaunchState)
@@ -9952,6 +10167,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldStartClaimLaunchID) {
 		fields = append(fields, agent.FieldStartClaimLaunchID)
 	}
+	if m.FieldCleared(agent.FieldSoftDeleteOpID) {
+		fields = append(fields, agent.FieldSoftDeleteOpID)
+	}
 	return fields
 }
 
@@ -10017,6 +10235,9 @@ func (m *AgentMutation) ClearField(name string) error {
 	case agent.FieldRuntimeBrokerID:
 		m.ClearRuntimeBrokerID()
 		return nil
+	case agent.FieldWorkspacePlacement:
+		m.ClearWorkspacePlacement()
+		return nil
 	case agent.FieldExposedPorts:
 		m.ClearExposedPorts()
 		return nil
@@ -10058,6 +10279,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRunID:
 		m.ClearRunID()
+		return nil
+	case agent.FieldPreviousRunIds:
+		m.ClearPreviousRunIds()
 		return nil
 	case agent.FieldLaunchState:
 		m.ClearLaunchState()
@@ -10142,6 +10366,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldStartClaimLaunchID:
 		m.ClearStartClaimLaunchID()
+		return nil
+	case agent.FieldSoftDeleteOpID:
+		m.ClearSoftDeleteOpID()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -10229,6 +10456,9 @@ func (m *AgentMutation) ResetField(name string) error {
 	case agent.FieldRuntimeBrokerID:
 		m.ResetRuntimeBrokerID()
 		return nil
+	case agent.FieldWorkspacePlacement:
+		m.ResetWorkspacePlacement()
+		return nil
 	case agent.FieldWebPtyEnabled:
 		m.ResetWebPtyEnabled()
 		return nil
@@ -10288,6 +10518,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRunID:
 		m.ResetRunID()
+		return nil
+	case agent.FieldPreviousRunIds:
+		m.ResetPreviousRunIds()
 		return nil
 	case agent.FieldLaunchState:
 		m.ResetLaunchState()
@@ -10378,6 +10611,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldStartClaimLaunchID:
 		m.ResetStartClaimLaunchID()
+		return nil
+	case agent.FieldSoftDeleteOpID:
+		m.ResetSoftDeleteOpID()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
