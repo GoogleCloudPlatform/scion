@@ -41,7 +41,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -227,7 +226,7 @@ type Server struct {
 	mu         sync.RWMutex
 	startTime  time.Time
 
-	// workspaceDownload replaces gcp.SyncFromGCS for the GCS workspace
+	// workspaceDownload replaces syncWorkspaceFromGCS for the GCS workspace
 	// bootstrap when set (see SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
 	version           string
@@ -965,7 +964,7 @@ func (s *Server) workspaceDownloader() func(ctx context.Context, bucket, prefix,
 	if s.workspaceDownload != nil {
 		return s.workspaceDownload
 	}
-	return gcp.SyncFromGCS
+	return syncWorkspaceFromGCS
 }
 
 // SetRequestLogger sets the dedicated request logger.
