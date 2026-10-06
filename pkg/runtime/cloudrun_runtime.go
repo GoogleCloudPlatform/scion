@@ -214,6 +214,17 @@ var cloudRunEnvLimit = envSizeLimit{maxBytes: cloudRunMaxEnvValueBytes}
 // an env-type secret must not also supply them (no duplicate EnvVar names).
 var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID"}
 
+// cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
+// as and owns its NFS workspace with: the broker's own ids for a
+// non-NFS backend, otherwise the configured NFS ids with 0 (unset)
+// meaning 1000, as in buildCommonRunArgs.
+func cloudRunOwnerIDs(cfg RunConfig) (uid, gid int) {
+	if cfg.WorkspaceBackendName != "nfs" {
+		return os.Getuid(), os.Getgid()
+	}
+	return nfsOwnerIDs(cfg.NFSUID, cfg.NFSGID)
+}
+
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	// Checked before anything is resolved or provisioned: this runtime
 	// always mounts the project's shared NFS workspace (see
@@ -238,15 +249,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	}
 	instanceID := cloudRunInstanceID(agentID)
 
-	uid := 1000
-	gid := 1000
-	if cfg.WorkspaceBackendName != "nfs" {
-		uid = os.Getuid()
-		gid = os.Getgid()
-	} else if cfg.NFSUID != 0 {
-		uid = cfg.NFSUID
-		gid = cfg.NFSGID
-	}
+	uid, gid := cloudRunOwnerIDs(cfg)
 
 	nfsPaths, err := r.provisionCloudRunNFS(ctx, cfg, agentID, uid, gid)
 	if err != nil {
@@ -497,6 +500,9 @@ type cloudRunNFSProvisionPaths struct {
 	secretsHostPath     string
 }
 
+// provisionCloudRunNFS prepares the agent's NFS directories. uid and gid
+// must already be defaulted by the caller (cloudRunOwnerIDs); they are
+// used as given.
 func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error) {
 	if cfg.WorkspaceBackendName != "nfs" {
 		return nil, nil
@@ -526,12 +532,6 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 		return nil, err
 	}
 
-	if gid == 0 {
-		gid = 1000
-	}
-	if uid == 0 {
-		uid = 1000
-	}
 	resolved := ResolvedWorkspace{
 		HostPath:           hostPaths.workspaceHostPath,
 		ServerRelativePath: hostPaths.serverRelativePath,
@@ -701,7 +701,11 @@ func mkdirNFSAgentDir(dir string, uid, gid int) error {
 	return nil
 }
 
-func (r *CloudRunRuntime) Stop(ctx context.Context, id string) error {
+// Stop stops the Cloud Run instance ref.ID.
+// TODO(ptone/scion#2550 P2/P4): enforce ref.RunID. The instance ID is
+// deterministic per agent name, so this is still name-scoped today.
+func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	if err := r.resolveConfig(ctx); err != nil {
 		return fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
