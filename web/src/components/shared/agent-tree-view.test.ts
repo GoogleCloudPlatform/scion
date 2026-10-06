@@ -1592,6 +1592,27 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
     }
   });
 
+  // The Ctrl check applies to a mouse only: a touch or pen contact pans
+  // even with Ctrl held (e.g. a keyboard-attached tablet).
+  it('still pans on a touch or pen contact with Ctrl held', () => {
+    for (const pointerType of ['touch', 'pen']) {
+      canvas().dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 0,
+          pointerType,
+          ctrlKey: true,
+        })
+      );
+      expect(canvas().classList.contains('dragging'), pointerType).toBe(true);
+      pointer('pointerup');
+      expect(canvas().classList.contains('dragging')).toBe(false);
+    }
+  });
+
   // macOS Ctrl+click is a context-menu click that reports button 0.
   it('does not start a pan on a mouse Ctrl+click', () => {
     const ev = new PointerEvent('pointerdown', {

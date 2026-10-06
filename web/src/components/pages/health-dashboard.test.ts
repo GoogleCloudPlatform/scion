@@ -92,6 +92,8 @@ describe('buildStallConfigUpdate', () => {
       { source: 'default', revision: 0 },
       { source: 'file' },
       { source: 'db', revision: 0 },
+      // Only a DB row's revision is a CAS base.
+      { source: 'file', revision: 3 },
     ]) {
       expect(
         buildStallConfigUpdate({ section_metadata: { lifecycle } }, true).expected_revisions

@@ -323,6 +323,7 @@ export class ScionScheduleList extends LitElement {
     // Writes below are guarded on the dialog still showing this schedule, in
     // case it was replaced while the PATCH was in flight.
     const current = (): boolean => this.editSchedule === sched;
+    let saved = false;
     try {
       const response = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(sched.id)}`,
@@ -335,15 +336,20 @@ export class ScionScheduleList extends LitElement {
       if (!response.ok) {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
-      this.editLoading = false;
-      if (current()) this.closeEditDialog();
-      await this.loadSchedules();
+      saved = true;
     } catch (err) {
       if (current()) {
         this.editError = err instanceof Error ? err.message : 'Failed to update schedule';
       }
     } finally {
       this.editLoading = false;
+    }
+    // Close and reload only after the in-flight flag is cleared, so the
+    // reload never holds it and a later save's flag is never cleared by
+    // this one's finally.
+    if (saved) {
+      if (current()) this.closeEditDialog();
+      await this.loadSchedules();
     }
   }
 
