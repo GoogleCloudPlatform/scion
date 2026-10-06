@@ -549,6 +549,10 @@ func writeStartQuotaError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
+// claimReleaseTimeout bounds a claim release or settlement that runs on a
+// context detached from its caller.
+const claimReleaseTimeout = 10 * time.Second
+
 // compensatingStoreTimeout bounds each store call of a compensating stop,
 // which runs detached from the triggering request.
 const compensatingStoreTimeout = 15 * time.Second

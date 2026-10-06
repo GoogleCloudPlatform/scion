@@ -236,7 +236,9 @@ func (s *Server) stopUnconfirmedStart(ctx context.Context, agentID, claimID stri
 			return
 		}
 		defer func() {
-			if _, err := s.store.MarkStartUnconfirmed(context.WithoutCancel(stopCtx), agentID, stop.ID, s.instanceID, cfg.Holds().For(store.StartClaimStop)); err != nil {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(stopCtx), claimReleaseTimeout)
+			defer cancel()
+			if _, err := s.store.MarkStartUnconfirmed(rctx, agentID, stop.ID, s.instanceID, cfg.Holds().For(store.StartClaimStop)); err != nil {
 				slog.Warn("Start claim reaper: keeping the stop claim failed; the reaper will settle it", "agent_id", agentID, "error", err)
 			}
 		}()
