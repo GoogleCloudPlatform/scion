@@ -95,6 +95,8 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 
 	// Skip the original 'run', '-d', and '-i' from buildCommonRunArgs (indices 0, 1, 2)
 	// then strip flags that the Apple container CLI does not support.
+	// Apple's container CLI has no --group-add: warn and start unchanged.
+	newArgs = appendSharedDirGroupArgs(newArgs, config, "container", false)
 	newArgs = append(newArgs, stripUnsupportedAppleFlags(args[3:])...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)

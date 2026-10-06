@@ -172,8 +172,12 @@ export interface Project {
   ownerId?: string;
   ownerName?: string;
   agentCount: number;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
@@ -615,6 +619,9 @@ export interface Agent {
   image?: string;
   runtime?: string;
   createdBy?: string;
+  // The creator's display name. Set on compact list items, which carry no
+  // appliedConfig; full items carry it as appliedConfig.creatorName.
+  creatorName?: string;
   appliedConfig?: AgentAppliedConfig;
 
   // Ordered ancestor chain [root, ..., parent]; last entry is the direct
@@ -644,6 +651,10 @@ export interface Agent {
   // sends this key on REST agents and SSE status deltas; an explicit `null`
   // means no delete is active and must clear any earlier value.
   deletion?: DeletionInfo | null;
+
+  // Computed by the hub: provisioned but never asked to run
+  // (ptone/scion#2929). Absent means false.
+  provisionedOnly?: boolean;
 }
 
 /** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
@@ -723,8 +734,12 @@ export interface Template {
   contentHash?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; kept optional for compatibility. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
 }
 
@@ -871,8 +886,12 @@ export interface RuntimeBroker {
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   /**
    * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061

@@ -172,6 +172,11 @@ func TestRunProvision_StateDir_LegacySentinelHonoured(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace, provision.ProvisionSentinelFile), []byte("provisioned_at=test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A provisioned workspace with content. (A marked but completely empty
+	// shared-plain workspace is cloned into instead.)
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("existing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	setupProvisionCmd(t, workspace, "shared-plain", filepath.Join(t.TempDir(), "missing.git"))
 	t.Setenv(provisionStateDirEnv, stateDir)
 

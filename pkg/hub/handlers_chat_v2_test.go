@@ -5414,3 +5414,99 @@ func TestInteragentAuthorizationAndCrossProject(t *testing.T) {
 		t.Errorf("reader-only: expected 403, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// TestChatV2_SendAgentRouted_RecordsWebChannelAffinity verifies that Wave-2
+// web chat sends (both topic threads with primary + @mentioned agents and DMs)
+// record "web" reply-channel affinity in WebChatStore (#2448). Without this,
+// a prior Discord/Telegram inbound message leaves last_channel = "discord" /
+// "telegram" indefinitely and causes untagged agent replies to be stamped with
+// the stale external channel instead of "web".
+func TestChatV2_SendAgentRouted_RecordsWebChannelAffinity(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	ctx := context.Background()
+
+	primaryAgent := &store.Agent{
+		ID:        tid("affinity-primary"),
+		ProjectID: proj.ID,
+		Name:      "Coordinator",
+		Slug:      "coordinator",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	mentionAgent := &store.Agent{
+		ID:        tid("affinity-mention"),
+		ProjectID: proj.ID,
+		Name:      "Reviewer",
+		Slug:      "reviewer",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	dmAgent := &store.Agent{
+		ID:        tid("affinity-dm"),
+		ProjectID: proj.ID,
+		Name:      "DM Helper",
+		Slug:      "dm-helper",
+		Phase:     "idle",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	for _, a := range []*store.Agent{primaryAgent, mentionAgent, dmAgent} {
+		if err := s.CreateAgent(ctx, a); err != nil {
+			t.Fatalf("CreateAgent(%s): %v", a.Slug, err)
+		}
+		// Seed stale "discord" channel affinity from an earlier bridge message.
+		if err := wcs.RecordChannel(ctx, DevUserID, proj.ID, a.ID, "discord", time.Now().UTC().Add(-time.Minute)); err != nil {
+			t.Fatalf("RecordChannel seed(%s): %v", a.Slug, err)
+		}
+	}
+
+	// 1. Topic send with default_agent (primary) + @reviewer (secondary mention).
+	topicID := tid("topic-affinity")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           topicID,
+		ProjectID:    proj.ID,
+		Name:         "general",
+		CreatedBy:    "dev",
+		CreatedAt:    time.Now().UTC(),
+		DefaultAgent: primaryAgent.ID,
+	}); err != nil {
+		t.Fatalf("CreateTopic: %v", err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "hello @reviewer please check status"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("topic send: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	for _, a := range []*store.Agent{primaryAgent, mentionAgent} {
+		ch, err := wcs.GetLastChannel(ctx, DevUserID, proj.ID, a.ID)
+		if err != nil {
+			t.Fatalf("GetLastChannel(%s): %v", a.Slug, err)
+		}
+		if ch != "web" {
+			t.Errorf("agent %s last_channel = %q, want %q", a.Slug, ch, "web")
+		}
+	}
+
+	// 2. DM send to dmAgent overwrites stale "discord" affinity with "web".
+	dmKey := "dm:agent:" + dmAgent.ID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, proj.ID)
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+url.PathEscape(dmKey)+"/messages",
+		map[string]string{"content": "direct web message"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("DM send: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	ch, err := wcs.GetLastChannel(ctx, DevUserID, proj.ID, dmAgent.ID)
+	if err != nil {
+		t.Fatalf("GetLastChannel(dmAgent): %v", err)
+	}
+	if ch != "web" {
+		t.Errorf("dmAgent last_channel = %q, want %q", ch, "web")
+	}
+}

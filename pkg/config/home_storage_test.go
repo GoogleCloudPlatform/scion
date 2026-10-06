@@ -331,3 +331,15 @@ profiles:
 	assert.Equal(t, "broker", got.Leaf)
 	assert.Equal(t, "runtimes.k8s.home_storage_leaf", got.LeafSource)
 }
+
+func TestHomeStorageWindowWarnings(t *testing.T) {
+	assert.Empty(t, HomeStorageWindowWarnings(nil))
+	assert.Empty(t, HomeStorageWindowWarnings(&V1HomeStorageConfig{}), "the defaults (30 + 15) fit")
+	w := HomeStorageWindowWarnings(&V1HomeStorageConfig{StopGraceSeconds: 80, TerminationWaitSeconds: 15})
+	require.Len(t, w, 1)
+	assert.Contains(t, w[0], "95s")
+	assert.Contains(t, w[0], "90s")
+	warnings := SettingsWarnings([]byte("schema_version: \"1\"\nserver:\n  home_storage:\n    stop_grace_seconds: 100\n"), "1")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "server.home_storage")
+}

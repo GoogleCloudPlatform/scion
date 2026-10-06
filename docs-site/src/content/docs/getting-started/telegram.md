@@ -254,7 +254,7 @@ group prefixed with `🤖 agentslug`. 🎉 You're now driving your agents from T
 
 :::tip[Watch agents collaborate]
 Enable **Observer mode** (`a2a`) via `/settings` to see agent-to-agent messages in the group
-(`👀 🤖 agentA → 🤖 agentB 👀`), and **Commentary** to see agents' replies to each other.
+(`👀 🤖 agentA → 🤖 agentB 👀`).
 :::
 
 ---
