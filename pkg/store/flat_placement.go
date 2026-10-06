@@ -91,6 +91,17 @@ func (b *RuntimeBroker) IsFlat() bool {
 // is no such row. It is a read-only scan used by the creation-time
 // collision checks; existing rows may already share names, so it is not a
 // uniqueness guarantee.
+//
+// Cost: it pages through every Runtime Broker row (200 per page). It runs
+// only on registrations that would create a row and on renames, and the
+// number of Runtime Broker rows is small, so a scan is acceptable; an indexed
+// query would be the change if that stops holding.
+//
+// slug is whatever the caller's row writer would store. The Hub's broker
+// registration derives slugs with its own slugify while the embedded legacy
+// registration and the deprecated RegisterProject path use api.Slugify; the
+// two agree for ordinary names, and the case-insensitive name comparison
+// covers the common collision either way.
 func RuntimeBrokerNameConflict(ctx context.Context, s RuntimeBrokerStore, name, slug, excludeID string, flatOnly bool) (*RuntimeBroker, error) {
 	cursor := ""
 	for {

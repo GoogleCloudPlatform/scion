@@ -551,11 +551,18 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 		return false
 	}
 	if !s.canDispatchToBroker(ctx, broker) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"You don't have permission to create agents on this broker", nil)
+		writeBrokerDispatchForbidden(w)
 		return false
 	}
 	return true
+}
+
+// writeBrokerDispatchForbidden writes the dispatch authorization denial
+// (canDispatchToBroker returned false). Every caller of canDispatchToBroker
+// that answers the request uses it, so the response cannot drift.
+func writeBrokerDispatchForbidden(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"You don't have permission to create agents on this broker", nil)
 }
 
 // enrichBrokerCreatorNames batch-resolves CreatedBy UUIDs to display names for a slice of brokers.

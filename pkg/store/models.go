@@ -673,14 +673,6 @@ const (
 	LabelGlobalProject = "scion.io/global"
 )
 
-// Runtime Broker role labels.
-const (
-	// LabelBrokerRole is the Runtime Broker role label; FindEmbeddedBroker
-	// matches BrokerRoleEmbedded.
-	LabelBrokerRole    = "scion.io/broker-role"
-	BrokerRoleEmbedded = "embedded"
-)
-
 // Project members group marker annotations (ptone/scion#2556).
 const (
 	// AnnotationProjectMembersGroup marks a group as the hub-managed

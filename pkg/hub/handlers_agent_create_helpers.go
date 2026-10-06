@@ -1319,6 +1319,9 @@ func (s *Server) handleExistingAgent(
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
+			// A flat Runtime Broker refusal is a definite start failure: record
+			// it on the agent before it is relayed.
+			s.settleRuntimeTargetRefusal(ctx, existingAgent, err)
 			switch {
 			case errors.Is(err, store.ErrDeleteInProgress):
 				deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1432,6 +1435,9 @@ func (s *Server) handleExistingAgent(
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
 				}
+				// A flat Runtime Broker refusal is a definite start failure: record
+				// it on the agent before it is relayed.
+				s.settleRuntimeTargetRefusal(ctx, existingAgent, err)
 				switch {
 				case errors.Is(err, store.ErrDeleteInProgress):
 					deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1581,6 +1587,9 @@ func (s *Server) handleExistingAgent(
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
+			// A flat Runtime Broker refusal is a definite start failure: record
+			// it on the agent before it is relayed.
+			s.settleRuntimeTargetRefusal(ctx, existingAgent, err)
 			switch {
 			case errors.Is(err, store.ErrDeleteInProgress):
 				deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1767,8 +1776,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			// refused without writing anything.
 			if broker.IsFlat() {
 				if !s.canDispatchToBroker(ctx, broker) {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"You don't have permission to create agents on this broker", nil)
+					writeBrokerDispatchForbidden(w)
 					return "", store.ErrNotFound
 				}
 				writeRuntimeTargetRefusal(w, runtimeBrokerNotLinkedRefusal(broker.ID, project.ID))

@@ -202,6 +202,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				return nil, refusal.dmError()
 			}
 			if dmErr := runtimeTargetDMErrorIfAny(err); dmErr != nil {
+				// A flat Runtime Broker refusal is a definite start
+				// failure: record it on the agent.
+				s.settleRuntimeTargetRefusal(ctx, agent, err)
 				return nil, dmErr
 			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {

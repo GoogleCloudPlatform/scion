@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerownership"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -368,7 +369,7 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 			if b.Labels == nil {
 				b.Labels = map[string]string{}
 			}
-			b.Labels[store.LabelBrokerRole] = store.BrokerRoleEmbedded
+			b.Labels[brokerownership.LabelBrokerRole] = brokerownership.BrokerRoleEmbedded
 		},
 	})
 	if err != nil {
@@ -574,14 +575,35 @@ func relayRuntimeTargetError(w http.ResponseWriter, err error) bool {
 	if writeRuntimeTargetRefusal(w, err) {
 		return true
 	}
+	se, code, details, ok := brokerRuntimeTargetRefusal(err)
+	if !ok {
+		return false
+	}
+	writeError(w, se.StatusCode, code, se.brokerErrorMessage(), details)
+	return true
+}
+
+// runtimeTargetRelayStatus is the HTTP status each shared flat wire code is
+// returned with by a Runtime Broker.
+var runtimeTargetRelayStatus = map[string]int{
+	ErrCodeRuntimeTargetMismatch:     http.StatusConflict,
+	ErrCodeRuntimeProfileUnsupported: http.StatusUnprocessableEntity,
+	ErrCodeRuntimeTargetRequired:     http.StatusPreconditionFailed,
+}
+
+// brokerRuntimeTargetRefusal reports whether err is a Runtime Broker answer
+// carrying one of the shared flat wire codes with its own status (409, 422
+// or 412), and returns it with its code and its frozen details (start
+// markers and any other key dropped).
+func brokerRuntimeTargetRefusal(err error) (*brokerStatusError, string, map[string]interface{}, bool) {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
-		return false
+		return nil, "", nil, false
 	}
 	code := se.brokerErrorCode()
 	keys, ok := runtimeTargetRelayDetailKeys[code]
-	if !ok {
-		return false
+	if !ok || runtimeTargetRelayStatus[code] != se.StatusCode {
+		return nil, "", nil, false
 	}
 	brokerDetails := se.brokerErrorDetails()
 	details := make(map[string]interface{}, len(keys))
@@ -590,8 +612,7 @@ func relayRuntimeTargetError(w http.ResponseWriter, err error) bool {
 			details[k] = v
 		}
 	}
-	writeError(w, se.StatusCode, code, se.brokerErrorMessage(), details)
-	return true
+	return se, code, details, true
 }
 
 // relayDispatchRefusal relays the Runtime Broker answers a create, start or
@@ -610,18 +631,8 @@ func runtimeTargetDMErrorIfAny(err error) *AgentDMError {
 	if errors.As(err, &refusal) {
 		return &AgentDMError{Code: refusal.Code, Message: refusal.Message, HTTPStatus: refusal.Status, Details: refusal.Details}
 	}
-	var se *brokerStatusError
-	if errors.As(err, &se) {
-		if keys, ok := runtimeTargetRelayDetailKeys[se.brokerErrorCode()]; ok {
-			bd := se.brokerErrorDetails()
-			details := make(map[string]interface{}, len(keys))
-			for _, k := range keys {
-				if v, ok := bd[k]; ok {
-					details[k] = v
-				}
-			}
-			return &AgentDMError{Code: se.brokerErrorCode(), Message: se.brokerErrorMessage(), HTTPStatus: se.StatusCode, Details: details}
-		}
+	if se, code, details, ok := brokerRuntimeTargetRefusal(err); ok {
+		return &AgentDMError{Code: code, Message: se.brokerErrorMessage(), HTTPStatus: se.StatusCode, Details: details}
 	}
 	return nil
 }
@@ -641,14 +652,10 @@ func runtimeTargetDMError(err error) *AgentDMError {
 func (s *Server) settleRuntimeTargetRefusal(ctx context.Context, agent *store.Agent, err error) {
 	msg := ""
 	var refusal *RuntimeTargetRefusal
-	var se *brokerStatusError
-	switch {
-	case errors.As(err, &refusal):
+	if errors.As(err, &refusal) {
 		msg = refusal.Message
-	case errors.As(err, &se):
-		if _, ok := runtimeTargetRelayDetailKeys[se.brokerErrorCode()]; ok {
-			msg = se.brokerErrorMessage()
-		}
+	} else if se, _, _, ok := brokerRuntimeTargetRefusal(err); ok {
+		msg = se.brokerErrorMessage()
 	}
 	if msg == "" || agent == nil {
 		return

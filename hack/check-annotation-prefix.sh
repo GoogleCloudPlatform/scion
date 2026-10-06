@@ -81,10 +81,11 @@ allowed_paths=(
   # shared project members group marker keys (canonical
   # scion.io/project-members-group and the read-only legacy
   # scion.io/system-project-members-group, ptone/scion#2556) and the project
-  # agents group marker scion.io/project-agents-group, and the existing
-  # global-project (scion.io/system, scion.io/global) and Runtime Broker role
-  # (scion.io/broker-role) label keys, so pkg/hub and pkg/store/entadapter
-  # import one definition.
+  # agents group marker scion.io/project-agents-group, so pkg/hub and
+  # pkg/store/entadapter import one definition. Also the existing
+  # global-project label keys (scion.io/system, scion.io/global) used by the
+  # Hub's embedded flat registration; cmd/server_broker.go still spells them
+  # as literals.
   "^pkg/store/models.go$"
 
   # --- pkg/hub/ ---
