@@ -95,6 +95,13 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	if !ValidJoinTokenTTLSeconds(req.JoinTokenTTLSeconds) {
+		ValidationError(w, ErrJoinTokenTTLOutOfRange.Error(), map[string]interface{}{
+			"field": "joinTokenTtlSeconds",
+		})
+		return
+	}
+
 	// If this request matches an existing broker record (by name or by a
 	// caller-supplied ID), treat it as re-registration of that broker rather
 	// than a brand-new one. Re-registration mutates the existing record and
@@ -157,6 +164,10 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		Conflict(w, err.Error())
+		return
+	}
+	if errors.Is(err, ErrJoinTokenTTLOutOfRange) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "joinTokenTtlSeconds"})
 		return
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

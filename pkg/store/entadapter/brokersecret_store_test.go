@@ -221,3 +221,61 @@ func TestJoinToken_CleanExpired(t *testing.T) {
 	_, err = bs.GetJoinTokenByBrokerID(ctx, valid.BrokerID)
 	assert.NoError(t, err, "valid token should remain")
 }
+
+func TestJoinToken_UpsertReplaces(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+
+	first := &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "hash-first", ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "user-a"}
+	replaced, err := bs.UpsertJoinToken(ctx, first)
+	require.NoError(t, err)
+	assert.False(t, replaced, "nothing to replace on the first token")
+
+	second := &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "hash-second", ExpiresAt: time.Now().Add(2 * time.Hour), CreatedBy: "user-b"}
+	replaced, err = bs.UpsertJoinToken(ctx, second)
+	require.NoError(t, err, "a second token for the same broker must not fail")
+	assert.True(t, replaced)
+
+	_, err = bs.GetJoinToken(ctx, "hash-first")
+	assert.ErrorIs(t, err, store.ErrNotFound, "the replaced token no longer resolves")
+
+	got, err := bs.GetJoinToken(ctx, "hash-second")
+	require.NoError(t, err)
+	assert.Equal(t, brokerID, got.BrokerID)
+	assert.Equal(t, "user-b", got.CreatedBy)
+	assert.WithinDuration(t, second.ExpiresAt, got.ExpiresAt, time.Second)
+	assert.WithinDuration(t, second.CreatedAt, got.CreatedAt, time.Second, "created records the re-mint time")
+
+	byBroker, err := bs.GetJoinTokenByBrokerID(ctx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, "hash-second", byBroker.TokenHash)
+}
+
+func TestJoinToken_UpsertInsideWithTx(t *testing.T) {
+	client := enttest.NewClient(t)
+	composite := NewCompositeStore(client)
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+
+	err := composite.WithTx(ctx, func(tx store.Store) error {
+		if _, err := tx.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "h1", ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "u"}); err != nil {
+			return err
+		}
+		replaced, err := tx.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "h2", ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "u"})
+		assert.True(t, replaced)
+		return err
+	})
+	require.NoError(t, err)
+	got, err := composite.GetJoinTokenByBrokerID(ctx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, "h2", got.TokenHash)
+}
+
+func TestJoinToken_UpsertInvalid(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	_, err := bs.UpsertJoinToken(context.Background(), &store.BrokerJoinToken{TokenHash: "h"})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = bs.UpsertJoinToken(context.Background(), &store.BrokerJoinToken{BrokerID: uuid.NewString()})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}

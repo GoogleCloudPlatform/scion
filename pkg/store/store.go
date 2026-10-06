@@ -1831,6 +1831,11 @@ type BrokerSecretStore interface {
 	// Returns ErrAlreadyExists if a token for this broker already exists.
 	CreateJoinToken(ctx context.Context, token *BrokerJoinToken) error
 
+	// UpsertJoinToken stores a join token for token.BrokerID, replacing any
+	// existing token for that broker (one token per broker). replaced reports
+	// whether a token for the broker already existed.
+	UpsertJoinToken(ctx context.Context, token *BrokerJoinToken) (replaced bool, err error)
+
 	// GetJoinToken retrieves a join token by token hash.
 	// Returns ErrNotFound if the token doesn't exist.
 	GetJoinToken(ctx context.Context, tokenHash string) (*BrokerJoinToken, error)

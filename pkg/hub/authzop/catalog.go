@@ -127,6 +127,7 @@ var SecurityMutationSymbols = map[string]string{
 	"UpdateBrokerSecret": "update-resource",
 	"DeleteBrokerSecret": "delete-resource",
 	"CreateJoinToken":    "mint-credential",
+	"UpsertJoinToken":    "mint-credential",
 	"DeleteJoinToken":    "delete-resource",
 
 	// Invite code operations
@@ -659,7 +660,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, expired join token cleanup, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
-	{File: "pkg/hub/brokerauth.go", Function: "createBrokerRegistration", Symbol: "CreateJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "createBrokerRegistration", Symbol: "UpsertJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "GenerateAndStoreSecret", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret generation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "RotateBrokerSecret", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret rotation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 

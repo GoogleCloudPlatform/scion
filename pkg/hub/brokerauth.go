@@ -197,6 +197,33 @@ type CreateBrokerRegistrationRequest struct {
 	// host. Set by the operator so the Hub can gate passthrough on actAs.
 	GCPHostServiceAccountEmail string `json:"gcpHostServiceAccountEmail,omitempty"`
 	GCPHostProjectID           string `json:"gcpHostProjectId,omitempty"`
+
+	// JoinTokenTTLSeconds is the lifetime of the issued join token. Zero
+	// means BrokerAuthConfig.JoinTokenExpiry; any other value must be within
+	// [MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds].
+	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`
+
+	// PreserveSettings, when the request matches an existing broker, leaves
+	// that broker's record unchanged (AutoProvide, labels and GCP host
+	// fields) and only issues a new join token. For a new broker it creates
+	// the record with AutoProvide off and no GCP host fields, whatever the
+	// request says; only Labels are applied. It changes nothing about
+	// authorization: the caller must still hold broker.create and own the
+	// matched broker.
+	PreserveSettings bool `json:"preserveSettings,omitempty"`
+}
+
+// Join token lifetime bounds for CreateBrokerRegistrationRequest.JoinTokenTTLSeconds.
+const (
+	MinJoinTokenTTLSeconds = 300   // 5 minutes
+	MaxJoinTokenTTLSeconds = 86400 // 24 hours
+)
+
+// ValidJoinTokenTTLSeconds reports whether ttl is an acceptable
+// JoinTokenTTLSeconds value: zero (use the configured default) or within
+// [MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds].
+func ValidJoinTokenTTLSeconds(ttl int) bool {
+	return ttl == 0 || (ttl >= MinJoinTokenTTLSeconds && ttl <= MaxJoinTokenTTLSeconds)
 }
 
 // CreateBrokerRegistrationResponse is the response for POST /api/v1/brokers.
@@ -205,6 +232,9 @@ type CreateBrokerRegistrationResponse struct {
 	JoinToken    string    `json:"joinToken"` // scion_join_<base64>
 	ExpiresAt    time.Time `json:"expiresAt"`
 	Reregistered bool      `json:"reregistered,omitempty"`
+	// Reissued is true when an earlier join token for this broker was
+	// replaced by this one. The earlier token no longer works.
+	Reissued bool `json:"reissued,omitempty"`
 }
 
 // BrokerJoinRequest is the request body for POST /api/v1/brokers/join.
@@ -297,6 +327,11 @@ func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, broker
 // on whether an existing broker is being reused, and on which one.
 var ErrBrokerRegistrationAuthorizationStale = errors.New("broker registration authorization is stale; retry")
 
+// ErrJoinTokenTTLOutOfRange is returned when
+// CreateBrokerRegistrationRequest.JoinTokenTTLSeconds is outside the
+// accepted range.
+var ErrJoinTokenTTLOutOfRange = fmt.Errorf("joinTokenTtlSeconds must be between %d and %d", MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds)
+
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
@@ -346,6 +381,16 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	if req.Name == "" {
 		return nil, errors.New("name is required")
 	}
+	if !ValidJoinTokenTTLSeconds(req.JoinTokenTTLSeconds) {
+		return nil, ErrJoinTokenTTLOutOfRange
+	}
+
+	if req.PreserveSettings {
+		// A token-only request never sets broker settings.
+		req.AutoProvide = false
+		req.GCPHostServiceAccountEmail = ""
+		req.GCPHostProjectID = ""
+	}
 
 	// GCP SA emails are case-insensitive; normalize to lowercase before
 	// storage so that later comparisons (e.g. actAs checks) are reliable.
@@ -375,7 +420,12 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		return nil, ErrBrokerRegistrationAuthorizationStale
 	}
 
-	if existingBroker != nil {
+	if existingBroker != nil && req.PreserveSettings {
+		// Reuse existing broker and leave its record as it is: only a new
+		// join token is issued below.
+		brokerID = existingBroker.ID
+		reregistered = true
+	} else if existingBroker != nil {
 		// Reuse existing broker - update its metadata
 		brokerID = existingBroker.ID
 		reregistered = true
@@ -434,7 +484,11 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	tokenHash := sha256Hash(joinToken)
 
 	// Calculate expiry
-	expiresAt := time.Now().Add(s.config.JoinTokenExpiry)
+	ttl := s.config.JoinTokenExpiry
+	if req.JoinTokenTTLSeconds > 0 {
+		ttl = time.Duration(req.JoinTokenTTLSeconds) * time.Second
+	}
+	expiresAt := time.Now().Add(ttl)
 
 	// Store the join token
 	joinTokenRecord := &store.BrokerJoinToken{
@@ -445,7 +499,10 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		CreatedBy: createdBy,
 	}
 
-	if err := s.store.CreateJoinToken(ctx, joinTokenRecord); err != nil {
+	// One token per broker: issuing a new one replaces any earlier token
+	// that has not been used yet.
+	reissued, err := s.store.UpsertJoinToken(ctx, joinTokenRecord)
+	if err != nil {
 		// Clean up the broker record on failure (only if we just created it)
 		if !reregistered {
 			_ = s.store.DeleteRuntimeBroker(ctx, brokerID)
@@ -458,6 +515,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		JoinToken:    joinToken,
 		ExpiresAt:    expiresAt,
 		Reregistered: reregistered,
+		Reissued:     reissued,
 	}, nil
 }
 

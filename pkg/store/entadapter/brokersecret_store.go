@@ -16,7 +16,12 @@ package entadapter
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
+
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
@@ -219,6 +224,68 @@ func (s *BrokerSecretStore) CreateJoinToken(ctx context.Context, token *store.Br
 		return mapError(err)
 	}
 	return nil
+}
+
+// UpsertJoinToken stores a join token for token.BrokerID, replacing any
+// existing token for that broker. The existence check and the upsert run in
+// one transaction (the caller's, when called inside store.WithTx). The
+// upsert itself is a single INSERT ... ON CONFLICT (broker_id) DO UPDATE, so
+// concurrent calls for the same broker never fail on the primary key.
+func (s *BrokerSecretStore) UpsertJoinToken(ctx context.Context, token *store.BrokerJoinToken) (bool, error) {
+	if token.BrokerID == "" || token.TokenHash == "" {
+		return false, store.ErrInvalidInput
+	}
+	uid, err := parseUUID(token.BrokerID)
+	if err != nil {
+		return false, err
+	}
+	if token.CreatedAt.IsZero() {
+		token.CreatedAt = time.Now()
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return false, err
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return upsertJoinToken(ctx, s.client, uid, token)
+	}
+	replaced, err := upsertJoinToken(ctx, tx.Client(), uid, token)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("broker secret store: commit UpsertJoinToken: %w", err)
+	}
+	return replaced, nil
+}
+
+func upsertJoinToken(ctx context.Context, client *ent.Client, uid uuid.UUID, token *store.BrokerJoinToken) (bool, error) {
+	replaced, err := client.BrokerJoinToken.Query().
+		Where(brokerjointoken.IDEQ(uid)).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	// ResolveWithNewValues replaces every column, including created and
+	// created_by, so a re-minted token records its own mint time and minter.
+	err = client.BrokerJoinToken.Create().
+		SetID(uid).
+		SetTokenHash(token.TokenHash).
+		SetExpiresAt(token.ExpiresAt).
+		SetCreatedBy(token.CreatedBy).
+		SetCreated(token.CreatedAt).
+		OnConflict(
+			entsql.ConflictColumns(brokerjointoken.FieldID),
+			entsql.ResolveWithNewValues(),
+		).
+		Exec(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return replaced, nil
 }
 
 // GetJoinToken retrieves a join token by token hash.

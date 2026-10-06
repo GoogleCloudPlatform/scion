@@ -42,7 +42,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -587,51 +586,23 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Broker created (ID: %s), completing join...\n", createResp.BrokerID)
 		}
 
-		// Build profiles from settings to send to Hub
-		profiles := buildBrokerProfiles(settings)
-
-		// Phase 2: Complete broker join with join token
-		joinReq := &hubclient.JoinBrokerRequest{
-			BrokerID:         createResp.BrokerID,
-			JoinToken:        createResp.JoinToken,
-			Hostname:         brokerName,
-			Version:          version.Version,
-			Capabilities:     brokerRegistrationCapabilities(),
-			Profiles:         profiles,
-			WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
-			DefaultProfile:   brokerRegistrationDefaultProfile(settings),
-		}
-
-		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
+		joined, err := completeJoinAndPersist(ctx, client, brokerJoinParams{
+			Settings:          settings,
+			Endpoint:          endpoint,
+			HubName:           hubName,
+			BrokerID:          createResp.BrokerID,
+			JoinToken:         createResp.JoinToken,
+			Hostname:          brokerName,
+			TransportMode:     brokerTransportMode,
+			TransportAudience: brokerTransportAudience,
+			CredStore:         multiStore,
+		})
 		if err != nil {
-			return fmt.Errorf("failed to complete broker join: %w", err)
+			return err
 		}
-
-		brokerID = joinResp.BrokerID
-
-		// Resolve transport config from flags, then env
-		transportMode := brokerTransportMode
-		if transportMode == "" {
-			transportMode = os.Getenv(transportauth.EnvTransportMode)
-		}
-		transportAudience := brokerTransportAudience
-		if transportAudience == "" {
-			transportAudience = os.Getenv(transportauth.EnvTransportAudience)
-		}
-
-		// Save credentials to MultiStore
-		newCreds := &brokercredentials.BrokerCredentials{
-			Name:              hubName,
-			BrokerID:          brokerID,
-			SecretKey:         joinResp.SecretKey,
-			HubEndpoint:       endpoint,
-			AuthMode:          brokercredentials.AuthModeHMAC,
-			RegisteredAt:      time.Now(),
-			TransportMode:     transportMode,
-			TransportAudience: transportAudience,
-		}
-		if err := multiStore.Save(newCreds); err != nil {
-			fmt.Printf("Warning: failed to save broker credentials: %v\n", err)
+		brokerID = joined.BrokerID
+		if joined.SaveErr != nil {
+			fmt.Printf("Warning: failed to save broker credentials: %v\n", joined.SaveErr)
 		} else {
 			fmt.Printf("Broker credentials saved to %s\n", multiStore.Dir())
 		}
@@ -641,18 +612,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	if globalDirErr != nil {
 		fmt.Printf("Warning: failed to get global directory: %v\n", globalDirErr)
 	} else {
-		if endpoint != "" {
-			if err := config.UpdateSetting(globalDir, "hub.endpoint", endpoint, true); err != nil {
-				fmt.Printf("Warning: failed to save hub endpoint to global settings: %v\n", err)
-			}
-		}
-		if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-			fmt.Printf("Warning: failed to save broker ID: %v\n", err)
-		}
-		// Write hub_connections entry for this registration
-		if err := config.UpdateSetting(globalDir, "hub_connections."+hubName+".endpoint", endpoint, true); err != nil {
-			fmt.Printf("Warning: failed to save hub connection to settings: %v\n", err)
-		}
+		persistBrokerHubSettings(os.Stdout, globalDir, endpoint, brokerID, hubName)
 	}
 
 	// If project is linked, offer to add this broker as a provider
