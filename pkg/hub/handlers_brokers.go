@@ -163,13 +163,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 // against) and issues its join token. The response echoes the stored runtime
 // target as the activation acknowledgement.
 func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker) (*CreateBrokerRegistrationResponse, error) {
-	labels := map[string]string{}
-	for k, v := range req.Labels {
-		labels[k] = v
-	}
-	if _, ok := labels["scion.io/broker-type"]; !ok {
-		labels["scion.io/broker-type"] = "external"
-	}
+	labels := registrationLabels(req.Labels)
 	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
 	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
 		BrokerID:  req.BrokerID,

@@ -667,6 +667,18 @@ const (
 const (
 	// LabelTemplate marks a project as a project template.
 	LabelTemplate = "scion.io/template"
+	// LabelSystemProject and LabelGlobalProject mark the Hub's built-in
+	// global project (value "true"), as the embedded registration creates it.
+	LabelSystemProject = "scion.io/system"
+	LabelGlobalProject = "scion.io/global"
+)
+
+// Runtime Broker role labels.
+const (
+	// LabelBrokerRole is the Runtime Broker role label; FindEmbeddedBroker
+	// matches BrokerRoleEmbedded.
+	LabelBrokerRole    = "scion.io/broker-role"
+	BrokerRoleEmbedded = "embedded"
 )
 
 // Project members group marker annotations (ptone/scion#2556).

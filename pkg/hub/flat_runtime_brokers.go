@@ -368,7 +368,7 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 			if b.Labels == nil {
 				b.Labels = map[string]string{}
 			}
-			b.Labels["scion.io/broker-role"] = "embedded"
+			b.Labels[store.LabelBrokerRole] = store.BrokerRoleEmbedded
 		},
 	})
 	if err != nil {
@@ -397,8 +397,8 @@ func (s *Server) ensureEmbeddedGlobalProject(ctx context.Context) error {
 		Name: "Global",
 		Slug: embeddedGlobalProjectSlug,
 		Labels: map[string]string{
-			"scion.io/system": "true",
-			"scion.io/global": "true",
+			store.LabelSystemProject: "true",
+			store.LabelGlobalProject: "true",
 		},
 	}
 	if err := s.store.CreateProject(ctx, p); err != nil && !errors.Is(err, store.ErrAlreadyExists) {

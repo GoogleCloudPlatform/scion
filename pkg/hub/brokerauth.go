@@ -1209,3 +1209,17 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 func writeBrokerAuthError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, message, nil)
 }
+
+// registrationLabels returns a copy of a registration request's labels with
+// the default scion.io/broker-type ("external") added when the request sets
+// none, as the legacy registration path does in place.
+func registrationLabels(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in)+1)
+	for k, v := range in {
+		out[k] = v
+	}
+	if _, exists := out["scion.io/broker-type"]; !exists {
+		out["scion.io/broker-type"] = "external"
+	}
+	return out
+}
