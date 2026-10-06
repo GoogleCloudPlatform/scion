@@ -1609,10 +1609,19 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// The same transaction checks that every delegator of the edges the soft
 	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
 	// fails), reactivates those edges (a conflicting active edge is a 409)
-	// and writes the agent_restore audit record.
+	// and writes the agent_restore audit record. It also refuses an agent
+	// whose guard user (its owner, ancestry root or schedule creator) no
+	// longer exists, normally a deleted user but possibly a purged legacy
+	// root agent (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errRestoreEdgeConflict) {

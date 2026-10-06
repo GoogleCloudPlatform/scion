@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -157,12 +158,44 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 	}
 
 	// Parse query parameters
-	query := r.URL.Query()
-	opts := LogQueryOptions{
-		HubName:   s.config.HubName,
-		AgentID:   agent.ID,
-		ProjectID: agent.ProjectID,
+	opts := agentCloudLogListOptions(s.config.HubName, agent, r.URL.Query())
+
+	result, err := s.logQueryService.Query(ctx, opts)
+	if err != nil {
+		slog.Error("cloud log query failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to query cloud logs", nil)
+		return
 	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// agentCloudLogQueryOptions builds the filter options shared by the
+// agent cloud-logs query and stream endpoints, so both select the same
+// set of entries for an agent.
+//
+// It deliberately does not set ProjectID: many server log entries carry
+// agent_id without a project_id label, so a project_id clause would drop
+// them. Agent IDs are UUIDs, so the agent_id clause alone is selective.
+func agentCloudLogQueryOptions(hubName string, agent *store.Agent, query url.Values) LogQueryOptions {
+	opts := LogQueryOptions{
+		HubName: hubName,
+		AgentID: agent.ID,
+	}
+	if v := query.Get("severity"); v != "" {
+		opts.Severity = v
+	}
+	if v := query.Get("broker_id"); v != "" {
+		opts.BrokerID = v
+	}
+	return opts
+}
+
+// agentCloudLogListOptions builds the options for the non-streaming
+// agent cloud-logs endpoint: the shared filter plus paging and time range.
+func agentCloudLogListOptions(hubName string, agent *store.Agent, query url.Values) LogQueryOptions {
+	opts := agentCloudLogQueryOptions(hubName, agent, query)
 
 	if v := query.Get("tail"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -179,22 +212,7 @@ func (s *Server) handleAgentCloudLogs(w http.ResponseWriter, r *http.Request, ag
 			opts.Until = t
 		}
 	}
-	if v := query.Get("severity"); v != "" {
-		opts.Severity = v
-	}
-	if v := query.Get("broker_id"); v != "" {
-		opts.BrokerID = v
-	}
-
-	result, err := s.logQueryService.Query(ctx, opts)
-	if err != nil {
-		slog.Error("cloud log query failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"Failed to query cloud logs", nil)
-		return
-	}
-
-	writeJSON(w, http.StatusOK, result)
+	return opts
 }
 
 // handleAgentCloudLogsStream handles GET /api/v1/agents/{id}/cloud-logs/stream
@@ -244,17 +262,7 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Parse query filters
-	query := r.URL.Query()
-	opts := LogQueryOptions{
-		HubName: s.config.HubName,
-		AgentID: agent.ID,
-	}
-	if v := query.Get("severity"); v != "" {
-		opts.Severity = v
-	}
-	if v := query.Get("broker_id"); v != "" {
-		opts.BrokerID = v
-	}
+	opts := agentCloudLogQueryOptions(s.config.HubName, agent, r.URL.Query())
 
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")

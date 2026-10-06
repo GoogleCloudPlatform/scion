@@ -95,9 +95,12 @@ func matchesAgentProject(a api.AgentInfo, projectID string) bool {
 func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	checks := make(map[string]string)
 
-	// Check runtime availability
-	if s.runtime != nil {
-		checks[s.runtime.Name()] = "available"
+	// Check runtime availability. A degraded default runtime (the
+	// *runtime.ErrorRuntime the broker falls back to when startup
+	// resolution fails) is reported as unavailable, not as an available
+	// runtime named "error" (ptone/scion#2766).
+	if rt, ok := s.defaultRuntime(); ok {
+		checks[rt.Name()] = "available"
 	} else {
 		checks["runtime"] = "unavailable"
 	}
@@ -179,6 +182,30 @@ func NFSWarnOnlyRuntime(name string) bool {
 	return false
 }
 
+// defaultRuntime returns one snapshot of the broker's default runtime,
+// read under s.mu (SwapRuntime replaces it concurrently), and whether it
+// is usable: set, and not the *runtime.ErrorRuntime placeholder installed
+// when runtime resolution failed at startup.
+func (s *Server) defaultRuntime() (scionrt.Runtime, bool) {
+	s.mu.RLock()
+	rt := s.runtime
+	s.mu.RUnlock()
+	if rt == nil {
+		return nil, false
+	}
+	if _, degraded := rt.(*scionrt.ErrorRuntime); degraded {
+		return rt, false
+	}
+	return rt, true
+}
+
+// handleHealthz is the liveness endpoint. It always answers 200 and carries
+// the overall status (healthy or degraded) in the body. A degraded default
+// runtime does not return 503 here. A restart can clear a transient boot
+// failure, but the CLI and liveness consumers treat any non-200 /healthz
+// as "broker not running", and a persistent fault would restart-loop
+// under a liveness probe. Operators restart after fixing the cause.
+// /readyz returns 503 instead.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -195,8 +222,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if we have a functional runtime
-	if s.runtime == nil {
+	// Check if we have a functional runtime. A degraded default
+	// *runtime.ErrorRuntime cannot run agents, so it is not ready either.
+	if _, ok := s.defaultRuntime(); !ok {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "not_ready",
 			"reason": "no runtime available",
@@ -215,9 +243,16 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One snapshot of the raw default runtime, read under s.mu because
+	// SwapRuntime replaces it concurrently. /info reports it even when it
+	// is the degraded *runtime.ErrorRuntime placeholder.
+	s.mu.RLock()
+	rt := s.runtime
+	s.mu.RUnlock()
+
 	runtimeType := "unknown"
-	if s.runtime != nil {
-		runtimeType = s.runtime.Name()
+	if rt != nil {
+		runtimeType = rt.Name()
 	}
 
 	resp := BrokerInfoResponse{
@@ -231,17 +266,20 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// (scionrt.HasAttachSupport) rather than a blanket true, so a
 			// runtime that opts out via the optional AttachCapableRuntime
 			// interface is reported accurately here too.
-			Attach:      scionrt.HasAttachSupport(s.runtime),
+			Attach:      scionrt.HasAttachSupport(rt),
 			Exec:        true,
 			Reprovision: true,
 			AsyncLaunch: true,
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
-			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
+			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
 			// This broker honours localOnly deletes and confirms a moved
 			// agent's NFS workspace before provisioning it (agent move).
 			AgentMove:      true,
 			StartsInFlight: s.startsInFlight != nil,
+			// This broker's reprovision reuses an empty-per-agent
+			// workspace in place (miller79/scion#167).
+			ReprovisionEmptyPerAgent: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -385,10 +423,14 @@ func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState
 // broker is not "probably fine" just because it's not the default type).
 func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
 	if rtType == defaultRuntimeType {
-		if s.runtime == nil {
+		// Read under s.mu: SwapRuntime replaces s.runtime concurrently.
+		s.mu.RLock()
+		def := s.runtime
+		s.mu.RUnlock()
+		if def == nil {
 			return nil, false
 		}
-		return s.runtime, true
+		return def, true
 	}
 	aux, found := s.findAuxiliaryRuntimeByType(rtType)
 	if !found || aux.Runtime == nil {
@@ -843,6 +885,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
+		if _, statErr := os.Lstat(req.ProjectPath); os.IsNotExist(statErr) {
+			req.workspaceAbsentAtAdmission = true
+		}
+		// Record the hub project ID for a broker copy of a hub workspace
+		// before any project settings are read.
+		s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
 	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
@@ -1313,7 +1361,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			span.SetStatus(codes.Error, err.Error())
 			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
+				// Names the resource without err's own text, which can carry
+				// broker paths (ptone/scion#3113); the full error is logged.
+				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found",
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("provision agent", err, opts.TemplateName), nil)
 				return
 			}
 			// A required skill reference that could not be resolved is mapped
@@ -1401,7 +1453,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.agentLifecycleLog.Error("Agent create failed",
-			"agent_id", req.ID, "project_id", req.ProjectID,
+			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
 			"name", req.Name, "slug", req.Slug,
 			"error", err)
 
@@ -1436,18 +1488,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		span.SetStatus(codes.Error, err.Error())
 		switch {
 		case errors.Is(err, agent.ErrContainerNameInUse):
-			Conflict(w, err.Error())
+			// Fixed text, as restart and the async launch give: a wrapped
+			// error can carry runtime detail. The full error is logged above.
+			Conflict(w, agent.ErrContainerNameInUse.Error())
 		case errors.Is(err, scionrt.ErrRunConflict):
 			// Fixed text: the wrapped error names the namespace, object and
 			// the other run's ID, which must not reach clients (see
 			// runtimeOpError). The full error is logged above.
 			Conflict(w, scionrt.ErrRunConflict.Error())
 		case notFoundErr:
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+			// Names the resource without err's own text, which can carry
+			// broker paths (ptone/scion#3113). The full error is logged above.
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr)
 		default:
-			RuntimeError(w, runtimeOpError("create agent", err).Error())
+			RuntimeError(w, runtimeOpError(opCreateAgent, err).Error())
 		}
 		return
 	}
@@ -1571,9 +1627,16 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		)
 	}
 
-	if syncErr := syncWorkspaceFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
+	if syncErr := s.workspaceDownloader()(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
 		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
 			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
+	}
+
+	if req.ProjectSlug != "" {
+		if recErr := recordBrokerWorkspaceCopy(req.ProjectSlug, req.ProjectID, !req.workspaceAbsentAtAdmission); recErr != nil {
+			s.agentLifecycleLog.Warn("Failed to write broker workspace record",
+				append([]any{"agent_id", req.ID, "project_id", req.ProjectID}, identityErrorAttrs(recErr)...)...)
+		}
 	}
 
 	opts.Workspace = workspaceDir
@@ -1583,7 +1646,9 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	// Write a workspace marker so in-container CLI
 	// can discover the project context and use the Hub API.
-	if req.ProjectID != "" && req.ProjectSlug != "" {
+	// A workspace a hub keeps as its own on this host keeps the hub's
+	// identity entry.
+	if req.ProjectID != "" && req.ProjectSlug != "" && !hubWorkspaceRecordExists(req.ProjectSlug) {
 		if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
@@ -2617,7 +2682,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		s.agentLifecycleLog.Error("Agent start failed",
-			"agent_id", id, "error", err)
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID, "error", err)
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
 		// the run the runtime holds now. Start can also re-provision the
@@ -2627,7 +2692,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		var skillErr *agent.SkillResolutionError
 		switch {
 		case errors.Is(err, agent.ErrContainerNameInUse):
-			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
+			// Fixed text, as restart and the async launch give: a wrapped
+			// error can carry runtime detail. The full error is logged above.
+			writeError(w, http.StatusConflict, ErrCodeConflict, agent.ErrContainerNameInUse.Error(), details)
 		case errors.Is(err, scionrt.ErrRunConflict):
 			// Another live run holds the agent name, and the runtime
 			// deleted nothing of it (ptone/scion#2550). Fixed text: the

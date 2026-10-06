@@ -765,6 +765,14 @@ type AgentFilter struct {
 	// chain contains the given principal ID (transitive access via creation lineage).
 	AncestorID string
 
+	// CreatedBy, when non-empty, restricts results to agents whose
+	// created_by equals this value exactly. It is always ANDed with every
+	// other filter. The user delete guard uses it to find agents a user's
+	// schedules started, which record the user only as created_by
+	// (ptone/scion#2769). omitempty keeps list cursor bindings unchanged
+	// when it is unset.
+	CreatedBy string `json:",omitempty"`
+
 	// Labels, when non-empty, restricts results to agents whose labels
 	// contain all specified key-value pairs (AND semantics).
 	Labels map[string]string
@@ -990,6 +998,14 @@ type AgentStatusUpdate struct {
 	// stop dispatched for run X sets it to X, so the stop never marks a
 	// newer run stopped. Internal to the hub — json:"-".
 	IfRunID string `json:"-"`
+	// StartWrite marks a start's own post-dispatch status write. Its delete
+	// guard uses the start-block rule (DeletionHoldsRow) instead of the
+	// lease-aware active rule: a finalizing row holds even with its lease
+	// expired (teardown already ran; only a retry or force moves it on), so
+	// a start that landed after such a delete keeps the delete's phase, as
+	// the hub's deleteWonAfterLanding check answers. A status report
+	// (heartbeat) keeps the lease-aware rule. Internal to the hub — json:"-".
+	StartWrite bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -1422,6 +1438,20 @@ type UserStore interface {
 	// Returns ErrNotFound if the user doesn't exist.
 	DeleteUser(ctx context.Context, id string) error
 
+	// LockUserRow locks the user row until the surrounding transaction ends
+	// (ptone/scion#2769). On PostgreSQL exclusive=true runs
+	// SELECT ... FOR UPDATE and exclusive=false runs SELECT ... FOR KEY SHARE,
+	// so a user delete (exclusive) and an agent create or restore for that
+	// user (shared) serialize under READ COMMITTED. FOR KEY SHARE conflicts
+	// only with FOR UPDATE (and DELETE), so ordinary updates of the user row
+	// (last seen, profile edits) do not wait on a create or restore. On
+	// SQLite this is a plain read (SQLite already serializes writes at the
+	// database level).
+	//
+	// Must be called inside a transaction (WithTx). Returns ErrNotFound if
+	// the user does not exist.
+	LockUserRow(ctx context.Context, id string, exclusive bool) error
+
 	// ListUsers returns users matching the filter criteria.
 	ListUsers(ctx context.Context, filter UserFilter, opts ListOptions) (*ListResult[User], error)
 
@@ -1688,6 +1718,20 @@ type GroupStore interface {
 	// Used by delegation checks to compute the full authority inherited
 	// through group membership.
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
+
+	// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+	// child group of parentGroupID. It returns ErrNotFound when no edge row
+	// was deleted, including when another transaction removed it first.
+	// It refuses project_agents parent groups with ErrInvalidInput, as
+	// RemoveGroupMember does, but unlike RemoveGroupMember it does not bump
+	// the parent group's updated timestamp.
+	RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error
+
+	// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+	// given group as a direct child group (one level only, no ancestors). A
+	// group with a self-edge is included in its own result. The result is
+	// sorted and empty, not ErrNotFound, when there are none.
+	GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error)
 
 	// CountGroupMembersByRole counts how many members of a group have the given role.
 	// Only memberships that still reference a user or an agent are counted;

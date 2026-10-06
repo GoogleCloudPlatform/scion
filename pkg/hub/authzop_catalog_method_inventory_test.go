@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -454,6 +455,22 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// single-file artifact owned by the dev user, homed in f.project.
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
+
+	// hub.conduit on too, so its experiment-gated routes are live: the
+	// registry above with hub.conduit also defaulting on (no operational
+	// settings, which the other entries rely on, are replaced).
+	var active []experiments.Experiment
+	for _, e := range srv.experimentRegistry().All() {
+		if e.Name == conduitExperiment {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+	require.True(t, srv.experimentEnabled(conduitExperiment))
+	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 
 	return f
 }
