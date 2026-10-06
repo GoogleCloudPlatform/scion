@@ -99,7 +99,6 @@ var PendingBearerDispositions = []PendingEntry{
 	// --- projects ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/shared/{token}", Method: "GET", Area: AreaProjects},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/broadcast", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/dav", Method: "COPY", Area: AreaProjects},
@@ -269,8 +268,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/invite/redeem", Method: "POST", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/me", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/scopes", Method: "GET", Area: AreaIdentity},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens", Method: "GET", Area: AreaIdentity},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens/{id}", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/authz/explain", Method: "POST", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/discord/link/verify", Method: "POST", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members", Method: "GET", Area: AreaIdentity},
@@ -293,9 +290,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/download", Method: "GET", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/finalize", Method: "POST", Area: AreaIdentity},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/upload", Method: "POST", Area: AreaIdentity},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/terminal-workspace", Method: "GET", Area: AreaIdentity},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/terminal-workspace", Method: "PUT", Area: AreaIdentity},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/revoke-sessions", Method: "POST", Area: AreaIdentity},
 	// --- hub ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/available", Method: "GET", Area: AreaHub},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/integrations/{name}/config", Method: "PUT", Area: AreaHub},

@@ -291,6 +291,11 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 		path:              []string{"default_gcp_identity_service_account_id"},
 		absentWhenMissing: false, // string, "" dropped by omitempty
 	},
+	// No hub-level per-profile default exists; the hub default is the
+	// single default_gcp_identity_service_account_id above.
+	projectSettingDefaultGCPIdentitySAIDByProfile: {
+		source: hubSourceNone,
+	},
 
 	// Default resource spec. The registry's five flat annotation keys face a
 	// single agent_defaults "default_resources" object, so the mapping is 5:1

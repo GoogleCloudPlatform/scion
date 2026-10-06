@@ -262,6 +262,17 @@ type createGCPServiceAccountResponse struct {
 	store.GCPServiceAccount
 	VerificationFailed  bool                       `json:"verificationFailed,omitempty"`
 	VerificationDetails *verificationFailedDetails `json:"verificationDetails,omitempty"`
+	// Warnings are advisory only (see projectSAMappingWarnings); set on the
+	// project-scoped route, never on the hub-scoped one.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// gcpServiceAccountWithWarnings is a service account response plus advisory
+// warnings. Embedding keeps the JSON identical to a bare
+// store.GCPServiceAccount when there are no warnings.
+type gcpServiceAccountWithWarnings struct {
+	store.GCPServiceAccount
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -368,6 +379,7 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 			}
 		}
 	}
+	resp.Warnings = s.projectSAMappingWarnings(r.Context(), projectID, sa)
 
 	writeJSON(w, http.StatusCreated, resp)
 }
@@ -393,6 +405,10 @@ type ListGCPServiceAccountsResponse struct {
 	Items        []GCPServiceAccountWithCapabilities `json:"items"`
 	Capabilities *Capabilities                       `json:"_capabilities,omitempty"`
 	MintQuota    *GCPMintQuotaInfo                   `json:"mint_quota,omitempty"`
+	// Warnings are advisory only: one per project-scoped account no
+	// Kubernetes broker profile of the project maps (see
+	// projectSAMappingWarnings). Hub-scoped items never get one.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -472,10 +488,16 @@ func (s *Server) listGCPServiceAccounts(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	saPtrs := make([]*store.GCPServiceAccount, len(sas))
+	for i := range sas {
+		saPtrs[i] = &sas[i]
+	}
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
 		MintQuota:    mintQuota,
+		Warnings:     s.projectSAMappingWarnings(ctx, projectID, saPtrs...),
 	})
 }
 
@@ -576,7 +598,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	s.runGCPServiceAccountVerification(w, r, sa)
+	s.runGCPServiceAccountVerification(w, r, sa, projectID)
 }
 
 // runGCPServiceAccountVerification performs the impersonation check and
@@ -590,7 +612,11 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 // this body writes verification state that the assign gate later trusts, so a
 // copy that forgot to persist a FAILURE would leave an account reading as
 // verified after a verification that did not pass.
-func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount) {
+//
+// warnProjectID is the project whose Kubernetes broker profiles a successful
+// response warns about (projectSAMappingWarnings), or "" for no warnings
+// (the parentless route).
+func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, warnProjectID string) {
 	// Fail-closed: if no token generator is configured, we cannot verify.
 	if s.gcpTokenGenerator == nil {
 		writeError(w, http.StatusServiceUnavailable, "gcp_not_configured",
@@ -618,7 +644,10 @@ func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http
 		return
 	}
 
-	writeJSON(w, http.StatusOK, sa)
+	writeJSON(w, http.StatusOK, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.verificationWarnings(r.Context(), warnProjectID, sa),
+	})
 }
 
 // applyGCPVerificationResult records the outcome of an impersonation check
@@ -968,7 +997,10 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 		"account_id", accountID, "project", projectID, "user", user.ID(),
 		"self_act_as", allowSelfActAs)
 
-	writeJSON(w, http.StatusCreated, sa)
+	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
+		GCPServiceAccount: *sa,
+		Warnings:          s.projectSAMappingWarnings(r.Context(), projectID, sa),
+	})
 }
 
 // GCPQuotaProjectInfo holds per-project mint quota info for the admin endpoint.

@@ -17,16 +17,22 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -184,6 +190,7 @@ type idFixtures struct {
 	agentRestore            string
 	agentRestoreProject     string
 	agentProvisioning       string
+	artifact                string
 }
 
 // seedLiveInventoryFixtures creates one real store row per resource family
@@ -443,7 +450,32 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		Updated: now,
 	}))
 
+	// Artifact service: on (experiment, store, blob storage) with one
+	// single-file artifact owned by the dev user, homed in f.project.
+	artStore, artBlobs := enableArtifactsForTest(t, srv)
+	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
+
 	return f
+}
+
+// seedLiveInventoryArtifact publishes a one-file artifact directly through
+// the store and blob storage, the way the single-file publish endpoint
+// writes it, and returns its id.
+func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.Store, blobs storage.Storage, projectID string) string {
+	t.Helper()
+	content := []byte("# live inventory\n")
+	sum := sha256.Sum256(content)
+	digest := hex.EncodeToString(sum[:])
+	_, err := blobs.Upload(ctx, artifacts.BlobPath("test-hub-id", digest), bytes.NewReader(content), storage.UploadOptions{ContentType: "text/markdown"})
+	require.NoError(t, err)
+	now := time.Now()
+	a := &artifacts.Artifact{ID: uuid.NewString(), ScopeKind: artifacts.ScopeKindProject, ScopeRef: projectID,
+		OwnerKind: artifacts.PrincipalKindUser, OwnerRef: DevUserID, Title: "live", CreatedAt: now, UpdatedAt: now}
+	v := &artifacts.Version{ID: uuid.NewString(), ArtifactID: a.ID, Seq: 1, Kind: artifacts.VersionKindPublish,
+		EntryPath: "live.md", TotalBytes: int64(len(content)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady}
+	files := []artifacts.File{{VersionID: v.ID, Path: "live.md", Size: int64(len(content)), SHA256: digest, MediaType: "text/markdown"}}
+	require.NoError(t, st.CreatePublished(ctx, a, v, files, nil))
+	return a.ID
 }
 
 // overrideKey identifies one (operation, pattern) pair for parameter
@@ -494,6 +526,11 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 // before the method switch.
 func patternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
+		// --- artifact family ---
+		"/api/v1/artifacts/{id}":                             {"id": f.artifact},
+		"/api/v1/artifacts/{id}/files/{path}":                {"id": f.artifact, "path": "live.md"},
+		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
+
 		// --- agent family ---
 		"/api/v1/agents/{id}":                                       {"id": f.agent},
 		"/api/v1/agents/{id}/ports":                                 {"id": f.agent},
@@ -541,7 +578,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
 		// --- user family ---
-		"/api/v1/users/{id}": {"id": f.user},
+		"/api/v1/users/{id}":                 {"id": f.user},
+		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}": {"id": f.skill},
@@ -635,6 +673,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 func queryOverrides(f idFixtures) map[string]string {
 	return map[string]string{
 		"/api/v1/chat/prefs": "agentId=" + f.agent,
+		// The single-file publish is selected by ?name= (pkg/artifacts).
+		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 	}
 }
 
