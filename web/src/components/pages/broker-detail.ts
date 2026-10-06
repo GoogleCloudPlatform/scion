@@ -609,8 +609,9 @@ export class ScionPageBrokerDetail extends LitElement {
     }
   }
 
-  private formatDate(dateString: string): string {
-    return formatInstantWithZone(dateString) || dateString;
+  /** Formats a timestamp for the header stats; "—" when missing or invalid. */
+  private formatDate(dateString: string | undefined): string {
+    return (dateString && formatInstantWithZone(dateString)) || '—';
   }
 
   private get isAdmin(): boolean {
@@ -729,7 +730,9 @@ export class ScionPageBrokerDetail extends LitElement {
         </div>
         <div class="stat">
           <span class="stat-label">Created</span>
-          <span class="stat-value-sm">${this.formatDate(this.broker.createdAt)}</span>
+          <span class="stat-value-sm"
+            >${this.formatDate(this.broker.created || this.broker.createdAt)}</span
+          >
         </div>
         <div class="stat">
           <span class="stat-label">Last Heartbeat</span>
