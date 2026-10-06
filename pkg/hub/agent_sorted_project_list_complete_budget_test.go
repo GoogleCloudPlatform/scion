@@ -282,7 +282,6 @@ func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_RacedWorstCase_Wit
 			}
 
 			want := 5 + tc.n + (1+perRow)*tc.rows
-			t.Logf("n=%d rows=%d decisions=%d race allowance=%d", tc.n, tc.rows, len(emitter.records), raceAllowance)
 			assert.Len(t, emitter.records, want, "a raced row costs 1+perRow decisions")
 			assert.LessOrEqual(t, len(emitter.records), raceAllowance, "the raced request stays within the race allowance")
 		})
