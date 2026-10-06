@@ -39,9 +39,9 @@ describe('stateLabel', () => {
     });
   });
 
-  it("shows the 'waiting_for_input' activity as 'waiting for user' (ptone/scion#3301)", () => {
-    expect(stateLabel('waiting_for_input')).toBe('waiting for user');
-    expect(ACTIVITY_DISPLAY.waiting_for_input.label).toBe('waiting for user');
+  it("shows the 'waiting_for_input' activity as 'waiting on parent' (ptone/scion#3301)", () => {
+    expect(stateLabel('waiting_for_input')).toBe('waiting on parent');
+    expect(ACTIVITY_DISPLAY.waiting_for_input.label).toBe('waiting on parent');
   });
 
   it('uses other defined display labels', () => {

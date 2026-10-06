@@ -76,14 +76,14 @@ export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
   thinking: { emoji: '💭', icon: 'lightning-charge', variant: 'primary', pulse: true },
   executing: { emoji: '⚙️', icon: 'gear', variant: 'primary', pulse: true },
   // Display only: the activity is still 'waiting_for_input' in the API and
-  // CLI. Pairs with 'blocked' below: one waits on a person, the other on
-  // agents or events (ptone/scion#3301).
+  // CLI. The input may come from a user or a parent agent, so one label
+  // covers both. Pairs with 'blocked' below (ptone/scion#3301).
   waiting_for_input: {
     emoji: '💬',
     icon: 'chat-dots',
     variant: 'warning',
     pulse: false,
-    label: 'waiting for user',
+    label: 'waiting on parent',
   },
   // Display only: the activity is still 'blocked' in the API and CLI. Users
   // read 'blocked' as broken; it means waiting on an external dependency

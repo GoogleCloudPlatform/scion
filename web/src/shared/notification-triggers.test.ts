@@ -24,14 +24,14 @@ import {
 } from './notification-triggers.js';
 
 describe('triggerLabel', () => {
-  it("shows WAITING_FOR_INPUT as 'Waiting for User' (ptone/scion#3301)", () => {
-    expect(triggerLabel('WAITING_FOR_INPUT')).toBe('Waiting for User');
+  it("shows WAITING_FOR_INPUT as 'Waiting on Parent' (ptone/scion#3301)", () => {
+    expect(triggerLabel('WAITING_FOR_INPUT')).toBe('Waiting on Parent');
   });
 
   it('labels every selectable trigger', () => {
     expect(ALL_TRIGGERS.map(triggerLabel)).toEqual([
       'Completed',
-      'Waiting for User',
+      'Waiting on Parent',
       'Limits Exceeded',
       'Stalled',
       'Error',
@@ -56,7 +56,7 @@ describe('triggerLabel', () => {
 describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
-      'You will be notified when this agent reaches: Completed, Waiting for User, or Limits Exceeded.'
+      'You will be notified when this agent reaches: Completed, Waiting on Parent, or Limits Exceeded.'
     );
   });
 

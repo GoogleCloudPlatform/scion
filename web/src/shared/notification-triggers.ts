@@ -41,7 +41,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   COMPLETED: 'Completed',
   // Display only: pairs with 'blocked' shown as 'waiting on others'
   // (ptone/scion#3301, ptone/scion#1571).
-  WAITING_FOR_INPUT: 'Waiting for User',
+  WAITING_FOR_INPUT: 'Waiting on Parent',
   LIMITS_EXCEEDED: 'Limits Exceeded',
   STALLED: 'Stalled',
   ERROR: 'Error',
