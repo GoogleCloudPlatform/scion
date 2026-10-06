@@ -500,10 +500,12 @@ func TestReincarnateAgent_RejectsUnsupportedOverrides(t *testing.T) {
 	self := agentIdentityFor(agent.ID, project.ID)
 
 	cases := []ReincarnateAgentRequest{
-		{Image: "new:v2"},
 		{HarnessConfig: "gemini"},
+		// Patch fields with invalid values (ptone/scion#3302).
 		{HarnessAuth: "oauth"},
-		{Model: "opus"},
+		{Role: "superuser"},
+		{ThinkingLevel: intPtr(101)},
+		{ThinkingLevel: intPtr(-1)},
 		{Env: map[string]string{"K": "V"}},
 		{TemplateHash: "abc123"},
 		{ResetOverrides: true},

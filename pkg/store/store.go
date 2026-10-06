@@ -41,6 +41,12 @@ var (
 	// conflict.
 	ErrPhaseMismatch = fmt.Errorf("agent phase changed: %w", ErrVersionConflict)
 
+	// ErrRunChanged is returned by UpdateAgentStatus when
+	// AgentStatusUpdate.IfRunID is set and the stored run_id differs
+	// (ptone/scion#2550): the row has moved to a newer run since the caller
+	// dispatched its operation. It wraps ErrVersionConflict.
+	ErrRunChanged = fmt.Errorf("agent run changed: %w", ErrVersionConflict)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
@@ -969,6 +975,13 @@ type AgentStatusUpdate struct {
 	// update's transaction; otherwise UpdateAgentStatus returns
 	// ErrPhaseMismatch and writes nothing. Internal to the hub — json:"-".
 	IfPhase string `json:"-"`
+	// IfRunID, when non-empty, makes the update conditional on the stored
+	// run_id equalling IfRunID, checked on the row read inside the update's
+	// transaction; otherwise UpdateAgentStatus returns ErrRunChanged and
+	// writes nothing (ptone/scion#2550). A hub that records the result of a
+	// stop dispatched for run X sets it to X, so the stop never marks a
+	// newer run stopped. Internal to the hub — json:"-".
+	IfRunID string `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
