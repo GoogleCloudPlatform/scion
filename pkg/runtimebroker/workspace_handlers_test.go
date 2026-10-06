@@ -1436,3 +1436,60 @@ func doProjectUploadRequest(t *testing.T, srv *Server, body ProjectWorkspaceUplo
 	srv.handleProjectWorkspaceUpload(rec, req)
 	return rec
 }
+
+// TestBuildWorkspaceManifestExcludesIdentityEntry checks that the root .scion
+// identity entry, as a marker file or a directory, stays out of the
+// manifest (gcp.SyncToGCS never uploads it), while a nested .scion is kept.
+func TestBuildWorkspaceManifestExcludesIdentityEntry(t *testing.T) {
+	cfg := DefaultServerConfig()
+	mgr := &mockAgentManager{}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+	srv := New(cfg, mgr, rt)
+
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{"marker file", map[string]string{".scion": "project-id: x\n"}},
+		{"directory", map[string]string{".scion/project-id": "x", ".scion/settings.yaml": "a: b\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			files := map[string]string{
+				"file1.txt":         "content1",
+				"sub/.scion/keep":   "nested",
+				".scionignore-like": "kept",
+			}
+			for k, v := range tc.files {
+				files[k] = v
+			}
+			for path, content := range files {
+				fullPath := filepath.Join(tmpDir, path)
+				if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(fullPath, []byte(content), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			manifest, err := srv.buildWorkspaceManifest(tmpDir, nil)
+			if err != nil {
+				t.Fatalf("failed to build manifest: %v", err)
+			}
+			got := map[string]bool{}
+			for _, f := range manifest.Files {
+				got[f.Path] = true
+			}
+			want := map[string]bool{"file1.txt": true, "sub/.scion/keep": true, ".scionignore-like": true}
+			if len(got) != len(want) {
+				t.Errorf("manifest files = %v, want %v", got, want)
+			}
+			for p := range want {
+				if !got[p] {
+					t.Errorf("manifest is missing %s (got %v)", p, got)
+				}
+			}
+		})
+	}
+}
