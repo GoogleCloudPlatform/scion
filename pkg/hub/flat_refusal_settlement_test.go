@@ -118,7 +118,13 @@ func TestFlatLifecycle_RefusalSettlesMessage(t *testing.T) {
 			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
 			d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
 			requireNoStartMarkers(t, d)
-			assert.True(t, f.client.startCalled || f.client.restartCalled, "the refusal came from the start dispatch")
+			// The refusal comes from the StartAgent leg (after a successful
+			// stop for restart), never from a broker-side restart call.
+			assert.True(t, f.client.startCalled, "the refusal came from the StartAgent dispatch")
+			assert.False(t, f.client.restartCalled, "no broker-side restart call")
+			if action == "restart" {
+				assert.True(t, f.client.stopCalled, "the restart's stop leg ran and succeeded")
+			}
 			got, err := f.s.GetAgent(context.Background(), a.ID)
 			require.NoError(t, err)
 			assert.Equal(t, "refused by the Runtime Broker", got.Message)

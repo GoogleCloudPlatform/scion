@@ -148,6 +148,21 @@ profiles:
         image: profile-image:v4
 `), 0o644))
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	// A stored harness config with its own image: the plan's last image step.
+	// The settings carry only the profile override (no base harness_configs
+	// entry), so for a pinned agent both settings steps (the override and the
+	// ResolveHarnessConfig fallback) yield nothing and the harness config's
+	// own image applies.
+	require.NoError(t, f.s.CreateHarnessConfig(context.Background(), &store.HarnessConfig{
+		ID:          tid("hc-flat-plan-" + t.Name()),
+		Name:        "hc",
+		Slug:        hcSlug,
+		Harness:     "claude",
+		Scope:       store.HarnessConfigScopeGlobal,
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "hc-hash-v1",
+		Config:      &store.HarnessConfigData{Image: "hc-own-image:v1"},
+	}))
 	withHC := func(a *store.Agent) {
 		reincarnationEligible(a)
 		a.AppliedConfig.HarnessConfig = hcSlug
@@ -166,5 +181,5 @@ profiles:
 	assert.Equal(t, "profile-image:v4", planImage(t, legacy), "control: a legacy agent takes the active profile's override image")
 
 	pinned := f.pinnedAgentWith(t, "plan-pinned", string(state.PhaseStopped), withHC)
-	assert.NotEqual(t, "profile-image:v4", planImage(t, pinned), "a pinned agent takes no profile-tier image")
+	assert.Equal(t, "hc-own-image:v1", planImage(t, pinned), "a pinned agent takes no profile-tier image: neither the override nor the active_profile fallback; the harness config's own image applies")
 }
