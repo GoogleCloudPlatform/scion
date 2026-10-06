@@ -71,6 +71,16 @@ async function openPaletteWithLongDocument(page: Page): Promise<void> {
         .first()
     ).toBeVisible();
   }
+  // Measure the settled layout, not a frame of the dialog's open animation.
+  await expect
+    .poll(() =>
+      page
+        .locator('scion-quick-palette sl-dialog')
+        .evaluate(
+          (dialog) => dialog.shadowRoot!.querySelector('[part~="panel"]')!.getAnimations().length
+        )
+    )
+    .toBe(0);
 }
 
 interface Layout {
