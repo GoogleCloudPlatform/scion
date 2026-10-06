@@ -81,7 +81,7 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	assert.NotEmpty(t, resp.Database.Status)
 
 	// Verify brokers is an array (even if empty)
-	assert.NotNil(t, resp.Brokers)
+	assert.NotNil(t, resp.Brokers.Items)
 
 	// Verify agents section has initialized maps/slices
 	assert.NotNil(t, resp.Agents.ByPhase)
@@ -236,30 +236,29 @@ func TestHandleHealthSummary_BrokerMixedStatus(t *testing.T) {
 	assert.Equal(t, "degraded", resp.Status)
 
 	// Should have two brokers
-	require.Len(t, resp.Brokers, 2)
+	require.Len(t, resp.Brokers.Items, 2)
 
 	// Find the online broker and verify agent counts
-	var onlineBroker, offlineBroker *HealthSummaryBrkr
-	for i := range resp.Brokers {
-		switch resp.Brokers[i].Status {
+	var onlineBroker, offlineBroker *HealthSummaryBroker
+	for i := range resp.Brokers.Items {
+		switch resp.Brokers.Items[i].Status {
 		case "online":
-			onlineBroker = &resp.Brokers[i]
+			onlineBroker = &resp.Brokers.Items[i]
 		case "offline":
-			offlineBroker = &resp.Brokers[i]
+			offlineBroker = &resp.Brokers.Items[i]
 		}
 	}
 
 	require.NotNil(t, onlineBroker, "should have an online broker")
 	require.NotNil(t, offlineBroker, "should have an offline broker")
 
-	assert.Equal(t, 3, onlineBroker.AgentCount)
-	assert.Equal(t, 3, onlineBroker.AgentHealthy)
-	assert.Equal(t, "docker", onlineBroker.Runtime)
-	assert.True(t, onlineBroker.RuntimeAvailable)
+	assert.Equal(t, 3, onlineBroker.Agents.Total)
+	require.NotNil(t, onlineBroker.Runtime)
+	assert.Equal(t, "docker", onlineBroker.Runtime.Type)
 
-	assert.Equal(t, 0, offlineBroker.AgentCount)
-	assert.Equal(t, "kubernetes", offlineBroker.Runtime)
-	assert.False(t, offlineBroker.RuntimeAvailable)
+	assert.Equal(t, 0, offlineBroker.Agents.Total)
+	require.NotNil(t, offlineBroker.Runtime)
+	assert.Equal(t, "kubernetes", offlineBroker.Runtime.Type)
 }
 
 func TestHandleHealthSummary_DispatchNullWhenUnavailable(t *testing.T) {

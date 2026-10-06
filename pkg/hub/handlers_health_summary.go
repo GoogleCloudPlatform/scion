@@ -15,14 +15,25 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net/http"
 	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// healthSummaryBrokerLimit caps the runtime broker rows returned by the
+// health summary. The total is still reported so the dashboard can show
+// that the list was truncated.
+const healthSummaryBrokerLimit = 100
+
+// healthSummaryBrokerPageSize is the store page size used while counting
+// runtime broker records for the health summary.
+const healthSummaryBrokerPageSize = 500
 
 // HealthSummaryResponse is the composite health summary returned by
 // GET /api/v1/admin/health/summary. It aggregates all subsystem health
@@ -31,7 +42,7 @@ type HealthSummaryResponse struct {
 	Status   string                 `json:"status"`
 	Hub      HealthSummaryHub       `json:"hub"`
 	Database HealthSummaryDB        `json:"database"`
-	Brokers  []HealthSummaryBrkr    `json:"brokers"`
+	Brokers  HealthSummaryBrokers   `json:"runtime_brokers"`
 	Agents   HealthSummaryAgents    `json:"agents"`
 	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
 	Stall    HealthSummaryStall     `json:"stall_config"`
@@ -69,20 +80,51 @@ type HealthSummaryDB struct {
 	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
 }
 
-// HealthSummaryBrkr contains per-broker health information.
-type HealthSummaryBrkr struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Status           string    `json:"status"`
-	Runtime          string    `json:"runtime"`
-	RuntimeAvailable bool      `json:"runtime_available"`
-	AgentCount       int       `json:"agent_count"`
-	AgentHealthy     int       `json:"agent_healthy"`
-	LastHeartbeat    time.Time `json:"last_heartbeat"`
-	// NFS health fields are not yet populated — the broker heartbeat protocol
-	// does not currently report NFS mount status. Tracked as a follow-up to
-	// the health monitoring design (§4.1 D5). TODO: wire NFS health once the
-	// broker API exposes it.
+// HealthSummaryBrokers is the runtime broker section of the health
+// summary. Plugin (message-broker) records are never included.
+type HealthSummaryBrokers struct {
+	Items []HealthSummaryBroker `json:"items"`
+	// Total is the number of runtime brokers, excluding plugin records.
+	Total int `json:"total"`
+	// Truncated is true when Total exceeds len(Items).
+	Truncated bool `json:"truncated"`
+}
+
+// HealthSummaryBroker contains per-broker health information.
+type HealthSummaryBroker struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// Status is broker liveness: online, offline or degraded.
+	Status string `json:"status"`
+	// LastHeartbeat is null when the broker has never sent a heartbeat.
+	LastHeartbeat *time.Time `json:"last_heartbeat"`
+	// Runtime is null when the broker reported no usable profile.
+	Runtime *HealthBrokerRuntime `json:"runtime"`
+	// WorkspaceStorage is null when the broker never reported it.
+	WorkspaceStorage *HealthBrokerStorage `json:"workspace_storage"`
+	Agents           HealthBrokerAgents   `json:"agents"`
+}
+
+// HealthBrokerAgents holds per-broker agent counts.
+type HealthBrokerAgents struct {
+	// Total is the number of non-deleted agents placed on the broker.
+	Total int `json:"total"`
+}
+
+// HealthBrokerRuntime is the runtime a broker places agents on by default.
+type HealthBrokerRuntime struct {
+	Type    string `json:"type"`
+	Profile string `json:"profile"`
+}
+
+// HealthBrokerStorage is the workspace storage a broker reports on each
+// heartbeat.
+type HealthBrokerStorage struct {
+	// Backend is "local" or "nfs".
+	Backend string `json:"backend"`
+	// NFSHealthy is set only when Backend is "nfs".
+	NFSHealthy *bool `json:"nfs_healthy,omitempty"`
 }
 
 // HealthSummaryAgents contains agent health summary.
@@ -193,44 +235,10 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build brokers section using pre-computed agent buckets from the aggregate.
-	var brokerSummaries []HealthSummaryBrkr
-	brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
+	brokerList, err := s.healthSummaryBrokers(ctx, agentAgg)
 	if err != nil {
 		slog.Error("health summary: failed to list runtime brokers", "error", err)
 		degrade()
-	} else {
-		for _, b := range brokerResult.Items {
-			agentCount := 0
-			agentHealthy := 0
-			if agentAgg != nil {
-				if bucket, ok := agentAgg.ByBroker[b.ID]; ok {
-					agentCount = bucket.Count
-					agentHealthy = bucket.Healthy
-				}
-			}
-
-			// Determine runtime type from profiles
-			runtime := "unknown"
-			runtimeAvailable := false
-			if len(b.Profiles) > 0 {
-				runtime = b.Profiles[0].Type
-				runtimeAvailable = b.Profiles[0].Available
-			}
-
-			brokerSummaries = append(brokerSummaries, HealthSummaryBrkr{
-				ID:               b.ID,
-				Name:             b.Name,
-				Status:           b.Status,
-				Runtime:          runtime,
-				RuntimeAvailable: runtimeAvailable,
-				AgentCount:       agentCount,
-				AgentHealthy:     agentHealthy,
-				LastHeartbeat:    b.LastHeartbeat,
-			})
-		}
-	}
-	if brokerSummaries == nil {
-		brokerSummaries = []HealthSummaryBrkr{}
 	}
 
 	// Dispatch section: the dispatchmetrics.Recorder does not currently expose a
@@ -250,7 +258,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	if len(agentsSummary.Stalled) > 0 || len(agentsSummary.Crashed) > 0 || len(agentsSummary.Errored) > 0 {
 		degrade()
 	}
-	for _, b := range brokerSummaries {
+	for _, b := range brokerList.Items {
 		if b.Status != "online" && b.Status != "" {
 			degrade()
 			break
@@ -261,13 +269,99 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		Status:   overallStatus,
 		Hub:      hubSummary,
 		Database: dbSummary,
-		Brokers:  brokerSummaries,
+		Brokers:  brokerList,
 		Agents:   agentsSummary,
 		Dispatch: dispatchSummary,
 		Stall:    stallConfig,
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// healthSummaryBrokers lists runtime brokers for the health summary,
+// excluding plugin records. It returns at most healthSummaryBrokerLimit rows
+// in store order, with the full runtime broker count in Total. On a store
+// error it returns an empty, non-nil list together with the error.
+func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate) (HealthSummaryBrokers, error) {
+	list := HealthSummaryBrokers{Items: []HealthSummaryBroker{}}
+	opts := store.ListOptions{Limit: healthSummaryBrokerPageSize}
+	for {
+		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, opts)
+		if err != nil {
+			return HealthSummaryBrokers{Items: []HealthSummaryBroker{}}, err
+		}
+		for i := range page.Items {
+			b := &page.Items[i]
+			if isPluginBroker(b) {
+				continue
+			}
+			list.Total++
+			if len(list.Items) < healthSummaryBrokerLimit {
+				list.Items = append(list.Items, healthSummaryBroker(b, agentAgg))
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+			break
+		}
+		opts.Cursor = page.NextCursor
+	}
+	list.Truncated = list.Total > len(list.Items)
+	return list, nil
+}
+
+// healthSummaryBroker builds one runtime broker row of the health summary.
+func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggregate) HealthSummaryBroker {
+	row := HealthSummaryBroker{
+		ID:               b.ID,
+		Name:             b.Name,
+		Version:          b.Version,
+		Status:           b.Status,
+		Runtime:          brokerRuntimeSummary(b),
+		WorkspaceStorage: brokerStorageSummary(b.WorkspaceStorage),
+	}
+	if !b.LastHeartbeat.IsZero() {
+		hb := b.LastHeartbeat
+		row.LastHeartbeat = &hb
+	}
+	if agentAgg != nil {
+		if bucket, ok := agentAgg.ByBroker[b.ID]; ok {
+			row.Agents.Total = bucket.Count
+		}
+	}
+	return row
+}
+
+// brokerRuntimeSummary returns the runtime a broker places agents on by
+// default: the profile named DefaultProfile; else the single profile when
+// there is exactly one; else nil (nothing to report).
+func brokerRuntimeSummary(b *store.RuntimeBroker) *HealthBrokerRuntime {
+	if b.DefaultProfile != "" {
+		for _, p := range b.Profiles {
+			if p.Name == b.DefaultProfile {
+				return &HealthBrokerRuntime{Type: p.Type, Profile: p.Name}
+			}
+		}
+	}
+	if len(b.Profiles) == 1 {
+		p := b.Profiles[0]
+		return &HealthBrokerRuntime{Type: p.Type, Profile: p.Name}
+	}
+	return nil
+}
+
+// brokerStorageSummary converts the workspace storage a broker reported on
+// its last heartbeat. NFS health is reported only for the NFS backend; an
+// NFS backend without a described share is reported as unhealthy.
+func brokerStorageSummary(ws *api.BrokerWorkspaceStorage) *HealthBrokerStorage {
+	if ws == nil || ws.Backend == "" {
+		return nil
+	}
+	out := &HealthBrokerStorage{Backend: ws.Backend}
+	if ws.Backend == api.WorkspaceStorageBackendNFS {
+		healthy := ws.NFS != nil && ws.NFS.Healthy
+		out.NFSHealthy = &healthy
+	}
+	return out
 }
 
 // unhealthyChecks returns the non-healthy entries of a check map as sorted
