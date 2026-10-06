@@ -105,6 +105,12 @@ type OperationSpec struct {
 	// requirements. Each exemption must declare which specific
 	// obligations it waives.
 	Exemptions []Exemption
+
+	// Bearer records how the operation treats a user access token.
+	// Required unless the operation is listed in PendingBearerOperations.
+	// Credentials must agree with it: scoped_uat is listed if and only if
+	// Bearer admits a token.
+	Bearer BearerDisposition
 }
 
 // OperationID is a stable, unique operation identifier.
@@ -123,6 +129,12 @@ type EntryPoint struct {
 	// Method is the HTTP method for HTTPRoute entry points. Empty for
 	// non-HTTP entry points.
 	Method string
+
+	// Variant distinguishes entry points that share a kind, method and
+	// pattern but select a different branch by query or body (for
+	// example "scope=user"). Empty when the pattern alone identifies the
+	// branch.
+	Variant string
 }
 
 // EntryPointKind classifies entry point types.

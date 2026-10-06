@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -49,6 +50,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var tracer = otel.Tracer("scion-broker")
@@ -1119,6 +1121,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// the hub sent none, which is every local and file-mode dispatch.
 	ctx = withHubAgentDefaults(ctx, req.Config)
 
+	// Carry the broker-provisioned-worktree signal (set above inside
+	// buildStartContext's tryProvisionWorktree call) into provisioning/start.
+	// See api.ContextWithProvisionedWorktreeRepoRoot for what this unlocks.
+	// No-op unless tryProvisionWorktree actually provisioned a worktree for
+	// this dispatch. Applied before the async-launch branch below so a
+	// launch that goes async still carries the signal into its own
+	// goroutine via ctx.
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, sc.ProvisionedWorktreeRepoRoot)
+	}
+
 	// Non-blocking create (design t1-async-create-v11.md §3.8.2, §7 P1b-1).
 	// ProvisionOnly and Reprovision always stay synchronous (design §3.2).
 	// With AsyncLaunch absent, no LaunchID to track the launch by, or a
@@ -1204,6 +1217,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// cleanup and ss.finish have all returned: finishTracked is
 		// deferred first, so it runs last.
 		trackCtx, finishTracked := s.startsInFlight.begin(startCtx, ss.key)
+		s.startsInFlight.setRunID(trackCtx, opts.RunID)
 		defer finishTracked()
 		defer ss.finish()
 		ctx = trackCtx
@@ -1780,6 +1794,22 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A delete the hub fenced with a deadline is refused once that deadline
+	// has passed, before anything below (the recorded-runtime check
+	// included) can act on it (ptone/scion#2906).
+	var fence deleteFence
+	if isBareDelete {
+		var err error
+		fence, err = parseDeleteNotAfter(r.URL.Query())
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		if s.refuseStaleDelete(w, fence, "arrival", id, projectID, r.URL.Query().Get("runId")) {
+			return
+		}
+	}
+
 	// Every request below except start acts on an existing agent: target the
 	// runtime that holds it, checking the runtime type the hub recorded for
 	// it first, and answer 503 only when no runtime lists the agent and this
@@ -1811,7 +1841,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.getAgent(w, r, id, projectID)
 	case http.MethodDelete:
-		s.deleteAgent(w, r, id, projectID)
+		s.deleteAgentFenced(w, r, id, projectID, fence)
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
@@ -1839,7 +1869,21 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 	NotFound(w, "Agent")
 }
 
+// deleteAgent deletes the agent, parsing the delete's deadline itself. For
+// callers that bypass handleAgentByID (tests); the route uses
+// deleteAgentFenced with the deadline it already parsed and checked.
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	fence, err := parseDeleteNotAfter(r.URL.Query())
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	s.deleteAgentFenced(w, r, id, projectID, fence)
+}
+
+// deleteAgentFenced deletes the agent. fence is the delete's deadline,
+// already parsed and checked on arrival by handleAgentByID.
+func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, projectID string, fence deleteFence) {
 	ctx := r.Context()
 
 	ctx, span := tracer.Start(ctx, "broker.agent.delete")
@@ -1880,6 +1924,10 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		return
 	}
 
+	// fence (notAfter, ptone/scion#2906) was checked on arrival by
+	// handleAgentByID; it is checked again below once the target is
+	// resolved.
+
 	// Cancel any in-flight start of this agent on this broker first, before
 	// resolving the delete target: a start still blocked in provisioning
 	// (for example, skill resolution) may have no container or listable
@@ -1893,6 +1941,16 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
 		"agent_id", id, "project_id", projectID, "run_id", runID)
 	target, err := s.resolveDeleteTarget(ctx, id, projectID, runID, query.Get("projectPath"), deleteFiles || softDelete)
+	// Resolution can be slow (it lists every runtime), so check the deadline
+	// again before the first side effect after it: the leftover cleanup of
+	// a not-found, the launch cancel, the soft-delete marking and
+	// DeleteTarget. Only a small marker-file read (agentFilesRunOwner) and
+	// in-memory launch-registry checks (otherRunInFlight) run between here
+	// and DeleteTarget.
+	if s.refuseStaleDelete(w, fence, "resolved", id, projectID, runID) {
+		span.SetStatus(codes.Error, "stale delete dispatch")
+		return
+	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetRunMismatch) {
@@ -2154,7 +2212,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	// Tracked until Manager.Start and Run's deferred cleanup have returned.
-	ctx, finishTracked := s.startsInFlight.begin(r.Context(), launchKey{ProjectID: projectID, Slug: id})
+	// The run comes from the runId query parameter when the hub sends it,
+	// so the start carries its run from the moment it is tracked
+	// (ptone/scion#2550); see trackedStartRunID for the body's runId.
+	queryRunID := r.URL.Query().Get("runId")
+	ctx, finishTracked := s.startsInFlight.beginRun(r.Context(), launchKey{ProjectID: projectID, Slug: id}, queryRunID)
 	defer finishTracked()
 
 	// ProjectID reaches filesystem paths further on (the project-marker
@@ -2242,6 +2304,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.agentLifecycleLog.Debug("No task in start request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
+	// Record the run on the tracked start, so a run-scoped stop for another
+	// run leaves this start alone (ptone/scion#2550).
+	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, projectID, queryRunID, startReq.RunID))
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent (#1960). ProjectID comes from the URL-scoped function
 	// argument since start doesn't repeat it in the body.
@@ -2388,7 +2453,16 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	// A saved profile names the runtime this existing agent was created
+	// on; if settings cannot resolve it, fail rather than start the agent
+	// on the default runtime (ptone/scion#2709). buildStartContext already
+	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
+	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "", slog.LevelDebug)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		writeSavedProfileUnresolved(w, err)
+		return
+	}
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(opts)
@@ -2694,13 +2768,13 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		attribute.String("scion.project.id", projectID),
 	)
 
-	// Wake any local launch waiting on this agent (design §3.8.1); see the
-	// identical comment in deleteAgent.
-	s.cancelLocalLaunch(launchKey{ProjectID: projectID, Slug: id})
-	// Cancel a start of this agent still running on this broker and wait
-	// for its cleanup before stopping, so a start whose hub cancel was lost
-	// cannot create a container after this stop.
-	s.cancelInFlightStart(ctx, launchKey{ProjectID: projectID, Slug: id})
+	// runId, when the hub sends it, names the run the stop is for
+	// (ptone/scion#2550). A stop for a run that no longer holds this name
+	// answers 404 and touches nothing, so a stale stop cannot stop an agent
+	// recreated under the same name. Without it, behaviour is as before.
+	runID := r.URL.Query().Get("runId")
+	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
+	key := launchKey{ProjectID: projectID, Slug: id}
 
 	// Resolve the project-scoped container so that same-slug agents in
 	// different projects on this broker don't collide. An empty target means
@@ -2715,7 +2789,85 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	// below — the manager whose List call actually produced the matched
 	// entry, not one re-resolved by a second, independent lookup that could
 	// land on a different runtime than the one the target came from.
-	target, mgr, err := s.projectScopedTarget(ctx, id, projectID)
+	var (
+		match     agentMatch
+		lookupErr error
+		// cancelledOwn counts the launch and tracked starts a run-scoped
+		// stop woke or cancelled as its own: those of the requested run, and
+		// unlabelled ones (no run recorded), which match any run. Always 0
+		// for a legacy stop.
+		cancelledOwn int
+	)
+	if runID == "" {
+		// Wake any local launch waiting on this agent (design §3.8.1); see
+		// the identical comment in deleteAgent.
+		s.cancelLocalLaunch(key)
+		// Cancel a start of this agent still running on this broker and
+		// wait for its cleanup before stopping, so a start whose hub cancel
+		// was lost cannot create a container after this stop.
+		s.cancelInFlightStart(ctx, key)
+		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
+	} else {
+		// A run-scoped stop resolves first, so a stop for a run that no
+		// longer holds the name returns 404 before any side effect: no
+		// launch cancel, and no cancel of, or wait on, a start of another
+		// run.
+		match, lookupErr = s.lookupAgentMatchForRun(ctx, id, projectID, runID)
+		if s.refuseStopRunMismatch(w, span, key, id, runID, match, lookupErr, stopCheckWithInFlight) {
+			return
+		}
+		// Then the same protection as above, limited to this run: wake its
+		// launch, cancel and wait for its own in-flight starts (and
+		// unlabelled ones), and always resolve again: a cancelled start's
+		// cleanup may have changed what the runtime lists, and a start of
+		// this run may have finished (creating its container) between the
+		// lookup above and the cancel, which a stale miss would report as
+		// "not found" while that container runs.
+		wokeLaunch := s.cancelLocalLaunchForRun(key, runID)
+		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
+		if wokeLaunch {
+			cancelledOwn++
+		}
+		match, lookupErr = s.lookupAgentMatchForRun(ctx, id, projectID, runID)
+		// Whatever the cancel did, a runtime entry of another run is never
+		// stopped. In-flight starts of other runs no longer count here: this
+		// run's own starts are already cancelled, so refusing for another
+		// run's start now would report a stop that did act as not done.
+		if current, mismatch := s.stopRunMismatch(key, runID, match, lookupErr, stopCheckEntryOnly); mismatch {
+			if cancelledOwn > 0 {
+				// This stop cancelled the requested run's own start or
+				// launch, and only another run's entry holds the name (for
+				// example the previous run's container during a restart):
+				// the requested run is gone, so the stop is accepted, as for
+				// a run with nothing left. A 404 here would make the hub keep
+				// showing the run as running. The other run's entry is left
+				// alone.
+				s.agentLifecycleLog.Warn("Agent stop: cancelled the requested run's start; another run holds the name and is left untouched",
+					"agent_id", id, "project_id", projectID, "run_id", runID, "current_run_id", current)
+				s.writeStopAccepted(w, id)
+				return
+			}
+			// Nothing of the requested run was cancelled, and another run's
+			// entry now holds the name (it appeared after the first lookup).
+			s.refuseStopRunMismatch(w, span, key, id, runID, match, lookupErr, stopCheckEntryOnly)
+			return
+		}
+	}
+
+	// A run-scoped stop never acts on the bare slug, which
+	// projectScopedTargetFrom falls back to for a project-blind request: a
+	// container of another run could take the name between the lookup and
+	// the Stop. When the lookup found no container (and did not fail),
+	// nothing of the requested run exists, so skip the target resolution
+	// and take the not-found path below.
+	var (
+		target string
+		mgr    agent.Manager
+		err    error
+	)
+	if runID == "" || match.containerID != "" || (lookupErr != nil && !errors.Is(lookupErr, ErrAgentNotFound)) {
+		target, mgr, err = s.projectScopedTargetFrom(ctx, id, projectID, match, lookupErr)
+	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, ErrAgentListUnavailable) {
@@ -2773,14 +2925,56 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		s.agentLifecycleLog.Info("Agent stopped (not found in project)",
 			"agent_id", id,
 			"phase", string(state.PhaseStopped))
-		s.forceHeartbeatAll("stop", id)
-		writeJSON(w, http.StatusAccepted, map[string]string{
-			"status":  "accepted",
-			"message": "Stop operation accepted",
-		})
+		s.writeStopAccepted(w, id)
 		return
 	}
-	if err := mgr.Stop(ctx, target, ""); err != nil {
+	// Stop exactly the resolved entry: StopTarget does not re-resolve by
+	// name, so the run checked above is the run stopped.
+	stopRef := resolvedStopRef(target, match, runID)
+	if err := mgr.StopTarget(ctx, stopRef); err != nil {
+		if errors.Is(err, scionrt.ErrRunMismatch) {
+			// The runtime enforces stopRef.RunID (Kubernetes Stop is a
+			// run-checked Delete, GoogleCloudPlatform/scion#2515): the
+			// resolved entry was replaced (by another run, or recreated)
+			// between the lookup and the stop, and the entry now holding
+			// the name was left running. Kubernetes reports this in two
+			// ways: the pod read already belonged to another run (nothing
+			// deleted), or the pod was replaced between its read and its
+			// delete, in which case the resolved entry's own Secrets and
+			// SecretProviderClass were already removed. Nothing of another
+			// run is touched either way. The runtime's error names the run
+			// now holding the name; the 404 leaves currentRunId out, since
+			// it is not known here.
+			if runID != "" && cancelledOwn > 0 {
+				// This stop already cancelled the requested run's own start
+				// or launch, so it did act: a 404 must have no side effects,
+				// and would make the hub keep showing the run as running.
+				// Accept it, as for the restart overlap above; the entry
+				// now holding the name is left alone.
+				s.agentLifecycleLog.Warn("Agent stop: cancelled the requested run's start; the runtime entry was replaced and is left untouched",
+					"agent_id", id, "project_id", projectID, "run_id", runID,
+					"resolved_run_id", stopRef.RunID, "error", err)
+				s.writeStopAccepted(w, id)
+				return
+			}
+			if runID != "" {
+				span.SetStatus(codes.Error, "run mismatch")
+				s.agentLifecycleLog.Info("Agent stop: runtime entry now belongs to another run; leaving it untouched",
+					"agent_id", id, "project_id", projectID, "run_id", runID,
+					"resolved_run_id", stopRef.RunID, "error", err)
+				StopRunMismatch(w, runID, "")
+				return
+			}
+			// A legacy stop names no run: the entry it resolved is gone,
+			// which is the "not found" outcome, answered as such. The newer
+			// run's entry is left running.
+			s.agentLifecycleLog.Info("Agent stopped (resolved entry replaced by another run)",
+				"agent_id", id, "project_id", projectID,
+				"resolved_run_id", stopRef.RunID, "error", err,
+				"phase", string(state.PhaseStopped))
+			s.writeStopAccepted(w, id)
+			return
+		}
 		if isContainerStopTolerable(err) {
 			// Container doesn't exist, is already stopped, or podman/docker can't find it.
 			// Treat as success so the hub can update its state.
@@ -2797,12 +2991,144 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			"phase", string(state.PhaseStopped))
 	}
 
-	s.forceHeartbeatAll("stop", id)
+	s.writeStopAccepted(w, id)
+}
 
+// writeStopAccepted forces a heartbeat and answers a stop with 202
+// "Stop operation accepted".
+func (s *Server) writeStopAccepted(w http.ResponseWriter, id string) {
+	s.forceHeartbeatAll("stop", id)
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"status":  "accepted",
 		"message": "Stop operation accepted",
 	})
+}
+
+// stopRunCheck selects what stopRunMismatch considers.
+type stopRunCheck int
+
+const (
+	// stopCheckWithInFlight is the check before any side effect: the matched
+	// entry, and in-flight launches and tracked starts.
+	stopCheckWithInFlight stopRunCheck = iota
+	// stopCheckEntryOnly is the check after the stop has cancelled its own
+	// run's starts: only the matched runtime entry.
+	stopCheckEntryOnly
+)
+
+// stopRunMismatch reports whether a stop naming run runID must be refused
+// with 404 and no further side effects (ptone/scion#2550), given the stop's
+// lookup result. It is a mismatch when:
+//   - the matched entry (with or without a container ID) is labelled with a
+//     different, non-empty run: that run now holds the name;
+//   - with stopCheckWithInFlight only: nothing matched, but a launch or a
+//     tracked start (start, restart or synchronous create) of a different
+//     run is in flight on this broker under key: the name belongs to that
+//     starting run, and the "not found in project" 202 must not be
+//     reported for it.
+//
+// With stopCheckWithInFlight, a launch or tracked start of runID itself
+// (an exact match) means the requested run is still starting: never a
+// mismatch, whatever else holds the name, so the stop goes on to cancel
+// that start rather than lose it. A start of another run overlapping it
+// (for example one whose hub cancel was lost) does not change that.
+//
+// A run-scoped lookup that listed only distinct entries of other runs
+// (otherRunsHoldNameError) is a mismatch too, with either check: nothing
+// of the requested run exists, as for a run-scoped delete.
+//
+// A legacy entry or launch with no run label matches by name, as a
+// run-scoped delete does. Any other lookup error is never a mismatch here;
+// the caller reports it as before. current is the run that holds the name
+// (the entry's, or the in-flight launch's), reported to the hub.
+func (s *Server) stopRunMismatch(key launchKey, runID string, m agentMatch, lookupErr error, check stopRunCheck) (current string, mismatch bool) {
+	if check == stopCheckWithInFlight && (s.startsInFlight.hasRun(key, runID) || s.launchRegistry.runInFlight(key, runID)) {
+		return "", false
+	}
+	if m.matched {
+		return m.entry.RunID, m.entry.RunID != "" && m.entry.RunID != runID
+	}
+	var otherRuns *otherRunsHoldNameError
+	if errors.As(lookupErr, &otherRuns) {
+		return otherRuns.currentRunID, true
+	}
+	if check == stopCheckEntryOnly {
+		return "", false
+	}
+	if lookupErr != nil && !errors.Is(lookupErr, ErrAgentNotFound) {
+		return "", false
+	}
+	if current, ok := s.launchRegistry.otherRunInFlightID(key, runID); ok {
+		return current, true
+	}
+	return s.startsInFlight.otherRun(key, runID)
+}
+
+// refuseStopRunMismatch answers a run-scoped stop with the run-mismatch
+// 404 and returns true when stopRunMismatch reports another run holding the
+// name; it does nothing else.
+func (s *Server) refuseStopRunMismatch(w http.ResponseWriter, span trace.Span, key launchKey, id, runID string, m agentMatch, lookupErr error, check stopRunCheck) bool {
+	current, mismatch := s.stopRunMismatch(key, runID, m, lookupErr, check)
+	if !mismatch {
+		return false
+	}
+	s.agentLifecycleLog.Info("Agent stop: no entry for the requested run; leaving the other run untouched",
+		"agent_id", id, "project_id", key.ProjectID, "run_id", runID, "current_run_id", current)
+	span.SetStatus(codes.Error, "run mismatch")
+	StopRunMismatch(w, runID, current)
+	return true
+}
+
+// trackedStartRunID returns the run to record on a tracked start once its
+// body is read. The body's runId is what the start actually begins (it
+// goes into StartOptions.RunID), so it wins; the query parameter, recorded
+// at begin, only covers the time before the body is read. A hub sends both
+// with the same value, so a difference means a malformed request: it is
+// logged, and the body's run is recorded. With no body runId, the query
+// run stays as recorded.
+func (s *Server) trackedStartRunID(id, projectID, queryRunID, bodyRunID string) string {
+	if bodyRunID == "" {
+		return queryRunID
+	}
+	if queryRunID != "" && queryRunID != bodyRunID {
+		s.agentLifecycleLog.Warn("Agent start: runId query parameter and body differ; using the body's",
+			"agent_id", id, "project_id", projectID, "query_run_id", queryRunID, "body_run_id", bodyRunID)
+	}
+	return bodyRunID
+}
+
+// resolvedStopRef is the runtime entry a broker stop acts on. When the
+// target is the matched entry's container, it is that entry as an
+// operation ID (AgentOperationID: namespace/pod for a Kubernetes entry),
+// with the entry's run; otherwise it is the bare target with no run, so
+// another entry's namespace or run is never applied. Both callers,
+// stopAgent and restartAgent's stop leg, pass it to Manager.StopTarget, so
+// the resolved entry is stopped without re-resolving by name.
+//
+// A legacy entry with no run label carries requestRunID instead (empty for
+// a legacy stop and for restart's stop leg), as deleteRunRef does for a
+// run-scoped delete. A run-scoped stop therefore acts on an unlabelled pod
+// exactly as a run-scoped delete does: the pod matches by name (a legacy
+// pod predates run IDs), and the runtime's run-checked path still applies,
+// so a pod recreated by another run after the lookup is left alone with
+// ErrRunMismatch rather than stopped by name: by its run label when it was
+// replaced before the runtime read it, or by the UID precondition when it
+// was replaced between the runtime's read and delete.
+func resolvedStopRef(target string, m agentMatch, requestRunID string) scionrt.RunRef {
+	ref := scionrt.RunRef{ID: target}
+	if m.containerID == target {
+		// The target as an operation ID (namespace-qualified with the
+		// matched entry's namespace for a pod listed outside the runtime's
+		// default namespace, GoogleCloudPlatform/scion#2515), and its run.
+		e := m.entry
+		e.ContainerID = target
+		ref.ID = scionrt.AgentOperationID(e)
+		ref.RunID = m.entry.RunID
+		if ref.RunID == "" {
+			ref.RunID = requestRunID
+		}
+	}
+	return ref
 }
 
 // reportRuntimePanic is deferred by startAgent and restartAgent just before
@@ -2839,8 +3165,9 @@ func (s *Server) panicFailureDetails(ctx context.Context, mgr agent.Manager, id,
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	// Tracked until the start leg, including Run's deferred cleanup, has
-	// returned.
-	ctx, finishTracked := s.startsInFlight.begin(r.Context(), launchKey{ProjectID: projectID, Slug: id})
+	// returned, with its run from the runId query parameter as on start.
+	queryRunID := r.URL.Query().Get("runId")
+	ctx, finishTracked := s.startsInFlight.beginRun(r.Context(), launchKey{ProjectID: projectID, Slug: id}, queryRunID)
 	defer finishTracked()
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
@@ -2868,6 +3195,9 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			s.agentLifecycleLog.Debug("No resolvedEnv in restart request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
 	}
+	// Record the run this restart starts on the tracked start, so a
+	// run-scoped stop for another run leaves it alone (ptone/scion#2550).
+	s.startsInFlight.setRunID(ctx, s.trackedStartRunID(id, projectID, queryRunID, restartReq.RunID))
 
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent/startAgent (#1960).
@@ -2965,7 +3295,17 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// a real side effect. A rejection here must leave the agent exactly as
 	// it was; running this after the stop would return 400 with the agent
 	// already stopped. See the identical re-check and comment in startAgent.
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	// As in startAgent, an unresolvable saved profile fails before the
+	// stop below instead of falling back to the default runtime.
+	// The profile is read by id but the recorded-runtime fallback reads
+	// agent-info.json by opts.Name (the container's name). If they differ
+	// the fallback cannot fire and the 503 is returned, which fails safe.
+	// buildStartContext already logged any fallback at Warn; Debug here.
+	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "", slog.LevelDebug)
+	if err != nil {
+		writeSavedProfileUnresolved(w, err)
+		return
+	}
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(opts)
@@ -3003,7 +3343,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// the start below create it.
 	if stopTarget == "" {
 		s.agentLifecycleLog.Warn("Restart: agent not found in project, proceeding with start", "agent_id", id)
-	} else if err := stopMgr.Stop(ctx, stopTarget, ""); err != nil {
+	} else if err := stopMgr.StopTarget(ctx, resolvedStopRef(stopTarget, match, "")); err != nil {
 		if isContainerStopTolerable(err) {
 			s.agentLifecycleLog.Warn("Restart: stop target not found or already stopped, proceeding with start", "agent_id", id, "error", err)
 		} else {
@@ -4934,16 +5274,51 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 // is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
+	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, false, slog.LevelWarn)
+	return mgr, runtimeType
+}
+
+// errSavedProfileUnresolved marks a start or restart of an existing agent
+// whose saved profile (agent-info.json) cannot be resolved against the
+// project's settings, so the broker cannot tell which runtime holds the
+// agent. Handlers return it as a retryable 503 (RuntimeUnavailable) rather
+// than running the agent on the broker's default runtime (ptone/scion#2709).
+var errSavedProfileUnresolved = errors.New("saved runtime profile cannot be resolved")
+
+// loadRuntimeSettings loads the settings resolveManagerForOptsStrict reads:
+// s.loadSettings when a test sets it, config.LoadEffectiveSettings otherwise.
+func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettings, []string, error) {
+	if s.loadSettings != nil {
+		return s.loadSettings(projectDir)
+	}
+	return config.LoadEffectiveSettings(projectDir)
+}
+
+// resolveManagerForOptsStrict is resolveManagerForOpts with an error result.
+// With strict set, used when opts.Profile is an existing agent's saved
+// profile, a settings load failure, missing settings or a profile/runtime
+// the settings do not define returns errSavedProfileUnresolved instead of
+// the broker's default manager, unless the agent's recorded runtime
+// (AgentInfo.Runtime) is the default runtime, in which case the default is
+// used (savedProfileUnresolved) and logged at fallbackLevel. Without
+// strict the error is always nil and those cases fall back to the
+// default, as for a fresh start.
+//
+// The returned error is sent to the client, so it names only the agent,
+// the profile and a fixed cause; it does not include file paths or
+// settings content. The full detail is logged here at Warn, once per
+// failure.
+func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool, fallbackLevel slog.Level) (agent.Manager, string, error) {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
 			// A ForceRuntime naming the default runtime returns s.manager
 			// here, bypassing the per-profile resolution below entirely —
 			// a second profile of the same runtime type with its own
 			// runtime config is not reachable under ForceRuntime.
-			return s.manager, s.runtime.Name()
+			return s.manager, s.runtime.Name(), nil
 		}
 		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
-			return aux.Manager, aux.Runtime.Name()
+			return aux.Manager, aux.Runtime.Name(), nil
 		}
 		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
 	}
@@ -4954,13 +5329,27 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// back to the broker's default runtime either way, but a malformed
 	// settings file should leave a trace.
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
-	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	vs, _, err := s.loadRuntimeSettings(projectDir)
+	if err != nil && strict {
+		return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, err,
+			fmt.Errorf("%w: agent %q profile %q: project settings could not be loaded",
+				errSavedProfileUnresolved, opts.Name, opts.Profile))
+	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("failed to load project settings for runtime resolution; using broker default runtime",
 			"projectDir", projectDir, "error", err)
 	}
 	if vs == nil {
-		return s.manager, s.runtime.Name()
+		// Defensive: LoadEffectiveSettings returns non-nil settings
+		// whenever err is nil (it layers the embedded defaults), so a
+		// project with no settings file reaches ResolveRuntime below and
+		// fails there with "profile not found" instead.
+		if strict {
+			return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, errors.New("no project settings found"),
+				fmt.Errorf("%w: agent %q profile %q: no project settings found",
+					errSavedProfileUnresolved, opts.Name, opts.Profile))
+		}
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// ResolveRuntime("") uses vs.ActiveProfile as the fallback. The
@@ -4976,8 +5365,14 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// default is also Kubernetes).
 	rtConfig, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
+		if strict {
+			// ResolveRuntime's errors name only the profile and runtime
+			// ("profile %q not found", "runtime %q not found for profile %q").
+			return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, err,
+				fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err))
+		}
 		// Profile or its runtime not found in settings; use default
-		return s.manager, s.runtime.Name()
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// Cheap pre-check: a profile matching the broker's own default runtime
@@ -5001,7 +5396,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// requested profile is the one the default runtime was built from; it
 	// relies on the capability instead.
 	if s.defaultRuntimeMatchesProfile(runtimeType, rtConfig) && !scionrt.HasPerProfileInstances(s.runtime) {
-		return s.manager, s.runtime.Name()
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// Resolve the profile's runtime so its true identity can be compared
@@ -5046,7 +5441,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 		// identity to compare or register. Wrap it in a manager so the
 		// caller's calls surface the underlying error, the same contract
 		// callers get for any other runtime construction failure.
-		return agent.NewManager(resolved), resolved.Name()
+		return agent.NewManager(resolved), resolved.Name(), nil
 	}
 
 	// A PerProfileInstancesRuntime default never short-circuits here either,
@@ -5056,7 +5451,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// a runtime would otherwise collapse to one identity and incorrectly
 	// share the default manager.
 	if !scionrt.HasPerProfileInstances(s.runtime) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(s.runtime) {
-		return s.manager, s.runtime.Name()
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// Keyed by resolved IDENTITY, not type (see auxiliaryRuntimeIdentity):
@@ -5068,7 +5463,45 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
 	s.auxiliaryRuntimesMu.Unlock()
 
-	return mgr, resolved.Name()
+	return mgr, resolved.Name(), nil
+}
+
+// savedProfileUnresolved handles a strict resolution failure. If the
+// agent's agent-info.json records that it last ran on the broker's default
+// runtime, that runtime is still the right one, so it returns the default
+// manager and logs the fallback at level. Otherwise it logs cause and
+// returns clientErr, which handlers write as the 503.
+//
+// agent-info.json records only the runtime type, so the fallback applies
+// only where a type match is an identity match: not for Kubernetes (the
+// identity includes context and namespace, see auxiliaryRuntimeIdentity)
+// and not for runtimes with per-profile instances. Those get the 503.
+func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
+	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
+		recorded == s.runtime.Name() &&
+		!scionrt.HasPerProfileInstances(s.runtime) &&
+		auxiliaryRuntimeIdentity(s.runtime) == s.runtime.Name() {
+		s.agentLifecycleLog.Log(context.Background(), level, "saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
+			"agent", opts.Name, "profile", opts.Profile, "runtime", recorded, "projectDir", projectDir, "error", cause)
+		return s.manager, s.runtime.Name(), nil
+	}
+	s.logSavedProfileUnresolved(opts, projectDir, cause)
+	return nil, "", clientErr
+}
+
+// logSavedProfileUnresolved records why a saved profile could not be
+// resolved, with the detail the client response leaves out.
+func (s *Server) logSavedProfileUnresolved(opts api.StartOptions, projectDir string, err error) {
+	s.agentLifecycleLog.Warn("saved runtime profile cannot be resolved; refusing to use the broker default runtime",
+		"agent", opts.Name, "profile", opts.Profile, "projectDir", projectDir, "error", err)
+}
+
+// writeSavedProfileUnresolved writes errSavedProfileUnresolved as a
+// retryable 503 (runtime_unavailable, Retry-After: 30): the agent's runtime
+// is not available on this broker until its profile resolves again.
+func writeSavedProfileUnresolved(w http.ResponseWriter, err error) {
+	w.Header().Set("Retry-After", recordedRuntimeRetryAfterSeconds)
+	RuntimeUnavailable(w, err.Error()+"; the agent's runtime is not available on this broker, retry once its profile is configured")
 }
 
 // recheckHubDefaultPassthrough re-runs the hub-default passthrough gate's

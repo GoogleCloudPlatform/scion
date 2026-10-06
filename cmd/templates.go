@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -701,7 +702,7 @@ Examples:
 
   # Sync with a different name on the Hub
   scion templates sync custom-claude --name my-team-claude`,
-	Args: cobra.MaximumNArgs(1),
+	Args: templateSyncArgs,
 	RunE: runTemplateSync,
 }
 
@@ -720,7 +721,7 @@ Examples:
 
   # Push with global scope
   scion --global templates push custom-claude`,
-	Args: cobra.MaximumNArgs(1),
+	Args: templateSyncArgs,
 	RunE: runTemplateSync,
 }
 
@@ -741,25 +742,31 @@ func templateScopeFromGlobalFlag() string {
 	return "project"
 }
 
+// templateSyncArgs is the Args validator for template sync/push: one
+// template name or --all (not both), and no --name with --all. Validating
+// here, before root's PersistentPreRunE, keeps these reported as usage
+// errors (ptone/scion#2859).
+func templateSyncArgs(cmd *cobra.Command, args []string) error {
+	if err := nameOrAllArgs("template")(cmd, args); err != nil {
+		return err
+	}
+	all, _ := cmd.Flags().GetBool("all")
+	hubName, _ := cmd.Flags().GetString("name")
+	if all && hubName != "" {
+		return fmt.Errorf("cannot use --name with --all")
+	}
+	return nil
+}
+
 // runTemplateSync implements the shared logic for sync and push commands.
 func runTemplateSync(cmd *cobra.Command, args []string) error {
-	// Get flags - handle nil cmd for testing
-	var hubName string
-	var syncAll bool
-	if cmd != nil {
-		hubName, _ = cmd.Flags().GetString("name")
-		syncAll, _ = cmd.Flags().GetBool("all")
-	}
+	hubName, _ := cmd.Flags().GetString("name")
+	syncAll, _ := cmd.Flags().GetBool("all")
 
-	// Validate args: either --all or a template name is required
+	// Arguments and --all/--name were validated by templateSyncArgs; this
+	// guard only protects args[0] below for a direct caller that skips it.
 	if !syncAll && len(args) == 0 {
-		return fmt.Errorf("requires a template name argument or --all flag")
-	}
-	if syncAll && len(args) > 0 {
-		return fmt.Errorf("cannot specify both a template name and --all")
-	}
-	if syncAll && hubName != "" {
-		return fmt.Errorf("cannot use --name with --all")
+		return newUsageError("requires a template name argument or --all flag")
 	}
 
 	// Check Hub availability first (we need it for sync anyway)
@@ -963,24 +970,29 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 		return fmt.Errorf("failed to get download URLs: %w", err)
 	}
 
+	// Every entry must be a canonical relative path before anything is written.
+	if err := validateDownloadEntries(downloadResp.Files); err != nil {
+		return err
+	}
+
+	// Files are written through an os.Root so they stay inside destPath.
+	root, err := os.OpenRoot(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
 	// Download files
 	fmt.Printf("Downloading %d files to %s...\n", len(downloadResp.Files), destPath)
 	for _, fileInfo := range downloadResp.Files {
-		filePath := filepath.Join(destPath, filepath.FromSlash(fileInfo.Path))
-
-		// Create parent directories
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			return fmt.Errorf("failed to create directory for %s: %w", fileInfo.Path, err)
-		}
-
 		// Download file content
 		content, err := hubCtx.Client.Templates().DownloadFile(ctx, fileInfo.URL)
 		if err != nil {
 			return fmt.Errorf("failed to download %s: %w", fileInfo.Path, err)
 		}
 
-		// Write file
-		if err := os.WriteFile(filePath, content, 0644); err != nil {
+		// Write file, creating parent directories as needed
+		if err := transfer.WriteFileInRoot(root, fileInfo.Path, content, 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", fileInfo.Path, err)
 		}
 		fmt.Printf("  Downloaded: %s\n", fileInfo.Path)
@@ -1617,7 +1629,7 @@ func init() {
 	syncAlias := &cobra.Command{
 		Use:   "sync [template]",
 		Short: "Create or update a template in the Hub (Hub only)",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  templateSyncArgs,
 		RunE:  runTemplateSync,
 	}
 	syncAlias.Flags().String("name", "", "Name for the template on the Hub (defaults to local template name)")
@@ -1627,7 +1639,7 @@ func init() {
 	pushAlias := &cobra.Command{
 		Use:   "push [template]",
 		Short: "Upload local template to Hub (alias for sync)",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  templateSyncArgs,
 		RunE:  runTemplateSync,
 	}
 	pushAlias.Flags().String("name", "", "Name for the template on the Hub (defaults to local template name)")

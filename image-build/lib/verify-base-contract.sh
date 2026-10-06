@@ -25,7 +25,7 @@
 # provided by convention and verified by nobody. Writing the contract down found
 # four violations of it, all live at the time of writing:
 #
-#   * git     — core-base provided >= 2.47, thick-prep provided whatever Ubuntu
+#   * git     — core-base provided >= 2.48, thick-prep provided whatever Ubuntu
 #     shipped (2.43). Every thick image silently lost worktree-per-agent mode.
 #   * gh      — scion-base only installs its token-injecting wrapper when it
 #     finds /usr/bin/gh. When core-base moved gh to /usr/local/bin the wrapper
@@ -61,7 +61,7 @@ set -uo pipefail
 
 GO_MIN_VERSION="${GO_MIN_VERSION:-1.26.1}"
 NODE_MIN_VERSION="${NODE_MIN_VERSION:-24}"
-GIT_MIN_VERSION="2.47.0" # pkg/util/git.go CheckGitVersion — hard floor, not a preference
+GIT_MIN_VERSION="2.48.0" # pkg/util/git.go CheckGitVersion — hard floor, not a preference
 
 # --- Emulation awareness ----------------------------------------------------
 #
@@ -143,7 +143,7 @@ need_cmd() {
 echo "--- base contract ---"
 
 # ---------------------------------------------------------------------------
-# git — pkg/util/git.go CheckGitVersion requires >= 2.47.0 for
+# git — pkg/util/git.go CheckGitVersion requires >= 2.48.0 for
 # `worktree add --relative-paths`, which is what worktree-per-agent mode runs.
 #
 # The five sub-checks are not redundant. Each maps to a distinct real failure

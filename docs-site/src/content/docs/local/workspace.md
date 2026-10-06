@@ -66,7 +66,7 @@ scion start my-agent "fix web bugs" --workspace packages/web
 When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees**. This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
 
 ### Prerequisites
-- Git **2.47.0** or newer is required (for relative path support).
+- Git **2.48.0** or newer is required (for relative path support).
 
 ### Branch Resolution
 Scion determines which branch to check out in the worktree:
@@ -154,11 +154,11 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 
 Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
 
-### Linked Projects (clone-based, even when the repo is local)
+### Linked Projects (clone-based by default, even when the repo is local)
 
-When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, **all agents started via the Hub use clone-based provisioning**, even if the broker machine already has the repository checked out locally.
+When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, agents started via the Hub use clone-based provisioning by default, even if the broker machine already has the repository checked out locally.
 
-This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects. Local worktrees are a local-mode feature only.
+This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects, rather than depending on what happens to already be checked out on whichever broker machine an agent lands on. A project can instead be configured for worktree-per-agent mode, in which case Hub-dispatched agents get the same host-side shared-clone-plus-worktree strategy local mode uses, gated on the broker's git version being 2.48 or later (falling back to clone-based provisioning otherwise).
 
 **What this means in practice:**
 
