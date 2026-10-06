@@ -3010,6 +3010,17 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		// phase on; do not write running here.
 		warnings = s.adoptAcceptedLaunch(ctx, agent)
 	} else {
+		// A delete that won after the broker run landed answers 409, as
+		// the synchronous create does (ptone/scion#3099,
+		// ptone/scion#3518). The dispatch has already run the compensating
+		// delete of the landed run; its outcome is in the dispatch
+		// warnings. An accepted launch is settled by its launch report.
+		if s.deleteWonAfterLanding(ctx, agent.ID) {
+			s.agentLifecycleLog.Info("Hub: agent was deleted while its env submit launched it; answering 409",
+				"agent_id", agent.ID, "agent", agent.Name)
+			writeDeletedDuringCreate(w, agent.ID, dispatchWarns.Warnings())
+			return
+		}
 		// Update agent phase from broker response
 		if agent.Phase == string(state.PhaseProvisioning) || agent.Phase == string(state.PhaseCreated) {
 			agent.Phase = string(state.PhaseRunning)
