@@ -205,7 +205,7 @@ func resolveReincarnateTarget(args []string, selfName string, hasHandoffFile, dr
 		agentName = api.Slugify(args[0])
 	} else {
 		if selfName == "" {
-			return "", false, fmt.Errorf("specify an agent name, or run this inside an agent container to migrate yourself")
+			return "", false, newUsageError("specify an agent name, or run this inside an agent container to migrate yourself")
 		}
 		agentName = api.Slugify(selfName)
 	}
@@ -290,7 +290,7 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 // real in-place reincarnation.
 func validateReincarnateBrokerFlags(broker string, dryRun bool) error {
 	if broker != "" && !dryRun {
-		return fmt.Errorf("--broker requires --dry-run: moving an agent between brokers is not supported yet")
+		return newUsageError("--broker requires --dry-run: moving an agent between brokers is not supported yet")
 	}
 	return nil
 }
