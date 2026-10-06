@@ -358,7 +358,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 				statusCode:     http.StatusOK,
 			}
 
-			next.ServeHTTP(wrapped, r)
+			aborted := ServeCatchingAbort(next, wrapped, r)
 
 			// Read final metadata (handlers/auth may have enriched it).
 			// auth_type and its attributes are read here, after next returns,
@@ -443,8 +443,43 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			// SetRequestAuth (e.g. user_id, principal_kind, a "credential"
 			// decoration group). Emitted only when auth actually set them.
 			attrs = append(attrs, finalAuthAttrs...)
+			if aborted {
+				attrs = append(attrs, slog.Bool(AttrAborted, true))
+			}
 
 			logger.LogAttrs(ctx, level, "", attrs...)
+			if aborted {
+				panic(http.ErrAbortHandler)
+			}
 		})
 	}
+}
+
+// AttrAborted marks a request line whose response was aborted mid-way
+// (the handler panicked with http.ErrAbortHandler).
+const AttrAborted = "aborted"
+
+// ServeCatchingAbort calls next.ServeHTTP and reports whether it ended by
+// panicking with http.ErrAbortHandler, the net/http signal to cut the
+// client connection without completing the response (a proxied stream
+// that lost its upstream after the headers went out). A request logger
+// uses it so the aborted request is still logged; it must then panic
+// with http.ErrAbortHandler itself so the server still aborts the
+// response. Any other panic propagates unchanged.
+func ServeCatchingAbort(next http.Handler, w http.ResponseWriter, r *http.Request) (aborted bool) {
+	defer func() {
+		if !aborted {
+			return
+		}
+		switch p := recover(); p {
+		case nil: // runtime.Goexit: there is no panic to recover
+		case http.ErrAbortHandler: // compared by identity, as net/http does
+		default:
+			panic(p)
+		}
+	}()
+	aborted = true
+	next.ServeHTTP(w, r)
+	aborted = false
+	return false
 }

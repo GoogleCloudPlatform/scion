@@ -2925,15 +2925,19 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
-		next.ServeHTTP(wrapped, r)
+		aborted := logging.ServeCatchingAbort(next, wrapped, r)
 
-		if ws.config.Debug || wrapped.statusCode >= 400 {
+		if ws.config.Debug || wrapped.statusCode >= 400 || aborted {
 			ws.logger().Info("Web request",
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", wrapped.statusCode),
 				slog.Duration("duration", time.Since(start)),
+				slog.Bool(logging.AttrAborted, aborted),
 			)
+		}
+		if aborted {
+			panic(http.ErrAbortHandler)
 		}
 	})
 }
