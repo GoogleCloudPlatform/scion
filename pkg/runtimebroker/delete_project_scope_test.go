@@ -711,3 +711,76 @@ func TestDeleteAgent_ListFailureWithFilesPresent_FailsWithoutSideEffects(t *test
 	}
 	assertUntouched(t, scionB, "dev", infoB)
 }
+
+// makeHubMarkerProject creates a hub-managed project the way the broker's
+// start path does for a project with no git remote: ~/.scion/projects/<slug>/.scion
+// is a marker file, and the agent's provision directory lives under the
+// external project-configs agents directory. It returns the external .scion
+// dir and the agent's provision dir.
+func makeHubMarkerProject(t *testing.T, home, slug, projectID, agentName string) (string, string) {
+	t.Helper()
+	root := filepath.Join(home, ".scion", "projects", slug)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := &config.ProjectMarker{ProjectID: projectID, ProjectName: slug, ProjectSlug: slug}
+	if err := config.WriteProjectMarker(filepath.Join(root, ".scion"), marker); err != nil {
+		t.Fatal(err)
+	}
+	extDir, err := marker.ExternalProjectPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(extDir, "agents", agentName)
+	if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return extDir, agentDir
+}
+
+// ptone/scion#2839: an agent in a hub-managed (marker-file) project that has
+// no runtime entry -- provisioned but never started, or its container already
+// gone -- must still resolve to its project so its provision directory under
+// the project configs agents directory is removed.
+func TestDeleteAgent_FileOnlyAgentInHubMarkerProject_DeletesFiles(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	extA, _ := makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+	extB, _ := makeHubMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if mgr.LastDeleteProjectPath() != extB {
+		t.Errorf("file deletion project path %q, want %q", mgr.LastDeleteProjectPath(), extB)
+	}
+	if mgr.LastDeleteProjectPath() == extA {
+		t.Errorf("delete resolved to the other project's dir %q", extA)
+	}
+}
+
+func TestFindAgentInHubManagedProjects_MarkerProjects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	extA, _ := makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+	extB, _ := makeHubMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+
+	for projectID, want := range map[string]string{scopeProjA: extA, scopeProjB: extB, "33333333-cccc": ""} {
+		got, err := findAgentInHubManagedProjects("dev", projectID)
+		if err != nil {
+			t.Fatalf("project %s: %v", projectID, err)
+		}
+		if got != want {
+			t.Errorf("project %s: got %q, want %q", projectID, got, want)
+		}
+	}
+	if got, err := findAgentInHubManagedProjects("other", scopeProjA); err != nil || got != "" {
+		t.Errorf("absent agent: got %q, %v; want empty", got, err)
+	}
+	// Without a project ID, each marker is checked against its own project
+	// ID; both projects hold the agent, so the lookup is ambiguous.
+	if got, err := findAgentInHubManagedProjects("dev", ""); err == nil || !strings.Contains(err.Error(), "found in 2 hub-managed projects") {
+		t.Errorf("unscoped lookup: got %q, %v; want the ambiguity error", got, err)
+	}
+}

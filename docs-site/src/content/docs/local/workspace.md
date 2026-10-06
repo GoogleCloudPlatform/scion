@@ -66,7 +66,7 @@ scion start my-agent "fix web bugs" --workspace packages/web
 When working inside a Git repository without an explicit `--workspace`, Scion automatically manages **Git Worktrees**. This ensures that each agent has its own isolated checkout of the code, allowing them to work on different branches simultaneously without interfering with your main working directory.
 
 ### Prerequisites
-- Git **2.47.0** or newer is required (for relative path support).
+- Git **2.48.0** or newer is required (for relative path support).
 
 ### Branch Resolution
 Scion determines which branch to check out in the worktree:
@@ -154,11 +154,11 @@ By default, git projects use a shallow clone with `depth=1` for fast startup.
 
 Authentication is handled via the `GITHUB_TOKEN` environment variable, injected from the project's secrets or your local environment through the env-gather flow.
 
-### Linked Projects (clone-based, even when the repo is local)
+### Linked Projects (clone-based by default, even when the repo is local)
 
-When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, **all agents started via the Hub use clone-based provisioning**, even if the broker machine already has the repository checked out locally.
+When you link an existing local git project to a Hub (`scion hub link`), the project becomes **Hub-managed**. Once linked, agents started via the Hub use clone-based provisioning by default, even if the broker machine already has the repository checked out locally.
 
-This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects. Local worktrees are a local-mode feature only.
+This is intentional: the Hub enforces a consistent, unambiguous workspace strategy for all git-based projects, rather than depending on what happens to already be checked out on whichever broker machine an agent lands on. A project can instead be configured for worktree-per-agent mode, in which case Hub-dispatched agents get the same host-side shared-clone-plus-worktree strategy local mode uses, gated on the broker's git version being 2.48 or later (falling back to clone-based provisioning otherwise).
 
 **What this means in practice:**
 
@@ -212,6 +212,19 @@ scion shared-dir info <name>
 # Remove a shared directory (permanently deletes contents)
 scion shared-dir remove <name>
 ```
+
+### When the Backing Directory Is Created
+
+Creating a shared directory and creating its backing directory on disk are separate steps:
+
+- **Local CLI (`scion shared-dir create`)** creates the backing directory immediately.
+- **Hub (Web UI or API)** only records the declaration. The backing directory is created on first use:
+  - when an agent in the project starts on a Runtime Broker. Each broker creates the directory locally, or on the NFS export when `server.shared_dir_storage.backend` is `nfs`.
+  - when a file is first written or uploaded to it through the Hub.
+
+Until then, listing the shared directory's files through the Hub returns an empty list, and reading a file returns not found. Listing or reading never creates the directory.
+
+A write through the Hub only creates the directory in storage the Hub itself can reach: the NFS export, a hub-managed project's storage on the Hub host, or the project's directory on a Runtime Broker running in the same server as the Hub. It never creates the directory on a remote broker; that copy appears only when an agent of the project starts on that broker. For a git project with no co-located broker and no NFS storage, a write through the Hub is rejected and creates nothing.
 
 ### Mounting Shared Directories
 

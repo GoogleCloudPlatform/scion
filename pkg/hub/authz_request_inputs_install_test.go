@@ -1241,7 +1241,7 @@ func withStablePolicyIDs(records []store.DecisionAuditRecord) []store.DecisionAu
 // fixture because the change is applied once.
 func TestMemoInstall_SortedListRaceRedecisionMatchesBaseline(t *testing.T) {
 	run := func(t *testing.T, masked bool, ownerChange bool) raceListResult {
-		f := sortedListSetup(t)
+		f, raced, fault := sortedListSetupWithFault(t, newFieldMutatingAfterMembersStore)
 		ctx := context.Background()
 		caller := &store.User{ID: tid("sl-race-caller"), Email: "sl-race@test.com", DisplayName: "Caller", Role: store.UserRoleMember, Status: "active"}
 		require.NoError(t, f.store.CreateUser(ctx, caller))
@@ -1253,11 +1253,16 @@ func TestMemoInstall_SortedListRaceRedecisionMatchesBaseline(t *testing.T) {
 		}
 		require.NoError(t, f.store.CreateAgent(ctx, a))
 		f.createAgent(t, "race-other", "stopped", map[string]string{"team": "a"})
+		// fieldMutatingAfterMembersStore generalizes the owner- and
+		// label-changing wrappers: same one-shot GetAgent/mutate/UpdateAgent
+		// after the first member read.
+		raced.agentID = a.ID
 		if ownerChange {
-			f.srv.store = &ownerChangingAfterMembersStore{Store: f.store, agentID: a.ID, newOwnerID: f.owner.ID}
+			raced.mutate = func(row *store.Agent) { row.OwnerID = f.owner.ID }
 		} else {
-			f.srv.store = &mutatingAfterMembersStore{Store: f.store, agentID: a.ID, newLabels: map[string]string{"team": "a", "v": "2"}}
+			raced.mutate = func(row *store.Agent) { row.Labels = map[string]string{"team": "a", "v": "2"} }
 		}
+		fault.Arm()
 		r := runListRequest(t, f.srv, f.listPath("sort=updated&fit=500&label=team=a"), userListAuth(t, f.srv, caller), masked)
 		out := raceListResult{status: r.status, audits: withStablePolicyIDs(r.audits)}
 		if r.status == http.StatusOK {

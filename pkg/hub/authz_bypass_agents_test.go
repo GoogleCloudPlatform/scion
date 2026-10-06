@@ -722,9 +722,10 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("agent reads a project peer", func(t *testing.T) {
 		// CO1: same as self-read — agent.read has no AgentScopes mapping,
 		// so the credential scope restriction blocks individual agent reads.
+		// An agent caller's denial reads as not found (ptone/scion#3409).
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
+		assert.Equal(t, http.StatusNotFound, rec.Code,
 			"CO1: agent.read has no AgentScopes mapping; agent must be denied; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
@@ -832,7 +833,7 @@ func TestGetAgent_SelfRead(t *testing.T) {
 	t.Run("baseline role still cannot read a peer", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
 		rec := f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID, nil, ScopesForRole(AgentRoleBaseline)...)
-		assert.Equal(t, http.StatusForbidden, rec.Code, "peer read: %s", rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, "peer read: %s", rec.Body.String())
 	})
 
 	t.Run("token without project:read cannot read itself", func(t *testing.T) {
