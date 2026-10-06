@@ -52,6 +52,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 			want: containerHubEndpointResult{
 				Endpoint:                   "http://scion-hub.internal:8080",
 				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              8080,
 			},
 		},
 		{
@@ -64,6 +65,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 			want: containerHubEndpointResult{
 				Endpoint:                   "http://scion-hub.internal:9810",
 				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              9810,
 			},
 		},
 		{
@@ -76,6 +78,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 			want: containerHubEndpointResult{
 				Endpoint:                   "http://host.docker.internal:8080",
 				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              8080,
 			},
 		},
 		{
@@ -88,6 +91,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 			want: containerHubEndpointResult{
 				Endpoint:                   "http://host.docker.internal:8080",
 				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              0,
 			},
 		},
 		{
@@ -100,6 +104,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 			want: containerHubEndpointResult{
 				Endpoint:                   "http://host.docker.internal:8080",
 				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              8080,
 			},
 		},
 		{
@@ -111,7 +116,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = testIAPCloudRunURL
 				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
 			}),
-			want: containerHubEndpointResult{},
+			want: containerHubEndpointResult{HubListenPort: 8080},
 		},
 		{
 			name: "explicit base URL with Caddy routes docker agents at the public domain",
@@ -119,7 +124,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = "https://hub.example.com/"
 				in.PublicHubEndpointSource = hubEndpointSourceBaseURLEnv
 			}),
-			want: containerHubEndpointResult{Endpoint: "https://hub.example.com"},
+			want: containerHubEndpointResult{Endpoint: "https://hub.example.com", HubListenPort: 8080},
 		},
 		{
 			name: "explicit public_url with Caddy routes docker agents at the public domain",
@@ -127,7 +132,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = "https://hub.example.com"
 				in.PublicHubEndpointSource = hubEndpointSourceConfig
 			}),
-			want: containerHubEndpointResult{Endpoint: "https://hub.example.com"},
+			want: containerHubEndpointResult{Endpoint: "https://hub.example.com", HubListenPort: 8080},
 		},
 		{
 			name: "explicit run.app base URL is trusted as served by this host",
@@ -135,7 +140,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = testIAPCloudRunURL
 				in.PublicHubEndpointSource = hubEndpointSourceBaseURLFlag
 			}),
-			want: containerHubEndpointResult{Endpoint: testIAPCloudRunURL},
+			want: containerHubEndpointResult{Endpoint: testIAPCloudRunURL, HubListenPort: 8080},
 		},
 		{
 			name: "localhost public URL uses the legacy bridge host",
@@ -143,7 +148,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = "http://localhost:8080"
 				in.PublicHubEndpointSource = hubEndpointSourceLocalhost
 			}),
-			want: containerHubEndpointResult{Endpoint: "http://host.docker.internal:8080"},
+			want: containerHubEndpointResult{Endpoint: "http://host.docker.internal:8080", HubListenPort: 8080},
 		},
 		{
 			name: "localhost public URL on podman uses host.containers.internal",
@@ -152,7 +157,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = "http://localhost:8080"
 				in.PublicHubEndpointSource = hubEndpointSourceLocalhost
 			}),
-			want: containerHubEndpointResult{Endpoint: "http://host.containers.internal:8080"},
+			want: containerHubEndpointResult{Endpoint: "http://host.containers.internal:8080", HubListenPort: 8080},
 		},
 		{
 			name: "configured container endpoint wins",
@@ -161,7 +166,7 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = testIAPCloudRunURL
 				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
 			}),
-			want: containerHubEndpointResult{Endpoint: "http://custom:1234"},
+			want: containerHubEndpointResult{Endpoint: "http://custom:1234", HubListenPort: 8080},
 		},
 		{
 			name: "broker-only mode computes nothing",
@@ -170,22 +175,19 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = testIAPCloudRunURL
 				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
 			}),
-			want: containerHubEndpointResult{},
+			want: containerHubEndpointResult{HubListenPort: 8080},
 		},
 		{
 			name: "no runtime computes nothing",
 			in: with(func(in *containerHubEndpointInputs) {
 				in.RuntimeName = ""
 			}),
-			want: containerHubEndpointResult{},
+			want: containerHubEndpointResult{HubListenPort: 8080},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// The listen port always passes through to the result;
-			// TestBrokerContainerHubConfig checks it end to end.
-			tt.want.HubListenPort = tt.in.HubListenPort
 			got := computeContainerHubEndpoint(tt.in, nil)
 			assert.Equal(t, tt.want, got)
 		})
@@ -380,7 +382,13 @@ func TestBrokerContainerHubConfig(t *testing.T) {
 			probed := false
 			probe := func() bool { probed = true; return tt.probe }
 
-			got := brokerContainerHubConfig(tt.cfg, tt.runtimeName, brokerHub, tt.hubEndpoint, tt.src, probe, nil)
+			got := brokerContainerHubConfig(tt.cfg, brokerContainerHubParams{
+				RuntimeName:             tt.runtimeName,
+				BrokerHubEndpoint:       brokerHub,
+				PublicHubEndpoint:       tt.hubEndpoint,
+				PublicHubEndpointSource: tt.src,
+				HostGatewayProbe:        probe,
+			}, nil)
 			assert.Equal(t, tt.want, got)
 			assert.Equal(t, tt.wantProbed, probed, "host-gateway probe called")
 		})

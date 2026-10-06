@@ -78,23 +78,37 @@ func (r containerHubEndpointResult) applyTo(cfg *runtimebroker.ServerConfig) {
 	cfg.HubListenPort = r.HubListenPort
 }
 
+// brokerContainerHubParams are the startRuntimeBroker values
+// brokerContainerHubConfig reads, passed by name so the several string
+// endpoints cannot be swapped silently.
+type brokerContainerHubParams struct {
+	// RuntimeName is the broker's default runtime ("" when there is none).
+	RuntimeName string
+	// BrokerHubEndpoint is the broker's own hub URL (hubEndpointForRH).
+	BrokerHubEndpoint string
+	// PublicHubEndpoint and PublicHubEndpointSource come from
+	// resolveHubEndpointWithSource.
+	PublicHubEndpoint       string
+	PublicHubEndpointSource hubEndpointSource
+	// HostGatewayProbe checks the Docker daemon for host-gateway support.
+	// It is only called when needed.
+	HostGatewayProbe func() bool
+}
+
 // brokerContainerHubConfig builds the inputs computeContainerHubEndpoint
-// needs from the server configuration and returns the container hub
-// settings startRuntimeBroker hands to the runtime broker. runtimeName is
-// the broker's default runtime ("" when there is none); hubEndpoint and src
-// come from resolveHubEndpointWithSource. hostGatewayProbe checks the Docker
-// daemon for host-gateway support and is only called when needed.
-func brokerContainerHubConfig(cfg *config.GlobalConfig, runtimeName, hubEndpointForRH, hubEndpoint string, src hubEndpointSource, hostGatewayProbe func() bool, logf func(format string, args ...any)) containerHubEndpointResult {
+// needs from the server configuration and p, and returns the container hub
+// settings startRuntimeBroker hands to the runtime broker.
+func brokerContainerHubConfig(cfg *config.GlobalConfig, p brokerContainerHubParams, logf func(format string, args ...any)) containerHubEndpointResult {
 	in := containerHubEndpointInputs{
 		Configured:              cfg.RuntimeBroker.ContainerHubEndpoint,
 		HubEnabled:              enableHub,
-		BrokerHubEndpoint:       hubEndpointForRH,
-		RuntimeName:             runtimeName,
-		PublicHubEndpoint:       hubEndpoint,
-		PublicHubEndpointSource: src,
+		BrokerHubEndpoint:       p.BrokerHubEndpoint,
+		RuntimeName:             p.RuntimeName,
+		PublicHubEndpoint:       p.PublicHubEndpoint,
+		PublicHubEndpointSource: p.PublicHubEndpointSource,
 		HubListenPort:           resolveHubListenPort(cfg),
 		ForceHostNetwork:        os.Getenv(runtime.ForceHostNetworkEnvVar) != "",
-		HostGatewaySupported:    hostGatewayProbe,
+		HostGatewaySupported:    p.HostGatewayProbe,
 	}
 	return computeContainerHubEndpoint(in, logf)
 }

@@ -3168,8 +3168,13 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	if rt != nil {
 		rtName = rt.Name()
 	}
-	chRes := brokerContainerHubConfig(cfg, rtName, hubEndpointForRH, hubEndpoint, hubEndpointSrc,
-		func() bool { return runtime.DockerSupportsHostGateway(ctx, "") }, log.Printf)
+	chRes := brokerContainerHubConfig(cfg, brokerContainerHubParams{
+		RuntimeName:             rtName,
+		BrokerHubEndpoint:       hubEndpointForRH,
+		PublicHubEndpoint:       hubEndpoint,
+		PublicHubEndpointSource: hubEndpointSrc,
+		HostGatewayProbe:        func() bool { return runtime.DockerSupportsHostGateway(ctx, "") },
+	}, log.Printf)
 	containerHubEndpoint := chRes.Endpoint
 
 	if rt != nil && rt.Name() == "container" && containerHubEndpoint != "" {
