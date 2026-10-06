@@ -33,6 +33,10 @@ All four findings were fixed; none declined.
 - **R1-3 (Nit):** every exactly-UTC tzdata name maps to `time.UTC`.
 - **R1-4 (Nit):** the orphaned class comment is reattached.
 
+## Review round 2 — disposition
+
+- **R2-1 (Low, test gap):** fixed in 1d7865e. Held-request web tests now pin the loading guard and the stale-error guard (only the newest request clears the spinner; an older error for the same view is dropped), plus a control test. Forcing either guard to `true` fails its test. No product change was needed.
+
 ## Follow-ups noticed (not done)
 
 - `QueryProjectSummary` ("Last 24 hours") stays a rolling 24h window with no buckets, so the zone does not affect it.
