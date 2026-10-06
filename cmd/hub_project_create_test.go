@@ -519,6 +519,7 @@ func TestRunHubProjectCreate_CredentialedURLNotSent(t *testing.T) {
 		{"query char inside password", "https://user:" + pw + "?W@github.com/acme/widgets.git", false},
 		{"fragment char inside password", "https://user:" + pw + "#W@github.com/acme/widgets.git", false},
 		{"invalid URL not echoed", "https://user:" + pw + "@host", false},
+		{"query char inside password with path-like prefix", "https://user:" + pw + "/x?W@github.com/acme/widgets.git", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := setupProjectCreateTest(t)

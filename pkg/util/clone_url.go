@@ -112,9 +112,11 @@ func canonicalSSHScheme(value string) string {
 }
 
 // isBracketedIPv6 reports whether s is an IPv6 literal in brackets with no
-// port ("[::1]"), as used for a URL or scp host. A zone ID
-// ("[fe80::1%25eth0]") is not accepted: net.ParseIP rejects it, so such a
-// host is refused by validation and dropped by sanitizing (fail closed).
+// port ("[::1]"), as used for an scp or schemeless host. A zone ID
+// ("[fe80::1%25eth0]") is not accepted: net.ParseIP rejects it, so an scp or
+// schemeless remote with such a host is refused by validation and dropped by
+// sanitizing (fail closed). Scheme URLs (https://, ssh://) do not go through
+// this check and keep a bracketed host as given.
 func isBracketedIPv6(s string) bool {
 	if len(s) < 3 || s[0] != '[' || s[len(s)-1] != ']' {
 		return false

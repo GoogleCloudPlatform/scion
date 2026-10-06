@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -451,6 +453,7 @@ var gitRemoteGuardCases = []struct {
 	{"scp userinfo in path", "git@user:" + cloneURLLabelSentinel + "@host:org/repo", true},
 	{"query char inside password", "https://user:" + cloneURLLabelSentinel + "?W@github.com/org/guard-q-pw", true},
 	{"fragment char inside password", "https://user:" + cloneURLLabelSentinel + "#W@github.com/org/guard-f-pw", true},
+	{"scp non-ipv6 bracket host", "git@[x@" + cloneURLLabelSentinel + "]:org/repo", true},
 	{"scp extra at in host stripped by normalization", "git@" + cloneURLLabelSentinel + "@host:org/guard-scp-extra-at", false},
 	{"query token stripped", "https://github.com/org/guard-query?access_token=" + cloneURLLabelSentinel, false},
 	{"fragment token stripped", "https://github.com/org/guard-fragment#" + cloneURLLabelSentinel, false},
@@ -500,6 +503,44 @@ func TestRegisterProject_CloneURLGitRemoteGuard(t *testing.T) {
 				GitRemote: tc.remote,
 			})
 			assertGitRemoteGuard(t, s, rec.Code, rec.Body.String(), tc.refused)
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverrideQueryCharInPassword covers the clone
+// override with a '?' or '#' inside the password: it is refused, and no
+// prefix of the password is stored anywhere.
+func TestProjectClone_GitRemoteOverrideQueryCharInPassword(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	src := &store.Project{
+		ID:        tid("clone-override-qpw-src"),
+		Name:      "Clone Override QPW Source",
+		Slug:      "clone-override-qpw-source",
+		GitRemote: "github.com/org/repo",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateProject(ctx, src))
+
+	for i, override := range []string{
+		"https://user:" + cloneURLLabelSentinel + "/o/r?W@github.com/org/repo",
+		"https://user:" + cloneURLLabelSentinel + "/o/r#W@github.com/org/repo",
+		"https://user:" + cloneURLLabelSentinel + "?W@github.com/org/repo",
+	} {
+		t.Run(fmt.Sprintf("case %d", i), func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]string{"name": fmt.Sprintf("Clone QPW %d", i), "gitRemote": override})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), cloneURLLabelSentinel)
+			projects, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+			require.NoError(t, err)
+			for _, p := range projects.Items {
+				assert.NotContains(t, strings.ToLower(p.GitRemote), strings.ToLower(cloneURLLabelSentinel))
+				for k, v := range p.Labels {
+					assert.NotContains(t, v, cloneURLLabelSentinel, "credential prefix stored in %s", k)
+				}
+			}
 		})
 	}
 }

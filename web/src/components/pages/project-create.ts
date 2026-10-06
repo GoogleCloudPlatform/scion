@@ -29,6 +29,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import {
+  GIT_REMOTE_INVALID,
   displayGitRemote,
   normalizeGitRemote,
   sanitizeGitRemote,
@@ -958,8 +959,14 @@ export class ScionPageProjectCreate extends LitElement {
    * re-validates (a 400 on gitRemote is shown inline too).
    */
   private checkTemplateGitRemote(): boolean {
-    const remote = stripQueryAndFragment(trimRemote(this.templateGitRemote));
-    this.templateGitRemoteError = remote ? validateGitRemote(remote) : null;
+    const trimmed = trimRemote(this.templateGitRemote);
+    const remote = stripQueryAndFragment(trimmed);
+    // '' from a non-empty value: a '?' or '#' inside the userinfo.
+    this.templateGitRemoteError = remote
+      ? validateGitRemote(remote)
+      : trimmed
+        ? GIT_REMOTE_INVALID
+        : null;
     return this.templateGitRemoteError === null;
   }
 

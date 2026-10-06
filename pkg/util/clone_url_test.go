@@ -348,6 +348,13 @@ func TestNormalizeGitRemote_IPv6SCP(t *testing.T) {
 	if got := NormalizeGitRemote("git@[::1]:org/repo.git"); got != "[::1]/org/repo" {
 		t.Fatalf("NormalizeGitRemote(git@[::1]:org/repo.git) = %q, want %q", got, "[::1]/org/repo")
 	}
+	// A non-IPv6 bracket keeps its '@' so a persisting caller refuses it.
+	for _, r := range []string{"git@[x@PW]:org/repo", "git@[notipv6]x@PW:org/repo", "git@[::1@PW]:org/repo"} {
+		got := NormalizeGitRemote(r)
+		if !strings.Contains(got, "@") {
+			t.Errorf("NormalizeGitRemote(%q) = %q; a malformed bracket must keep its '@'", r, got)
+		}
+	}
 	if got := NormalizeGitRemote("git@github.com:org/repo.git"); got != "github.com/org/repo" {
 		t.Fatalf("NormalizeGitRemote(git@github.com:org/repo.git) = %q", got)
 	}
