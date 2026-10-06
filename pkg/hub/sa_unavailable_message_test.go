@@ -137,3 +137,48 @@ func TestProjectDefaultSA_WrappedNotFoundMatchesUnreachable(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, other.status, "body: %s", other.body)
 	requireIndistinguishable(t, wrapped, other)
 }
+
+// TestProfileDefaultSA_WrappedNotFoundMatchesUnreachable checks the same for
+// the per-profile default map: a wrapped not-found from the store on a
+// defaultGCPIdentityServiceAccountIDByProfile entry gets the same status and
+// body as an entry naming an account registered in another project, and not
+// a 404.
+func TestProfileDefaultSA_WrappedNotFoundMatchesUnreachable(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	elsewhere := &store.Project{
+		ID:   tid("sa-wrapped-profile-other-project"),
+		Name: "Wrapped Profile Other",
+		Slug: "sa-wrapped-profile-other-project",
+	}
+	require.NoError(t, s.CreateProject(t.Context(), elsewhere))
+	unreachable := &store.GCPServiceAccount{
+		ID:        uuid.New().String(),
+		Scope:     store.ScopeProject,
+		ScopeID:   elsewhere.ID,
+		Email:     "sa-wrapped-profile-elsewhere@proj.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		Verified:  true,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), unreachable))
+
+	putProfileDefault := func(saID string) *httptest.ResponseRecorder {
+		t.Helper()
+		return doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+			hubclient.ProjectSettings{
+				DefaultGCPIdentityServiceAccountIDByProfile: map[string]string{"gpu": saID},
+			})
+	}
+
+	other := putProfileDefault(unreachable.ID)
+
+	srv.store = &wrappedNotFoundSAStore{Store: s}
+	wrapped := putProfileDefault(uuid.New().String())
+
+	assert.NotEqual(t, http.StatusNotFound, wrapped.Code, "body: %s", wrapped.Body.String())
+	requireErrorText(t, other, ErrCodeInvalidRequest)
+	assert.Equal(t, other.Code, wrapped.Code, "status: wrapped not-found vs other-project account")
+	assert.Equal(t, other.Body.String(), wrapped.Body.String(), "body: wrapped not-found vs other-project account")
+}

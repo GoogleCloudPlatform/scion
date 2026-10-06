@@ -326,10 +326,6 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	// enumerate other projects' service account IDs by watching which ones fail
 	// differently. "Does not exist" and "exists but is not yours" are one answer.
 	//
-	// This site shares the msgSANotAvailableInProject literal with the agent
-	// create and PATCH paths, so all three give the same message text. Three
-	// copies of a string whose entire value is that they match is three chances
-	// to stop matching.
 	// The check itself lives in validateProjectDefaultSAID, shared with the
 	// per-profile map.
 	return s.validateProjectDefaultSAID(w, ctx, project, req.DefaultGCPIdentityServiceAccountID, "the project default")
@@ -344,6 +340,12 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 func (s *Server) validateProjectDefaultSAID(w http.ResponseWriter, ctx context.Context, project *store.Project, saID, what string) bool {
 	// See validateDefaultGCPIdentity: not-found and not-reachable share one
 	// message so the endpoint is not an existence oracle.
+	//
+	// This helper shares the msgSANotAvailableInProject literal with the agent
+	// create and PATCH paths, so the project default, each per-profile default,
+	// agent create and agent PATCH all give the same message text. Separate
+	// copies of a string whose entire value is that they match would be
+	// separate chances to stop matching.
 	const notAvailable = msgSANotAvailableInProject
 
 	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
