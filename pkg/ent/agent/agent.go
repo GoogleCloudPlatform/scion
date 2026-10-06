@@ -110,6 +110,8 @@ const (
 	FieldLaunchID = "launch_id"
 	// FieldRunID holds the string denoting the run_id field in the database.
 	FieldRunID = "run_id"
+	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
+	FieldPreviousRunIds = "previous_run_ids"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -255,6 +257,7 @@ var Columns = []string{
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
 	FieldRunID,
+	FieldPreviousRunIds,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
