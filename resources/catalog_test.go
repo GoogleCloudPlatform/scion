@@ -127,6 +127,29 @@ func TestPlatformSkillsFS_ScionAgentManageLifecycleReferencesReincarnate(t *test
 	}
 }
 
+// TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove pins the
+// embedded skill's move section (ptone/scion#2727 phase 3): agents learn
+// the --broker command, its same-NFS-export requirement, the self-move
+// limit and that the CLI does not set their status.
+func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
+	data, err := fs.ReadFile(PlatformSkillsFS(), "scion-agent-manage/references/agent-lifecycle.md")
+	if err != nil {
+		t.Fatalf("reading embedded scion-agent-manage lifecycle reference: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		"### Moving to another Runtime Broker",
+		"scion reincarnate <agent> --broker <name|id>",
+		"**same NFS export**",
+		"already serves your project",
+		"The CLI does not set\n  your status",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("embedded scion-agent-manage/references/agent-lifecycle.md does not contain %q", want)
+		}
+	}
+}
+
 func TestSourceURLFormat(t *testing.T) {
 	const harnessPrefix = "https://github.com/GoogleCloudPlatform/scion/harnesses/"
 	const builtinPrefix = "builtin://scion/"

@@ -8,6 +8,33 @@ If a long-lived agent (lead, coordinator, architect) needs a newer template, ima
 harness config but should keep its identity, conversations, and lineage, use
 `scion reincarnate <agent>` (or `scion reincarnate` from inside the agent, to migrate
 itself) instead of delete-and-recreate; see its `--help` for the contract.
+Patch flags (`--model`, `--image`, `--role`, `--service-account`, `--thinking-level`,
+`--harness-auth`) change that setting on the new generation.
+
+### Moving to another Runtime Broker
+
+`scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker,
+keeping its identity and its workspace (uncommitted work included). Check first with
+`--dry-run`; it changes nothing and prints every eligibility check.
+
+- **Requirement:** both brokers mount the **same NFS export** and the agent's workspace
+  is on it. The workspace is never copied or re-cloned; a move that does not meet this
+  is refused before anything changes. Both brokers must support agent move and be
+  online (an offline source is refused).
+- **What carries over:** the workspace on the export, the agent ID, slug and lineage.
+  The agent home is regenerated on the target and harness session history is not
+  carried, so write a full handoff (`--handoff-file`), as for any reincarnation.
+- **Moving yourself:** allowed only to a broker that already serves your project
+  (otherwise `409`); an agent with a GCP passthrough identity cannot move itself
+  (`403`: ask a user). Follow the five-line contract in `--help`. The CLI does not set
+  your status; it only prints that the container will be stopped shortly, so do nothing
+  after the call.
+- **Moving another agent:** a broker you cannot see returns `404`. A broker that does
+  not serve the project yet needs a signed-in user with broker read, broker dispatch
+  (unless the broker auto-provides) and project update; a user access token can only
+  move to a broker that already serves the project and auto-provides.
+- **Failure:** a move that fails before the new generation runs rolls back; the agent is
+  left on the source, not running, with its workspace intact. Start it or retry.
 
 ## Default: delete when done
 
