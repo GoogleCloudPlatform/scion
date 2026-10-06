@@ -350,28 +350,26 @@ func (s *Server) removeUserScopedSecretRowsWithoutBackend(ctx context.Context, u
 // call to an external secret backend.
 const userScopedDataSweepBudget = 2 * time.Minute
 
-// startUserScopedDataSweep runs the startup sweep in the background so a slow
-// or unreachable secret backend cannot delay startup. The missing users are
-// found before it returns (database reads only); their values are removed in
-// a goroutine under one total time budget (userScopedDataSweepBudget). The
-// sweep is non-fatal: failures are logged at Warn. The returned channel is
-// closed when the goroutine ends.
+// startUserScopedDataSweep runs the startup sweep in a goroutine so slow
+// database reads or a slow or unreachable secret backend cannot delay
+// startup. The goroutine finds the missing users and removes their values
+// under one total time budget (userScopedDataSweepBudget), which bounds the
+// lookups as well as the removals. The sweep is non-fatal: failures are
+// logged at Warn. The returned channel is closed when the goroutine ends.
 func (s *Server) startUserScopedDataSweep(parent context.Context) <-chan struct{} {
 	done := make(chan struct{})
-	missing, err := s.findOrphanedUserScopeIDs(parent)
-	if err != nil {
-		slog.Warn("Failed to sweep user-scope data of deleted users", "error", err)
-		close(done)
-		return done
-	}
-	if len(missing) == 0 {
-		close(done)
-		return done
-	}
 	go func() {
 		defer close(done)
 		ctx, cancel := context.WithTimeout(parent, userScopedDataSweepBudget)
 		defer cancel()
+		missing, err := s.findOrphanedUserScopeIDs(ctx)
+		if err != nil {
+			slog.Warn("Failed to sweep user-scope data of deleted users", "error", err)
+			return
+		}
+		if len(missing) == 0 {
+			return
+		}
 		removed, kept := s.removeOrphanedUserScopedData(ctx, missing)
 		slog.Info("Swept user-scope data of deleted users",
 			"users_removed", removed, "users_kept_or_failed", kept)

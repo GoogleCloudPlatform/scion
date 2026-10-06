@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -450,6 +452,78 @@ func TestNew_SchedulesUserScopedDataSweep(t *testing.T) {
 		t.Fatal("startup sweep did not finish")
 	}
 	_, ev := userScopedCounts(t, s, missing)
+	assert.Zero(t, ev, "the startup sweep must remove a missing user's env vars")
+}
+
+// blockingUserScopeListStore blocks the sweep's unscoped list of user-scope
+// env vars until release is closed (or a fallback timeout passes, so a
+// synchronous lookup fails the test instead of hanging it).
+type blockingUserScopeListStore struct {
+	store.Store
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+	timedOut    atomic.Bool
+}
+
+// DB forwards to the wrapped store's raw *sql.DB so New()'s D4
+// membership-index migration runs against the real store.
+func (s *blockingUserScopeListStore) DB() *sql.DB {
+	if p, ok := s.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+func (s *blockingUserScopeListStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
+	if filter.Scope == store.ScopeUser && filter.ScopeID == "" {
+		s.enteredOnce.Do(func() { close(s.entered) })
+		select {
+		case <-s.release:
+		case <-time.After(5 * time.Second):
+			s.timedOut.Store(true)
+		}
+	}
+	return s.Store.ListEnvVars(ctx, filter)
+}
+
+// TestNew_UserScopedDataSweepLookupRunsInBackground: the sweep's database
+// lookups run in the background goroutine, so New() returns while they are
+// still blocked and the done channel closes only after they finish.
+func TestNew_UserScopedDataSweepLookupRunsInBackground(t *testing.T) {
+	inner, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	ctx := context.Background()
+	require.NoError(t, inner.Migrate(ctx))
+	missing := tid("user-gone")
+	_, err = inner.UpsertEnvVar(ctx, &store.EnvVar{
+		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",
+		Scope: store.ScopeUser, ScopeID: missing, InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+	bs := &blockingUserScopeListStore{Store: inner, entered: make(chan struct{}), release: make(chan struct{})}
+
+	srv, _ := testServerWithStore(t, bs)
+	require.NotNil(t, srv.userScopedDataSweepDone)
+	select {
+	case <-bs.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("startup sweep lookup did not start")
+	}
+	require.False(t, bs.timedOut.Load(), "New() must not wait for the sweep lookup")
+	select {
+	case <-srv.userScopedDataSweepDone:
+		t.Fatal("startup sweep finished while its lookup was blocked")
+	default:
+	}
+
+	close(bs.release)
+	select {
+	case <-srv.userScopedDataSweepDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("startup sweep did not finish")
+	}
+	_, ev := userScopedCounts(t, inner, missing)
 	assert.Zero(t, ev, "the startup sweep must remove a missing user's env vars")
 }
 

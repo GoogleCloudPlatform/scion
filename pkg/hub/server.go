@@ -2228,8 +2228,8 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Remove user-scope secrets and env vars whose user no longer exists
 	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
-	// removal runs in the background under one time budget and is
-	// non-fatal; see startUserScopedDataSweep.
+	// whole sweep, lookup and removal, runs in the background under one time
+	// budget and is non-fatal; see startUserScopedDataSweep.
 	srv.userScopedDataSweepDone = srv.startUserScopedDataSweep(srv.ctx)
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
