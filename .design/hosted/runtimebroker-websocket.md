@@ -1,6 +1,8 @@
 # Runtime Broker WebSocket Design
 
 > **Status**: ✅ **Implemented** (2026-02-03) - Core control channel and PTY streaming functionality is complete.
+>
+> **Updated 2026-10-05:** sections 4.1, 4.4, 5.3, 6.2 and 9 now match the code: the CLI attach route is `/api/v1/agents/{id}/pty` on the Hub, login is `scion hub auth login`, the browser ticket flow is not implemented, and close codes and the CLI's no-reconnect behaviour are described. Attach is expected to move to the conduit relay (a new connection layer); see section 9.5.
 
 This document consolidates the WebSocket-related design for communication between the Hub and Runtime Brokers. The WebSocket connection serves two primary purposes:
 
@@ -232,19 +234,18 @@ The WebSocket control channel is primarily for **Hub-initiated** traffic (Tunnel
 
 ### 4.1 Stream Multiplexing
 
-PTY sessions are initiated via a special "Upgrade" request over the HTTP tunnel, which establishes a multiplexed stream.
+PTY sessions are opened with a `stream_open` message on the control channel (`wsprotocol.StreamOpenMessage`), which establishes a multiplexed stream. The Hub does not tunnel an HTTP upgrade request for this; the broker's direct `/api/v1/agents/{id}/attach` endpoint is a separate path that the CLI does not use.
 
-**Upgrade Request (Hub → Broker):**
+**Stream Open (Hub → Broker):**
 ```json
 {
-  "type": "request",
-  "requestId": "req-456",
-  "method": "GET",
-  "path": "/api/v1/agents/agent-123/attach",
-  "headers": {
-    "Upgrade": ["websocket"],
-    "X-Stream-ID": ["stream-xyz"]
-  }
+  "type": "stream_open",
+  "streamId": "stream-xyz",
+  "streamType": "pty",
+  "slug": "agent-123",
+  "projectId": "project-1",
+  "cols": 120,
+  "rows": 40
 }
 ```
 
@@ -315,15 +316,16 @@ PTY sessions are initiated via a special "Upgrade" request over the HTTP tunnel,
 
 The CLI acts similarly to a browser but uses standard user authentication.
 
-1.  **Auth**: CLI obtains a user Bearer token (via `scion login`).
-2.  **Connect**: CLI connects to `wss://hub.example.com/api/v1/agents/{id}/attach`.
+1.  **Auth**: CLI uses the user's Hub credentials from `scion hub auth login` (or `SCION_HUB_TOKEN`), plus transport-level headers when the Hub is behind IAP.
+2.  **Connect**: CLI connects to `wss://hub.example.com/api/v1/agents/{id}/pty` (`pkg/wsclient/pty.go`). Any path prefix on the Hub endpoint is kept.
     *   Header: `Authorization: Bearer <token>`
 3.  **Proxying**:
-    *   Hub validates the user token.
-    *   Hub locates the target Runtime Broker.
-    *   Hub sends "Upgrade Request" (see 4.1) over the Control Channel to the Broker.
+    *   Hub validates the user token and checks the `attach` action on the agent.
+    *   Hub locates the target Runtime Broker. This hub process must hold that broker's control channel, otherwise it returns `503`.
+    *   Hub sends `stream_open` (see 4.1) over the Control Channel to the Broker.
     *   Hub pipes the CLI WebSocket frames to the Broker Stream frames.
-4.  **Terminal Mode**: CLI sets its local TTY to raw mode to handle special characters locally before sending.
+4.  **Terminal Mode**: CLI requires a terminal on stdin and stdout and sets its local TTY to raw mode. Detach is the tmux key (`Ctrl-b d`).
+5.  **End**: the close frame carries a PTY close code (`pkg/wsprotocol/pty_close.go`). `1000` is a clean detach. For any other code the CLI prints a message based on `ClassifyPTYClose` and exits non-zero. It does not reconnect.
 
 ---
 
@@ -363,7 +365,8 @@ There are distinct authentication strategies for Browsers and CLI clients due to
 
 **Browser:**
 Browsers using the standard `WebSocket` API **cannot** add custom headers (like `Authorization`) to the initial handshake request. This is a known security limitation of the web platform.
-*   **Solution:** Use a short-lived, single-use "ticket" passed in the URL query string.
+*   **Today:** the web terminal connects to the same `/pty` route, and its browser session cookie authenticates it (`credentials: 'include'`).
+*   **Proposed, not implemented:** a short-lived, single-use "ticket" passed in the URL query string. There is no `/api/v1/auth/ws-ticket` endpoint, and the Hub's ticket validation is an unimplemented placeholder.
     1. `POST /api/v1/auth/ws-ticket` -> `{ "ticket": "..." }` (Authenticated with cookie/session)
     2. `WS /api/v1/agents/{id}/pty?ticket=<ticket>`
 
@@ -397,7 +400,7 @@ The CLI (e.g., using a library like `gorilla/websocket`) has full control over t
 
 - **Backoff**: Exponential backoff (1s, 2s, 4s, ... max 60s)
 - **Session Resumption**: On reconnect, Hub sends list of expected agents for reconciliation
-- **Stream Recovery**: Active streams are terminated on disconnect; clients must re-attach
+- **Stream Recovery**: Active streams are terminated on disconnect (PTY clients receive close code `4503`, reason `broker_disconnected`); clients must re-attach. The web terminal re-attaches on its own. The CLI does not: it prints a message and exits, and the user runs `scion attach` again.
 
 ### 6.3 Graceful Shutdown
 
@@ -580,7 +583,7 @@ For horizontal scalability, a hybrid approach could decouple command delivery fr
 
 **PTY Streaming:**
 - WebSocket endpoint at `/api/v1/agents/{id}/pty`
-- User authentication (Bearer token or ticket)
+- User authentication (Bearer token; ticket validation not implemented)
 - Agent lookup and access control
 - Stream proxy to runtime broker via control channel
 - Bidirectional data relay
@@ -601,7 +604,9 @@ runtimeBroker:
 
 | Item | Description | Priority |
 |------|-------------|----------|
-| PTY Ticket Validation | Single-use tickets for browser clients | Medium |
+| PTY Ticket Validation | Single-use tickets for browser clients. Not implemented: no ticket endpoint exists and validation is a placeholder. | Medium |
+| CLI reconnect | The CLI exits on any non-clean close. Reconnect is planned as part of the move to the conduit relay. | Medium |
+| Conduit migration | Attach is expected to move from this control-channel stream to the conduit relay, which also removes the requirement that the hub process serving the attach holds the broker's control channel (multi-replica hubs). No user action is expected. | Medium |
 | Resize Propagation | Apply terminal resize to tmux sessions | Low |
 | Integration Tests | End-to-end WebSocket tests | Medium |
 | Browser Terminal | xterm.js integration with PTY endpoint | High |

@@ -1576,6 +1576,31 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 	return false // field omitted → compiled default → OFF
 }
 
+// Artifacts returns the resolved artifact service settings (the
+// "artifacts" section). It returns opsettings.DefaultArtifactsConfig when
+// the section is absent, and fails closed (opsettings.MalformedArtifactsConfig:
+// service disabled, compiled-default limits) when the stored document is
+// unreadable or holds an invalid value.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["artifacts"]
+	if !ok {
+		return opsettings.DefaultArtifactsConfig() // section absent → compiled defaults
+	}
+	if state.Malformed {
+		return opsettings.MalformedArtifactsConfig() // unreadable → fail closed
+	}
+	cfg, err := opsettings.ParseArtifactsDoc(state.Value)
+	if err != nil {
+		return opsettings.MalformedArtifactsConfig() // invalid value → fail closed
+	}
+	return cfg
+}
+
 // CrossProjectSettingResult holds the authoritative cross-project messaging
 // setting and its revision, read directly from the store (not the cache).
 type CrossProjectSettingResult struct {

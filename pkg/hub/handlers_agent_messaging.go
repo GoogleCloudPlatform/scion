@@ -1832,6 +1832,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
+	// Resuming a suspended agent to deliver a message requires the
+	// lifecycle permission that starting the agent requires. The check runs
+	// before conversation resolution, persistence and dispatch, so a refused
+	// request resumes nothing and stores nothing. A migrating recipient is
+	// never resumed (see the migration gate below), so the rule does not
+	// apply to it.
+	if req.Wake && !reincarnationInFlight(agent) {
+		if denial := s.wakeResumeDenial(ctx, GetIdentityFromContext(ctx), agent); denial != nil {
+			WriteAgentDMError(w, denial)
+			return
+		}
+	}
+
 	// ── Foreign attachment rejection (#1687) — inbound path ──────────────
 	// When the authenticated sender is an agent in a different project,
 	// reject any attachments before persistence, dispatch, or publication.

@@ -89,8 +89,7 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 	if h.UID == "" {
 		return errNoUID(h)
 	}
-	uid := types.UID(h.UID)
-	opts := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}
+	opts := metav1.DeleteOptions{Preconditions: k8sUIDPrecondition(types.UID(h.UID))}
 
 	var err error
 	switch h.Kind {
