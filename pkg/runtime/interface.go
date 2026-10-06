@@ -91,6 +91,18 @@ type RunConfig struct {
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
+	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
+	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
+	// runtime-specific mount narrowing in buildCommonRunArgs that cannot yet
+	// be applied uniformly across adapters — currently the narrowed read-only
+	// mount over the shared base repo's .git admin surface (config/hooks/info)
+	// for hub-native worktree-per-agent projects, which the broker-git
+	// worktree change currently applies to Docker only. Left empty by
+	// adapters that have not yet been extended (podman, apple); code gating on
+	// this field must fail closed (i.e. skip the mount narrowing) for any
+	// value it does not explicitly recognize.
+	RuntimeName string
+
 	// WorkspaceBackendName is the name of the backend chosen by the workspace
 	// backend selector: "local", "nfs", "cloudrun-volume" or
 	// "gke-shared-volume". Used to branch UID/GID injection and skip per-start

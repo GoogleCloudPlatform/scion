@@ -1119,6 +1119,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// the hub sent none, which is every local and file-mode dispatch.
 	ctx = withHubAgentDefaults(ctx, req.Config)
 
+	// Carry the broker-provisioned-worktree signal (set above inside
+	// buildStartContext's tryProvisionWorktree call) into provisioning/start.
+	// See api.ContextWithProvisionedWorktreeRepoRoot for what this unlocks.
+	// No-op unless tryProvisionWorktree actually provisioned a worktree for
+	// this dispatch. Applied before the async-launch branch below so a
+	// launch that goes async still carries the signal into its own
+	// goroutine via ctx.
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, sc.ProvisionedWorktreeRepoRoot)
+	}
+
 	// Non-blocking create (design t1-async-create-v11.md §3.8.2, §7 P1b-1).
 	// ProvisionOnly and Reprovision always stay synchronous (design §3.2).
 	// With AsyncLaunch absent, no LaunchID to track the launch by, or a
