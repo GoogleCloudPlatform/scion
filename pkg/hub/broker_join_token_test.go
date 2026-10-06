@@ -21,8 +21,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -257,4 +260,190 @@ func TestBrokerJoinToken_PreserveSettingsNewBrokerIgnoresSettings(t *testing.T) 
 	assert.Empty(t, got.GCPHostProjectID)
 	assert.Equal(t, "remote", got.Labels["scion.io/broker-role"])
 	assert.Equal(t, minter.ID, got.CreatedBy)
+}
+
+// TestBrokerJoinToken_ConcurrentJoins: of eight concurrent joins with one
+// token, exactly one succeeds and the broker ends up with one secret.
+func TestBrokerJoinToken_ConcurrentJoins(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	minter := newHubMemberUser(t, s, "jt-concurrent-minter")
+
+	rec := mintJoinToken(t, srv, minter, "jt-concurrent-broker", 0)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	minted := decodeRegistration(t, rec)
+
+	const joiners = 8
+	codes := make(chan int, joiners)
+	keys := make(chan string, joiners)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < joiners; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			r := joinWithToken(t, srv, minted.BrokerID, minted.JoinToken)
+			codes <- r.Code
+			if r.Code == http.StatusOK {
+				var resp BrokerJoinResponse
+				_ = json.NewDecoder(r.Body).Decode(&resp)
+				keys <- resp.SecretKey
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(codes)
+	close(keys)
+
+	ok, unauthorized := 0, 0
+	for c := range codes {
+		switch c {
+		case http.StatusOK:
+			ok++
+		case http.StatusUnauthorized:
+			unauthorized++
+		default:
+			t.Errorf("unexpected status %d", c)
+		}
+	}
+	assert.Equal(t, 1, ok, "exactly one join succeeds")
+	assert.Equal(t, joiners-1, unauthorized)
+
+	active, err := s.GetActiveSecrets(ctx, minted.BrokerID)
+	require.NoError(t, err)
+	require.Len(t, active, 1, "the broker has exactly one active secret")
+	winner := <-keys
+	assert.Equal(t, winner, base64.StdEncoding.EncodeToString(active[0].SecretKey), "the stored secret is the one returned to the winner")
+}
+
+// seedJoinToken stores a join token for brokerID directly and returns the
+// plaintext token.
+func seedJoinToken(t *testing.T, s store.Store, brokerID string, expiresAt time.Time) string {
+	t.Helper()
+	token := JoinTokenPrefix + "seeded-" + brokerID
+	_, err := s.UpsertJoinToken(context.Background(), &store.BrokerJoinToken{
+		BrokerID:  brokerID,
+		TokenHash: sha256Hash(token),
+		ExpiresAt: expiresAt,
+		CreatedBy: "test",
+	})
+	require.NoError(t, err)
+	return token
+}
+
+func TestBrokerJoinToken_ExpiredToken(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "jt-expired-owner")
+	broker := createReregistrationTestBroker(t, s, "jt-expired-broker", owner.ID)
+	token := seedJoinToken(t, s, broker.ID, time.Now().Add(-time.Minute))
+
+	rec := joinWithToken(t, srv, broker.ID, token)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, ErrCodeExpiredJoinToken, errorCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "join token has expired")
+
+	_, err := s.GetJoinTokenByBrokerID(ctx, broker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the expired token is removed")
+	_, err = s.GetBrokerSecret(ctx, broker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "no secret is issued")
+}
+
+func TestBrokerJoinToken_WrongBrokerAndUnknownToken(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "jt-mismatch-owner")
+	broker := createReregistrationTestBroker(t, s, "jt-mismatch-broker", owner.ID)
+	other := createReregistrationTestBroker(t, s, "jt-mismatch-other", owner.ID)
+	token := seedJoinToken(t, s, broker.ID, time.Now().Add(time.Hour))
+
+	rec := joinWithToken(t, srv, other.ID, token)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, ErrCodeInvalidJoinToken, errorCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "join token does not match broker")
+
+	rec = joinWithToken(t, srv, broker.ID, JoinTokenPrefix+"unknown")
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, ErrCodeInvalidJoinToken, errorCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "invalid join token")
+
+	_, err := s.GetJoinTokenByBrokerID(ctx, broker.ID)
+	require.NoError(t, err, "failed joins leave the token usable")
+	rec = joinWithToken(t, srv, broker.ID, token)
+	assert.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+}
+
+// failingBrokerUpdateStore makes UpdateRuntimeBroker fail while fail is
+// set, including on the transactional store WithTx hands out.
+type failingBrokerUpdateStore struct {
+	store.Store
+	fail *atomic.Bool
+}
+
+func (f *failingBrokerUpdateStore) UpdateRuntimeBroker(ctx context.Context, b *store.RuntimeBroker) error {
+	if f.fail.Load() {
+		return errors.New("injected broker update failure")
+	}
+	return f.Store.UpdateRuntimeBroker(ctx, b)
+}
+
+func (f *failingBrokerUpdateStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&failingBrokerUpdateStore{Store: tx, fail: f.fail})
+	})
+}
+
+// TestBrokerJoinToken_FailedJoinRollsBack: when a step after the token is
+// consumed fails, the join returns 500, nothing is kept, and the same token
+// works on retry.
+func TestBrokerJoinToken_FailedJoinRollsBack(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	minter := newHubMemberUser(t, s, "jt-rollback-minter")
+
+	rec := mintJoinToken(t, srv, minter, "jt-rollback-broker", 0)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	minted := decodeRegistration(t, rec)
+
+	fail := &atomic.Bool{}
+	fail.Store(true)
+	srv.brokerAuthService.store = &failingBrokerUpdateStore{Store: s, fail: fail}
+
+	rec = joinWithToken(t, srv, minted.BrokerID, minted.JoinToken)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+	_, err := s.GetJoinTokenByBrokerID(ctx, minted.BrokerID)
+	require.NoError(t, err, "the token survives a failed join")
+	_, err = s.GetBrokerSecret(ctx, minted.BrokerID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the secret write is rolled back")
+
+	fail.Store(false)
+	rec = joinWithToken(t, srv, minted.BrokerID, minted.JoinToken)
+	require.Equal(t, http.StatusOK, rec.Code, "a retry with the same token succeeds; body: %s", rec.Body.String())
+	_, err = s.GetJoinTokenByBrokerID(ctx, minted.BrokerID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestCompleteBrokerJoin_SentinelErrors(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	owner := newPlainUser(t, s, "jt-sentinel-owner")
+	broker := createReregistrationTestBroker(t, s, "jt-sentinel-broker", owner.ID)
+	svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), s)
+	t.Cleanup(svc.Close)
+
+	_, err := svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{BrokerID: broker.ID, JoinToken: JoinTokenPrefix + "nope"}, "")
+	assert.ErrorIs(t, err, ErrJoinTokenInvalid)
+	assert.EqualError(t, err, "invalid join token")
+
+	token := seedJoinToken(t, s, broker.ID, time.Now().Add(time.Hour))
+	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{BrokerID: tid("jt-sentinel-other"), JoinToken: token}, "")
+	assert.ErrorIs(t, err, ErrJoinTokenBrokerMismatch)
+	assert.EqualError(t, err, "join token does not match broker")
+
+	expired := seedJoinToken(t, s, broker.ID, time.Now().Add(-time.Second))
+	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{BrokerID: broker.ID, JoinToken: expired}, "")
+	assert.ErrorIs(t, err, ErrJoinTokenExpired)
+	assert.EqualError(t, err, "join token has expired")
 }

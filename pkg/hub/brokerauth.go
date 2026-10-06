@@ -532,60 +532,115 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	// Hash the provided token
 	tokenHash := sha256Hash(req.JoinToken)
 
-	// Look up the join token
-	joinToken, err := s.store.GetJoinToken(ctx, tokenHash)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("invalid join token")
-		}
-		return nil, fmt.Errorf("failed to validate join token: %w", err)
-	}
-
-	// Verify broker ID matches
-	if joinToken.BrokerID != req.BrokerID {
-		return nil, fmt.Errorf("join token does not match broker")
-	}
-
-	// Check expiry
-	if time.Now().After(joinToken.ExpiresAt) {
-		// Delete expired token
-		_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
-		return nil, fmt.Errorf("join token has expired")
-	}
-
 	// Generate shared secret
 	secretKey := make([]byte, s.config.SecretKeyLength)
 	if _, err := rand.Read(secretKey); err != nil {
 		return nil, fmt.Errorf("failed to generate secret key: %w", err)
 	}
 
-	// Delete any existing secret for this broker (re-registration case)
-	_ = s.store.DeleteBrokerSecret(ctx, req.BrokerID)
+	// Consume the token and install the secret in one transaction. The
+	// token is deleted by a single conditional statement, so only one of
+	// several concurrent joins with the same token gets past it. If any
+	// later step fails the transaction rolls back and the token is still
+	// usable, so a failed join can be retried.
+	now := time.Now()
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.ConsumeJoinToken(ctx, tokenHash, req.BrokerID, now); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errJoinTokenNotConsumed
+			}
+			return fmt.Errorf("failed to validate join token: %w", err)
+		}
 
-	// Store the broker secret
-	brokerSecret := &store.BrokerSecret{
-		BrokerID:  req.BrokerID,
-		SecretKey: secretKey,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		CreatedAt: time.Now(),
-		Status:    store.BrokerSecretStatusActive,
+		// Delete any existing secret for this broker (re-registration case)
+		if err := tx.DeleteBrokerSecret(ctx, req.BrokerID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("failed to replace broker secret: %w", err)
+		}
+
+		// Store the broker secret
+		brokerSecret := &store.BrokerSecret{
+			BrokerID:  req.BrokerID,
+			SecretKey: secretKey,
+			Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+			CreatedAt: now,
+			Status:    store.BrokerSecretStatusActive,
+		}
+		if err := tx.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+			return fmt.Errorf("failed to store broker secret: %w", err)
+		}
+
+		// Update the runtime broker with connection info
+		broker, err := tx.GetRuntimeBroker(ctx, req.BrokerID)
+		if err != nil {
+			return fmt.Errorf("failed to get runtime broker: %w", err)
+		}
+		applyBrokerJoinRequest(broker, req, now)
+		if err := tx.UpdateRuntimeBroker(ctx, broker); err != nil {
+			return fmt.Errorf("failed to update runtime broker: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(err, errJoinTokenNotConsumed) {
+		return nil, s.classifyUnconsumedJoinToken(ctx, tokenHash, req.BrokerID, now)
 	}
-
-	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
-		return nil, fmt.Errorf("failed to store broker secret: %w", err)
-	}
-
-	// Update the runtime broker with connection info
-	broker, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get runtime broker: %w", err)
+		return nil, err
 	}
 
+	return &BrokerJoinResponse{
+		SecretKey:   base64.StdEncoding.EncodeToString(secretKey),
+		HubEndpoint: hubEndpoint,
+		BrokerID:    req.BrokerID,
+	}, nil
+}
+
+// Join token errors returned by CompleteBrokerJoin. The handler maps the
+// first two to 401 invalid_join_token and the third to 401
+// expired_join_token.
+var (
+	ErrJoinTokenInvalid        = errors.New("invalid join token")
+	ErrJoinTokenBrokerMismatch = errors.New("join token does not match broker")
+	ErrJoinTokenExpired        = errors.New("join token has expired")
+)
+
+// errJoinTokenNotConsumed aborts the CompleteBrokerJoin transaction when no
+// token was consumed; the reason is worked out afterwards.
+var errJoinTokenNotConsumed = errors.New("join token not consumed")
+
+// classifyUnconsumedJoinToken explains why ConsumeJoinToken matched no row,
+// with a read outside the join transaction. The read only selects the error
+// returned; a concurrent change can at most change which of the three join
+// token errors the caller sees.
+func (s *BrokerAuthService) classifyUnconsumedJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error {
+	joinToken, err := s.store.GetJoinToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrJoinTokenInvalid
+		}
+		return fmt.Errorf("failed to validate join token: %w", err)
+	}
+	if joinToken.BrokerID != brokerID {
+		return ErrJoinTokenBrokerMismatch
+	}
+	if !joinToken.ExpiresAt.After(now) {
+		// Best effort: the cleanup job removes it otherwise.
+		_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
+		return ErrJoinTokenExpired
+	}
+	// The token exists and is valid now, so another join consumed a token
+	// with this hash concurrently and has not finished, or this token
+	// replaced it in the meantime. Either way this request did not use it.
+	return ErrJoinTokenInvalid
+}
+
+// applyBrokerJoinRequest records the connection details a joining broker
+// reports on its broker record.
+func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, now time.Time) {
 	broker.Version = req.Version
 	broker.Status = store.BrokerStatusOnline
 	broker.ConnectionState = "connected"
-	broker.LastHeartbeat = time.Now()
-	broker.Updated = time.Now()
+	broker.LastHeartbeat = now
+	broker.Updated = now
 
 	// Update profiles if provided in the join request
 	if len(req.Profiles) > 0 {
@@ -610,19 +665,6 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	if req.DefaultProfile != nil {
 		broker.DefaultProfile = *req.DefaultProfile
 	}
-
-	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-		return nil, fmt.Errorf("failed to update runtime broker: %w", err)
-	}
-
-	// Delete the used join token
-	_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
-
-	return &BrokerJoinResponse{
-		SecretKey:   base64.StdEncoding.EncodeToString(secretKey),
-		HubEndpoint: hubEndpoint,
-		BrokerID:    req.BrokerID,
-	}, nil
 }
 
 // GenerateAndStoreSecret generates a new HMAC secret for an existing broker.

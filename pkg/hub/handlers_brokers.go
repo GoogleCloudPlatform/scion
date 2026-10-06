@@ -317,15 +317,14 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error())
 
 		// Determine error type and return appropriate response
-		errMsg := err.Error()
-		switch errMsg {
-		case "invalid join token", "join token does not match broker":
-			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, errMsg, nil)
-		case "join token has expired":
-			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, errMsg, nil)
+		switch {
+		case errors.Is(err, ErrJoinTokenInvalid), errors.Is(err, ErrJoinTokenBrokerMismatch):
+			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, err.Error(), nil)
+		case errors.Is(err, ErrJoinTokenExpired):
+			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, err.Error(), nil)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"failed to complete broker join: "+errMsg, nil)
+				"failed to complete broker join: "+err.Error(), nil)
 		}
 		return
 	}
