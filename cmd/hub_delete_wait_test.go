@@ -506,7 +506,7 @@ func TestDeleteAgentsViaHub_202AbandonedMayBlockStart(t *testing.T) {
 	err := deleteAgentsViaHub(env.hubCtx, []string{"bad-agent"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "(abandoned)")
-	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used.")
+	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used")
 	assert.True(t, env.dirExists())
 }
 
@@ -522,7 +522,7 @@ func TestDeleteAgentsViaHub_202GenericFailedView(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "delete failed on the Hub; local worktree kept")
 	assert.Contains(t, err.Error(), "scion delete bad-agent")
-	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used.")
+	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used")
 	assert.NotContains(t, err.Error(), "unknown")
 	assert.NotContains(t, err.Error(), "()")
 	assert.True(t, env.dirExists())

@@ -744,7 +744,13 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 
 	ts := httptest.NewServer(ws.Handler())
 	defer ts.Close()
-	resp, err := http.Get(ts.URL + "/events?sub=project.redact1.>")
+	// One deadline for the connect and the whole stream read below, so a
+	// stalled stream fails the test instead of hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events?sub=project.redact1.>", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
