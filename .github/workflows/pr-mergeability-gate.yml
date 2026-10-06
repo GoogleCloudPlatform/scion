@@ -42,9 +42,10 @@
 # live-head guard's request to re-run an existing run of this same workflow
 # uses the write scope. Any step added to this job also receives it. This is
 # safe because no PR-controlled code runs that could reach the token, the
-# re-run target is picked only from API data (PR number -> live head SHA ->
-# run ID), and PR-controlled strings (title, body, branch name) never reach
-# a shell.
+# re-run target is picked only from trusted context and API data (this
+# run's ID -> workflow ID, digits-only; PR number -> live head SHA -> run
+# ID), and PR-controlled strings (title, body, branch name) never reach a
+# shell.
 #
 # Known gap (deferred, see ptone/scion#1294): this only re-evaluates on PR
 # events (opened/synchronize/reopened/ready_for_review). A PR that goes
@@ -86,6 +87,7 @@ on: # zizmor: ignore[dangerous-triggers] -- no PR code checked out or run; see S
 # while this run holds the slot, so it is now the last arrival and (1)
 # applies to it. If the guard fails or its attempt backstop fires, the
 # repair stops with a warning.
+#
 # Do NOT set cancel-in-progress to true: a later arrival could cancel the
 # latest head's run mid-run, and the guard cannot repair that because it
 # runs inside the cancelled run. Do not add a job-level `if:` or a trigger
@@ -109,7 +111,7 @@ jobs:
     permissions:
       contents: read # no checkout; kept explicit as the read-only default
       pull-requests: read # read the PR's mergeable_state and head SHA
-      actions: write # live-head guard: re-run this workflow's own run
+      actions: write # live-head guard: re-run the live head's cancelled run of this workflow
     steps:
       - name: Check PR mergeable state
         env:
