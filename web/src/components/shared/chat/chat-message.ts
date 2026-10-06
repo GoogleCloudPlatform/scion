@@ -1441,6 +1441,14 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-warning-600, #d97706);
     }
 
+    .delivery-state.no-recipient {
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .delivery-state.no-recipient sl-icon {
+      color: var(--scion-warning-600, #d97706);
+    }
+
     /* ---- Phase-3: Reply preview quote block ---- */
     .reply-preview {
       display: flex;
@@ -2162,6 +2170,15 @@ export class ScionChatMessage extends LitElement {
             Sending
           </div>
         `;
+      case 'waking':
+        // Client-only state (chat-wake.ts): the user chose "Wake and send"
+        // and the hub is resuming the suspended agent before delivery.
+        return html`
+          <div class="delivery-state pending waking">
+            <sl-icon name="hourglass-split"></sl-icon>
+            Waking agent…
+          </div>
+        `;
       case 'dispatched':
         return this.seen
           ? html`
@@ -2191,6 +2208,17 @@ export class ScionChatMessage extends LitElement {
             <div class="delivery-state deferred">
               <sl-icon name="pause-circle"></sl-icon>
               Deferred: agent is reincarnating (saved)
+            </div>
+          </sl-tooltip>
+        `;
+      case 'no_recipient':
+        // A thread message that resolved no agent recipient: it was saved
+        // to the thread, but no agent was given it.
+        return html`
+          <sl-tooltip content="Mention an agent to send it to that agent" hoist>
+            <div class="delivery-state no-recipient">
+              <sl-icon name="info-circle"></sl-icon>
+              Not delivered to any agent, mention an agent to send it
             </div>
           </sl-tooltip>
         `;

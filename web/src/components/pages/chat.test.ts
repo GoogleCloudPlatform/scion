@@ -1216,9 +1216,24 @@ describe('chat page — late route lookups', () => {
     return release;
   }
 
+  /** A page that reports itself mounted, as one the router shows does. */
+  function mountedPage(): any {
+    const el = createPage();
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
+    return el;
+  }
+
+  /**
+   * A rail reload landing, as one does after each inbound message: the rail
+   * knows no slug for the route yet, so every re-parse starts its own lookup.
+   */
+  function railReloaded(el: any): void {
+    el.handleRailLoaded(new CustomEvent('rail-loaded', { detail: { spaceIds: [], spaces: [] } }));
+  }
+
   it('a late slug lookup leaves the panel alone once the rail has opened the thread', async () => {
     const release = holdSlugLookup();
-    const el = createPage();
+    const el = mountedPage();
     window.history.replaceState({}, '', '/chat/alpha/topic-1');
     el.parseV2Route();
     // The rail loads first and opens the thread through the known slug.
@@ -1237,7 +1252,7 @@ describe('chat page — late route lookups', () => {
 
   it('a late slug lookup does not pull the user back from a thread they opened since', async () => {
     const release = holdSlugLookup();
-    const el = createPage();
+    const el = mountedPage();
     window.history.replaceState({}, '', '/chat/alpha/topic-1');
     el.parseV2Route();
     el.navigateToThread({
@@ -1256,7 +1271,7 @@ describe('chat page — late route lookups', () => {
 
   it('a slug lookup still opens a cold-loaded thread', async () => {
     const release = holdSlugLookup();
-    const el = createPage();
+    const el = mountedPage();
     window.history.replaceState({}, '', '/chat/alpha/topic-1');
     el.parseV2Route();
 
@@ -1265,6 +1280,58 @@ describe('chat page — late route lookups', () => {
 
     expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectId: 'p1' });
     expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a burst of rail reloads does not pull the user back to the thread the URL named before', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    railReloaded(el);
+    railReloaded(el);
+    // The user opens another thread and starts typing in it.
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-2');
+  });
+
+  it('a burst of rail reloads still opens the thread the URL names', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    railReloaded(el);
+    railReloaded(el);
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectSlug: 'alpha' });
+    expect(window.location.pathname).toBe('/chat/alpha/topic-1');
+  });
+
+  it('a late slug lookup on a page that is no longer mounted does nothing', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    // The router replaced this page with a new one for the same URL.
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
   });
 });
 
@@ -1394,6 +1461,55 @@ describe('chat page — late space lookups', () => {
     expect(el.v2Conversation).toBeNull();
   });
 
+  /** A rail reload that knows the space, as after each inbound message. */
+  function railReloadedWithSpace(el: any): void {
+    el.handleRailLoaded(
+      new CustomEvent('rail-loaded', {
+        detail: {
+          spaceIds: [],
+          spaces: [{ projectId: 'p1', projectSlug: 'alpha', projectName: 'A' }],
+        },
+      })
+    );
+  }
+
+  it('on desktop, a burst of rail reloads does not move the user off a thread opened since', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(false);
+    window.history.replaceState({}, '', '/chat/alpha');
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    expect(el.rail.threadsFor).toHaveBeenCalledTimes(3);
+    openThreadFromRail(el);
+
+    releases.threads();
+    await flush();
+
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+  });
+
+  it('on desktop, a burst of rail reloads on a space opens its #general once', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(false);
+    vi.mocked(navigateTo).mockImplementationOnce((path: string) => {
+      window.history.pushState({}, '', path);
+    });
+    window.history.replaceState({}, '', '/chat/alpha');
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+
+    releases.threads();
+    await flush();
+
+    expect(navigateTo).toHaveBeenCalledTimes(1);
+    expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/general-1');
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'general-1', projectSlug: 'alpha' });
+  });
+
   it('a slug lookup still opens a cold-loaded space', async () => {
     const releases = holdSpaceLookups();
     releases.threads();
@@ -1472,10 +1588,14 @@ describe('chat page — late DM peer lookups', () => {
     return releases;
   }
 
-  /** A page whose user ID is unknown, so a peer-ID DM route is resolved over the API. */
+  /**
+   * A mounted page whose user ID is unknown, so a peer-ID DM route is
+   * resolved over the API.
+   */
   function createPageWithoutUserId(): any {
     const el = createPage();
     el.pageData = {};
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
     return el;
   }
 
@@ -1703,6 +1823,21 @@ describe('chat page — late DM peer lookups', () => {
       peerName: 'Coder One',
     });
     expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a lookup on a page that is no longer mounted opens nothing', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+    // The router replaced this page with a new one for the same URL.
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
   });
 
   it('a lookup overtaken during the user refresh builds no key and logs no error', async () => {

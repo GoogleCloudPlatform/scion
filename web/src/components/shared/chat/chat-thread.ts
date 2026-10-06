@@ -49,6 +49,22 @@ import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
 import type { ChatAgentMember } from './chat-members.js';
+import {
+  WAKING_DISPATCH_STATE,
+  confirmWake,
+  WAKE_OUTCOME_UNKNOWN_MESSAGE,
+  WAKE_RETRY_DELAY_MS,
+  errorMessageFromBody,
+  WakeOutcomeUnknownError,
+  isAnswerAboutThisSend,
+  isGatewayDrop,
+  isSendInProgressBody,
+  jsonResponse,
+  saveDraftForConversation,
+  wakeConfirmBudgetMs,
+  wakeOfferFromErrorBody,
+  type WakeOffer,
+} from './chat-wake.js';
 import './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
@@ -497,8 +513,20 @@ export class ScionChatThread extends LitElement {
   /** The restore anchor already applied, so a re-load does not reuse it. */
   private _usedRestoreAnchor: ChatScrollAnchor | null = null;
 
-  /** Bumped by an explicit jump, so a restore still in flight stands down. */
-  private _restoreSeq = 0;
+  /**
+   * Bumped by each explicit jump, so a restore or an earlier jump still in
+   * flight stands down, and the initial load leaves the view to the jump.
+   */
+  private _jumpSeq = 0;
+
+  /** `_jumpSeq` when the current conversation was opened. */
+  private _jumpSeqAtOpen = 0;
+
+  /** The initial load left the view to a jump that has not landed yet. */
+  private _openScrollDeferred = false;
+
+  /** `_jumpSeq` of the last jump that reached its target. */
+  private _landedJumpSeq = 0;
 
   /** Latest scroll position, kept current from scroll events. */
   private _scrollAnchor: ChatScrollAnchor | null = null;
@@ -515,6 +543,18 @@ export class ScionChatThread extends LitElement {
   @state() private error: string | null = null;
   @state() private sending = false;
   @state() private sendError: string | null = null;
+  /**
+   * Conversation whose wake-and-send is in flight, or ''. Its composer is
+   * blocked meanwhile (up to the hub's wake budget), so text typed during
+   * the wait cannot be overwritten when a failed wake restores the draft.
+   */
+  @state() private wakingConversationKey = '';
+  /** Conversations with a v2 send in flight (see handleChatSendV2). */
+  private _sendingConversations = new Set<string>();
+  /** Delay between wake-send confirmation retries; tests shorten it. */
+  private wakeRetryDelayMs = WAKE_RETRY_DELAY_MS;
+  /** Overrides wakeConfirmBudgetMs(recipients) when set; tests shorten it. */
+  private wakeConfirmBudgetOverrideMs: number | null = null;
   @state() private pinnedToBottom = true;
   /** Whether the user expanded a one-line send error to its full text. */
   @state() private sendErrorExpanded = false;
@@ -1418,6 +1458,10 @@ export class ScionChatThread extends LitElement {
     this.loaded = false;
     this.error = null;
     this.sendError = null;
+    // A send still in flight belongs to the conversation we just left; its
+    // completion will not touch `sending` (fetchId guard), so release the
+    // composer here.
+    this.sending = false;
     this.pinnedToBottom = true;
     this._lastScrollEl = null;
     this.loadingOlder = false;
@@ -1441,6 +1485,9 @@ export class ScionChatThread extends LitElement {
 
     // Increment fetchId to invalidate any in-flight requests
     this.fetchId++;
+    // Jumps made before this point belong to the conversation left.
+    this._jumpSeqAtOpen = this._jumpSeq;
+    this._openScrollDeferred = false;
   }
 
   override disconnectedCallback(): void {
@@ -1734,11 +1781,16 @@ export class ScionChatThread extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async initialLoadV2(): Promise<void> {
+    const loadId = this.fetchId;
     this.loading = true;
     this.error = null;
 
     try {
-      await this.fetchHistoryV2();
+      // A switch while the history loads hands over to the next
+      // conversation's own load; this one stops here.
+      // A jump that has already shown the page around its target keeps
+      // it: merging the latest page in as well would leave a gap.
+      if (!(await this.fetchHistoryV2(undefined, () => !this.viewingAroundMessage))) return;
       this.startStreamV2();
       // Set up read tracking
       window.addEventListener('focus', this._focusHandler);
@@ -1757,115 +1809,146 @@ export class ScionChatThread extends LitElement {
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
-      this.loading = false;
-      // Determine scroll target: permalink hash > restored position >
-      // unread divider > bottom. A restored position that was following the
-      // bottom yields to the unread divider: messages that arrived while the
-      // user was away should be met at "New messages", not scrolled past.
-      // The anchor is taken (used up) even when the hash wins.
-      const hashMsgId = this.parseMessageHash();
-      const restore = this.takeRestoreScrollAnchor();
-      if (hashMsgId) {
-        void this.scrollToMessageById(hashMsgId, true);
-      } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
-        void this.restoreScrollPosition(restore);
-      } else if (this.showUnreadDivider) {
-        this.scrollToUnreadDivider();
-      } else {
-        this.scrollToBottomAfterRender();
-      }
-      // Advance read watermark after a delay so the blue dot clears. When
-      // showUnreadDivider is true, use a longer delay so the user can see the
-      // "New messages" divider before it is acknowledged. When it is false
-      // (first DM open — no prior read state), a shorter settle delay is
-      // enough to let the render commit.
-      if (this.messages.length > 0) {
-        const delay = this.showUnreadDivider ? 2000 : 500;
-        if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
-        this._initialWatermarkTimer = setTimeout(() => {
-          this._initialWatermarkTimer = null;
-          // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
-          // gates — a mark-unread landing during this delay (e.g. another tab,
-          // or this one via the rail) must not be undone the instant this
-          // timer fires.
-          if (this._autoAdvanceSuppressed) return;
-          const messageId = this.lastReadableMessageId();
-          if (messageId) {
-            void this.advanceReadWatermark(messageId);
-          }
-        }, delay);
+      // The loading flag, the restore anchor, the scroll target and the
+      // watermark timer all belong to the conversation now on screen.
+      if (loadId === this.fetchId) {
+        this.loading = false;
+        // Determine scroll target: permalink hash > restored position >
+        // unread divider > bottom. A restored position that was following the
+        // bottom yields to the unread divider: messages that arrived while the
+        // user was away should be met at "New messages", not scrolled past.
+        // The anchor is taken (used up) even when the hash wins.
+        // An explicit jump made while loading (e.g. a search result in
+        // this conversation) outranks all of them, including the hash.
+        const jumped = this._jumpSeq !== this._jumpSeqAtOpen;
+        const hashMsgId = jumped ? '' : this.parseMessageHash();
+        const restore = jumped ? null : this.takeRestoreScrollAnchor();
+        if (jumped) {
+          // The jump owns the scroll position. Deferred only while it has
+          // not landed and no earlier jump has landed since the open.
+          this._openScrollDeferred =
+            this._landedJumpSeq !== this._jumpSeq && this._landedJumpSeq <= this._jumpSeqAtOpen;
+        } else if (hashMsgId) {
+          void this.scrollToMessageById(hashMsgId, true);
+        } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
+          void this.restoreScrollPosition(restore);
+        } else if (this.showUnreadDivider) {
+          this.scrollToUnreadDivider();
+        } else {
+          this.scrollToBottomAfterRender();
+        }
+        // Advance read watermark after a delay so the blue dot clears. When
+        // showUnreadDivider is true, use a longer delay so the user can see the
+        // "New messages" divider before it is acknowledged. When it is false
+        // (first DM open — no prior read state), a shorter settle delay is
+        // enough to let the render commit.
+        if (this.messages.length > 0) {
+          const delay = this.showUnreadDivider ? 2000 : 500;
+          if (this._initialWatermarkTimer) clearTimeout(this._initialWatermarkTimer);
+          this._initialWatermarkTimer = setTimeout(() => {
+            this._initialWatermarkTimer = null;
+            // Same "viewing counts as reading" auto-behaviour maybeAdvanceReadWatermark
+            // gates — a mark-unread landing during this delay (e.g. another tab,
+            // or this one via the rail) must not be undone the instant this
+            // timer fires.
+            if (this._autoAdvanceSuppressed) return;
+            const messageId = this.lastReadableMessageId();
+            if (messageId) {
+              void this.advanceReadWatermark(messageId);
+            }
+          }, delay);
+        }
       }
     }
   }
 
-  private async fetchHistoryV2(cursor?: string): Promise<void> {
+  /**
+   * Fetch a page of history and merge it. Resolves false, having changed
+   * nothing, when the thread switched conversations before the page
+   * arrived — including when the request then failed: that failure
+   * belongs to the conversation left. Callers then leave the new
+   * conversation alone too. When `shouldMerge` turns false while the page
+   * loads, the page is dropped but the result is still true.
+   */
+  private async fetchHistoryV2(
+    cursor?: string,
+    shouldMerge: () => boolean = () => true
+  ): Promise<boolean> {
     const currentId = this.fetchId;
-    // Captured before the request starts: a response landing after the user
-    // has logged out (or switched accounts) must not repopulate a store that
-    // is no longer this identity's.
-    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
-    const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
-    if (cursor) {
-      params.set('cursor', cursor);
-    }
-
-    const res = await apiFetch(
-      `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
-    );
-
-    if (currentId !== this.fetchId) return;
-
-    if (!res.ok) {
-      throw new Error(await extractApiError(res, 'Failed to fetch messages'));
-    }
-
-    const data = (await res.json()) as {
-      items?: Message[];
-      messages?: Message[];
-      nextCursor?: string;
-      messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
-      messageExtensions?: Record<
-        string,
-        { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
-      >;
-      replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
-    };
-
-    const items = data?.items ?? data?.messages ?? [];
-
-    // W7: Merge attachment refs from history response.
-    if (data?.messageAttachments) {
-      for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
-        this.v2AttachmentMap.set(msgId, refs);
+    try {
+      // Captured before the request starts: a response landing after the user
+      // has logged out (or switched accounts) must not repopulate a store that
+      // is no longer this identity's.
+      const recentFilesGeneration = chatRecentFiles.scopeGeneration;
+      const params = new URLSearchParams({ limit: String(HISTORY_PAGE_SIZE) });
+      if (cursor) {
+        params.set('cursor', cursor);
       }
-    }
 
-    // Phase-3: Merge message extensions and reply previews.
-    if (data?.messageExtensions) {
-      for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
-        this.v2MessageExtMap.set(msgId, ext);
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
+      );
+
+      // Early out only: the catch below and the check after the body is
+      // read would also drop a stale page, but there is no need to read it.
+      if (currentId !== this.fetchId) return false;
+
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, 'Failed to fetch messages'));
       }
-    }
-    if (data?.replyPreviews) {
-      for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
-        this.v2ReplyPreviewMap.set(msgId, preview);
+
+      const data = (await res.json()) as {
+        items?: Message[];
+        messages?: Message[];
+        nextCursor?: string;
+        messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageExtensions?: Record<
+          string,
+          { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+        >;
+        replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+      };
+
+      // The body can still be arriving after the headers; a conversation
+      // switch in the meantime must not merge this page into the new one.
+      if (currentId !== this.fetchId) return false;
+      if (!shouldMerge()) return true;
+
+      const items = data?.items ?? data?.messages ?? [];
+
+      // W7: Merge attachment refs from history response.
+      if (data?.messageAttachments) {
+        for (const [msgId, refs] of Object.entries(data.messageAttachments)) {
+          this.v2AttachmentMap.set(msgId, refs);
+        }
       }
-    }
 
-    if (items.length < HISTORY_PAGE_SIZE) {
-      this.hasOlderMessages = false;
-    }
+      // Phase-3: Merge message extensions and reply previews.
+      if (data?.messageExtensions) {
+        for (const [msgId, ext] of Object.entries(data.messageExtensions)) {
+          this.v2MessageExtMap.set(msgId, ext);
+        }
+      }
+      if (data?.replyPreviews) {
+        for (const [msgId, preview] of Object.entries(data.replyPreviews)) {
+          this.v2ReplyPreviewMap.set(msgId, preview);
+        }
+      }
 
-    if (data?.nextCursor) {
-      this.nextCursor = data.nextCursor;
-    }
+      if (items.length < HISTORY_PAGE_SIZE) {
+        this.hasOlderMessages = false;
+      }
 
-    this.mergeMessages(items);
-    // Re-checked here, not just before the fetch/json-parse awaits above: a
-    // conversation switch that lands during `res.json()` must not attribute
-    // this page's items to the new conversation/project.
-    if (currentId === this.fetchId) {
+      if (data?.nextCursor) {
+        this.nextCursor = data.nextCursor;
+      }
+
+      this.mergeMessages(items);
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
+      return true;
+    } catch (err) {
+      if (currentId !== this.fetchId) return false;
+      throw err;
     }
   }
 
@@ -2155,6 +2238,8 @@ export class ScionChatThread extends LitElement {
       >;
       replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
     };
+    // See fetchHistoryV2: re-checked once the body has been read.
+    if (currentId !== this.fetchId) return;
     const items = data?.items ?? data?.messages ?? [];
 
     // W7: Merge attachment refs from history response.
@@ -2177,12 +2262,7 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
-    // See fetchHistoryV2's identical re-check: a conversation switch during
-    // `res.json()` must not attribute this page's items to the new
-    // conversation/project.
-    if (currentId === this.fetchId) {
-      this.recordRecentFilesForHistory(items, recentFilesGeneration);
-    }
+    this.recordRecentFilesForHistory(items, recentFilesGeneration);
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
     this.maybeAdvanceReadWatermark();
@@ -2432,6 +2512,37 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
+    const { text, attachmentIds, onSuccess, onError } = e.detail;
+    const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
+    if (!hasContent) return;
+    // One send at a time per conversation. The guard is per conversation,
+    // not per thread element: chat.ts reuses one element across
+    // conversations, and a wake send can stay in flight for minutes. A
+    // refused send hands its draft back rather than dropping it.
+    if (this._sendingConversations.has(this.conversationKey)) {
+      this.sendError = 'Still sending the previous message';
+      onError?.(this.sendError);
+      return;
+    }
+
+    // Check for /default slash command
+    if (text.startsWith('/default ')) {
+      await this.handleDefaultCommand(text);
+      onSuccess();
+      return;
+    }
+
+    await this.sendV2(e.detail, false);
+  }
+
+  /**
+   * POST one v2 send. With `wake` false the request carries `offer_wake`, so
+   * a suspended primary the user may wake answers with a wake offer instead
+   * of a failed row; the user is then asked, and a confirmed wake resends the
+   * same message with `wake` (see chat-wake.ts). The composer keeps its draft
+   * (via onError) on Cancel and on any failure.
+   */
+  private async sendV2(detail: ChatSendDetail, wake: boolean): Promise<void> {
     const {
       text,
       interrupt,
@@ -2441,18 +2552,11 @@ export class ScionChatThread extends LitElement {
       replyToContent,
       onSuccess,
       onError,
-    } = e.detail;
-    const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
-    if (!hasContent || this.sending) return;
-
-    // Check for /default slash command
-    if (text.startsWith('/default ')) {
-      await this.handleDefaultCommand(text);
-      onSuccess();
-      return;
-    }
-
-    this.sending = true;
+    } = detail;
+    let wakeOffer: WakeOffer | null = null;
+    const inFlightKey = this.conversationKey;
+    this._sendingConversations.add(inFlightKey);
+    if (wake) this.wakingConversationKey = inFlightKey;
     this.sendError = null;
     // Sending is the other way mark-unread's suppression lifts (besides
     // navigating away and back): you cannot both have just marked a
@@ -2481,7 +2585,9 @@ export class ScionChatThread extends LitElement {
       type: replyToId ? 'reply' : 'chat',
       agentId: '',
       createdAt: new Date().toISOString(),
-      dispatchState: 'pending',
+      // A wake resumes the agent before delivery, which takes a while:
+      // say so on the bubble instead of a plain "Sending".
+      dispatchState: wake ? WAKING_DISPATCH_STATE : 'pending',
     };
     this.messageMap.set(optimisticMsg.id, optimisticMsg);
     this._pendingIdempotencyKeys.add(idempotencyKey);
@@ -2495,6 +2601,23 @@ export class ScionChatThread extends LitElement {
     // whatever conversation/project the thread has since moved on to.
     const sendConversationKey = this.conversationKey;
     const sendProjectId = this.resolvePathLinkProjectId(optimisticMsg);
+    // The user may switch conversations while the send is in flight (for
+    // minutes, for a wake). Its outcome must then neither touch the open
+    // conversation's view nor land its draft in that conversation's composer.
+    const switchedAway = (): boolean => sendConversationKey !== this.conversationKey;
+    // A failure that lands after any conversation switch (even back to this
+    // one) must not put this send's reply bar or error on the thread now on
+    // screen: the switch reset that state.
+    const sendFetchId = this.fetchId;
+    const threadMovedOn = (): boolean => sendFetchId !== this.fetchId;
+    const failSend = (message: string, outcomeUnknown = false): void => {
+      if (switchedAway()) {
+        this.returnDraftElsewhere(sendConversationKey, text, outcomeUnknown);
+        return;
+      }
+      if (!threadMovedOn()) this.sendError = message;
+      onError?.(message);
+    };
 
     try {
       const body: Record<string, unknown> = {
@@ -2508,6 +2631,13 @@ export class ScionChatThread extends LitElement {
       // keep the minimal body.
       if (interrupt) {
         body.interrupt = true;
+      }
+      // Wake-on-send: either wake the suspended agent (the user confirmed)
+      // or ask the hub to offer a wake rather than fail the send.
+      if (wake) {
+        body.wake = true;
+      } else {
+        body.offer_wake = true;
       }
       // W7: Include attachment IDs.
       if (attachmentIds && attachmentIds.length > 0) {
@@ -2532,13 +2662,17 @@ export class ScionChatThread extends LitElement {
         body.metadata = metadata;
       }
 
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages`,
+      const res = await this.postChatSend(
+        `/api/v1/chat/conversations/${encodeURIComponent(sendConversationKey)}/messages`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-        }
+        },
+        wake,
+        // Recipients from the composer's accepted mentions: may undercount
+        // typed ones, which fails safe (see wakeConfirmBudgetMs).
+        this.wakeConfirmBudgetOverrideMs ?? wakeConfirmBudgetMs(1 + new Set(mentions ?? []).size)
       );
 
       if (!res.ok) {
@@ -2548,10 +2682,23 @@ export class ScionChatThread extends LitElement {
         this.messages = Array.from(this.messageMap.values())
           .filter((m) => m.type !== 'mention')
           .sort(compareMessageOrder);
-        // Restore reply-to state so the reply bar comes back for retry.
-        this.composerReplyTo = savedReplyTo;
-        this.sendError = await extractApiError(res, 'Failed to send message');
-        onError?.(this.sendError ?? 'Failed to send message');
+        // Restore reply-to state so the reply bar comes back for retry —
+        // before reading the error, so a reply picked meanwhile stands — but
+        // not onto a thread a conversation switch has since reset.
+        if (!threadMovedOn()) this.composerReplyTo = savedReplyTo;
+        if (!wake && res.status === 409) {
+          // Read the body once: it is either a wake offer or an ordinary
+          // conflict whose message is shown as usual.
+          const data: unknown = await res.json().catch(() => null);
+          wakeOffer = wakeOfferFromErrorBody(data);
+          if (!wakeOffer) {
+            failSend(errorMessageFromBody(data, 'Failed to send message'));
+          }
+        } else {
+          failSend(
+            await extractApiError(res, wake ? 'Failed to wake agent' : 'Failed to send message')
+          );
+        }
       } else {
         // W7: Parse attachment refs from the send response.
         const resData = (await res.json().catch(() => null)) as {
@@ -2572,68 +2719,78 @@ export class ScionChatThread extends LitElement {
         // instead of deleting it. This avoids a visible flicker (message
         // disappearing then reappearing) between the delete and the backfill
         // delivering the real message.
-        const optimistic = this.messageMap.get(idempotencyKey);
-        if (optimistic && resData?.id) {
+        if (switchedAway()) {
+          // Sent, but the user has moved on: leave the open conversation's
+          // view alone (its own history shows the message on return).
           this.messageMap.delete(idempotencyKey);
           this._pendingIdempotencyKeys.delete(idempotencyKey);
-          // If SSE already delivered the real message, keep it as the ground truth
-          // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
-          const sseVersion = this.messageMap.get(resData.id);
-          if (sseVersion) {
-            // nc-delivery-unreachable review FYI 1: never downgrade a
-            // terminal `failed` state — skip applying this HTTP response's
-            // dispatch fields if the SSE-delivered version is already failed
-            // and this response would move it back to dispatched/pending.
-            const wouldDowngrade =
-              sseVersion.dispatchState === 'failed' &&
-              (dispatchState === 'dispatched' || dispatchState === 'pending');
-            let updatedSseVersion = sseVersion;
-            if (!wouldDowngrade) {
-              // Strip any prior dispatchFailureReason/Code before
-              // conditionally re-adding the response's, so a stale value is
-              // dropped rather than left behind when the response omits it.
-              updatedSseVersion = withDispatchFailure(
-                sseVersion,
-                dispatchState,
-                resData?.dispatchFailureReason || undefined,
-                resData?.dispatchFailureCode || undefined
-              );
-            }
-            // Preserve optimistic agent recipient if SSE version lacks it.
-            if (
-              optimistic.recipient?.startsWith('agent:') &&
-              !updatedSseVersion.recipient?.startsWith('agent:')
-            ) {
-              updatedSseVersion = {
-                ...updatedSseVersion,
-                recipient: optimistic.recipient,
-                recipientId: optimistic.recipientId,
-              };
-            }
-            this.messageMap.set(resData.id, updatedSseVersion);
-          } else {
-            // Symmetric with the sseVersion branch above: a stale
-            // dispatchFailureReason/Code is dropped, not left behind on this
-            // reused object, when the response omits it.
-            const updatedOptimistic: Message = {
-              ...withDispatchFailure(
-                optimistic,
-                dispatchState,
-                resData?.dispatchFailureReason || undefined,
-                resData?.dispatchFailureCode || undefined
-              ),
-              id: resData.id,
-            };
-            this.messageMap.set(resData.id, updatedOptimistic);
-          }
         } else {
-          // Fallback: remove if we cannot remap (should not happen).
-          this.messageMap.delete(idempotencyKey);
-          this._pendingIdempotencyKeys.delete(idempotencyKey);
+          const optimistic = this.messageMap.get(idempotencyKey);
+          if (optimistic && resData?.id) {
+            this.messageMap.delete(idempotencyKey);
+            this._pendingIdempotencyKeys.delete(idempotencyKey);
+            // If SSE already delivered the real message, keep it as the ground truth
+            // to preserve all server-enriched fields (createdAt, metadata, groupId, etc.)
+            const sseVersion = this.messageMap.get(resData.id);
+            if (sseVersion) {
+              // nc-delivery-unreachable review FYI 1: never downgrade a
+              // terminal `failed` state — skip applying this HTTP response's
+              // dispatch fields if the SSE-delivered version is already failed
+              // and this response would move it back to dispatched/pending.
+              // The same holds for terminal `no_recipient`: a replayed
+              // response without dispatchState defaults to dispatched above.
+              const wouldDowngrade =
+                (sseVersion.dispatchState === 'failed' ||
+                  sseVersion.dispatchState === 'no_recipient') &&
+                (dispatchState === 'dispatched' || dispatchState === 'pending');
+              let updatedSseVersion = sseVersion;
+              if (!wouldDowngrade) {
+                // Strip any prior dispatchFailureReason/Code before
+                // conditionally re-adding the response's, so a stale value is
+                // dropped rather than left behind when the response omits it.
+                updatedSseVersion = withDispatchFailure(
+                  sseVersion,
+                  dispatchState,
+                  resData?.dispatchFailureReason || undefined,
+                  resData?.dispatchFailureCode || undefined
+                );
+              }
+              // Preserve optimistic agent recipient if SSE version lacks it.
+              if (
+                optimistic.recipient?.startsWith('agent:') &&
+                !updatedSseVersion.recipient?.startsWith('agent:')
+              ) {
+                updatedSseVersion = {
+                  ...updatedSseVersion,
+                  recipient: optimistic.recipient,
+                  recipientId: optimistic.recipientId,
+                };
+              }
+              this.messageMap.set(resData.id, updatedSseVersion);
+            } else {
+              // Symmetric with the sseVersion branch above: a stale
+              // dispatchFailureReason/Code is dropped, not left behind on this
+              // reused object, when the response omits it.
+              const updatedOptimistic: Message = {
+                ...withDispatchFailure(
+                  optimistic,
+                  dispatchState,
+                  resData?.dispatchFailureReason || undefined,
+                  resData?.dispatchFailureCode || undefined
+                ),
+                id: resData.id,
+              };
+              this.messageMap.set(resData.id, updatedOptimistic);
+            }
+          } else {
+            // Fallback: remove if we cannot remap (should not happen).
+            this.messageMap.delete(idempotencyKey);
+            this._pendingIdempotencyKeys.delete(idempotencyKey);
+          }
+          this.messages = Array.from(this.messageMap.values())
+            .filter((m) => m.type !== 'mention')
+            .sort(compareMessageOrder);
         }
-        this.messages = Array.from(this.messageMap.values())
-          .filter((m) => m.type !== 'mention')
-          .sort(compareMessageOrder);
 
         // The send response never carries the server's authoritative
         // createdAt, so this is recorded "provisional": the client's own
@@ -2662,13 +2819,144 @@ export class ScionChatThread extends LitElement {
       this.messages = Array.from(this.messageMap.values())
         .filter((m) => m.type !== 'mention')
         .sort(compareMessageOrder);
-      // Restore reply-to state so the reply bar comes back for retry.
-      this.composerReplyTo = savedReplyTo;
-      this.sendError = err instanceof Error ? err.message : 'Failed to send message';
-      onError?.(this.sendError ?? 'Failed to send message');
+      // Restore reply-to state so the reply bar comes back for retry (not
+      // onto a thread a conversation switch has since reset).
+      if (!threadMovedOn()) this.composerReplyTo = savedReplyTo;
+      // For a wake send, postChatSend already retried with the same
+      // idempotency key until the budget ran out: the outcome is unknown.
+      if (wake) {
+        failSend(WAKE_OUTCOME_UNKNOWN_MESSAGE, true);
+      } else {
+        failSend(err instanceof Error ? err.message : 'Failed to send message');
+      }
     } finally {
-      this.sending = false;
+      this._sendingConversations.delete(inFlightKey);
+      if (wake && this.wakingConversationKey === inFlightKey) this.wakingConversationKey = '';
     }
+
+    if (wakeOffer) {
+      await this.offerWake(detail, wakeOffer, sendConversationKey);
+    }
+  }
+
+  /**
+   * POST a send. A wake send runs long enough that the connection can drop
+   * while the hub is still working, so its outcome is confirmed by retrying
+   * the identical request (same idempotency key): the hub answers with the
+   * original message once that send has finished (200), sends it now if it
+   * never arrived (201), or 409 send_in_progress while it is still running,
+   * in which case this waits and asks again. A gateway 502/503/504 without
+   * a structured hub error (the proxy lost the hub connection) is retried
+   * the same way; the hub's own 502/503 answers are returned.
+   *
+   * Limit: the hub's idempotency cache is per hub process with a 5 minute
+   * TTL, so this holds the message to at most once per hub process within
+   * the TTL. A retry reaching another hub replica, or arriving after a hub
+   * restart, is not recognised and sends again. budgetMs stays below the
+   * TTL (wakeConfirmBudgetMs). Throws when the outcome stays unknown for
+   * budgetMs.
+   */
+  private async postChatSend(
+    url: string,
+    init: RequestInit,
+    wake: boolean,
+    budgetMs: number
+  ): Promise<Response> {
+    if (!wake) return apiFetch(url, init);
+    const giveUpAt = Date.now() + budgetMs;
+    // Set once an attempt may have reached the hub without telling us its
+    // outcome (a dropped connection, a gateway drop, or send_in_progress).
+    // From then on, an answer the hub gives before looking at this send
+    // (maintenance, rate limit, re-authentication) says nothing about that
+    // earlier attempt, so the outcome is unknown rather than "not sent".
+    let mayHaveReachedHub = false;
+    for (;;) {
+      let lastError: unknown = null;
+      try {
+        const res = await apiFetch(url, init);
+        if (res.ok) return res;
+        const data: unknown = await res.json().catch(() => null);
+        if (res.status === 409 && isSendInProgressBody(data)) {
+          mayHaveReachedHub = true;
+        } else if (isGatewayDrop(res.status, data)) {
+          mayHaveReachedHub = true;
+        } else {
+          if (mayHaveReachedHub && !isAnswerAboutThisSend(res.status, data)) {
+            throw new WakeOutcomeUnknownError();
+          }
+          // A real answer about this send: hand it back intact.
+          return jsonResponse(data, res.status);
+        }
+      } catch (err) {
+        if (err instanceof WakeOutcomeUnknownError) throw err;
+        lastError = err;
+        mayHaveReachedHub = true;
+      }
+      if (Date.now() + this.wakeRetryDelayMs > giveUpAt) {
+        throw lastError ?? new WakeOutcomeUnknownError();
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.wakeRetryDelayMs));
+    }
+  }
+
+  /**
+   * Ask whether to wake the suspended agent. "Wake and send" resends the
+   * held message with `wake`; Cancel hands the draft back to the composer.
+   * The composer stays cleared while the dialog is open, so the draft is
+   * restored exactly once, by whichever path ends the send.
+   */
+  private async offerWake(
+    detail: ChatSendDetail,
+    offer: WakeOffer,
+    conversationKey: string
+  ): Promise<void> {
+    // The offer may arrive after the user already switched away.
+    if (conversationKey !== this.conversationKey) {
+      this.returnDraftElsewhere(conversationKey, detail.text);
+      return;
+    }
+    const confirmed = await confirmWake(offer);
+    // A conversation switch while the dialog was open must neither deliver
+    // the message nor drop the draft into the new conversation's composer.
+    if (conversationKey !== this.conversationKey) {
+      this.returnDraftElsewhere(conversationKey, detail.text);
+      return;
+    }
+    if (!confirmed) {
+      detail.onError?.('Wake cancelled');
+      return;
+    }
+    // The resend saves and clears the reply bar again.
+    await this.sendV2(detail, true);
+  }
+
+  /**
+   * The user switched conversations while a wake send was pending: keep the
+   * draft with the conversation it was written in, not the open composer.
+   */
+  private returnDraftElsewhere(
+    conversationKey: string,
+    text: string,
+    outcomeUnknown = false
+  ): void {
+    const saved = saveDraftForConversation(conversationKey, text);
+    if (outcomeUnknown) {
+      // Not "not sent": a wake send whose outcome could not be confirmed
+      // may well have been delivered.
+      showToast(
+        saved
+          ? 'Could not confirm whether the message was delivered. It was kept as a draft in its conversation; check there before sending it again.'
+          : WAKE_OUTCOME_UNKNOWN_MESSAGE,
+        'warning'
+      );
+      return;
+    }
+    showToast(
+      saved
+        ? 'Message not sent: you switched conversations. It was kept as a draft there.'
+        : 'Message not sent: you switched conversations.',
+      'warning'
+    );
   }
 
   /** Handle /default slash command. */
@@ -3045,6 +3333,7 @@ export class ScionChatThread extends LitElement {
   }
 
   private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
+    const loadId = this.fetchId;
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
@@ -3053,10 +3342,14 @@ export class ScionChatThread extends LitElement {
     } catch {
       // Silently fail for older messages
     } finally {
-      this.loadingOlder = false;
-      await this.updateComplete;
-      const newScrollHeight = scrollEl.scrollHeight;
-      scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+      // After a switch, the spinner and the height delta belong to the
+      // conversation the user left.
+      if (loadId === this.fetchId) {
+        this.loadingOlder = false;
+        await this.updateComplete;
+        const newScrollHeight = scrollEl.scrollHeight;
+        scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+      }
     }
   }
 
@@ -3143,7 +3436,7 @@ export class ScionChatThread extends LitElement {
    * does not include it. Falls back to the bottom if the message is gone.
    */
   private async restoreScrollPosition(anchor: ChatScrollAnchor): Promise<void> {
-    const restoreSeq = this._restoreSeq;
+    const jumpSeq = this._jumpSeq;
     // Until a real capture replaces it, the restore target is this thread's
     // position: leaving while the restore is still loading (slow network)
     // must hand it on rather than lose it. Seeded here, not where the anchor
@@ -3161,13 +3454,13 @@ export class ScionChatThread extends LitElement {
     await this.updateComplete;
     let msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(anchor.messageId, () => restoreSeq === this._restoreSeq);
+      await this.fetchAroundMessage(anchor.messageId, () => jumpSeq === this._jumpSeq);
       await this.updateComplete;
       msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
     }
     // Superseded by a thread switch or an explicit jump (e.g. a search
     // result in this conversation) made while the anchor was being located.
-    if (fetchId !== this.fetchId || restoreSeq !== this._restoreSeq) return;
+    if (fetchId !== this.fetchId || jumpSeq !== this._jumpSeq) return;
     if (!msgEl) {
       this.pinnedToBottom = true;
       this.scrollToBottomAfterRender();
@@ -3278,7 +3571,8 @@ export class ScionChatThread extends LitElement {
       this.pinnedToBottom = true;
 
       try {
-        await this.fetchHistoryV2();
+        // Switched away meanwhile: the new conversation keeps its own view.
+        if (!(await this.fetchHistoryV2())) return;
         this.viewingAroundMessage = false;
       } catch (err) {
         this.error = err instanceof Error ? err.message : 'Failed to load messages';
@@ -3315,19 +3609,30 @@ export class ScionChatThread extends LitElement {
     // It also outranks a restored position: use the anchor up if the load
     // has not taken it yet, and stop a restore that is still in flight.
     this.takeRestoreScrollAnchor();
-    ++this._restoreSeq;
+    const jumpSeq = ++this._jumpSeq;
+    const fetchId = this.fetchId;
+    // A newer jump, or leaving the conversation, supersedes this one.
+    const isCurrent = () => jumpSeq === this._jumpSeq && fetchId === this.fetchId;
     this.cancelRestoreSettleWatch();
     await this.updateComplete;
-    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
-    if (!scrollEl) return;
+    if (!isCurrent()) return;
 
+    // Looked up after the target: while the initial load is still running
+    // the thread shows a spinner, not the scroll container.
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(messageId);
+      await this.fetchAroundMessage(messageId, isCurrent);
       await this.updateComplete;
+      if (!isCurrent()) return;
       msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     }
-    if (!msgEl) return;
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+    if (!msgEl || !scrollEl) {
+      this.handOpenScrollBack();
+      return;
+    }
+    this._openScrollDeferred = false;
+    this._landedJumpSeq = jumpSeq;
 
     const align: ScrollLogicalPosition = 'center';
     const containerRect = scrollEl.getBoundingClientRect();
@@ -3356,6 +3661,24 @@ export class ScionChatThread extends LitElement {
     if (highlight) {
       msgEl.classList.add('permalink-highlight');
       setTimeout(() => msgEl?.classList.remove('permalink-highlight'), 2000);
+    }
+  }
+
+  /**
+   * A jump that found no target gives the open-time scroll back: to the
+   * initial load if it is still running, else straight to the bottom if the
+   * load already left the view to this jump. Either way a later load (a
+   * Retry after a failed one) no longer counts this jump as started.
+   * Nothing to hand back once an earlier jump has landed since the open:
+   * the view stays on it.
+   */
+  private handOpenScrollBack(): void {
+    if (this._landedJumpSeq > this._jumpSeqAtOpen) return;
+    this._jumpSeqAtOpen = this._jumpSeq;
+    if (!this.loading && this._openScrollDeferred) {
+      this._openScrollDeferred = false;
+      this.pinnedToBottom = true;
+      this.scrollToBottomAfterRender();
     }
   }
 
@@ -4725,6 +5048,8 @@ export class ScionChatThread extends LitElement {
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}
+          ?disabled=${this.wakingConversationKey !== '' &&
+          this.wakingConversationKey === this.conversationKey}
           @chat-cancel-reply=${this.handleComposerCancelReply}
           @chat-cancel-edit=${this.handleComposerCancelEdit}
           @chat-send=${this.handleChatSendV2}
