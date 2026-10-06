@@ -206,6 +206,40 @@ func TestTranslateExplicitReplyProducesArtifact(t *testing.T) {
 	}
 }
 
+// TestTranslateInputNeededProducesArtifact covers ptone/scion#3377: an agent
+// asking the A2A caller for input must produce an artifact carrying the
+// question, on both translation paths.
+func TestTranslateInputNeededProducesArtifact(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version: 1,
+		Sender:  "agent:agent-a",
+		Msg:     "Which region should I deploy to?",
+		Type:    messages.TypeInputNeeded,
+	}
+
+	_, artifacts := TranslateScionToA2A(msg)
+	if len(artifacts) != 1 {
+		t.Fatalf("TranslateScionToA2A artifacts = %d, want 1", len(artifacts))
+	}
+	if len(artifacts[0].Parts) < 1 {
+		t.Fatalf("TranslateScionToA2A artifact has no parts: %+v", artifacts[0])
+	}
+	if artifacts[0].Parts[0].Text != msg.Msg {
+		t.Errorf("TranslateScionToA2A artifacts = %+v, want one with the question", artifacts)
+	}
+
+	_, sdkArtifacts := TranslateScionToA2AParts(msg)
+	if len(sdkArtifacts) != 1 {
+		t.Fatalf("TranslateScionToA2AParts artifacts = %d, want 1", len(sdkArtifacts))
+	}
+	if len(sdkArtifacts[0].Parts) < 1 {
+		t.Fatalf("TranslateScionToA2AParts artifact has no parts: %+v", sdkArtifacts[0])
+	}
+	if sdkArtifacts[0].Parts[0].Text() != msg.Msg {
+		t.Errorf("TranslateScionToA2AParts artifacts = %+v, want one with the question", sdkArtifacts)
+	}
+}
+
 // The retired end-of-turn assistant-reply mirror no longer becomes an
 // artifact on either translation path.
 func TestTranslateRetiredAssistantReplyProducesNoArtifact(t *testing.T) {
