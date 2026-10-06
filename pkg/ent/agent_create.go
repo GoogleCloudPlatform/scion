@@ -630,6 +630,12 @@ func (_c *AgentCreate) SetNillableRunID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_c *AgentCreate) SetPreviousRunIds(v []string) *AgentCreate {
+	_c.mutation.SetPreviousRunIds(v)
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -1046,6 +1052,20 @@ func (_c *AgentCreate) SetStartClaimLaunchID(v string) *AgentCreate {
 func (_c *AgentCreate) SetNillableStartClaimLaunchID(v *string) *AgentCreate {
 	if v != nil {
 		_c.SetStartClaimLaunchID(*v)
+	}
+	return _c
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_c *AgentCreate) SetSoftDeleteOpID(v string) *AgentCreate {
+	_c.mutation.SetSoftDeleteOpID(v)
+	return _c
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSoftDeleteOpID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSoftDeleteOpID(*v)
 	}
 	return _c
 }
@@ -1572,6 +1592,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRunID, field.TypeString, value)
 		_node.RunID = value
 	}
+	if value, ok := _c.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+		_node.PreviousRunIds = value
+	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 		_node.LaunchState = value
@@ -1691,6 +1715,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.StartClaimLaunchID(); ok {
 		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
 		_node.StartClaimLaunchID = value
+	}
+	if value, ok := _c.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+		_node.SoftDeleteOpID = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -2567,6 +2595,24 @@ func (u *AgentUpsert) ClearRunID() *AgentUpsert {
 	return u
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsert) SetPreviousRunIds(v []string) *AgentUpsert {
+	u.Set(agent.FieldPreviousRunIds, v)
+	return u
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePreviousRunIds() *AgentUpsert {
+	u.SetExcluded(agent.FieldPreviousRunIds)
+	return u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsert) ClearPreviousRunIds() *AgentUpsert {
+	u.SetNull(agent.FieldPreviousRunIds)
+	return u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsert) SetLaunchState(v string) *AgentUpsert {
 	u.Set(agent.FieldLaunchState, v)
@@ -3104,6 +3150,24 @@ func (u *AgentUpsert) UpdateStartClaimLaunchID() *AgentUpsert {
 // ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
 func (u *AgentUpsert) ClearStartClaimLaunchID() *AgentUpsert {
 	u.SetNull(agent.FieldStartClaimLaunchID)
+	return u
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsert) SetSoftDeleteOpID(v string) *AgentUpsert {
+	u.Set(agent.FieldSoftDeleteOpID, v)
+	return u
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSoftDeleteOpID() *AgentUpsert {
+	u.SetExcluded(agent.FieldSoftDeleteOpID)
+	return u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsert) ClearSoftDeleteOpID() *AgentUpsert {
+	u.SetNull(agent.FieldSoftDeleteOpID)
 	return u
 }
 
@@ -4061,6 +4125,27 @@ func (u *AgentUpsertOne) ClearRunID() *AgentUpsertOne {
 	})
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertOne) SetPreviousRunIds(v []string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertOne) ClearPreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertOne) SetLaunchState(v string) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -4688,6 +4773,27 @@ func (u *AgentUpsertOne) UpdateStartClaimLaunchID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearStartClaimLaunchID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearStartClaimLaunchID()
+	})
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) SetSoftDeleteOpID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) ClearSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
 	})
 }
 
@@ -5812,6 +5918,27 @@ func (u *AgentUpsertBulk) ClearRunID() *AgentUpsertBulk {
 	})
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertBulk) SetPreviousRunIds(v []string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertBulk) ClearPreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertBulk) SetLaunchState(v string) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -6439,6 +6566,27 @@ func (u *AgentUpsertBulk) UpdateStartClaimLaunchID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearStartClaimLaunchID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearStartClaimLaunchID()
+	})
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) SetSoftDeleteOpID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) ClearSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
 	})
 }
 

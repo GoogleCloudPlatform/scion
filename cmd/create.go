@@ -57,8 +57,14 @@ The agent is provisioned but not started, even when a task is given. Run
 			case "api-key", "oauth-token", "auth-file", "vertex-ai":
 				// valid
 			default:
-				return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
+				return newUsageError("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
 			}
+		}
+
+		// Validate --template-scope with the other flag checks, before any
+		// hub work (ResolveTemplateForHub keeps its own check as a guard).
+		if err := validateTemplateScope(templateScope); err != nil {
+			return asUsageError(err)
 		}
 
 		// Check if Hub should be used, excluding the target agent from sync requirements.
@@ -139,11 +145,7 @@ The agent is provisioned but not started, even when a task is given. Run
 		// Attempt Hub connection for skill resolution in local mode.
 		// If Hub is not configured, this returns nil and provisioning
 		// proceeds without a resolver (S1 fail-closed for required skills).
-		hctx, hubErr := hubsync.EnsureHubReady(projectPath, hubsync.EnsureHubReadyOptions{
-			NoHub:       noHub,
-			AutoConfirm: true,
-			SkipSync:    true,
-		})
+		hctx, hubErr := hubsync.EnsureHubReady(projectPath, skillResolverHubOptions(projectPath))
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
 			var flushResolutions func()
 			ctx, flushResolutions = withLocalSkillResolution(ctx, hctx.Client.Skills(), hctx.Client.SkillRegistries(),
@@ -370,17 +372,17 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 
 	parsedLabels, err := parseLabels(labelFlags)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --role flag if provided
 	if err := validateAgentRole(agentRoleFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --message-mode flag if provided
 	if err := validateMessageMode(messageModeFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Build create request — always provision-only (create does not start the agent)
@@ -479,4 +481,16 @@ func init() {
 
 	// GCP service account assignment flag
 	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+}
+
+// skillResolverHubOptions returns the EnsureHubReady options for the hub
+// context that create uses for skill resolution. A project named with a
+// flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
+func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
+	return hubsync.EnsureHubReadyOptions{
+		NoHub:           noHub,
+		AutoConfirm:     true,
+		SkipSync:        true,
+		ExplicitProject: explicitProjectTargetFor(projectPath),
+	}
 }
