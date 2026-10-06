@@ -1171,8 +1171,9 @@ export class AgentStore {
       feed.endSeedEpoch(token);
     }
 
-    // Only the rows seeded: an agent deleted on an earlier feed can still be
-    // held by this one, from a `created` replayed after the delete.
+    // Only the rows seeded. The server can still list an agent deleted on an
+    // earlier feed while its delete completes, and this feed can hold it
+    // from a `created` replayed after the delete.
     const upserted = Array.from(new Set(fresh.map((row) => row.id)));
     if (upserted.length > 0) {
       this.applyChange(
