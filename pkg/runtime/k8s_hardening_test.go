@@ -793,6 +793,18 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 			wantField: "kubernetes.resources.requests.memory",
 		},
 		{
+			name: "empty k8s memory limit",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Kubernetes: &api.KubernetesConfig{
+					Resources: &api.K8sResources{
+						Limits: map[string]string{"memory": ""},
+					},
+				},
+			},
+			wantField: "kubernetes.resources.limits.memory",
+		},
+		{
 			name: "invalid k8s extended resource",
 			config: RunConfig{
 				Name: "test", Image: "test:latest",
