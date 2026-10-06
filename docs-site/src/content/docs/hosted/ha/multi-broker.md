@@ -26,14 +26,18 @@ Each broker maintains a persistent WebSocket connection to the Hub. The Hub acts
 
 On each machine you want to register:
 
-1. **Install Scion** and configure the Hub endpoint (`scion login`).
-2. **Register the broker** with the Hub:
+1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub <hub-url>`), and set the Hub endpoint in your global settings (`scion -g global config set --global hub.endpoint <hub-url>`).
+2. **Start the broker**:
    ```bash
-   scion broker register
+   scion runtime-broker start
    ```
-3. **Authorize projects** the broker should serve:
+3. **Register the broker** with the Hub:
    ```bash
-   scion broker provide <project>
+   scion runtime-broker register
+   ```
+4. **Authorize projects** the broker should serve:
+   ```bash
+   scion runtime-broker provide --project <project>
    ```
 
 Repeat for each machine. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for detailed setup.
@@ -56,8 +60,9 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
   ```
 - **Check broker availability** across all registered brokers:
   ```bash
-  scion broker status
+  scion hub brokers
   ```
+  On a broker machine, `scion runtime-broker status` shows that broker's own state.
 
 ## IAP-Protected Hubs
 

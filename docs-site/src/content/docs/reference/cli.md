@@ -816,14 +816,34 @@ Manages notifications and notification subscriptions. Requires Hub mode.
 
 Manages the local host as a Runtime Broker. The old name `scion broker` still works as a deprecated alias.
 
+**Broker port.** The broker listens on port 9800 unless `start` is given `--port`. `start` saves the port it used. `register`, `deregister`, `status`, `stop`, `restart` and `hubs` use that saved port unless they are given their own `--port`, and fall back to 9800 when nothing is saved.
+
 - `scion runtime-broker status`: Show status of the local broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away.
+    - `--json`: Output in JSON format.
+    - `--broker <id>`: Show the status of another broker as the Hub sees it, instead of the local one.
+    - `--port <port>`: Port of the local broker.
 - `scion runtime-broker start`: Start the broker server as a background daemon.
     - `--foreground`: Run in the current process instead of daemonizing. Use this as the `ExecStart` of a systemd `Type=simple` unit.
-    - `--port <port>`: Listen on a custom port.
+    - `--port <port>`: Listen on a custom port (default 9800).
     - `--auto-provide`: Automatically add this broker as a provider for new projects.
-- `scion runtime-broker stop`: Stop the broker daemon.
-- `scion runtime-broker register`: Register this host as a Runtime Broker with the Hub. Requires the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)).
-- `scion runtime-broker deregister`: Remove this broker's registration from the Hub.
+    - `--debug`: Enable debug logging.
+- `scion runtime-broker stop`: Stop the broker daemon. A broker running in the foreground is stopped with Ctrl+C instead.
+    - `--port <port>`: Port of the local broker (used to detect a foreground broker).
+- `scion runtime-broker restart`: Stop the broker daemon and start it again with the current `scion` binary, for example after an upgrade. It does not restart a foreground broker. The new daemon keeps the `--port`, `--auto-provide` and `--debug` values the running daemon was started with, unless you pass them again.
+    - `--port <port>`, `--auto-provide`, `--debug`: Override the values the daemon was started with.
+- `scion runtime-broker register`: Register this host as a Runtime Broker with the Hub. The local broker server must be running. Requires the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)). Credentials are saved to `~/.scion/hub-credentials/<name>.json`.
+    - `--name <name>`: Name for this Hub connection. Default: derived from the Hub endpoint.
+    - `--force`: Register again even if already registered. This also issues a new broker secret.
+    - `--auto-provide`: Automatically add this broker as a provider for new projects.
+    - `--transport-mode <iap|cloudrun_invoker>`, `--transport-audience <audience>`: Transport auth for a Hub behind IAP or Cloud Run, saved to the credentials file (see [Transport Auth for IAP-Protected Hubs](/scion/hosted/ha/runtime-broker/#transport-auth-for-iap-protected-hubs)).
+    - `--port <port>`: Port of the local broker.
+- `scion runtime-broker deregister`: Remove this broker's registration from the Hub, which also removes it from every project it provides for. Deletes the local credentials for that Hub connection and removes the connection from global settings; other settings are kept.
+    - `--name <name>`: The Hub connection to deregister. Required when there is more than one (see `hubs`).
+    - `--broker-only`: Accepted, but currently has no effect.
+    - `--port <port>`: Port of the local broker.
+- `scion runtime-broker hubs`: List this broker's Hub connections, with live connection status when the broker is running.
+    - `--json`: Output in JSON format.
+    - `--port <port>`: Port of the local broker.
 - `scion runtime-broker provide`: Add this broker as a provider for a project.
     - `--project <name|id>`: The project to provide for. Without it, the project is resolved from the current directory.
     - `--path <path>`: The local project path to register for this broker. With `--project`, no path is sent unless `--path` is given: an existing provider path is kept, and otherwise the broker uses its Hub-managed project directory. The broker's global directory (`~/.scion`) is refused as the path of any project other than the global project.
