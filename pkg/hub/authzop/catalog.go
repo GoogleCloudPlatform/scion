@@ -87,6 +87,11 @@ var SecurityMutationSymbols = map[string]string{
 	"AddGroupMember":        "grant-authority",
 	"RemoveGroupMember":     "revoke-authority",
 	"UpdateGroupMemberRole": "change-authority",
+	// Group-membership cleanup on principal delete and at startup
+	// (ptone/scion#2769): rows of deleted users and agents.
+	"DeleteGroupMembershipsForUser":   "revoke-authority",
+	"DeleteGroupMembershipsForAgents": "revoke-authority",
+	"DeleteOrphanedGroupMemberships":  "revoke-authority",
 
 	// Access constraint mutations
 	"CreateAccessConstraint": "tighten-boundary",
@@ -223,12 +228,9 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/messages/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own message by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
-	// Artifact service (hub.artifacts experiment). Deferred, not stubbed:
-	// the routes have no handler behaviour yet and answer 404; catalog
-	// operations replace these exemptions when the handlers land
-	// (ptone/scion#3202).
-	{Pattern: "/api/v1/artifacts", Kind: ExemptionAuthenticationOnly, Reason: "Artifact collection, experiment-gated, answers 404 with no handler behaviour yet; replaced by catalog operations when handlers land (ptone/scion#3202)", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/artifacts/", Kind: ExemptionAuthenticationOnly, Reason: "Artifact by ID, experiment-gated, answers 404 with no handler behaviour yet; replaced by catalog operations when handlers land (ptone/scion#3202)", Owner: "route_metadata.go"},
+	// Artifact share links (hub.artifacts experiment): no handler behaviour
+	// yet, the route answers 404; a catalog operation replaces this
+	// exemption when share links land (ptone/scion#3202).
 	{Pattern: "/api/v1/artifacts/shared/", Kind: ExemptionPublicEndpoint, Reason: "Artifact share links (token-only by design; still behind the auth middleware until token access ships), experiment-gated, answers 404 with no handler behaviour yet; replaced by a catalog operation when the handler lands (ptone/scion#3202)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/message-channels", Kind: ExemptionAuthenticationOnly, Reason: "List own message channels, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service", Owner: "route_metadata.go"},
@@ -423,6 +425,7 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/handlers_users_core.go — user management
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUser", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
@@ -437,7 +440,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agents_core.go — agent lifecycle
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_agents_core.go", Function: "cleanupFailedCreate", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
+	{File: "pkg/hub/handlers_agents_core.go", Function: "deleteFailedCreateRow", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
 	{File: "pkg/hub/handlers_agents_core.go", Function: "handleAgentTokenRefresh", Symbol: "RevokeAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent token refresh, agent-JWT auth; old credential revoked on refresh", Scope: "pkg/hub/handlers_agents_core.go"}},
 	{File: "pkg/hub/handlers_agents_core.go", Function: "ensureHostSARecord", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Host SA record creation during agent assignment, broker-HMAC authenticated", Scope: "pkg/hub/handlers_agents_core.go"}},
 
@@ -534,6 +537,7 @@ var MutationClassifications = []MutationClassification{
 	// pkg/hub/admin_allow_list.go — hub admin: allow-list management
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListAdd", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list add, hub-admin operation", Scope: "pkg/hub/admin_allow_list.go"}},
+	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListByEmail", Symbol: "DeleteGroupMembershipsForUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list remove, hub-admin operation; removes the invited user's group memberships in the same WithTx, before DeleteUser (ON DELETE SET NULL would otherwise orphan them; ptone/scion#2769)", Scope: "pkg/hub/admin_allow_list.go"}},
 	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListByEmail", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list remove, hub-admin operation; runs inside WithTx with the same last-project-owner guard and role-binding cascade as user.admin.delete (guardAndCascadeUserRoleBindingsTx)", Scope: "pkg/hub/admin_allow_list.go"}},
 	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListImport", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list import, hub-admin operation", Scope: "pkg/hub/admin_allow_list.go"}},
 
@@ -596,6 +600,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/server.go — server infrastructure
 	// -----------------------------------------------------------------------
+	{File: "pkg/hub/server.go", Function: "sweepOrphanedGroupMemberships", Symbol: "DeleteOrphanedGroupMemberships", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Server startup: delete group memberships whose user and agent are both NULL (principal deleted, ON DELETE SET NULL); such rows are always orphans and carry no principal; idempotent, every startup (ptone/scion#2769)", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "RecordAgentCredential", Symbol: "CreateAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent credential provisioning during agent create, server infrastructure", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "a2aBridgeSweepHandler", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Background job: A2A bridge sweep generates GCP tokens", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/server.go", Function: "backupSigningKeyToStore", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC signing key backup, server infrastructure", Scope: "pkg/hub/server.go"}},
@@ -680,7 +685,13 @@ var MutationClassifications = []MutationClassification{
 	// pkg/store/entadapter/ — store layer implementation
 	// -----------------------------------------------------------------------
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteAgent implementation", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/composite.go", Function: "DeleteAgent", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteAgent re-enters itself on the transactional store so the cascade and the row delete commit together (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/composite.go", Function: "DeleteAgent", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: DeleteAgent removes the agent's group memberships before the agent row (ON DELETE SET NULL would orphan them; ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: DeleteProject removes its agents' group memberships before the bulk agent delete (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/composite.go", Function: "PurgeDeletedAgents", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: PurgeDeletedAgents removes each batch's still-eligible agents' group memberships before the delete, in the purge transaction (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/agent_deletion_finalize.go", Function: "finalizeAgentDeletionOnce", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: finalize-hard removes the agent's group memberships before tx.Agent.Delete(), in the same transaction; the caller (FinalizeAgentDeletion via the delete engine) authorizes (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject implementation", Scope: "pkg/store/entadapter"}},
+	{File: "pkg/store/entadapter/composite.go", Function: "DeleteProject", Symbol: "DeleteProject", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: composite DeleteProject re-enters itself on the transactional store so the cascade and the row deletes commit together (ptone/scion#2769)", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to CreateSecret", Scope: "pkg/store/entadapter"}},
 	{File: "pkg/store/entadapter/secret_store.go", Function: "UpsertSecret", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store adapter: UpsertSecret delegates to UpdateSecret", Scope: "pkg/store/entadapter"}},
 
@@ -710,6 +721,17 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain teardown", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_secret_template.go", Function: "SecretDomain", Symbol: "UpdateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: secret domain update", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance user setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "CreateGroup", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance group setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "AddGroupMember", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance membership setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteGroupMembershipsForUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance user cleanup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteGroupMembershipsForUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance user cleanup (idempotent re-run)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance agent cleanup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteGroupMembershipsForAgents", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance agent cleanup (empty ids)", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance orphan creation", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance orphan creation", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteOrphanedGroupMemberships", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance sweep", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_group_membership.go", Function: "GroupMembershipCleanupConformance", Symbol: "DeleteOrphanedGroupMemberships", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: group-membership cleanup conformance sweep (idempotent re-run)", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_user.go", Function: "InviteCodeDomain", Symbol: "CreateInviteCode", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: invite code domain setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_user.go", Function: "InviteCodeDomain", Symbol: "DeleteInviteCode", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: invite code domain teardown", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain setup", Scope: "pkg/store/storetest"}},

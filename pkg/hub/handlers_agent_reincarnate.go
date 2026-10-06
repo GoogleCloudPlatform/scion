@@ -489,6 +489,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	imageRegistry := dispatchImageRegistry(dispatcher)
 	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
@@ -573,6 +576,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		}
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	// A reincarnation starts the agent (also one that was stopped): record
+	// that the agent is meant to run, now, before the worker's start, so a
+	// stop the user records during the reincarnation is newer and wins.
+	// Limits: the intent is written after the claim commits, so a stop
+	// recorded in that short gap is overwritten by this running intent; and
+	// if the write fails, the reincarnation proceeds with only a warning
+	// (the intent keeps its previous value).
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+		s.agentLifecycleLog.Warn("Reincarnate: failed to record run intent", "agent_id", agent.ID, "error", err)
 	}
 
 	// design §3.4 Amendment A3: the requester and the creator must both
@@ -671,6 +684,9 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 	imageRegistry := dispatchImageRegistry(dispatcher)
 	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return

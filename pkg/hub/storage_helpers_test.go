@@ -14,7 +14,14 @@
 
 package hub
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
 
 func TestLegacyStoragePath(t *testing.T) {
 	tests := []struct {
@@ -67,4 +74,21 @@ func TestLegacyStoragePath(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsCanonicalResourceFilePath(t *testing.T) {
+	for _, p := range []string{"a", "config.yaml", "dir/file.txt", "a/b/c", "..x", "dir/..x", ".hidden", "dir/.hidden"} {
+		assert.True(t, isCanonicalResourceFilePath(p), "expected %q to be canonical", p)
+	}
+	for _, p := range []string{"", ".", "..", "../a", "a/..", "a/../b", "./a", "a/./b", "a//b", "a/", "/a", `a\b`, "a\x00b"} {
+		assert.False(t, isCanonicalResourceFilePath(p), "expected %q not to be canonical", p)
+	}
+}
+
+func TestValidateManifestFilePaths_RejectsRepeatedPath(t *testing.T) {
+	err := validateManifestFilePaths([]store.TemplateFile{{Path: "a"}, {Path: "b"}, {Path: "a"}})
+	var pathErr *invalidFilePathError
+	require.ErrorAs(t, err, &pathErr)
+	assert.True(t, pathErr.duplicate)
+	assert.NoError(t, validateManifestFilePaths([]store.TemplateFile{{Path: "a"}, {Path: "b"}}))
 }

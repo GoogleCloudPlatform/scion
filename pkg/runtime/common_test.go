@@ -224,6 +224,18 @@ func TestAppendContainerResourceArgs(t *testing.T) {
 			want: []string{"run", "-t", "--memory", "1g", "--memory-reservation", "512m", "--cpus", "1.5"},
 		},
 		{
+			// The built-in default spec (limits.cpu only) must produce only
+			// --cpus: the Kubernetes request defaults never reach Docker/Podman.
+			name:      "builtin default cpu limit only",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}},
+			want:      []string{"run", "-t", "--cpus", "2"},
+		},
+		{
+			name:      "disk only is not mapped",
+			resources: &api.ResourceSpec{Disk: "20Gi"},
+			want:      []string{"run", "-t"},
+		},
+		{
 			name:      "invalid memory limit",
 			resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "bad"}},
 			wantError: `invalid memory limit "bad"`,

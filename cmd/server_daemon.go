@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -453,55 +454,145 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// Composite /healthz status values (see pkg/hub HealthStatus* constants;
+// mirrored here rather than imported to keep this CLI-side probe decoupled
+// from the Hub's response types).
+//
+//   - healthy:   everything is fine.
+//   - degraded:  the process is up and serving, but a non-critical check is
+//     non-healthy (e.g. colocated_broker). "Process is up" consumers treat
+//     this as up and name the non-healthy checks.
+//   - unhealthy: a critical check (database, workspace_storage) failed; treated as not up.
+const (
+	probeStatusHealthy   = "healthy"
+	probeStatusDegraded  = "degraded"
+	probeStatusUnhealthy = "unhealthy"
+)
+
+// probeStatusIsUp reports whether a composite /healthz status means the
+// process is up and serving: healthy or degraded (ptone/scion#1094).
+func probeStatusIsUp(status string) bool {
+	return status == probeStatusHealthy || status == probeStatusDegraded
+}
+
+// healthProbeComponent is the nested per-component health object in the
+// composite (combined-mode) /healthz body.
+type healthProbeComponent struct {
+	Status string            `json:"status"`
+	Checks map[string]string `json:"checks"`
+}
+
 // healthProbeResponse covers both shapes /healthz can return, so a single
 // probe/parse works whether the Hub answers directly (standalone, port 9810:
 // pkg/hub.HealthResponse, checks at the top level) or the web server answers
 // on its behalf (combined workstation mode, the default: port 8080,
 // pkg/hub.CompositeHealthResponse — the top-level checks are always empty,
-// and the Hub's own status/checks are nested under "hub". See
-// WebServer.handleHealthz in pkg/hub/web.go). Declared locally (rather than
-// importing pkg/hub) to keep this CLI-side probe decoupled from the Hub's
-// response type.
+// and the Hub's own status/checks are nested under "hub", the broker's under
+// "broker". See WebServer.handleHealthz in pkg/hub/web.go). Declared locally
+// (rather than importing pkg/hub) to keep this CLI-side probe decoupled from
+// the Hub's response type.
 type healthProbeResponse struct {
 	Status string            `json:"status"`
 	Checks map[string]string `json:"checks"`
 	// Hub is set only on the composite (combined-mode) response; nil on a
 	// standalone Hub's direct response, which has no "hub" key at all.
-	Hub *struct {
-		Status string            `json:"status"`
-		Checks map[string]string `json:"checks"`
-	} `json:"hub,omitempty"`
+	Hub *healthProbeComponent `json:"hub,omitempty"`
+	// Broker is set only on the composite response when a co-located broker
+	// health provider is registered.
+	Broker *healthProbeComponent `json:"broker,omitempty"`
 }
 
-// colocatedBrokerReason extracts an actionable reason from a health probe
-// when the composite status is degraded specifically because of the
-// co-located broker check (ptone/scion#2154), so callers can name the check
-// instead of printing a bare "not ready"/"not detected". Returns "" when the
-// health response has no colocated_broker key (a purely distributed Hub, or
-// an unreachable/unparsed response) or it reports healthy. Checks the
-// top-level checks first (standalone Hub, port 9810), then falls back to the
-// nested "hub" object (combined mode behind the web server, port 8080 — the
-// default workstation setup, and the case this exists for).
-func colocatedBrokerReason(health healthProbeResponse) string {
-	if reason := colocatedBrokerReasonFromChecks(health.Status, health.Checks); reason != "" {
-		return reason
+// nonHealthyChecks lists what kept a health response from being "healthy",
+// as sorted "key: value" strings: non-healthy hub checks from either the
+// top level (standalone Hub) or the nested "hub" object (combined mode),
+// plus, when a nested broker reports non-healthy, its problem checks as
+// "broker.<key>: <value>" (falling back to "broker: <status>" if no check
+// qualifies). Returns nil for a healthy or empty response.
+func nonHealthyChecks(health healthProbeResponse) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(checks map[string]string) {
+		for k, v := range checks {
+			if v == probeStatusHealthy {
+				continue
+			}
+			entry := k + ": " + v
+			if !seen[entry] {
+				seen[entry] = true
+				out = append(out, entry)
+			}
+		}
 	}
+	add(health.Checks)
 	if health.Hub != nil {
-		return colocatedBrokerReasonFromChecks(health.Hub.Status, health.Hub.Checks)
+		add(health.Hub.Checks)
 	}
-	return ""
+	if b := health.Broker; b != nil && b.Status != "" && b.Status != probeStatusHealthy {
+		problems := brokerProblemChecks(b.Checks)
+		if len(problems) == 0 {
+			out = append(out, "broker: "+b.Status)
+		}
+		for _, p := range problems {
+			out = append(out, "broker."+p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
-// colocatedBrokerReasonFromChecks is the single-level lookup colocatedBrokerReason
-// applies to both the top-level and the nested "hub" object.
-func colocatedBrokerReasonFromChecks(status string, checks map[string]string) string {
-	if status == "healthy" || status == "" {
+// brokerProblemChecks returns a broker's problem checks as sorted
+// "key: value" strings, using the rule the broker itself degrades on
+// (pkg/runtimebroker/handlers.go): a value other than "available" or
+// "healthy" is a problem. Broker check values are not "healthy"-valued
+// (e.g. docker: "available"), so nonHealthyChecks' hub rule does not apply.
+func brokerProblemChecks(checks map[string]string) []string {
+	var out []string
+	for k, v := range checks {
+		if v != "available" && v != probeStatusHealthy {
+			out = append(out, k+": "+v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// brokerProblemReason renders a non-healthy broker's own /healthz answer for
+// its status line: its problem checks, or "status: <status>" when none
+// qualifies. "" when healthy.
+func brokerProblemReason(health healthProbeComponent) string {
+	if health.Status == "" || health.Status == probeStatusHealthy {
 		return ""
 	}
-	if reason, ok := checks["colocated_broker"]; ok && reason != "healthy" {
-		return reason
+	if problems := brokerProblemChecks(health.Checks); len(problems) > 0 {
+		return strings.Join(problems, "; ")
 	}
-	return ""
+	return "status: " + health.Status
+}
+
+// healthProblemReason renders nonHealthyChecks as a single human-readable
+// reason, e.g. "colocated_broker: unhealthy: registration failed". Returns ""
+// when the response is healthy. A non-healthy response that names no check
+// falls back to its bare status so the caller still has something to print.
+func healthProblemReason(health healthProbeResponse) string {
+	if health.Status == probeStatusHealthy || health.Status == "" {
+		return ""
+	}
+	if checks := nonHealthyChecks(health); len(checks) > 0 {
+		return strings.Join(checks, "; ")
+	}
+	return "status: " + health.Status
+}
+
+// healthProblemHint returns the recovery hint for a reason produced by
+// healthProblemReason. A co-located broker registration failure
+// (ptone/scion#2154) is terminal for the process lifetime, so it gets the
+// specific "fix the config and restart" advice; anything else just points
+// at the server log.
+func healthProblemHint(reason string) string {
+	if strings.Contains(reason, "colocated_broker: ") {
+		return "see server log; restart after fixing the broker config"
+	}
+	return "see server log"
 }
 
 type serverStatusInfo struct {
@@ -509,26 +600,39 @@ type serverStatusInfo struct {
 	DaemonPID     int    `json:"daemonPid,omitempty"`
 	LogFile       string `json:"logFile,omitempty"`
 	PIDFile       string `json:"pidFile,omitempty"`
-	HubRunning    bool   `json:"hubRunning,omitempty"`
-	BrokerRunning bool   `json:"brokerRunning,omitempty"`
-	WebRunning    bool   `json:"webRunning,omitempty"`
-	// HubDegradedReason is set when either probe (the combined web+hub probe
-	// on 8080, or the standalone Hub probe on 9810) responded but its status
-	// was not "healthy" because of the colocated_broker check — e.g. a
-	// configured co-located broker that failed to register
-	// (ptone/scion#2154). Empty when the Hub is healthy, unreachable, or
-	// degraded for some other reason. HubRunning/WebRunning keep their
-	// existing exact-"healthy" meaning for backward compatibility with
-	// --json consumers; this is additive detail for the human-readable
-	// output so it can name the check instead of a bare "not detected".
-	HubDegradedReason string `json:"hubDegradedReason,omitempty"`
-	// WebDegradedReason is set only when the 8080 (combined web+hub) probe
-	// itself reported the colocated_broker reason — i.e. the process
-	// actually serving the Web Frontend is the degraded one. Kept separate
-	// from HubDegradedReason so a standalone Hub-only deployment (port 9810,
-	// no web server running at all) does not get an incorrect
-	// "Web Frontend: degraded" line just because the Hub is degraded.
-	WebDegradedReason string `json:"webDegradedReason,omitempty"`
+	// HubRunning/WebRunning are true when the component answered /healthz
+	// with a status that means "up": healthy or degraded. An unhealthy
+	// response (critical check failed, e.g. database) leaves them false.
+	HubRunning    bool `json:"hubRunning,omitempty"`
+	BrokerRunning bool `json:"brokerRunning,omitempty"`
+	WebRunning    bool `json:"webRunning,omitempty"`
+	// HubStatus/WebStatus carry the component's /healthz status string when
+	// it answered but was not healthy ("degraded" or "unhealthy"); empty
+	// when healthy or not detected. In combined mode WebStatus is the
+	// composite status and HubStatus the nested hub's own.
+	HubStatus    string `json:"hubStatus,omitempty"`
+	WebStatus    string `json:"webStatus,omitempty"`
+	BrokerStatus string `json:"brokerStatus,omitempty"`
+	// HubHealthReason names the hub's own non-healthy checks (see
+	// healthProblemReason, e.g. "colocated_broker: unhealthy: registration
+	// failed"): from the nested "hub" object in combined mode (port 8080),
+	// or from the top level on a standalone Hub (port 9810). Broker-only
+	// problems are not included; see BrokerHealthReason and
+	// WebHealthReason. Empty when the Hub is healthy or not detected.
+	HubHealthReason string `json:"hubHealthReason,omitempty"`
+	// WebHealthReason is set only when the 8080 (combined web+hub) probe
+	// itself reported a non-healthy status — i.e. the process actually
+	// serving the Web Frontend is the degraded one. In combined mode this is
+	// the composite (hub and broker) reason. Kept separate from
+	// HubHealthReason so a standalone Hub-only deployment (port 9810, no
+	// web server running at all) does not get an incorrect "Web Frontend:
+	// degraded" line just because the Hub is degraded.
+	WebHealthReason string `json:"webHealthReason,omitempty"`
+	// BrokerHealthReason names a degraded broker's problem checks from its
+	// own /healthz (see brokerProblemReason); BrokerStatus holds its
+	// non-healthy status. Both empty when the broker is healthy or not
+	// detected.
+	BrokerHealthReason string `json:"brokerHealthReason,omitempty"`
 }
 
 // probeServerStatus probes the web, hub, and broker health endpoints at the
@@ -544,21 +648,21 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 	var status serverStatusInfo
 
 	// webPortHasHub tracks whether the combined web port returned the scion
-	// combined composite body (healthy or degraded) — i.e. health.Hub != nil,
-	// which CompositeHealthResponse always populates when a Hub provider is
-	// registered (see WebServer.handleHealthz, pkg/hub/web.go:915-917) — as
-	// opposed to status.HubRunning, which is only set on "healthy". Combined
-	// mode (--enable-web) never starts the standalone Hub listener (port
-	// 9810), so once the web port has answered with that composite body, a
-	// follow-up probe to the standalone hub port is redundant, not just when
-	// the web port reported healthy. This must not key off "any parseable
-	// 200 JSON body": an unrelated service on 8080 (a common dev port) can
-	// answer 200 with an unrelated JSON object, and health.Hub == nil then,
-	// so the standalone hub still gets probed.
+	// combined composite body (any status) — i.e. health.Hub != nil, which
+	// CompositeHealthResponse always populates when a Hub provider is
+	// registered (see WebServer.handleHealthz in pkg/hub/web.go) — as
+	// opposed to status.HubRunning, which is only set on an "up" status
+	// (healthy or degraded). Combined mode (--enable-web) never starts the
+	// standalone Hub listener (port 9810), so once the web port has answered
+	// with that composite body, a follow-up probe to the standalone hub port
+	// is redundant, whatever status it reported. This must not key off "any
+	// parseable 200 JSON body": an unrelated service on 8080 (a common dev
+	// port) can answer 200 with an unrelated JSON object, and health.Hub ==
+	// nil then, so the standalone hub still gets probed.
 	var webPortHasHub bool
 
 	// Check web/hub on the combined web port. In combined mode this is the
-	// only listener (see colocatedBrokerReason for the nested-hub JSON shape
+	// only listener (see healthProbeResponse for the nested-hub JSON shape
 	// it returns).
 	if resp, err := client.Get(webBaseURL + "/healthz"); err == nil {
 		body, readErr := io.ReadAll(resp.Body)
@@ -567,21 +671,45 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 			var health healthProbeResponse
 			if json.Unmarshal(body, &health) == nil {
 				webPortHasHub = health.Hub != nil
-				if health.Status == "healthy" {
+				switch {
+				case health.Status == probeStatusHealthy:
 					status.WebRunning = true
 					status.HubRunning = true
-				} else if reason := colocatedBrokerReason(health); reason != "" {
-					status.HubDegradedReason = reason
-					status.WebDegradedReason = reason
+				case webPortHasHub:
+					// A scion composite body (it carries a nested "hub"):
+					// degraded is up, unhealthy is not, and either way the
+					// non-healthy checks are named instead of a bare "not
+					// detected". Requiring webPortHasHub keeps an unrelated
+					// service on 8080 answering {"status":"degraded"} from
+					// being reported as the scion web server. A web+broker
+					// server without a hub (no nested "hub") that is
+					// degraded therefore stays "not detected" here, as
+					// before this change; only bodies with a nested hub are
+					// treated as the scion composite.
+					// The Web fields carry the composite (web server's own
+					// answer, which folds in hub and broker). The Hub fields
+					// come from the nested hub only, so a broker-only
+					// degradation is not pinned on the Hub line; it shows on
+					// the Web line here and on the Runtime Broker line from
+					// the broker's own probe below.
+					status.WebRunning = probeStatusIsUp(health.Status)
+					status.WebStatus = health.Status
+					status.WebHealthReason = healthProblemReason(health)
+					hub := healthProbeResponse{Status: health.Hub.Status, Checks: health.Hub.Checks}
+					status.HubRunning = probeStatusIsUp(hub.Status)
+					if hub.Status != probeStatusHealthy {
+						status.HubStatus = hub.Status
+						status.HubHealthReason = healthProblemReason(hub)
+					}
 				}
 			}
 		}
 	}
 
 	// Check standalone hub port if not already found on the web port. This
-	// probe intentionally leaves WebDegradedReason unset: a standalone Hub
-	// (no web server) must not print "Web Frontend: degraded" just because
-	// the Hub itself is degraded.
+	// probe intentionally leaves WebHealthReason/WebStatus unset: a
+	// standalone Hub (no web server) must not print "Web Frontend: degraded"
+	// just because the Hub itself is degraded.
 	if !status.HubRunning && !webPortHasHub {
 		if resp, err := client.Get(hubBaseURL + "/healthz"); err == nil {
 			body, readErr := io.ReadAll(resp.Body)
@@ -589,11 +717,20 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 			if resp.StatusCode == http.StatusOK && readErr == nil {
 				var health healthProbeResponse
 				if json.Unmarshal(body, &health) == nil {
-					status.HubRunning = true
-					if status.HubDegradedReason == "" {
-						if reason := colocatedBrokerReason(health); reason != "" {
-							status.HubDegradedReason = reason
+					switch health.Status {
+					case probeStatusHealthy:
+						status.HubRunning = true
+					case probeStatusDegraded, probeStatusUnhealthy:
+						status.HubRunning = health.Status == probeStatusDegraded
+						status.HubStatus = health.Status
+						if status.HubHealthReason == "" {
+							status.HubHealthReason = healthProblemReason(health)
 						}
+					default:
+						// Not a scion hub status (e.g. {"status":"ok"} from
+						// some other service on this port, or no status at
+						// all): report the Hub as not detected rather than
+						// echoing an unrecognised status.
 					}
 				}
 			}
@@ -605,11 +742,22 @@ func probeServerStatus(client *http.Client, webBaseURL, hubBaseURL, brokerBaseUR
 		body, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK && readErr == nil {
-			var health struct {
-				Status string `json:"status"`
-			}
+			var health healthProbeComponent
 			if json.Unmarshal(body, &health) == nil {
-				status.BrokerRunning = true
+				// Same rule as the standalone 9810 probe: degraded is up
+				// (and names its problem checks), unhealthy is not, and a
+				// status that is not a scion status means not detected.
+				switch health.Status {
+				case probeStatusHealthy:
+					status.BrokerRunning = true
+				case probeStatusDegraded, probeStatusUnhealthy:
+					status.BrokerRunning = health.Status == probeStatusDegraded
+					status.BrokerStatus = health.Status
+					status.BrokerHealthReason = brokerProblemReason(health)
+				default:
+					// Not a scion broker status (e.g. {"status":"ok"} from
+					// some other service on this port, or no status).
+				}
 			}
 		}
 	}
@@ -639,8 +787,12 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	status.HubRunning = probed.HubRunning
 	status.BrokerRunning = probed.BrokerRunning
 	status.WebRunning = probed.WebRunning
-	status.HubDegradedReason = probed.HubDegradedReason
-	status.WebDegradedReason = probed.WebDegradedReason
+	status.HubStatus = probed.HubStatus
+	status.WebStatus = probed.WebStatus
+	status.BrokerStatus = probed.BrokerStatus
+	status.BrokerHealthReason = probed.BrokerHealthReason
+	status.HubHealthReason = probed.HubHealthReason
+	status.WebHealthReason = probed.WebHealthReason
 
 	if serverStatusJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -669,70 +821,86 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 // formatServerStatusComponents renders the "Components:" lines of
 // `scion server status` from an already-populated serverStatusInfo. Split
 // out from runServerStatus so the formatting — in particular, naming the
-// colocated_broker check instead of a bare "not detected" (ptone/scion#2154)
-// — can be unit tested without spinning up HTTP servers.
+// non-healthy checks (e.g. colocated_broker, ptone/scion#2154) instead of a
+// bare "not detected" — can be unit tested without spinning up HTTP servers.
 func formatServerStatusComponents(status serverStatusInfo) []string {
 	var lines []string
 
-	switch {
-	case status.HubRunning && status.HubDegradedReason != "":
-		// Loose standalone-hub-port probe (see probeServerStatus): HubRunning
-		// can be true without status=="healthy", so surface the reason even
-		// then. This is the line a standalone (no web server) operator
-		// actually sees, so it needs the same recovery hint as the other
-		// degraded lines below.
-		lines = append(lines, fmt.Sprintf("  Hub API:         running, degraded (colocated_broker: %s) — see server log; restart after fixing the broker config", status.HubDegradedReason))
-	case status.HubRunning:
-		lines = append(lines, "  Hub API:         running")
-	case status.HubDegradedReason != "":
-		// The process answered /healthz but reported non-"healthy" because of
-		// the co-located broker (ptone/scion#2154): it is up and serving, not
-		// actually absent, so name the check instead of "not detected". No
-		// retry — see server log; fix the broker config and restart.
-		lines = append(lines, fmt.Sprintf("  Hub API:         degraded (colocated_broker: %s) — see server log; restart after fixing the broker config", status.HubDegradedReason))
-	default:
-		lines = append(lines, "  Hub API:         not detected")
-	}
+	lines = append(lines, "  Hub API:         "+formatComponentState(status.HubRunning, status.HubStatus, status.HubHealthReason))
 
-	if status.BrokerRunning {
-		lines = append(lines, "  Runtime Broker:  running")
-	} else {
-		lines = append(lines, "  Runtime Broker:  not detected")
-	}
+	lines = append(lines, "  Runtime Broker:  "+formatComponentState(status.BrokerRunning, status.BrokerStatus, status.BrokerHealthReason))
 
-	switch {
-	case status.WebRunning:
-		lines = append(lines, "  Web Frontend:    running")
-	case status.WebDegradedReason != "":
-		// WebDegradedReason (not HubDegradedReason): a standalone Hub-only
-		// deployment with no web server at all must not print "Web Frontend:
-		// degraded" just because the Hub is degraded.
-		lines = append(lines, fmt.Sprintf("  Web Frontend:    degraded (colocated_broker: %s) — see server log; restart after fixing the broker config", status.WebDegradedReason))
-	default:
-		lines = append(lines, "  Web Frontend:    not detected")
-	}
+	// WebStatus/WebHealthReason (not the Hub fields): a standalone Hub-only
+	// deployment with no web server at all must not print "Web Frontend:
+	// degraded" just because the Hub is degraded.
+	lines = append(lines, "  Web Frontend:    "+formatComponentState(status.WebRunning, status.WebStatus, status.WebHealthReason))
 
 	return lines
 }
+
+// formatComponentState renders one component's state for
+// formatServerStatusComponents:
+//   - running (healthy):            "running"
+//   - running, degraded:            "running, degraded (<checks>) — <hint>"
+//   - answered but not up (unhealthy): "unhealthy (<checks>) — <hint>"
+//   - no answer:                    "not detected"
+func formatComponentState(running bool, healthStatus, reason string) string {
+	switch {
+	case running && reason == "":
+		return "running"
+	case running:
+		return fmt.Sprintf("running, degraded (%s) — %s", reason, healthProblemHint(reason))
+	case healthStatus != "" || reason != "":
+		label := healthStatus
+		if label == "" || label == probeStatusDegraded {
+			// Not up but no usable status string; never claim "degraded"
+			// (which means up) for a component that is not running.
+			label = probeStatusUnhealthy
+		}
+		if reason == "" {
+			return label
+		}
+		return fmt.Sprintf("%s (%s) — %s", label, reason, healthProblemHint(reason))
+	default:
+		return "not detected"
+	}
+}
+
+// serverReadyPollInterval is how often waitForServerReady polls /healthz.
+// A variable so tests can shorten it.
+var serverReadyPollInterval = 250 * time.Millisecond
 
 // waitForServerReady polls the server's /healthz endpoint until it returns 200
 // with a "healthy" composite status, or the timeout expires.
 // The web server's /healthz always returns HTTP 200 but reports a composite
 // status that reflects hub and broker readiness. On first start the hub
 // database may still be migrating when the HTTP listener begins accepting
-// connections, so we parse the JSON body to confirm all components are ready.
+// connections, and the co-located broker registers just after the listener
+// starts (colocated_broker is transiently non-healthy), so we parse the JSON
+// body and keep polling for "healthy" until the deadline.
+//
+// If the deadline passes and the last observed status was "degraded", the
+// process is up and serving with a non-critical problem, so this still
+// reports ready (ptone/scion#1094); the caller checks lastHealth.Status and
+// warns, naming the checks via healthProblemReason. "unhealthy" (a critical
+// check such as the database failed) or no answer at all is not ready.
 //
 // It also returns the last health response it observed (zero value if the
-// endpoint was never reachable), so a caller that times out can name the
-// specific check that kept the composite status from going healthy — e.g.
-// colocated_broker (ptone/scion#2154) — instead of printing a bare
-// "not ready" for a process that is in fact up and serving.
+// endpoint was never reachable), so a caller can name the specific checks
+// that kept the composite status from going healthy — e.g. colocated_broker
+// (ptone/scion#2154) — instead of printing a bare "not ready".
 func waitForServerReady(host string, port int, timeout time.Duration) (ready bool, lastHealth healthProbeResponse) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	url := fmt.Sprintf("http://%s:%d/healthz", host, port)
 	deadline := time.Now().Add(timeout)
 
+	// lastAnswered tracks whether the most recent poll got a parsed answer,
+	// so a server that answered degraded and then died before the deadline
+	// is not reported ready on a stale response. lastHealth is still
+	// returned for naming the checks.
+	lastAnswered := false
 	for time.Now().Before(deadline) {
+		lastAnswered = false
 		if resp, err := client.Get(url); err == nil {
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
@@ -740,15 +908,47 @@ func waitForServerReady(host string, port int, timeout time.Duration) (ready boo
 				var health healthProbeResponse
 				if json.Unmarshal(body, &health) == nil {
 					lastHealth = health
-					if health.Status == "healthy" {
+					lastAnswered = true
+					if health.Status == probeStatusHealthy {
 						return true, lastHealth
 					}
 				}
 			}
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(serverReadyPollInterval)
 	}
-	return false, lastHealth
+	return lastAnswered && lastHealth.Status == probeStatusDegraded, lastHealth
+}
+
+// quickstartReadyMessage chooses what printWorkstationQuickstart prints after
+// waitForServerReady, and whether to open the browser:
+//   - ready, healthy:            no message, open.
+//   - ready, degraded:           a warning naming the checks, open (it is up).
+//   - not ready, stale degraded: the server stopped answering after a
+//     degraded answer; say so, with the last checks, no open.
+//   - not ready, with a reason:  the status and checks (e.g. unhealthy), no open.
+//   - not ready, no answer:      "not yet ready", no open.
+func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg string, openBrowser bool) {
+	reason := healthProblemReason(lastHealth)
+	switch {
+	case ready && reason != "":
+		// Degraded: e.g. a co-located broker that failed to register
+		// (ptone/scion#2154), which does not retry: fix config and restart.
+		return fmt.Sprintf("  Warning: server is up but degraded: %s — %s", reason, healthProblemHint(reason)), true
+	case ready:
+		return "", true
+	case reason != "" && probeStatusIsUp(lastHealth.Status):
+		// Not ready, yet the last answer was an "up" status: the server
+		// answered (degraded) and then stopped answering before the
+		// deadline (waitForServerReady requires the last poll to answer).
+		// Do not claim it is up.
+		return fmt.Sprintf("  (server stopped answering /healthz; last status %s: %s — see server log)", lastHealth.Status, reason), false
+	case reason != "":
+		// Unhealthy (a critical check failed) is not up; say what it is.
+		return fmt.Sprintf("  (server is %s: %s — %s)", lastHealth.Status, reason, healthProblemHint(reason)), false
+	default:
+		return "  (server not yet ready — open the URL manually once it starts)", false
+	}
 }
 
 // printWorkstationQuickstart prints the first-run quickstart information
@@ -786,15 +986,12 @@ func printWorkstationQuickstart(needsOnboarding bool, globalDir string, host str
 
 		// Auto-open the browser in interactive terminals once the server is ready.
 		if os.Getenv("SCION_NO_BROWSER") == "" && util.IsTerminal() && !util.IsHeadlessEnvironment() {
-			if ready, lastHealth := waitForServerReady(displayHost, wPort, 20*time.Second); ready {
+			msg, openBrowser := quickstartReadyMessage(waitForServerReady(displayHost, wPort, 20*time.Second))
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			if openBrowser {
 				_ = util.OpenBrowser(url)
-			} else if reason := colocatedBrokerReason(lastHealth); reason != "" {
-				// The process is up and answering /healthz; it is degraded,
-				// not absent. No retry — see server log; the broker
-				// configuration needs to be fixed and the server restarted.
-				fmt.Printf("  (server is up but degraded: colocated_broker: %s — open the URL manually; see server log)\n", reason)
-			} else {
-				fmt.Println("  (server not yet ready — open the URL manually once it starts)")
 			}
 		}
 	}
