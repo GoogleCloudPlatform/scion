@@ -63,7 +63,15 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	var externalAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	var globalWorkspaceDir string
+	// resolvedProjectDir is config.GetResolvedProjectDir's return value,
+	// captured here (rather than only inside the block below) so the
+	// sharer-registry calls further down can pass it through as the
+	// ProvisionAgent-layout shape check's root — see
+	// provision.WorktreePathIsScionCreated's doc comment on why this must be
+	// the actual resolved project directory, not derived from repoRoot.
+	var resolvedProjectDir string
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
+		resolvedProjectDir = projectDir
 		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
 
 		// The global project's own per-agent workspace
@@ -155,32 +163,71 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		// Do NOT silently swallow registry errors and fall through to the legacy
 		// path — that path could delete the shared worktree out from under live
 		// joiners. On a real registry I/O error, fail loudly instead.
-		branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, agentName)
+		branch, _, found, findErr := provision.FindBranchForAgent(repoRoot, resolvedProjectDir, agentName)
 		if findErr != nil {
 			return branchDeleted, fmt.Errorf("delete: FindBranchForAgent for %s: %w", agentName, findErr)
 		}
 		if found {
-			remaining, wtPath, unregErr := provision.UnregisterSharer(repoRoot, branch, agentName)
+			remaining, wtPath, unregErr := provision.UnregisterSharer(repoRoot, resolvedProjectDir, branch, agentName)
 			if unregErr != nil {
 				return branchDeleted, fmt.Errorf("delete: UnregisterSharer for branch %s agent %s: %w", branch, agentName, unregErr)
 			}
 			if len(remaining) == 0 {
-				util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
-				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(wtPath, removeBranch); err == nil {
-					if deleted {
-						branchDeleted = true
-					}
-					util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+				// Additional check: re-check wtPath's unresolved/lexical form
+				// against a scion-created shape immediately before acting on
+				// it, rather than trusting that UnregisterSharer's return
+				// value is still exactly what the read boundary validated.
+				// This is deliberately a second LEXICAL check, not a new
+				// EvalSymlinks anchor for the removal step below — the
+				// resolved-containment check inside util.RemoveWorktree stays
+				// anchored at repoRoot (see its own doc comment on why
+				// narrowing that anchor to a per-marker subdirectory would
+				// let a symlinked intermediate component pass through
+				// unchecked, defeating that check's purpose). This only scopes what counts as
+				// an acceptable shape going into that call, one guard closer
+				// to the removal itself.
+				if wtPath != "" && !provision.WorktreePathIsScionCreated(repoRoot, resolvedProjectDir, wtPath) {
+					slog.Warn("delete: worktree path no longer matches a scion-created shape at removal time; skipping worktree removal",
+						"agent_id", agentName, "branch", branch, "path", wtPath)
+					wtPath = ""
+				}
+				if wtPath == "" {
+					// The registry read boundary (pkg/provision.readMarker)
+					// already fails closed on an out-of-tree/relative/empty
+					// WorktreePath, discarding the whole marker. There is no
+					// validated in-tree path to remove — do not guess one.
+					slog.Warn("delete: no valid worktree path for last sharer; skipping worktree removal",
+						"agent_id", agentName, "branch", branch)
 				} else {
-					util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
-					_ = util.RemoveAllSafe(wtPath)
-					// Worktree removal failed, so the branch wasn't deleted by it —
-					// fall back to deleting the branch by name (like the legacy path).
-					if removeBranch && !branchDeleted {
-						if util.DeleteBranchIn(repoRoot, branch) {
+					util.Debugf("delete: last sharer for branch %s, removing worktree at %s", branch, wtPath)
+					worktreeStart := time.Now()
+					if deleted, err := util.RemoveWorktree(repoRoot, wtPath, removeBranch); err == nil {
+						if deleted {
 							branchDeleted = true
-							util.Debugf("delete: deleted branch %s via fallback after worktree removal failure", branch)
+						}
+						util.Debugf("delete: shared worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
+					} else {
+						util.Debugf("delete: shared worktree removal failed in %v: %v", time.Since(worktreeStart), err)
+						if errors.Is(err, util.ErrPathNotContained) {
+							// The marker's WorktreePath passed the lexical
+							// read-boundary check but resolves
+							// outside repoRoot once symlinks are followed
+							// (e.g. a symlinked worktrees dir or leaf).
+							// Do NOT fall back to a raw recursive removal —
+							// that is exactly what this check exists to
+							// prevent.
+							slog.Warn("delete: refusing fallback removal; worktree path does not resolve under repo root",
+								"agent_id", agentName, "branch", branch, "path", wtPath, "repo_root", repoRoot)
+						} else {
+							_ = util.RemoveAllSafe(wtPath)
+						}
+						// Worktree removal failed, so the branch wasn't deleted by it —
+						// fall back to deleting the branch by name (like the legacy path).
+						if removeBranch && !branchDeleted {
+							if util.DeleteBranchIn(repoRoot, branch) {
+								branchDeleted = true
+								util.Debugf("delete: deleted branch %s via fallback after worktree removal failure", branch)
+							}
 						}
 					}
 				}
@@ -199,14 +246,16 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(worktreeDir, removeBranch); err == nil {
+			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, removeBranch); err == nil {
 				if deleted {
 					branchDeleted = true
 				}
 				util.Debugf("delete: worktree-per-agent removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
 			} else {
 				util.Debugf("delete: worktree-per-agent removal failed in %v: %v", time.Since(worktreeStart), err)
-				_ = util.RemoveAllSafe(worktreeDir)
+				if !errors.Is(err, util.ErrPathNotContained) {
+					_ = util.RemoveAllSafe(worktreeDir)
+				}
 			}
 		} else {
 			_ = util.RemoveAllSafe(worktreeDir)
@@ -227,14 +276,16 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 			if _, err := os.Stat(filepath.Join(agentWorkspace, ".git")); err == nil {
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(agentWorkspace, removeBranch); err == nil {
+				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, removeBranch); err == nil {
 					if deleted {
 						branchDeleted = true
 					}
 					util.Debugf("delete: worktree removal completed in %v (branch deleted: %v)", time.Since(worktreeStart), deleted)
 				} else {
 					util.Debugf("delete: worktree removal failed in %v: %v", time.Since(worktreeStart), err)
-					_ = util.RemoveAllSafe(agentWorkspace)
+					if !errors.Is(err, util.ErrPathNotContained) {
+						_ = util.RemoveAllSafe(agentWorkspace)
+					}
 				}
 			}
 		}
@@ -272,6 +323,39 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 
 	// Phase 2: directory removal.
 	for _, agentDir := range dirsToDelete {
+		// ProvisionAgent's worktree-mode layout nests an agent's worktree at
+		// agentDir/workspace — for the creator of a shared branch (the
+		// ProvisionAgent attach-to-existing-worktree case), this is the SAME
+		// physical worktree another live sharer may still be using. The
+		// refcount path above already decided whether that worktree may be
+		// removed (skipping it here via refcountHandled when other sharers
+		// remain); a blanket RemoveAllSafe(agentDir) would ignore that
+		// decision and destroy it anyway, since it has no notion of a
+		// worktree being nested inside the directory it's asked to remove.
+		// If workspace/ is still a live worktree at this point, clean up
+		// everything else in agentDir but leave it in place. An
+		// empty-per-agent workspace owns no worktree and is removed with
+		// agentDir even when it contains a .git.
+		workspaceStillLive := false
+		if _, err := os.Stat(filepath.Join(agentDir, "workspace", ".git")); err == nil && !emptyPerAgent {
+			workspaceStillLive = true
+		}
+		if workspaceStillLive {
+			entries, err := os.ReadDir(agentDir)
+			if err != nil {
+				return branchDeleted, fmt.Errorf("read agent directory %s: %w", agentDir, err)
+			}
+			for _, e := range entries {
+				if e.Name() == "workspace" {
+					continue
+				}
+				if err := util.RemoveAllSafe(filepath.Join(agentDir, e.Name())); err != nil {
+					return branchDeleted, fmt.Errorf("failed to remove agent directory entry: %w", err)
+				}
+			}
+			util.Debugf("delete: preserved shared workspace, removed other entries in: %s", agentDir)
+			continue
+		}
 		util.Debugf("delete: removing directory: %s", agentDir)
 		removeStart := time.Now()
 		if err := util.RemoveAllSafe(agentDir); err != nil {
@@ -1194,7 +1278,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if rootErr != nil {
 					return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
 				}
-				if regErr := provision.RegisterSharer(root, targetBranch, existingPath, agentName); regErr != nil {
+				if regErr := provision.RegisterSharer(root, projectDir, targetBranch, existingPath, agentName); regErr != nil {
 					return "", "", nil, fmt.Errorf("register sharer (attach): %w", regErr)
 				}
 			}
@@ -1278,7 +1362,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if rootErr != nil {
 			return "", "", nil, fmt.Errorf("resolve repo root for sharer registration: %w", rootErr)
 		}
-		if regErr := provision.RegisterSharer(root, worktreeBranch, agentWorkspace, agentName); regErr != nil {
+		if regErr := provision.RegisterSharer(root, projectDir, worktreeBranch, agentWorkspace, agentName); regErr != nil {
 			return "", "", nil, fmt.Errorf("register sharer (create): %w", regErr)
 		}
 
@@ -1959,6 +2043,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		info.RunID = readAgentInfoRunID(filepath.Join(agentHome, "agent-info.json"))
 	}
 
+	// Persist the broker-provisioned worktree's repo root now, if the ctx
+	// signal validates against workspaceSource: run.go's Start does not
+	// always run after this call returns — the hub's provision-only flow
+	// (Manager.Provision, DispatchAgentProvision) can provision an agent
+	// without starting it in the same dispatch, and a later start/restart
+	// carries no ctx signal of its own. (Reprovision is clone-per-agent only
+	// today, so it never carries this signal; if it gains worktree support,
+	// this call already covers it, since Reprovision also reaches
+	// ProvisionAgent directly.) Start still carries its own call to the same
+	// gate, for the one case this function never runs at all: GetAgent
+	// skipping ProvisionAgent because the agent directory already exists.
+	// See persistProvisionedWorktreeRepoRootIfValid.
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
+
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
@@ -2420,6 +2518,97 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(tmpPath, path)
 }
 
+// provisionedWorktreeStateFile is the broker-owned file that persists the
+// broker-provisioned worktree's repo root (see
+// api.ContextWithProvisionedWorktreeRepoRoot). It lives directly in agentDir,
+// a sibling of prompt.md and scion-agent.json — never in agentHome or the
+// agent's workspace, which pkg/runtime/common.go bind-mounts read-write into
+// the agent container. agentDir itself is not mounted for hub-native/broker
+// agents. It can fall inside a read-write mount in some local, non-broker
+// configurations (e.g. an explicit --workspace pointed at the project root);
+// provision.ValidateWorktreeForBase is the backstop that applies regardless
+// of where this file lives, so its correctness never depends on the storage
+// location alone.
+const provisionedWorktreeStateFile = "provisioned-worktree.json"
+
+// provisionedWorktreeState is the on-disk shape of provisionedWorktreeStateFile.
+type provisionedWorktreeState struct {
+	RepoRoot string `json:"repoRoot"`
+}
+
+// writeProvisionedWorktreeRepoRoot persists repoRoot to agentDir's
+// broker-owned state file (atomic write via writeAgentInfoFile). A write
+// failure only means a later resume falls back to detectRepoRoot — a
+// functional regression, not a security issue — so callers may log and
+// continue rather than fail the whole dispatch.
+func writeProvisionedWorktreeRepoRoot(agentDir, repoRoot string) error {
+	data, err := json.Marshal(provisionedWorktreeState{RepoRoot: repoRoot})
+	if err != nil {
+		return err
+	}
+	return writeAgentInfoFile(filepath.Join(agentDir, provisionedWorktreeStateFile), data, 0o644)
+}
+
+// readProvisionedWorktreeRepoRoot reads the value written by
+// writeProvisionedWorktreeRepoRoot, or "" if the file is absent or doesn't
+// parse. Never returns an error: a missing or unreadable state file is
+// exactly equivalent to "no broker-provisioned worktree recorded", which is
+// the correct, common state for every agent that isn't one.
+func readProvisionedWorktreeRepoRoot(agentDir string) string {
+	data, err := os.ReadFile(filepath.Join(agentDir, provisionedWorktreeStateFile))
+	if err != nil {
+		return ""
+	}
+	var state provisionedWorktreeState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return ""
+	}
+	return state.RepoRoot
+}
+
+// persistProvisionedWorktreeRepoRootIfValid validates ctxRepoRoot against
+// workspace (via validatedWorktreeRepoRoot) and, only if it validates and
+// differs from what is already on disk, persists it to agentDir's
+// broker-owned state file. A no-op when ctxRepoRoot is empty or fails to
+// validate.
+//
+// workspace must be passed in its original, as-given form — the same
+// spelling the caller received it in, not a form resolved ahead of this
+// call; validatedWorktreeRepoRoot applies its own resolution internally.
+// run.go's Start must pass the value effectiveWorkspace held before calling
+// runtime.ValidateWorkspaceSource, not the resolved value that call
+// produces — the two calls run.go makes to validatedWorktreeRepoRoot (its
+// own RunConfig.RepoRoot resolution and this persistence gate) only agree
+// with each other when both are given the same pre-resolution spelling.
+//
+// This is the single persistence gate shared by every call site that can be
+// the first to see a fresh ctx signal for a given dispatch:
+//   - ProvisionAgent, for a fresh create (via GetAgent, for
+//     Manager.Provision/Manager.Start's normal first-provision path) — the
+//     hub's provision-only flow provisions without ever calling Start in the
+//     same dispatch, so this is the only chance to record the value there.
+//     Reprovision is clone-per-agent only today, so it never carries this
+//     signal; if it gains worktree support, the persist in ProvisionAgent
+//     already covers it, since Reprovision also calls ProvisionAgent
+//     directly.
+//   - run.go's Start, for the case ProvisionAgent never runs at all: GetAgent
+//     skips it when the agent directory already exists on disk (e.g. a
+//     leftover from a deleted hub agent recreated under the same name).
+//
+// A write failure only means a later resume falls back to detectRepoRoot;
+// see writeProvisionedWorktreeRepoRoot.
+func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string) {
+	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
+		return
+	}
+	if readProvisionedWorktreeRepoRoot(agentDir) == ctxRepoRoot {
+		return
+	}
+	if err := writeProvisionedWorktreeRepoRoot(agentDir, ctxRepoRoot); err != nil {
+		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: failed to persist for %s: %v", agentDir, err)
+	}
+}
+
 func UpdateAgentConfig(agentName string, projectPath string, status string, runtime string, profile string) error {
 	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
 		if status != "" {
@@ -2431,6 +2620,37 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 		if profile != "" {
 			info.Profile = profile
 		}
+	})
+}
+
+// AgentDeleteState is the part of agent-info.json a soft delete marks
+// (Phase and DeletedAt), captured so the mark can be undone.
+type AgentDeleteState struct {
+	Phase     string
+	DeletedAt time.Time
+}
+
+// GetAgentDeleteState reads the Phase and DeletedAt of agent-info.json.
+// ok is false when the file cannot be read.
+func GetAgentDeleteState(agentName string, projectPath string) (AgentDeleteState, bool) {
+	info := getSavedAgentInfo(agentName, projectPath)
+	if info == nil {
+		return AgentDeleteState{}, false
+	}
+	return AgentDeleteState{Phase: info.Phase, DeletedAt: info.DeletedAt}, true
+}
+
+// RestoreAgentDeleteState writes st's Phase and DeletedAt back to
+// agent-info.json, undoing a soft-delete mark. It changes nothing unless the
+// file still shows the mark (Phase "deleted"), so a phase a newer start has
+// written since the snapshot is kept.
+func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDeleteState) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		if info.Phase != "deleted" {
+			return
+		}
+		info.Phase = st.Phase
+		info.DeletedAt = st.DeletedAt
 	})
 }
 

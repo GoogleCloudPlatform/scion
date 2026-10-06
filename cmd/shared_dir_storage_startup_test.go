@@ -64,7 +64,8 @@ func TestLogSharedDirStorageStartup(t *testing.T) {
 		if assert.Len(t, *lines, 2) {
 			assert.Contains(t, (*lines)[0], "Warning")
 			assert.Contains(t, (*lines)[0], "uid")
-			assert.Contains(t, (*lines)[0], "gid")
+			// gid is the leaf-group allowlist, not ignored (ptone/scion#3155).
+			assert.NotContains(t, (*lines)[0], "gid")
 			assert.Contains(t, (*lines)[1], "resolved layout")
 			assert.Contains(t, (*lines)[1], "backend=nfs")
 			assert.Contains(t, (*lines)[1], "scion-shared-pv")

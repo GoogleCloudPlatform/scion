@@ -16,7 +16,7 @@ core-base          System dependencies (Go, Node, Python)
         └── hub             Scion hub server
 
 thick-prep         Patches Cloud Workstations base for scion compatibility,
-                   including git >= 2.47 (amd64 only)
+                   including git >= 2.48 (amd64 only)
   └── scion-base   Same Dockerfile, different foundation
         ├── harness images
         └── hub
@@ -29,7 +29,7 @@ a `Dockerfile` and `cloudbuild.yaml`. See
 
 ### Where git comes from
 
-Scion hard-requires **git >= 2.47.0** (`pkg/util/git.go` `CheckGitVersion`, for
+Scion hard-requires **git >= 2.48.0** (`pkg/util/git.go` `CheckGitVersion`, for
 `git worktree add --relative-paths`). Below that, worktree-per-agent mode is
 disabled.
 

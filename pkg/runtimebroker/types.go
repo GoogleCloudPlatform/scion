@@ -402,6 +402,13 @@ type CreateAgentConfig struct {
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
 
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings, sent by the Hub alongside SharedWorkspace. It never turns on
+	// the per-agent clone mode GitClone does; it reaches the runtime only as
+	// the clone settings of the Kubernetes workspace-provision init container
+	// (api.StartOptions.SharedWorkspaceClone).
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
+
 	// SharedDirs contains project-level shared directory declarations.
 	SharedDirs []api.SharedDir `json:"sharedDirs,omitempty"`
 

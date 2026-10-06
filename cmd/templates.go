@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -960,24 +961,29 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 		return fmt.Errorf("failed to get download URLs: %w", err)
 	}
 
+	// Every entry must be a canonical relative path before anything is written.
+	if err := validateDownloadEntries(downloadResp.Files); err != nil {
+		return err
+	}
+
+	// Files are written through an os.Root so they stay inside destPath.
+	root, err := os.OpenRoot(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to open destination directory: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
 	// Download files
 	fmt.Printf("Downloading %d files to %s...\n", len(downloadResp.Files), destPath)
 	for _, fileInfo := range downloadResp.Files {
-		filePath := filepath.Join(destPath, filepath.FromSlash(fileInfo.Path))
-
-		// Create parent directories
-		if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-			return fmt.Errorf("failed to create directory for %s: %w", fileInfo.Path, err)
-		}
-
 		// Download file content
 		content, err := hubCtx.Client.Templates().DownloadFile(ctx, fileInfo.URL)
 		if err != nil {
 			return fmt.Errorf("failed to download %s: %w", fileInfo.Path, err)
 		}
 
-		// Write file
-		if err := os.WriteFile(filePath, content, 0644); err != nil {
+		// Write file, creating parent directories as needed
+		if err := transfer.WriteFileInRoot(root, fileInfo.Path, content, 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %w", fileInfo.Path, err)
 		}
 		fmt.Printf("  Downloaded: %s\n", fileInfo.Path)
