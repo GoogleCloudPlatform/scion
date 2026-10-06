@@ -626,9 +626,10 @@ type AgentStore interface {
 	// records run intent running in the same write (run_intent_at strictly
 	// increasing, as SetRunIntent). It requires that no claim is held, the
 	// agent is not deleted or being deleted, and no reincarnation is in
-	// flight. Returns *ClaimHeldError when a claim is held, ErrClaimPredicate
-	// when the agent is otherwise not eligible, and ErrNotFound when it does
-	// not exist.
+	// flight. Returns ErrDeleteInProgress when a delete holds the row or the
+	// agent is soft-deleted (as SwapRunIntent does for a running intent),
+	// *ClaimHeldError when a claim is held, ErrClaimPredicate when the agent
+	// is otherwise not eligible, and ErrNotFound when it does not exist.
 	ClaimAgentStart(ctx context.Context, agentID, owner string, kind StartClaimKind, target string, ttl time.Duration) (StartClaim, error)
 
 	// ClaimAgentStop takes a live claim of kind StartClaimStop, used while a
@@ -669,6 +670,13 @@ type AgentStore interface {
 	// name: claims owned by its previous process can no longer be renewed.
 	// excludeOwner (this process's own owner value) is never demoted.
 	DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, excludeOwner string, holds StartClaimHolds) (int, error)
+
+	// ConvertUnconfirmedToStop replaces the unconfirmed claim claimID with a
+	// live stop-kind claim owned by owner, with a lease of ttl, when the agent
+	// has no active launch. It is taken before the hub stops a container an
+	// unconfirmed start left running, so no start can claim the agent while
+	// that stop is applied. ErrClaimPredicate when the claim changed.
+	ConvertUnconfirmedToStop(ctx context.Context, agentID, claimID, owner string, ttl time.Duration) (StartClaim, error)
 
 	// ReleaseUnconfirmedStart clears claimID when it is unconfirmed and the
 	// agent has no active launch.

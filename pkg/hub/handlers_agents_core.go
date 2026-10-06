@@ -2285,15 +2285,15 @@ func (s *Server) createAgentInProject(
 	// handles a delete that won the race (see compensateLandedRun).
 	acceptedLaunch := false
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
-		// A create is a start, unless it only provisions.
-		intent := store.RunIntentRunning
+		// A create is a start, unless it only provisions. A create-and-start
+		// runs under a start claim (createUnderClaim), which records run
+		// intent running; a provision-only create records stopped.
 		if req.ProvisionOnly {
-			intent = store.RunIntentStopped
-		}
-		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
-			corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
-			writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
-			return
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+				corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+				writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+				return
+			}
 		}
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested
@@ -2301,10 +2301,14 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Debug("Hub: env-gather requested, using DispatchAgentCreateWithGather",
 					"agent_id", agent.ID,
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
-				var created *CreateDispatchResult
-				err := syncDispatch(ctx, func(dctx context.Context) (err error) {
-					created, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
-					return err
+				// The create runs under its start claim; the dispatch is bounded
+				// by syncDispatch, derived from the claim's context.
+				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+					err = syncDispatch(ctx, func(dctx context.Context) error {
+						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
+						return err
+					})
+					return out, err
 				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
@@ -2312,6 +2316,23 @@ func (s *Server) createAgentInProject(
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
+					return
+				} else if errors.Is(err, errStartClaimWrite) {
+					// The start claim (this create's run-intent write)
+					// failed, or a delete holds the row: nothing was
+					// dispatched. Rolled back as a failed intent write.
+					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					return
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(w, err, agent.ID) {
+					// Refused by the start claim before dispatch (held, or
+					// not eligible), or the claim was lost while the create
+					// ran: a stop superseded it, and whatever was
+					// dispatched now belongs to that stop and the
+					// start-claim reaper. Either way the record is kept,
+					// not cleaned up as a failed create. A delete that
+					// claimed the row during the dispatch is a dispatch
+					// failure, cleaned up below.
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2364,10 +2385,14 @@ func (s *Server) createAgentInProject(
 					}
 				}
 			} else {
-				var created *CreateDispatchResult
-				err := syncDispatch(ctx, func(dctx context.Context) (err error) {
-					created, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
-					return err
+				// The create runs under its start claim; the dispatch is bounded
+				// by syncDispatch, derived from the claim's context.
+				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+					err = syncDispatch(ctx, func(dctx context.Context) error {
+						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
+						return err
+					})
+					return out, err
 				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
@@ -2375,6 +2400,23 @@ func (s *Server) createAgentInProject(
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
 					writeLaunchInvalidPhase(w, err, agent.ID)
+					return
+				} else if errors.Is(err, errStartClaimWrite) {
+					// The start claim (this create's run-intent write)
+					// failed, or a delete holds the row: nothing was
+					// dispatched. Rolled back as a failed intent write.
+					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
+					return
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(w, err, agent.ID) {
+					// Refused by the start claim before dispatch (held, or
+					// not eligible), or the claim was lost while the create
+					// ran: a stop superseded it, and whatever was
+					// dispatched now belongs to that stop and the
+					// start-claim reaper. Either way the record is kept,
+					// not cleaned up as a failed create. A delete that
+					// claimed the row during the dispatch is a dispatch
+					// failure, cleaned up below.
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2867,13 +2909,20 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	// launch actually runs. The dispatch is bounded by syncDispatch.
 	ctx = detachLaunchFromClient(ctx)
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
-	var finalized *CreateDispatchResult
-	err = syncDispatch(ctx, func(dctx context.Context) (err error) {
-		finalized, err = dispatcher.DispatchFinalizeEnv(dctx, agent, req.Env)
-		return err
+	// The finalize starts the agent: it runs under a start claim, its
+	// dispatch bounded by syncDispatch, derived from the claim's context.
+	finalized, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+		err = syncDispatch(ctx, func(dctx context.Context) error {
+			out, err = dispatcher.DispatchFinalizeEnv(dctx, agent, req.Env)
+			return err
+		})
+		return out, err
 	})
 	if errors.Is(err, ErrLaunchInvalidPhase) {
 		writeLaunchInvalidPhase(w, err, agent.ID)
+		return
+	}
+	if s.writeStartClaimError(w, err, agent.ID) {
 		return
 	}
 	if err != nil {

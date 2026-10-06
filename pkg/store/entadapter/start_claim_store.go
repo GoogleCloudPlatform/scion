@@ -107,14 +107,11 @@ func heldClaimError(row *ent.Agent) *store.ClaimHeldError {
 }
 
 // claimEligible reports whether row may take a claim apart from the
-// no-claim-held condition: not deleted, not being deleted, and no
-// reincarnation in flight.
+// no-claim-held condition and a delete holding the row (checked first, see
+// ClaimAgentStart): not deleted and no reincarnation in flight. A delete
+// whose lease expired (abandoned) does not hold the row.
 func claimEligible(row *ent.Agent) bool {
 	if row.DeletedAt != nil {
-		return false
-	}
-	switch row.DeletionState {
-	case store.DeletionStateDeleting, store.DeletionStateFinalizing:
 		return false
 	}
 	switch row.ReincarnationState {
@@ -178,8 +175,10 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 	}
 	var claim store.StartClaim
 	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
-		if row.DeletedAt != nil {
-			return false, store.ErrClaimPredicate
+		// A start on a row a delete holds, or a soft-deleted row, is
+		// refused exactly as the running-intent write refuses it.
+		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, time.Now()) {
+			return false, store.ErrDeleteInProgress
 		}
 		if held := heldClaimError(row); held != nil {
 			return false, held
@@ -210,6 +209,7 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			SetStartClaimLaunchID("").
 			SetRunIntent(string(store.RunIntentRunning)).
 			SetRunIntentAt(intentAt).
+			SetRunIntentMarkedAt(intentAt).
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
@@ -398,6 +398,49 @@ func (s *AgentStore) DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, ex
 		}
 	}
 	return n, nil
+}
+
+// ConvertUnconfirmedToStop implements store.AgentStore.ConvertUnconfirmedToStop.
+func (s *AgentStore) ConvertUnconfirmedToStop(ctx context.Context, agentID, claimID, owner string, ttl time.Duration) (store.StartClaim, error) {
+	if ttl <= 0 || owner == "" {
+		return store.StartClaim{}, fmt.Errorf("%w: stop claim needs an owner and a positive lease", store.ErrInvalidInput)
+	}
+	var claim store.StartClaim
+	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
+		if !holdsClaim(row, claimID) || launchActive(row) ||
+			row.StartClaimState != string(store.StartClaimUnconfirmed) {
+			return false, store.ErrClaimPredicate
+		}
+		claim = store.StartClaim{
+			ID:         uuid.NewString(),
+			Kind:       store.StartClaimStop,
+			Owner:      owner,
+			Target:     row.StartClaimTarget,
+			At:         now,
+			LeaseUntil: now.Add(ttl),
+		}
+		if row.RunIntentAt != nil {
+			claim.RunIntentAt = *row.RunIntentAt
+		}
+		if _, err := claimUpdate(c, row).
+			SetStartClaimID(claim.ID).
+			SetStartClaimKind(string(store.StartClaimStop)).
+			SetStartClaimState(string(store.StartClaimLive)).
+			SetStartClaimOwner(owner).
+			SetStartClaimAt(claim.At).
+			SetStartClaimLeaseUntil(claim.LeaseUntil).
+			ClearStartClaimUnconfirmedAt().
+			ClearStartClaimHoldUntil().
+			SetStartClaimLaunchID("").
+			Save(ctx); err != nil {
+			return false, mapError(err)
+		}
+		return true, nil
+	})
+	if err != nil {
+		return store.StartClaim{}, err
+	}
+	return claim, nil
 }
 
 // ReleaseUnconfirmedStart implements store.AgentStore.ReleaseUnconfirmedStart.

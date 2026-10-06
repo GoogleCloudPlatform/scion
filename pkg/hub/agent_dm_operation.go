@@ -369,9 +369,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
 				return nil, denial
 			}
-			_, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
+			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
 				return nil, wakeErr
+			}
+			if wakeResult != nil && wakeResult.Outcome == WakeDeferred {
+				// Another start is in progress: keep the message, deferred.
+				deferred = true
 			}
 		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
 			// SkipPhaseGate applies only to mention deliveries — a non-mention

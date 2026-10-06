@@ -5639,3 +5639,55 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 		})
 	}
 }
+
+// claimRefusedTxStore refuses the reincarnation claim inside the claim
+// transaction with err.
+type claimRefusedTxStore struct {
+	store.Store
+	err error
+}
+
+func (s *claimRefusedTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&claimRefusedTx{Store: tx, err: s.err})
+	})
+}
+
+type claimRefusedTx struct {
+	store.Store
+	err error
+}
+
+func (t *claimRefusedTx) ClaimAgentReincarnation(context.Context, string, int64, time.Time) (int64, error) {
+	return 0, t.err
+}
+
+// A reincarnation claim refused inside the claim transaction answers 409
+// with the refusal's message and leaves no reincarnation record.
+func TestReincarnateAgent_ClaimRefusedInTransaction(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		msg  string
+	}{
+		{"already pending", store.ErrClaimPredicate, "a reincarnation is already pending for this agent"},
+		{"start in progress", &store.ClaimHeldError{ClaimID: "c", Kind: store.StartClaimUser, State: store.StartClaimLive, Since: time.Now()}, "a start is in progress for this agent; retry once it completes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newReincarnateTestAgent(t, s, project, broker, nil)
+			self := agentIdentityFor(agent.ID, project.ID)
+			srv.store = &claimRefusedTxStore{Store: srv.store, err: tc.err}
+
+			rec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.msg)
+			list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "a refused claim leaves no record")
+		})
+	}
+}
