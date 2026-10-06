@@ -355,7 +355,9 @@ func TestCheckAccessWithEvidence_EvidenceClassifiesWithoutWidening(t *testing.T)
 	t.Run("the evidence reaches the gate", func(t *testing.T) {
 		d := authz.CheckAccessWithEvidence(ctx, adminToken, groups, ActionList, TargetScopeEvidence{})
 		assert.False(t, d.Allowed)
-		assert.Equal(t, bearerReasonTargetUnknown, d.Reason)
+		assert.Equal(t, unresolvedTargetReason(groups), d.Reason)
+		eval := authz.EvaluateBearerCeiling(ctx, principalContextForIdentity(admin), hubBoundary(), adminToken.Ceiling(), "group.list", groups, BearerOptions{})
+		assert.Equal(t, BearerStageTargetUnknown, eval.Stage, eval.Decision.Reason)
 	})
 
 	t.Run("no live authority denies", func(t *testing.T) {
@@ -384,10 +386,9 @@ func TestCheckAccessWithEvidence_EvidenceClassifiesWithoutWidening(t *testing.T)
 	t.Run("evidence naming another project does not widen the boundary", func(t *testing.T) {
 		owner := bearerUser(f.ownerA)
 		token := NewScopedUserIdentityWithBoundaryAndDecoration(owner, projectBoundary(f.projectA), []string{"agent:list"}, tid("evidcheck-owner-cred"), bearerCeiling(t, "agent:list"), nil)
-		agents := Resource{Type: "agent"}
-		own := authz.CheckAccessWithEvidence(ctx, token, agents, ActionList, projectCollectionEvidence("agent.list", f.projectA))
+		own := authz.CheckAccessWithEvidence(ctx, token, Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, ActionList, projectCollectionEvidence("agent.list", f.projectA))
 		assert.True(t, own.Allowed, own.Reason)
-		other := authz.CheckAccessWithEvidence(ctx, token, agents, ActionList, projectCollectionEvidence("agent.list", f.projectB))
+		other := authz.CheckAccessWithEvidence(ctx, token, Resource{Type: "agent", ParentType: "project", ParentID: f.projectB}, ActionList, projectCollectionEvidence("agent.list", f.projectB))
 		assert.False(t, other.Allowed)
 		assert.Equal(t, bearerReasonOutsideProject, other.Reason)
 	})
