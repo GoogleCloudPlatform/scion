@@ -159,9 +159,17 @@ value of each patched setting. An agent that patches itself needs the
 agent lifecycle permission, and can lower its own role but not raise it.
 
 Use --broker <name|id> to move the agent to another runtime broker. Both
-brokers must mount the same NFS export, so the workspace moves without being
-copied. Only --dry-run is supported with --broker for now: it reports each
-eligibility check and changes nothing.`,
+brokers must mount the same NFS export, the agent's workspace must be on
+that export, and both brokers must support agent move and be online. The
+workspace stays where it is; the agent home is regenerated on the target,
+and the handoff carries continuity. The CLI runs a dry run first: an
+ineligible move is refused before anything changes, with the failing check
+named (404 for a broker you cannot see, 409 for a different export, 412 for
+a broker without agent move). Add --dry-run to see every check. Targeting a
+broker that does not serve the project yet needs broker read, dispatch and
+project update permissions; an agent can move itself only to a broker that
+already serves its project. Patch flags combine with --broker. See "Moving
+an agent to another broker" in the multi-broker docs.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")

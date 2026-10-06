@@ -242,3 +242,23 @@ func TestReincarnateMove_PatchedMoveIgnoredPatchStops(t *testing.T) {
 	require.Error(t, reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false))
 	assert.Equal(t, []bool{true}, *dryRuns)
 }
+
+// TestReincarnateHelp_BrokerParagraph pins the --broker help: real moves
+// are supported (no "dry-run only" wording), and the help names the move
+// preconditions and points to the move guide.
+func TestReincarnateHelp_BrokerParagraph(t *testing.T) {
+	long := reincarnateCmd.Long
+	assert.NotContains(t, long, "Only --dry-run is supported", "--broker moves are real; the help must not say dry-run only")
+	for _, want := range []string{
+		"--broker <name|id>",
+		"same NFS export",
+		"support agent move",
+		"agent home is regenerated",
+		"refused before anything changes",
+		"already serves its project",
+		"Patch flags combine with --broker",
+		"Moving\nan agent to another broker",
+	} {
+		assert.Contains(t, long, want)
+	}
+}
