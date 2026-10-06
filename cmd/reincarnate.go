@@ -166,7 +166,7 @@ and the handoff carries continuity. The CLI runs a dry run first: an
 ineligible move is refused before anything changes, and the CLI prints the
 failing check (a broker you cannot see is reported as not found). Add
 --dry-run to see every check. Targeting a broker that does not serve the
-project yet needs broker read and project update, and dispatch unless the
+project yet needs project update, plus broker read and dispatch unless the
 broker auto-provides; an agent can move itself only to a broker that
 already serves its project. Patch flags combine with --broker. See "Moving
 an Agent to Another Runtime Broker" in the multi-broker docs.`,

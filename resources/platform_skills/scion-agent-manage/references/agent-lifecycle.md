@@ -35,7 +35,7 @@ keeping its identity and its workspace (uncommitted work included). Check first 
   An agent never links a new broker to the project; a broker you cannot see returns
   `404`.
 - **Moving another agent (as a user):** reaching a broker that does not serve the
-  project yet needs a signed-in user with broker read, project update, and broker
+  project yet needs a signed-in user with project update, plus broker read and broker
   dispatch unless the broker auto-provides. A user access token can only reach brokers
   that auto-provide.
 - **Failure:** the move runs in the background after the request is accepted, so a

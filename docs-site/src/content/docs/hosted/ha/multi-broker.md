@@ -89,7 +89,7 @@ scion reincarnate my-agent --broker broker-b --handoff-file handoff.md
 - **The target profile.** The profile the agent runs under (its own, else the project's active profile, else the target's default profile) must exist on the target and be available.
 - **Both Runtime Brokers support agent move and are up to date.** Each must report its workspace storage and the agent-move capability. An older Runtime Broker on either side gets `412 Precondition Failed`, and nothing on the export is touched.
 - **Both Runtime Brokers are online.** The target must be reachable and report its NFS mount healthy (`503` otherwise). The source must be online too, because it removes its local copy of the agent after the move. A move off an offline source is refused with `412`.
-- **Room on the target** under its [per-broker agent limit](#considerations) (`429` otherwise).
+- **Room on the target** under its [per-broker agent limit](#considerations) (`429` otherwise). This check only reads the current count; the limit is enforced when the quota moves, after the agent is stopped (see [What happens during a move](#what-happens-during-a-move)).
 
 ### What moves and what is regenerated
 
@@ -105,7 +105,7 @@ A refused move is refused **before any side effect**: the agent is not stopped, 
 
 ### Permissions
 
-Every move needs `agent.lifecycle` on the agent, as any reincarnation does. If you are not the agent, you also become its recorded delegator, so you must be able to delegate its role: a non-admin reincarnating an agent with a privileged role gets `403` from this authority check before any of the move checks run.
+Moving another agent needs `agent.lifecycle` on it, as any reincarnation does; an agent moving itself needs no permission unless it also passes patch flags. If you are not the agent, you also become its recorded delegator, so you must be able to delegate its role: a non-admin reincarnating an agent with a privileged role gets `403` from this authority check before any of the move checks run.
 
 For a user, the move then needs:
 
@@ -122,6 +122,8 @@ What each kind of caller can reach:
 | The agent itself | Only a Runtime Broker that already serves its project (AutoProvide is not needed); otherwise `409`, and nothing is linked. No extra permission is needed. An agent that runs with a GCP passthrough identity cannot move itself (`403`, "ask a user to move you"). |
 | Another agent (for example, a coordinator moving its child) | Only a Runtime Broker that already serves the project and has AutoProvide on, or, if the calling agent has the `project:agent:create` scope, any Runtime Broker that serves the project. An agent never links a new broker, because agents cannot update the project. The calling agent needs the agent lifecycle permission on the agent it moves. |
 
+When a user or another agent moves an agent that runs with a GCP passthrough identity, the passthrough rules are checked again against the target, and the move gets `403` if passthrough is not allowed there.
+
 ### What happens during a move
 
 The Hub accepts an eligible move with `202 Accepted` and runs it in the background. It re-runs the checks, stops the agent on the source, moves its quota, assigns it to the target, links the target to the project if needed, and provisions the agent on the target. The target first confirms through its own mount that the workspace directory exists; if it does not, the target refuses to provision the agent, and the move fails and rolls back. The Hub then starts the new generation with the preamble and handoff, and finally asks the source to remove its local copy of the agent: its container, its broker-local agent directory, and its home. That cleanup never touches the export or the agent's branch.
@@ -129,6 +131,7 @@ The Hub accepts an eligible move with `202 Accepted` and runs it in the backgrou
 These steps run after the CLI has already received `202`, so a failure here does not come back as an HTTP error. The agent goes to the `error` phase, and its status message reads `reincarnation failed: …` with the reason, for example `provision on the target broker failed: …`.
 
 - **Failure before the stop.** If the re-run checks or the stop fail, nothing has moved: the agent stays assigned to the source, in the `error` phase, and may still be running there.
+- **No room on the target, or another failure after the stop.** If the target has no room when the quota moves (the dry-run capacity check only reads the current count), or anything else fails after the stop and before the agent is assigned to the target, the agent is left stopped on the source in the `error` phase, for example with `reincarnation failed: target broker quota: …`. Nothing was moved; start it or retry the move later.
 - **Rollback.** If anything fails after the agent is assigned to the target and before the new generation is running, including a start that definitely left no container, the Hub rolls the move back: it removes the agent's local state on the target (best effort), and restores the agent to the source with its quota, previous configuration, and workspace. The agent is left stopped on the source, in the `error` phase; start it or retry the move. A provider link created by the move stays. If the Hub log warns that the agent's state on the target could not be removed, clean up the target as described under [Cleaning up stale state](#operator-notes-and-limits) below; the target is not running the agent.
 - **Ambiguous start.** If the target's start fails in a way that may have left a container, the agent stays on the target in the `error` phase, with its quota there, and the source is not cleaned up.
 - **Moving to a freshly linked target.** A target that has never hosted the project is linked to it by the move, just before it provisions the agent. If the target cannot confirm the workspace through its mount, it refuses to provision the agent, and the move fails and rolls back as above; the agent's status message names the missing workspace, and nothing on the export is lost. Check that the target mounts the export and that the project's workspace is visible there, then retry. The provider link stays, so the retry no longer needs `project.update`.
