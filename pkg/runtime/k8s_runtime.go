@@ -664,7 +664,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		if !nfsHomeStart {
 			r.cleanupAgentSecrets(ctx, namespace, config.Name)
 		}
-		if err := r.cleanupStalePod(ctx, namespace, config.Name, config.HomeStorage); err != nil {
+		if err := r.cleanupStalePod(ctx, namespace, config.Name, nfsHomeStart, config.HomeStorage); err != nil {
 			return "", err
 		}
 		if nfsHomeStart {
@@ -2127,6 +2127,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		SeccompProfile: &corev1.SeccompProfile{
 			Type: corev1.SeccompProfileTypeRuntimeDefault,
 		},
+		SupplementalGroups: sharedDirSupplementalGroups(config, fsGroupGID),
 	}
 
 	// Determine image pull policy
@@ -3422,15 +3423,18 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 // pod never writes to the home while the old one still does; a pod that
 // cannot be confirmed stopped fails the start with a retryable error.
 //
-// hs supplies the configured termination wait (nil uses the default); the
-// grace period is the previous pod's own.
-func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podName string, hs *HomeStorageRealization) error {
+// nfsHome reports whether this start uses an NFS home (its home storage
+// backend). A start with an NFS home, or with home storage set, never
+// force-deletes a previous pod it could not read. hs supplies the
+// configured termination wait (nil uses the default); the grace period is
+// the previous pod's own.
+func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podName string, nfsHome bool, hs *HomeStorageRealization) error {
 	pods := r.Client.Clientset.CoreV1().Pods(namespace)
 	pod, err := pods.Get(ctx, podName, metav1.GetOptions{})
 	if k8serrors.IsNotFound(err) {
 		return nil
 	}
-	if err != nil && hs != nil {
+	if err != nil && (nfsHome || hs != nil) {
 		// An NFS-home start never force-deletes a pod it could not read:
 		// it may be a previous pod of this agent still writing to the home.
 		return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
@@ -4340,4 +4344,24 @@ func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
 		envs = append(envs, corev1.EnvVar{Name: "SCION_CLONE_BRANCH", Value: gc.Branch})
 	}
 	return envs
+}
+
+// sharedDirSupplementalGroups returns the nfs shared-dir leaf groups
+// (RunConfig.SharedDirStorage.SupplementalGroups, already guarded by
+// pkg/agent) to add as pod supplementalGroups, so the agent can write files
+// other agent kinds create in the leaf's group (ptone/scion#3155). A gid
+// equal to fsGroup is skipped, since Kubernetes already adds fsGroup. Nil
+// when the agent mounts no nfs shared dir, leaving the pod spec unchanged.
+func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
+	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+		return nil
+	}
+	var out []int64
+	for _, gid := range config.SharedDirStorage.SupplementalGroups {
+		if gid <= 0 || gid == fsGroup {
+			continue
+		}
+		out = append(out, gid)
+	}
+	return out
 }

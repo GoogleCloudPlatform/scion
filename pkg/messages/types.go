@@ -59,11 +59,15 @@ func IsValidChannel(ch string) bool {
 }
 
 // Message type constants (closed enum).
+//
+// TypeAssistantReply is retired: it was the harness's automatic end-of-turn
+// transcript mirror. It stays valid so historical rows keep validating and
+// rendering; the hub drops new outbound sends of it.
 const (
 	TypeInstruction    = "instruction"
 	TypeInputNeeded    = "input-needed"
 	TypeStateChange    = "state-change"
-	TypeAssistantReply = "assistant-reply"
+	TypeAssistantReply = "assistant-reply" // retired; see above
 	TypeGroupSet       = "group-set"
 	TypeMention        = "mention"
 	TypeSystem         = "system"

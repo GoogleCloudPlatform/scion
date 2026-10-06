@@ -7,18 +7,12 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
-	"unicode/utf8"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -27,15 +21,6 @@ import (
 // HubHandler sends status updates to the Scion Hub.
 type HubHandler struct {
 	client *hub.Client
-
-	// addresseeCachePath caches the assistant-reply addressee resolved by
-	// creatorUserID; see readAddresseeCache.
-	addresseeCachePath string
-
-	// wait blocks for d or until ctx is done, returning ctx.Err() in the
-	// latter case. Nil means waitCtx; tests substitute it to observe the
-	// requested rate-limit wait without sleeping.
-	wait func(ctx context.Context, d time.Duration) error
 }
 
 // NewHubHandler creates a new hub handler.
@@ -45,192 +30,7 @@ func NewHubHandler() *HubHandler {
 	if client == nil || !client.IsConfigured() {
 		return nil
 	}
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = "/home/scion"
-	}
-	return &HubHandler{
-		client:             client,
-		addresseeCachePath: filepath.Join(home, addresseeCacheFile),
-	}
-}
-
-// mirrorBudget bounds the assistant-reply mirror (lookup, send and any
-// rate-limit retry) within Handle's 5s hook budget, so at least 1.5s is
-// always left for the status update that follows it.
-const mirrorBudget = 3500 * time.Millisecond
-
-// retryReserve is the part of the mirror's budget a rate-limit retry must
-// leave unspent after its Retry-After wait: time for the retried send
-// itself. It does not protect the status update; mirrorBudget does.
-const retryReserve = time.Second
-
-// forwardAssistantReply mirrors an assistant reply to the agent's creator as
-// an outbound "assistant-reply" message. The hub requires an explicit
-// addressee, so the reply is addressed to the creator by user ID; when the
-// creator is unknown or is not a user (an agent created by another agent),
-// the mirror is skipped. The mirror runs under its own mirrorBudget deadline
-// derived from ctx; a 429 is retried once if its Retry-After, plus
-// retryReserve, fits in what remains of that budget.
-// Best-effort: failures are logged, never returned.
-func (h *HubHandler) forwardAssistantReply(ctx context.Context, text string, metadata map[string]string, thinkingFiltered bool) {
-	ctx, cancel := context.WithTimeout(ctx, mirrorBudget)
-	defer cancel()
-
-	creatorID, err := h.creatorUserID(ctx)
-	if err != nil {
-		log.Warn("Hub: outbound assistant reply skipped, agent lookup failed: %v", err)
-		return
-	}
-	if creatorID == "" {
-		log.Debug("Hub: outbound assistant reply skipped: creator is unknown or not a user")
-		return
-	}
-
-	msg := hub.OutboundMessage{
-		RecipientID: creatorID,
-		Msg:         text,
-		Type:        "assistant-reply",
-		Metadata:    metadata,
-	}
-	err = h.client.SendOutboundMessage(ctx, msg)
-	if wait, ok := retryAfterWithinBudget(ctx, err, time.Now()); ok {
-		log.Debug("Hub: outbound assistant reply rate limited, retrying in %s", wait)
-		if err = h.waitFor(ctx, wait); err == nil {
-			err = h.client.SendOutboundMessage(ctx, msg)
-		}
-	}
-	if isAddrUnknown(err) {
-		// The creator no longer resolves (e.g. the user was deleted). That
-		// will not change for this agent, so cache a skip instead of
-		// sending a request the hub rejects on every later Stop.
-		// Permanent because user IDs are never reused; a user restore or
-		// undelete feature would need to invalidate this cache.
-		log.Warn("Hub: assistant reply addressee %s is unknown to the hub; disabling the mirror for this agent", creatorID)
-		writeAddresseeCache(h.addresseeCachePath, addresseeCache{AgentID: h.client.AgentID()})
-		return
-	}
-	if err != nil {
-		log.Error("Hub: outbound assistant reply failed: %v", err)
-		return
-	}
-	log.Debug("Hub: Forwarded assistant reply to message store (%d bytes, thinking_filtered=%v)",
-		len(text), thinkingFiltered)
-}
-
-// isAddrUnknown reports whether err is the hub's 400 addr_unknown rejection.
-func isAddrUnknown(err error) bool {
-	var statusErr *hub.HTTPStatusError
-	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusBadRequest &&
-		statusErr.Code() == addrUnknownCode
-}
-
-// addrUnknownCode is the hub's ErrCodeAddrUnknown (pkg/hub/errors.go).
-const addrUnknownCode = "addr_unknown"
-
-func (h *HubHandler) waitFor(ctx context.Context, d time.Duration) error {
-	if h.wait != nil {
-		return h.wait(ctx, d)
-	}
-	return waitCtx(ctx, d)
-}
-
-// waitCtx blocks for d or until ctx is done.
-func waitCtx(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// creatorUserID returns the user ID of the agent's creator, or "" when the
-// creator is unknown or is not a user. A user-created agent has
-// CreatedBy == the user's ID and ancestry exactly [that user]; an agent
-// created by another agent has the parent agent as CreatedBy and a longer
-// ancestry chain. The first successful lookup is cached in the agent home
-// and reused on later calls; lookup errors are returned uncached.
-func (h *HubHandler) creatorUserID(ctx context.Context) (string, error) {
-	agentID := h.client.AgentID()
-	if cached, ok := readAddresseeCache(h.addresseeCachePath, agentID); ok {
-		return cached.RecipientID, nil
-	}
-	self, err := h.client.GetSelf(ctx)
-	if err != nil {
-		// Not cached: a transient failure is retried on the next Stop.
-		return "", err
-	}
-	recipientID := ""
-	if self.CreatedBy != "" && len(self.Ancestry) == 1 && self.Ancestry[0] == self.CreatedBy {
-		recipientID = self.CreatedBy
-	}
-	// createdBy and ancestry are immutable, so the decision (including a
-	// skip) holds for the agent's lifetime.
-	writeAddresseeCache(h.addresseeCachePath, addresseeCache{AgentID: agentID, RecipientID: recipientID})
-	return recipientID, nil
-}
-
-// addresseeCacheFile is the agent-home file caching the assistant-reply
-// addressee. An empty RecipientID records a decision to skip.
-const addresseeCacheFile = ".scion-reply-addressee.json"
-
-// addresseeCacheMaxBytes bounds the cache read.
-const addresseeCacheMaxBytes = 4096
-
-type addresseeCache struct {
-	AgentID     string `json:"agentId"`
-	RecipientID string `json:"recipientId"`
-}
-
-// readAddresseeCache returns the cached addressee for agentID. A missing,
-// unreadable, corrupt or foreign-agent file reports ok=false so the caller
-// resolves afresh.
-func readAddresseeCache(path, agentID string) (addresseeCache, bool) {
-	if path == "" || agentID == "" {
-		return addresseeCache{}, false
-	}
-	data, err := dirfd.ReadFileNoFollow(path, addresseeCacheMaxBytes)
-	if err != nil {
-		return addresseeCache{}, false
-	}
-	var c addresseeCache
-	if err := json.Unmarshal(data, &c); err != nil || c.AgentID != agentID {
-		return addresseeCache{}, false
-	}
-	return c, true
-}
-
-// writeAddresseeCache atomically replaces the cache file. Failure only costs
-// a lookup on the next Stop, so it is logged and otherwise ignored.
-func writeAddresseeCache(path string, c addresseeCache) {
-	if path == "" || c.AgentID == "" {
-		return
-	}
-	data, err := json.Marshal(c)
-	if err != nil {
-		return
-	}
-	if err := dirfd.WriteFileNoFollow(path, data, 0600, 0, 0, dirfd.ReplaceLeaf); err != nil {
-		log.Debug("Failed to cache assistant-reply addressee: %v", err)
-	}
-}
-
-// retryAfterWithinBudget reports whether err is a 429 carrying a Retry-After
-// such that waiting it out, plus retryReserve, fits within (<=) the time
-// remaining at now before ctx's deadline, and returns the wait. With no
-// deadline, any such 429 qualifies.
-func retryAfterWithinBudget(ctx context.Context, err error, now time.Time) (time.Duration, bool) {
-	var statusErr *hub.HTTPStatusError
-	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusTooManyRequests || !statusErr.HasRetryAfter {
-		return 0, false
-	}
-	if deadline, ok := ctx.Deadline(); ok && statusErr.RetryAfter+retryReserve > deadline.Sub(now) {
-		return 0, false
-	}
-	return statusErr.RetryAfter, true
+	return &HubHandler{client: client}
 }
 
 // Handle processes an event and sends a status update to the Hub.
@@ -328,29 +128,6 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		})
 
 	case hooks.EventToolEnd, hooks.EventAgentEnd, hooks.EventModelEnd:
-		// Forward assistant text (when the dialect extracted it — e.g.
-		// Claude's Stop hook via transcript_path) to the hub message
-		// store as an outbound agent→user reply. This is what makes
-		// assistant responses show up in the Messages tab. Best-effort:
-		// failure here must not break the status update flow below.
-		//
-		// Content-type filtering: AssistantText is pre-filtered by the
-		// dialect layer (thinking/reasoning blocks stripped).
-		if event.Name == hooks.EventAgentEnd && event.Data.AssistantText != "" {
-			text := truncateAssistantText(event.Data.AssistantText)
-
-			// Build metadata tags for content classification.
-			metadata := map[string]string{
-				"source": "hook",
-			}
-			if event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking() {
-				metadata["has_thinking"] = "true"
-			}
-
-			h.forwardAssistantReply(ctx, text, metadata,
-				event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking())
-		}
-
 		// Check if local activity is sticky before sending working
 		if h.isLocalActivitySticky() {
 			log.Debug("Hub: Skipping working (local activity is sticky)")
@@ -527,28 +304,6 @@ func (h *HubHandler) ReportCounts(turnCount, modelCallCount int) error {
 		CurrentTurns:      &turnCount,
 		CurrentModelCalls: &modelCallCount,
 	})
-}
-
-// truncateAssistantText caps an assistant reply at the hub's message-length
-// limit, measured in runes as the hub measures it, keeping the start of the
-// reply and reserving room for a marker reporting how many were dropped.
-func truncateAssistantText(text string) string {
-	total := utf8.RuneCountInString(text)
-	if total <= messages.MaxMessageLength {
-		return text
-	}
-
-	marker := func(dropped int) string {
-		return fmt.Sprintf("\n[truncated, %d characters omitted]", dropped)
-	}
-	// Sized against the worst case: the dropped count can only shrink the marker.
-	keep := messages.MaxMessageLength - utf8.RuneCountInString(marker(total))
-	if keep <= 0 {
-		// Defensive: unreachable at the current limit, but a negative slice
-		// would panic and no caller up to dispatchEvent recovers.
-		return string([]rune(text)[:messages.MaxMessageLength])
-	}
-	return string([]rune(text)[:keep]) + marker(total-keep)
 }
 
 // truncateMessage truncates a message to the specified length.

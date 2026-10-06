@@ -158,10 +158,12 @@ For `members`:
    principal, consistent with `OriginUserID`; reject missing/corrupt ancestry,
    a non-human root, and an absent/disabled/deleted user.
 3. Resolve that user's **current active membership in the destination project**.
-   Count built-in member/admin/owner bindings, including active effective-group
-   membership for member/admin. An owner counts as a member; ownership does
-   not permit the agent to pierce a target's mode.
-4. Ignore expired, not-yet-active, revoked, unrelated, and custom additive role
+   Count any active project-scoped role binding, built-in (member/admin/owner)
+   or custom, held directly or through active effective-group membership.
+   Groups never confer owner, so a group-bound owner role is ignored. An owner
+   counts as a member; ownership does not permit the agent to pierce a
+   target's mode.
+4. Ignore expired, not-yet-active, revoked, and unrelated (other-scope) role
    bindings. Public project visibility, a generic read grant, a shared project
    conversation, or Hub-admin status alone is not membership.
 5. Distinguish a negative membership result from a store error. Both refuse
@@ -720,7 +722,7 @@ that reply.
 | Initial scope | Cross-project DMs; group expansion must remain possible | Confirmed; kind-specific policies/capabilities preserve an additive extension. |
 | Hub disable | Block cross-project sends and agent history access | Confirmed; retain records and authorized human audit views. |
 | Receive enum | `none`, `members`, `any` | Matches original outline; no source-project allowlist. |
-| Membership level | Active member/admin/owner, including valid group-derived member/admin | Proposed detail; custom-only roles and public visibility do not qualify. |
+| Membership level | Any active project role binding (built-in or custom), direct or group-derived; group-bound owner ignored | Confirmed (ptone, 2026-10-05); public visibility alone does not qualify. |
 | Origin principal | Hub-attested root human | Proposed detail implementing member-progeny policy. |
 | Replies | Independent directional check; sender must have hub mode | Consequence of sender-mode and receiving-project controls; no automatic upgrade. |
 | Fine-grained history revocation | Canonical pair + active Hub feature + at least one allowed direction | Proposed detail; permits project-mode recipient reads without enabling replies. |

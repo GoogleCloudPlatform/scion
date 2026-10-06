@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
@@ -61,12 +62,18 @@ type Store interface {
 
 	// Agent cache
 	SetProjectAgents(ctx context.Context, pa *ProjectAgents) error
-	GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error)
 
 	// Pending ask-user requests
+	// CreatePendingAskUser stores req unless a request with the same ID
+	// already exists, in which case the existing request is kept unchanged.
 	CreatePendingAskUser(ctx context.Context, req *PendingAskUser) error
 	GetPendingAskUser(ctx context.Context, requestID string) (*PendingAskUser, error)
-	MarkAskUserResponded(ctx context.Context, requestID string) error
+	// MarkAskUserResponded marks an unanswered request as answered. It
+	// returns false when the request was already answered or does not exist.
+	MarkAskUserResponded(ctx context.Context, requestID string) (bool, error)
+	// ResetAskUserResponded marks a request as unanswered again so it can
+	// be retried.
+	ResetAskUserResponded(ctx context.Context, requestID string) error
 	DeleteExpiredAskUsers(ctx context.Context) (int, error)
 
 	// Callback lookup
@@ -99,21 +106,28 @@ func NewSQLiteStore(dbPath string) (Store, error) {
 		dbPath = expanded
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	// Apply the busy timeout on every pooled connection, not just the first,
+	// so concurrent writes wait for the lock instead of failing.
+	dsn := dbPath
+	if strings.Contains(dsn, "?") {
+		dsn += "&_pragma=busy_timeout(5000)"
+	} else {
+		dsn += "?_pragma=busy_timeout(5000)"
+	}
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite database: %w", err)
+	}
+	// Each connection to ":memory:" is a separate database, so use one.
+	if dbPath == ":memory:" {
+		db.SetMaxOpenConns(1)
 	}
 
 	// Enable WAL mode for concurrent read performance.
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
-	}
-
-	// Set busy timeout to avoid SQLITE_BUSY errors under contention.
-	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 
 	s := &sqliteStore{db: db}
@@ -138,7 +152,6 @@ CREATE TABLE IF NOT EXISTS channel_links (
 	linked_at TEXT NOT NULL,
 	active INTEGER NOT NULL DEFAULT 1,
 	show_agent_to_agent INTEGER NOT NULL DEFAULT 0,
-	show_assistant_reply INTEGER NOT NULL DEFAULT 1,
 	show_state_changes INTEGER NOT NULL DEFAULT 0,
 	chat_only INTEGER NOT NULL DEFAULT 0
 );
@@ -218,33 +231,33 @@ func (s *sqliteStore) Close() error {
 
 func (s *sqliteStore) CreateChannelLink(ctx context.Context, link *ChannelLink) error {
 	const q = `
-INSERT INTO channel_links (conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO channel_links (conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(conversation_id) DO UPDATE SET
 	team_id=excluded.team_id, team_name=excluded.team_name, channel_name=excluded.channel_name,
 	project_id=excluded.project_id, project_slug=excluded.project_slug,
 	default_agent=excluded.default_agent, linked_by=excluded.linked_by, linked_at=excluded.linked_at,
 	active=excluded.active, show_agent_to_agent=excluded.show_agent_to_agent,
-	show_assistant_reply=excluded.show_assistant_reply, show_state_changes=excluded.show_state_changes,
+	show_state_changes=excluded.show_state_changes,
 	chat_only=excluded.chat_only`
 	_, err := s.db.ExecContext(ctx, q,
 		link.ConversationID, link.TeamID, link.TeamName, link.ChannelName,
 		link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC().Format(time.RFC3339),
 		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent),
-		boolToInt(link.ShowAssistantReply), boolToInt(link.ShowStateChanges),
+		boolToInt(link.ShowStateChanges),
 		boolToInt(link.ChatOnly))
 	return err
 }
 
 func (s *sqliteStore) GetChannelLink(ctx context.Context, conversationID string) (*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM channel_links WHERE conversation_id = ?`
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only FROM channel_links WHERE conversation_id = ?`
 	row := s.db.QueryRowContext(ctx, q, conversationID)
 	return scanChannelLink(row)
 }
 
 func (s *sqliteStore) GetChannelLinksForProject(ctx context.Context, projectID string) ([]*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM channel_links WHERE (project_id = ? OR project_slug = ?) AND active = 1`
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only FROM channel_links WHERE (project_id = ? OR project_slug = ?) AND active = 1`
 	rows, err := s.db.QueryContext(ctx, q, projectID, projectID)
 	if err != nil {
 		return nil, err
@@ -254,7 +267,7 @@ func (s *sqliteStore) GetChannelLinksForProject(ctx context.Context, projectID s
 }
 
 func (s *sqliteStore) GetAllChannelLinks(ctx context.Context) ([]*ChannelLink, error) {
-	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_assistant_reply, show_state_changes, chat_only FROM channel_links`
+	const q = `SELECT conversation_id, team_id, team_name, channel_name, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, show_state_changes, chat_only FROM channel_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -267,14 +280,14 @@ func (s *sqliteStore) UpdateChannelLink(ctx context.Context, link *ChannelLink) 
 	const q = `
 UPDATE channel_links SET
 	team_id=?, team_name=?, channel_name=?, project_id=?, project_slug=?, default_agent=?, linked_by=?, linked_at=?,
-	active=?, show_agent_to_agent=?, show_assistant_reply=?, show_state_changes=?,
+	active=?, show_agent_to_agent=?, show_state_changes=?,
 	chat_only=?
 WHERE conversation_id=?`
 	_, err := s.db.ExecContext(ctx, q,
 		link.TeamID, link.TeamName, link.ChannelName, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC().Format(time.RFC3339),
 		boolToInt(link.Active), boolToInt(link.ShowAgentToAgent),
-		boolToInt(link.ShowAssistantReply), boolToInt(link.ShowStateChanges),
+		boolToInt(link.ShowStateChanges),
 		boolToInt(link.ChatOnly),
 		link.ConversationID)
 	return err
@@ -454,29 +467,6 @@ ON CONFLICT(project_id) DO UPDATE SET
 	return err
 }
 
-func (s *sqliteStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`
-	row := s.db.QueryRowContext(ctx, q, projectID)
-
-	var pa ProjectAgents
-	var slugsJSON, refreshedAt string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs); err != nil {
-		return nil, fmt.Errorf("unmarshal agent_slugs: %w", err)
-	}
-	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
-	if err != nil {
-		return nil, fmt.Errorf("parse refreshed_at: %w", err)
-	}
-	return &pa, nil
-}
-
 // --- PendingAskUser ---
 
 func (s *sqliteStore) CreatePendingAskUser(ctx context.Context, req *PendingAskUser) error {
@@ -487,10 +477,7 @@ func (s *sqliteStore) CreatePendingAskUser(ctx context.Context, req *PendingAskU
 	const q = `
 INSERT INTO pending_ask_users (request_id, activity_id, conversation_id, agent_slug, project_id, choices, expires_at, responded)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(request_id) DO UPDATE SET
-	activity_id=excluded.activity_id, conversation_id=excluded.conversation_id, agent_slug=excluded.agent_slug,
-	project_id=excluded.project_id, choices=excluded.choices, expires_at=excluded.expires_at,
-	responded=excluded.responded`
+ON CONFLICT(request_id) DO NOTHING`
 	_, err = s.db.ExecContext(ctx, q,
 		req.RequestID, req.ActivityID, req.ConversationID,
 		req.AgentSlug, req.ProjectID, string(choicesJSON),
@@ -523,8 +510,20 @@ func (s *sqliteStore) GetPendingAskUser(ctx context.Context, requestID string) (
 	return &p, nil
 }
 
-func (s *sqliteStore) MarkAskUserResponded(ctx context.Context, requestID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE pending_ask_users SET responded = 1 WHERE request_id = ?`, requestID)
+func (s *sqliteStore) MarkAskUserResponded(ctx context.Context, requestID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE pending_ask_users SET responded = 1 WHERE request_id = ? AND responded = 0`, requestID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
+func (s *sqliteStore) ResetAskUserResponded(ctx context.Context, requestID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE pending_ask_users SET responded = 0 WHERE request_id = ?`, requestID)
 	return err
 }
 
@@ -585,11 +584,11 @@ func (s *sqliteStore) DeleteExpiredCallbacks(ctx context.Context) (int, error) {
 func scanChannelLink(row *sql.Row) (*ChannelLink, error) {
 	var link ChannelLink
 	var linkedAt string
-	var active, showA2A, showAssistantReply, showStateChanges, chatOnly int
+	var active, showA2A, showStateChanges, chatOnly int
 	err := row.Scan(&link.ConversationID, &link.TeamID, &link.TeamName, &link.ChannelName,
 		&link.ProjectID, &link.ProjectSlug,
 		&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A,
-		&showAssistantReply, &showStateChanges, &chatOnly)
+		&showStateChanges, &chatOnly)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -602,7 +601,6 @@ func scanChannelLink(row *sql.Row) (*ChannelLink, error) {
 	}
 	link.Active = active != 0
 	link.ShowAgentToAgent = showA2A != 0
-	link.ShowAssistantReply = showAssistantReply != 0
 	link.ShowStateChanges = showStateChanges != 0
 	link.ChatOnly = chatOnly != 0
 	return &link, nil
@@ -613,11 +611,11 @@ func scanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 	for rows.Next() {
 		var link ChannelLink
 		var linkedAt string
-		var active, showA2A, showAssistantReply, showStateChanges, chatOnly int
+		var active, showA2A, showStateChanges, chatOnly int
 		err := rows.Scan(&link.ConversationID, &link.TeamID, &link.TeamName, &link.ChannelName,
 			&link.ProjectID, &link.ProjectSlug,
 			&link.DefaultAgent, &link.LinkedBy, &linkedAt, &active, &showA2A,
-			&showAssistantReply, &showStateChanges, &chatOnly)
+			&showStateChanges, &chatOnly)
 		if err != nil {
 			return nil, err
 		}
@@ -627,7 +625,6 @@ func scanChannelLinks(rows *sql.Rows) ([]*ChannelLink, error) {
 		}
 		link.Active = active != 0
 		link.ShowAgentToAgent = showA2A != 0
-		link.ShowAssistantReply = showAssistantReply != 0
 		link.ShowStateChanges = showStateChanges != 0
 		link.ChatOnly = chatOnly != 0
 		links = append(links, &link)
