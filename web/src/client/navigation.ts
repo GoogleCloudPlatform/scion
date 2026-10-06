@@ -29,11 +29,36 @@
 /**
  * Prefix an app path (e.g. `/projects/abc`) with the configured base path
  * for use as a browser URL. Returns the path unchanged when the app is
- * served at `/`.
+ * served at `/`. The inverse of {@link stripBasePath}.
  */
 export function browserPath(path: string): string {
   const base = import.meta.env.BASE_URL;
   return base && base !== '/' ? base.replace(/\/$/, '') + path : path;
+}
+
+/**
+ * Strip the Vite base path prefix from a URL pathname so the client-side
+ * router can match application routes when served behind a reverse proxy.
+ * Uses import.meta.env.BASE_URL which Vite injects at build/dev time.
+ * When base is '/' (no proxy), this is a no-op.
+ */
+export function stripBasePath(pathname: string): string {
+  const base = import.meta.env.BASE_URL;
+  if (!base || base === '/') return pathname;
+
+  // Normalize: strip trailing slash from base for comparison
+  const baseNoSlash = base.replace(/\/$/, '');
+
+  // Exact match (base path without trailing slash, e.g. /foo)
+  if (pathname === baseNoSlash) return '/';
+
+  // Prefix match (e.g. /foo/bar → /bar)
+  if (pathname.startsWith(base)) {
+    const stripped = pathname.slice(base.length - 1); // keep leading /
+    return stripped || '/';
+  }
+
+  return pathname;
 }
 
 /**
