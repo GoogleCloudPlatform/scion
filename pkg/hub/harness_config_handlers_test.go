@@ -327,6 +327,124 @@ func TestHarnessConfigPatch(t *testing.T) {
 	}
 }
 
+// createHarnessConfigWithContent stores a harness config whose content hash
+// and file manifest were set by the server.
+func createHarnessConfigWithContent(t *testing.T, s store.Store, id string) *store.HarnessConfig {
+	t.Helper()
+	hc := &store.HarnessConfig{
+		ID:          tid(id),
+		Slug:        id,
+		Name:        "Content Test",
+		Description: "original description",
+		Harness:     "claude",
+		Config:      &store.HarnessConfigData{Harness: "claude", Image: "original-image:1"},
+		Scope:       "global",
+		Status:      store.HarnessConfigStatusActive,
+		ContentHash: "sha256:server-computed",
+		Files: []store.TemplateFile{
+			{Path: "config.yaml", Size: 42, Hash: "sha256:config", Mode: "0644"},
+			{Path: "home/.bashrc", Size: 7, Hash: "sha256:bashrc", Mode: "0644"},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateHarnessConfig(context.Background(), hc); err != nil {
+		t.Fatalf("failed to create harness config: %v", err)
+	}
+	return hc
+}
+
+func assertHarnessConfigContentEqual(t *testing.T, label string, want, got *store.HarnessConfig) {
+	t.Helper()
+	if got.ContentHash != want.ContentHash {
+		t.Errorf("%s content hash = %q, want %q", label, got.ContentHash, want.ContentHash)
+	}
+	if len(got.Files) != len(want.Files) {
+		t.Fatalf("%s files = %+v, want %+v", label, got.Files, want.Files)
+	}
+	for i := range want.Files {
+		if got.Files[i] != want.Files[i] {
+			t.Errorf("%s files[%d] = %+v, want %+v", label, i, got.Files[i], want.Files[i])
+		}
+	}
+}
+
+// TestHarnessConfigUpdate_PreservesContentHashAndFiles verifies that the
+// update handler keeps the server-computed content hash and file list from
+// the existing record when the request body carries different values.
+func TestHarnessConfigUpdate_PreservesContentHashAndFiles(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	hc := createHarnessConfigWithContent(t, s, "hc-update-content")
+
+	body := store.HarnessConfig{
+		Name:        hc.Name,
+		Slug:        hc.Slug,
+		Harness:     hc.Harness,
+		Status:      hc.Status,
+		ContentHash: "sha256:request-body",
+		Files: []store.TemplateFile{
+			{Path: "other.yaml", Size: 1, Hash: "sha256:other", Mode: "0600"},
+		},
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/harness-configs/"+hc.ID, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var returned store.HarnessConfig
+	if err := json.Unmarshal(rec.Body.Bytes(), &returned); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	assertHarnessConfigContentEqual(t, "returned", hc, &returned)
+
+	stored, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		t.Fatalf("failed to get harness config: %v", err)
+	}
+	assertHarnessConfigContentEqual(t, "stored", hc, stored)
+}
+
+// TestHarnessConfigUpdate_AppliesUpdatableFields verifies that descriptive
+// fields and config still update through the update handler.
+func TestHarnessConfigUpdate_AppliesUpdatableFields(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	hc := createHarnessConfigWithContent(t, s, "hc-update-fields")
+
+	body := store.HarnessConfig{
+		Name:        "Renamed Config",
+		Slug:        hc.Slug,
+		DisplayName: "Renamed Display",
+		Description: "updated description",
+		Harness:     hc.Harness,
+		Config:      &store.HarnessConfigData{Harness: "claude", Image: "updated-image:2"},
+		Status:      hc.Status,
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/harness-configs/"+hc.ID, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	stored, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		t.Fatalf("failed to get harness config: %v", err)
+	}
+	if stored.Name != "Renamed Config" {
+		t.Errorf("name = %q, want %q", stored.Name, "Renamed Config")
+	}
+	if stored.DisplayName != "Renamed Display" {
+		t.Errorf("display name = %q, want %q", stored.DisplayName, "Renamed Display")
+	}
+	if stored.Description != "updated description" {
+		t.Errorf("description = %q, want %q", stored.Description, "updated description")
+	}
+	if stored.Config == nil || stored.Config.Image != "updated-image:2" {
+		t.Errorf("config = %+v, want image %q", stored.Config, "updated-image:2")
+	}
+	assertHarnessConfigContentEqual(t, "stored", hc, stored)
+}
+
 // TestHandleHarnessConfigFinalize_PersistsModelAliases is a regression test
 // for ptone/scion#2365 review round 1 (R2): the production record that
 // triggered the bug was written through the push/finalize path

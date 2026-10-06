@@ -566,6 +566,10 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	hc.StoragePath = existing.StoragePath
 	hc.StorageURI = existing.StorageURI
 	hc.StorageBucket = existing.StorageBucket
+	// Content state is computed by the server during upload/finalize and
+	// is carried over from the existing record.
+	hc.ContentHash = existing.ContentHash
+	hc.Files = existing.Files
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
