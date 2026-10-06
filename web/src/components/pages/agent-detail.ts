@@ -278,8 +278,9 @@ export class ScionPageAgentDetail extends LitElement {
     }
     .header-meta {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 1rem;
+      gap: 0.5rem 1rem;
       margin-top: 0.5rem;
     }
     .template-badge {

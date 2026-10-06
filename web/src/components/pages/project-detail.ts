@@ -518,21 +518,37 @@ export class ScionPageProjectDetail extends LitElement {
 
     .header-title {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 0.75rem;
       margin-bottom: 0.5rem;
     }
 
-    .header-title sl-icon {
+    .header-title > sl-icon {
+      flex-shrink: 0;
       color: var(--scion-primary, #3b82f6);
       font-size: 1.5rem;
+      /* Centre the icon on the first line of the name: (1.95rem h1 line box
+         - 1.5rem icon) / 2. */
+      margin-top: 0.225rem;
+    }
+    /* A long name wraps on its own line; the badges then follow on the next
+       line instead of floating beside a multi-line name. */
+    .header-title-text {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      min-width: 0;
     }
 
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
+      line-height: 1.3;
       color: var(--scion-text, #1e293b);
       margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     .header-path {
@@ -2613,7 +2629,9 @@ export class ScionPageProjectDetail extends LitElement {
         <div class="header-info">
           <div class="header-title">
             ${this.renderProjectIcon()}
-            <h1>${this.project.name}${this.renderLinkedBadge()}</h1>
+            <div class="header-title-text">
+              <h1>${this.project.name}${this.renderLinkedBadge()}</h1>
+            </div>
           </div>
           <div class="header-path">
             <scion-git-remote-display .project=${this.project}></scion-git-remote-display>

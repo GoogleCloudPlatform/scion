@@ -68,6 +68,12 @@ describe('agent detail layout', () => {
     expect(rules.get('.header h1') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
   });
 
+  it('wraps the template, project and broker links under the name', () => {
+    const meta = rules.get('.header-meta') ?? '';
+    expect(meta).toMatch(/display:\s*flex/);
+    expect(meta).toMatch(/flex-wrap:\s*wrap/);
+  });
+
   it('keeps the message-mode select inside its column', () => {
     expect(rules.get('.messaging-grid') ?? '').toMatch(/flex-wrap:\s*wrap/);
     const column = rules.get('.messaging-grid .messaging-mode') ?? '';
