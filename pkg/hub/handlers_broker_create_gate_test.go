@@ -40,7 +40,7 @@ import (
 // through real middleware and handlers — no manually constructed identity
 // stands in for the authorization decision itself — and confirm that neither
 // the target-owner nor the super-admin shortcut in
-// authorizedForBrokerOwnerAction admits a scoped UAT.
+// authorizedForBrokerRotate admits a scoped UAT.
 // ============================================================================
 
 // TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied pins the primary
@@ -73,8 +73,8 @@ func TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied(t *testing.T) {
 // (not broker-related at all), must be denied re-registration of that
 // broker. The broker.create gate is the first, and today the only, denier
 // here: a project-scoped UAT is rejected against this hub-level resource
-// before authorizedForBrokerOwnerAction ever runs. The scoped-credential
-// exclusion in authorizedForBrokerOwnerAction (see
+// before authorizedForBrokerRotate ever runs. The scoped-credential
+// exclusion in authorizedForBrokerRotate (see
 // TestBrokerCreateGate_OwnerUATCannotRotate) is what enforces the same rule
 // on the owner shortcut once a caller reaches that check at all.
 func TestBrokerCreateGate_OwnerUATCannotRemint(t *testing.T) {
@@ -100,7 +100,7 @@ func TestBrokerCreateGate_OwnerUATCannotRemint(t *testing.T) {
 // that a super-admin's UAT, scoped to agent:read only, must be denied
 // re-registering a broker it does not own. As with the owner case above, the
 // broker.create gate denies this first; the scoped-credential exclusion in
-// authorizedForBrokerOwnerAction (see
+// authorizedForBrokerRotate (see
 // TestBrokerCreateGate_SuperAdminUATCannotRotate) enforces the same rule on
 // the admin shortcut once a caller reaches that check at all.
 func TestBrokerCreateGate_SuperAdminUATCannotRemint(t *testing.T) {
@@ -124,7 +124,7 @@ func TestBrokerCreateGate_SuperAdminUATCannotRemint(t *testing.T) {
 }
 
 // TestBrokerCreateGate_OwnerUATCannotRotate confirms the owner shortcut in
-// authorizedForBrokerOwnerAction does not admit a scoped UAT for
+// authorizedForBrokerRotate does not admit a scoped UAT for
 // rotate-secret. Rotate-secret is a distinct operation from registration and
 // is not covered by the broker.create gate, so this exclusion is the only
 // check standing between a scoped owner UAT and the broker's HMAC secret: a
@@ -156,7 +156,7 @@ func TestBrokerCreateGate_OwnerUATCannotRotate(t *testing.T) {
 // TestBrokerCreateGate_SuperAdminUATCannotRotate is the rotate-secret
 // counterpart for the super-admin shortcut: rotate-secret is a distinct
 // operation from registration and is not covered by the broker.create gate,
-// so authorizedForBrokerOwnerAction is the only check standing between a
+// so authorizedForBrokerRotate is the only check standing between a
 // scoped super-admin UAT and another user's HMAC secret.
 func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
 	srv, s := testServer(t)
