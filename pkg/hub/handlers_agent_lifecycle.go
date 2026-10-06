@@ -578,6 +578,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// startFromRest: a start of an agent in an uncounted phase, which
 	// startAgentCore marked starting (a new generation).
 	var startFromRest bool
+	// startDispatched: a start's dispatch through startAgentCore reached the
+	// broker successfully (its status write may have failed).
+	var startDispatched bool
 	// stopRunID is the run a stop is dispatched for; the stopped status is
 	// recorded only while the row still holds it (ptone/scion#2550).
 	var stopRunID string
@@ -619,6 +622,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
 			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			// From here the start no longer follows the client
+			// (ptone/scion#1961): a client that gives up must not cancel the
+			// broker launch, the rollback or the final status write. The
+			// dispatch is bounded by syncDispatch (SyncDispatchBound).
+			ctx = detachLaunchFromClient(ctx)
 			// The start runs under a start claim, which records run intent
 			// running (it stays running if the dispatch fails: a failed
 			// start is still a start the user asked for). startAgentCore
@@ -629,7 +637,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// made when the start fails (ptone/scion#1978), and writes the
 			// started status while the claim is held.
 			startFromRest = !isBrokerQuotaCountedPhase(agent.Phase)
-			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume})
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume, SyncDispatchBound: true})
+			startDispatched = dispatchErr == nil || errors.Is(dispatchErr, errStartedStatusWrite)
 			if dispatchErr == nil {
 				startStatusWritten = true
 				newPhase = agent.Phase
@@ -704,6 +713,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		hasBroker := dispatcher != nil && agent.RuntimeBrokerID != ""
 		var restartClaim *startClaimRun
 		if hasBroker {
+			// As for start: from here the restart no longer follows the
+			// client (ptone/scion#1961). Each leg is bounded by
+			// syncDispatch.
+			ctx = detachLaunchFromClient(ctx)
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
@@ -767,7 +780,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// exited and some runtimes (podman) return non-standard
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
-			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
+			stopErr := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStop(dctx, agent)
+			})
 			// The broker has no runtime of the agent's recorded type
 			// registered (ptone/scion#2748): the agent may still be
 			// running there, so do not start it anywhere else.
@@ -787,10 +802,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			sd.reassertReservation(ctx)
 			// Restart is stop + start: a fresh harness session, not a resume.
 			// The start leg runs under the claim taken before the stop leg,
-			// with the capacity hold taken before it.
+			// with the capacity hold taken before it; its dispatch is bounded
+			// by syncDispatch (SyncDispatchBound).
 			existing := restartClaim
 			restartClaim = nil
-			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing, Dispatch: sd, NewGeneration: true})
+			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimRestart, Existing: existing, Dispatch: sd, NewGeneration: true, SyncDispatchBound: true})
 			if dispatchErr == nil {
 				startStatusWritten = true
 				newPhase = agent.Phase
@@ -910,6 +926,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// generation and keeps its live status.
 		statusUpdate.ClearTerminalRemnants = action == api.AgentActionRestart || sd.wroteStarting() || startFromRest
 	}
+	// A start or restart whose broker start landed after a delete won
+	// (ptone/scion#3255): the dispatch has already deleted the landed run
+	// again (compensateLandedRun), so answer 409 delete_in_progress as the
+	// mid-dispatch case does, rather than writing the status and answering
+	// 200 (delete-claimed or soft-deleted row) or 404 (row gone). The
+	// delete engine owns the row and its reservation; nothing is written or
+	// published here. Reached only after a successful dispatch
+	// (dispatchErr == nil above). A restart's start leg holds sd; a start
+	// dispatched through startAgentCore sets startDispatched.
+	landed := (sd != nil || startDispatched) && (action == api.AgentActionStart || action == api.AgentActionRestart)
+	if landed {
+		if s.deleteWonAfterLanding(ctx, id) {
+			writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
+			return
+		}
+	}
 	if action == api.AgentActionStop {
 		// Only while the row still holds the stopped run: a newer run keeps
 		// its state and reservation (ptone/scion#2550).
@@ -937,6 +969,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// A start or restart run by startAgentCore wrote its status while
 		// its claim was held.
 		if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+			// The row was hard-deleted between the re-read above and this
+			// write: the same delete_in_progress answer.
+			if landed && errors.Is(err, store.ErrNotFound) {
+				writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
+				return
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}

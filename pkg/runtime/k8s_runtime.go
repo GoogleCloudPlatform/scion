@@ -2509,87 +2509,18 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, extraVolumeMounts...)
 	}
 
-	// Apply resource requests/limits from the common resource spec with safe parsing.
-	// When no resources are specified, apply defaults so that GKE Autopilot
-	// (and other environments) get predictable scheduling behavior.
-	if config.Resources == nil {
-		config.Resources = &api.ResourceSpec{
-			Requests: api.ResourceList{CPU: "250m", Memory: "512Mi"},
-			Limits:   api.ResourceList{CPU: "2", Memory: "4Gi"},
-			Disk:     "10Gi",
-		}
+	// Apply resource requests/limits from the resolved spec and
+	// kubernetes.resources. Default requests fill only resources with neither a
+	// request nor a limit (see buildK8sResourceRequirements).
+	var k8sResources *api.K8sResources
+	if config.Kubernetes != nil {
+		k8sResources = config.Kubernetes.Resources
 	}
-	if config.Resources != nil {
-		reqs := corev1.ResourceList{}
-		limits := corev1.ResourceList{}
-		if config.Resources.Requests.CPU != "" {
-			q, err := parseResourceSafe(config.Resources.Requests.CPU, "requests.cpu")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceCPU] = q
-		}
-		if config.Resources.Requests.Memory != "" {
-			q, err := parseResourceSafe(config.Resources.Requests.Memory, "requests.memory")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceMemory] = q
-		}
-		if config.Resources.Limits.CPU != "" {
-			q, err := parseResourceSafe(config.Resources.Limits.CPU, "limits.cpu")
-			if err != nil {
-				return nil, err
-			}
-			limits[corev1.ResourceCPU] = q
-		}
-		if config.Resources.Limits.Memory != "" {
-			q, err := parseResourceSafe(config.Resources.Limits.Memory, "limits.memory")
-			if err != nil {
-				return nil, err
-			}
-			limits[corev1.ResourceMemory] = q
-		}
-		if config.Resources.Disk != "" {
-			q, err := parseResourceSafe(config.Resources.Disk, "disk (ephemeral-storage)")
-			if err != nil {
-				return nil, err
-			}
-			reqs[corev1.ResourceEphemeralStorage] = q
-			limits[corev1.ResourceEphemeralStorage] = q
-		}
-		if len(reqs) > 0 || len(limits) > 0 {
-			pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
-				Requests: reqs,
-				Limits:   limits,
-			}
-		}
+	containerResources, err := buildK8sResourceRequirements(config.Resources, k8sResources)
+	if err != nil {
+		return nil, err
 	}
-
-	// Merge Kubernetes-specific resources on top (supports extended resources like GPUs).
-	if config.Kubernetes != nil && config.Kubernetes.Resources != nil {
-		res := &pod.Spec.Containers[0].Resources
-		if res.Requests == nil {
-			res.Requests = corev1.ResourceList{}
-		}
-		if res.Limits == nil {
-			res.Limits = corev1.ResourceList{}
-		}
-		for k, v := range config.Kubernetes.Resources.Requests {
-			q, err := parseResourceSafe(v, fmt.Sprintf("kubernetes.resources.requests.%s", k))
-			if err != nil {
-				return nil, err
-			}
-			res.Requests[corev1.ResourceName(k)] = q
-		}
-		for k, v := range config.Kubernetes.Resources.Limits {
-			q, err := parseResourceSafe(v, fmt.Sprintf("kubernetes.resources.limits.%s", k))
-			if err != nil {
-				return nil, err
-			}
-			res.Limits[corev1.ResourceName(k)] = q
-		}
-	}
+	pod.Spec.Containers[0].Resources = containerResources
 
 	// Process shared directories — mount shared-dir volumes.
 	// Build a set of shared dir targets so we can skip them in the regular volume loop.
