@@ -405,13 +405,13 @@ func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 
 	payload, err := json.Marshal(DispatchAgentEventPayload{AgentName: "sched-skill-agent", Template: "sched-skill-tmpl"})
 	require.NoError(t, err)
-	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, store.ScheduledEvent{
+	require.NoError(t, srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID:        tid("sched-skill-event"),
 		ProjectID: project.ID,
 		EventType: "dispatch_agent",
 		Payload:   string(payload),
 		CreatedBy: alice.ID,
-	}))
+	}, alice.ID)))
 
 	// #1795: the scheduled path stamps the resolved template's ID and hash,
 	// as the agent-create path does, so the broker can hydrate it and the

@@ -36,7 +36,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-jose/go-jose/v4/jwt"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/sync/singleflight"
 
@@ -4061,156 +4060,86 @@ type DispatchAgentEventPayload struct {
 	Branch    string `json:"branch,omitempty"`
 }
 
-func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.ScheduledEvent) (bool, error) {
-	if evt.CreatedBy == "" {
-		return false, fmt.Errorf("dispatch_agent event has no creator; cannot authorize at fire time")
-	}
-
-	if creator, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
-		if !creator.DeletedAt.IsZero() {
-			return false, fmt.Errorf("scheduled dispatch creator agent %q is deleted; cannot authorize", evt.CreatedBy)
-		}
-		if creator.ProjectID == "" || creator.ProjectID != evt.ProjectID {
-			return false, fmt.Errorf("scheduled dispatch creator agent %q is not in project %q", evt.CreatedBy, evt.ProjectID)
-		}
-		if s.authzService == nil {
-			return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
-		}
-		role, additionalScopes := agentRoleAndScopes(creator)
-		scopes := append(ScopesForRole(role), additionalScopes...)
-		hasCreate := false
-		for _, scope := range scopes {
-			if scope == ScopeAgentCreate {
-				hasCreate = true
-				break
-			}
-		}
-		if !hasCreate {
-			return false, fmt.Errorf("scheduled dispatch creator agent %q missing required scope: %s", evt.CreatedBy, ScopeAgentCreate)
-		}
-
-		agentIdentity := &agentIdentityWrapper{&AgentTokenClaims{
-			Claims:    jwt.Claims{Subject: creator.ID},
-			ProjectID: creator.ProjectID,
-			Scopes:    scopes,
-		}}
-
-		// The creator agent needs agent.create in the project through
-		// Decide, including the delegation ceiling of every live ancestor.
-		if decision := s.agentCreateDecision(ctx, agentIdentity, evt.ProjectID); !decision.Allowed {
-			return false, fmt.Errorf("scheduled dispatch creator agent %q is not authorized to create agents in project %q: %s",
-				evt.CreatedBy, evt.ProjectID, decision.Reason)
-		}
-
-		// CanDelegate check (Phase 1F): at fire time, verify the creator
-		// agent still holds the scopes it would delegate to the new agent.
-		grantDesc := GrantDescriptor{
-			Type:      GrantTypeAgentDelegation,
-			AgentRole: string(role),
-			ProjectID: evt.ProjectID,
-			ScopeType: store.RoleScopeProject,
-			ScopeID:   evt.ProjectID,
-		}
-		delegateDecision := s.authzService.CanDelegate(ctx, agentIdentity, grantDesc)
-		if !delegateDecision.Allowed {
-			s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-				MutationType:       "agent_delegation",
-				ActorPrincipalKind: "agent",
-				ActorPrincipalID:   creator.ID,
-				TargetType:         "scheduled_dispatch",
-				TargetID:           evt.ID,
-				CanDelegateResult:  "deny",
-				CanDelegateReason:  delegateDecision.Reason,
-			})
-			return false, fmt.Errorf("scheduled dispatch creator agent %q failed CanDelegate: %s",
-				evt.CreatedBy, delegateDecision.Reason)
-		}
-
-		return true, nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return false, fmt.Errorf("failed to resolve scheduled dispatch creator agent %q: %w", evt.CreatedBy, err)
-	}
-
-	user, err := s.store.GetUser(ctx, evt.CreatedBy)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return false, fmt.Errorf("scheduled dispatch creator %q was not found", evt.CreatedBy)
-		}
-		return false, fmt.Errorf("failed to resolve scheduled dispatch creator user %q: %w", evt.CreatedBy, err)
-	}
-	if user.Status != store.UserStatusActive {
-		return false, fmt.Errorf("scheduled dispatch creator user %q has status %s; cannot authorize",
-			evt.CreatedBy, user.Status)
-	}
-	if s.authzService == nil {
-		return false, fmt.Errorf("scheduled dispatch cannot authorize agent creation without authz service")
-	}
-	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
-	decision := s.agentCreateDecision(ctx, identity, evt.ProjectID)
-	if !decision.Allowed {
-		return false, fmt.Errorf("scheduled dispatch creator user %q is not authorized to create agents in project %q: %s",
-			evt.CreatedBy, evt.ProjectID, decision.Reason)
-	}
-
-	// CanDelegate check (Phase 1F): at fire time, re-resolve the user's
-	// current permissions and check they still cover the agent being dispatched.
-	if s.authzService != nil {
-		grantDesc := GrantDescriptor{
-			Type:      GrantTypeAgentDelegation,
-			AgentRole: string(AgentRoleFull), // scheduled dispatch uses the default role
-			ProjectID: evt.ProjectID,
-			ScopeType: store.RoleScopeProject,
-			ScopeID:   evt.ProjectID,
-		}
-		delegateDecision := s.authzService.CanDelegate(ctx, identity, grantDesc)
-		if !delegateDecision.Allowed {
-			s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-				MutationType:       "agent_delegation",
-				ActorPrincipalKind: "user",
-				ActorPrincipalID:   user.ID,
-				TargetType:         "scheduled_dispatch",
-				TargetID:           evt.ID,
-				CanDelegateResult:  "deny",
-				CanDelegateReason:  delegateDecision.Reason,
-			})
-			return false, fmt.Errorf("scheduled dispatch creator user %q failed CanDelegate at fire time: %s",
-				evt.CreatedBy, delegateDecision.Reason)
-		}
-	}
-
-	return true, nil
+// scheduledCreator is the creator a scheduled dispatch_agent fire runs as:
+// the authority of the event's authorization revision, the identity that
+// carries it, and the creator name recorded on the agent.
+type scheduledCreator struct {
+	Authority ScheduledAuthority
+	Identity  Identity
+	Name      string
 }
 
-// scheduledCreatorIdentity resolves a scheduled event's CreatedBy principal
-// into the Identity the agent-create path would have had on its request
-// context, plus the human-readable creator name that path records in
-// AppliedConfig.CreatorName (#1797). Mirrors createAgent: an agent creator is
-// named by its agent Name, a user creator by their email.
-//
-// authorizeScheduledAgentCreate has already admitted the creator by the time
-// this runs; this is attribution and identity construction, not a gate.
-func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string) (Identity, string, error) {
-	if createdBy == "" {
-		return nil, "", fmt.Errorf("scheduled event has no creator")
-	}
-	if creator, err := s.store.GetAgent(ctx, createdBy); err == nil {
-		role, additionalScopes := agentRoleAndScopes(creator)
-		scopes := append(ScopesForRole(role), additionalScopes...)
-		identity := &agentIdentityWrapper{&AgentTokenClaims{
-			Claims:    jwt.Claims{Subject: creator.ID},
-			ProjectID: creator.ProjectID,
-			Scopes:    scopes,
-		}}
-		return identity, creator.Name, nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return nil, "", fmt.Errorf("failed to resolve scheduled dispatch creator agent %q: %w", createdBy, err)
-	}
-	user, err := s.store.GetUser(ctx, createdBy)
+// authorizeScheduledAgentCreate authorizes a dispatch_agent fire under the
+// event's authorization revision (resolveScheduledAuthority): the returned
+// identity needs agent.create in the event's project through Decide, and
+// CanDelegate for the role it delegates. An agent principal also needs
+// ScopeAgentCreate. CreatedBy is history only and is never read for
+// authority.
+func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.ScheduledEvent) (scheduledCreator, error) {
+	creator, err := s.scheduledCreatorIdentity(ctx, evt)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve scheduled dispatch creator user %q: %w", createdBy, err)
+		return scheduledCreator{}, err
 	}
-	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
-	return identity, user.Email, nil
+	auth, identity := creator.Authority, creator.Identity
+
+	delegatedRole := AgentRoleFull // a user's scheduled dispatch is checked against the default role
+	if auth.PrincipalKind == store.DelegationPrincipalAgent {
+		role, _ := agentRoleAndScopes(auth.agent)
+		delegatedRole = role
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
+			return scheduledCreator{}, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
+		}
+	}
+
+	if decision := s.agentCreateDecision(ctx, identity, evt.ProjectID); !decision.Allowed {
+		return scheduledCreator{}, fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
+			auth.PrincipalKind, auth.PrincipalID, evt.ProjectID, decision.Reason)
+	}
+
+	// CanDelegate check (Phase 1F): at fire time, verify the principal still
+	// holds the scopes it would delegate to the new agent.
+	delegateDecision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(delegatedRole),
+		ProjectID: evt.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   evt.ProjectID,
+	})
+	if !delegateDecision.Allowed {
+		s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType:       mutationTypeAgentDelegation,
+			ActorPrincipalKind: auth.PrincipalKind,
+			ActorPrincipalID:   auth.PrincipalID,
+			TargetType:         "scheduled_dispatch",
+			TargetID:           evt.ID,
+			CanDelegateResult:  "deny",
+			CanDelegateReason:  delegateDecision.Reason,
+		})
+		return scheduledCreator{}, fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
+			auth.PrincipalKind, auth.PrincipalID, delegateDecision.Reason)
+	}
+	return creator, nil
+}
+
+// scheduledCreatorIdentity resolves the event's authorization revision
+// (resolveScheduledAuthority) into the identity the agent-create path would
+// have had on its request context, plus the creator name that path records
+// in AppliedConfig.CreatorName (#1797): an agent principal is named by its
+// agent Name, a user principal by their email.
+func (s *Server) scheduledCreatorIdentity(ctx context.Context, evt store.ScheduledEvent) (scheduledCreator, error) {
+	auth, identity, err := s.resolveScheduledAuthority(ctx, evt)
+	if err != nil {
+		return scheduledCreator{}, err
+	}
+	creator := scheduledCreator{Authority: auth, Identity: identity}
+	switch {
+	case auth.agent != nil:
+		creator.Name = auth.agent.Name
+	case auth.user != nil:
+		creator.Name = auth.user.Email
+	}
+	return creator, nil
 }
 
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
@@ -4379,7 +4308,17 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("dispatch_agent payload: agentName is required")
 		}
 
-		if _, err := s.authorizeScheduledAgentCreate(ctx, evt); err != nil {
+		// The fire runs under the event's authorization revision; CreatedBy
+		// is history only.
+		creator, err := s.authorizeScheduledAgentCreate(ctx, evt)
+		if err != nil {
+			return err
+		}
+		creatorIdentity := creator.Identity
+		// The child's edge takes its ceiling and provenance from the
+		// revision (scheduledEffectCeiling), never from the fire identity.
+		edgeCeiling, edgeProvenance, err := s.scheduledEffectCeiling(ctx, creator.Authority, evt)
+		if err != nil {
 			return err
 		}
 
@@ -4441,18 +4380,20 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 
 		// Build applied config with task
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
-		// Scheduled dispatch has no modeled delegation context yet. Persist the
-		// lowest explicit role for every scheduled child so migration/backfill
-		// code can never reinterpret it as a legacy empty-role agent.
-		agent.AppliedConfig.AgentRole = string(AgentRoleNone)
-		agent.AppliedConfig.NoAuth = true
+		// Scheduled dispatch persists the lowest explicit role for every
+		// scheduled child so migration/backfill code can never reinterpret it
+		// as a legacy empty-role agent. The role is checked against the
+		// edge ceiling at the point the create path checks it, before the
+		// role selects NoAuth; role=none fits every ceiling.
+		childRole, cause, fits := childRoleWithinCeiling(edgeCeiling, AgentRoleNone, true)
+		if !fits {
+			return fmt.Errorf("scheduled dispatch of agent %q: %w: %s", slug, errScheduledAuthorityDenied, cause)
+		}
+		agent.AppliedConfig.AgentRole = string(childRole)
+		agent.AppliedConfig.NoAuth = childRole == AgentRoleNone
 		// Record the creator's display name exactly as the agent-create path
 		// does; the broker threads it through to the agent (#1797).
-		creatorIdentity, creatorName, err := s.scheduledCreatorIdentity(ctx, evt.CreatedBy)
-		if err != nil {
-			return err
-		}
-		agent.AppliedConfig.CreatorName = creatorName
+		agent.AppliedConfig.CreatorName = creator.Name
 		if payload.Task != "" {
 			agent.AppliedConfig.Task = payload.Task
 		}
@@ -4602,10 +4543,6 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// hub.asyncAgentLaunch is on.
 		agent.LaunchAsyncOptIn = true
 
-		if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {
-			return fmt.Errorf("failed to create agent %q: %w", slug, err)
-		}
-
 		// E.2b: success-path audit for scheduled dispatch. The deny-path
 		// records for this same CanDelegate check are in
 		// authorizeScheduledAgentCreate above. ActorPrincipalKind/ID mirror
@@ -4614,6 +4551,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// keeps the fire-time execution/authorization identity as CreatedBy,
 		// so the deny and allow audits for the same check agree on who the
 		// actor is.
+		//
+		// The audit record is written in the agent-create transaction below.
 		//
 		// The recorded initiator's credential is copied onto the audit ONLY
 		// when the initiator is the same principal as the creator/executor
@@ -4630,11 +4569,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// column every other writer fills from that domain, not
 		// InitiatorAttribution's smaller one.
 		scheduledDispatchAudit := &store.MutationAuditRecord{
-			MutationType:       "agent_delegation",
+			MutationType:       mutationTypeAgentDelegation,
 			ActorPrincipalKind: creatorIdentity.Type(),
 			ActorPrincipalID:   creatorIdentity.ID(),
-			TargetType:         "agent",
-			TargetID:           agent.ID,
 			CanDelegateResult:  "allow",
 		}
 		initiator := s.scheduledInitiator(evt.InitiatorAttribution)
@@ -4644,23 +4581,43 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				scheduledDispatchAudit.ActorCredentialID = initiator.CredentialID
 			}
 		}
-		s.emitMutationAudit(ctx, scheduledDispatchAudit)
 
-		// Record delegation edge (Phase 1G) from the schedule creator to the
-		// dispatched agent. Best-effort: log errors but do not fail dispatch.
-		// Determine delegator type by looking up whether the creator is an agent.
-		delegatorType := store.DelegationPrincipalUser
-		if _, err := s.store.GetAgent(ctx, evt.CreatedBy); err == nil {
-			delegatorType = store.DelegationPrincipalAgent
+		// The agent row, its identity keys, its delegation edge and the
+		// audit record commit in one transaction, or none do. The edge's
+		// delegator is the typed revision principal; its ceiling and
+		// provenance are the scheduledEffectCeiling pair. An edge-write
+		// failure fails the create.
+		if err := s.commitAgentCreate(ctx, agentCreateWrite{
+			Ceiling:    edgeCeiling,
+			Provenance: edgeProvenance,
+			Agent:      agent,
+			Slug:       slug,
+			Edge: &store.DelegationEdge{
+				DelegatorType: creator.Authority.PrincipalKind,
+				DelegatorID:   creator.Authority.PrincipalID,
+				DelegateType:  store.DelegationPrincipalAgent,
+				ScopeType:     store.RoleScopeProject,
+				ScopeID:       evt.ProjectID,
+				Role:          agent.AppliedConfig.AgentRole,
+				Active:        true,
+			},
+			Audit: scheduledDispatchAudit,
+		}); err != nil {
+			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
-		// Use the agent's actual effective role from its applied config,
-		// not AgentRoleNone. The edge role is used for audit and for
-		// frozen-ceiling decisions on orphaned delegations.
-		edgeRole := string(AgentRoleNone)
-		if agent.AppliedConfig != nil && agent.AppliedConfig.AgentRole != "" {
-			edgeRole = agent.AppliedConfig.AgentRole
+		// rollback compensates the committed create after a later step
+		// failed: the agent row is deleted, its edge deactivated with cause
+		// create_compensation, and an agent_create_dispatch_failed audit
+		// record written (cleanupFailedCreate).
+		rollback := func(rb createRollback) error {
+			rb.Agent = agent
+			rb.RuntimeBrokerID = runtimeBrokerID
+			rb.CreateAuditID = scheduledDispatchAudit.ID
+			if corrID := s.cleanupFailedCreate(ctx, rb); corrID != "" {
+				return fmt.Errorf("failed to dispatch agent %q: %w (rollback incomplete, correlation ID %s)", slug, rb.Cause, corrID)
+			}
+			return fmt.Errorf("failed to dispatch agent %q: %w", slug, rb.Cause)
 		}
-		s.recordDelegationEdgeWithType(ctx, agent.ID, evt.ProjectID, edgeRole, delegatorType, evt.CreatedBy)
 
 		// Dispatch to runtime broker
 		dispatchExecutor, _ := ExecutorContextFromContext(ctx)
@@ -4676,9 +4633,15 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+			return rollback(createRollback{Stage: createStageRunIntent, Cause: err})
 		}
 		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
+		if errors.Is(err, ErrLaunchInvalidPhase) {
+			// A stop or delete reached the record before the launch began.
+			// Nothing was sent to the broker; the record is left to that
+			// operation.
+			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		}
 		if err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,
@@ -4687,7 +4650,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"error", err,
 				"executor_kind", dispatchExecutor.Kind,
 				"executor_id", dispatchExecutor.ID)
-			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+			// No revoke here: DispatchAgentCreate revokes any credential it
+			// minted on its error return.
+			return rollback(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(dispatcher, agent)})
 		}
 		if created.AcceptedLaunch() != nil {
 			// The row is already provisioning; persist the non-status

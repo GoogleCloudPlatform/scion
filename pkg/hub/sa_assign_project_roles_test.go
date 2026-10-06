@@ -740,13 +740,13 @@ func TestSAAssign2147_MemberScheduledDispatch_Enforce_EvaluatesScheduleCreator(t
 			enforceSAAssign(m.srv, checker)
 
 			agentName := "2147-path-sched-" + tc.name
-			err := m.srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+			err := m.srv.dispatchAgentEventHandler()(context.Background(), withSessionRevision(store.ScheduledEvent{
 				ID:        "evt-" + agentName,
 				ProjectID: m.proj.ID,
 				EventType: "dispatch_agent",
 				Payload:   `{"agentName":"` + agentName + `","task":"scheduled work"}`,
 				CreatedBy: m.member.ID,
-			})
+			}, m.member.ID))
 			if tc.allow {
 				require.NoError(t, err)
 			} else {

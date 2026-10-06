@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -336,6 +337,7 @@ type mockScheduledEventStore struct {
 	users           map[string]*store.User
 	roleBindings    []*store.RoleBinding
 	roleDefinitions map[string]*store.RoleDefinition
+	audits          []*store.MutationAuditRecord
 }
 
 func newMockStore() *mockScheduledEventStore {
@@ -530,6 +532,15 @@ func (m *mockScheduledEventStore) ReplaceAgentIdentityKeys(_ context.Context, _,
 
 func (m *mockScheduledEventStore) CreateDelegationEdge(_ context.Context, _ *store.DelegationEdge) error {
 	return nil // no-op for mock
+}
+
+// CreateMutationAudit records the audit row a scheduled create writes in
+// its transaction.
+func (m *mockScheduledEventStore) CreateMutationAudit(_ context.Context, r *store.MutationAuditRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.audits = append(m.audits, r)
+	return nil
 }
 
 func (m *mockScheduledEventStore) GetTemplate(_ context.Context, _ string) (*store.Template, error) {
@@ -1419,13 +1430,13 @@ func TestDispatchAgentEventHandler_ProjectNotFound(t *testing.T) {
 	handler := srv.dispatchAgentEventHandler()
 
 	ctx := context.Background()
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-noproject-1",
 		ProjectID: "nonexistent-project",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
 		CreatedBy: creatorID,
-	}
+	}, creatorID)
 
 	err := handler(ctx, evt)
 	if err == nil {
@@ -1452,13 +1463,13 @@ func TestDispatchAgentEventHandler_AgentAlreadyExists(t *testing.T) {
 	handler := srv.dispatchAgentEventHandler()
 
 	ctx := context.Background()
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-exists-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"worker-1"}`,
 		CreatedBy: creatorID,
-	}
+	}, creatorID)
 
 	err := handler(ctx, evt)
 	if err == nil {
@@ -1482,13 +1493,13 @@ func TestDispatchAgentEventHandler_CreatesAgentNoDispatcher(t *testing.T) {
 	handler := srv.dispatchAgentEventHandler()
 
 	ctx := context.Background()
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-ok-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker","template":"my-tmpl","task":"Do the thing"}`,
 		CreatedBy: "creator-agent",
-	}
+	}, "creator-agent")
 
 	// Should succeed — agent is created but not dispatched (no dispatcher)
 	err := handler(ctx, evt)
@@ -1530,13 +1541,13 @@ func TestDispatchAgentEventHandler_FireRequiresAgentCreateScope(t *testing.T) {
 	srv := newEventHandlerTestServer(ms)
 	handler := srv.dispatchAgentEventHandler()
 
-	err := handler(context.Background(), store.ScheduledEvent{
+	err := handler(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-readonly-creator",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker"}`,
 		CreatedBy: "readonly-creator",
-	})
+	}, "readonly-creator"))
 	if err == nil {
 		t.Fatal("expected readonly creator to be denied at fire time")
 	}
@@ -1579,17 +1590,17 @@ func TestAuthorizeScheduledAgentCreate_UserSuccessReturnsAllowed(t *testing.T) {
 	srv := newEventHandlerTestServer(ms)
 	srv.authzService = NewAuthzService(ms, slog.Default())
 
-	allowed, err := srv.authorizeScheduledAgentCreate(context.Background(), store.ScheduledEvent{
+	allowed, err := srv.authorizeScheduledAgentCreate(context.Background(), withSessionRevision(store.ScheduledEvent{
 		ID:        "dispatch-admin-user",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		CreatedBy: "admin-user",
-	})
+	}, "admin-user"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !allowed {
-		t.Fatal("expected user authorization success to return allowed=true")
+	if allowed.Authority.PrincipalID != "admin-user" || allowed.Identity == nil {
+		t.Fatalf("expected the revision principal as the scheduled creator, got %+v", allowed.Authority)
 	}
 }
 
@@ -1608,18 +1619,18 @@ func TestDispatchAgentEventHandler_SuspendedUserCreatorDenied(t *testing.T) {
 	srv.authzService = NewAuthzService(ms, slog.Default())
 	handler := srv.dispatchAgentEventHandler()
 
-	err := handler(context.Background(), store.ScheduledEvent{
+	err := handler(context.Background(), withSessionRevision(store.ScheduledEvent{
 		ID:        "dispatch-suspended-user",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"new-worker"}`,
 		CreatedBy: "admin-user",
-	})
+	}, "admin-user"))
 	if err == nil {
 		t.Fatal("expected suspended user creator to be denied at fire time")
 	}
-	if !strings.Contains(err.Error(), "status suspended") {
-		t.Fatalf("expected suspended status error, got: %v", err)
+	if !strings.Contains(err.Error(), reasonPrincipalInactive) {
+		t.Fatalf("expected inactive principal error, got: %v", err)
 	}
 	if _, err := ms.GetAgentBySlug(context.Background(), "project-1", "new-worker"); err == nil {
 		t.Fatal("suspended user creator must not create a scheduled agent")
@@ -1642,8 +1653,8 @@ func TestDispatchAgentEventHandler_EmptyCreatorDenied(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected empty creator to be denied at fire time")
 	}
-	if !strings.Contains(err.Error(), "no creator") {
-		t.Fatalf("expected no creator error, got: %v", err)
+	if !errors.Is(err, errScheduledAuthorityUnrecorded) {
+		t.Fatalf("expected unrecorded schedule authority error, got: %v", err)
 	}
 	if _, err := ms.GetAgentBySlug(context.Background(), "project-1", "new-worker"); err == nil {
 		t.Fatal("empty creator must not create a scheduled agent")
@@ -1705,13 +1716,13 @@ func TestDispatchAgentEventHandler_ResolvableTemplateDoesNotPanic(t *testing.T) 
 	srv := newEventHandlerTestServer(&resolvingTemplateStore{ms})
 	handler := srv.dispatchAgentEventHandler()
 
-	evt := store.ScheduledEvent{
+	evt := withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-resolvable-1",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"tmpl-worker","template":"my-tmpl","task":"Do the thing"}`,
 		CreatedBy: creatorID,
-	}
+	}, creatorID)
 
 	err := handler(context.Background(), evt)
 	if err != nil {
@@ -2367,13 +2378,13 @@ func TestDispatchAgentEventHandler_AgentCreatorSetsCreatorName(t *testing.T) {
 	}
 
 	srv := newEventHandlerTestServer(ms)
-	if err := srv.dispatchAgentEventHandler()(context.Background(), store.ScheduledEvent{
+	if err := srv.dispatchAgentEventHandler()(context.Background(), withMockAgentRevision(store.ScheduledEvent{
 		ID:        "dispatch-creator-name",
 		ProjectID: "project-1",
 		EventType: "dispatch_agent",
 		Payload:   `{"agentName":"sched-child"}`,
 		CreatedBy: "creator-agent",
-	}); err != nil {
+	}, "creator-agent")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

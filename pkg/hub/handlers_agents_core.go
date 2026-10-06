@@ -1091,14 +1091,14 @@ func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) 
 var errInvalidDisplayName = errors.New("invalid display name")
 
 // createAgentWithIdentityKey validates slug as the identity key agent.Name
-// will hold at creation (both production callers set Name to Slug before
+// will hold at creation (callers set Name to Slug before
 // calling this), then writes agent and its identity-key row in the same
 // transaction: the key row is what makes the key's per-project uniqueness a
 // database invariant, so it must never be able to drift from the row it was
-// computed from. This is the single point every production create path --
-// createAgentInProject and the scheduler's dispatchAgentEventHandler -- goes
-// through for this, so they cannot drift on the invariant the way only one
-// of them did before.
+// computed from. Both production create paths (createAgentInProject and the
+// scheduler's dispatchAgentEventHandler) write the same rows through
+// commitAgentCreate, which applies the same validation and key write inside
+// the agent-create transaction.
 //
 // A validation failure is wrapped in errInvalidDisplayName so a caller that
 // wants the specific, safe-to-surface message can distinguish it with
@@ -1113,7 +1113,7 @@ func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Ag
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
 		}
-		// Both production callers set Name to slug before calling this, so
+		// Callers set Name to slug before calling this, so
 		// api.IdentityKeysFor(slug, agent.Name) collapses to the single
 		// {slug} row -- the same function rename, restore, and the backfill
 		// migration use, rather than a separately-maintained literal here.
@@ -4488,33 +4488,6 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 		}
 	}
 	return out
-}
-
-// recordDelegationEdgeWithType creates a delegation edge with an explicitly
-// specified delegator type. Used by the scheduled dispatch path, where the
-// caller resolves the creator type. Best-effort: errors are logged but do not
-// fail the operation. The interactive create path writes its edge inside the
-// agent-create transaction instead (commitAgentCreate).
-func (s *Server) recordDelegationEdgeWithType(ctx context.Context, agentID, projectID, role, delegatorType, delegatorID string) {
-	edge := &store.DelegationEdge{
-		DelegatorType: delegatorType,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agentID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       projectID,
-		Role:          role,
-		Active:        true,
-		Grandfathered: false,
-	}
-	if err := s.store.CreateDelegationEdge(ctx, edge); err != nil {
-		slog.Warn("Failed to record delegation edge (best-effort)",
-			"agent_id", agentID,
-			"delegator_type", delegatorType,
-			"delegator_id", delegatorID,
-			"project_id", projectID,
-			"error", err)
-	}
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
@@ -39,4 +40,67 @@ func seedScheduleAuthorAgent(t *testing.T, s store.Store, projectID string) {
 		Phase:         "running",
 		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
 	}))
+}
+
+// withSessionRevision returns evt carrying the recorded authorization
+// revision a session create or re-save by userID writes: session attribution
+// for the user and the principal ceiling.
+func withSessionRevision(evt store.ScheduledEvent, userID string) store.ScheduledEvent {
+	evt.InitiatorAttribution = store.InitiatorAttribution{
+		InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+		InitiatorPrincipalID:    userID,
+		InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+		AttributionVersion:      1,
+		AuthorizationRevision:   1,
+	}
+	evt.AuthorityCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
+	return evt
+}
+
+// withAgentRevision returns evt carrying the recorded authorization revision
+// a create or re-save by the stored agent agentID writes: agent attribution
+// and the agent's own write ceiling, computed now from its stored row and
+// edge, as the authoring handler computes it.
+func withAgentRevision(t *testing.T, srv *Server, evt store.ScheduledEvent, agentID string) store.ScheduledEvent {
+	t.Helper()
+	ctx := context.Background()
+	agent, err := srv.store.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	ceiling, err := srv.authzService.agentRowEffectCeiling(ctx, agent)
+	require.NoError(t, err)
+	evt.InitiatorAttribution = store.InitiatorAttribution{
+		InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+		InitiatorPrincipalID:    agentID,
+		InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+		InitiatorCredentialID:   "jti-" + agentID,
+		AttributionVersion:      1,
+		AuthorizationRevision:   1,
+	}
+	evt.AuthorityCeiling = ceiling
+	return evt
+}
+
+// withMockAgentRevision returns evt carrying an agent revision for agentID
+// whose recorded ceiling allows every registry permission, for stores where
+// the author's write ceiling is not computed. A fire intersects it with the
+// agent's write ceiling at fire time, so the result is that ceiling.
+func withMockAgentRevision(evt store.ScheduledEvent, agentID string) store.ScheduledEvent {
+	ids := make([]string, 0, len(permissions.Registry))
+	for _, p := range permissions.Registry {
+		ids = append(ids, p.ID)
+	}
+	evt.InitiatorAttribution = store.InitiatorAttribution{
+		InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+		InitiatorPrincipalID:    agentID,
+		InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+		InitiatorCredentialID:   "jti-" + agentID,
+		AttributionVersion:      1,
+		AuthorizationRevision:   1,
+	}
+	evt.AuthorityCeiling = store.EffectCeiling{
+		Kind:          store.EffectCeilingBounded,
+		Version:       permissions.CeilingVersionV1,
+		PermissionIDs: sortedUniqueIDs(ids),
+	}
+	return evt
 }
