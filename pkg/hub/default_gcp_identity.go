@@ -66,7 +66,7 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 		return nil, fmt.Errorf("%s default GCP service account is not available in this project; "+
 			"update the %s's default GCP identity setting", tier, tier)
 	}
-	if !sa.Verified {
+	if !gcpServiceAccountVerified(sa) {
 		slog.Warn(tier+"-default SA assignment failed: service account not verified",
 			"surface", surface,
 			"project_id", projectID,

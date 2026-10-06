@@ -54,6 +54,8 @@ const apiFetch = vi.fn();
 
 const navigateToMock = vi.fn();
 
+const extractApiErrorMock = vi.fn((_res: unknown, _fallback: string) => Promise.resolve('error'));
+
 vi.mock('../../../client/main.js', () => ({
   get navigateTo() {
     return navigateToMock;
@@ -65,7 +67,7 @@ vi.mock('../../../client/main.js', () => ({
 
 vi.mock('../../../client/api.js', () => ({
   apiFetch: (...args: unknown[]) => apiFetch(...args) as unknown,
-  extractApiError: () => Promise.resolve('error'),
+  extractApiError: (res: unknown, fallback: string) => extractApiErrorMock(res, fallback),
 }));
 
 const showConfirmMock = vi.fn<(message: string, options?: unknown) => Promise<boolean>>();
@@ -78,7 +80,7 @@ vi.mock('../confirm-dialog.js', () => ({
   showConfirm: (message: string, options?: unknown) => showConfirmMock(message, options),
 }));
 
-await import('./chat-thread.js');
+const { pinnedAfterScroll } = await import('./chat-thread.js');
 // Registers <sl-textarea> so the composer's shadow root actually contains it
 // (and its own shadow root) instead of an unupgraded, shadow-less stand-in —
 // needed for the reply-focus tests below to walk into the native <textarea>.
@@ -1623,6 +1625,64 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
   });
 
+  // A replayed send response without dispatchState (an idempotency hit
+  // returns only id/content/sender) defaults to dispatched; it must not
+  // overwrite an SSE-delivered terminal no_recipient.
+  it('never downgrades an SSE-delivered no_recipient when the HTTP response omits dispatchState', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-me';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    let resolveSend!: (response: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveSend = resolve;
+        })
+    );
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'thanks',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    internals.messageMap.set('server-sse-no-recipient', {
+      id: 'server-sse-no-recipient',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'thread:t1',
+      recipientId: 't1',
+      msg: 'thanks',
+      type: 'chat',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'no_recipient',
+    });
+
+    resolveSend({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ id: 'server-sse-no-recipient', content: 'thanks' }),
+    } as unknown as Response);
+
+    await sendPromise;
+
+    expect(internals.messageMap.get('server-sse-no-recipient')?.dispatchState).toBe('no_recipient');
+  });
+
   // Review R2: PublishUserMessage now carries dispatchFailureReason/Code on
   // the SSE event for a failed row, so a live viewer in another tab (which
   // only ever sees the SSE path, never the send response) also renders
@@ -1652,6 +1712,78 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.dispatchState).toBe('failed');
     expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
     expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
+  });
+});
+
+describe('scion-chat-thread stale send and the sending state', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('frees the new conversation to send and keeps a stale send off it', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      _sendingConversations: Set<string>;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    const pending: Array<(value: unknown) => void> = [];
+    const send = (text: string) =>
+      internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text,
+            plain: false,
+            interrupt: false,
+            onSuccess: vi.fn(),
+            onError: vi.fn(),
+            mentions: [],
+            attachmentIds: [],
+          },
+        })
+      );
+    const holdNextPost = () =>
+      apiFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            pending.push(resolve);
+          })
+      );
+
+    const inFlight = internals._sendingConversations;
+    holdNextPost();
+    const staleSend = send('first');
+    expect(inFlight.has(CONVERSATION_KEY)).toBe(true);
+
+    // Switch conversations while the first POST is still in flight: the
+    // composer must not stay stuck in sending on the new conversation.
+    el.conversationKey = 'other-thread';
+    await el.updateComplete;
+    expect(inFlight.has('other-thread')).toBe(false);
+
+    // Start a send on the new conversation, then let the stale one finish.
+    holdNextPost();
+    const freshSend = send('second');
+    expect(inFlight.has('other-thread')).toBe(true);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+
+    pending[0]({ ok: false, status: 500, text: () => Promise.resolve('') });
+    await staleSend;
+    expect(inFlight.has(CONVERSATION_KEY)).toBe(false);
+    expect(inFlight.has('other-thread')).toBe(true);
+
+    pending[1]({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'server-fresh', attachments: [] }),
+    });
+    await freshSend;
+    expect(inFlight.size).toBe(0);
   });
 });
 
@@ -2633,6 +2765,238 @@ describe('scion-chat-thread initial scroll position', () => {
     await Promise.resolve();
 
     expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
+  });
+
+  it('stays at the bottom when the list grows under a pinned reader', async () => {
+    const el = await mountWithHistory();
+    scrollWrites = [];
+
+    // An image further up finishes loading and the list grows.
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
+  });
+
+  it('leaves a reader who scrolled away where they are when the list grows', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    container.scrollTop = 0;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites).toEqual([]);
+  });
+
+  it('keeps the pin when a scroll event trails the list growing beneath the reader', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    // At the bottom: 1000 - 700 - 300 = 0.
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+
+    // An image box renders and the list grows by 484px before the scroll
+    // event queued by the last pin write is dispatched. The position did
+    // not move up, so this is not the reader scrolling away.
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => SCROLL_HEIGHT + 484,
+    });
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT + 484);
+  });
+
+  it('keeps the pin when the list shrinks and then grows before the scroll event', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+
+    // Clamp scrollTop to the scroll range, as a browser does.
+    let height = SCROLL_HEIGHT;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => height,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return Math.min(scrollTops.get(this) ?? 0, Math.max(0, height - CLIENT_HEIGHT));
+      },
+      set(this: HTMLElement, value: number) {
+        scrollTops.set(this, Math.min(value, Math.max(0, height - CLIENT_HEIGHT)));
+        if (this.classList.contains('messages-scroll') && this.isConnected) {
+          scrollWrites.push({ top: value, messagesRendered: 0, renderPending: false });
+        }
+      },
+    });
+
+    // A reserved image box is taller than the image: the list shrinks, the
+    // offset is pulled up, and the resize catch-up runs.
+    height = SCROLL_HEIGHT - 171;
+    el.keepPinnedToBottom();
+    // Then the list grows before the clamp's scroll event is dispatched.
+    height = SCROLL_HEIGHT + 101;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT + 101);
+  });
+
+  it('drops the pin when the reader scrolls up past the threshold', async () => {
+    const el = await mountWithHistory();
+    const container = scrollContainer(el);
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+
+    container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT - 200;
+    container.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    scrollWrites = [];
+
+    el.keepPinnedToBottom();
+
+    expect(scrollWrites).toEqual([]);
+  });
+
+  for (const step of [0.5, 0.9]) {
+    it(`drops the pin when the reader drags up slowly, ${step}px at a time`, async () => {
+      const el = await mountWithHistory();
+      const container = scrollContainer(el);
+      container.scrollTop = SCROLL_HEIGHT - CLIENT_HEIGHT;
+      container.dispatchEvent(new Event('scroll'));
+      await el.updateComplete;
+
+      // Each frame moves less than a pixel, but together they carry the
+      // reader well past the threshold.
+      let top = SCROLL_HEIGHT - CLIENT_HEIGHT;
+      while (top > SCROLL_HEIGHT - CLIENT_HEIGHT - 200) {
+        top -= step;
+        container.scrollTop = top;
+        container.dispatchEvent(new Event('scroll'));
+      }
+      await el.updateComplete;
+      scrollWrites = [];
+
+      el.keepPinnedToBottom();
+
+      expect(scrollWrites).toEqual([]);
+    });
+  }
+
+  describe('steps aside for the other scroll owners', () => {
+    const owners: Array<[string, (el: Record<string, unknown>) => void]> = [
+      ['the unread anchor', (el) => (el._unreadAnchorActive = true)],
+      ['a jump to a message', (el) => (el._jumpScrollCleanup = () => {})],
+      ['a view around an older message', (el) => (el.viewingAroundMessage = true)],
+    ];
+    for (const [owner, claim] of owners) {
+      it(`writes no scroll while ${owner} is steering`, async () => {
+        const el = await mountWithHistory();
+        const internals = el as unknown as Record<string, unknown>;
+        expect(internals.pinnedToBottom, 'the reader starts at the bottom').toBe(true);
+        claim(internals);
+        scrollWrites = [];
+
+        el.keepPinnedToBottom();
+
+        expect(scrollWrites).toEqual([]);
+      });
+    }
+  });
+
+  it('watches the message list for size changes while open', async () => {
+    const observed: Element[] = [];
+    const callbacks: ResizeObserverCallback[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(cb: ResizeObserverCallback) {
+        callbacks.push(cb);
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    } as unknown as typeof ResizeObserver;
+    try {
+      const el = await mountWithHistory();
+      expect(observed.some((t) => t.classList.contains('messages-list'))).toBe(true);
+      scrollWrites = [];
+      for (const cb of callbacks) cb([], {} as ResizeObserver);
+      expect(scrollWrites.at(-1)?.top).toBe(SCROLL_HEIGHT);
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
+
+  it('stops watching the message list once removed', async () => {
+    const instances: { targets: Element[]; disconnects: number }[] = [];
+    const original = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly record = { targets: [] as Element[], disconnects: 0 };
+      constructor() {
+        instances.push(this.record);
+      }
+      observe(target: Element): void {
+        this.record.targets.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {
+        this.record.disconnects++;
+      }
+    } as unknown as typeof ResizeObserver;
+    try {
+      const el = await mountWithHistory();
+      const watch = instances.find((r) =>
+        r.targets.some((t) => t.classList.contains('messages-list'))
+      );
+      expect(watch, 'the list is watched while open').toBeDefined();
+      const before = watch!.disconnects;
+
+      el.remove();
+
+      expect(watch!.disconnects).toBe(before + 1);
+      expect((el as unknown as Record<string, unknown>)._bottomPinTarget).toBeNull();
+    } finally {
+      globalThis.ResizeObserver = original;
+    }
+  });
+});
+
+describe('pinnedAfterScroll', () => {
+  it('pins near the bottom whatever came before', () => {
+    expect(pinnedAfterScroll(false, 0, true, true)).toBe(true);
+    expect(pinnedAfterScroll(false, 79, false, false)).toBe(true);
+  });
+
+  it('keeps a pin when the list grew without the reader scrolling up', () => {
+    expect(pinnedAfterScroll(true, 484, false, false)).toBe(true);
+  });
+
+  it('drops the pin when the reader scrolled up', () => {
+    expect(pinnedAfterScroll(true, 200, true, false)).toBe(false);
+  });
+
+  it('drops the pin while another scroll owner is steering', () => {
+    expect(pinnedAfterScroll(true, 200, false, true)).toBe(false);
+  });
+
+  it('never pins a reader away from the bottom who was not pinned', () => {
+    expect(pinnedAfterScroll(false, 200, false, false)).toBe(false);
   });
 });
 
@@ -5182,6 +5546,17 @@ describe('scion-chat-thread deliveryStateFor visibility (O1, p2a-r3 review)', ()
     }
   );
 
+  // no_recipient is shown like dispatched: only on the newest own message.
+  it('shows no_recipient only on the newest own message', () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    document.body.appendChild(el);
+    const internals = el as unknown as DeliveryStateInternals;
+    const msg = makeDeliveryMessage('no_recipient');
+    expect(internals.deliveryStateFor(msg, msg.id, false)).toBe('no_recipient');
+    expect(internals.deliveryStateFor(msg, 'a-newer-message-id', false)).toBe('');
+    expect(internals.deliveryStateFor(msg, 'a-newer-message-id', true)).toBe('');
+  });
+
   it('hides an ordinary dispatched state once it is no longer the last own message', () => {
     // Control: proves the test above is actually exercising the
     // deferred/failed exception, not a bug that shows every dispatchState
@@ -5533,7 +5908,7 @@ describe('scion-chat-thread recent-files capture', () => {
     );
   });
 
-  it('does not attribute an initial history page to a conversation the thread has since switched away from', async () => {
+  it('drops an initial history page once the thread has switched conversations', async () => {
     // The race is specifically in the gap between the fetch resolving (the
     // existing fetchId check at that point still passes) and `res.json()`
     // resolving — not the earlier gap during the fetch itself, which the
@@ -5551,7 +5926,9 @@ describe('scion-chat-thread recent-files capture', () => {
             }),
         }) as unknown as Promise<Response>
     );
-    apiFetch.mockResolvedValue(emptyHistory());
+    // The new conversation's own load stays pending, so whatever the
+    // pagination state reads afterwards was left by the stale page alone.
+    apiFetch.mockImplementation(() => new Promise(() => {}));
 
     const el = document.createElement('scion-chat-thread') as ScionChatThread;
     el.conversationKey = CONVERSATION_KEY;
@@ -5580,13 +5957,27 @@ describe('scion-chat-thread recent-files capture', () => {
           createdAt: '2026-01-01T00:00:00Z',
         },
       ],
+      nextCursor: 'stale-cursor',
+      messageAttachments: {
+        'hist-stale': [{ id: 'att-stale', name: 'a.md', mime: 'text/markdown', size: 1 }],
+      },
     });
 
-    const internals = el as unknown as { messageMap: Map<string, unknown> };
-    // mergeMessages (unconditional) runs immediately before the recent-files
-    // guard, in the same synchronous continuation — once the stale item is
-    // merged, the guard has already run too.
-    await vi.waitFor(() => expect(internals.messageMap.has('hist-stale')).toBe(true));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // The page belongs to the conversation the thread has left: it is
+    // neither shown in the new one nor recorded as its files.
+    const internals = el as unknown as {
+      messageMap: Map<string, unknown>;
+      v2AttachmentMap: Map<string, unknown>;
+      nextCursor: string | null;
+      hasOlderMessages: boolean;
+    };
+    expect(internals.messageMap.has('hist-stale')).toBe(false);
+    expect(internals.v2AttachmentMap.has('hist-stale')).toBe(false);
+    // A one-item page would mark the history exhausted and set a cursor.
+    expect(internals.nextCursor).toBeNull();
+    expect(internals.hasOlderMessages).toBe(true);
     expect(ingestSpy).not.toHaveBeenCalled();
   });
 
@@ -5707,9 +6098,9 @@ describe('scion-chat-thread recent-files capture', () => {
     void el;
   });
 
-  it('does not attribute a reconnect-backfill page to a conversation the thread has since switched away from', async () => {
+  it('drops a reconnect-backfill page once the thread has switched conversations', async () => {
     // Same race as the initial-history-load test above, but for
-    // runBackfillV2's post-json re-check specifically: the gap is between
+    // runBackfillV2's post-json re-check: the gap is between
     // the fetch resolving (its earlier fetchId check still passes) and
     // `res.json()` resolving.
     const el = await mount();
@@ -5752,13 +6143,27 @@ describe('scion-chat-thread recent-files capture', () => {
           createdAt: '2026-01-01T00:00:00Z',
         },
       ],
+      messageAttachments: {
+        'backfill-stale': [{ id: 'att-stale', name: 'b.md', mime: 'text/markdown', size: 1 }],
+      },
+      messageExtensions: { 'backfill-stale': { messageId: 'backfill-stale', replyToId: 'x' } },
+      replyPreviews: { 'backfill-stale': { messageId: 'x', senderName: 'A', content: 'c' } },
     });
 
-    const internals = el as unknown as { messageMap: Map<string, unknown> };
-    // mergeMessages (unconditional) runs immediately before the recent-files
-    // guard, in the same synchronous continuation — once the stale item is
-    // merged, the guard has already run too.
-    await vi.waitFor(() => expect(internals.messageMap.has('backfill-stale')).toBe(true));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // The page belongs to the conversation the thread has left: it is
+    // neither shown in the new one nor recorded as its files.
+    const internals = el as unknown as {
+      messageMap: Map<string, unknown>;
+      v2AttachmentMap: Map<string, unknown>;
+      v2MessageExtMap: Map<string, unknown>;
+      v2ReplyPreviewMap: Map<string, unknown>;
+    };
+    expect(internals.messageMap.has('backfill-stale')).toBe(false);
+    expect(internals.v2AttachmentMap.has('backfill-stale')).toBe(false);
+    expect(internals.v2MessageExtMap.has('backfill-stale')).toBe(false);
+    expect(internals.v2ReplyPreviewMap.has('backfill-stale')).toBe(false);
     expect(ingestSpy).not.toHaveBeenCalled();
   });
 
@@ -7732,5 +8137,369 @@ describe('scion-chat-thread scroll position hand-over', () => {
     el.conversationKey = 'topic-2';
     await el.updateComplete;
     expect(el.scrollAnchor).toBeNull();
+  });
+});
+
+describe('scion-chat-thread work finishing after a conversation switch', () => {
+  type Internals = {
+    loading: boolean;
+    loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void>;
+    loadingOlder: boolean;
+    error: string | null;
+    handleJumpToLatest(): Promise<void>;
+    handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    startStreamV2(): void;
+    viewingAroundMessage: boolean;
+    pinnedToBottom: boolean;
+    composerReplyTo: { messageId: string; senderName: string; content: string } | null;
+    sendError: string | null;
+  };
+
+  const REPLY_TO = { messageId: 'm-1', senderName: 'Ada', content: 'hello' };
+
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  /** The next request answers at once, but its body waits for `release`. */
+  function holdNextBody(): { release: (body: unknown) => void } {
+    const held = { release: (_body: unknown): void => {} };
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((resolve) => {
+            held.release = resolve;
+          }),
+      } as unknown as Response)
+    );
+    return held;
+  }
+
+  function stalePage(id: string): unknown {
+    return {
+      items: [
+        {
+          id,
+          projectId: '',
+          sender: 'agent:coder',
+          senderId: 'agent-1',
+          recipient: '',
+          recipientId: '',
+          msg: 'old thread',
+          type: 'chat',
+          agentId: '',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    };
+  }
+
+  function send(el: ScionChatThread): Promise<void> {
+    return (el as unknown as Internals).handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hi',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+  }
+
+  async function switchConversation(el: ScionChatThread): Promise<void> {
+    el.conversationKey = 'other-thread';
+    await el.updateComplete;
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+    // Tests wait for this mock to be called; a call left over from an
+    // earlier test must not satisfy that wait.
+    extractApiErrorMock.mockClear();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('a stale initial load leaves the next conversation loading, its anchor and stream alone', async () => {
+    const held = holdNextBody();
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    // The next conversation's own history stays pending.
+    apiFetch.mockImplementation(() => new Promise(() => {}));
+    const consumed = vi.fn();
+    el.addEventListener('scroll-restore-consumed', consumed);
+    el.restoreScrollAnchor = {
+      conversationKey: 'other-thread',
+      pinnedToBottom: false,
+      messageId: 'x',
+      offset: 0,
+    };
+    await switchConversation(el);
+    const internals = el as unknown as Internals;
+    const startStream = vi.spyOn(internals, 'startStreamV2');
+    expect(internals.loading).toBe(true);
+
+    held.release(stalePage('stale-1'));
+    await flush();
+
+    expect(startStream).not.toHaveBeenCalled();
+    expect(internals.loading).toBe(true);
+    expect(consumed).not.toHaveBeenCalled();
+  });
+
+  it('a stale initial load error is not shown on the next conversation', async () => {
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    // The next conversation's own history stays pending.
+    apiFetch.mockImplementation(() => new Promise(() => {}));
+    await switchConversation(el);
+
+    releaseError('stale failure');
+    await flush();
+
+    expect((el as unknown as { error: string | null }).error).toBeNull();
+  });
+
+  it('an initial load error in the same conversation is shown', async () => {
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(() => expect((el as unknown as { error: string | null }).error).toBe('error'));
+  });
+
+  it('a stale older page does not shift the new conversation’s scroll position', async () => {
+    const el = await mount();
+    const held = holdNextBody();
+    let height = 100;
+    const scrollEl = {
+      scrollTop: 50,
+      get scrollHeight(): number {
+        return height;
+      },
+    } as unknown as HTMLElement;
+    const loading = (el as unknown as Internals).loadOlderMessagesV2(scrollEl);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    height = 400;
+    // The new conversation is loading its own older page.
+    (el as unknown as Internals).loadingOlder = true;
+
+    held.release(stalePage('stale-older'));
+    await loading;
+
+    expect(scrollEl.scrollTop).toBe(50);
+    expect((el as unknown as Internals).loadingOlder).toBe(true);
+  });
+
+  it('an older page failing after a switch leaves the new conversation’s spinner and scroll', async () => {
+    const el = await mount();
+    let rejectBody: (err: Error) => void = () => {};
+    apiFetch.mockImplementationOnce(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => new Promise((_, reject) => (rejectBody = reject)),
+      } as unknown as Response)
+    );
+    let height = 100;
+    const scrollEl = {
+      scrollTop: 50,
+      get scrollHeight(): number {
+        return height;
+      },
+    } as unknown as HTMLElement;
+    const internals = el as unknown as Internals;
+    const loading = internals.loadOlderMessagesV2(scrollEl);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    height = 400;
+    internals.loadingOlder = true;
+
+    rejectBody(new Error('stream reset'));
+    await loading;
+
+    expect(scrollEl.scrollTop).toBe(50);
+    expect(internals.loadingOlder).toBe(true);
+  });
+
+  it('a stale jump to latest leaves the new conversation’s view alone', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.viewingAroundMessage = true;
+    const held = holdNextBody();
+    const jumping = internals.handleJumpToLatest();
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    await flush();
+    // The new conversation opened on a message further up its history.
+    internals.viewingAroundMessage = true;
+    internals.pinnedToBottom = false;
+
+    held.release(stalePage('stale-latest'));
+    await jumping;
+
+    expect(internals.viewingAroundMessage).toBe(true);
+    expect(internals.pinnedToBottom).toBe(false);
+  });
+
+  it('a jump to latest whose request fails after a switch leaves the new view alone', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.viewingAroundMessage = true;
+    let rejectFetch: (err: Error) => void = () => {};
+    apiFetch.mockImplementationOnce(() => new Promise((_, reject) => (rejectFetch = reject)));
+    const jumping = internals.handleJumpToLatest();
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    await switchConversation(el);
+    await flush();
+    internals.viewingAroundMessage = true;
+
+    rejectFetch(new Error('offline'));
+    await jumping;
+
+    expect(internals.error).toBeNull();
+    expect(internals.pinnedToBottom).toBe(true);
+    expect(internals.viewingAroundMessage).toBe(true);
+  });
+
+  it('a jump to latest whose error is read after a switch leaves the new view alone', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.viewingAroundMessage = true;
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const jumping = internals.handleJumpToLatest();
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    await switchConversation(el);
+    await flush();
+    internals.viewingAroundMessage = true;
+
+    releaseError('stale failure');
+    await jumping;
+
+    expect(internals.error).toBeNull();
+    expect(internals.pinnedToBottom).toBe(true);
+    expect(internals.viewingAroundMessage).toBe(true);
+  });
+
+  it('a send refused after a switch puts no reply bar or error on the new conversation', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    let resolveSend!: (value: unknown) => void;
+    apiFetch.mockImplementationOnce(() => new Promise((resolve) => (resolveSend = resolve)));
+    const sending = send(el);
+    await switchConversation(el);
+
+    resolveSend({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    await sending;
+
+    expect(internals.composerReplyTo).toBeNull();
+    expect(internals.sendError).toBeNull();
+  });
+
+  it('a send that throws after a switch puts no reply bar or error on the new conversation', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    let rejectSend!: (err: Error) => void;
+    apiFetch.mockImplementationOnce(() => new Promise((_, reject) => (rejectSend = reject)));
+    const sending = send(el);
+    await switchConversation(el);
+
+    rejectSend(new Error('offline'));
+    await sending;
+
+    expect(internals.composerReplyTo).toBeNull();
+    expect(internals.sendError).toBeNull();
+  });
+
+  it('a send whose error is read after a switch shows no error on the new conversation', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const sending = send(el);
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    await switchConversation(el);
+
+    releaseError('stale failure');
+    await sending;
+
+    expect(internals.sendError).toBeNull();
+  });
+
+  it('a reply picked while a refused send reads its error is kept', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    let releaseError: (msg: string) => void = () => {};
+    extractApiErrorMock.mockImplementationOnce(
+      () => new Promise<string>((resolve) => (releaseError = resolve))
+    );
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500 } as unknown as Response);
+    const sending = send(el);
+    await vi.waitFor(() => expect(extractApiErrorMock).toHaveBeenCalled());
+    const picked = { messageId: 'm-2', senderName: 'Bob', content: 'later' };
+    internals.composerReplyTo = picked;
+
+    releaseError('refused');
+    await sending;
+
+    expect(internals.composerReplyTo).toEqual(picked);
+    expect(internals.sendError).toBe('refused');
+  });
+
+  it('a send refused in the same conversation restores the reply bar and shows the error', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 500, json: () => Promise.resolve({}) });
+
+    await send(el);
+
+    expect(internals.composerReplyTo).toEqual(REPLY_TO);
+    expect(internals.sendError).toBe('error');
+  });
+
+  it('a send that throws in the same conversation restores the reply bar and shows the error', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    internals.composerReplyTo = REPLY_TO;
+    apiFetch.mockRejectedValueOnce(new Error('offline'));
+
+    await send(el);
+
+    expect(internals.composerReplyTo).toEqual(REPLY_TO);
+    expect(internals.sendError).toBe('offline');
   });
 });

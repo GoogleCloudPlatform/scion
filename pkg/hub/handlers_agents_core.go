@@ -1458,7 +1458,7 @@ func (s *Server) createAgentInProject(
 			ValidationError(w, msgSANotAvailableInProject, nil)
 			return
 		}
-		if !sa.Verified {
+		if !gcpServiceAccountVerified(sa) {
 			ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
 			return
 		}
@@ -3541,7 +3541,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				ValidationError(w, msgSANotAvailableInProject, nil)
 				return
 			}
-			if !sa.Verified {
+			if !gcpServiceAccountVerified(sa) {
 				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
 				return
 			}
