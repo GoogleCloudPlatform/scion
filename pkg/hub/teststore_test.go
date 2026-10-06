@@ -70,10 +70,10 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 		return nil, err
 	}
 	s := entadapter.NewCompositeStore(client)
-	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Migrate(context.Background()); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
+	t.Cleanup(func() { _ = s.Close() })
 	return s, nil
 }
