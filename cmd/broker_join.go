@@ -104,8 +104,9 @@ func init() {
 // resolveBrokerJoinToken returns the join token, trimmed of surrounding
 // whitespace. It is read from tokenFile when set ('-' reads stdin), and
 // otherwise from SCION_BROKER_JOIN_TOKEN. A value without the scion_join_
-// prefix is rejected here, before any request is sent. A token file that
-// group or other users can read is used, with a warning written to stderr.
+// prefix is rejected here, before any request is sent. A token file with
+// any group or other permission bits is used, with a warning written to
+// stderr.
 func resolveBrokerJoinToken(tokenFile string, stdin io.Reader, stderr io.Writer) (string, error) {
 	var token, source string
 	switch tokenFile {
@@ -128,8 +129,8 @@ func resolveBrokerJoinToken(tokenFile string, stdin io.Reader, stderr io.Writer)
 		if err != nil {
 			return "", fmt.Errorf("failed to read the join token file: %w", err)
 		}
-		if info, statErr := f.Stat(); statErr == nil && info.Mode().Perm()&0o044 != 0 {
-			_, _ = fmt.Fprintf(stderr, "Warning: %s is readable by group or other users (mode %04o); consider chmod 600\n", tokenFile, info.Mode().Perm())
+		if info, statErr := f.Stat(); statErr == nil && info.Mode().Perm()&0o077 != 0 {
+			_, _ = fmt.Fprintf(stderr, "Warning: %s has group or other permissions (mode %04o); consider chmod 600\n", tokenFile, info.Mode().Perm())
 		}
 		data, err := readBrokerJoinTokenInput(f)
 		_ = f.Close()
@@ -281,7 +282,7 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 		hostname = "local-host"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 	defer cancel()
 
 	joined, err := completeJoinAndPersist(ctx, client, brokerJoinParams{

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,6 +67,10 @@ func isolateJoinEnv(t *testing.T) {
 		brokerJoinCmd.SetIn(nil)
 		hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = savedTTL, savedJSON
 	})
+	// cobra sets a context when the command is executed; these tests call
+	// the run functions directly.
+	brokerJoinCmd.SetContext(context.Background())
+	hubBrokersJoinTokenCreateCmd.SetContext(context.Background())
 	globalMode, hubEndpoint = false, ""
 	brokerJoinBrokerID, brokerHubName = "", ""
 	brokerJoinTokenFile, brokerJoinForce = "", false
@@ -504,17 +509,19 @@ func TestResolveBrokerJoinToken_Sources(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, at, got)
 	})
-	t.Run("readable token file warns", func(t *testing.T) {
-		p := write("open", "scion_join_open\n")
-		require.NoError(t, os.Chmod(p, 0o644))
-		var errOut bytes.Buffer
-		got, err := resolveBrokerJoinToken(p, nil, &errOut)
-		require.NoError(t, err, "the file is still used")
-		assert.Equal(t, "scion_join_open", got)
-		assert.Contains(t, errOut.String(), "readable by group or other users")
-		assert.NotContains(t, errOut.String(), "scion_join_open")
-		assert.Equal(t, 1, strings.Count(errOut.String(), "\n"), "one line")
-	})
+	for _, mode := range []os.FileMode{0o644, 0o620, 0o601, 0o640} {
+		t.Run(fmt.Sprintf("token file mode %04o warns", mode), func(t *testing.T) {
+			p := write(fmt.Sprintf("open-%o", mode), "scion_join_open\n")
+			require.NoError(t, os.Chmod(p, mode))
+			var errOut bytes.Buffer
+			got, err := resolveBrokerJoinToken(p, nil, &errOut)
+			require.NoError(t, err, "the file is still used")
+			assert.Equal(t, "scion_join_open", got)
+			assert.Contains(t, errOut.String(), "has group or other permissions")
+			assert.NotContains(t, errOut.String(), "scion_join_open")
+			assert.Equal(t, 1, strings.Count(errOut.String(), "\n"), "one line")
+		})
+	}
 	t.Run("private token file does not warn", func(t *testing.T) {
 		p := write("private", "scion_join_private\n")
 		require.NoError(t, os.Chmod(p, 0o600))
