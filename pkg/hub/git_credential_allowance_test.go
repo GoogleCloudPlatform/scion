@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -131,4 +132,67 @@ func TestApplyStartExtras_AllowGitCredentials(t *testing.T) {
 	payload = map[string]interface{}{}
 	applyStartExtras(payload, StartExtras{AllowGitCredentials: true})
 	assert.Equal(t, true, payload["allowGitCredentials"])
+}
+
+// TestReincarnate_AllowGitCredentials_RecomputedFromCurrentTemplate pins that
+// reincarnate recomputes the allowance from the agent's CURRENT template, in
+// both directions, rather than carrying the old generation's value: a
+// template turned on grants it to an agent created without it, and a
+// template turned off revokes it from an agent created with it. Each
+// direction is checked on the fresh config builder and through the
+// reincarnate endpoint (the config dispatched to the broker and the stored
+// row).
+func TestReincarnate_AllowGitCredentials_RecomputedFromCurrentTemplate(t *testing.T) {
+	cases := []struct {
+		name          string
+		templateAllow bool
+		oldAllow      bool
+	}{
+		{name: "template-on-grants", templateAllow: true, oldAllow: false},
+		{name: "template-off-revokes", templateAllow: false, oldAllow: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+
+			template := &store.Template{
+				ID:          tid("tmpl-gitcred-" + t.Name()),
+				Name:        "t",
+				Slug:        "reincarnate-template-gitcred-" + tidSlugSafe(t.Name()),
+				Harness:     "claude",
+				Scope:       store.TemplateScopeGlobal,
+				Status:      store.TemplateStatusActive,
+				ContentHash: "template-hash-gitcred",
+				Config:      &store.TemplateConfig{AllowGitCredentials: tc.templateAllow},
+			}
+			require.NoError(t, s.CreateTemplate(ctx, template))
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Template = template.Slug
+				a.AppliedConfig.AllowGitCredentials = tc.oldAllow
+			})
+
+			fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, project, "")
+			require.NoError(t, err)
+			assert.Equal(t, tc.templateAllow, fresh.AllowGitCredentials, "fresh config builder")
+
+			rec := httptest.NewRecorder()
+			self := agentIdentityFor(agent.ID, project.ID)
+			srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			r := waitForReincarnationSettled(t, s, agent.ID)
+			require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+
+			calls, cfgs := disp.reprovisionSnapshot()
+			require.Equal(t, 1, calls)
+			assert.Equal(t, tc.templateAllow, cfgs[0].AllowGitCredentials, "config dispatched to the broker")
+
+			final, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, final.AppliedConfig)
+			assert.Equal(t, tc.templateAllow, final.AppliedConfig.AllowGitCredentials, "stored applied config")
+		})
+	}
 }
