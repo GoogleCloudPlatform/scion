@@ -798,7 +798,8 @@ func TestAgentCompactView_MessagePayloadBytesRecord(t *testing.T) {
 // harness with the admin caller classes of the deletion visibility rule
 // (ptone/scion#3122): the unscoped local super admin, who sees code, error
 // and claim; a super admin's project-scoped user access token and a
-// federated user with the admin role, who get the generic view; and a
+// federated user with the admin role, who get the generic view (the
+// federated user reads no rows here; see the end of the test); and a
 // member and an agent token for reference. The scoped admin is also a
 // project owner, so its token reads the project's rows. Every non-admin
 // row must be the super admin's view without the detail fields.
@@ -845,7 +846,24 @@ func TestAgentCompactView_DeletionDetailAdminClasses(t *testing.T) {
 		assert.Positive(t, views[caller], "%s: non-null deletion views checked", caller)
 	}
 	assert.Positive(t, tally.cellObjects["scoped-admin-uat project"]["deletion"], "the scoped admin token reads deletion views on its project")
-	// The federated admin is not a local platform admin: whatever it
-	// reads is checked above as generic. Record what it reached.
-	t.Logf("federated-admin: %d non-null deletion views, statuses %v", views["federated-admin"], tally.cellStatus)
+	// The federated admin cannot read agent rows on these endpoints at all:
+	// a federated principal's ID is issuer:subject, not a local user UUID,
+	// so it holds no project membership or role binding and authorization
+	// resolves no grant for it (the same fail-closed path pinned for skills
+	// by TestListSkills_FederatedUserFailsClosedNotServerError). No fixture
+	// can grant it membership, so this harness pins that it reads nothing
+	// and never errors, in both views alike (the harness compares status
+	// and body). That federated users get the generic deletion view is
+	// pinned by TestCallerSeesDeletionDetail_OnlyUnscopedLocalAdmins and
+	// TestEnrichAgent_DeletionDetailFailsClosed, which call the predicate
+	// and both enrichment functions with a federated admin identity.
+	for _, ep := range []string{"global", "project", "other-project"} {
+		cell := "federated-admin " + ep
+		require.NotEmpty(t, tally.cellStatus[cell], "%s: requested", cell)
+		for status := range tally.cellStatus[cell] {
+			assert.Less(t, status, 500, "%s: first-page status %d", cell, status)
+		}
+		assert.Zero(t, tally.cellRows[cell], "%s: a federated principal reads no agent rows", cell)
+	}
+	assert.Zero(t, views["federated-admin"], "federated-admin: no deletion views read")
 }

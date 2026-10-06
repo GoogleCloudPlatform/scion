@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -976,6 +977,10 @@ func deleteSyncWaitFor(r *http.Request) time.Duration {
 // any other caller (isAdmin false) the body carries a generic message and
 // no deletionCode.
 func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAfter string, isAdmin bool) {
+	// The operator log keeps the full failure for every caller; writeError
+	// below logs only the message the caller receives.
+	slog.Warn("agent delete failed", "agent_id", agentID, "deletion_code", code,
+		"message", message, "body_redacted", !isAdmin)
 	details := map[string]interface{}{"agentId": agentID}
 	if isAdmin {
 		if message == "" {

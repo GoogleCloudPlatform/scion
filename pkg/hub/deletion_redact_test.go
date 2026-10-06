@@ -112,6 +112,18 @@ func seedDeletionWithError(t *testing.T, s store.Store, agentID string, d delete
 	require.Equal(t, 1, n)
 }
 
+// adminPublishCtx is a context carrying an unscoped local platform admin, the
+// one caller class that sees the detail on REST. Status events are published
+// with the request context (performAgentDelete publishes the claim snapshot
+// with it), so the SSE tests publish with this context: the event must still
+// carry the generic view.
+func adminPublishCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx := contextWithIdentity(context.Background(), NewAuthenticatedUser("u-pub-admin", "pub-admin@test.com", "Admin", "admin", "web"))
+	require.True(t, callerSeesDeletionDetail(ctx), "the publish context is an admin context")
+	return ctx
+}
+
 // --- the redaction function ---
 
 func TestRedactDeletionForCaller(t *testing.T) {
@@ -511,6 +523,68 @@ func TestDeleteJoinFailure_BodyAdminVsNonAdmin(t *testing.T) {
 	assert.NotContains(t, userRec.Body.String(), "c-91")
 }
 
+// TestDeleteJoinNotCompleted_BodyAdminVsNonAdmin covers resolveJoinFromRow's
+// other failure answer: the marker was cleared (state none) at a claim at or
+// above the observed one, so the delete did not complete.
+func TestDeleteJoinNotCompleted_BodyAdminVsNonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	agent := setupBrokerAgentInPhase(t, s, "redact-join-cleared", state.PhaseRunning)
+	seedDeletionWithError(t, s, agent.ID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}, "old failure text")
+	none := store.DeletionStateNone
+	n, err := s.UpdateAgentDeletion(context.Background(), agent.ID, store.DeletionPredicate{}, store.DeletionFields{State: &none})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	cleared := mustGetAgent(t, s, agent.ID)
+	require.Equal(t, store.DeletionStateNone, cleared.DeletionState)
+	require.Positive(t, cleared.DeletionClaim)
+
+	adminRec := httptest.NewRecorder()
+	require.True(t, srv.resolveJoinFromRow(adminRec, context.Background(), agent.ID, cleared.DeletionClaim, true))
+	userRec := httptest.NewRecorder()
+	require.True(t, srv.resolveJoinFromRow(userRec, context.Background(), agent.ID, cleared.DeletionClaim, false))
+
+	assert.Equal(t, http.StatusBadGateway, adminRec.Code)
+	assert.Equal(t, http.StatusBadGateway, userRec.Code)
+	_, msg, details := errorMessageAndDetails(t, adminRec)
+	assert.Equal(t, "agent delete did not complete", msg)
+	assert.Equal(t, store.DeletionCodeRuntimeError, details["deletionCode"])
+	apiCode, msg, details := errorMessageAndDetails(t, userRec)
+	assert.Equal(t, ErrCodeRuntimeError, apiCode)
+	assert.Equal(t, genericDeleteFailedMessage, msg)
+	assert.NotContains(t, details, "deletionCode")
+	assert.NotContains(t, userRec.Body.String(), "did not complete")
+}
+
+// TestDeleteJoinerDeadline202_BodyAdminVsNonAdmin covers the joiner's 202
+// at its deadline (joinAgentDeletion's timer) for both caller classes: a
+// live delete held by another request never resolves before the deadline.
+func TestDeleteJoinerDeadline202_BodyAdminVsNonAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	agent := setupBrokerAgentInPhase(t, s, "redact-join-202", state.PhaseRunning)
+	seedDeletionWithError(t, s, agent.ID, deleteSeed{state: store.DeletionStateDeleting, leaseIn: time.Hour}, "joiner detail text")
+	claim := mustGetAgent(t, s, agent.ID).DeletionClaim
+
+	join := func(isAdmin bool) map[string]json.RawMessage {
+		req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		rec := httptest.NewRecorder()
+		srv.joinAgentDeletion(rec, req, agent.ID, claim, time.Now().Add(200*time.Millisecond), isAdmin)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		obj := decodeObject(t, rec.Body.Bytes())
+		assert.JSONEq(t, `"`+agent.ID+`"`, string(obj["agentId"]))
+		return rawDeletionObject(t, obj["deletion"])
+	}
+	adminView := join(true)
+	require.NotNil(t, adminView)
+	assert.Contains(t, adminView, "claim")
+	assert.JSONEq(t, `"joiner detail text"`, string(adminView["error"]))
+	userView := join(false)
+	require.NotNil(t, userView)
+	for _, k := range deletionDetailKeys {
+		assert.NotContains(t, userView, k, "non-admin joiner 202 has no %q", k)
+	}
+	assertGenericDeletionOf(t, adminView, userView, "joiner 202")
+}
+
 // TestDeleteAccepted202_BodyAdminVsNonAdmin covers the 202 body, through the
 // writer for both classes and through a real slow DELETE for both.
 func TestDeleteAccepted202_BodyAdminVsNonAdmin(t *testing.T) {
@@ -573,7 +647,9 @@ func TestDeleteAccepted202_BodyAdminVsNonAdmin(t *testing.T) {
 // --- SSE ---
 
 // TestPublishAgentStatus_DeletionGenericForEverySubscriber: the status
-// event is marshaled once and fanned out as bytes, so every subscriber, on
+// event is published with an admin request context (as performAgentDelete
+// does for an admin's delete) and is marshaled once and fanned out as
+// bytes, so every subscriber, on
 // the agent subject and on the project subject, receives the same generic
 // view: no code, error or claim, with state and timestamps intact.
 func TestPublishAgentStatus_DeletionGenericForEverySubscriber(t *testing.T) {
@@ -594,7 +670,7 @@ func TestPublishAgentStatus_DeletionGenericForEverySubscriber(t *testing.T) {
 		DeletionError: "broker said: token /x invalid", DeletionClaim: 3,
 		DeletionStartedAt: &failedAt, DeletionFailedAt: &failedAt, DeletionLeaseAt: &failedAt,
 	}
-	pub.PublishAgentStatus(context.Background(), agent)
+	pub.PublishAgentStatus(adminPublishCtx(t), agent)
 	adminView := deletionJSON(t, store.ComputeAgentDeletion(agent, now))
 
 	var first string
@@ -615,7 +691,8 @@ func TestPublishAgentStatus_DeletionGenericForEverySubscriber(t *testing.T) {
 }
 
 // TestSSEHandler_AgentStatusDeletionGenericForAdminSession: even an admin
-// web session receives the generic view over SSE; admins read the detail
+// web session, receiving an event published with an admin request context,
+// gets the generic view over SSE; admins read the detail
 // fields from the REST agent.
 func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 	ws := newDevAuthWebServer(t)
@@ -638,6 +715,7 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 		DeletionError: "sse-secret-detail", DeletionClaim: 2,
 		DeletionStartedAt: &failedAt, DeletionFailedAt: &failedAt,
 	}
+	publishCtx := adminPublishCtx(t)
 	stop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(20 * time.Millisecond)
@@ -645,7 +723,7 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 		for {
 			select {
 			case <-ticker.C:
-				pub.PublishAgentStatus(context.Background(), agent)
+				pub.PublishAgentStatus(publishCtx, agent)
 			case <-stop:
 				return
 			}
@@ -654,13 +732,21 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 	var frame string
 	buf := make([]byte, 8192)
 	deadline := time.Now().Add(5 * time.Second)
-	for !strings.Contains(frame, "event: update") {
+	// Read until a whole update frame is buffered: its event line, its
+	// data line and the blank line that ends it.
+	complete := func() bool {
+		i := strings.Index(frame, "event: update")
+		return i >= 0 && strings.Contains(frame[i:], "\n\n")
+	}
+	for !complete() {
 		require.True(t, time.Now().Before(deadline), "timed out waiting for SSE event")
 		n, err := resp.Body.Read(buf)
 		require.NoError(t, err)
 		frame += string(buf[:n])
 	}
 	close(stop)
+	frame = frame[strings.Index(frame, "event: update"):]
+	frame = frame[:strings.Index(frame, "\n\n")]
 	assert.Contains(t, frame, `"deletion":{`)
 	assert.Contains(t, frame, `"state":"failed"`)
 	assert.NotContains(t, frame, "sse-secret-detail")
@@ -682,6 +768,7 @@ func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	var computeSites, viewSites []string
+	eventSites := 0
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -706,8 +793,17 @@ func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
 					if lit, ok := call.Args[2].(*ast.Ident); ok && lit.Name == "true" {
 						t.Errorf("deletionViewForCaller with a literal true at %s", fset.Position(call.Pos()))
 					}
-					if lit, ok := call.Args[2].(*ast.Ident); ok && lit.Name == "false" {
+					lit, isIdent := call.Args[2].(*ast.Ident)
+					isFalse := isIdent && lit.Name == "false"
+					if isFalse {
 						assert.Equal(t, "events.go", name, "only the event publisher uses the generic view unconditionally (%s)", fset.Position(call.Pos()))
+					}
+					// The status event is fanned out as one payload to
+					// every subscriber, so it must never take the
+					// publishing request's caller view.
+					if name == "events.go" {
+						eventSites++
+						assert.True(t, isFalse, "deletionViewForCaller in events.go must pass the literal false (%s)", fset.Position(call.Pos()))
 					}
 				}
 			}
@@ -719,4 +815,5 @@ func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
 	// enrichAgents, enrichAgent, two lifecycle responses, the managed
 	// response, the 202 writer and the status event.
 	assert.Len(t, viewSites, 7, "deletion view call sites: %v", viewSites)
+	assert.Equal(t, 1, eventSites, "events.go builds the status event's deletion view once")
 }
