@@ -58,7 +58,7 @@ func (e *userOwnsAgentsDeleteError) Error() string {
 	return userOwnsAgentsDeleteMessage
 }
 
-const userOwnsAgentsDeleteMessage = "cannot delete a user who owns agents — delete their agents first, including agents started by those agents"
+const userOwnsAgentsDeleteMessage = "cannot delete a user who owns agents — delete their agents first, including agents started by those agents or by the user's schedules"
 
 // writeUserOwnsAgentsDeleteError writes the 409 conflict response for a user
 // deletion refused because the user owns agents; details.agents lists them.
@@ -83,15 +83,16 @@ var ownedAgentsPageSize = 100
 // PostgreSQL; see store.UserStore.LockUserRow). Agent create (including the
 // scheduler's) and restore take a shared lock on that user's row in their
 // own transactions and re-check that the user exists (lockAgentGuardUserTx),
-// so an agent this check would count either commits
-// before it runs (and is listed) or waits for the delete and then fails. It
-// returns store.ErrNotFound if the user no longer exists.
+// so an agent this check would count either commits before it runs (and is
+// listed) or waits for the delete and then fails. It returns
+// store.ErrNotFound if the user no longer exists.
 //
 // Soft-deleted agents do not count: the agent list hides them by default
 // (AgentFilter.IncludeDeleted is false), and they are purged later; restore
-// refuses an agent whose guard user (lockAgentGuardUserTx) no longer exists. Every other agent
-// counts whatever its phase, including a stopped agent or one whose deletion
-// is still in progress, since all of those still appear in the agent list.
+// refuses an agent whose guard user (lockAgentGuardUserTx) no longer exists.
+// Every other agent counts whatever its phase, including a stopped agent or
+// one whose deletion is still in progress, since all of those still appear
+// in the agent list.
 func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string) error {
 	// agents.owner_id is a UUID column, so a user ID that is not a UUID
 	// cannot own an agent (and the store rejects it as a filter value).

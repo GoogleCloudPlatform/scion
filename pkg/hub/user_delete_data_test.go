@@ -806,7 +806,8 @@ func requireBefore(t *testing.T, r *userLockRecordingStore, first, second string
 // TestUserRowLocks_DeleteExclusiveCreateRestoreShared pins where the hub
 // takes the user-row lock (ptone/scion#2769): both delete paths lock the
 // user's row exclusively before listing the user's agents, and agent create
-// and restore lock the owner's row shared before writing the agent. On
+// and restore lock the guard user's row (owner, ancestry root, or schedule
+// creator; lockAgentGuardUserTx) shared before writing the agent. On
 // SQLite the lock is a plain read, so only the call order is checked here;
 // the PostgreSQL lock semantics are covered in pkg/store/integrationtest.
 func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {

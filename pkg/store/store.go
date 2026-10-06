@@ -1403,8 +1403,9 @@ type UserStore interface {
 	// so a user delete (exclusive) and an agent create or restore for that
 	// user (shared) serialize under READ COMMITTED. FOR KEY SHARE conflicts
 	// only with FOR UPDATE (and DELETE), so ordinary updates of the user row
-	// (last seen, profile edits) do not wait on a create or restore. On SQLite this is a plain read
-	// (SQLite already serializes writes at the database level).
+	// (last seen, profile edits) do not wait on a create or restore. On
+	// SQLite this is a plain read (SQLite already serializes writes at the
+	// database level).
 	//
 	// Must be called inside a transaction (WithTx). Returns ErrNotFound if
 	// the user does not exist.

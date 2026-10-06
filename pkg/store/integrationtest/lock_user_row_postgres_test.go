@@ -27,6 +27,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// waitLocked blocks until the holder goroutine signals that it holds the row
+// lock. If the holder returns before locking (for example LockUserRow or the
+// seed write fails), it fails the test at once instead of hanging until the
+// package timeout.
+func waitLocked(t *testing.T, locked <-chan struct{}, holderDone <-chan error) {
+	t.Helper()
+	select {
+	case <-locked:
+	case err := <-holderDone:
+		t.Fatalf("lock holder failed before locking: %v", err)
+	}
+}
+
 // lockWaitProbe is how long a transaction is expected to stay blocked on a
 // row lock held by another transaction before the holder is released.
 const lockWaitProbe = 300 * time.Millisecond
@@ -54,7 +67,7 @@ func TestLockUserRow_DeleteFirstFailsCreate_Postgres(t *testing.T) {
 			return tx.DeleteUser(ctx, u.ID)
 		})
 	}()
-	<-locked
+	waitLocked(t, locked, deleteDone)
 
 	createDone := make(chan error, 1)
 	go func() {
@@ -104,7 +117,7 @@ func TestLockUserRow_CreateFirstIsSeenByDelete_Postgres(t *testing.T) {
 			return nil
 		})
 	}()
-	<-locked
+	waitLocked(t, locked, createDone)
 
 	type result struct {
 		owned int
@@ -162,7 +175,7 @@ func TestLockUserRow_SharedDoesNotBlockUserUpdate_Postgres(t *testing.T) {
 			return nil
 		})
 	}()
-	<-locked
+	waitLocked(t, locked, holderDone)
 	defer func() {
 		close(release)
 		require.NoError(t, <-holderDone)
