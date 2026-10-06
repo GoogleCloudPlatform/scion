@@ -711,6 +711,9 @@ export class TerminalWorkspaceRoot {
    * explicit `eventFromTerminalPane` check below is belt-and-suspenders, not
    * what does the work. Only `ctrlKey` skips that check; `metaKey` must still
    * open the palette from inside a pane, so it is deliberately exempted.
+   * On macOS, Ctrl+K in any editable text field stays with the field (see
+   * isQuickPaletteShortcut); xterm's input textarea counts as one, which
+   * agrees with the pane rule.
    *
    * While the palette is open, the same shortcut closes it, as in chat.
    */

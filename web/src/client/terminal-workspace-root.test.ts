@@ -2267,6 +2267,27 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     await expectNotOpened();
   });
 
+  it('on a Mac, leaves Ctrl+K typed in a text field to the field', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(true);
+    await expectNotOpened();
+
+    expect(press({ key: 'k', metaKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field opens the palette', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    const input = document.createElement('input');
+    root.element.append(input);
+
+    expect(press({ key: 'k', ctrlKey: true }, input)).toBe(false);
+    await expectOpened();
+  });
+
   it('neither Ctrl+K nor Meta+K fire with both modifiers, Alt, or Shift held', async () => {
     expect(press({ key: 'k', ctrlKey: true, metaKey: true })).toBe(true);
     expect(press({ key: 'k', ctrlKey: true, altKey: true })).toBe(true);

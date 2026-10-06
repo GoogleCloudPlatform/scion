@@ -1525,4 +1525,81 @@ describe('isQuickPaletteShortcut', () => {
     handled.preventDefault();
     expect(isQuickPaletteShortcut(handled)).toBe(false);
   });
+
+  /** A Ctrl+K or Cmd+K keydown typed in `el`, which is put in the document. */
+  const typedIn = (el: HTMLElement, init: KeyboardEventInit): KeyboardEvent => {
+    document.body.append(el);
+    let seen: KeyboardEvent | undefined;
+    document.addEventListener('keydown', (e) => (seen = e), { once: true });
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true, ...init }));
+    return seen!;
+  };
+  const inputOf = (
+    type: string,
+    attrs: { readOnly?: boolean; disabled?: boolean } = {}
+  ): HTMLInputElement => {
+    const input = document.createElement('input');
+    input.type = type;
+    input.readOnly = attrs.readOnly ?? false;
+    input.disabled = attrs.disabled ?? false;
+    return input;
+  };
+  const editable = (): HTMLElement => {
+    const el = document.createElement('div');
+    el.contentEditable = 'true';
+    return el;
+  };
+
+  it('on a Mac, leaves Ctrl+K typed in an editable text field to the field', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    for (const type of ['text', 'search', 'email', 'url', 'tel', 'password', 'number']) {
+      expect(isQuickPaletteShortcut(typedIn(inputOf(type), { ctrlKey: true }))).toBe(false);
+    }
+    const textarea = document.createElement('textarea');
+    expect(isQuickPaletteShortcut(typedIn(textarea, { ctrlKey: true }))).toBe(false);
+    expect(isQuickPaletteShortcut(typedIn(editable(), { ctrlKey: true }))).toBe(false);
+  });
+
+  it('on a Mac, a field inside a shadow root counts by its own element', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const host = document.createElement('div');
+    document.body.append(host);
+    const input = inputOf('text');
+    host.attachShadow({ mode: 'open' }).append(input);
+    let seen: KeyboardEvent | undefined;
+    document.addEventListener('keydown', (e) => (seen = e), { once: true });
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, composed: true })
+    );
+    expect(isQuickPaletteShortcut(seen!)).toBe(false);
+  });
+
+  it('on a Mac, Ctrl+K on a non-text, read-only or disabled field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    const fields: HTMLElement[] = [
+      inputOf('checkbox'),
+      inputOf('button'),
+      inputOf('text', { readOnly: true }),
+      inputOf('text', { disabled: true }),
+      Object.assign(document.createElement('textarea'), { readOnly: true }),
+      Object.assign(document.createElement('textarea'), { disabled: true }),
+      document.createElement('button'),
+    ];
+    for (const el of fields) {
+      expect(isQuickPaletteShortcut(typedIn(el, { ctrlKey: true }))).toBe(true);
+    }
+  });
+
+  it('on a Mac, Cmd+K typed in a text field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    expect(isQuickPaletteShortcut(typedIn(inputOf('text'), { metaKey: true }))).toBe(true);
+    expect(isQuickPaletteShortcut(typedIn(editable(), { metaKey: true }))).toBe(true);
+  });
+
+  it('off a Mac, Ctrl+K typed in a text field is the shortcut', () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    expect(isQuickPaletteShortcut(typedIn(inputOf('text'), { ctrlKey: true }))).toBe(true);
+    const textarea = document.createElement('textarea');
+    expect(isQuickPaletteShortcut(typedIn(textarea, { ctrlKey: true }))).toBe(true);
+  });
 });
