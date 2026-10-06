@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -89,6 +90,12 @@ type startContextInputs struct {
 	AgentID string // Hub UUID (for env injection and logging)
 	Slug    string
 
+	// SharedWorkspace is the shared-workspace flag for a start/restart that
+	// carries no Config (restart): it selects the agents root the agent's
+	// broker-side state is read from, the same one Start uses. A Config's
+	// own SharedWorkspace is used as well when present.
+	SharedWorkspace bool
+
 	// Project
 	ProjectPath string
 	ProjectSlug string
@@ -157,6 +164,31 @@ type startContextInputs struct {
 	// than inferred from request shape (see resolveEffectiveHubEndpoint).
 	// Required: buildStartContext rejects the zero value.
 	Operation startOperation
+
+	// PolicyPreflight, set by createAgent when the harness-config policy can
+	// refuse, runs agent.PreflightResolve (with the policy hook attached to
+	// ctx by the caller) right after hydration and before any workspace
+	// step, so a refusal happens before a worktree, agent directory, staged
+	// bundle or container exists. Hub-managed project path initialization
+	// and hydration precede it, since resolution reads their results.
+	PolicyPreflight bool
+
+	// Prehydrated carries hydration results createAgent's preflights
+	// already obtained, so launch provisions the same bundle they evaluated
+	// instead of hydrating again. Zero value (startAgent, restartAgent):
+	// hydrate here as usual.
+	Prehydrated prehydratedBundle
+}
+
+// prehydratedBundle records hub hydration already performed for a dispatch.
+// A Done flag means hydration completed without error; its Path may be empty
+// (unstamped, hash-only, or no resolver), which still means "do not hydrate
+// again".
+type prehydratedBundle struct {
+	TemplateDone      bool
+	TemplatePath      string
+	HarnessConfigDone bool
+	HarnessConfigPath string
 }
 
 // buildStartContext unifies the common startup logic shared by createAgent,
@@ -211,6 +243,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// Shared-workspace dispatch verifies the project identity before loading
+	// project settings, before the marker handling below and before the
+	// recorded profile is computed (ptone/scion#1799): see
+	// verifySharedProjectIdentity.
+	if in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace) {
+		if err := verifySharedProjectIdentity(in.ProjectPath, in.ProjectID); err != nil {
+			span.SetStatus(codes.Error, "shared-workspace project identity check failed")
+			return nil, s.projectIdentityStartContextError(err, in.Name)
+		}
+	}
+
 	// Ensure hub-managed projects have a .scion marker with project-id for
 	// external split storage. When the hub dispatches to a broker without a
 	// LocalPath (e.g. auto-provided embedded broker for a linked project), the
@@ -230,6 +273,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// directory; it is not a project root to initialize, so it skips this
 	// block (see ProjectPathFromContainer).
 	if in.ProjectPath != "" && !in.ProjectPathFromContainer && (in.ProjectSlug != "" || in.ProjectID != "") {
+		// A broker copy of a hub workspace (~/.scion/projects/<slug>)
+		// records the hub project ID as its identity; see
+		// recordHubProjectIdentity. Done before the checks below, which
+		// then find it matching.
+		s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
+
 		scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 		if config.IsProjectMarkerFile(scionPath) {
@@ -374,14 +423,35 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// to read from a request body that doesn't exist), and handlers.go's
 	// startAgent/restartAgent already resolve the saved profile themselves,
 	// re-running this same check after their own, later resolution.
+	//
+	// Start/restart classify the runtime with the provisioned profile
+	// recorded in broker-side image provenance when the agent has it, rather
+	// than the agent-info.json profile (GetSavedProfile): this classification
+	// picks the default GCP metadata mode
+	// when the hub sends none, the Kubernetes assign mapping, the hub
+	// endpoint and extra hosts (ptone/scion#1799). An unusable provenance
+	// file fails closed (409, re-provision); an agent without one keeps
+	// the saved profile.
 	gcpIdentityProfile := ""
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
 	}
-	savedProfile := false
+	profileMode := profileLenient
 	if gcpIdentityProfile == "" && in.Operation != opCreate {
-		gcpIdentityProfile = agent.GetSavedProfile(in.Name, in.ProjectPath)
-		savedProfile = gcpIdentityProfile != ""
+		profile, provisioned, err := classificationProfile(in)
+		if err != nil {
+			var pe *agent.ImageProvenanceError
+			if errors.As(err, &pe) {
+				s.agentLifecycleLog.Error("image provenance unusable", "agent", in.Name, "path", pe.Path, "error", pe.Err)
+			}
+			var de *agent.AgentStateDirError
+			if errors.As(err, &de) {
+				s.agentLifecycleLog.Error("agent state directory unavailable", "agent", in.Name, "path", de.Path, "error", de.Err)
+			}
+			return nil, &startContextError{Status: http.StatusConflict, Message: err.Error(), OriginalErr: err}
+		}
+		gcpIdentityProfile = profile
+		profileMode = existingAgentProfileResolution(gcpIdentityProfile, provisioned)
 	}
 	// A saved profile that no longer resolves fails here, with the same
 	// 503 as start/restart's own later resolution, rather than classifying
@@ -391,7 +461,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, savedProfile, slog.LevelWarn)
+	}, profileMode, slog.LevelWarn)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -546,15 +616,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	hubEndpoint, hubEndpointTrusted, err := resolveEffectiveHubEndpoint(ctx, hubEndpointInputs{
-		Op:                    in.Operation,
-		ReqHubEndpoint:        in.HubEndpoint,
-		ConnectionHubEndpoint: connectionHubEndpoint,
-		BrokerHubEndpoint:     s.config.HubEndpoint,
-		ResolvedEnv:           in.ResolvedEnv,
-		ProjectPath:           in.ProjectPath,
-		ContainerHubEndpoint:  s.config.ContainerHubEndpoint,
-		RuntimeName:           runtimeName,
-		HubListenPort:         s.config.HubListenPort,
+		Op:                         in.Operation,
+		ReqHubEndpoint:             in.HubEndpoint,
+		ConnectionHubEndpoint:      connectionHubEndpoint,
+		BrokerHubEndpoint:          s.config.HubEndpoint,
+		ResolvedEnv:                in.ResolvedEnv,
+		ProjectPath:                in.ProjectPath,
+		ContainerHubEndpoint:       s.config.ContainerHubEndpoint,
+		ColocatedPublicHubEndpoint: s.config.ColocatedPublicHubEndpoint,
+		RuntimeName:                runtimeName,
+		HubListenPort:              s.config.HubListenPort,
 	})
 	if err != nil {
 		return nil, &startContextError{
@@ -786,6 +857,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.SharedWorkspace = in.Config.SharedWorkspace
 		opts.ProjectPreStartHookScript = in.Config.ProjectPreStartHookScript
 	}
+	// The Hub-supplied project ID locates a shared-workspace project's
+	// broker-side external agents root; the project-id marker inside the
+	// workspace does not affect it.
+	opts.HubProjectID = in.ProjectID
+	if in.SharedWorkspace {
+		opts.SharedWorkspace = true
+	}
 
 	if in.InlineConfig != nil {
 		opts.InlineConfig = in.InlineConfig
@@ -820,7 +898,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Template hydration ---
-	if hubConn != nil && in.Config != nil {
+	if in.Prehydrated.TemplateDone {
+		if in.Prehydrated.TemplatePath != "" {
+			opts.Template = in.Prehydrated.TemplatePath
+		}
+	} else if hubConn != nil && in.Config != nil {
 		templatePath, err := s.hydrateTemplate(ctx, in.Config, hubConn)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
@@ -842,7 +924,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Harness-config hydration ---
 	// Resolve a Hub-managed harness-config to a local directory so provisioning
 	// can use it even on a broker that lacks the config on its local filesystem.
-	if hubConn != nil && in.Config != nil {
+	if in.Prehydrated.HarnessConfigDone {
+		if in.Prehydrated.HarnessConfigPath != "" {
+			opts.HarnessConfigPath = in.Prehydrated.HarnessConfigPath
+			if in.Config != nil {
+				opts.HarnessConfigID = in.Config.HarnessConfigID
+			}
+		}
+	} else if hubConn != nil && in.Config != nil {
 		hcPath, err := s.hydrateHarnessConfig(ctx, in.Config, hubConn)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
@@ -855,8 +944,27 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 		if hcPath != "" {
 			opts.HarnessConfigPath = hcPath
+			opts.HarnessConfigID = in.Config.HarnessConfigID
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Using hydrated harness-config", "agent_id", in.AgentID, "path", hcPath)
+			}
+		}
+	}
+	// Drift visibility: WARN when a broker-local copy of the same name
+	// differs from the hub copy this launch uses (ptone/scion#611).
+	if opts.HarnessConfigPath != "" && in.Config != nil {
+		s.warnHarnessConfigDrift(in.AgentID, in.Config.HarnessConfig, opts.HarnessConfigPath, in.ProjectPath, in.Config.HarnessConfigHash)
+	}
+
+	// --- Harness-config policy at create admission ---
+	// Same template and harness-config resolution as Provision, side-effect
+	// free. Only a policy refusal is acted on here; any other resolution
+	// error is left to Provision/Start, which report it as before.
+	if in.PolicyPreflight {
+		if err := agent.PreflightResolve(ctx, opts); err != nil {
+			if _, refused := harnessPolicyRefusalFrom(err); refused {
+				span.SetStatus(codes.Error, err.Error())
+				return nil, err
 			}
 		}
 	}

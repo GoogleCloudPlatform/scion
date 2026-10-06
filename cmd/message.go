@@ -1093,6 +1093,9 @@ type groupSendHooks struct {
 	fanOutContext func(context.Context) (context.Context, context.CancelFunc)
 	// onRecord, if set, is called after each recipient's result is stored.
 	onRecord func(groupRecipientResult)
+	// onQueued, if set, is called each time a recipient has to wait for a
+	// free fan-out slot (see boundedFanOut).
+	onQueued func()
 }
 
 func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecipient, message string, interrupt bool) error {
@@ -1143,7 +1146,6 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 	// cutShort[i] is set when recipient i's send was stopped by an interrupt
 	// (never sent, or cancelled in flight), as opposed to finishing on its own.
 	cutShort := make([]bool, len(recipients))
-	var wg sync.WaitGroup
 
 	// record stores one recipient's result and streams a progress line, so
 	// a send that is killed outright still leaves the delivered lines behind.
@@ -1186,84 +1188,89 @@ func sendGroupMessageViaHubCtx(hubCtx *HubContext, recipients []messages.GroupRe
 			Error: fmt.Sprintf("Hub reported delivery as ambiguous (message %s); it may have been delivered", messageID)})
 	}
 
-	for i, r := range recipients {
-		wg.Add(1)
-		go func(idx int, recip messages.GroupRecipient) {
-			defer wg.Done()
-			recipStr := recip.String()
+	// An interrupt before a recipient's request was started means it was
+	// never sent, so nothing was delivered and it is safe to retry: report it
+	// failed (and so in retry_recipient), not unknown. Once the request has
+	// started there is no telling whether the Hub acted on it, so a later
+	// cancellation is unknown. This covers recipients still queued for a
+	// fan-out slot (ptone/scion#3521) as well as ones whose slot was taken
+	// just as the interrupt arrived.
+	recordNotSent := func(idx int) {
+		cutShort[idx] = true
+		record(idx, groupRecipientResult{Recipient: recipients[idx].String(), Status: groupStatusFailed,
+			Error: "not sent: interrupted before the request was sent"})
+	}
 
-			// An interrupt before this request was started means it was
-			// never sent, so nothing was delivered and it is safe to retry:
-			// report it failed (and so in retry_recipient), not unknown. Once
-			// the request has started there is no telling whether the Hub
-			// acted on it, so a later cancellation is unknown.
-			if fanCtx.Err() != nil {
-				cutShort[idx] = true
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusFailed,
-					Error: "not sent: interrupted before the request was sent"})
+	// ptone/scion#3521: at most maxFanOutConcurrency sends are in flight at
+	// once; results stay in recipient order because each is stored by index.
+	sendOne := func(idx int) {
+		recip := recipients[idx]
+		recipStr := recip.String()
+
+		if fanCtx.Err() != nil {
+			recordNotSent(idx)
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(fanCtx, 30*time.Second)
+		defer cancel()
+
+		switch recip.Kind {
+		case messages.RecipientAgent:
+			slug := api.Slugify(recip.Name)
+			msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgPlain, interrupt)
+			msg.Type = messages.TypeGroupSet
+			msg.Recipients = recipientsStr
+			msg.Metadata = map[string]string{"group_id": groupID}
+			sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
+			if err != nil {
+				recordErr(idx, recipStr, err)
 				return
 			}
-
-			ctx, cancel := context.WithTimeout(fanCtx, 30*time.Second)
-			defer cancel()
-
-			switch recip.Kind {
-			case messages.RecipientAgent:
-				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgPlain, interrupt)
-				msg.Type = messages.TypeGroupSet
-				msg.Recipients = recipientsStr
-				msg.Metadata = map[string]string{"group_id": groupID}
-				sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
-				if err != nil {
-					recordErr(idx, recipStr, err)
-					return
-				}
-				if sendResp != nil && sendResp.Status == "deferred" {
-					record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred})
-					return
-				}
-				if sendResp != nil && sendResp.Status == "ambiguous" {
-					recordAmbiguous(idx, recipStr, sendResp.MessageID)
-					return
-				}
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
-
-			case messages.RecipientUser:
-				senderAgent := os.Getenv("SCION_AGENT_NAME")
-				if senderAgent == "" {
-					record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusFailed,
-						Error: "sending to users requires agent context (SCION_AGENT_NAME not set)"})
-					return
-				}
-				userRecip := recipStr
-				if !strings.HasPrefix(userRecip, "user:") {
-					userRecip = "user:" + recip.Name
-				}
-				outMsg := &hubclient.OutboundMessageRequest{
-					Recipient:   userRecip,
-					Msg:         message,
-					Type:        messages.TypeGroupSet,
-					Urgent:      interrupt,
-					Attachments: msgAttach,
-					Channel:     msgChannel,
-					ThreadID:    msgThreadID,
-					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
-				}
-				outResp, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
-				if err != nil {
-					recordErr(idx, recipStr, err)
-					return
-				}
-				if outResp != nil && outResp.Status == "ambiguous" {
-					recordAmbiguous(idx, recipStr, outResp.MessageID)
-					return
-				}
-				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+			if sendResp != nil && sendResp.Status == "deferred" {
+				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDeferred})
+				return
 			}
-		}(i, r)
+			if sendResp != nil && sendResp.Status == "ambiguous" {
+				recordAmbiguous(idx, recipStr, sendResp.MessageID)
+				return
+			}
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+
+		case messages.RecipientUser:
+			senderAgent := os.Getenv("SCION_AGENT_NAME")
+			if senderAgent == "" {
+				record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusFailed,
+					Error: "sending to users requires agent context (SCION_AGENT_NAME not set)"})
+				return
+			}
+			userRecip := recipStr
+			if !strings.HasPrefix(userRecip, "user:") {
+				userRecip = "user:" + recip.Name
+			}
+			outMsg := &hubclient.OutboundMessageRequest{
+				Recipient:   userRecip,
+				Msg:         message,
+				Type:        messages.TypeGroupSet,
+				Urgent:      interrupt,
+				Attachments: msgAttach,
+				Channel:     msgChannel,
+				ThreadID:    msgThreadID,
+				Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
+			}
+			outResp, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+			if err != nil {
+				recordErr(idx, recipStr, err)
+				return
+			}
+			if outResp != nil && outResp.Status == "ambiguous" {
+				recordAmbiguous(idx, recipStr, outResp.MessageID)
+				return
+			}
+			record(idx, groupRecipientResult{Recipient: recipStr, Status: groupStatusDelivered})
+		}
 	}
-	wg.Wait()
+	boundedFanOut(fanCtx, len(recipients), maxFanOutConcurrency, hooks.onQueued, sendOne, recordNotSent)
 	// signalled must be read before stopFanOut, which cancels fanCtx.
 	signalled := fanCtx.Err() != nil
 	stopFanOut()

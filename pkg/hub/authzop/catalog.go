@@ -124,11 +124,15 @@ var SecurityMutationSymbols = map[string]string{
 	"GetSecretValue":             "read-secret",
 
 	// Broker secret operations
-	"CreateBrokerSecret": "create-resource",
-	"UpdateBrokerSecret": "update-resource",
-	"DeleteBrokerSecret": "delete-resource",
-	"CreateJoinToken":    "mint-credential",
-	"DeleteJoinToken":    "delete-resource",
+	"CreateBrokerSecret":     "create-resource",
+	"UpdateBrokerSecret":     "update-resource",
+	"DeleteBrokerSecret":     "delete-resource",
+	"CreateJoinToken":        "mint-credential",
+	"UpsertJoinToken":        "mint-credential",
+	"DeleteJoinToken":        "delete-resource",
+	"ConsumeJoinToken":       "delete-resource",
+	"DeleteExpiredJoinToken": "delete-resource",
+	"CleanExpiredJoinTokens": "delete-resource",
 
 	// Invite code operations
 	"CreateInviteCode": "mint-credential",
@@ -429,6 +433,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
+	// pkg/hub/user_delete_data.go — deleted user's user-scope secrets when no secret backend is configured (ptone/scion#2769)
+	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Reads a deleted user's user-scope secret row only to tell a value stored in the hub database from an external reference; never returned; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
+	{File: "pkg/hub/user_delete_data.go", Function: "removeUserScopedSecretRowsWithoutBackend", Symbol: "DeleteSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Deletes a deleted user's user-scope secret rows whose value is stored in the hub database when no secret backend is configured; runs after user.admin.delete or the allow-list delete commits, or from the startup sweep for users that no longer exist", Scope: "pkg/hub/user_delete_data.go"}},
 	{File: "pkg/hub/handlers_users_core.go", Function: "createSuperAdminBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding creation inside single atomic WithTx in updateUser; caller checks user.promote + CanDelegate; uses SystemReconcileCreatedBy sentinel", Scope: "pkg/hub/handlers_users_core.go"}},
 	{File: "pkg/hub/handlers_users_core.go", Function: "deleteSuperAdminBindingTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Super-admin binding deletion inside single atomic WithTx in updateUser; caller checks user.promote + CanDelegate from canonical binding state; guarded by checkLastSuperAdminTx with serialization lock, self-lockout re-check, and full error propagation (R4-fix)", Scope: "pkg/hub/handlers_users_core.go"}},
 
@@ -538,7 +545,7 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListAdd", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list add, hub-admin operation", Scope: "pkg/hub/admin_allow_list.go"}},
 	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListByEmail", Symbol: "DeleteGroupMembershipsForUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list remove, hub-admin operation; removes the invited user's group memberships in the same WithTx, before DeleteUser (ON DELETE SET NULL would otherwise orphan them; ptone/scion#2769)", Scope: "pkg/hub/admin_allow_list.go"}},
-	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListByEmail", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list remove, hub-admin operation; runs inside WithTx with the same last-project-owner guard and role-binding cascade as user.admin.delete (guardAndCascadeUserRoleBindingsTx)", Scope: "pkg/hub/admin_allow_list.go"}},
+	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListByEmail", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list remove, hub-admin operation; runs inside WithTx with the same last-project-owner guard and role-binding cascade as user.admin.delete (guardAndCascadeUserRoleBindingsTx) and owned-agents check (checkUserOwnsNoAgentsTx)", Scope: "pkg/hub/admin_allow_list.go"}},
 	{File: "pkg/hub/admin_allow_list.go", Function: "handleAdminAllowListImport", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionHubAdmin, Reason: "Admin allow-list import, hub-admin operation", Scope: "pkg/hub/admin_allow_list.go"}},
 
 	// -----------------------------------------------------------------------
@@ -660,9 +667,10 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
-	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
-	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, expired join token cleanup, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
-	{File: "pkg/hub/brokerauth.go", Function: "createBrokerRegistration", Symbol: "CreateJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "ConsumeJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion: single-use join token consumed in the join transaction, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/server.go", Function: "brokerJoinTokenCleanupHandler", Symbol: "CleanExpiredJoinTokens", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Scheduled removal of expired broker join tokens, no caller", Scope: "pkg/hub/server.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "classifyUnconsumedJoinToken", Symbol: "DeleteExpiredJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, expired join token cleanup, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/brokerauth.go", Function: "createBrokerRegistration", Symbol: "UpsertJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "GenerateAndStoreSecret", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret generation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "RotateBrokerSecret", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret rotation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 
