@@ -96,7 +96,7 @@ const MESSAGE_BODIES: string[] = [
 
 const MESSAGE_COUNT = 40;
 
-function buildMessages(threadId: string, projectId: string): Record<string, unknown>[] {
+export function buildMessages(threadId: string, projectId: string): Record<string, unknown>[] {
   const messages: Record<string, unknown>[] = [];
   const base = Date.parse('2026-09-01T00:00:00Z');
   for (let i = 0; i < MESSAGE_COUNT; i++) {
