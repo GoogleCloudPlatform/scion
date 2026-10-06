@@ -468,3 +468,98 @@ describe('paginateAll page timeout', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('paginateAll failed-response body (ptone/scion#2949)', () => {
+  async function failWith(res: Response): Promise<PaginationError> {
+    vi.mocked(apiFetch).mockResolvedValueOnce(res);
+    const err = await paginateAll({
+      path: '/api/v1/things',
+      pageSize: 100,
+      parsePage,
+      label: 'Things',
+    }).then(
+      () => undefined,
+      (e: unknown) => e
+    );
+    expect(err).toBeInstanceOf(PaginationError);
+    return err as PaginationError;
+  }
+
+  it('carries the status, the parsed body and the hub message ({error: {message}})', async () => {
+    const body = { error: { code: 'forbidden', message: 'You cannot list skills here' } };
+    const err = await failWith(jsonResponse(body, 403));
+    expect(err.message).toBe('Things request failed: 403');
+    expect(err.status).toBe(403);
+    expect(err.body).toEqual(body);
+    expect(err.hubMessage).toBe('You cannot list skills here');
+  });
+
+  it('reads {message} and {error: "..."} bodies', async () => {
+    expect((await failWith(jsonResponse({ message: 'quota exceeded' }, 429))).hubMessage).toBe(
+      'quota exceeded'
+    );
+    expect((await failWith(jsonResponse({ error: 'bad cursor' }, 400))).hubMessage).toBe(
+      'bad cursor'
+    );
+  });
+
+  it('keeps a non-JSON body as text and uses it as the message', async () => {
+    const err = await failWith(new Response('upstream unavailable', { status: 502 }));
+    expect(err.status).toBe(502);
+    expect(err.body).toBe('upstream unavailable');
+    expect(err.hubMessage).toBe('upstream unavailable');
+  });
+
+  it('has no body or hub message for an empty body or a body without a message', async () => {
+    const empty = await failWith(new Response('', { status: 500 }));
+    expect(empty.status).toBe(500);
+    expect(empty.body).toBeUndefined();
+    expect(empty.hubMessage).toBeUndefined();
+
+    const noMessage = await failWith(jsonResponse({ error: { code: 'internal' } }, 500));
+    expect(noMessage.body).toEqual({ error: { code: 'internal' } });
+    expect(noMessage.hubMessage).toBeUndefined();
+  });
+
+  it('reports the status alone when the error body cannot be read', async () => {
+    const res = new Response('ignored', { status: 503 });
+    vi.spyOn(res, 'text').mockRejectedValue(new TypeError('body stream failed'));
+    const err = await failWith(res);
+    expect(err.message).toBe('Things request failed: 503');
+    expect(err.status).toBe(503);
+    expect(err.body).toBeUndefined();
+    expect(err.hubMessage).toBeUndefined();
+  });
+
+  it('bounds the error body read by the page timeout and leaves no pending timer', async () => {
+    vi.useFakeTimers();
+    const res = new Response('ignored', { status: 500 });
+    vi.mocked(apiFetch).mockImplementationOnce((_url, init) => {
+      vi.spyOn(res, 'text').mockReturnValue(settleOnlyOnAbort(init?.signal));
+      return Promise.resolve(res);
+    });
+    const settled = paginateAll({
+      path: '/api/v1/things',
+      pageSize: 100,
+      parsePage,
+      label: 'Things',
+      pageTimeoutMs: 5000,
+    }).then(
+      () => undefined,
+      (e: unknown) => e
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    const err = (await settled) as PaginationError;
+    expect(err).toBeInstanceOf(PaginationError);
+    expect(err.status).toBe(500);
+    expect(err.body).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps PaginationError constructible with a message only', () => {
+    const err = new PaginationError('x');
+    expect(err.status).toBeUndefined();
+    expect(err.body).toBeUndefined();
+    expect(err.hubMessage).toBeUndefined();
+  });
+});

@@ -102,6 +102,7 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /** A request/refresh trigger; every one funnels into `loadAgentsForView`, which asks the window's planner for the one request it needs. */
 type AgentsViewTrigger = AgentListTrigger;
@@ -2454,8 +2455,7 @@ export class ScionPageProjectDetail extends LitElement {
       this.cloneDialogOpen = false;
 
       // Navigate to the newly cloned project
-      window.history.pushState({}, '', `/projects/${cloned.id}`);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`/projects/${cloned.id}`);
     } catch (err) {
       this.cloneError = err instanceof Error ? err.message : 'Failed to clone project';
     } finally {
@@ -2489,8 +2489,7 @@ export class ScionPageProjectDetail extends LitElement {
       }
       this.templateDialogOpen = false;
       // Navigate to hub resources templates tab
-      window.history.pushState({}, '', '/settings?tab=project-templates');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/settings?tab=project-templates');
     } catch (err) {
       this.templateError = err instanceof Error ? err.message : 'Failed to create template';
     } finally {

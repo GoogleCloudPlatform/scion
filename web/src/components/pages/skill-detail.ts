@@ -33,6 +33,7 @@ import '../shared/skill-publish-dialog.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 @customElement('scion-page-skill-detail')
 export class ScionPageSkillDetail extends LitElement {
@@ -533,8 +534,7 @@ export class ScionPageSkillDetail extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to archive skill'));
       }
-      window.history.pushState({}, '', '/skills');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/skills');
     } catch (err) {
       console.error('Failed to archive skill:', err);
       showToast(err instanceof Error ? err.message : 'Failed to archive skill');

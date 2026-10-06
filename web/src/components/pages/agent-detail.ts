@@ -88,6 +88,7 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { navigateTo } from '../../client/navigation.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -761,13 +762,6 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  /** Dispatch SPA navigation via the document-level nav-click listener. */
-  private navigateViaSpa(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
-    );
-  }
-
   /**
    * True while this element is still attached AND the app's current route
    * is still this agent's detail page. Guards the deferred SPA-redirect in
@@ -817,7 +811,7 @@ export class ScionPageAgentDetail extends LitElement {
     this.deleteRedirectTimer = setTimeout(() => {
       this.deleteRedirectTimer = null;
       if (this.isOnThisAgentRoute()) {
-        this.navigateViaSpa(this.redirectTarget);
+        navigateTo(this.redirectTarget);
       }
     }, DELETE_REDIRECT_DELAY_MS);
   }
