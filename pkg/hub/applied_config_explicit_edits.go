@@ -480,3 +480,41 @@ func deepCopyTelemetryConfig(cfg *api.TelemetryConfig) *api.TelemetryConfig {
 	}
 	return &out
 }
+
+// recordReincarnatePatchEdits records a `scion reincarnate` patch
+// (ptone/scion#3302) into CreateInputs: the same fields, written the same
+// way, as recordExplicitEdits writes for a PATCH, so a later reincarnation
+// without the flag replays the value. Unlike a PATCH body, a reincarnate
+// flag is never an echo of the live config, so each set field is recorded
+// unconditionally, even when it equals the live value: the requester asked
+// for it explicitly, and it must not drift with a later template change.
+// The model is recorded as given (not alias-resolved), like create's own
+// CreateInputs; deriveAgentConfig resolves it against the current harness
+// config each generation.
+func recordReincarnatePatchEdits(ci *store.AgentCreateInputs, p *reincarnatePatch) {
+	if ci == nil || p == nil {
+		return
+	}
+	ensureInline := func() *api.ScionConfig {
+		if ci.InlineConfig == nil {
+			ci.InlineConfig = &api.ScionConfig{}
+		}
+		return ci.InlineConfig
+	}
+	if p.Image != "" {
+		ensureInline().Image = p.Image
+	}
+	if p.Model != "" {
+		ensureInline().Model = p.Model
+	}
+	if p.ThinkingLevel != nil {
+		tl := *p.ThinkingLevel
+		ci.ThinkingLevel = &tl
+		inlineTL := tl
+		ensureInline().ThinkingLevel = &inlineTL
+	}
+	if p.HarnessAuth != "" {
+		ci.HarnessAuth = p.HarnessAuth
+		ensureInline().AuthSelectedType = p.HarnessAuth
+	}
+}
