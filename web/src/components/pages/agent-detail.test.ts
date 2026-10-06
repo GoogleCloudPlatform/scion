@@ -109,6 +109,7 @@ vi.mock('../../client/state.js', () => ({
 // client/main.js, not client/state.js directly. Mock it the same way so the
 // real main.ts — with its SSE/terminal-workspace singleton side effects —
 // never loads in this test.
+// Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
   get stateManager() {
