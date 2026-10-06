@@ -975,6 +975,12 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// For local storage, rewrite file:// URLs to HTTP proxy URLs: a file://
+	// URL names a hub-host path a remote broker cannot read.
+	if stor.Provider() == storage.ProviderLocal {
+		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID)
+	}
+
 	writeJSON(w, http.StatusOK, DownloadResponse{
 		Files:       downloadURLs,
 		ManifestURL: manifestURL,

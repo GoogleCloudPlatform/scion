@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -78,6 +79,7 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			}
 			imported++
 		} else {
+			oldHash := existing.ContentHash
 			changed, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDir, false)
 			if err != nil {
 				s.resourceLog.Warn("harness config bootstrap: failed to sync config, skipping",
@@ -86,6 +88,8 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			}
 			if changed {
 				updated++
+				warnBootstrapOverwrite(s.resourceLog, "harness-config", name, existing.ID, dirPath, oldHash,
+					s.currentHarnessConfigHash(ctx, existing.ID))
 			}
 		}
 	}
@@ -119,4 +123,52 @@ func isHarnessConfigDir(dir string) bool {
 // content hash is unchanged (used by direct imports).
 func (s *Server) syncExistingHarnessConfig(ctx context.Context, existing *store.HarnessConfig, dirPath string, hcDir *config.HarnessConfigDir, force bool) (bool, error) {
 	return s.harnessConfigStore(hcDir.Config.Harness).Bootstrap(ctx, existing.Name, dirPath, existing.Scope, existing.ScopeID, "", force)
+}
+
+// warnBootstrapOverwrite reports that the workstation (non-hosted) startup
+// bootstrap replaced an existing hub record's content with the local
+// ~/.scion copy (ptone/scion#611, workstation-mode overwrite). Any edit made
+// through the hub (web UI, API) since the last import is lost at that point.
+//
+// The message states only what is known. Most overwrites are benign — e.g.
+// a binary upgrade that changed a bundled default, which
+// UpdateDefaultTemplates re-materializes on disk at every workstation start
+// — and the hub cannot currently tell those apart from a lost hub-side edit:
+// harness-config edit handlers do not set UpdatedBy; template edit handlers
+// do, but this bootstrap never clears it, so a set UpdatedBy means "edited
+// at some point", not "edited since the last import"; Updated is bumped by
+// every write (including this bootstrap, storage repair and image-status
+// checks); and nothing records the hash the last import wrote.
+// Distinguishing them needs that marker persisted on the record
+// (ResourceStore/schema work, out of scope here). Until then this stays at
+// WARN because the destructive case is silent otherwise.
+//
+// logger is the caller's subsystem logger (resourceLog for harness-configs,
+// templateLog for templates) so the WARN lands next to that bootstrap's
+// other log lines.
+func warnBootstrapOverwrite(logger *slog.Logger, kind, name, id, dir, oldHash, newHash string) {
+	logger.Warn("workstation bootstrap: hub record replaced from local disk copy; "+
+		"any hub-side edits made since the last import are lost",
+		"kind", kind, "name", name, "id", id, "dir", dir,
+		"oldHash", oldHash, "newHash", newHash)
+}
+
+// currentHarnessConfigHash re-reads a harness-config's stored content hash
+// (for logging); returns "" when it cannot be read.
+func (s *Server) currentHarnessConfigHash(ctx context.Context, id string) string {
+	hc, err := s.store.GetHarnessConfig(ctx, id)
+	if err != nil || hc == nil {
+		return ""
+	}
+	return hc.ContentHash
+}
+
+// currentTemplateHash re-reads a template's stored content hash (for
+// logging); returns "" when it cannot be read.
+func (s *Server) currentTemplateHash(ctx context.Context, id string) string {
+	t, err := s.store.GetTemplate(ctx, id)
+	if err != nil || t == nil {
+		return ""
+	}
+	return t.ContentHash
 }

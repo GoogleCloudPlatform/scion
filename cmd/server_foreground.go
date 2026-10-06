@@ -989,7 +989,9 @@ func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
 	// idempotent and keeps this check independent of the load path.
 	cfg.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
 	if err := cfg.WorkspaceStorage.ValidateWorkspaceStorage(); err != nil {
-		return fmt.Errorf("invalid server.workspace_storage: %w", err)
+		// The wrapped error already names the key (for example
+		// server.workspace_storage.nfs.uid), so do not repeat it here.
+		return fmt.Errorf("invalid workspace storage settings: %w", err)
 	}
 	return nil
 }
@@ -1454,7 +1456,9 @@ func migrateStore(ctx context.Context, s *entadapter.CompositeStore) error {
 // per-resource OverwritePolicy checks, secretmigration.MigratePluginSecrets
 // checks for existing secret values)
 // and no-ops if so. The winning replica does the work; the others skip it
-// here and will see the completed state on their next access.
+// here and will see the completed state on their next access. Exception:
+// the workstation resource bootstrap imports per-replica disk content; see
+// bootstrapWorkstationResources.
 func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryLockKey, label string, fn func()) {
 	if s == nil {
 		fn()
@@ -1479,6 +1483,42 @@ func runWithAdvisoryLock(ctx context.Context, s store.Store, key store.AdvisoryL
 	}
 	defer func() { _ = release() }()
 	fn()
+}
+
+// workstationResourceBootstrapper is the subset of *hub.Server used by the
+// workstation (non-hosted) resource bootstrap; an interface so the lock
+// routing can be unit-tested without a full hub.
+type workstationResourceBootstrapper interface {
+	BootstrapTemplatesFromDir(ctx context.Context, dir string) error
+	BootstrapHarnessConfigsFromDir(ctx context.Context, dir string) error
+}
+
+// bootstrapWorkstationResources imports templates and harness-configs from
+// the local ~/.scion directories into the hub (non-hosted mode). Both imports
+// run under one advisory lock (ptone/scion#1079): ResourceStore.Bootstrap is
+// GetBySlug-then-Create with no ErrAlreadyExists recovery, so two replicas
+// sharing a Postgres store would race. The key is shared with the hosted
+// bundled-resource bootstrap; the two branches are mutually exclusive.
+//
+// Caveats:
+//   - In non-hosted mode each replica imports its OWN ~/.scion, so when the
+//     lock is held the loser skips and the winner's disk content defines the
+//     hub records.
+//   - A lock-acquire error (Postgres only, e.g. pool exhaustion) skips the
+//     import for this boot, logged at ERROR by runWithAdvisoryLock. Before
+//     the lock the import always ran; this matches the hosted branch.
+//   - On SQLite the lock is a no-op and both imports always run.
+func bootstrapWorkstationResources(ctx context.Context, s store.Store, b workstationResourceBootstrapper, globalDir string) {
+	runWithAdvisoryLock(ctx, s, store.LockBundledResources, "workstation resource bootstrap", func() {
+		globalTemplatesDir := filepath.Join(globalDir, "templates")
+		if err := b.BootstrapTemplatesFromDir(ctx, globalTemplatesDir); err != nil {
+			log.Printf("Warning: template bootstrap failed: %v", err)
+		}
+		globalHarnessConfigsDir := filepath.Join(globalDir, "harness-configs")
+		if err := b.BootstrapHarnessConfigsFromDir(ctx, globalHarnessConfigsDir); err != nil {
+			log.Printf("Warning: harness config bootstrap failed: %v", err)
+		}
+	})
 }
 
 // maybeMigrateLegacySQLite detects a legacy raw-SQL hub.db at path and, unless
@@ -2207,14 +2247,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	} else {
 		// Workstation mode: import from local ~/.scion directories. These were
 		// refreshed from embeds earlier in the startup sequence.
-		globalTemplatesDir := filepath.Join(globalDir, "templates")
-		if err := hubSrv.BootstrapTemplatesFromDir(ctx, globalTemplatesDir); err != nil {
-			log.Printf("Warning: template bootstrap failed: %v", err)
-		}
-		globalHarnessConfigsDir := filepath.Join(globalDir, "harness-configs")
-		if err := hubSrv.BootstrapHarnessConfigsFromDir(ctx, globalHarnessConfigsDir); err != nil {
-			log.Printf("Warning: harness config bootstrap failed: %v", err)
-		}
+		bootstrapWorkstationResources(ctx, s, hubSrv, globalDir)
 	}
 
 	// On first boot with hub-namespaced paths, copy legacy GCS objects to
@@ -2969,15 +3002,15 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 // substrate runtime whose construct-time dependencies failed (building the
 // Kubernetes client, or substrate.Dial's trust-bundle/CA load and API dial,
 // e.g. on an API-server blip at boot) — refusing on those would turn a
-// transient outage into a boot crash loop. The broker starts degraded
-// instead, but that degraded state is not self-healing: the default runtime
-// is resolved once here and is not rebuilt until the broker process
-// restarts, and /healthz still reports healthy (the "error" runtime counts
-// as an available runtime in the health check), so nothing restarts the
-// broker automatically. Operators must alert on the logged degraded "error"
-// runtime line and restart the broker to rebuild the runtime. It also
-// includes, for example, a Kubernetes client that fails Verify at startup,
-// or a missing container CLI.
+// transient outage into a boot crash loop. It also includes, for example, a
+// Kubernetes client that fails Verify at startup, or a missing container
+// CLI. The broker starts degraded instead, but that degraded state is not
+// self-healing: the default runtime is resolved once here and is not
+// rebuilt until the broker process restarts. /healthz reports status
+// "degraded" with checks["runtime"] = "unavailable" but still answers 200,
+// so a liveness probe does not restart the broker; /readyz returns 503, and
+// the Broker /healthz and /readyz uptime checks alert. Operators restart the
+// broker to rebuild the runtime once the cause is fixed.
 //
 // Named profiles other than the default are unaffected: those are resolved
 // lazily, per request, and this check only ever sees the one runtime

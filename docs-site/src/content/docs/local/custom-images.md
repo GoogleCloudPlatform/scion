@@ -228,16 +228,22 @@ profiles:
     image_registry: "us-central1-docker.pkg.dev/myproject/staging"
 ```
 
-Profile-level `image_registry` takes precedence over the top-level setting.
+Profile-level `image_registry` takes precedence over the top-level setting. The profile used is
+the one the agent was provisioned with, recorded broker-side, on every start and restart; see
+[Settings precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1).
 
 ### Override Precedence
 
-The `image_registry` setting is the lowest-priority way to configure images. Explicit overrides always win:
+The `image_registry` setting is the lowest-priority way to configure images. Explicit overrides always win (summary; see the full chain linked below, which also covers inline config and settings `harness_configs.<name>.image`):
 
 1. **CLI `--image` flag** (highest priority)
-2. **Template `scion-agent.yaml`** image field
-3. **Profile `harness_overrides`** image field
+2. **Profile `harness_overrides`** image field, when explicitly set
+3. **Template `scion-agent.yaml`** image field
 4. **`image_registry`** rewrite (lowest priority)
+
+Each time a higher-priority source replaces another source's image, the agent start logs it at
+Info. See [Settings precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
+for the full chain.
 
 If any higher-priority override specifies a full image path, `image_registry` does not apply to that agent.
 
