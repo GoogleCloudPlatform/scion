@@ -116,9 +116,12 @@ const (
 	ReasonCapabilityRequired   = "capability_required"
 	ReasonIdentityNotLocal     = "identity_not_local"
 	ReasonInvalidScope         = "invalid_scope"
-	// ReasonGitCredentialNotAllowed: the key names a GitHub credential
-	// (agent.IsGitCredentialEnvKey) and the agent's applied config does not
-	// allow GitHub credentials (agentAllowsGitCredentials).
+	// ReasonGitCredentialNotAllowed: the agent's applied config does not
+	// allow GitHub credentials (agentAllowsGitCredentials) and either the key
+	// names a GitHub credential (agent.IsGitCredentialEnvKey, decided before
+	// any read) or the secret is delivered under a GitHub credential env name
+	// through its target (agent.IsGitCredentialSecret, decided from the
+	// metadata, before the value read).
 	ReasonGitCredentialNotAllowed = "git_credential_not_allowed"
 )
 

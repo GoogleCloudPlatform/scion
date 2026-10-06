@@ -56,9 +56,11 @@ const (
 // Every key goes through one check sequence (material_runtime.go) before
 // any value is read: the whole-request precheck (checks 1-6), then per-item
 // project authorization (check 7) and the record-race rule (check 9).
-// A GitHub credential key is reported not_found, without being read, unless
-// the agent's applied config allows GitHub credentials
-// (gitCredentialKeyDenied in selectRuntimeMaterial).
+// Unless the agent's applied config allows GitHub credentials, a GitHub
+// credential key is reported not_found without any read
+// (gitCredentialKeyDenied), and so is a secret whose target names a GitHub
+// credential, refused after its metadata is read and before its value is
+// read (gitCredentialSecretDenied); both checks are in selectRuntimeMaterial.
 func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
