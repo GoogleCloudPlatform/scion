@@ -418,6 +418,8 @@ func Unprocessable(w http.ResponseWriter, message string) {
 //   - upstream_unavailable: 502, GitHub itself returned repeated 5xx.
 //   - unreachable: 502, a network-level failure (DNS, connection refused,
 //     TLS) rather than a response GitHub chose to send.
+//   - forbidden: 403, the Hub's per-URI code for a gh:// ref the caller may
+//     not resolve GitHub skills for in this project.
 //   - anything else — including an uncategorized local failure and the Hub's
 //     own per-URI codes for PreResolvedSkills (storage_error, internal_error,
 //     federation_error) — keeps the existing 500, not a client error: the
@@ -427,6 +429,8 @@ func skillResolutionHTTPStatus(code string) int {
 	switch code {
 	case agent.SkillErrCodeNotFound:
 		return http.StatusNotFound
+	case agent.SkillErrCodeForbidden:
+		return http.StatusForbidden
 	case agent.SkillErrCodeRateLimited:
 		return http.StatusTooManyRequests
 	case agent.SkillErrCodeTimeout:
@@ -444,12 +448,24 @@ func skillResolutionHTTPStatus(code string) int {
 // mapped status gets the same {skill, cause} detail payload so the response
 // is actionable without broker logs, including the uncategorized/5xx default.
 func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
+	skillResolutionFailedWithDetails(w, err, nil)
+}
+
+// skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
+// details (for example the start markers from startFailureDetails) merged
+// alongside the skill and cause.
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, extra map[string]interface{}) {
 	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
 		w.Header().Set("Retry-After", err.RetryAfter)
 	}
+	details := make(map[string]interface{}, len(extra)+2)
+	for k, v := range extra {
+		details[k] = v
+	}
+	details["skill"] = err.URI
+	details["cause"] = err.Code
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
-		"Failed to provision agent: "+err.Error(),
-		map[string]interface{}{"skill": err.URI, "cause": err.Code})
+		"Failed to provision agent: "+err.Error(), details)
 }
 
 // writeStartContextError writes the HTTP response for an error returned by

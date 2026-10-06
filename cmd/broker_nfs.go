@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -74,6 +75,37 @@ func brokerWorkspaceStorageWarning(vs *config.VersionedSettings) string {
 			err, vs.Server.WorkspaceStorage.Backend)
 	}
 	return ""
+}
+
+// brokerWorkspaceStorageBackend returns the server.workspace_storage backend
+// name from the broker's global settings, or "" (local) when unset.
+func brokerWorkspaceStorageBackend(vs *config.VersionedSettings) string {
+	if vs == nil || vs.Server == nil || vs.Server.WorkspaceStorage == nil {
+		return ""
+	}
+	return vs.Server.WorkspaceStorage.Backend
+}
+
+// brokerRegistrationWorkspaceStorage returns the workspace storage
+// descriptor a broker sends when it registers with a hub, built from the
+// global settings the same way the running broker builds the one it sends
+// on every heartbeat. Share health is reported false: registration happens
+// before the broker has checked its mounts, and the next heartbeat carries
+// the real health.
+func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.BrokerWorkspaceStorage {
+	nfs, _ := brokerNFSConfig(vs)
+	return runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
+}
+
+// loadBrokerRegistrationWorkspaceStorage loads the global settings and
+// returns brokerRegistrationWorkspaceStorage for them, or nil (descriptor
+// not reported; the next heartbeat reports it) when they cannot be loaded.
+func loadBrokerRegistrationWorkspaceStorage() *api.BrokerWorkspaceStorage {
+	vs, _, err := config.LoadGlobalSettings()
+	if err != nil {
+		return nil
+	}
+	return brokerRegistrationWorkspaceStorage(vs)
 }
 
 // validateBrokerNFS checks the fields the broker uses to build each mount:

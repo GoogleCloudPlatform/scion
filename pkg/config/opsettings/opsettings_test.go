@@ -33,7 +33,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments"}
+		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments", "artifacts"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -71,6 +71,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 		"maintenance": true,
 		"messaging":   true,
 		"experiments": true,
+		"artifacts":   true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {
@@ -247,6 +248,8 @@ func TestValidateValidDoc(t *testing.T) {
 		{"profiles", `{"gke":{"runtime":"k8s","shared_dir_storage_backend":"nfs"}}`},
 		{"profiles", `{"local":{"runtime":"docker","shared_dir_storage_backend":"local"}}`},
 		{"runtimes", `{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"nfs"}}`},
+		{"profiles", `{"gke":{"runtime":"k8s","home_storage_backend":"nfs","home_storage_leaf":"pod"}}`},
+		{"runtimes", `{"k8s":{"type":"kubernetes","home_storage_backend":"local","home_storage_leaf":"broker"}}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -281,6 +284,10 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image_pull_policy":"always"}}}}`, "invalid profile harness_overrides image_pull_policy enum"},
 		{"profiles", `{"gke":{"runtime":"k8s","shared_dir_storage_backend":"ceph"}}`, "invalid profile shared_dir_storage_backend enum"},
 		{"runtimes", `{"k8s":{"type":"kubernetes","shared_dir_storage_backend":"NFS"}}`, "invalid runtime shared_dir_storage_backend enum (case-sensitive)"},
+		{"profiles", `{"gke":{"runtime":"k8s","home_storage_backend":"ceph"}}`, "invalid profile home_storage_backend enum"},
+		{"profiles", `{"gke":{"runtime":"k8s","home_storage_leaf":"node"}}`, "invalid profile home_storage_leaf enum"},
+		{"runtimes", `{"k8s":{"type":"kubernetes","home_storage_backend":"NFS"}}`, "invalid runtime home_storage_backend enum (case-sensitive)"},
+		{"runtimes", `{"k8s":{"type":"kubernetes","home_storage_leaf":"Pod"}}`, "invalid runtime home_storage_leaf enum (case-sensitive)"},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))

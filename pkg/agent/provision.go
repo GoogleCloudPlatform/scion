@@ -36,8 +36,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/resources"
+	"github.com/google/uuid"
 )
 
 func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (bool, error) {
@@ -431,6 +433,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
+	if opts.TemplateName != "" {
+		ctx = api.ContextWithTemplateName(ctx, opts.TemplateName)
+	}
 	inlineCfg := opts.InlineConfig
 	if opts.HarnessAuth != "" {
 		// Copy rather than mutate opts.InlineConfig in place: it is a
@@ -683,6 +688,21 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		return cfg, err
 	}
 
+	// A provision-only create carries no run (the hub mints runs only for
+	// starts), yet it may reuse, or newly provision, files under a name an
+	// earlier same-named agent's late delete still targets by that agent's
+	// run. Record a provision owner so such a delete leaves these files
+	// alone (ptone/scion#2675). The agent's own delete names no run until
+	// it is started, and its first start records its run in place of this.
+	// If a runtime entry for the name still exists in this project (or the
+	// runtime cannot be listed), the files stay that entry's run's.
+	if opts.FreshProvision && opts.RunID == "" && !m.hasRuntimeEntry(ctx, opts) {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
+			slog.Warn("Provision: failed to record the provision owner in agent-info.json",
+				"agent", opts.Name, "error", err)
+		}
+	}
+
 	// If a task was provided, write it to prompt.md for later execution
 	if opts.Task != "" {
 		promptFile := filepath.Join(agentDir, "prompt.md")
@@ -779,12 +799,12 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		// Load scion-agent config from this template and merge it
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
-			return nil, fmt.Errorf("failed to load config from template %s: %w", tpl.Name, err)
+			return nil, fmt.Errorf("failed to load config from template %s: %w", templateRef(tpl), err)
 		}
 
 		// Validate: reject legacy templates that still have a 'harness' field
 		if err := config.ValidateAgnosticTemplate(tplCfg); err != nil {
-			return nil, fmt.Errorf("template %s: %w", tpl.Name, err)
+			return nil, fmt.Errorf("template %s: %w", templateRef(tpl), err)
 		}
 
 		finalScionCfg = config.MergeScionConfig(finalScionCfg, tplCfg)
@@ -1033,8 +1053,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	_, agentDirStatErr := os.Lstat(agentDir)
+	newAgentDir := errors.Is(agentDirStatErr, fs.ErrNotExist)
 	if err := os.MkdirAll(agentDir, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent directory: %w", err)
+	}
+	if newAgentDir {
+		// A new agent chooses its home storage at its first start; see
+		// resolveHomeStorage.
+		if err := markHomeStoragePending(agentDir); err != nil {
+			return "", "", nil, fmt.Errorf("failed to record the agent's home storage: %w", err)
+		}
 	}
 	if err := os.MkdirAll(agentHome, 0755); err != nil {
 		return "", "", nil, fmt.Errorf("failed to create agent home: %w", err)
@@ -1372,7 +1401,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		templateHome := filepath.Join(tpl.Path, "home")
 		if info, err := os.Stat(templateHome); err == nil && info.IsDir() {
 			if err := util.CopyDir(templateHome, agentHome); err != nil {
-				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", tpl.Name, err)
+				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
 			}
 			templateHomeCopied = true
 		}
@@ -1460,7 +1489,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("failed to create skills dir: %w", err)
 				}
 				if err := util.CopyDir(tplSkills, skillsDest); err != nil {
-					return "", "", nil, fmt.Errorf("failed to copy template skills %s: %w", tpl.Name, err)
+					return "", "", nil, fmt.Errorf("failed to copy template skills %s: %w", templateRef(tpl), err)
 				}
 			}
 		}
@@ -1874,11 +1903,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Create the Info object which will go into agent-info.json.
 	// Use the resolved template name from the chain (human-friendly) rather
-	// than the raw templateName which may be a cache path or remote URI.
-	displayTemplateName := templateName
-	if len(chain) > 0 {
-		displayTemplateName = chain[len(chain)-1].Name
-	}
+	// than the raw templateName which may be a cache path or remote URI. A
+	// content-hash cache directory is never recorded as the name; the slug
+	// carried in ctx is used instead when known.
+	displayTemplateName, templateHash := infoTemplateFields(ctx, templateName, chain)
 	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
 		Project:               projectName,
@@ -1886,6 +1914,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		ProjectPath:           projectDir,
 		Name:                  agentName,
 		Template:              displayTemplateName,
+		TemplateHash:          templateHash,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: config.ComputeHarnessConfigRevision(hcDir.Path),
 		Profile:               profileName,
@@ -1903,6 +1932,14 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
+	}
+	// Record the run that owns these files (ptone/scion#2675): a delete
+	// naming a different run then leaves them alone. A provision with no run
+	// (provision-only, reprovision) keeps whatever run already owned them,
+	// since the files still belong to that run's runtime entry.
+	info.RunID = api.RunIDFromContext(ctx)
+	if info.RunID == "" {
+		info.RunID = readAgentInfoRunID(filepath.Join(agentHome, "agent-info.json"))
 	}
 
 	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
@@ -2218,6 +2255,73 @@ func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 	return &info
 }
 
+// hasRuntimeEntry reports whether the runtime holds an entry for opts.Name
+// in its project, or cannot tell (a List error).
+func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOptions) bool {
+	if m.Runtime == nil {
+		return false
+	}
+	projectName := ""
+	if projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath); err == nil {
+		projectName = config.GetProjectName(projectDir)
+	}
+	projectID := ""
+	if opts.Env != nil {
+		projectID = opts.Env["SCION_PROJECT_ID"]
+	}
+	entries, err := m.Runtime.List(ctx, map[string]string{"scion.name": api.Slugify(opts.Name)})
+	if err != nil {
+		return true
+	}
+	for _, e := range entries {
+		if matchAgentProject(e, projectName, projectID) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProvisionOwnerPrefix prefixes the owner a provision-only create records
+// in agent-info.json runId in place of a run (see Provision). It never
+// equals a run ID the hub sends.
+const ProvisionOwnerPrefix = "provision-"
+
+// readAgentInfoRunID returns the runId recorded in the agent-info.json at
+// path, or "" if the file is missing, unreadable or carries none.
+func readAgentInfoRunID(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		RunID string `json:"runId"`
+	}
+	if json.Unmarshal(data, &info) != nil {
+		return ""
+	}
+	return info.RunID
+}
+
+// GetSavedRunID returns the run ID recorded in the agent's agent-info.json:
+// the run that owns the agent's files (ptone/scion#2675). It is "" for an
+// agent provisioned before run IDs were recorded, one provisioned but never
+// started, or one whose agent-info.json is missing or unreadable.
+func GetSavedRunID(agentName string, projectPath string) string {
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.RunID
+	}
+	return ""
+}
+
+// SetSavedRunID records runID in the agent's agent-info.json as the run that
+// owns the agent's files (ptone/scion#2675). It is a no-op when
+// agent-info.json does not exist yet.
+func SetSavedRunID(agentName string, projectPath string, runID string) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		info.RunID = runID
+	})
+}
+
 func GetSavedProfile(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
 		return info.Profile
@@ -2319,6 +2423,37 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 		if profile != "" {
 			info.Profile = profile
 		}
+	})
+}
+
+// AgentDeleteState is the part of agent-info.json a soft delete marks
+// (Phase and DeletedAt), captured so the mark can be undone.
+type AgentDeleteState struct {
+	Phase     string
+	DeletedAt time.Time
+}
+
+// GetAgentDeleteState reads the Phase and DeletedAt of agent-info.json.
+// ok is false when the file cannot be read.
+func GetAgentDeleteState(agentName string, projectPath string) (AgentDeleteState, bool) {
+	info := getSavedAgentInfo(agentName, projectPath)
+	if info == nil {
+		return AgentDeleteState{}, false
+	}
+	return AgentDeleteState{Phase: info.Phase, DeletedAt: info.DeletedAt}, true
+}
+
+// RestoreAgentDeleteState writes st's Phase and DeletedAt back to
+// agent-info.json, undoing a soft-delete mark. It changes nothing unless the
+// file still shows the mark (Phase "deleted"), so a phase a newer start has
+// written since the snapshot is kept.
+func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDeleteState) error {
+	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
+		if info.Phase != "deleted" {
+			return
+		}
+		info.Phase = st.Phase
+		info.DeletedAt = st.DeletedAt
 	})
 }
 
@@ -2498,8 +2633,15 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	var agentInfo *api.AgentInfo
 	effectiveTemplate := defaultTemplate
 
+	// A template recorded as loaded from a content-addressed cache (a
+	// TemplateHash, or a content hash stored as the name by older versions)
+	// is not available by name on this broker, so it is not looked up by
+	// name: the agent loads from its persisted config alone, as it did when
+	// the stored name was the cache directory's hash.
+	hydratedTemplate := false
 	if infoData, err := os.ReadFile(agentInfoPath); err == nil {
 		if err := json.Unmarshal(infoData, &agentInfo); err == nil {
+			hydratedTemplate = normalizeHydratedTemplateInfo(agentInfo, api.TemplateNameFromContext(ctx))
 			if agentInfo.Template != "" {
 				effectiveTemplate = agentInfo.Template
 			}
@@ -2514,7 +2656,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		return agentDir, agentHome, agentWorkspace, nil, fmt.Errorf("failed to load agent config: %w", err)
 	}
 
-	chain, err := config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+	var chain []*config.Template
+	if hydratedTemplate {
+		err = fmt.Errorf("template %q was loaded from a content-addressed cache (%s): %w", effectiveTemplate, agentInfo.TemplateHash, config.ErrTemplateNotFound)
+	} else {
+		chain, err = config.GetTemplateChainInProject(effectiveTemplate, projectPath)
+	}
 	if err != nil {
 		util.Debugf("GetAgent: template chain for %q not found: %v, returning agentCfg only (harness=%q image=%q)",
 			effectiveTemplate, err, agentCfg.Harness, agentCfg.Image)
@@ -2537,7 +2684,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	for _, tpl := range chain {
 		tplCfg, err := tpl.LoadConfig()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", tpl.Name, err)
+			fmt.Fprintf(os.Stderr, "Warning: failed to load config from template %s, skipping: %v\n", templateRef(tpl), err)
 			continue
 		}
 		mergedCfg = config.MergeScionConfig(mergedCfg, tplCfg)
@@ -2621,4 +2768,73 @@ func isWorkspaceEmptyDir(path string) bool {
 		}
 	}
 	return true
+}
+
+// infoTemplateFields returns the template name and content hash to record in
+// agent-info.json for a template resolved to chain from templateName. When
+// the template was loaded from a content-addressed cache directory, the
+// directory's content hash is returned as hash and is never used as the
+// name; the name is the slug carried by api.ContextWithTemplateName, or
+// empty when no slug is known.
+func infoTemplateFields(ctx context.Context, templateName string, chain []*config.Template) (name, hash string) {
+	name = templateName
+	dir := ""
+	if len(chain) > 0 {
+		last := chain[len(chain)-1]
+		name = last.Name
+		dir = last.Path
+	} else if filepath.IsAbs(templateName) {
+		dir = templateName
+		name = filepath.Base(templateName)
+	}
+	if dir != "" && transfer.IsContentHash(filepath.Base(dir)) {
+		hash = filepath.Base(dir)
+	}
+	if transfer.IsContentHash(name) {
+		if hash == "" {
+			hash = name
+		}
+		name = ""
+	}
+	if hash != "" {
+		name = ""
+		if slug := api.TemplateNameFromContext(ctx); slug != "" && !transfer.IsContentHash(slug) {
+			name = slug
+		}
+	}
+	return name, hash
+}
+
+// normalizeHydratedTemplateInfo reports whether info records a template
+// loaded from a content-addressed cache, and in that case makes sure
+// info.Template is a display name, never a content hash. Older versions
+// stored the cache directory's hash as the template name; such a value is
+// moved to TemplateHash. The name becomes slug when one is known, otherwise
+// it is left empty. info is changed in memory only.
+func normalizeHydratedTemplateInfo(info *api.AgentInfo, slug string) bool {
+	if info == nil {
+		return false
+	}
+	if transfer.IsContentHash(info.Template) {
+		if info.TemplateHash == "" {
+			info.TemplateHash = info.Template
+		}
+		info.Template = ""
+	}
+	if info.TemplateHash == "" {
+		return false
+	}
+	if slug != "" && !transfer.IsContentHash(slug) {
+		info.Template = slug
+	}
+	return true
+}
+
+// templateRef names tpl in messages: its name, or its path when it has no
+// name (a template in a content-hash cache directory).
+func templateRef(tpl *config.Template) string {
+	if tpl.Name != "" {
+		return tpl.Name
+	}
+	return tpl.Path
 }

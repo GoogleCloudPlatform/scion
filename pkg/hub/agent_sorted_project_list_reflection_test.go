@@ -134,6 +134,8 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     UpdateAgentDeletion, never by CreateAgent/UpdateAgent, and json:"-".
 //     Deletion is their computed view (ComputeAgentDeletion), set only on
 //     response copies.
+//   - SoftDeleteOpID: written only through SetAgentSoftDeleteOpID, and only
+//     meaningful on a soft-deleted row (see DeletedAt above).
 //
 // Every other exported field, including Slug (which a mutation of
 // agentResource to read ScopeUserID would depend on), is filled and
@@ -164,15 +166,37 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
 	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
 	"Deletion": true,
-	// run_id is written only through SetAgentRunID and
-	// CompareAndSwapAgentRunID (ptone/scion#2550): CreateAgent and
-	// UpdateAgent never write it, so it cannot round-trip here. It is not an
-	// authz input, and no list reader uses it (only the delete dispatch, from
-	// a single-row read).
+	// run_id is written only through SetAgentRunID and the run-ID swaps
+	// (ptone/scion#2550): CreateAgent and UpdateAgent never write it, so it
+	// cannot round-trip here; that is the only reason it is skipped. List
+	// reads do carry it (ListAgents maps full rows), and project deletion
+	// dispatches deletes from one. It is not an authz input.
 	"RunID": true,
+	// previous_run_ids: the same writers and the same reasons
+	// (ptone/scion#3097).
+	"PreviousRunIDs": true,
+	// workspace_placement is written only through SetAgentWorkspacePlacement
+	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
+	// cannot round-trip here. It is not an authz input.
+	"WorkspacePlacement": true,
 	// Run intent columns are written only through SetRunIntent and
 	// RevertRunIntent (never by CreateAgent/UpdateAgent).
 	"RunIntent": true, "RunIntentAt": true,
+	// ProvisionedOnly is computed by the hub at response time from Phase,
+	// RunIntent and the launch/deletion columns (ptone/scion#2929); it is
+	// not stored.
+	"ProvisionedOnly": true,
+	// Start claim columns are written only through the start-claim store
+	// methods (never by CreateAgent/UpdateAgent).
+	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
+	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
+	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
+	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
+	// soft_delete_op_id is written only through SetAgentSoftDeleteOpID
+	// (never by CreateAgent/UpdateAgent) and is set only alongside
+	// DeletedAt, which GetAgentsByIDs filters out. It is json:"-" and not
+	// an authz input.
+	"SoftDeleteOpID": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

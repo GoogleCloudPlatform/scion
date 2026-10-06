@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -467,6 +468,19 @@ func (s *ProjectStore) DeleteProject(ctx context.Context, id string) error {
 
 // ListProjects returns projects matching the filter criteria.
 func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, true)
+}
+
+// ListProjectSummaries returns the projects ListProjects would return for
+// the same filter and options, without populateProjectComputed's
+// per-project queries.
+func (s *ProjectStore) ListProjectSummaries(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions) (*store.ListResult[store.Project], error) {
+	return s.listProjects(ctx, filter, opts, false)
+}
+
+// listProjects implements ListProjects and ListProjectSummaries; computed
+// selects whether each row is enriched by populateProjectComputed.
+func (s *ProjectStore) listProjects(ctx context.Context, filter store.ProjectFilter, opts store.ListOptions, computed bool) (*store.ListResult[store.Project], error) {
 	query := s.client.Project.Query()
 
 	// Membership / ownership filtering mirrors the SQLite precedence:
@@ -609,8 +623,10 @@ func (s *ProjectStore) ListProjects(ctx context.Context, filter store.ProjectFil
 	items := make([]store.Project, 0, len(rows))
 	for _, p := range rows {
 		sp := entProjectToStore(p)
-		if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
-			return nil, err
+		if computed {
+			if err := s.populateProjectComputed(ctx, sp, p.ID); err != nil {
+				return nil, err
+			}
 		}
 		items = append(items, *sp)
 	}
@@ -747,6 +763,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
 	sb.DefaultProfile = b.DefaultProfile
+	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -774,6 +791,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
 		SetDefaultProfile(b.DefaultProfile).
+		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 
@@ -875,6 +893,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
 			SetDefaultProfile(b.DefaultProfile).
+			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
@@ -979,6 +998,10 @@ func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error
 	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
 	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
 		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	// broker_target_inventory has no FK to runtime_brokers either.
+	if _, err := tx.BrokerTargetInventory.Delete().Where(brokertargetinventory.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete target inventory: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete runtime broker: commit: %w", err)

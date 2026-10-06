@@ -21,7 +21,6 @@ The Web Dashboard is a client-side SPA served by the Go server, which also handl
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `SCION_SERVER_WEB_PORT` | `8080` | The HTTP port the web UI listens on (overridden by `--web-port`). |
 | `SESSION_SECRET` | | Secret key for signing session cookies. **Preferred over `--session-secret`** — environment variables are not visible in process listings. Deliver via systemd `EnvironmentFile` or a secrets manager. |
 
 ### Authentication
@@ -31,23 +30,16 @@ These variables are required for standard user login in production.
 
 | Variable | Description |
 | :--- | :--- |
-| `SCION_SERVER_AUTH_GOOGLE_CLIENTID` | Google OAuth 2.0 Client ID. |
-| `SCION_SERVER_AUTH_GOOGLE_CLIENTSECRET` | Google OAuth 2.0 Client Secret. |
-| `SCION_SERVER_AUTH_GITHUB_CLIENTID` | GitHub OAuth App Client ID. |
-| `SCION_SERVER_AUTH_GITHUB_CLIENTSECRET` | GitHub OAuth App Client Secret. |
+| `SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTID` | Google OAuth 2.0 Client ID. |
+| `SCION_SERVER_OAUTH_WEB_GOOGLE_CLIENTSECRET` | Google OAuth 2.0 Client Secret. |
+| `SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID` | GitHub OAuth App Client ID. |
+| `SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET` | GitHub OAuth App Client Secret. |
 | `SCION_SERVER_AUTH_AUTHORIZEDDOMAINS` | Comma-separated list of email domains allowed to sign in. |
 
 #### External OIDC Login Provider
-These variables configure user login via an external OIDC provider (e.g. Okta, Keycloak).
+Configure user login via an external OIDC provider (e.g. Okta, Keycloak) in the `server.oidc_login` section of `settings.yaml` (`enabled`, `display_name`, `issuer_url`, `client_id`, `client_secret`, `scopes`). See [Authentication](/scion/hosted/single-node/auth/) for an example.
 
-| Variable | Description |
-| :--- | :--- |
-| `SCION_SERVER_OIDC_LOGIN_ENABLED` | Set to `"true"` to enable the external OIDC login option. |
-| `SCION_SERVER_OIDC_LOGIN_DISPLAY_NAME` | Human-readable label shown on the login button (e.g. `"Corporate SSO"`). |
-| `SCION_SERVER_OIDC_LOGIN_ISSUER_URL` | Base issuer URL of the OIDC provider (used for auto-discovery). |
-| `SCION_SERVER_OIDC_LOGIN_CLIENT_ID` | Client ID registered with the OIDC provider. |
-| `SCION_SERVER_OIDC_LOGIN_CLIENT_SECRET` | Client Secret registered with the provider (can be empty for public clients). |
-| `SCION_SERVER_OIDC_LOGIN_SCOPES` | Comma-separated list of scopes to request (defaults to `"openid,email,profile"`). |
+Underscored names such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, and so on) take effect only when `settings.yaml` has a `server:` section. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 #### Development Authentication
 Used for local testing without setting up full OAuth.
@@ -70,8 +62,9 @@ Feature flags control the availability of Web Dashboard features. Registered exp
 | `web.native_chat` | ON | Enable the [Native Web Chat](/scion/workstation/dashboard/#native-web-chat) workspace. |
 | `web.terminal_workspace` | ON | Enable the [Terminal Workspace](/scion/workstation/dashboard/#terminal-workspace) — a multi-pane terminal environment as a top-level workspace. |
 | `web.gcs_links` | OFF | Linkify a `gs://bucket/object` URI an agent posts in chat, and let the viewer fetch and preview that object through the hub. Also gates the hub's `GET /api/v1/gcs/object` endpoint, which additionally requires a configured GCP token generator. |
+| `hub.artifacts` | OFF | Artifacts: files and bundles agents and users publish with stable, versioned references. Also gates the hub's `/api/v1/artifacts` routes, which answer 404 while it is off. In development: the routes have no behaviour yet. |
 
-`web.terminal_workspace` and `web.gcs_links` are registered experiments; `web.native_chat` is not (see [Experiments](/scion/reference/experiments/) for what that distinction means). `web.native_chat` is instead driven by the hub's `nativeChatEnabled` setting (from `/api/v1/settings/public`): when it is `false`, boot writes the flag to `false` directly into the flag bag `isFeatureEnabled` checks first, ahead of any localStorage override.
+`web.terminal_workspace`, `web.gcs_links` and `hub.artifacts` are registered experiments; `web.native_chat` is not (see [Experiments](/scion/reference/experiments/) for what that distinction means). `web.native_chat` is instead driven by the hub's `nativeChatEnabled` setting (from `/api/v1/settings/public`): when it is `false`, boot writes the flag to `false` directly into the flag bag `isFeatureEnabled` checks first, ahead of any localStorage override.
 
 To disable a registered experiment hub-wide, use the Experiments tab. A localStorage override has no effect on a registered experiment for a signed-in user on a working hub — it only applies to an unregistered flag (such as `web.native_chat`), or on a page load where the experiments fetch fails:
 

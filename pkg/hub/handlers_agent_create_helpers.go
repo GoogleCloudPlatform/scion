@@ -254,12 +254,11 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
 	// Shared-workspace git projects skip clone — agents mount the shared workspace instead.
+	// The shared workspace's own clone settings travel separately, at
+	// dispatch time (sharedWorkspaceCloneConfig), so they never turn on the
+	// broker's per-agent clone mode.
 	if project != nil && project.GitRemote != "" && !project.IsSharedWorkspace() {
-		cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
-		defaultBranch := project.Labels[store.LabelDefaultBranch]
-		if defaultBranch == "" {
-			defaultBranch = "main"
-		}
+		cloneURL, defaultBranch := projectCloneSource(project)
 		defaultDepth := 1
 		agent.AppliedConfig.GitClone = &api.GitCloneConfig{
 			URL:    cloneURL,
@@ -294,6 +293,41 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+}
+
+// projectCloneSource returns the URL and branch to clone a git-anchored
+// project from: the clone-url label (or the git remote), and the
+// default-branch label (or "main").
+func projectCloneSource(project *store.Project) (cloneURL, branch string) {
+	cloneURL = resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	branch = project.Labels[store.LabelDefaultBranch]
+	if branch == "" {
+		branch = "main"
+	}
+	return cloneURL, branch
+}
+
+// sharedWorkspaceCloneConfig returns the clone settings for the workspace of
+// a shared-plain git project, or nil for any other project. They describe
+// the same full clone of the default branch the hub makes for the project's
+// own workspace (cloneSharedWorkspaceProject).
+//
+// They are sent to the broker separately from AppliedConfig.GitClone, which
+// stays nil for these projects: GitClone would make the broker clone into a
+// per-agent workspace. Only the Kubernetes runtime uses these settings, in
+// the workspace-provision init container of an NFS-backed workspace
+// (RunConfig.GitCloneForInit), where the first agent to start clones the
+// repository into the shared workspace.
+func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
+	if project == nil || !project.IsSharedWorkspace() {
+		return nil
+	}
+	cloneURL, branch := projectCloneSource(project)
+	if cloneURL == "" {
+		return nil
+	}
+	fullClone := 0
+	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone}
 }
 
 // deriveAgentConfig is create's whole config-resolution pipeline, run after
@@ -985,20 +1019,11 @@ const (
 // createNotifySubscription creates a notification subscription for the given agent
 // if notify is true and a subscriber has been identified.
 func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectID, notifySubscriberType, notifySubscriberID, createdBy string) {
-	if notifySubscriberID == "" {
+	sub := newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, createdBy)
+	if sub == nil {
 		return
 	}
-	sub := &store.NotificationSubscription{
-		ID:                api.NewUUID(),
-		Scope:             store.SubscriptionScopeAgent,
-		AgentID:           agentID,
-		SubscriberType:    notifySubscriberType,
-		SubscriberID:      notifySubscriberID,
-		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
-		CreatedAt:         time.Now(),
-		CreatedBy:         createdBy,
-	}
+	sub.AgentID = agentID
 	if err := s.store.CreateNotificationSubscription(ctx, sub); err != nil {
 		s.agentLifecycleLog.Warn("Failed to create notification subscription",
 			"agent_id", agentID, "subscriber", notifySubscriberID, "error", err)
@@ -1006,6 +1031,25 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 		s.agentLifecycleLog.Debug("Created notification subscription",
 			"subscriptionID", sub.ID, "agent_id", agentID,
 			"subscriberType", notifySubscriberType, "subscriberID", notifySubscriberID)
+	}
+}
+
+// newNotifySubscription builds the agent-scoped notification subscription a
+// create with notify=true records, without its AgentID. It returns nil when
+// there is no subscriber.
+func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, createdBy string) *store.NotificationSubscription {
+	if notifySubscriberID == "" {
+		return nil
+	}
+	return &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		SubscriberType:    notifySubscriberType,
+		SubscriberID:      notifySubscriberID,
+		ProjectID:         projectID,
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		CreatedAt:         time.Now(),
+		CreatedBy:         createdBy,
 	}
 }
 
@@ -1113,6 +1157,12 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+			return existingAgentErrored
+		}
+
 		if req.Task != "" {
 			if existingAgent.AppliedConfig == nil {
 				existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
@@ -1125,7 +1175,11 @@ func (s *Server) handleExistingAgent(
 		// re-reserve (with the cap check) before dispatch, same as create
 		// (ptone/scion#1963). Idempotent, and rejects with the same
 		// quota-exceeded response create uses if the broker is at capacity.
-		ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+		// The agent is marked starting for the dispatch so the quota
+		// reconcile keeps the slot (ptone/scion#2014); beginStartDispatch
+		// requires the lifecycle op.
+		defer s.beginLifecycleOp(existingAgent.ID)()
+		sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 		if !ok {
 			return existingAgentErrored
 		}
@@ -1134,12 +1188,12 @@ func (s *Server) handleExistingAgent(
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			sd.rollback(ctx)
 			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
-			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			sd.rollback(ctx)
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
@@ -1152,6 +1206,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+			case relaySkillResolutionError(w, err):
+				// Required-skill resolution failure relayed with the broker's status.
 			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
@@ -1167,9 +1223,15 @@ func (s *Server) handleExistingAgent(
 		// pod actually stopping, which describes the old pod, not this one.
 		existingAgent.ExitReason = ""
 		existingAgent.ExitCode = nil
+		// The row read starting during the dispatch (beginStartDispatch),
+		// so clear the rest of the prior generation's remnants here, as
+		// ClearTerminalRemnants does for a status write.
+		existingAgent.Message = ""
+		existingAgent.StalledFromActivity = ""
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
+		sd.settle()
 
 		if req.Notify {
 			s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
@@ -1203,6 +1265,12 @@ func (s *Server) handleExistingAgent(
 				return existingAgentErrored
 			}
 
+			// Fail fast on a GCP identity the token-mint gate would refuse,
+			// before any quota reservation or run-intent write.
+			if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+				return existingAgentErrored
+			}
+
 			if req.Task != "" {
 				if existingAgent.AppliedConfig == nil {
 					existingAgent.AppliedConfig = &store.AgentAppliedConfig{}
@@ -1223,18 +1291,22 @@ func (s *Server) handleExistingAgent(
 			}
 			// A stopped or errored agent's reservation was released when it
 			// stopped/crashed; re-reserve (with the cap check) before
-			// dispatch, same as create (ptone/scion#1963).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+			// dispatch, same as create (ptone/scion#1963), and mark it
+			// starting for the dispatch so the quota reconcile keeps the
+			// slot (ptone/scion#2014); beginStartDispatch requires the
+			// lifecycle op.
+			defer s.beginLifecycleOp(existingAgent.ID)()
+			sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 			if !ok {
 				return existingAgentErrored
 			}
 			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
-				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				sd.rollback(ctx)
 				writeRunIntentError(w, err, existingAgent.ID)
 				return existingAgentErrored
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
-				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				sd.rollback(ctx)
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
 				}
@@ -1247,6 +1319,8 @@ func (s *Server) handleExistingAgent(
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+				case relaySkillResolutionError(w, err):
+					// Required-skill resolution failure relayed with the broker's status.
 				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
@@ -1261,9 +1335,15 @@ func (s *Server) handleExistingAgent(
 			// pod, not this one.
 			existingAgent.ExitReason = ""
 			existingAgent.ExitCode = nil
+			// The row read starting during the dispatch (beginStartDispatch),
+			// so clear the rest of the prior generation's remnants here, as
+			// ClearTerminalRemnants does for a status write.
+			existingAgent.Message = ""
+			existingAgent.StalledFromActivity = ""
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
+			sd.settle()
 
 			if req.Notify {
 				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
@@ -1304,7 +1384,15 @@ func (s *Server) handleExistingAgent(
 		// fall-through create below mints a credential for the new agent
 		// row's own (distinct) ID.
 		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
-		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
+		// The row delete runs as a hard-delete lifecycle transaction, so the
+		// agent's delegation edges are deactivated, the hard-delete hooks run
+		// and the agent_hard_delete audit record is written atomically with it.
+		if err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.DeleteAgent(ctx, existingAgent.ID); err != nil {
+				return err
+			}
+			return s.hardDeleteAgentTx(ctx, tx, existingAgent, auditActorFromContext(ctx))
+		}); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}
@@ -1335,6 +1423,12 @@ func (s *Server) handleExistingAgent(
 		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				"cannot start agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "start") {
 			return existingAgentErrored
 		}
 
@@ -1374,6 +1468,8 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
+			case relaySkillResolutionError(w, err):
+				// Required-skill resolution failure relayed with the broker's status.
 			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
@@ -2016,7 +2112,7 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 		return false, err
 	}
 	for _, sa := range sas {
-		if sa.Verified {
+		if gcpServiceAccountVerified(&sa) {
 			return true, nil
 		}
 	}

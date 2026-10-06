@@ -104,11 +104,27 @@ export class ScionApp extends LitElement {
       position: sticky;
       top: 0;
       height: var(--scion-app-height, 100dvh);
+      /* Landscape on a notched phone (the page uses viewport-fit=cover):
+         the nav moves clear of the notch and the home indicator, and the
+         sidebar paints the nav's surface under the gaps. 0 elsewhere. */
+      box-sizing: border-box;
+      padding-left: env(safe-area-inset-left, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    /* The sidebar sits between the header and the left edge and takes the
+       left inset itself, so the header does not repeat it. */
+    scion-header {
+      --scion-header-inset-left: 0px;
     }
 
     @media (max-width: 768px) {
       .sidebar {
         display: none;
+      }
+      scion-header {
+        --scion-header-inset-left: env(safe-area-inset-left, 0px);
       }
     }
 
@@ -119,12 +135,16 @@ export class ScionApp extends LitElement {
     }
 
     /* Mobile drawer */
+    /* The drawer grows by the left inset and pads it, so the nav keeps its
+       width and clears the notch in landscape. 0 elsewhere. */
     .mobile-drawer {
-      --size: 280px;
+      --size: calc(280px + env(safe-area-inset-left, 0px));
     }
 
     .mobile-drawer::part(panel) {
       background: var(--scion-surface, #ffffff);
+      padding-left: env(safe-area-inset-left, 0px);
+      box-sizing: border-box;
     }
 
     .mobile-drawer::part(close-button) {
@@ -150,16 +170,29 @@ export class ScionApp extends LitElement {
       /* The last of the scrolled content clears the home indicator (the
          page uses viewport-fit=cover); the inset is 0 elsewhere. */
       padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));
+      /* Likewise clear of the notch and rounded corners in landscape. The
+         right edge always meets the screen; the left only once the sidebar
+         gives way to the drawer (below), as the sidebar takes the left
+         inset itself. */
+      padding-right: max(1.5rem, env(safe-area-inset-right, 0px));
       overflow: auto;
       overscroll-behavior: contain;
       display: flex;
       flex-direction: column;
     }
 
+    @media (max-width: 768px) {
+      .content {
+        padding-left: max(1.5rem, env(safe-area-inset-left, 0px));
+      }
+    }
+
     @media (max-width: 640px) {
       .content {
         padding: 1rem;
         padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
+        padding-inline: max(1rem, env(safe-area-inset-left, 0px))
+          max(1rem, env(safe-area-inset-right, 0px));
       }
     }
 

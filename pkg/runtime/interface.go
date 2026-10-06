@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -98,8 +99,11 @@ type RunConfig struct {
 	// HomeStorageBackend selects where the agent home lives on the
 	// Kubernetes runtime. Empty (or "local") keeps the home in the pod and
 	// the pod spec unchanged. HomeStorageNFS builds an NFS-home pod (see
-	// k8s_nfs_home.go). Nothing sets HomeStorageNFS yet.
+	// k8s_nfs_home.go); HomeStorage then describes the home.
 	HomeStorageBackend string
+	// HomeStorage describes the NFS agent home. Set exactly when
+	// HomeStorageBackend is HomeStorageNFS.
+	HomeStorage *HomeStorageRealization
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
@@ -250,6 +254,31 @@ func (h launchHooks) created(handle api.ResourceHandle) {
 	h.createdFn(handle)
 }
 
+// HomeStorageRealization describes the NFS agent home of one start: the
+// agent's home directory <SubPathRoot>/<ProjectID>/agents/<AgentSlug>/home-<AgentID>
+// on the claim PVClaimName (see NFSHomeSubPaths). Computed in pkg/agent
+// from the agent's recorded home storage and consumed by the Kubernetes
+// runtime.
+type HomeStorageRealization struct {
+	PVClaimName string
+	SubPathRoot string
+	ProjectID   string
+	AgentSlug   string
+	AgentID     string
+	// Leaf is "pod" (the home-leaf init container creates the home
+	// directory) or "broker" (the broker created it before Run).
+	Leaf string
+	// GID is the export's group, which owns the agent and home directories.
+	GID int
+	// StopGraceSeconds is the pod's termination grace period;
+	// TerminationWaitSeconds the extra time a start waits for the previous
+	// pod to stop.
+	StopGraceSeconds       int
+	TerminationWaitSeconds int
+	// SkeletonMaxBytes caps the image home copied into a new home.
+	SkeletonMaxBytes int64
+}
+
 // SharedDirRealization holds the plan for realizing a project's shared
 // directories when server.shared_dir_storage.backend is "nfs" (design
 // deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
@@ -269,6 +298,12 @@ type SharedDirRealization struct {
 	// SubPaths maps each shared dir name to its subPath within PVClaimName,
 	// e.g. "projects/<pid>/shared-dirs/<name>".
 	SubPaths map[string]string
+	// SupplementalGroups are the owning group ids of the shared-dir leaves,
+	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
+	// and filtered by its guard. Kubernetes adds them to the pod's
+	// supplementalGroups; Docker and rootful Podman pass them as
+	// --group-add. Empty means no extra group (ptone/scion#3155).
+	SupplementalGroups []int64
 }
 
 // RunRef identifies the runtime entry a Delete targets. ID is the backend
@@ -284,6 +319,20 @@ type RunRef struct {
 	ID    string
 	RunID string
 }
+
+// ErrRunMismatch is returned (wrapped) by a Delete whose RunRef names a run
+// when the entry holding ref.ID belongs to a different run: nothing was
+// deleted, and the run the caller meant is already gone. Callers treat it
+// like the broker's own run mismatch (ptone/scion#2550): not found, touch
+// nothing.
+var ErrRunMismatch = errors.New("runtime entry belongs to a different run")
+
+// ErrRunConflict is returned (wrapped) by Run when an object it must
+// replace belongs to another run that is still live (a Kubernetes pod of
+// another run that is Pending or Running, or a per-agent Secret created by
+// a concurrent start). Run deletes nothing of that run and fails; the
+// start can be retried once the other run is gone.
+var ErrRunConflict = errors.New("agent name is held by another live run")
 
 type Runtime interface {
 	Name() string
