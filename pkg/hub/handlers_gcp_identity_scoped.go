@@ -249,10 +249,22 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Project scope warns about project-scoped accounts no Kubernetes broker
+	// profile of the project maps, the same as the nested route.
+	var warnings []string
+	if req.scope == store.ScopeProject {
+		saPtrs := make([]*store.GCPServiceAccount, len(sas))
+		for i := range sas {
+			saPtrs[i] = &sas[i]
+		}
+		warnings = s.projectSAMappingWarnings(ctx, req.scopeID, saPtrs...)
+	}
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
 		MintQuota:    mintQuota,
+		Warnings:     warnings,
 	})
 }
 
@@ -534,7 +546,7 @@ func (s *Server) verifyGCPServiceAccountByID(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	s.runGCPServiceAccountVerification(w, r, sa)
+	s.runGCPServiceAccountVerification(w, r, sa, "")
 }
 
 // createGCPServiceAccountScoped registers a service account at an explicit

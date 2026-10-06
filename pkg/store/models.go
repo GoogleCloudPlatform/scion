@@ -1005,6 +1005,24 @@ type BrokerProfile struct {
 	// pkg/runtime.HasAttachSupport uses), not false. A plain bool could not
 	// tell that "never reported" apart from an explicit false.
 	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings lists the GCP service accounts this profile
+	// maps to a Kubernetes ServiceAccount (kubernetes_service_account_mappings
+	// in the broker's global settings, profile and runtime-entry level).
+	// Reported at broker join; the Hub uses it only to warn about registered
+	// service accounts no profile maps (ptone/scion#3329 phase 2).
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	// MappingsReported is true when the broker reported
+	// ServiceAccountMappings for this profile, so an empty list means
+	// "nothing mapped" rather than "unknown" (an older broker, or a broker
+	// that could not read its settings).
+	MappingsReported bool `json:"mappingsReported,omitempty"`
+}
+
+// BrokerProfileSAMapping is one GCP service account a broker profile maps
+// to a Kubernetes ServiceAccount. A struct, not a bare string, so a later
+// phase can add per-entry details (such as the namespace) without a rename.
+type BrokerProfileSAMapping struct {
+	GSA string `json:"gsa"`
 }
 
 // ProjectProvider links a runtime broker to a project.

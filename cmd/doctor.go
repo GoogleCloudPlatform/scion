@@ -110,6 +110,16 @@ func runDoctor() error {
 	hubChecks = append(hubChecks, d4)
 	printCheck(d4.Name, d4.Status, d4.Message, d4.Remediation)
 
+	// D9: GCP service account mappings (warning only): registered GSAs of
+	// the linked project that no Kubernetes broker profile maps.
+	var linkedProjectID string
+	if settings.Hub != nil {
+		linkedProjectID = settings.Hub.ProjectID
+	}
+	d9 := checkDoctorSAMappings(hubEP, hubConnected, hubClient, linkedProjectID)
+	hubChecks = append(hubChecks, d9)
+	printCheck(d9.Name, d9.Status, d9.Message, d9.Remediation)
+
 	// D5: NFS Mount Status (local check against this host's global
 	// settings and mount table; read-only)
 	nfsSettings, _, nfsErr := config.LoadGlobalSettings()
@@ -550,6 +560,52 @@ func checkDoctorBrokerConnectivity(hubEP string, hubConnected bool, client hubcl
 		Name:    "broker-connectivity",
 		Status:  "pass",
 		Message: fmt.Sprintf("%d/%d broker(s) online", onlineCount, len(resp.Brokers)),
+	}
+}
+
+// checkDoctorSAMappings performs D9: it reports, as a warning, each GCP
+// service account registered in the linked project that no Kubernetes
+// broker profile of the project maps in kubernetes_service_account_mappings
+// (ptone/scion#3329 phase 2). The Hub computes the warnings; this check
+// never fails, since an unmapped account only matters if it is assigned on
+// a Kubernetes profile.
+func checkDoctorSAMappings(hubEP string, hubConnected bool, client hubclient.Client, projectID string) scionruntime.CheckResult {
+	const name = "gcp-sa-mappings"
+	switch {
+	case hubEP == "":
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "No Hub endpoint configured"}
+	case !hubConnected:
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "Skipped (Hub unreachable)"}
+	case client == nil:
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "Skipped (Hub client not available)"}
+	case projectID == "":
+		return scionruntime.CheckResult{Name: name, Status: "skip", Message: "Skipped (project not linked to Hub)"}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	sas, warnings, err := client.GCPServiceAccounts().ListWithWarnings(ctx, hubclient.ListForProject(projectID))
+	if err != nil {
+		return scionruntime.CheckResult{
+			Name:    name,
+			Status:  "warn",
+			Message: fmt.Sprintf("Could not list the project's GCP service accounts: %v", err),
+		}
+	}
+	if len(warnings) > 0 {
+		return scionruntime.CheckResult{
+			Name:   name,
+			Status: "warn",
+			Message: fmt.Sprintf("%d of %d registered GCP service account(s) not mapped on any Kubernetes broker profile:\n    %s",
+				len(warnings), len(sas), strings.Join(warnings, "\n    ")),
+			Remediation: "Add the service account to kubernetes_service_account_mappings in the broker's settings (and provision the bound Kubernetes ServiceAccount), then re-register the broker; or assign a mapped service account on Kubernetes profiles",
+		}
+	}
+	return scionruntime.CheckResult{
+		Name:    name,
+		Status:  "pass",
+		Message: fmt.Sprintf("No unmapped GCP service accounts reported (%d registered)", len(sas)),
 	}
 }
 

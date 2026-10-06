@@ -409,6 +409,21 @@ The mapping is read only from the broker's global settings: `~/.scion/settings.y
 
 There is no fallback: a failed mapping never runs the pod with the emulator or with the pod's default identity.
 
+**Early warning for unmapped service accounts.** The Hub warns, before any dispatch, about a GSA registered in a project that no Kubernetes broker profile of the project maps. The warning appears on:
+
+- registering, minting, or verifying a project service account (the response's `warnings` field, printed to stderr by `scion project service-accounts add`, `mint`, and `verify`),
+- listing the project's service accounts (`warnings` in the list response, printed by `scion project service-accounts list`),
+- the `gcp-sa-mappings` check of `scion doctor`.
+
+It is only a warning: it never fails a request, and an unmapped GSA is fine if it is never assigned on a Kubernetes profile. It is not shown for hub-scoped service accounts, for projects whose provider brokers have no Kubernetes profile, or when no Kubernetes profile has reported its mappings.
+
+Where the Hub gets the mappings from:
+
+- **A broker in the same process as the Hub** (the embedded broker): the Hub reads its settings live, the same global settings and database overlay the broker reads at dispatch. Changes show up right away.
+- **A standalone broker**: it reports, for each profile, the GSAs that profile maps (its own `kubernetes_service_account_mappings` plus its runtime entry's) when it registers with `scion broker register`. The Hub treats that report as current until the next registration. After changing a mapping, re-run `scion broker register` on that broker for the warning to reflect it. A broker that predates this report, or could not read its settings, counts as unknown and produces no warning on its own. When other profiles did report, the warning says how many profiles did not.
+
+The warning says a profile maps the GSA, not that the Workload Identity binding works: the Hub cannot see the KSA annotation or the IAM binding.
+
 #### passthrough
 
 `passthrough` is unchanged on Kubernetes. Scion sets no metadata override, and the pod uses whatever identity the cluster provides: the node's service account, or a KSA bound through Workload Identity that you set up yourself (for example with `serviceAccountName`, as in [GKE Workload Identity](#gke-workload-identity)). Identity is assigned out of band, so Scion does not check which GSA the pod ends up with. An explicit per-agent `passthrough` request goes through the Hub's [passthrough authorization checks](/scion/hosted/ha/permissions/#hub-default-gcp-identity). Use `assign` when you want the Hub to control which GSA an agent gets.
@@ -741,6 +756,8 @@ This checks:
 - (GKE mode) SecretProviderClass CRD availability
 - (GKE mode) Secrets Store CSI driver installation
 - (GKE mode) GCS FUSE CSI driver installation
+
+In its Hub checks, `scion doctor` also reports `gcp-sa-mappings`: a warning for each GSA registered in the linked project that no Kubernetes broker profile maps (see [early warning for unmapped service accounts](#gcp-identity-mode-assign-workload-identity-mapping)). This check never fails.
 
 Use `scion doctor --format json` for machine-readable output.
 

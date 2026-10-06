@@ -360,6 +360,16 @@ type BrokerProfile struct {
 	// the field was never reported (an older broker or profile record),
 	// which must be read as supported, not as an explicit false.
 	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings and MappingsReported mirror
+	// store.BrokerProfile: the GCP service accounts this profile maps to a
+	// Kubernetes ServiceAccount, and whether the list was reported at all.
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	MappingsReported       bool                     `json:"mappingsReported,omitempty"`
+}
+
+// BrokerProfileSAMapping mirrors store.BrokerProfileSAMapping.
+type BrokerProfileSAMapping struct {
+	GSA string `json:"gsa"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
