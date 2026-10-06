@@ -282,6 +282,19 @@ func TestSchedAgentCreatorChainEvaluated(t *testing.T) {
 	f.assertNoChild(t, "sched-agent-c2")
 }
 
+// An agent principal in another project denies: the revision names a live
+// agent whose project is not the event's.
+func TestSchedAgentPrincipalOtherProjectDenied(t *testing.T) {
+	f := newSchedFire(t, "sched-agent-xproj")
+	require.NotEqual(t, f.proj.ID, f.stranger.ProjectID)
+	evt := withMockAgentRevision(f.event("sched-agent-xproj-c"), f.stranger.ID)
+
+	err := f.fire(t, evt)
+	require.ErrorIs(t, err, errScheduledAuthorityDenied)
+	assert.Contains(t, err.Error(), "not in the event's project")
+	f.assertNoChild(t, "sched-agent-xproj-c")
+}
+
 // The agent principal's fire identity carries the agent's stored ancestry.
 func TestSchedAgentPrincipalCarriesStoredAncestry(t *testing.T) {
 	f := newSchedFire(t, "sched-anc")
