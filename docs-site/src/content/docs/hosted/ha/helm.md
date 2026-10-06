@@ -112,7 +112,7 @@ value.
 | `hub.baseUrl` | The external URL of the hub, for example `https://hub.example.com`. It must start with `https://`: the session cookie's `Secure` attribute is derived from that prefix. |
 | `auth.existingSecret` or `auth.sessionSecret` | Exactly one. The session secret is both the cookie encryption key and the hub's JWT signing key, so every replica must see the same value. `auth.existingSecret` names a Secret you manage; the key defaults to `SCION_SERVER_SESSION_SECRET` and can be changed with `auth.existingSecretKey`. |
 | `image.repository` | Your `scion-hub-gke` repository (see above). |
-| An agent image registry | `agents.imageRegistry`, for example `us-docker.pkg.dev/my-project/scion`. The in-process Runtime Broker does not start without one. The chart also accepts `image_registry` for the active profile set through `config.extra`, or `SCION_IMAGE_REGISTRY` / `SCION_MAINTENANCE_IMAGE_REGISTRY` set through `hub.extraEnv`. Under `config.existingSecret` this value is not checked, and your settings file must set it. |
+| An agent image registry | `agents.imageRegistry`, for example `us-docker.pkg.dev/my-project/scion`. The in-process Runtime Broker does not start without one. The chart also accepts `profiles.default.image_registry` set through `config.extra` (the chart fixes `active_profile` to `default`, and `config.extra` cannot override it), or `SCION_IMAGE_REGISTRY` / `SCION_MAINTENANCE_IMAGE_REGISTRY` set through `hub.extraEnv`. Under `config.existingSecret` this value is not checked, and your settings file must set it. |
 | `auth.proxy.iap.audience` | Required while `auth.mode` is `proxy`, which is the default. See [Authentication](#4-authentication). |
 
 Create the session secret before installing:
@@ -242,8 +242,9 @@ below. There is no value for setting it directly.
 - `database.name` is required.
 - `storage.provider: gcs` with a `storage.bucket` is required under Postgres.
 - The proxy runs as a native sidecar (`cloudsql.nativeSidecar: true`), which
-  needs Kubernetes 1.29 or later. On older clusters, set it to `false`. The hub
-  then crash-loops until the proxy is ready, which happens on every rollout.
+  needs Kubernetes 1.29 or later. On older clusters, set it to `false`. The proxy
+  then starts unordered alongside the hub, so the hub can crash-loop for the
+  first minute of each rollout until the proxy is ready. This recovers on its own.
 - `cloudsql.privateIp: true` connects over the instance's private IP.
 
 The chart grants no IAM. The Google service account named in
@@ -408,7 +409,8 @@ the Secret but the running containers keep the old value:
 - the session secret (`auth.sessionSecret` or the Secret named by
   `auth.existingSecret`),
 - `database.password`,
-- any value under `auth.oauth`.
+- an OAuth client secret (`auth.oauth.web.google.clientSecret` or
+  `auth.oauth.web.github.clientSecret`).
 
 After changing one of these, run:
 
