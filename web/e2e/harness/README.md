@@ -129,6 +129,10 @@ Available helpers:
    the hub's database).
 2. Find the role definition: `findRoleDefinition(baseURL, token, 'hub-admin')`.
 3. Create a role binding: `createRoleBinding(baseURL, token, { ... })`.
+   `scopeType` defaults to `'system'`, whose `scopeId` defaults to `''`
+   (the hub's representation of system scope; a non-empty value is
+   rejected). Any other scope, e.g. `'project'`, requires an explicit
+   `scopeId`.
 4. The user's next API call will reflect the new permissions.
 
 ## Navigation waits

@@ -140,7 +140,9 @@ func New(config Config) *Supervisor {
 }
 
 // Run starts and supervises the given command until it exits or the context
-// is cancelled. It returns the exit code of the child process.
+// is cancelled. It returns the exit code of the child process. Run must be
+// called at most once per Supervisor: a second call panics when it closes the
+// already-closed started and done channels.
 func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	if len(args) == 0 {
 		return 1, ErrNoCommand
@@ -402,7 +404,8 @@ func (s *Supervisor) shutdown() (int, error) {
 // Started returns a channel that is closed once the child process has been
 // started, i.e. from the point at which Signal reaches it rather than being
 // a no-op. It is never closed if Run fails before starting the child, so
-// callers waiting on it should also select on Done or a deadline.
+// callers waiting on it should also select on Done or a deadline. Because the
+// channel is closed exactly once, Run must be called at most once.
 func (s *Supervisor) Started() <-chan struct{} {
 	return s.startedCh
 }
