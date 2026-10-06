@@ -496,6 +496,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		fresh.SharedDirBackendChanges = req.SharedDirBackends
 		fresh.AllowEmptySharedDir = req.AllowEmptySharedDir
 	}
+	// Fail fast, as start and restart do, when the GCP identity the fresh
+	// config will run with is no longer allowed for this agent. Checked
+	// before the claim and the worker's stop, so a refused request leaves
+	// the agent as it was, and a dry run reports the same refusal.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
+
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	targetGeneration := agent.Generation + 1
@@ -716,6 +726,13 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	// A dry-run move reports the same GCP identity refusal as start and
+	// as an in-place reincarnate, so every dry-run variant agrees.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
 		return
 	}
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
