@@ -47,10 +47,12 @@ var guardedDirs = []string{
 //     "Recv.name" for a method (pointer receivers drop the "*"). A call
 //     inside a closure is attributed to the top-level function containing
 //     the closure; a call in a package-level var initializer uses the var's
-//     name. The two names Go lets a file repeat, func init and blank _
-//     vars, carry their ordinal among same-named declarations in file
-//     order ("init#1", "init#2", "_#1"; see enclosingDeclName), so moving
-//     a call from one init into another is also a change of Func.
+//     name. Names Go lets a file repeat (func init, blank funcs
+//     "func _()", blank methods "func (T) _()", and blank "_" vars and
+//     consts) carry their ordinal among same-named declarations in file
+//     order ("init#1", "init#2", "_#1", "T._#1"; see enclosingDeclName),
+//     so moving a call from one init into another is also a change of
+//     Func.
 //   - Call is the call expression's normalized text (see
 //     normalizeCallText): the Go tokens of the call, with comments, layout
 //     and optional trailing commas/semicolons stripped, one space after each
@@ -405,35 +407,58 @@ func staleAllowlistEntries(allowlist map[execSite]string, seen map[execSite]bool
 // parameters dropped from the receiver), the first declared name for a
 // package-level var/const initializer, or "<file>" if pos is in none.
 //
-// func init and the blank identifier _ are the only top-level names Go
-// allows to repeat within one file, so for those two the name carries its
-// 1-based ordinal among same-named declarations in file order: "init#1",
-// "init#2", "_#1". The ordinal counts declarations, not lines, so it is
-// stable across line shifts and reflows, yet moving a call from one init
-// (or _ var) into another changes its key. Adding or removing an earlier
-// declaration of the same name renumbers the later ones, which errs on the
-// strict side (stale entry plus violation) and is rare.
+// Go lets these top-level names repeat within one file, so each carries
+// its 1-based ordinal among same-named declarations in file order:
+//
+//   - func init: "init#1", "init#2", ...
+//   - blank funcs func _() and blank var/const specs (first name _): one
+//     shared counter, "_#1", "_#2", ...
+//   - blank methods func (T) _(): one counter per receiver base type
+//     (value and pointer receivers share it), "T._#1", "T._#2", ...
+//
+// Every other name that can hold a call is unique per file (or per
+// receiver type), so it needs no ordinal: non-blank funcs, non-blank
+// methods (including a method named init), and value specs whose first
+// name is not _. Repeatable names that cannot hold an exec call (blank
+// types, blank imports) never reach here. A multi-name value spec is one
+// declaration, keyed by its first name, so swapping calls between its
+// values is a reorder within one Func, like reordering a function body.
+//
+// The ordinal counts declarations, not lines, so it is stable across line
+// shifts and reflows, yet moving a call from one repeated declaration into
+// another changes its key. Adding or removing an earlier declaration of
+// the same name renumbers the later ones, which errs on the strict side
+// (stale entry plus violation) and is rare.
 func enclosingDeclName(f *ast.File, pos token.Pos) string {
-	repeats := map[string]int{} // ordinal so far per repeatable name
+	repeats := map[string]int{} // ordinal so far per repeatable key
+	numbered := func(key string) string {
+		repeats[key]++
+		return fmt.Sprintf("%s#%d", key, repeats[key])
+	}
 	ordinal := func(name string) string {
 		if name != "init" && name != "_" {
 			return name
 		}
-		repeats[name]++
-		return fmt.Sprintf("%s#%d", name, repeats[name])
+		return numbered(name)
 	}
 	for _, decl := range f.Decls {
 		contains := pos >= decl.Pos() && pos <= decl.End()
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			if d.Recv != nil && len(d.Recv.List) > 0 {
-				if !contains {
-					continue
-				}
+				name := d.Name.Name
 				if recv := receiverTypeName(d.Recv.List[0].Type); recv != "" {
-					return recv + "." + d.Name.Name
+					name = recv + "." + name
 				}
-				return d.Name.Name
+				// Only blank method names repeat; a method named init is
+				// an ordinary, unique method.
+				if d.Name.Name == "_" {
+					name = numbered(name)
+				}
+				if contains {
+					return name
+				}
+				continue
 			}
 			if name := ordinal(d.Name.Name); contains {
 				return name
@@ -901,15 +926,26 @@ func runSyntheticGuard(t *testing.T, src string, allowlist map[execSite]string) 
 	return violations, staleAllowlistEntries(allowlist, seen)
 }
 
-// syntheticInits has two init funcs and two blank vars, one of each holding
-// an unprovable exec call; syntheticInitsAllowlist lists both calls.
+// syntheticInits has two init funcs, two blank vars and two blank methods
+// on T, one of each holding an unprovable exec call;
+// syntheticInitsAllowlist lists all three calls.
 const syntheticInits = "package synthetic\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n)\n\n" +
+	"type T struct{}\n\n" +
 	"func init() {\n\t_ = exec.Command(os.Args[1])\n}\n\nfunc init() {}\n\n" +
-	"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n"
+	"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n\n" +
+	"func (T) _() {\n\t_ = exec.Command(os.Args[3])\n}\n\nfunc (*T) _() {}\n"
+
+// syntheticBlankFuncs is syntheticInits with its two blank vars replaced
+// by two blank funcs; func _ shares the blank vars' counter, so
+// syntheticInitsAllowlist still lists every call.
+var syntheticBlankFuncs = strings.Replace(syntheticInits,
+	"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n",
+	"func _() {\n\t_ = exec.Command(os.Args[2])\n}\n\nfunc _() {}\n", 1)
 
 var syntheticInitsAllowlist = map[execSite]string{
 	{File: "synthetic.go", Func: "init#1", Call: `exec.Command(os.Args[1])`}: "synthetic",
 	{File: "synthetic.go", Func: "_#1", Call: `exec.Command(os.Args[2])`}:    "synthetic",
+	{File: "synthetic.go", Func: "T._#1", Call: `exec.Command(os.Args[3])`}:  "synthetic",
 }
 
 // syntheticAllowlist is a one-entry allowlist for syntheticBase's single
@@ -951,9 +987,11 @@ func TestExecSiteAllowlist_KeyIgnoresLineShiftsAndFormatting(t *testing.T) {
 	}
 	initVariants := map[string]string{
 		"repeated init/_ decls unchanged": syntheticInits,
-		"repeated init/_ decls shifted and reflowed": strings.Replace(strings.Replace(syntheticInits,
+		"repeated blank funcs unchanged":  syntheticBlankFuncs,
+		"repeated init/_ decls shifted and reflowed": strings.Replace(strings.Replace(strings.Replace(syntheticInits,
 			"func init() {}", "// A doc comment.\n\n\nfunc init() {\n}", 1),
 			"_ = exec.Command(os.Args[1])", "_ = exec.Command(\n\t\tos.Args[1], // why\n\t)", 1),
+			"func (*T) _() {}", "// Another doc comment.\n\nfunc (*T) _() {\n}", 1),
 	}
 	for name, src := range initVariants {
 		t.Run(name, func(t *testing.T) {
@@ -1023,6 +1061,25 @@ func TestExecSiteAllowlist_EnclosingFuncAttribution(t *testing.T) {
 			decls: "var _ = 1\n\nvar (\n\tother = 2\n\t_     = exec.Command(os.Args[1])\n)\n",
 			sites: []execSite{{Func: "_#2", Call: `exec.Command(os.Args[1])`}},
 		},
+		{
+			name:  "blank funcs and blank vars/consts share one ordinal",
+			decls: "const _ = 1\n\nfunc _() {}\n\nvar _, _ = 2, 3\n\nfunc _() {\n\t_ = exec.Command(os.Args[1])\n}\n",
+			sites: []execSite{{Func: "_#4", Call: `exec.Command(os.Args[1])`}},
+		},
+		{
+			name: "blank methods are keyed by ordinal per receiver type",
+			decls: "type other struct{}\n\nfunc (runner) _() {}\n\nfunc (other) _() {}\n\nfunc _() {}\n\n" +
+				"func (r *runner) _() {\n\t_ = exec.Command(os.Args[1])\n}\n\nfunc (other) _() {\n\t_ = exec.Command(os.Args[2])\n}\n",
+			sites: []execSite{
+				{Func: "runner._#2", Call: `exec.Command(os.Args[1])`},
+				{Func: "other._#2", Call: `exec.Command(os.Args[2])`},
+			},
+		},
+		{
+			name:  "a method named init is not numbered",
+			decls: "func init() {}\n\nfunc (runner) init() {\n\t_ = exec.Command(os.Args[1])\n}\n",
+			sites: []execSite{{Func: "runner.init", Call: `exec.Command(os.Args[1])`}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1083,6 +1140,22 @@ func TestExecSiteAllowlist_UnlistedSitesStillFail(t *testing.T) {
 			src: strings.Replace(syntheticInits,
 				"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n",
 				"var _ = 0\n\nvar _ = exec.Command(os.Args[2])\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
+			name: "listed call moved between two blank methods",
+			src: strings.Replace(syntheticInits,
+				"func (T) _() {\n\t_ = exec.Command(os.Args[3])\n}\n\nfunc (*T) _() {}\n",
+				"func (T) _() {}\n\nfunc (*T) _() {\n\t_ = exec.Command(os.Args[3])\n}\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
+			name: "listed call moved between two blank funcs",
+			src: strings.Replace(syntheticBlankFuncs,
+				"func _() {\n\t_ = exec.Command(os.Args[2])\n}\n\nfunc _() {}\n",
+				"func _() {}\n\nfunc _() {\n\t_ = exec.Command(os.Args[2])\n}\n", 1),
 			allowlist: syntheticInitsAllowlist,
 			wantStale: true,
 		},
