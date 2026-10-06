@@ -27,7 +27,7 @@ To allow the Hub to dispatch agents to your machine, you must start a Runtime Br
 
 ### 0. Prerequisites
 
-- Sign in to the Hub: `scion hub auth login --hub https://hub.example.com`.
+- Sign in to the Hub: `scion hub auth login --hub-url https://hub.example.com`.
 - Configure the Hub endpoint in your global settings **before** starting the broker, for example with `scion -g global config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. A broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
 - Configure an image registry (`scion -g global config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
 - Outside a project directory, pass `--global` to `scion runtime-broker start` and `register`.
@@ -40,13 +40,13 @@ You can start a standalone broker process in the background:
 scion runtime-broker start
 ```
 
-The broker listens on port 9800 by default. If that port is taken, pass `--port`:
+The broker listens on port 9800 by default, or on `server.broker.port` if your global settings set it. If that port is taken, pass `--port`:
 
 ```bash
 scion runtime-broker start --port 19800
 ```
 
-`start` saves the port it used, and the other `runtime-broker` subcommands (`register`, `deregister`, `status`, `stop`, `restart`, `hubs`) use that port unless you pass their own `--port`. `restart` also keeps the `--auto-provide` and `--debug` values the daemon was started with.
+While the broker runs, `start` keeps a record of the port it used, and the other `runtime-broker` subcommands (`register`, `deregister`, `status`, `stop`, `restart`, `hubs`) use that port unless you pass their own `--port`. `restart` also keeps the `--auto-provide` and `--debug` values the daemon was started with.
 
 *(Alternatively, `scion server start` with no flags runs a local workstation server, which includes a broker.)*
 
@@ -140,7 +140,7 @@ To permanently remove a broker from the Hub, use the **Unregister** button on th
 - Removes the broker's registration from the Hub.
 - Cleans up associated HMAC secrets and join tokens.
 
-Unregistration is an admin-gated action and requires confirmation. After unregistering, the broker can no longer receive agent dispatch commands. Re-registration via `scion runtime-broker register` is required to reconnect.
+Only the broker's owner or a Hub admin can unregister it, and unregistering requires confirmation. After unregistering, the broker can no longer receive agent dispatch commands. Re-registration via `scion runtime-broker register` is required to reconnect.
 
 From the broker machine itself, run:
 
@@ -148,7 +148,7 @@ From the broker machine itself, run:
 scion runtime-broker deregister
 ```
 
-This deletes the broker from the Hub (removing it from every project it provides for), deletes the local credentials file for that Hub connection, and removes that connection's entries from your global settings. Other settings, such as `image_registry`, are left as they are. With more than one Hub connection, choose one with `--name` (see `scion runtime-broker hubs`).
+This deletes the broker from the Hub (removing it from every project it provides for), and deletes the local credentials file for that Hub connection. Once no Hub connection remains, it also clears this broker's ID and token from your global settings. Other settings, such as `image_registry`, are left as they are. With more than one Hub connection, choose one with `--name` (see `scion runtime-broker hubs`).
 
 ## Stopping the Broker
 

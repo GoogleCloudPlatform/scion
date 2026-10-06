@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -44,17 +45,21 @@ func setBrokerFlagForTest(t *testing.T, cmd *cobra.Command, name, value string) 
 	})
 }
 
-// newFakeBrokerHealthServer starts a local server answering the broker
-// /healthz probe and returns its port.
-func newFakeBrokerHealthServer(t *testing.T, status string) int {
+// newFakeBrokerServer starts a local server answering the broker /healthz
+// probe (and /api/v1/hub-connections when conns is non-nil) and returns its
+// port.
+func newFakeBrokerServer(t *testing.T, status string, conns *BrokerHubConnectionsResponse) int {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(BrokerHealthResponse{Status: status, Version: "test"})
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(BrokerHealthResponse{Status: status, Version: "test"})
+		case r.URL.Path == "/api/v1/hub-connections" && conns != nil:
+			_ = json.NewEncoder(w).Encode(conns)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
@@ -62,6 +67,17 @@ func newFakeBrokerHealthServer(t *testing.T, status string) int {
 	port, err := strconv.Atoi(portStr)
 	require.NoError(t, err)
 	return port
+}
+
+func newFakeBrokerHealthServer(t *testing.T, status string) int {
+	t.Helper()
+	return newFakeBrokerServer(t, status, nil)
+}
+
+// writeGlobalSettings writes content as the global settings.yaml.
+func writeGlobalSettings(t *testing.T, globalDir, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(content), 0644))
 }
 
 // unusedPort returns a local port with nothing listening on it.
@@ -126,6 +142,7 @@ func TestResolveBrokerPort(t *testing.T) {
 }
 
 func TestResolveBrokerRestartOptions(t *testing.T) {
+	brokerTestHome(t)
 	saved := buildBrokerDaemonArgs(19800, true, true)
 
 	t.Run("no saved args uses flag defaults", func(t *testing.T) {
@@ -242,4 +259,102 @@ func TestBrokerRegister_NonDefaultPort(t *testing.T) {
 		assert.NotContains(t, err.Error(), "broker server not running")
 		assert.Contains(t, err.Error(), "is not responding", "register should get past the broker check to the hub check")
 	})
+}
+
+// TestBrokerPort_FromSettings: server.broker.port in settings moves the
+// broker off 9800 (the server reads it when no --runtime-broker-port is
+// passed), so start must run on, print and save that port, and the other
+// subcommands must find it.
+func TestBrokerPort_FromSettings(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	port := newFakeBrokerHealthServer(t, "healthy")
+	writeGlobalSettings(t, globalDir, "schema_version: \"1\"\nserver:\n  broker:\n    port: "+strconv.Itoa(port)+"\n")
+
+	assert.Equal(t, port, settingsBrokerPort())
+	assert.Equal(t, port, resolveBrokerStartPort(brokerStartCmd), "start without --port uses the settings port")
+	args := pinBrokerPort(buildBrokerDaemonArgs(resolveBrokerStartPort(brokerStartCmd), false, false), port)
+	assert.Equal(t, port, brokerPortFromArgs(args), "the saved args name the settings port")
+
+	// An explicit 'start --port 9800' must win over the settings port, so
+	// the launch args pin it.
+	setBrokerFlagForTest(t, brokerStartCmd, "port", "9800")
+	assert.Equal(t, DefaultBrokerPort, resolveBrokerStartPort(brokerStartCmd))
+	pinned := pinBrokerPort(buildBrokerDaemonArgs(DefaultBrokerPort, false, false), DefaultBrokerPort)
+	assert.Contains(t, pinned, "--runtime-broker-port=9800")
+
+	// With nothing saved (for example a broker run by 'scion server start'),
+	// status falls back to the settings port.
+	savedOutputFormat, savedJSON := outputFormat, brokerStatusJSON
+	t.Cleanup(func() { outputFormat, brokerStatusJSON = savedOutputFormat, savedJSON })
+	brokerStatusJSON = true
+	out := captureStdout(t, func() {
+		require.NoError(t, runBrokerStatus(brokerStatusCmd, nil))
+	})
+	var info brokerStatusInfo
+	require.NoError(t, json.Unmarshal([]byte(out), &info), "status output: %s", out)
+	assert.True(t, info.ServerRunning)
+	assert.Equal(t, port, info.ServerPort)
+
+	// Restart of a daemon with no saved args also uses the settings port.
+	restartPort, _, _ := resolveBrokerRestartOptions(brokerRestartCmd, nil)
+	assert.Equal(t, port, restartPort)
+}
+
+func TestBrokerPort_DefaultWithoutSettings(t *testing.T) {
+	brokerTestHome(t)
+	assert.Equal(t, DefaultBrokerPort, settingsBrokerPort())
+	args := buildBrokerDaemonArgs(DefaultBrokerPort, false, false)
+	assert.Equal(t, args, pinBrokerPort(args, DefaultBrokerPort), "nothing to pin when settings use the default")
+}
+
+// TestResolveBrokerPort_CorruptArgsWarns: an unreadable args file is
+// reported on stderr, not silently replaced by the default port.
+func TestResolveBrokerPort_CorruptArgsWarns(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, daemon.ArgsFileName(brokerDaemonComponent)), []byte("{not json"), 0644))
+
+	var port int
+	errOut := captureStderr(t, func() { port = resolveBrokerPort(brokerStatusCmd) })
+	assert.Equal(t, DefaultBrokerPort, port)
+	assert.Contains(t, errOut, "broker-args.json")
+	assert.Contains(t, errOut, "--port")
+}
+
+// TestBrokerRestart_NonDefaultPort: with no daemon, restart probes the
+// saved port to tell a foreground broker from no broker.
+func TestBrokerRestart_NonDefaultPort(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	port := newFakeBrokerHealthServer(t, "healthy")
+	require.NoError(t, daemon.SaveArgs(brokerDaemonComponent, globalDir, buildBrokerDaemonArgs(port, false, false)))
+
+	err := runBrokerRestart(brokerRestartCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not as a daemon", "restart should find the foreground broker on port %d", port)
+}
+
+// TestBrokerHubs_NonDefaultPort: hubs reads live connection status from the
+// broker on the saved port.
+func TestBrokerHubs_NonDefaultPort(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	require.NoError(t, brokercredentials.NewMultiStore("").Save(&brokercredentials.BrokerCredentials{
+		Name:        "myhub",
+		BrokerID:    "33333333-3333-3333-3333-333333333333",
+		SecretKey:   "c2VjcmV0",
+		HubEndpoint: "https://hub.example.com",
+	}))
+	port := newFakeBrokerServer(t, "healthy", &BrokerHubConnectionsResponse{
+		Mode:        "standalone-test",
+		Connections: []BrokerHubConnectionInfo{{Name: "myhub", Status: "connected-test"}},
+	})
+	require.NoError(t, daemon.SaveArgs(brokerDaemonComponent, globalDir, buildBrokerDaemonArgs(port, false, false)))
+
+	savedOutputFormat, savedJSON := outputFormat, brokerHubsJSON
+	t.Cleanup(func() { outputFormat, brokerHubsJSON = savedOutputFormat, savedJSON })
+	outputFormat, brokerHubsJSON = "", false
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runBrokerHubs(brokerHubsCmd, nil))
+	})
+	assert.Contains(t, out, "Mode: standalone-test")
+	assert.Contains(t, out, "connected-test")
 }

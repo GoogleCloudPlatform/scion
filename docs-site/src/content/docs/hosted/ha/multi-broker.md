@@ -26,7 +26,7 @@ Each broker maintains a persistent WebSocket connection to the Hub. The Hub acts
 
 On each machine you want to register:
 
-1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub <hub-url>`), and set the Hub endpoint in your global settings (`scion -g global config set --global hub.endpoint <hub-url>`).
+1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion -g global config set --global hub.endpoint <hub-url>`).
 2. **Start the broker**:
    ```bash
    scion runtime-broker start

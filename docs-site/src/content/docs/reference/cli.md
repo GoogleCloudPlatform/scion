@@ -816,7 +816,7 @@ Manages notifications and notification subscriptions. Requires Hub mode.
 
 Manages the local host as a Runtime Broker. The old name `scion broker` still works as a deprecated alias.
 
-**Broker port.** The broker listens on port 9800 unless `start` is given `--port`. `start` saves the port it used. `register`, `deregister`, `status`, `stop`, `restart` and `hubs` use that saved port unless they are given their own `--port`, and fall back to 9800 when nothing is saved.
+**Broker port.** `start` runs the broker on `--port`, else on `server.broker.port` from the global settings, else on 9800. While the broker runs, `start` keeps a record of that port (removed by `stop`). `register`, `deregister`, `status`, `stop`, `restart` and `hubs` use their own `--port` if given, else the recorded port, else the settings port, else 9800.
 
 - `scion runtime-broker status`: Show status of the local broker server, including the projects it provides for. Providers added with `--auto-provide` are listed right away.
     - `--json`: Output in JSON format.
@@ -824,7 +824,7 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--port <port>`: Port of the local broker.
 - `scion runtime-broker start`: Start the broker server as a background daemon.
     - `--foreground`: Run in the current process instead of daemonizing. Use this as the `ExecStart` of a systemd `Type=simple` unit.
-    - `--port <port>`: Listen on a custom port (default 9800).
+    - `--port <port>`: Listen on a custom port (default: `server.broker.port` from settings, else 9800).
     - `--auto-provide`: Automatically add this broker as a provider for new projects.
     - `--debug`: Enable debug logging.
 - `scion runtime-broker stop`: Stop the broker daemon. A broker running in the foreground is stopped with Ctrl+C instead.
@@ -837,7 +837,7 @@ Manages the local host as a Runtime Broker. The old name `scion broker` still wo
     - `--auto-provide`: Automatically add this broker as a provider for new projects.
     - `--transport-mode <iap|cloudrun_invoker>`, `--transport-audience <audience>`: Transport auth for a Hub behind IAP or Cloud Run, saved to the credentials file (see [Transport Auth for IAP-Protected Hubs](/scion/hosted/ha/runtime-broker/#transport-auth-for-iap-protected-hubs)).
     - `--port <port>`: Port of the local broker.
-- `scion runtime-broker deregister`: Remove this broker's registration from the Hub, which also removes it from every project it provides for. Deletes the local credentials for that Hub connection and removes the connection from global settings; other settings are kept.
+- `scion runtime-broker deregister`: Remove this broker's registration from the Hub, which also removes it from every project it provides for. Deletes the local credentials for that Hub connection. Once no Hub connection remains, it also clears this broker's ID and token from global settings; other settings are kept.
     - `--name <name>`: The Hub connection to deregister. Required when there is more than one (see `hubs`).
     - `--broker-only`: Accepted, but currently has no effect.
     - `--port <port>`: Port of the local broker.
