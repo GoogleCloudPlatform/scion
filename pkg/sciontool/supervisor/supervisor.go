@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
@@ -170,10 +171,8 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	// Drop privileges if UID/GID specified (skip in rootless mode where
 	// UID 0 inside the container is already the unprivileged host user).
 	if s.config.UID > 0 && s.config.GID > 0 {
-		s.cmd.SysProcAttr.Credential = &syscall.Credential{
-			Uid: uint32(s.config.UID),
-			Gid: uint32(s.config.GID),
-		}
+		// Keeps the runtime-granted nfs shared-dir groups (ptone/scion#3155).
+		s.cmd.SysProcAttr.Credential = suppgroups.Credential(uint32(s.config.UID), uint32(s.config.GID))
 		log.Debug("Child will run as UID=%d, GID=%d", s.config.UID, s.config.GID)
 	} else if s.config.RequirePrivilegeDrop {
 		return 1, ErrPrivilegeDropRequired
