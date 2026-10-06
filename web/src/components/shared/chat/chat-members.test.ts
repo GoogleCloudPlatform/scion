@@ -36,7 +36,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 // ECONNREFUSED on stderr. These tests only need a stub.
 vi.mock('../../../client/main.js', () => ({
   navigateTo: vi.fn(),
-  stateManager: new EventTarget(),
 }));
 
 import './chat-members.js';

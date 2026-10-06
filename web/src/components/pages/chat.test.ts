@@ -23,8 +23,9 @@
  *  2. Mobile swipe navigation between the rail / conversation / members
  *     panels, which must ignore vertical scrolling and desktop viewports.
  *
- * Elements are created but never appended, so connectedCallback (and its
- * network calls) never runs.
+ * Most elements are created but never appended, so connectedCallback (and
+ * its network calls) never runs. The few tests that do append a page rely
+ * on the beforeAll below, which warms the lazily imported modules first.
  */
 
 // @vitest-environment happy-dom
