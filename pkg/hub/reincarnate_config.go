@@ -62,7 +62,8 @@ import (
 //
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
-// AppliedConfig).
+// AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
+// which wraps errWorkspaceContentTimeout).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
 	return s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, nil)
 }
@@ -229,7 +230,9 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// resolveDerivedConfig alone would skip the project/hub defaulting step
 	// and let the template win over a project or hub default (design §3.3
 	// Amendment A1 property 1).
-	s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate)
+	if err := s.deriveAgentConfig(ctx, freshAgent, project, resolvedTemplate); err != nil {
+		return nil, nil, err
+	}
 
 	// Design §3.4 Amendment A11.1(a): fill Image from Hub settings, then the
 	// resolved harness config, when deriveAgentConfig still left it empty.
