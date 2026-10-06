@@ -1231,14 +1231,22 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
+    const statusLabel = `${disconnectLabel(
+      entry.state.connection,
+      entry.state.disconnectReason
+    )} · ${availabilityLabel(metadata.availability)}`;
+
     const select = document.createElement('button');
     select.type = 'button';
     select.className = 'terminal-rail-select';
+    // The status dot is small and aria-hidden, so surface its status text on
+    // the whole row: as the hover title and in the accessible label.
+    select.title = statusLabel;
     select.setAttribute(
       'aria-label',
       projectLabel
-        ? `Show terminal for ${agentName} in ${projectLabel}`
-        : `Show terminal for ${agentName}`
+        ? `Show terminal for ${agentName} in ${projectLabel}, ${statusLabel}`
+        : `Show terminal for ${agentName}, ${statusLabel}`
     );
     if (visibleSlots.includes(entry.state.key)) select.setAttribute('aria-current', 'page');
     select.dataset.railFocusId = `${entry.state.key}:select`;
@@ -1246,10 +1254,7 @@ export class TerminalWorkspaceRoot {
 
     const connection = document.createElement('span');
     connection.className = 'terminal-connection-dot';
-    connection.title = `${disconnectLabel(
-      entry.state.connection,
-      entry.state.disconnectReason
-    )} · ${availabilityLabel(metadata.availability)}`;
+    connection.title = statusLabel;
     connection.setAttribute('aria-hidden', 'true');
     const text = document.createElement('span');
     text.className = 'terminal-rail-text';

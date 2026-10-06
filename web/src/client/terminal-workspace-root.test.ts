@@ -885,7 +885,7 @@ describe('idle entries', () => {
     expect(errorBanner).toBeNull();
   });
 
-  it('rail row shows the project name on one line with the full name on hover', async () => {
+  it('rail row shows the project name with the full name in its title', async () => {
     const registry = new TerminalSessionRegistry({
       hubUrl: window.location.origin,
       accountId: 'p1',
@@ -908,6 +908,12 @@ describe('idle entries', () => {
     expect(project?.title).toBe('A rather long project name');
     expect(item.querySelector('.terminal-state-label')).toBeNull();
     expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in A rather long project name, Not connected · metadata pending'
+    );
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
   });
 
   it('rail row falls back to the project id when the project name is unknown', async () => {
@@ -927,6 +933,11 @@ describe('idle entries', () => {
     const project = railItem().querySelector<HTMLElement>('.terminal-project-name');
     expect(project?.textContent).toBe('project-id-2');
     expect(project?.title).toBe('project-id-2');
+    const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.getAttribute('aria-label')).toBe(
+      'Show terminal for test in project-id-2, Not connected · metadata pending'
+    );
   });
 
   it('rail row omits the project line when no agent metadata is loaded', async () => {
@@ -940,6 +951,11 @@ describe('idle entries', () => {
     const item = railItem();
     expect(item.querySelector('.terminal-project-name')).toBeNull();
     expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
+    const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
+    const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
+    expect(status).toContain('Not connected');
+    expect(select.title).toBe(status);
+    expect(select.getAttribute('aria-label')).toBe(`Show terminal for ${agentId}, ${status}`);
   });
 
   it('selecting an idle entry connects it', async () => {
