@@ -24,13 +24,107 @@ import (
 )
 
 // Default-tier labels for the agent-creation GCP identity ladder (explicit
-// request -> project default -> hub default -> unset, the broker applies its
-// runtime default). They name the tier in log lines and in the user-facing
+// request -> per-profile default -> project default -> hub default -> unset,
+// the broker applies its runtime default). They name the tier in log lines and in the user-facing
 // error text, so an operator can tell which setting to fix.
-const (
-	defaultTierProject = "project"
-	defaultTierHub     = "hub"
+//
+// A defaultTier is a struct rather than a string so the per-profile rung can
+// name the profile its entry belongs to in the user-facing error text.
+type defaultTier struct {
+	// name labels the tier in log lines ("project", "hub", "project profile").
+	name string
+	// profile is the broker profile of a per-profile default, "" otherwise.
+	profile string
+}
+
+var (
+	defaultTierProject = defaultTier{name: "project"}
+	defaultTierHub     = defaultTier{name: "hub"}
 )
+
+// profileDefaultTier is the tier of the per-profile default for profile.
+func profileDefaultTier(profile string) defaultTier {
+	return defaultTier{name: "project profile", profile: profile}
+}
+
+// subject names the setting at fault in an error, e.g. "project default" or
+// `project default for profile "remote"`.
+func (t defaultTier) subject() string {
+	if t.profile != "" {
+		return fmt.Sprintf("project default for profile %q", t.profile)
+	}
+	return t.name + " default"
+}
+
+// setting names what the operator should update.
+func (t defaultTier) setting() string {
+	if t.profile != "" {
+		return fmt.Sprintf("the project's per-profile default service account for profile %q", t.profile)
+	}
+	return "the " + t.name + "'s default GCP identity setting"
+}
+
+// projectProfileDefaultSA returns the per-profile default GCP service
+// account ID (ProjectSettings.DefaultGCPIdentityServiceAccountIDByProfile)
+// for the profile the agent runs under, and that profile's name. Both are
+// empty when the project sets no per-profile default or has no entry for
+// that profile, and the caller then applies the rest of the ladder
+// unchanged.
+//
+// The profile is resolved with the same helpers the hub-default passthrough
+// rung uses, so both rungs agree on which profile an agent dispatches under:
+// effectiveRuntimeProfileName (request profile, then the project's active
+// profile), then resolveAgentRuntimeProfileType against the broker record
+// (falling back to the broker's default profile, or its single profile).
+// When the broker record is unavailable or does not list a named profile,
+// the named profile itself is used: the agent is dispatched under that name
+// either way. The caller pins the returned profile onto the agent (see
+// pinResolvedProfile) so the broker cannot dispatch it under another one.
+func (s *Server) projectProfileDefaultSA(ctx context.Context, runtimeBrokerID string, project *store.Project, requestProfile string) (profile, saID string) {
+	if project == nil {
+		return "", ""
+	}
+	byProfile := projectSettingsFromAnnotations(project).DefaultGCPIdentityServiceAccountIDByProfile
+	if len(byProfile) == 0 {
+		return "", ""
+	}
+	profile = effectiveRuntimeProfileName(requestProfile, project)
+	if runtimeBrokerID != "" {
+		broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+		if err == nil && broker != nil {
+			if resolved, _, ok := resolveAgentRuntimeProfileType(broker, profile); ok {
+				profile = resolved
+			}
+		} else {
+			slog.Debug("per-profile default GCP service account: runtime broker unavailable, using the named profile only",
+				"project_id", project.ID, "broker", runtimeBrokerID, "profile", profile, "error", err)
+		}
+	}
+	if profile == "" {
+		return "", ""
+	}
+	saID = byProfile[profile]
+	if saID == "" {
+		return "", ""
+	}
+	return profile, saID
+}
+
+// pinResolvedProfile pins profile onto the agent's applied config and its
+// CreateInputs (what reincarnate replays) when they name none yet, so the
+// agent dispatches under the profile a profile-scoped default was chosen
+// for. An explicit profile already set is never overwritten.
+func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
+	if ac == nil || profile == "" {
+		return
+	}
+	if ac.Profile == "" {
+		ac.Profile = profile
+	}
+	if ac.CreateInputs != nil && ac.CreateInputs.Profile == "" {
+		ac.CreateInputs.Profile = profile
+	}
+}
 
 // resolveDefaultSAAssignmentCore is the transport-independent body shared by
 // every default-tier assign rung of the GCP identity ladder: the HTTP
@@ -51,28 +145,28 @@ const (
 // The returned error is either a plain error (not available / not verified)
 // or a *saAssignDenial (authorization gate), so a caller with an HTTP
 // response can render either the same way resolveDefaultSAAssignment does.
-func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Request, projectID, saID, surface, tier string) (*store.GCPIdentityConfig, error) {
+func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Request, projectID, saID, surface string, tier defaultTier) (*store.GCPIdentityConfig, error) {
 	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
 	// Scope-aware admissibility (P4 item F), same predicate as the two
 	// caller-supplied assign sites. A default may legitimately nominate a
 	// hub-scoped account; a project-scoped one is only usable in its own
 	// project.
 	if err != nil || sa == nil || !sa.ReachableFromProject(projectID) {
-		slog.Warn(tier+"-default SA assignment failed: service account not available",
+		slog.Warn(tier.name+"-default SA assignment failed: service account not available",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", saID,
 			"err", err)
-		return nil, fmt.Errorf("%s default GCP service account is not available in this project; "+
-			"update the %s's default GCP identity setting", tier, tier)
+		return nil, fmt.Errorf("%s GCP service account is not available in this project; "+
+			"update %s", tier.subject(), tier.setting())
 	}
 	if !gcpServiceAccountVerified(sa) {
-		slog.Warn(tier+"-default SA assignment failed: service account not verified",
+		slog.Warn(tier.name+"-default SA assignment failed: service account not verified",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", sa.ID, "sa_email", sa.Email)
-		return nil, fmt.Errorf("%s default GCP service account is not verified; "+
-			"verify it before it can be assigned to agents", tier)
+		return nil, fmt.Errorf("%s GCP service account is not verified; "+
+			"verify it before it can be assigned to agents", tier.subject())
 	}
 
 	// P10: Authorization gate for default SA assignment.
@@ -97,7 +191,7 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 	//   3. GCP actAs check via callerPrincipal, using the identity on ctx.
 	//   4. Audit record via EvaluateActAs with the given surface.
 	if denial := s.evaluateSAAssignment(ctx, r, sa, surface); denial != nil {
-		slog.Warn(tier+"-default SA assignment denied by authorization gate",
+		slog.Warn(tier.name+"-default SA assignment denied by authorization gate",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", sa.ID, "sa_email", sa.Email)
@@ -117,7 +211,7 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 // failure it writes the appropriate HTTP error (the core's plain errors as a
 // 400 validation error, a *saAssignDenial through its own write method) and
 // returns ok=false.
-func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.ResponseWriter, r *http.Request, projectID, saID, surface, tier string) (*store.GCPIdentityConfig, bool) {
+func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.ResponseWriter, r *http.Request, projectID, saID, surface string, tier defaultTier) (*store.GCPIdentityConfig, bool) {
 	cfg, err := s.resolveDefaultSAAssignmentCore(ctx, r, projectID, saID, surface, tier)
 	if err == nil {
 		return cfg, true

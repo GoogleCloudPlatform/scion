@@ -226,18 +226,26 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 		resource Resource
 		action   Action
 		perm     string
+		// absent marks a rule that builds no candidate at all for a
+		// federated agent.
+		absent bool
 	}{
+		// The launcher status read applies to local agents only.
+		"launcher": {RelationshipRuleLauncher, agentStatusReadResource(&store.Agent{
+			ID: tid("relrule-fedrow-launched"), ProjectID: f.projectBeta.ID,
+			Ancestry: []string{f.projectOwnerID, fed.ID()},
+		}), ActionRead, "agent.read", true},
 		"ancestor": {RelationshipRuleAncestor, agentResource(&store.Agent{
 			ID: tid("relrule-fedrow-desc"), ProjectID: f.projectBeta.ID,
 			Ancestry: []string{f.projectOwnerID, fed.ID()},
-		}), Action("notify"), "agent.notify"},
+		}), Action("notify"), "agent.notify", false},
 		// ptone/scion#2128: personal skills are a progeny row too now
 		// (skillProgenyAdapter), sharing RelationshipRuleProgeny with the
 		// secret case below; kept as its own case for the skill shape.
 		"progeny_skill": {RelationshipRuleProgeny, skillResource(&store.Skill{
 			ID: tid("relrule-fedrow-skill"), Scope: store.SkillScopeUser, ScopeID: f.projectOwnerID,
-		}), ActionRead, "skill.read"},
-		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead},
+		}), ActionRead, "skill.read", false},
+		"progeny": {RelationshipRuleProgeny, Resource{Type: "secret", ID: f.secretID}, ActionRead, permissionProjectSecretRead, false},
 	}
 
 	// Every relationship with an agent-kind row has a case here.
@@ -262,7 +270,11 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 					assert.Equal(t, RelationshipRejectUntrustedAncestry, r.RejectedBy)
 				}
 			}
-			assert.True(t, found, "candidate %q must be evaluated", tc.rule)
+			if tc.absent {
+				assert.False(t, found, "candidate %q must not be built", tc.rule)
+			} else {
+				assert.True(t, found, "candidate %q must be evaluated", tc.rule)
+			}
 			assert.False(t, decidePerm(f.authz, fed, tc.resource, tc.action, tc.perm, false).Allowed)
 		})
 	}
@@ -355,7 +367,7 @@ func TestRelationshipRules_RuleIDsMatchPolicyNames(t *testing.T) {
 	ids := map[string]bool{}
 	for _, id := range []RelationshipRuleID{
 		RelationshipRuleOwner, RelationshipRuleAncestor, RelationshipRuleProgeny,
-		RelationshipRuleHubMemberSAAssign,
+		RelationshipRuleHubMemberSAAssign, RelationshipRuleLauncher,
 		RelationshipRuleProjectAssociation, RelationshipRuleHubAssociation, RelationshipRuleBrokerAssociation,
 	} {
 		ids[string(id)] = true

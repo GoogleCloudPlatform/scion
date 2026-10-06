@@ -611,6 +611,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				}
 				return
 			}
+			// From the reservation on, the start no longer follows the
+			// client (ptone/scion#1961): a client that gives up must not
+			// cancel the broker launch, the rollback or the final status
+			// write. The dispatch is bounded by syncDispatch instead.
+			ctx = detachLaunchFromClient(ctx)
 			// Re-reserve the per-broker ceiling before dispatch, exactly as
 			// create does, so a start that would exceed the cap is rejected
 			// up front rather than after the container is already running
@@ -632,7 +637,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				writeRunIntentError(w, err, agent.ID)
 				return
 			}
-			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
+			dispatchErr = syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStart(dctx, agent, "", resume)
+			})
 			if dispatchErr == nil {
 				// The container is up: the final status write below
 				// moves the row off starting.
@@ -710,6 +717,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		newPhase = string(state.PhaseRunning)
 		hasBroker := dispatcher != nil && agent.RuntimeBrokerID != ""
 		if hasBroker {
+			// As for start: from here the restart no longer follows the
+			// client (ptone/scion#1961). Each leg is bounded by
+			// syncDispatch.
+			ctx = detachLaunchFromClient(ctx)
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
@@ -756,7 +767,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// exited and some runtimes (podman) return non-standard
 			// errors for stopping non-running containers. The subsequent
 			// Start will handle cleanup of the exited container.
-			stopErr := dispatcher.DispatchAgentStop(ctx, agent)
+			stopErr := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStop(dctx, agent)
+			})
 			// The broker has no runtime of the agent's recorded type
 			// registered (ptone/scion#2748): the agent may still be
 			// running there, so do not start it anywhere else.
@@ -775,7 +788,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// held it throughout, so put it back without the cap check.
 			sd.reassertReservation(ctx)
 			// Restart is stop + start: a fresh harness session, not a resume.
-			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
+			dispatchErr = syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStart(dctx, agent, "", false)
+			})
 			if dispatchErr == nil {
 				// The container is up: the final status write below
 				// moves the row off starting.
@@ -892,6 +907,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// generation and keeps its live status.
 		statusUpdate.ClearTerminalRemnants = action == api.AgentActionRestart || sd.wroteStarting()
 	}
+	// A start or restart whose broker start landed after a delete won
+	// (ptone/scion#3255): the dispatch has already deleted the landed run
+	// again (compensateLandedRun), so answer 409 delete_in_progress as the
+	// mid-dispatch case does, rather than writing the status and answering
+	// 200 (delete-claimed or soft-deleted row) or 404 (row gone). The
+	// delete engine owns the row and its reservation; nothing is written or
+	// published here. Reached only after a successful dispatch
+	// (dispatchErr == nil above), and sd is non-nil only when a start leg
+	// was dispatched to a broker.
+	landed := sd != nil && (action == api.AgentActionStart || action == api.AgentActionRestart)
+	if landed {
+		if s.deleteWonAfterLanding(ctx, id) {
+			writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
+			return
+		}
+	}
 	if action == api.AgentActionStop {
 		// Only while the row still holds the stopped run: a newer run keeps
 		// its state and reservation (ptone/scion#2550).
@@ -916,6 +947,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// max_agents_per_broker reservation (ptone/scion#1963).
 		s.releaseBrokerQuota(ctx, agent)
 	} else if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
+		// The row was hard-deleted between the re-read above and this
+		// write: the same delete_in_progress answer.
+		if landed && errors.Is(err, store.ErrNotFound) {
+			writeDeleteWon(w, id, deletedWhileStartingMessage, dispatchWarns.Warnings())
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}

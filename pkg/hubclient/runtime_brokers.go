@@ -244,6 +244,8 @@ type BrokerHeartbeat struct {
 	// An older broker omits the field and the hub keeps every stored
 	// value.
 	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
+	// ProfileSAMappings: see ProfileSAMappingsState.
+	ProfileSAMappings []ProfileSAMappingsState `json:"profileSAMappings,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// when this heartbeat was built, read before the agents were listed, so
 	// a start that finishes between the two reads is either listed here or

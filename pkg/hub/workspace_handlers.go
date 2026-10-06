@@ -499,11 +499,18 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
+		// From here the launch no longer follows the client
+		// (ptone/scion#1961); the dispatch is bounded by syncDispatch.
+		ctx = detachLaunchFromClient(ctx)
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, agent.ID)
 			return
 		}
-		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
+		var created *CreateDispatchResult
+		err = syncDispatch(ctx, func(dctx context.Context) (err error) {
+			created, err = dispatcher.DispatchAgentCreate(dctx, agent)
+			return err
+		})
 		if errors.Is(err, ErrLaunchInvalidPhase) {
 			writeLaunchInvalidPhase(w, err, agent.ID)
 			return
