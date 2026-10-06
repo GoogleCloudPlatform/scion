@@ -150,19 +150,16 @@ func uploadHarnessConfigFileBySignedURL(
 	return nil
 }
 
-func ensureParentDir(root *os.Root, relPath string) error {
-	dir := filepath.Dir(filepath.FromSlash(relPath))
-	if dir == "." {
-		return nil
-	}
-	if err := root.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create harness config destination directory: %w", err)
-	}
-	return nil
-}
-
+// writeHarnessConfigFile writes content to relPath inside root, creating any
+// missing parent directories first. Both steps go through root.
 func writeHarnessConfigFile(root *os.Root, relPath string, content []byte) error {
-	if err := root.WriteFile(filepath.FromSlash(relPath), content, 0644); err != nil {
+	name := filepath.FromSlash(relPath)
+	if dir := filepath.Dir(name); dir != "." {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("create harness config destination directory: %w", err)
+		}
+	}
+	if err := root.WriteFile(name, content, 0644); err != nil {
 		return fmt.Errorf("write harness config file: %w", err)
 	}
 	return nil

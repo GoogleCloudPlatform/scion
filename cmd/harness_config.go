@@ -908,9 +908,6 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	}
 	defer func() { _ = root.Close() }()
 	for _, f := range pending {
-		if err := ensureParentDir(root, f.relPath); err != nil {
-			return err
-		}
 		if err := writeHarnessConfigFile(root, f.relPath, f.content); err != nil {
 			return err
 		}
