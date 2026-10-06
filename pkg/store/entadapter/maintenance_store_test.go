@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/maintenanceoperation"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -56,6 +57,39 @@ func TestSeedMaintenanceOperations(t *testing.T) {
 	ops, err = s.ListMaintenanceOperations(ctx)
 	require.NoError(t, err)
 	assert.Len(t, ops, len(defaultSeedOperations))
+}
+
+// TestSeedMaintenanceOperations_RefreshesStaleDescription checks that
+// re-seeding updates a built-in row's title and description to the current
+// text (a hub created by an older release otherwise keeps the old one) and
+// leaves its status untouched (ptone/scion#1976).
+func TestSeedMaintenanceOperations_RefreshesStaleDescription(t *testing.T) {
+	s := newTestMaintenanceStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+
+	const key = "applied-config-env-cleanup"
+	require.NoError(t, s.client.MaintenanceOperation.Update().
+		Where(maintenanceoperation.KeyEQ(key)).
+		SetTitle("Old Title").
+		SetDescription("old, stale description").
+		SetStatus(store.MaintenanceStatusCompleted).
+		Exec(ctx))
+
+	require.NoError(t, s.SeedMaintenanceOperations(ctx))
+
+	op, err := s.GetMaintenanceOperation(ctx, key)
+	require.NoError(t, err)
+	var want store.MaintenanceOperation
+	for _, seed := range defaultSeedOperations {
+		if seed.Key == key {
+			want = seed
+		}
+	}
+	require.NotEmpty(t, want.Description)
+	assert.Equal(t, want.Title, op.Title)
+	assert.Equal(t, want.Description, op.Description)
+	assert.Equal(t, store.MaintenanceStatusCompleted, op.Status, "re-seeding must not reset the status")
 }
 
 func TestGetMaintenanceOperationNotFound(t *testing.T) {
