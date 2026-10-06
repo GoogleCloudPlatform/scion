@@ -51,14 +51,8 @@ The agent is provisioned but not started, even when a task is given. Run
 		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
-		// Validate --harness-auth value
-		if harnessAuthFlag != "" {
-			switch harnessAuthFlag {
-			case "api-key", "oauth-token", "auth-file", "vertex-ai":
-				// valid
-			default:
-				return newUsageError("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
-			}
+		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
+			return asUsageError(err)
 		}
 
 		// Validate --template-scope with the other flag checks, before any
