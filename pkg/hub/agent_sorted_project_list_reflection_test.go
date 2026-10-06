@@ -222,6 +222,11 @@ func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
 			}}))
 		},
 	}
+	// A pin must name the agent's own Runtime Broker (CreateAgent rejects
+	// any other pin), so both columns get the same value.
+	brokerID := uuid.New().String()
+	special["RuntimeBrokerID"] = func(f reflect.Value) { f.SetString(brokerID) }
+	special["PinnedRuntimeBrokerID"] = func(f reflect.Value) { f.SetString(brokerID) }
 
 	seq := 0
 	for i := 0; i < typ.NumField(); i++ {
