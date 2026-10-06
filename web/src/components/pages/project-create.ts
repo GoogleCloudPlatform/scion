@@ -43,6 +43,7 @@ import { can, isEmptyPerAgentWorkspace } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type WorkspaceType = 'git' | 'shared' | 'empty-per-agent' | 'linked';
 type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
@@ -371,7 +372,7 @@ export class ScionPageProjectCreate extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.checkCreateCapability();
-    this.checkGitHubApp();
+    void this.checkGitHubApp();
     void this.loadSystemStatus();
     void this.loadTemplates();
   }
@@ -1044,7 +1045,7 @@ export class ScionPageProjectCreate extends LitElement {
     }
     const url = this.gitRemote.trim();
     if (url.length > 5) {
-      this.gitRemoteCheckTimer = setTimeout(() => this.checkExistingProjects(url), 500);
+      this.gitRemoteCheckTimer = setTimeout(() => void this.checkExistingProjects(url), 500);
     } else {
       this.existingProjectsForRemote = [];
     }
@@ -1064,8 +1065,7 @@ export class ScionPageProjectCreate extends LitElement {
   }
 
   private navigateToProject(projectId: string): void {
-    window.history.pushState({}, '', `/projects/${projectId}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateTo(`/projects/${projectId}`);
   }
 
   private async handleSubmit(_e: Event): Promise<void> {

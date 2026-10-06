@@ -23,6 +23,7 @@ import { styleRules } from './__fixtures__/card-layout.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the header tests do.
+// Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
   stateManager: new EventTarget(),

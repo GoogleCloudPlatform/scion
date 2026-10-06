@@ -202,6 +202,7 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
         ...originalLocation,
         search: '',
         pathname: '/admin/groups',
+        hash: '',
       },
       writable: true,
     });
@@ -216,7 +217,9 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
 
     el.syncFiltersToURL();
 
-    expect(replaceStateSpy).toHaveBeenCalledWith({}, '', expect.stringContaining('q=hello'));
+    // replaceSearch() keeps the current history state; only the URL matters.
+    expect(replaceStateSpy).toHaveBeenCalledTimes(1);
+    expect(replaceStateSpy.mock.calls[0][2]).toEqual(expect.stringContaining('q=hello'));
     const urlArg = replaceStateSpy.mock.calls[0][2] as string;
     expect(urlArg).toContain('groupType=project_agents');
     expect(urlArg).toContain('owner=me');
@@ -237,6 +240,7 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
         ...originalLocation,
         search: '',
         pathname: '/admin/groups',
+        hash: '',
       },
       writable: true,
     });
@@ -251,7 +255,8 @@ describe('URL round-trip (readFiltersFromURL / syncFiltersToURL)', () => {
 
     el.syncFiltersToURL();
 
-    expect(replaceStateSpy).toHaveBeenCalledWith({}, '', '/admin/groups');
+    expect(replaceStateSpy).toHaveBeenCalledTimes(1);
+    expect(replaceStateSpy.mock.calls[0][2]).toBe('/admin/groups');
 
     Object.defineProperty(window, 'location', {
       value: originalLocation,

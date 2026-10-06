@@ -34,7 +34,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo } from '../../client/navigation.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import { getPrincipalIcon } from '../shared/role-binding-utils.js';
 import '../shared/principal-picker.js';

@@ -21,8 +21,15 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
+// Navigation goes through the shared helper (ptone/scion#2857); record it.
+vi.mock('../../client/navigation.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../client/navigation.js')>()),
+  navigateTo: vi.fn(),
+}));
+
 import type { Capabilities, PageData, UserRole } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
+import { navigateTo } from '../../client/navigation.js';
 import {
   MEMBERSHIP_CHANGED_EVENT,
   type MembershipChangedDetail,
@@ -200,10 +207,12 @@ describe('scion-page-project-create — hub project.create gate', () => {
   });
 
   it('does not redirect away from /projects/new', async () => {
+    vi.mocked(navigateTo).mockClear();
     const pushState = vi.spyOn(window.history, 'pushState');
     element = await createComponent({ caps: { actions: [] } }, 'viewer');
 
     expect(pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 });
 
@@ -376,7 +385,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
 
   beforeEach(() => {
     resetHubProjectCapabilitiesCache();
-    vi.spyOn(window.history, 'pushState').mockImplementation(() => {});
+    vi.mocked(navigateTo).mockClear();
   });
 
   afterEach(() => {
@@ -591,7 +600,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(posts(requests)).toEqual([
       { path: '/api/v1/projects/tpl-git/clone', method: 'POST', body: { name: 'payments-api' } },
     ]);
-    expect(window.history.pushState).toHaveBeenCalledWith({}, '', '/projects/new-clone');
+    expect(navigateTo).toHaveBeenCalledWith('/projects/new-clone');
   });
 
   it('a git remote override marks the field, updates the summary, and is sent', async () => {
@@ -732,7 +741,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
 
     expect(text(q(el, '.git-remote-error'))).toContain('gitRemote must be a remote git URL');
     expect(q(el, '.error-banner')).toBeNull();
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 
   it('shows other clone 400s in the banner', async () => {
@@ -760,7 +769,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     await submit(el);
 
     expect(text(q(el, '.error-banner'))).toContain('No project ID in response');
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 
   it('"Use template value" clears the override', async () => {
@@ -859,7 +868,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
 
     expect(text(q(el, '.slug-error'))).toContain('already exists');
     expect(q(el, '.error-banner')).toBeNull();
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
 
     // a11y: the input is marked invalid and the error is its help text, which
     // sl-input wires to the native input via aria-describedby.
@@ -887,7 +896,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(q(el, '.slug-error')).toBeNull();
     expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('false');
     expect(text(q(el, '.error-banner'))).toContain('Template is being modified');
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 
   it('follows nextCursor so the template list is not truncated', async () => {
@@ -982,7 +991,7 @@ describe('scion-page-project-create — linked create and existing projects', ()
 
   beforeEach(() => {
     resetHubProjectCapabilitiesCache();
-    vi.spyOn(window.history, 'pushState').mockImplementation(() => {});
+    vi.mocked(navigateTo).mockClear();
   });
 
   afterEach(() => {
@@ -1024,7 +1033,7 @@ describe('scion-page-project-create — linked create and existing projects', ()
         body: { brokerId: 'broker-1', localPath: '/home/u/code/notes' },
       },
     ]);
-    expect(window.history.pushState).toHaveBeenCalledWith({}, '', '/projects/new-blank');
+    expect(navigateTo).toHaveBeenCalledWith('/projects/new-blank');
   });
 
   it('still links the directory when the project already exists (200)', async () => {
@@ -1047,7 +1056,7 @@ describe('scion-page-project-create — linked create and existing projects', ()
       '/api/v1/projects/new-blank/providers',
     ]);
     expect(q(el, 'sl-dialog[label="Project Already Exists"]')?.hasAttribute('open')).toBe(false);
-    expect(window.history.pushState).toHaveBeenCalledWith({}, '', '/projects/new-blank');
+    expect(navigateTo).toHaveBeenCalledWith('/projects/new-blank');
   });
 
   it('keeps the user on the form with an error when linking fails', async () => {
@@ -1066,7 +1075,7 @@ describe('scion-page-project-create — linked create and existing projects', ()
     expect(heard).toEqual([{ kind: 'project', id: 'new-blank' }]);
 
     expect(q(el, '.error-banner')).not.toBeNull();
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 
   it('does not create when the path is not a valid directory', async () => {
@@ -1094,7 +1103,7 @@ describe('scion-page-project-create — linked create and existing projects', ()
     expect(heard).toEqual([]);
 
     expect(q(el, 'sl-dialog[label="Project Already Exists"]')?.hasAttribute('open')).toBe(true);
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 });
 
