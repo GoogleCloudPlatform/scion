@@ -79,6 +79,12 @@ type startContextInputs struct {
 	Name    string
 	AgentID string // Hub UUID (for env injection and logging)
 	Slug    string
+	// LaunchID is the launch identifier of the request, when the Hub sent
+	// one. It is injected as SCION_LAUNCH_ID, which sciontool presents to
+	// the conduit endpoint as its endpoint incarnation. Empty when the
+	// request carries none (no hub path records launches yet;
+	// ptone/scion#2933).
+	LaunchID string
 
 	// Project
 	ProjectPath string
@@ -580,6 +586,16 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.AgentID != "" {
 		env["SCION_AGENT_ID"] = in.AgentID
 		classifyBrokerEnv("SCION_AGENT_ID", api.EnvKindPlain)
+	}
+	// SCION_LAUNCH_ID is broker-owned: a value from the resolved env is
+	// never passed through, so the container presents either the launch id
+	// of this request or none.
+	if in.LaunchID != "" {
+		env["SCION_LAUNCH_ID"] = in.LaunchID
+		classifyBrokerEnv("SCION_LAUNCH_ID", api.EnvKindPlain)
+	} else {
+		delete(env, "SCION_LAUNCH_ID")
+		delete(envCls, "SCION_LAUNCH_ID")
 	}
 	if in.ProjectID != "" {
 		env["SCION_PROJECT_ID"] = in.ProjectID
@@ -1199,7 +1215,11 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		//
 		// The current hub always writes SCION_METADATA_MODE_SOURCE=hub
 		// alongside its own authoritative mode (DispatchAgentStart,
-		// DispatchAgentRestart, buildCreateRequest). A hub old enough to
+		// DispatchAgentRestart, buildCreateRequest), and leaves the mode
+		// itself absent when the agent has no GCP identity configured, so
+		// that case reaches the runtime default below rather than this
+		// branch. A hub that predates that still sends "block" here, which
+		// Kubernetes refuses; it needs a hub upgrade. A hub old enough to
 		// predate that write won't send the marker at all, and on such a hub
 		// this value could be whatever a stray stored env var or secret
 		// happened to contain rather than a real dispatch decision. Downgrade

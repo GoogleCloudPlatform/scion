@@ -153,6 +153,7 @@ func TestExtractChildCommand(t *testing.T) {
 }
 
 func TestInitCommand_Help(t *testing.T) {
+	resetRootCmdState(t)
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
 	rootCmd.SetArgs([]string{"init", "--help"})
@@ -2125,7 +2126,7 @@ func TestSetupHostUser_ZeroUIDGIDModeGated(t *testing.T) {
 func TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	log.SetLogPath(filepath.Join(home, "agent.log"))
+	setTestLogPath(t, filepath.Join(home, "agent.log"))
 	logDir := filepath.Join(home, ".scion", "services", "logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -2497,7 +2498,7 @@ func TestCleanGcloudConfigForMetadata_Enforced_CleansRealDir(t *testing.T) {
 func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
 	tmpHome := t.TempDir()
 	logPath := filepath.Join(tmpHome, "capture.log")
-	log.SetLogPath(logPath)
+	setTestLogPath(t, logPath)
 	log.SetQuiet(true)
 	t.Cleanup(func() { log.SetQuiet(false) })
 
@@ -2522,7 +2523,7 @@ func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
 func TestCleanGcloudConfigForMetadata_Enforced_SymlinkLogsErrorLine(t *testing.T) {
 	tmpHome := t.TempDir()
 	logPath := filepath.Join(tmpHome, "capture.log")
-	log.SetLogPath(logPath)
+	setTestLogPath(t, logPath)
 	log.SetQuiet(true)
 	t.Cleanup(func() { log.SetQuiet(false) })
 
@@ -2903,7 +2904,7 @@ func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 	servicesPath := filepath.Join(tmpHome, ".scion", "scion-services.yaml")
 
 	logPath := filepath.Join(tmpHome, "capture.log")
-	log.SetLogPath(logPath)
+	setTestLogPath(t, logPath)
 	log.SetQuiet(true)
 	t.Cleanup(func() { log.SetQuiet(false) })
 
