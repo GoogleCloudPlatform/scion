@@ -698,12 +698,16 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			wantRejected:  false,
 		},
 		{
-			// Design #2703 D4: explicit refusal, not the generic message.
-			name:          "empty-per-agent (non-git per-agent): unsupported",
+			// miller79/scion#167: same-broker empty-per-agent is
+			// eligible only on a local-disk runtime. This fixture agent
+			// has no recorded runtime, which the allow-list refuses
+			// (fail closed). The positive case is
+			// TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible.
+			name:          "empty-per-agent (non-git per-agent), no recorded runtime: refused",
 			workspaceMode: store.WorkspaceModePerAgent,
 			nonGit:        true,
 			wantRejected:  true,
-			wantBodyText:  `reincarnate does not yet support \"Empty directory per agent\" (empty-per-agent) workspaces`,
+			wantBodyText:  "empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)",
 		},
 	}
 
@@ -845,6 +849,75 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 			realRec := httptest.NewRecorder()
 			srv.handleReincarnateAgent(realRec, realReq, agent.ID)
 			assert.Equal(t, http.StatusAccepted, realRec.Code, "real request: body: %s", realRec.Body.String())
+		})
+	}
+}
+
+// TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible pins
+// miller79/scion#167: an empty-per-agent agent on a local-disk runtime,
+// whose broker advertises ReprovisionEmptyPerAgent, is eligible for a
+// same-broker reincarnation. The dry run reports it eligible (200, no move
+// verdict) and a real request is accepted and reprovisions on the agent's
+// own broker with no workspace source in the dispatched config (the broker
+// reuses the private workspace in place).
+func TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", "container"} {
+		t.Run(rt, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			broker.Capabilities = &store.BrokerCapabilities{Reprovision: true, EmptyPerAgentWorkspace: true, ReprovisionEmptyPerAgent: true}
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+			project.GitRemote = ""
+			project.Labels = map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}
+			require.NoError(t, s.UpdateProject(ctx, project))
+			require.True(t, project.IsEmptyPerAgent(), "fixture check: project must be empty-per-agent")
+
+			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
+			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: empty-per-agent has no GitClone")
+			require.Empty(t, probe.AppliedConfig.Workspace, "fixture check: empty-per-agent has no Workspace")
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Runtime = rt
+				a.AppliedConfig.GitClone = nil
+				a.AppliedConfig.Workspace = ""
+				if a.AppliedConfig.CreateInputs != nil {
+					a.AppliedConfig.CreateInputs.Workspace = ""
+				}
+			})
+			self := agentIdentityFor(agent.ID, project.ID)
+
+			for _, req := range []ReincarnateAgentRequest{
+				{Handoff: "h", DryRun: true},
+				{Handoff: "h", DryRun: true, TargetBroker: broker.ID}, // --broker <current>
+			} {
+				dryRec := httptest.NewRecorder()
+				srv.handleReincarnateAgent(dryRec, reincarnateRequest(t, agent.ID, self, req), agent.ID)
+				require.Equal(t, http.StatusOK, dryRec.Code, "dry run (target %q): body: %s", req.TargetBroker, dryRec.Body.String())
+				var dryResp ReincarnateAgentResponse
+				require.NoError(t, json.Unmarshal(dryRec.Body.Bytes(), &dryResp))
+				assert.Equal(t, agent.ID, dryResp.AgentID)
+				assert.Equal(t, 2, dryResp.Generation)
+				assert.Nil(t, dryResp.MoveVerdict, "a same-broker reincarnation is not a move")
+			}
+			n, _ := disp.reprovisionSnapshot()
+			require.Equal(t, 0, n, "a dry run must not dispatch anything")
+
+			realRec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(realRec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+			require.Equal(t, http.StatusAccepted, realRec.Code, "real request: body: %s", realRec.Body.String())
+
+			r := waitForReincarnationSettled(t, s, agent.ID)
+			require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+			n, cfgs := disp.reprovisionSnapshot()
+			require.Equal(t, 1, n, "exactly one reprovision dispatch")
+			assert.Nil(t, cfgs[0].GitClone, "empty-per-agent reprovision carries no git clone")
+			assert.Empty(t, cfgs[0].Workspace, "empty-per-agent reprovision carries no workspace path")
+			after, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, broker.ID, after.RuntimeBrokerID, "the agent stays on its broker")
 		})
 	}
 }

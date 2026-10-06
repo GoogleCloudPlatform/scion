@@ -254,11 +254,11 @@ func TestStart_EmptyPerAgent_NFSFailsClosed(t *testing.T) {
 	}
 }
 
-// TestReprovision_EmptyPerAgent_RefusedWorkspaceUntouched pins that
-// reincarnate, which supports only clone-per-agent and explicit-mount
-// agents, refuses an empty-per-agent agent cleanly (409 at the handler)
-// and leaves its private workspace as it was.
-func TestReprovision_EmptyPerAgent_RefusedWorkspaceUntouched(t *testing.T) {
+// TestReprovision_EmptyPerAgent_ReusesWorkspaceInPlace pins same-broker
+// reincarnation of an empty-per-agent agent (miller79/scion#167): Reprovision
+// accepts it, the private workspace keeps its content, nothing is created
+// in it, and the next generation's Start mounts the same directory.
+func TestReprovision_EmptyPerAgent_ReusesWorkspaceInPlace(t *testing.T) {
 	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -266,27 +266,81 @@ func TestReprovision_EmptyPerAgent_RefusedWorkspaceUntouched(t *testing.T) {
 	t.Chdir(tmpDir)
 	t.Setenv("HOME", tmpDir)
 	projectScionDir := setupEmptyPerAgentStartProject(t, filepath.Join(tmpDir, "project"), "")
-	ws := filepath.Join(projectScionDir, "agents", "worker", "workspace")
-	if err := os.MkdirAll(ws, 0755); err != nil {
-		t.Fatal(err)
-	}
-	note := filepath.Join(ws, "notes.md")
-	if err := os.WriteFile(note, []byte("keep"), 0644); err != nil {
-		t.Fatal(err)
-	}
 
 	var captured runtime.RunConfig
 	var ran bool
-	_, err = NewManager(emptyPerAgentStartRuntime(&captured, &ran)).Reprovision(context.Background(), api.StartOptions{
+	mgr := NewManager(emptyPerAgentStartRuntime(&captured, &ran))
+	opts := api.StartOptions{
 		Name:                   "worker",
 		ProjectPath:            projectScionDir,
 		NoAuth:                 true,
 		EmptyPerAgentWorkspace: true,
-	})
-	if !errors.Is(err, ErrReprovisionRefused) {
-		t.Fatalf("Reprovision error = %v, want ErrReprovisionRefused", err)
 	}
+	// Generation N: a normal provision persists the empty-per-agent mode
+	// and creates the private workspace.
+	if _, err := mgr.Provision(context.Background(), opts); err != nil {
+		t.Fatalf("Provision failed: %v", err)
+	}
+	ws := filepath.Join(projectScionDir, "agents", "worker", "workspace")
+	note := filepath.Join(ws, "notes.md")
+	if err := os.WriteFile(note, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	listTree := func() []string {
+		var out []string
+		if err := filepath.Walk(ws, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			out = append(out, fmt.Sprintf("%s %v", path, info.Mode()))
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := listTree()
+	wsInfoBefore, err := os.Stat(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mgr.Reprovision(context.Background(), opts); err != nil {
+		t.Fatalf("Reprovision failed: %v", err)
+	}
+
 	if got, err := os.ReadFile(note); err != nil || string(got) != "keep" {
 		t.Fatalf("workspace content changed: %q, %v", got, err)
+	}
+	if after := listTree(); strings.Join(after, "\n") != strings.Join(before, "\n") {
+		t.Fatalf("workspace tree changed:\nbefore: %v\nafter:  %v", before, after)
+	}
+	wsInfoAfter, err := os.Stat(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(wsInfoBefore, wsInfoAfter) {
+		t.Fatal("workspace directory was recreated, want the same directory reused in place")
+	}
+	if !persistedEmptyPerAgent([]string{filepath.Join(projectScionDir, "agents")}, "", "worker") {
+		t.Fatal("reprovisioned scion-agent.json must still record empty-per-agent")
+	}
+
+	// Generation N+1 mounts the same directory.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "worker", ProjectPath: projectScionDir, NoAuth: true,
+		EmptyPerAgentWorkspace: true,
+		Env:                    map[string]string{"SCION_AGENT_ID": "agent-1", "SCION_PROJECT_ID": "proj-1"},
+	}); err != nil {
+		t.Fatalf("Start after Reprovision failed: %v", err)
+	}
+	if !ran {
+		t.Fatal("runtime Run was not called")
+	}
+	if captured.Workspace != ws {
+		t.Fatalf("Workspace = %q, want %q", captured.Workspace, ws)
+	}
+	if got, err := os.ReadFile(note); err != nil || string(got) != "keep" {
+		t.Fatalf("workspace content changed after Start: %q, %v", got, err)
 	}
 }

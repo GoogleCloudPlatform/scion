@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -261,15 +262,19 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// touch a workspace it did not find already on disk): this is what
 	// makes --dry-run report the restriction too, instead of a dry run
 	// showing a plan that a real request could not safely execute.
-	// Empty-per-agent workspaces are broker-local, unsynced state: the only
-	// possible reincarnation would be a fresh empty directory, silently
-	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	// Empty-per-agent workspaces are broker-local, unsynced state.
 	// A4 (ptone/scion#2727): an empty-per-agent workspace can move when it
 	// is on the shared export (placement export) and both brokers see the
 	// same export (equal identity markers): the target finds it in place.
+	// miller79/scion#167: on the same broker (no move target, including
+	// `--broker <current>`) the broker reuses the private workspace in
+	// place, gated below on a local-disk runtime and the broker's
+	// ReprovisionEmptyPerAgent capability. Any other empty-per-agent
+	// request (a move whose workspace is not movable) is still refused.
 	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() && s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget)
+	sameBrokerEmptyPerAgent := project.IsEmptyPerAgent() && moveTarget == nil
 	workspaceModeErr := ""
-	if project.IsEmptyPerAgent() && !emptyPerAgentMove {
+	if project.IsEmptyPerAgent() && !emptyPerAgentMove && !sameBrokerEmptyPerAgent {
 		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
 	}
 
@@ -285,7 +290,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
 		(hasGitClone && project.IsSharedWorkspace()) ||
 		switchedToCloneOnly ||
-		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)))) {
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace, project.IsEmptyPerAgent())))) {
 		// FYI-6 (review p1b-r1): the generic message now covers every
 		// eligible mode, not just clone-per-agent.
 		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
@@ -304,6 +309,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 	if workspaceModeErr != "" {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, workspaceModeErr, nil)
+		return
+	}
+	// miller79/scion#167: in-place reuse is safe only where the private
+	// workspace is a directory on the broker's own disk. Checked, like the
+	// capability below, before anything is planned or stopped, so a dry
+	// run reports the same verdict.
+	if sameBrokerEmptyPerAgent && !localDiskRuntime(agent.Runtime) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)", nil)
 		return
 	}
 
@@ -332,6 +346,14 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		// plan is computed or anything is persisted).
 		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
 			"runtime broker does not support agent reincarnation; upgrade the broker", nil)
+		return
+	}
+	if sameBrokerEmptyPerAgent && !broker.Capabilities.ReprovisionEmptyPerAgent {
+		// An older broker advertises Reprovision and EmptyPerAgentWorkspace
+		// but its reprovision refuses empty-per-agent, which would only
+		// surface after the worker had stopped the agent. Refuse up front.
+		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
+			"runtime broker does not support in-place empty-per-agent reincarnation; upgrade the broker", nil)
 		return
 	}
 
@@ -696,4 +718,19 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 	}
 
 	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// localDiskRuntime reports whether an agent's recorded runtime
+// (store.Agent.Runtime: the broker's runtime name, or a profile type) keeps
+// an empty-per-agent workspace as a directory on the broker's own disk, so
+// same-broker reincarnation can reuse it in place (miller79/scion#167). An
+// allow-list: kubernetes, cloud runtimes, and empty or unknown values are
+// refused (fail closed).
+func localDiskRuntime(rt string) bool {
+	switch strings.ToLower(strings.TrimSpace(rt)) {
+	case "docker", "podman", "container", "apple":
+		return true
+	default:
+		return false
+	}
 }

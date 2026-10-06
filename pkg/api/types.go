@@ -960,22 +960,27 @@ func IsReprovisionFromContext(ctx context.Context) bool {
 }
 
 // ReincarnateEligible implements the eligibility predicate of design §3.4
-// Amendment A23: a `scion reincarnate` reprovision is safe to attempt for a
-// workspace that is either clone-per-agent (a real GitClone) or an explicit
-// mount (no GitClone, but a non-empty Workspace). Both the Hub (deciding
-// whether to accept a reincarnate request, using AppliedConfig.GitClone and
-// AppliedConfig.Workspace) and the broker (deciding whether Manager.Reprovision
-// may run, using the equivalent StartOptions fields) call this one helper so
-// the two gates cannot drift apart.
+// Amendment A23, extended for empty-per-agent (miller79/scion#167): a
+// `scion reincarnate` reprovision is safe to attempt for a workspace that is
+// clone-per-agent (a real GitClone), an explicit mount (no GitClone, but a
+// non-empty Workspace), or empty-per-agent (the agent's private
+// <agentDir>/workspace directory, reused in place). Both the Hub (deciding
+// whether to accept a reincarnate request, using AppliedConfig.GitClone,
+// AppliedConfig.Workspace and the project's empty-per-agent mode) and the
+// broker (deciding whether Manager.Reprovision may run, using the equivalent
+// StartOptions fields) call this one helper so the two gates cannot drift
+// apart.
 //
 // Neither side treats this as sufficient on its own: the Hub additionally
 // excludes worktree-per-agent projects (which it can detect from the project
 // record but this helper cannot, since GitClone is also set for
-// worktree-per-agent agents — see design §3.4 Amendment A4), and the broker
-// additionally requires the workspace to already exist on disk — Reprovision
-// never creates, clones, pulls, resets, or removes a workspace.
-func ReincarnateEligible(hasGitClone bool, workspace string) bool {
-	return hasGitClone || workspace != ""
+// worktree-per-agent agents — see design §3.4 Amendment A4) and gates
+// empty-per-agent on a local-disk runtime and the broker's
+// ReprovisionEmptyPerAgent capability; the broker additionally requires the
+// workspace to already exist on disk — Reprovision never creates, clones,
+// pulls, resets, or removes a workspace.
+func ReincarnateEligible(hasGitClone bool, workspace string, emptyPerAgent bool) bool {
+	return hasGitClone || workspace != "" || emptyPerAgent
 }
 
 type harnessConfigPathContextKey struct{}

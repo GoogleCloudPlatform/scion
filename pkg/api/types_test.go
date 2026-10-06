@@ -524,27 +524,30 @@ func TestScionConfig_ParseMaxDuration(t *testing.T) {
 
 // TestReincarnateEligible covers the design §3.4 Amendment A23 eligibility
 // predicate over the modes it distinguishes: clone-per-agent, an explicit
-// mount (shared-workspace or hub-managed), and "neither". Worktree-per-agent
+// mount (shared-workspace or hub-managed), empty-per-agent
+// (miller79/scion#167), and "none of these". Worktree-per-agent
 // and shared-workspace exclusion are layered on top by the Hub caller (see
 // ReincarnateEligible's doc comment) and are not this function's concern —
 // pkg/hub's handlers_agent_reincarnate_test.go covers those.
 func TestReincarnateEligible(t *testing.T) {
 	tests := []struct {
-		name        string
-		hasGitClone bool
-		workspace   string
-		want        bool
+		name          string
+		hasGitClone   bool
+		workspace     string
+		emptyPerAgent bool
+		want          bool
 	}{
-		{"clone-per-agent: GitClone set, no Workspace", true, "", true},
-		{"explicit mount: no GitClone, Workspace set", false, "/mnt/project", true},
-		{"both set (defensive; GitClone still wins)", true, "/mnt/project", true},
-		{"neither GitClone nor Workspace", false, "", false},
+		{"clone-per-agent: GitClone set, no Workspace", true, "", false, true},
+		{"explicit mount: no GitClone, Workspace set", false, "/mnt/project", false, true},
+		{"both set (defensive; GitClone still wins)", true, "/mnt/project", false, true},
+		{"empty-per-agent: no GitClone, no Workspace", false, "", true, true},
+		{"none of GitClone, Workspace, empty-per-agent", false, "", false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ReincarnateEligible(tt.hasGitClone, tt.workspace)
+			got := ReincarnateEligible(tt.hasGitClone, tt.workspace, tt.emptyPerAgent)
 			if got != tt.want {
-				t.Errorf("ReincarnateEligible(%v, %q) = %v, want %v", tt.hasGitClone, tt.workspace, got, tt.want)
+				t.Errorf("ReincarnateEligible(%v, %q, %v) = %v, want %v", tt.hasGitClone, tt.workspace, tt.emptyPerAgent, got, tt.want)
 			}
 		})
 	}

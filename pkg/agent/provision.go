@@ -528,6 +528,12 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //     non-empty opts.Workspace — shared-workspace and hub-managed projects.
 //     The agent directory and the workspace path must already exist;
 //     Reprovision never creates either.
+//   - empty-per-agent (miller79/scion#167): opts.EmptyPerAgentWorkspace with
+//     no GitClone, Workspace or shared workspace. The agent must have been
+//     created empty-per-agent (persisted scion-agent.json), and its private
+//     <agentDir>/workspace must already exist as a real directory (not a
+//     symlink); it is reused in place with its content, never created or
+//     cleared. Refused on the kubernetes runtime.
 //
 // Preconditions are enforced here rather than merely documented (design §3.4
 // Amendments A2.1/A2.4 and A23), before ProvisionAgent ever runs:
@@ -558,8 +564,14 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	hasGitClone := opts.GitClone != nil
-	if !api.ReincarnateEligible(hasGitClone, opts.Workspace) {
-		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
+	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
+		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
+	}
+	// Empty-per-agent combined with another workspace source is
+	// contradictory. ProvisionAgent refuses it too, but with an untyped
+	// error (a 500 at the broker); refusing here keeps it a typed 409.
+	if opts.EmptyPerAgentWorkspace && (hasGitClone || opts.Workspace != "" || opts.SharedWorkspace) {
+		return nil, fmt.Errorf("%w: agent %q is empty-per-agent but the request also names a git clone, workspace path or shared workspace", ErrReprovisionRefused, opts.Name)
 	}
 
 	projectDir, pdErr := config.GetResolvedProjectDir(opts.ProjectPath)
@@ -580,6 +592,12 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
 			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
 		}
+	} else if opts.EmptyPerAgentWorkspace {
+		dir, err := reprovisionEmptyPerAgentPreflight(projectDir, opts.Name, m.Runtime)
+		if err != nil {
+			return nil, err
+		}
+		agentDir = dir
 	} else {
 		// Design §3.4 Amendment A23: explicit-mount case. Confirm this is an
 		// existing agent (CheckAgentDirContained both resolves the
@@ -675,6 +693,34 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// (the hub-built preamble plus handoff) is delivered by the subsequent
 	// DispatchAgentStart call, not pre-staged as a file.
 	return cfg, nil
+}
+
+// reprovisionEmptyPerAgentPreflight runs Reprovision's empty-per-agent
+// preconditions (miller79/scion#167) and returns the agent's directory. The
+// agent's private <agentDir>/workspace is reused in place, so it must
+// already exist as a real directory: every check here runs before
+// ProvisionAgent, whose MkdirAll would otherwise create a missing workspace.
+// All refusals wrap ErrReprovisionRefused (409 at the broker).
+func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.Runtime) (string, error) {
+	agentDir, err := CheckAgentDirContained(projectDir, agentName, false)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
+	}
+	if !persistedEmptyPerAgent([]string{filepath.Dir(agentDir)}, "", agentName) {
+		return "", fmt.Errorf("%w: agent %q was not created empty-per-agent", ErrReprovisionRefused, agentName)
+	}
+	agentWorkspace := filepath.Join(agentDir, "workspace")
+	info, statErr := os.Lstat(agentWorkspace)
+	if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("%w: agent %q workspace missing or not a real directory at %s; reincarnate never recreates it", ErrReprovisionRefused, agentName, agentWorkspace)
+	}
+	// Defence in depth (the hub gates on an allow-list of local-disk
+	// runtimes): on Kubernetes the empty-per-agent workspace is pod-local
+	// or on an NFS export, never this broker-disk directory.
+	if rt != nil && rt.Name() == "kubernetes" {
+		return "", fmt.Errorf("%w: agent %q: empty-per-agent reincarnation is not supported on the kubernetes runtime", ErrReprovisionRefused, agentName)
+	}
+	return agentDir, nil
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
