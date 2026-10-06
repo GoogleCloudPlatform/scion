@@ -184,7 +184,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestPreviousRunIDs_|TestSeedMaintenanceOperations)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

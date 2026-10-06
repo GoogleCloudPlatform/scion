@@ -166,12 +166,15 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
 	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
 	"Deletion": true,
-	// run_id is written only through SetAgentRunID and
-	// CompareAndSwapAgentRunID (ptone/scion#2550): CreateAgent and
-	// UpdateAgent never write it, so it cannot round-trip here. It is not an
-	// authz input, and no list reader uses it (only the delete dispatch, from
-	// a single-row read).
+	// run_id is written only through SetAgentRunID and the run-ID swaps
+	// (ptone/scion#2550): CreateAgent and UpdateAgent never write it, so it
+	// cannot round-trip here; that is the only reason it is skipped. List
+	// reads do carry it (ListAgents maps full rows), and project deletion
+	// dispatches deletes from one. It is not an authz input.
 	"RunID": true,
+	// previous_run_ids: the same writers and the same reasons
+	// (ptone/scion#3097).
+	"PreviousRunIDs": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.
