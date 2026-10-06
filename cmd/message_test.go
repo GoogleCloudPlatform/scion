@@ -3016,6 +3016,7 @@ func newCountingHubServer(t *testing.T) (*httptest.Server, *int32) {
 // and credentials).
 func setHermeticHubEnv(t *testing.T, server *httptest.Server) {
 	t.Helper()
+	restoreAllSilenceUsage(t)
 	clearHubContextEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())

@@ -1060,10 +1060,12 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	return slug, nil
 }
 
-func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, id string) error {
+// TODO(ptone/scion#2550 P2/P4): enforce ref.RunID. The sandbox name is
+// reused across runs, so this is still name-scoped today.
+func (r *CloudRunSandboxRuntime) Stop(ctx context.Context, ref RunRef) error {
 	// sandbox delete requires --force for running sandboxes.
 	// There is no stop/pause verb; Stop == Delete.
-	return r.deleteOrWorkaround(ctx, id)
+	return r.deleteOrWorkaround(ctx, ref.ID)
 }
 
 // P2/P4: enforce ref.RunID (ptone/scion#2550). The sandbox name is reused

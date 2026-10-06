@@ -16,7 +16,11 @@ package teams
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,20 +45,19 @@ func TestChannelLinkCRUD(t *testing.T) {
 		ctx := context.Background()
 
 		link := &ChannelLink{
-			ConversationID:     "conv-123",
-			TeamID:             "team-456",
-			TeamName:           "Engineering",
-			ChannelName:        "general",
-			ProjectID:          "proj-1",
-			ProjectSlug:        "my-project",
-			DefaultAgent:       "coder",
-			LinkedBy:           "user-aad-object-id",
-			LinkedAt:           time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
-			Active:             true,
-			ShowAgentToAgent:   false,
-			ShowAssistantReply: true,
-			ShowStateChanges:   true,
-			ChatOnly:           false,
+			ConversationID:   "conv-123",
+			TeamID:           "team-456",
+			TeamName:         "Engineering",
+			ChannelName:      "general",
+			ProjectID:        "proj-1",
+			ProjectSlug:      "my-project",
+			DefaultAgent:     "coder",
+			LinkedBy:         "user-aad-object-id",
+			LinkedAt:         time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			Active:           true,
+			ShowAgentToAgent: false,
+			ShowStateChanges: true,
+			ChatOnly:         false,
 		}
 
 		require.NoError(t, store.CreateChannelLink(ctx, link))
@@ -73,7 +76,6 @@ func TestChannelLinkCRUD(t *testing.T) {
 		assert.Equal(t, "user-aad-object-id", got.LinkedBy)
 		assert.True(t, got.Active)
 		assert.False(t, got.ShowAgentToAgent)
-		assert.True(t, got.ShowAssistantReply)
 		assert.True(t, got.ShowStateChanges)
 		assert.False(t, got.ChatOnly)
 		assert.Equal(t, 2026, got.LinkedAt.Year())
@@ -217,13 +219,12 @@ func TestChannelLinkCRUD(t *testing.T) {
 		ctx := context.Background()
 
 		link := &ChannelLink{
-			ConversationID:     "conv-111",
-			TeamID:             "team-999",
-			ProjectID:          "proj-1",
-			DefaultAgent:       "coder",
-			LinkedAt:           time.Now().UTC(),
-			Active:             true,
-			ShowAssistantReply: true,
+			ConversationID: "conv-111",
+			TeamID:         "team-999",
+			ProjectID:      "proj-1",
+			DefaultAgent:   "coder",
+			LinkedAt:       time.Now().UTC(),
+			Active:         true,
 		}
 		require.NoError(t, store.CreateChannelLink(ctx, link))
 
@@ -593,8 +594,30 @@ func TestConversationContext(t *testing.T) {
 
 // --- ProjectAgents ---
 
+// readCachedProjectAgents reads the cached agent list of projectID straight
+// from the sqlite table, or nil when there is none.
+func readCachedProjectAgents(t *testing.T, store Store, projectID string) (*ProjectAgents, error) {
+	t.Helper()
+	s, ok := store.(*sqliteStore)
+	require.True(t, ok, "unsupported store %T", store)
+	row := s.db.QueryRow(`SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`, projectID)
+	var pa ProjectAgents
+	var slugsJSON, refreshedAt string
+	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	require.NoError(t, json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs))
+	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
+	require.NoError(t, err)
+	return &pa, nil
+}
+
 func TestProjectAgents(t *testing.T) {
-	t.Run("SetAndGet", func(t *testing.T) {
+	t.Run("Set", func(t *testing.T) {
 		store := newTestStore(t)
 		ctx := context.Background()
 
@@ -605,7 +628,7 @@ func TestProjectAgents(t *testing.T) {
 		}
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "proj-1", got.ProjectID)
@@ -613,11 +636,10 @@ func TestProjectAgents(t *testing.T) {
 		assert.Equal(t, 2026, got.RefreshedAt.Year())
 	})
 
-	t.Run("GetNotFound", func(t *testing.T) {
+	t.Run("NotCached", func(t *testing.T) {
 		store := newTestStore(t)
-		ctx := context.Background()
 
-		got, err := store.GetProjectAgents(ctx, "nonexistent")
+		got, err := readCachedProjectAgents(t, store, "nonexistent")
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
@@ -637,7 +659,7 @@ func TestProjectAgents(t *testing.T) {
 		pa.RefreshedAt = time.Now().UTC().Add(time.Hour)
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, []string{"coder", "reviewer"}, got.AgentSlugs)
@@ -654,7 +676,7 @@ func TestProjectAgents(t *testing.T) {
 		}
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, []string{}, got.AgentSlugs)
@@ -712,12 +734,80 @@ func TestPendingAskUser(t *testing.T) {
 			ExpiresAt:      time.Now().Add(time.Hour).UTC(),
 		}))
 
-		require.NoError(t, store.MarkAskUserResponded(ctx, "req-123"))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.True(t, claimed)
 
 		got, err := store.GetPendingAskUser(ctx, "req-123")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.True(t, got.Responded)
+
+		// A second mark does not claim the request again.
+		claimed, err = store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.False(t, claimed)
+
+		// Unknown requests are not claimed.
+		claimed, err = store.MarkAskUserResponded(ctx, "missing")
+		require.NoError(t, err)
+		assert.False(t, claimed)
+	})
+
+	t.Run("ResetResponded", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID: "req-123",
+			ExpiresAt: time.Now().Add(time.Hour).UTC(),
+		}))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		require.True(t, claimed)
+
+		require.NoError(t, store.ResetAskUserResponded(ctx, "req-123"))
+		got, err := store.GetPendingAskUser(ctx, "req-123")
+		require.NoError(t, err)
+		assert.False(t, got.Responded)
+
+		claimed, err = store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.True(t, claimed)
+	})
+
+	t.Run("CreateKeepsExisting", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+		expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID:      "req-123",
+			ConversationID: "conv-1",
+			AgentSlug:      "dev-1",
+			Choices:        []string{"yes"},
+			ExpiresAt:      expires,
+		}))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		require.True(t, claimed)
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID:      "req-123",
+			ConversationID: "conv-2",
+			AgentSlug:      "dev-2",
+			Choices:        []string{"no"},
+			ExpiresAt:      expires.Add(24 * time.Hour),
+		}))
+
+		got, err := store.GetPendingAskUser(ctx, "req-123")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.True(t, got.Responded)
+		assert.Equal(t, "conv-1", got.ConversationID)
+		assert.Equal(t, "dev-1", got.AgentSlug)
+		assert.Equal(t, []string{"yes"}, got.Choices)
+		assert.True(t, expires.Equal(got.ExpiresAt))
 	})
 
 	t.Run("DeleteExpired", func(t *testing.T) {
@@ -874,4 +964,75 @@ func TestAdvisoryLock_SQLiteAlwaysAcquired(t *testing.T) {
 func TestStore_OpenInvalidPath(t *testing.T) {
 	_, err := NewSQLiteStore("/nonexistent/dir/test.db")
 	assert.Error(t, err)
+}
+
+// A database created before ShowAssistantReply was retired still has the
+// show_assistant_reply column. The store must keep working without a
+// migration: the column is ignored and inserts rely on its default.
+func TestSQLiteStore_OpensDatabaseWithRetiredShowAssistantReplyColumn(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+
+	old, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = old.Exec(`
+CREATE TABLE channel_links (
+	conversation_id TEXT PRIMARY KEY,
+	team_id TEXT NOT NULL DEFAULT '',
+	team_name TEXT NOT NULL DEFAULT '',
+	channel_name TEXT NOT NULL DEFAULT '',
+	project_id TEXT NOT NULL,
+	project_slug TEXT NOT NULL DEFAULT '',
+	default_agent TEXT NOT NULL DEFAULT '',
+	linked_by TEXT NOT NULL DEFAULT '',
+	linked_at TEXT NOT NULL,
+	active INTEGER NOT NULL DEFAULT 1,
+	show_agent_to_agent INTEGER NOT NULL DEFAULT 0,
+	show_assistant_reply INTEGER NOT NULL DEFAULT 1,
+	show_state_changes INTEGER NOT NULL DEFAULT 0,
+	chat_only INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO channel_links (conversation_id, project_id, linked_at, show_assistant_reply)
+VALUES ('old-conv', 'proj-old', '2026-01-01T00:00:00Z', 0);`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+
+	s, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	got, err := s.GetChannelLink(ctx, "old-conv")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "proj-old", got.ProjectID)
+
+	link := &ChannelLink{ConversationID: "new-conv", ProjectID: "proj-new", LinkedAt: time.Now().UTC(), Active: true}
+	require.NoError(t, s.CreateChannelLink(ctx, link))
+	link.ChatOnly = true
+	require.NoError(t, s.UpdateChannelLink(ctx, link))
+	got, err = s.GetChannelLink(ctx, "new-conv")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.ChatOnly)
+}
+
+func TestNewSQLiteStore_InMemorySharedAcrossGoroutines(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("req-%d", i)
+			assert.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{RequestID: id, ExpiresAt: time.Now().Add(time.Hour)}))
+			got, err := store.GetPendingAskUser(ctx, id)
+			assert.NoError(t, err)
+			assert.NotNil(t, got, "every goroutine sees the same in-memory database")
+		}(i)
+	}
+	wg.Wait()
 }

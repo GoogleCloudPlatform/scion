@@ -25,10 +25,11 @@ import (
 
 // TestEmbeddedHarnessThinkingBlocks loads every embedded harness config.yaml
 // that declares a `thinking:` block and checks that it passes the schema and
-// the load-time ordering check, then pins the codex and antigravity tables to
-// their agreed literals (ptone/scion#2673). The codex table must equal the
-// pre-migration hard-coded buckets in provision.py byte for byte; the
-// provision_test.py characterization tables restate the same literals.
+// the load-time ordering check, then pins the codex, antigravity and claude
+// tables to their agreed literals (ptone/scion#2673, ptone/scion#3011). The
+// codex table must equal the pre-migration hard-coded buckets in provision.py
+// byte for byte; the provision_test.py characterization tables restate the
+// same literals.
 func TestEmbeddedHarnessThinkingBlocks(t *testing.T) {
 	want := map[string]*config.HarnessThinkingConfig{
 		"codex": {
@@ -45,6 +46,16 @@ func TestEmbeddedHarnessThinkingBlocks(t *testing.T) {
 				{Max: 25, Value: "low"},
 				{Max: 50, Value: "medium"},
 				{Max: 100, Value: "high"},
+			},
+		},
+		// No Default: an unset level leaves Claude Code's per-model default
+		// effort in place (ptone/scion#3011).
+		"claude": {
+			Levels: []config.HarnessThinkingLevel{
+				{Max: 25, Value: "low"},
+				{Max: 50, Value: "medium"},
+				{Max: 75, Value: "high"},
+				{Max: 100, Value: "xhigh"},
 			},
 		},
 	}

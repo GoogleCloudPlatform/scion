@@ -571,6 +571,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			Capabilities:     brokerRegistrationCapabilities(),
 			Profiles:         profiles,
 			WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
+			DefaultProfile:   brokerRegistrationDefaultProfile(settings),
 		}
 
 		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
@@ -2010,6 +2011,28 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 	}
 
 	return profiles
+}
+
+// brokerRegistrationDefaultProfile returns the broker's default (active)
+// profile name to report at join, or nil when settings could not be loaded
+// (the hub then keeps what it has).
+func brokerRegistrationDefaultProfile(settings *config.Settings) *string {
+	if settings == nil {
+		return nil
+	}
+	name := settings.ActiveProfile
+	return &name
+}
+
+// brokerHeartbeatDefaultProfile returns the default profile the running
+// broker reports on every heartbeat: settings' active profile, or nil when
+// settings failed to load, so the heartbeat omits it and the hub keeps what
+// it has (the same rule as join).
+func brokerHeartbeatDefaultProfile(settings *config.Settings, loaded bool) *string {
+	if !loaded {
+		return nil
+	}
+	return brokerRegistrationDefaultProfile(settings)
 }
 
 // getHubClientForConnection creates a hub client using credentials from a named hub connection.

@@ -56,6 +56,7 @@ import {
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
 import './chat-avatar.js';
+import { focusElement } from '../focus-moved.js';
 
 /** A space (project) in the rail. */
 export interface ChatSpace {
@@ -2967,7 +2968,7 @@ export class ScionChatSpaceRail extends LitElement {
     >('.create-thread sl-input');
     if (!input) return;
     await input.updateComplete;
-    input.focus();
+    focusElement(input);
   }
 
   /** Close the new-thread name entry without creating a thread. */
