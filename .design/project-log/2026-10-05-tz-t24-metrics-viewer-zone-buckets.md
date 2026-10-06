@@ -25,6 +25,14 @@
 - Existing tests updated for the new window semantics and cache-key format.
 - Web: `metrics-dashboard.test.ts` covers `tz` with the preference unset (the browser zone, stubbed to America/Chicago) and set; headings and axis title from the reported zone on all three tabs; reported-UTC fallback; an older hub without `timeZone`; refetch on a preference change; and no listener after disconnect. `time.test.ts` covers the label helpers.
 
+## Review round 1 — disposition
+
+All four findings were fixed; none declined.
+- **R1-1 (Medium):** tab labels came from a page-global zone set by whichever response arrived last. They now come from each view's own `timeZone`. Stale responses for the same view are dropped by request sequence number, and an existing chart's axis title is refreshed with its data.
+- **R1-2 (Low):** the resolver now reuses `validateIANATimezone` for the portability rules.
+- **R1-3 (Nit):** every exactly-UTC tzdata name maps to `time.UTC`.
+- **R1-4 (Nit):** the orphaned class comment is reattached.
+
 ## Follow-ups noticed (not done)
 
 - `QueryProjectSummary` ("Last 24 hours") stays a rolling 24h window with no buckets, so the zone does not affect it.
