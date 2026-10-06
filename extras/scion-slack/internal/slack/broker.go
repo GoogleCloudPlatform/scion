@@ -424,8 +424,10 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 
 	projectID, agentSlug := parseTopicComponents(topic)
 
+	// Discard the retired end-of-turn assistant-reply mirror; an older hub
+	// may still forward it.
 	if msg.Type == messages.TypeAssistantReply {
-		b.log.Debug("Filtering assistant-reply message")
+		b.log.Debug("Discarding retired assistant-reply message")
 		return nil
 	}
 

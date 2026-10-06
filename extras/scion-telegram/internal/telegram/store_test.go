@@ -1059,3 +1059,50 @@ func TestStore_OpenInvalidPath(t *testing.T) {
 	_, err := NewSQLiteStore("/nonexistent/dir/test.db")
 	assert.Error(t, err)
 }
+
+// A database created before the Commentary setting was retired still has
+// the show_assistant_reply column. The store must open it and keep working
+// without a migration: the column is ignored, inserts rely on its default.
+func TestSQLiteStore_OpensDatabaseWithRetiredShowAssistantReplyColumn(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+
+	old, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = old.Exec(`
+CREATE TABLE group_links (
+	chat_id            INTEGER PRIMARY KEY,
+	chat_title         TEXT NOT NULL DEFAULT '',
+	project_id         TEXT NOT NULL,
+	project_slug       TEXT NOT NULL DEFAULT '',
+	default_agent      TEXT NOT NULL DEFAULT '',
+	linked_by          TEXT NOT NULL DEFAULT '',
+	linked_at          TEXT NOT NULL,
+	active             INTEGER NOT NULL DEFAULT 1,
+	show_agent_to_agent    INTEGER NOT NULL DEFAULT 0,
+	notify_in_group        INTEGER NOT NULL DEFAULT 0,
+	show_assistant_reply   INTEGER NOT NULL DEFAULT 1
+);
+INSERT INTO group_links (chat_id, project_id, linked_at, show_assistant_reply)
+VALUES (-100, 'proj-old', '2026-01-01T00:00:00Z', 0);`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+
+	s, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	got, err := s.GetGroupLink(ctx, -100)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "proj-old", got.ProjectID)
+
+	require.NoError(t, s.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -200, ProjectID: "proj-new", LinkedAt: time.Now().UTC(), Active: true,
+	}))
+	require.NoError(t, s.MigrateGroupLink(ctx, -200, -201))
+	moved, err := s.GetGroupLink(ctx, -201)
+	require.NoError(t, err)
+	require.NotNil(t, moved)
+	assert.Equal(t, "proj-new", moved.ProjectID)
+}

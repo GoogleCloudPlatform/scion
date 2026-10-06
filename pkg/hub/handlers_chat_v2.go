@@ -1876,9 +1876,8 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
 	// Record "web" reply-channel affinity so untagged agent replies
-	// (e.g. `scion message user:...` or sciontool Stop-hook assistant-reply
-	// mirror) route back to web chat rather than a stale external bridge
-	// channel (Discord/Telegram). See #2448.
+	// (e.g. `scion message user:...`) route back to web chat rather than a
+	// stale external bridge channel (Discord/Telegram). See #2448.
 	s.mu.RLock()
 	affinityWcs := s.webChatStore
 	s.mu.RUnlock()

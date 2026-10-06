@@ -651,6 +651,29 @@ func TestPublish_ForumChannelWithoutThreadID_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "thread ID is required")
 }
 
+// The retired assistant-reply mirror is discarded before any send, even if
+// an older hub still forwards it. A forum channel without a thread makes
+// any send attempt fail, so a nil error proves nothing was attempted; the
+// same message as an instruction is the control.
+func TestPublish_DiscardsRetiredAssistantReply(t *testing.T) {
+	session := stubSession([]*discordgo.Channel{
+		{ID: "forum123", Type: discordgo.ChannelTypeGuildForum},
+	})
+	b := testBroker(session)
+	msg := &messages.StructuredMessage{
+		Version:  messages.Version,
+		Channel:  "discord",
+		Sender:   "agent:test",
+		Msg:      "turn text",
+		Type:     messages.TypeAssistantReply,
+		Metadata: map[string]string{"discord_channel_id": "forum123"},
+	}
+	require.NoError(t, b.Publish(context.Background(), "test-topic", msg))
+
+	msg.Type = messages.TypeInstruction
+	require.Error(t, b.Publish(context.Background(), "test-topic", msg), "control: an instruction is attempted")
+}
+
 func TestPublish_MediaChannelWithoutThreadID_ReturnsError(t *testing.T) {
 	session := stubSession([]*discordgo.Channel{
 		{ID: "media123", Type: discordgo.ChannelTypeGuildMedia},
@@ -1955,6 +1978,7 @@ func TestConfigure_BootstrapSkippedWhenDone(t *testing.T) {
 	err := b.Configure(map[string]string{
 		"hub_url":  "http://localhost:8080",
 		"hmac_key": "test-key",
+		"db_path":  filepath.Join(t.TempDir(), "discord.db"),
 	})
 	require.NoError(t, err)
 

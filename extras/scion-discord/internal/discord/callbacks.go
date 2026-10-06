@@ -220,18 +220,17 @@ func (h *CallbackHandler) saveChannelLink(ctx context.Context, i *discordgo.Inte
 	}
 
 	link := &ChannelLink{
-		ChannelID:          channelID,
-		GuildID:            guildID,
-		GuildName:          guildName,
-		ProjectID:          projectID,
-		ProjectSlug:        projectSlug,
-		DefaultAgent:       agentSlug,
-		LinkedBy:           linkedBy,
-		LinkedAt:           time.Now(),
-		Active:             true,
-		ShowAssistantReply: false,
-		ShowStateChanges:   false,
-		NotifyInGroup:      true,
+		ChannelID:        channelID,
+		GuildID:          guildID,
+		GuildName:        guildName,
+		ProjectID:        projectID,
+		ProjectSlug:      projectSlug,
+		DefaultAgent:     agentSlug,
+		LinkedBy:         linkedBy,
+		LinkedAt:         time.Now(),
+		Active:           true,
+		ShowStateChanges: false,
+		NotifyInGroup:    true,
 	}
 
 	if err := h.store.CreateChannelLink(ctx, link); err != nil {

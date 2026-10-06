@@ -1309,7 +1309,7 @@ func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 		Sender:    "agent:coder",
 		Recipient: "user:alice@example.com",
 		Msg:       "reply to alice",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 	}
 
 	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
@@ -1434,7 +1434,7 @@ func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 		Version: messages.Version,
 		Sender:  "agent:coder",
 		Msg:     "reply message",
-		Type:    messages.TypeAssistantReply,
+		Type:    messages.TypeInstruction,
 		Metadata: map[string]string{
 			"telegram_chat_id":    "-200",
 			"telegram_message_id": "42",
@@ -1511,6 +1511,50 @@ func TestV2_HandleCallback_AskUserResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pending)
 	assert.True(t, pending.Responded)
+}
+
+// A Commentary button on a settings card sent before the setting was
+// retired must be answered as a no-op, not fail, and the card refreshed.
+func TestV2_HandleCallback_RetiredCommentarySettingIsNoOp(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2WithHub(t, tgSrv, newFakeHubClient())
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -200, ProjectID: "proj-1", LinkedAt: time.Now().UTC(),
+		Active: true, ShowAgentToAgent: true,
+	}))
+
+	b.handleCallbackQuery(ctx, &CallbackQuery{
+		ID:      "cb-com",
+		From:    &TGUser{ID: 456, Username: "alice"},
+		Message: &TGMessage{MessageID: 51, Chat: TGChat{ID: -200, Type: "group"}},
+		Data:    "settings:commentary:off",
+	})
+
+	callbacks := tgSrv.getAnsweredCallbacks()
+	require.Len(t, callbacks, 1)
+	assert.Equal(t, "cb-com", callbacks[0].CallbackQueryID)
+	assert.Contains(t, callbacks[0].Text, "removed")
+
+	// The card is refreshed in place without the stale Commentary row.
+	tgSrv.mu.Lock()
+	edits := append([]editMessageReplyMarkupRequest(nil), tgSrv.editedMarkups...)
+	tgSrv.mu.Unlock()
+	require.Len(t, edits, 1, "the settings card must be refreshed")
+	assert.Equal(t, int64(-200), edits[0].ChatID)
+	assert.Equal(t, int64(51), edits[0].MessageID)
+	require.NotNil(t, edits[0].ReplyMarkup)
+	require.Len(t, edits[0].ReplyMarkup.InlineKeyboard, 2, "observer and group-notification rows only")
+	for _, row := range edits[0].ReplyMarkup.InlineKeyboard {
+		for _, btn := range row {
+			assert.NotContains(t, btn.CallbackData, "commentary")
+		}
+	}
+
+	link, err := b.store.GetGroupLink(ctx, -200)
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.True(t, link.ShowAgentToAgent, "other settings must be unchanged")
 }
 
 func TestV2_HandleCallback_AskUserWithMapping(t *testing.T) {
@@ -1886,7 +1930,7 @@ func TestFormatMessageV2(t *testing.T) {
 			name: "assistant reply",
 			msg: &messages.StructuredMessage{
 				Msg:  "here is the result",
-				Type: messages.TypeAssistantReply,
+				Type: messages.TypeInstruction,
 			},
 			agentSlug: "",
 			contains:  []string{"here is the result"},
@@ -3640,6 +3684,24 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 				"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 		})
 	}
+}
+
+// The retired assistant-reply mirror is discarded even if an older hub still
+// forwards it; the same message as an instruction is the control.
+func TestV2_Publish_DiscardsRetiredAssistantReply(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+	meta := map[string]string{"telegram_chat_id": "-200", "telegram_message_id": "42"}
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "turn text",
+			Type: messages.TypeAssistantReply, Metadata: meta}))
+	assert.Empty(t, tgSrv.getSentMessages(), "assistant-reply must be discarded")
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "deliberate",
+			Type: messages.TypeInstruction, Metadata: meta}))
+	assert.Len(t, tgSrv.getSentMessages(), 1, "control: an instruction is sent")
 }
 
 func TestV2_ImportV1ChatRoutes_ResolvesSlugFromBrokerProjectList(t *testing.T) {

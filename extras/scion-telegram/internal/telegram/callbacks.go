@@ -534,14 +534,12 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 			return fmt.Errorf("invalid a2a value: %s", value)
 		}
 	case "commentary":
-		switch value {
-		case "on":
-			link.ShowAssistantReply = true
-		case "off":
-			link.ShowAssistantReply = false
-		default:
-			return fmt.Errorf("invalid commentary value: %s", value)
-		}
+		// Retired setting: the end-of-turn assistant-reply mirror it
+		// filtered no longer exists. A button on an older settings card
+		// is a no-op that refreshes the card without the stale row.
+		h.editMarkup(ctx, chatID, messageID, buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup))
+		h.answerCallback(ctx, cb.ID, "Commentary setting has been removed.", false)
+		return nil
 	case "grp":
 		switch value {
 		case "on":
@@ -561,7 +559,7 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 		return err
 	}
 
-	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup, link.ShowAssistantReply)
+	kb := buildSettingsKeyboard(link.ShowAgentToAgent, link.NotifyInGroup)
 	h.editMarkup(ctx, chatID, messageID, kb)
 
 	var toastMsg string
@@ -572,12 +570,6 @@ func (h *CallbackHandler) handleSettingsCallback(ctx context.Context, cb *Callba
 			label = "on"
 		}
 		toastMsg = fmt.Sprintf("Observer mode: %s", label)
-	case "commentary":
-		label := "off"
-		if link.ShowAssistantReply {
-			label = "on"
-		}
-		toastMsg = fmt.Sprintf("Commentary: %s", label)
 	case "grp":
 		label := "off"
 		if link.NotifyInGroup {

@@ -270,14 +270,13 @@ func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, 
 	}
 
 	link := &ChannelLink{
-		ConversationID:     stripThreadSuffix(activity.Conversation.ID),
-		TeamID:             teamID,
-		ProjectID:          projectID,
-		ProjectSlug:        projectSlug,
-		LinkedBy:           linkedBy,
-		LinkedAt:           time.Now(),
-		Active:             true,
-		ShowAssistantReply: true,
+		ConversationID: stripThreadSuffix(activity.Conversation.ID),
+		TeamID:         teamID,
+		ProjectID:      projectID,
+		ProjectSlug:    projectSlug,
+		LinkedBy:       linkedBy,
+		LinkedAt:       time.Now(),
+		Active:         true,
 	}
 
 	if err := store.CreateChannelLink(ctx, link); err != nil {

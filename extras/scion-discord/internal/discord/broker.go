@@ -665,9 +665,10 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	// Always suppress commentary messages — Discord has no user toggle for this.
+	// Discard the retired end-of-turn assistant-reply mirror; an older hub
+	// may still forward it.
 	if msg != nil && msg.Type == messages.TypeAssistantReply {
-		b.log.Debug("Filtering assistant-reply message (commentary always suppressed in Discord)")
+		b.log.Debug("Discarding retired assistant-reply message")
 		return nil
 	}
 

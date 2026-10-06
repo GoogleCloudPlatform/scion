@@ -30,19 +30,18 @@ func TestChannelLinkCRUD(t *testing.T) {
 		ctx := context.Background()
 
 		link := &ChannelLink{
-			ChannelID:          "111222333444555666",
-			GuildID:            "999888777666555444",
-			ProjectID:          "proj-1",
-			ProjectSlug:        "my-project",
-			DefaultAgent:       "coder",
-			LinkedBy:           "456789012345678901",
-			LinkedAt:           time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
-			Active:             true,
-			ShowAgentToAgent:   false,
-			ShowAssistantReply: true,
-			ShowStateChanges:   true,
-			NotifyInGroup:      true,
-			ChatOnly:           false,
+			ChannelID:        "111222333444555666",
+			GuildID:          "999888777666555444",
+			ProjectID:        "proj-1",
+			ProjectSlug:      "my-project",
+			DefaultAgent:     "coder",
+			LinkedBy:         "456789012345678901",
+			LinkedAt:         time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+			Active:           true,
+			ShowAgentToAgent: false,
+			ShowStateChanges: true,
+			NotifyInGroup:    true,
+			ChatOnly:         false,
 		}
 
 		require.NoError(t, store.CreateChannelLink(ctx, link))
@@ -59,7 +58,6 @@ func TestChannelLinkCRUD(t *testing.T) {
 		assert.Equal(t, "456789012345678901", got.LinkedBy)
 		assert.True(t, got.Active)
 		assert.False(t, got.ShowAgentToAgent)
-		assert.True(t, got.ShowAssistantReply)
 		assert.True(t, got.ShowStateChanges)
 		assert.True(t, got.NotifyInGroup)
 		assert.False(t, got.ChatOnly)
@@ -162,14 +160,13 @@ func TestChannelLinkCRUD(t *testing.T) {
 		ctx := context.Background()
 
 		link := &ChannelLink{
-			ChannelID:          "111",
-			GuildID:            "999",
-			ProjectID:          "proj-1",
-			DefaultAgent:       "coder",
-			LinkedAt:           time.Now().UTC(),
-			Active:             true,
-			ShowAssistantReply: true,
-			NotifyInGroup:      true,
+			ChannelID:     "111",
+			GuildID:       "999",
+			ProjectID:     "proj-1",
+			DefaultAgent:  "coder",
+			LinkedAt:      time.Now().UTC(),
+			Active:        true,
+			NotifyInGroup: true,
 		}
 		require.NoError(t, store.CreateChannelLink(ctx, link))
 
@@ -1072,4 +1069,54 @@ func TestDeleteChannelLinkCascade(t *testing.T) {
 func TestStore_OpenInvalidPath(t *testing.T) {
 	_, err := NewSQLiteStore("/nonexistent/dir/test.db")
 	assert.Error(t, err)
+}
+
+// A database created before ShowAssistantReply was retired still has the
+// show_assistant_reply column. The store must keep working without a
+// migration: the column is ignored and inserts rely on its default.
+func TestSQLiteStore_OpensDatabaseWithRetiredShowAssistantReplyColumn(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+
+	old, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = old.Exec(`
+CREATE TABLE channel_links (
+	channel_id TEXT PRIMARY KEY,
+	guild_id TEXT NOT NULL,
+	guild_name TEXT NOT NULL DEFAULT '',
+	project_id TEXT NOT NULL,
+	project_slug TEXT NOT NULL DEFAULT '',
+	default_agent TEXT NOT NULL DEFAULT '',
+	linked_by TEXT NOT NULL DEFAULT '',
+	linked_at TEXT NOT NULL,
+	active INTEGER NOT NULL DEFAULT 1,
+	show_agent_to_agent INTEGER NOT NULL DEFAULT 0,
+	show_assistant_reply INTEGER NOT NULL DEFAULT 1,
+	show_state_changes INTEGER NOT NULL DEFAULT 0,
+	notify_in_group INTEGER NOT NULL DEFAULT 1,
+	chat_only INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO channel_links (channel_id, guild_id, project_id, linked_at, show_assistant_reply)
+VALUES ('old-chan', 'g1', 'proj-old', '2026-01-01T00:00:00Z', 0);`)
+	require.NoError(t, err)
+	require.NoError(t, old.Close())
+
+	s, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	got, err := s.GetChannelLink(ctx, "old-chan")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "proj-old", got.ProjectID)
+
+	link := &ChannelLink{ChannelID: "new-chan", GuildID: "g1", ProjectID: "proj-new", LinkedAt: time.Now().UTC(), Active: true}
+	require.NoError(t, s.CreateChannelLink(ctx, link))
+	link.ChatOnly = true
+	require.NoError(t, s.UpdateChannelLink(ctx, link))
+	got, err = s.GetChannelLink(ctx, "new-chan")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.ChatOnly)
 }

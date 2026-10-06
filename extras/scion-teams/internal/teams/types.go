@@ -123,20 +123,19 @@ type ConversationReference struct {
 
 // ChannelLink maps a Teams conversation to a Scion project.
 type ChannelLink struct {
-	ConversationID     string
-	TeamID             string
-	TeamName           string
-	ChannelName        string
-	ProjectID          string
-	ProjectSlug        string
-	DefaultAgent       string
-	LinkedBy           string // Azure AD object ID of user who ran setup
-	LinkedAt           time.Time
-	Active             bool
-	ShowAgentToAgent   bool
-	ShowAssistantReply bool
-	ShowStateChanges   bool
-	ChatOnly           bool
+	ConversationID   string
+	TeamID           string
+	TeamName         string
+	ChannelName      string
+	ProjectID        string
+	ProjectSlug      string
+	DefaultAgent     string
+	LinkedBy         string // Azure AD object ID of user who ran setup
+	LinkedAt         time.Time
+	Active           bool
+	ShowAgentToAgent bool
+	ShowStateChanges bool
+	ChatOnly         bool
 }
 
 // TeamsUserMapping links a Teams user to a Scion user identity.
