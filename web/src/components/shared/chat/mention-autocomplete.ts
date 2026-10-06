@@ -42,6 +42,46 @@ import type { Agent } from '../../../shared/types.js';
 /** Maximum items shown in the dropdown. */
 const MAX_DROPDOWN_ITEMS = 8;
 
+/** Gap kept between the dropdown's top and whatever clips it, in px. */
+const DROPDOWN_TOP_MARGIN_PX = 8;
+/** The dropdown never shrinks below one touch-sized row. */
+const DROPDOWN_MIN_HEIGHT_PX = 44;
+/** The dropdown's gap above the composer (matches the inline `bottom`). */
+const DROPDOWN_GAP_PX = 4;
+
+/**
+ * The top edge, in viewport px, of the region the dropdown can draw in when
+ * it opens upwards from `el`: the lowest top of any ancestor that clips its
+ * content (crossing shadow roots), and never above the visible viewport,
+ * which is shorter while an on-screen keyboard is open.
+ */
+export function clipTopAbove(el: Element): number {
+  let top = window.visualViewport?.offsetTop ?? 0;
+  let node: Element | null = el;
+  while (node) {
+    const parent: Element | null =
+      node.parentElement ?? ((node.getRootNode() as ShadowRoot).host || null);
+    if (!parent) break;
+    const overflow = getComputedStyle(parent).overflowY;
+    if (overflow && overflow !== 'visible') {
+      top = Math.max(top, parent.getBoundingClientRect().top);
+    }
+    node = parent;
+  }
+  return top;
+}
+
+/**
+ * The tallest the upward dropdown can be so it stays wholly inside the
+ * region above the composer.
+ */
+export function dropdownMaxHeight(anchorTop: number, clipTop: number): number {
+  return Math.max(
+    DROPDOWN_MIN_HEIGHT_PX,
+    Math.floor(anchorTop - DROPDOWN_GAP_PX - DROPDOWN_TOP_MARGIN_PX - clipTop)
+  );
+}
+
 /** Detail emitted when the user accepts a mention. */
 export interface MentionAcceptDetail {
   slug: string;
@@ -87,6 +127,12 @@ export class ScionMentionAutocomplete extends LitElement {
 
   /** Horizontal offset for the dropdown (pixels from left of host). */
   @state() private dropdownLeft = 0;
+
+  /**
+   * The highlight last moved by arrow key, so the list scrolls it into view.
+   * A hover moves the highlight too, but onto a row already in view.
+   */
+  private highlightFromKeyboard = false;
 
   /** Internal tracking of the trigger position. */
   private triggerStart = -1;
@@ -135,7 +181,12 @@ export class ScionMentionAutocomplete extends LitElement {
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
       max-width: 280px;
       min-width: 200px;
-      overflow: hidden;
+      /* Capped to the room above the composer (see updated()); the list
+         scrolls rather than running under whatever sits above it. */
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      box-sizing: border-box;
     }
 
     .dropdown-item {
@@ -165,6 +216,15 @@ export class ScionMentionAutocomplete extends LitElement {
       white-space: nowrap;
     }
 
+    /* A touch-sized row on touch screens and phones. */
+    @media (pointer: coarse), (max-width: 768px) {
+      .dropdown-item {
+        min-height: 44px;
+        justify-content: center;
+        box-sizing: border-box;
+      }
+    }
+
     .no-results {
       padding: 0.5rem 0.75rem;
       font-size: var(--chat-fs-base);
@@ -176,6 +236,36 @@ export class ScionMentionAutocomplete extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.removeMirrorDiv();
+  }
+
+  /** Fit the open dropdown into the room above the composer. */
+  override updated(changed: Map<string, unknown>): void {
+    const dropdown = this.shadowRoot?.querySelector<HTMLElement>('.dropdown');
+    if (!dropdown) return;
+    const anchorTop = this.getBoundingClientRect().top;
+    dropdown.style.maxHeight = `${dropdownMaxHeight(anchorTop, clipTopAbove(this))}px`;
+    // A new candidate list starts at its top.
+    if (changed.has('candidates')) {
+      dropdown.scrollTop = 0;
+      return;
+    }
+    if (!changed.has('highlightIndex') || !this.highlightFromKeyboard) return;
+    this.highlightFromKeyboard = false;
+    // Keep the keyboard-highlighted row in view in a capped, scrolling list.
+    // Scrolled by hand: scrollIntoView would also scroll the clipping
+    // ancestors the dropdown has just been fitted inside.
+    const highlighted = dropdown.querySelector<HTMLElement>('.dropdown-item.highlighted');
+    if (highlighted) {
+      const view = dropdown.getBoundingClientRect();
+      const row = highlighted.getBoundingClientRect();
+      const viewTop = view.top + dropdown.clientTop;
+      const viewBottom = viewTop + dropdown.clientHeight;
+      if (row.top < viewTop) {
+        dropdown.scrollTop -= viewTop - row.top;
+      } else if (row.bottom > viewBottom) {
+        dropdown.scrollTop += row.bottom - viewBottom;
+      }
+    }
   }
 
   /** Remove the cached mirror div from the DOM (cleanup). */
@@ -286,11 +376,13 @@ export class ScionMentionAutocomplete extends LitElement {
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
+        this.highlightFromKeyboard = true;
         this.highlightIndex = (this.highlightIndex + 1) % this.candidates.length;
         return true;
 
       case 'ArrowUp':
         e.preventDefault();
+        this.highlightFromKeyboard = true;
         this.highlightIndex =
           (this.highlightIndex - 1 + this.candidates.length) % this.candidates.length;
         return true;

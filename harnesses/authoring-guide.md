@@ -659,8 +659,8 @@ Map into the normalized event vocabulary: `session-start`, `session-end`,
 `prompt-submit`, `tool-start`, `tool-end`, `model-start`, `model-end`,
 `agent-end`, `subagent-end`, `response-complete`, `notification`.
 Extractable fields include `prompt`, `tool_name`, `tool_input`,
-`tool_output`, `message`, `session_id`, `success`, `error`, `assistant_text`,
-`file_path`, and the token fields `input_tokens` (→ `input`), `output_tokens`
+`tool_output`, `message`, `session_id`, `success`, `error`, `file_path`,
+and the token fields `input_tokens` (→ `input`), `output_tokens`
 (→ `output`), `cached_tokens` (→ `cache_read`), `cache_write_tokens` (→
 `cache_write`) and `reasoning_tokens` (→ `reasoning`, informational only).
 `output_tokens` must be the *total* output including reasoning (canonical

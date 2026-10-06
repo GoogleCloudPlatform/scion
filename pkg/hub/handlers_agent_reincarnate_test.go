@@ -454,10 +454,12 @@ func TestReincarnateAgent_RejectsUnsupportedOverrides(t *testing.T) {
 	self := agentIdentityFor(agent.ID, project.ID)
 
 	cases := []ReincarnateAgentRequest{
-		{Image: "new:v2"},
 		{HarnessConfig: "gemini"},
+		// Patch fields with invalid values (ptone/scion#3302).
 		{HarnessAuth: "oauth"},
-		{Model: "opus"},
+		{Role: "superuser"},
+		{ThinkingLevel: intPtr(101)},
+		{ThinkingLevel: intPtr(-1)},
 		{Env: map[string]string{"K": "V"}},
 		{TemplateHash: "abc123"},
 		{ResetOverrides: true},
@@ -2067,7 +2069,7 @@ func TestReincarnateAgent_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
 
 // TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict is the design §3.4
 // Amendment A3 regression test: a version conflict on the claim write (the guarded
-// UpdateAgent that sets reincarnation_state=pending) must leave nothing
+// ClaimAgentReincarnation that sets reincarnation_state=pending) must leave nothing
 // behind — no orphaned agent_reincarnations row, and no stuck claim — so a
 // retry succeeds. Before the fix, the record was created FIRST, so any
 // failure on the following UpdateAgent left a permanent pending row with no
@@ -2088,11 +2090,11 @@ func (f *failOnceUpdateStore) takeFailure() bool {
 	return true
 }
 
-func (f *failOnceUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+func (f *failOnceUpdateStore) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
 	if f.takeFailure() {
-		return store.ErrVersionConflict
+		return 0, store.ErrVersionConflict
 	}
-	return f.Store.UpdateAgent(ctx, a)
+	return f.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
 }
 
 // WithTx injects the same one-shot conflict into the claim transaction.
@@ -2107,11 +2109,11 @@ type failOnceUpdateTx struct {
 	parent *failOnceUpdateStore
 }
 
-func (t *failOnceUpdateTx) UpdateAgent(ctx context.Context, a *store.Agent) error {
+func (t *failOnceUpdateTx) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
 	if t.parent.takeFailure() {
-		return store.ErrVersionConflict
+		return 0, store.ErrVersionConflict
 	}
-	return t.Store.UpdateAgent(ctx, a)
+	return t.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
 }
 
 func TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict(t *testing.T) {

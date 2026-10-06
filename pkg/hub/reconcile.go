@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -204,6 +205,12 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 			return "", fmt.Errorf("unmarshal stop args: %w", err)
 		}
 		intentAt = args.IntentAt
+		if args.RunID != "" {
+			// Stop the run the intent was queued for, not whatever run the
+			// row names now (ptone/scion#2550). agent is this call's own
+			// copy, loaded by resolveDispatchAgent above.
+			agent.RunID = args.RunID
+		}
 	}
 	// A stop queued while the broker was offline applies only while the
 	// stop intent it was queued for is still the current one; a start or
@@ -225,21 +232,32 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		s.logStopRunMismatch(agent, "queued stop", err)
 		return "", fmt.Errorf("dispatch stop: %w", err)
 	}
 	if intentAt != nil {
 		// The queued stop has now been applied: release the per-broker
 		// reservation as a direct stop does, and replace the stop_queued
 		// container status and the queued-stop notice the offline stop set.
-		s.releaseBrokerQuota(ctx, agent)
+		// Both only while the row still holds the run the stop was queued
+		// for (agent.RunID, the intent's run): a newer run keeps its state
+		// and reservation (ptone/scion#2550).
 		if agent.ContainerStatus == containerStatusStopQueued {
-			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			recorded, err := s.recordStopStatus(ctx, agent.ID, agent.RunID, "queued stop", store.AgentStatusUpdate{
 				ContainerStatus: "stopped",
 				ClearMessageIf:  offlineStopMessage,
-			}); err != nil {
+			})
+			if err != nil {
 				s.agentLifecycleLog.Warn("reconcile: failed to update container status after queued stop",
 					"id", d.ID, "agent_id", agent.ID, "error", err)
 			}
+			if recorded {
+				s.releaseBrokerQuota(ctx, agent)
+			}
+		} else if s.stopRunStillCurrent(ctx, agent.ID, agent.RunID, "queued stop") {
+			// A check, not a lock: a run minted between this read and the
+			// release loses its reservation until the backfill restores it.
+			s.releaseBrokerQuota(ctx, agent)
 		}
 	}
 	return "", nil
@@ -272,6 +290,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 	}
 	var deleteFiles, removeBranch, softDelete bool
 	var deletedAt time.Time
+	var claim int64
 	if d.Args != "" {
 		args, err := UnmarshalDeleteArgs(d.Args)
 		if err != nil {
@@ -281,8 +300,40 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		removeBranch = args.RemoveBranch
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
+		claim = args.Claim
+		if len(args.PreviousRunIDs) > 0 {
+			agent.PreviousRunIDs = args.PreviousRunIDs
+		}
+	}
+	// A delete engine's intent applies only while the claim it was created
+	// under is still the row's current claim, live or failed in_doubt (see
+	// deferredDeleteDeadline): the engine may have died, its lease lapsed
+	// and the user started the agent again since (ptone/scion#2906). A
+	// stale intent is dropped without dispatching; failing it (rather than
+	// completing it) keeps a waiting engine from reading it as a teardown
+	// that ran. The deadline sent to the broker is computed now, not when
+	// the intent was written.
+	//
+	// An intent records no run ID of its own until ptone/scion#2550 P5; the
+	// broker gets the re-read row's run ID. The intent's previous runs
+	// (ptone/scion#3097) are deleted by the same DispatchAgentDelete call
+	// under this fence, so each previous-run delete carries the same
+	// notAfter and a stale intent deletes none of them.
+	if claim != 0 {
+		notAfter, ok := deferredDeleteDeadline(ctx, agent, claim, deleteClock())
+		if !ok {
+			s.agentLifecycleLog.Info("reconcile: deferred delete intent's claim is no longer current; dropped",
+				"id", d.ID, "agent_id", agent.ID, "intent_claim", claim, "row_claim", agent.DeletionClaim,
+				"deletion_state", agent.DeletionState, "deletion_code", agent.DeletionCode)
+			return "", fmt.Errorf("%w (intent claim %d, row claim %d)", errStaleDeleteDispatch, claim, agent.DeletionClaim)
+		}
+		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: claim, notAfter: notAfter})
 	}
 	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
+		if isStaleDeleteDispatch(err) && !errors.Is(err, errStaleDeleteDispatch) {
+			// Keep the marker in the row's error text for the originating node.
+			return "", fmt.Errorf("dispatch delete: %w: %w", errStaleDeleteDispatch, err)
+		}
 		return "", fmt.Errorf("dispatch delete: %w", err)
 	}
 	return "", nil

@@ -21,9 +21,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"path"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -282,6 +279,13 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		createScope = store.HarnessConfigScopeGlobal
 	}
 	if !s.authorize(w, r, harnessConfigScopeResource(createScope, req.ScopeID), ActionCreate) {
+		return
+	}
+
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
 		return
 	}
 
@@ -657,7 +661,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, existing.StoragePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
 		}
 	}
 
@@ -702,6 +706,9 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 
 	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, hc.StoragePath, req.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
 		return
 	}
@@ -743,15 +750,12 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		ValidationError(w, "manifest with files is required", nil)
 		return
 	}
-	for _, f := range req.Manifest.Files {
-		if !isCanonicalHarnessConfigFilePath(f.Path) {
-			ValidationError(w, "invalid manifest file path: "+strconv.Quote(f.Path), map[string]interface{}{"path": f.Path})
-			return
-		}
-	}
 
 	contentHash, err := verifyAndFinalizeFiles(ctx, stor, hc.StoragePath, req.Manifest.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		ValidationError(w, err.Error(), nil)
 		return
 	}
@@ -805,7 +809,7 @@ func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor stora
 		}
 		// Records written before manifest paths were validated may hold
 		// paths that resolve outside this config or alias a kept file.
-		if !isCanonicalHarnessConfigFilePath(f.Path) {
+		if !isCanonicalResourceFilePath(f.Path) {
 			skipped = append(skipped, f.Path)
 			continue
 		}
@@ -821,32 +825,6 @@ func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor stora
 		s.resourceLog.Warn("harness-config finalize: failed to delete removed files from storage",
 			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", failed)
 	}
-}
-
-// isCanonicalHarnessConfigFilePath reports whether p is a relative,
-// slash-separated, already-clean file path inside a harness-config: not empty
-// or ".", not absolute, no ".." element, no "./", repeated or trailing
-// slashes, backslashes or NUL bytes. Only such paths map one-to-one onto a
-// storage object below the config's storage path.
-//
-// Manifest paths are logical slash-separated paths, so the checks use the
-// path package and give the same result on every platform. The local storage
-// backend joins object paths with OS paths, so filepath.IsLocal on the
-// OS-form path is kept as an extra guard; on Windows it also rejects drive
-// letters and reserved names, which is stricter and safe.
-func isCanonicalHarnessConfigFilePath(p string) bool {
-	if p == "" || p == "." || path.IsAbs(p) || path.Clean(p) != p {
-		return false
-	}
-	if strings.ContainsAny(p, "\\\x00") {
-		return false
-	}
-	for _, elem := range strings.Split(p, "/") {
-		if elem == ".." {
-			return false
-		}
-	}
-	return filepath.IsLocal(filepath.FromSlash(p))
 }
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.
@@ -1151,7 +1129,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			srcPath := source.StoragePath + "/" + file.Path
 			dstPath := storagePath + "/" + file.Path
 			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 				RuntimeError(w, "Failed to copy files: "+err.Error())
 				return
 			}
@@ -1163,7 +1141,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 
 	if err := s.store.CreateHarnessConfig(ctx, clone); err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storagePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)

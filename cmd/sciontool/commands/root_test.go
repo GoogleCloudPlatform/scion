@@ -19,6 +19,7 @@ func TestRootCommand(t *testing.T) {
 }
 
 func TestRootCommandHelp(t *testing.T) {
+	resetRootCmdState(t)
 	// Test that help runs without error
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)

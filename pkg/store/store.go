@@ -41,6 +41,12 @@ var (
 	// conflict.
 	ErrPhaseMismatch = fmt.Errorf("agent phase changed: %w", ErrVersionConflict)
 
+	// ErrRunChanged is returned by UpdateAgentStatus when
+	// AgentStatusUpdate.IfRunID is set and the stored run_id differs
+	// (ptone/scion#2550): the row has moved to a newer run since the caller
+	// dispatched its operation. It wraps ErrVersionConflict.
+	ErrRunChanged = fmt.Errorf("agent run changed: %w", ErrVersionConflict)
+
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
 	// Super-admin authority is conferred exclusively via User.Role (out-of-band)
@@ -387,6 +393,10 @@ type AgentStore interface {
 	// delete claim and a run-ID write are ordered by the database: a claim
 	// that lands first refuses the write, and a claim that lands after it
 	// snapshots the new run ID.
+	//
+	// The same write appends the replaced run to the row's PreviousRunIDs
+	// (AppendPreviousRunID, ptone/scion#3097), so a delete still names it
+	// until the new run settles.
 	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
 
 	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
@@ -394,8 +404,20 @@ type AgentStore interface {
 	// dispatch uses it to correct (or revert) the run ID it minted without
 	// overwriting a newer run ID a later dispatch has since recorded. Like
 	// SetAgentRunID it neither checks nor bumps state_version. A missing
-	// agent reports false with no error.
+	// agent reports false with no error. A swap also clears the row's
+	// PreviousRunIDs: callers use it only to settle the run (the broker
+	// reported the run its runtime holds, or a start landed and so replaced
+	// every entry of the name), so no other run's entry is left to delete.
 	CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
+
+	// RevertAgentRunID is CompareAndSwapAgentRunID (mintedRunID to
+	// previousRunID) for a dispatch the broker never acted on, and leaves
+	// PreviousRunIDs untouched (ptone/scion#3097): the restored run may
+	// itself be unsettled, so the runs listed before the dispatch may still
+	// have entries. The list then holds the restored run too, which is
+	// harmless: a delete skips the current run, and AppendPreviousRunID
+	// drops it.
+	RevertAgentRunID(ctx context.Context, agentID, mintedRunID, previousRunID string) (bool, error)
 
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
@@ -952,6 +974,13 @@ type AgentStatusUpdate struct {
 	// update's transaction; otherwise UpdateAgentStatus returns
 	// ErrPhaseMismatch and writes nothing. Internal to the hub — json:"-".
 	IfPhase string `json:"-"`
+	// IfRunID, when non-empty, makes the update conditional on the stored
+	// run_id equalling IfRunID, checked on the row read inside the update's
+	// transaction; otherwise UpdateAgentStatus returns ErrRunChanged and
+	// writes nothing (ptone/scion#2550). A hub that records the result of a
+	// stop dispatched for run X sets it to X, so the stop never marks a
+	// newer run stopped. Internal to the hub — json:"-".
+	IfRunID string `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.

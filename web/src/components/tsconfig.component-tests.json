@@ -11,6 +11,8 @@
     "shared/palette/quick-palette-ranking-memo.test.ts",
     "shared/palette/quick-palette-host.test.ts",
     "shared/palette/graph-palette-controller.test.ts",
+    "shared/palette/palette-typeahead.test.ts",
+    "../utils/platform.test.ts",
     "shared/open-modal.test.ts",
     "shared/agent-tree-view.test.ts",
     "shared/deep-active-element.test.ts",

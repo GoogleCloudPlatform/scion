@@ -1181,6 +1181,46 @@ func ceilingSourceDenialMessage(cause DenyCause) string {
 	}
 }
 
+// projectMaxAgentRole returns the project's maximum agent role annotation,
+// or full when it is unset or invalid. Shared by create and by reincarnate
+// --role, so both cap a requested role against the same value.
+func projectMaxAgentRole(project *store.Project) AgentRole {
+	if project != nil && project.Annotations != nil {
+		if maxStr, ok := project.Annotations[projectSettingMaxAgentRole]; ok && maxStr != "" {
+			if ValidAgentRole(AgentRole(maxStr)) {
+				return AgentRole(maxStr)
+			}
+		}
+	}
+	return AgentRoleFull
+}
+
+// callerAgentRoleCeiling returns the stored role of the calling agent
+// (the no-escalation ceiling for any role it grants) and its message mode.
+// It fails closed: a lookup failure or an invalid stored role yields
+// baseline, so a transient error never grants maximum privileges. Shared by
+// create and by reincarnate --role.
+func (s *Server) callerAgentRoleCeiling(ctx context.Context, callerAgentID string) (role AgentRole, messageMode string) {
+	callerAgent, err := s.store.GetAgent(ctx, callerAgentID)
+	if err != nil {
+		// Fail-closed: default to baseline on lookup failure so that
+		// transient errors do not grant maximum privileges.
+		slog.Warn("Failed to read parent agent for role ceiling",
+			"parent_agent_id", callerAgentID, "error", err)
+		return AgentRoleBaseline, ""
+	}
+	role, _ = agentRoleAndScopes(callerAgent)
+	messageMode = callerAgent.MessageMode
+
+	// Validate stored role to guard against corrupted data.
+	if !ValidAgentRole(role) {
+		slog.Warn("Parent agent has invalid stored role, defaulting to baseline",
+			"parent_agent_id", callerAgentID, "stored_role", role)
+		role = AgentRoleBaseline
+	}
+	return role, messageMode
+}
+
 func (s *Server) createAgentInProject(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -1243,14 +1283,7 @@ func (s *Server) createAgentInProject(
 	requestedRole := AgentRole(req.AgentRole)
 
 	// Read project max agent role from annotations (default: full)
-	projectMax := AgentRoleFull
-	if project != nil && project.Annotations != nil {
-		if maxStr, ok := project.Annotations[projectSettingMaxAgentRole]; ok && maxStr != "" {
-			if ValidAgentRole(AgentRole(maxStr)) {
-				projectMax = AgentRole(maxStr)
-			}
-		}
-	}
+	projectMax := projectMaxAgentRole(project)
 
 	// Read default agent role: project annotation → hub default → full.
 	// Applied only when no explicit role is requested.
@@ -1275,24 +1308,7 @@ func (s *Server) createAgentInProject(
 
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		// Agent caller: read parent agent's stored role for no-escalation ceiling.
-		creatorAgent, err := s.store.GetAgent(ctx, agentIdent.ID())
-		if err != nil {
-			// Fail-closed: default to baseline on lookup failure so that
-			// transient errors do not grant maximum privileges.
-			parentRole = AgentRoleBaseline
-			slog.Warn("Failed to read parent agent for role ceiling",
-				"parent_agent_id", agentIdent.ID(), "error", err)
-		} else {
-			parentRole, _ = agentRoleAndScopes(creatorAgent)
-			parentMessageMode = creatorAgent.MessageMode
-		}
-
-		// Validate stored parentRole to guard against corrupted data.
-		if !ValidAgentRole(parentRole) {
-			slog.Warn("Parent agent has invalid stored role, defaulting to baseline",
-				"parent_agent_id", agentIdent.ID(), "stored_role", parentRole)
-			parentRole = AgentRoleBaseline
-		}
+		parentRole, parentMessageMode = s.callerAgentRoleCeiling(ctx, agentIdent.ID())
 
 		// Log the parent role for audit trail
 		slog.Info("Agent creating sub-agent",
@@ -1458,7 +1474,7 @@ func (s *Server) createAgentInProject(
 			ValidationError(w, msgSANotAvailableInProject, nil)
 			return
 		}
-		if !sa.Verified {
+		if !gcpServiceAccountVerified(sa) {
 			ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
 			return
 		}
@@ -2202,6 +2218,10 @@ func (s *Server) createAgentInProject(
 	}
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
+	// acceptedLaunch is set when the broker accepted the create for
+	// asynchronous launch; the launch then reports back to the hub, which
+	// handles a delete that won the race (see compensateLandedRun).
+	acceptedLaunch := false
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
 		// A create is a start, unless it only provisions.
 		intent := store.RunIntentRunning
@@ -2239,6 +2259,7 @@ func (s *Server) createAgentInProject(
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
 					// provisioning; persist only the non-status fields.
+					acceptedLaunch = true
 					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
 				} else if envReqs != nil {
 					// Broker returned 202: needs env gather
@@ -2247,7 +2268,15 @@ func (s *Server) createAgentInProject(
 						s.agentLifecycleLog.Warn("Failed to update agent phase for env-gather", "agent_id", agent.ID, "error", err)
 					}
 
-					s.publishAgentCreatedIfLive(ctx, agent)
+					// A delete that won the race answers 409, as the
+					// final publish below does (ptone/scion#3099): no
+					// env should be gathered for a deleted agent.
+					if !s.publishAgentCreatedIfLive(ctx, agent) {
+						s.agentLifecycleLog.Info("Hub: agent was deleted while it was being created; answering 409",
+							"agent_id", agent.ID, "agent", agent.Name)
+						writeDeletedDuringCreate(w, agent.ID, dispatchWarns.Warnings())
+						return
+					}
 
 					s.enrichAgent(ctx, agent, project, nil)
 					hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
@@ -2289,6 +2318,7 @@ func (s *Server) createAgentInProject(
 				} else if created.AcceptedLaunch() != nil {
 					// Accepted for asynchronous launch: the row is already
 					// provisioning; persist only the non-status fields.
+					acceptedLaunch = true
 					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
 					// Broker reported missing required env vars — fail the dispatch.
@@ -2357,7 +2387,18 @@ func (s *Server) createAgentInProject(
 	// (it ignores status events for agents not yet in state), the UI would never
 	// reflect the error.
 	// A delete that claimed the row meanwhile suppresses it (ptone/scion#2972).
-	s.publishAgentCreatedIfLive(ctx, agent)
+	//
+	// A synchronous create that lost to a delete answers 409
+	// delete_in_progress rather than 201 (ptone/scion#3099): the row is gone,
+	// soft-deleted or held by a delete, so the agent was not created. The
+	// dispatch has already run the compensating delete of a run that landed
+	// (compensateLandedRun); its outcome is in the dispatch warnings.
+	if !s.publishAgentCreatedIfLive(ctx, agent) && !acceptedLaunch {
+		s.agentLifecycleLog.Info("Hub: agent was deleted while it was being created; answering 409",
+			"agent_id", agent.ID, "agent", agent.Name)
+		writeDeletedDuringCreate(w, agent.ID, dispatchWarns.Warnings())
+		return
+	}
 
 	// Enrich agent with project and broker names for display
 	s.enrichAgent(ctx, agent, project, nil)
@@ -3541,7 +3582,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				ValidationError(w, msgSANotAvailableInProject, nil)
 				return
 			}
-			if !sa.Verified {
+			if !gcpServiceAccountVerified(sa) {
 				ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
 				return
 			}

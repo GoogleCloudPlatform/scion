@@ -17,6 +17,7 @@ package teams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -141,6 +142,32 @@ func testActivity(text string) *Activity {
 	}
 }
 
+// linkTestUser stores a link mapping for testActivity's sender.
+func linkTestUser(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+	err := broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID:      "aad-user-1",
+		TeamsDisplayName: "Test User",
+		ScionUserID:      "scion-1",
+		ScionEmail:       "user@example.com",
+		LinkedAt:         time.Now(),
+	})
+	require.NoError(t, err)
+}
+
+// linkTestChannel stores a channel link for testActivity's conversation.
+func linkTestChannel(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "test-project",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	})
+	require.NoError(t, err)
+}
+
 func TestCommandDispatch_KnownCommands(t *testing.T) {
 	broker, _ := testBrokerWithStore(t, nil)
 	handler := broker.commandHandler
@@ -210,10 +237,11 @@ func TestCommandDispatch_StripsBotMention(t *testing.T) {
 }
 
 func TestSetupCommand_WithProjectSlug(t *testing.T) {
-	// Mock hub that returns projects via the broker endpoint.
+	// Mock hub that returns the linked user's projects.
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/api/v1/broker/projects":
+		case r.URL.Path == "/api/v1/projects":
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubProjectsResponse{
 				Projects: []hubProject{
 					{ID: "proj-1", Name: "My Project", Slug: "my-project"},
@@ -256,6 +284,7 @@ func TestSetupCommand_WithProjectSlug(t *testing.T) {
 
 func TestSetupCommand_AlreadyLinked(t *testing.T) {
 	broker, ms := testBrokerWithStore(t, nil)
+	linkTestUser(t, broker)
 	handler := broker.commandHandler
 
 	// Pre-create a channel link.
@@ -279,10 +308,11 @@ func TestSetupCommand_AlreadyLinked(t *testing.T) {
 }
 
 func TestSetupCommand_NoSlug(t *testing.T) {
-	// Mock hub that returns projects via the broker endpoint.
+	// Mock hub that returns the linked user's projects.
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/api/v1/broker/projects":
+		case r.URL.Path == "/api/v1/projects":
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubProjectsResponse{
 				Projects: []hubProject{
 					{ID: "proj-1", Name: "My Project", Slug: "my-project"},
@@ -407,6 +437,7 @@ func TestUnlinkCommand_NotLinked(t *testing.T) {
 func TestAgentsCommand(t *testing.T) {
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubAgentsResponse{
 				Agents: []hubAgent{
 					{ID: "a1", Slug: "dev-1", Activity: "coding", Phase: "running"},
@@ -419,6 +450,7 @@ func TestAgentsCommand(t *testing.T) {
 	})
 
 	broker, ms := testBrokerWithStore(t, hubHandler)
+	linkTestUser(t, broker)
 	handler := broker.commandHandler
 
 	// Pre-create a channel link.
@@ -440,7 +472,7 @@ func TestAgentsCommand(t *testing.T) {
 	require.NotEmpty(t, ms.sent)
 
 	// Verify agents were cached.
-	cached, err := broker.store.GetProjectAgents(context.Background(), "proj-1")
+	cached, err := readCachedProjectAgents(t, broker.store, "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, cached)
 	assert.ElementsMatch(t, []string{"dev-1", "reviewer"}, cached.AgentSlugs)
@@ -449,6 +481,7 @@ func TestAgentsCommand(t *testing.T) {
 func TestStatusCommand_ProjectOverview(t *testing.T) {
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubAgentsResponse{
 				Agents: []hubAgent{
 					{ID: "a1", Slug: "dev-1", Phase: "running"},
@@ -461,6 +494,7 @@ func TestStatusCommand_ProjectOverview(t *testing.T) {
 	})
 
 	broker, ms := testBrokerWithStore(t, hubHandler)
+	linkTestUser(t, broker)
 
 	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
 		ConversationID: "conv-1",
@@ -482,6 +516,7 @@ func TestStatusCommand_ProjectOverview(t *testing.T) {
 func TestStatusCommand_SpecificAgent(t *testing.T) {
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubAgentsResponse{
 				Agents: []hubAgent{
 					{ID: "a1", Slug: "dev-1", Activity: "coding feature X", Phase: "running"},
@@ -493,6 +528,7 @@ func TestStatusCommand_SpecificAgent(t *testing.T) {
 	})
 
 	broker, ms := testBrokerWithStore(t, hubHandler)
+	linkTestUser(t, broker)
 
 	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
 		ConversationID: "conv-1",
@@ -866,4 +902,182 @@ func TestAgentPhaseEmoji(t *testing.T) {
 	for _, tc := range tests {
 		assert.Equal(t, tc.expected, agentPhaseEmoji(tc.phase), "phase=%q", tc.phase)
 	}
+}
+
+func TestHubReadCommands_SendLinkedUser(t *testing.T) {
+	for _, text := range []string{"agents", "status", "status dev-1", "default dev-1"} {
+		t.Run(text, func(t *testing.T) {
+			var gotHeader string
+			hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+					gotHeader = r.Header.Get("X-Scion-On-Behalf-Of")
+					json.NewEncoder(w).Encode(hubAgentsResponse{
+						Agents: []hubAgent{{ID: "a1", Slug: "dev-1", Phase: "running"}},
+					})
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			})
+			broker, ms := testBrokerWithStore(t, hubHandler)
+			linkTestUser(t, broker)
+			linkTestChannel(t, broker)
+
+			handled, err := broker.commandHandler.Handle(context.Background(), testActivity(text))
+			assert.True(t, handled)
+			assert.NoError(t, err)
+			assert.Equal(t, "user:user@example.com", gotHeader)
+			require.NotEmpty(t, ms.sent)
+		})
+	}
+}
+
+func TestHubReadCommands_UnlinkedUserGetsRegisterHint(t *testing.T) {
+	for _, text := range []string{"agents", "status", "status dev-1", "default dev-1"} {
+		t.Run(text, func(t *testing.T) {
+			hubCalled := false
+			hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hubCalled = true
+				w.WriteHeader(http.StatusForbidden)
+			})
+			broker, ms := testBrokerWithStore(t, hubHandler)
+			linkTestChannel(t, broker)
+
+			handled, err := broker.commandHandler.Handle(context.Background(), testActivity(text))
+			assert.True(t, handled)
+			assert.NoError(t, err)
+			assert.False(t, hubCalled, "hub should not be called for an unlinked user")
+			require.Len(t, ms.sent, 1)
+			assert.Contains(t, ms.sent[0].Text, "register")
+		})
+	}
+}
+
+func TestSetupCommand_OffersOnlyUserProjects(t *testing.T) {
+	var gotQuery string
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/projects" {
+			t.Errorf("unexpected hub request %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		gotQuery = r.URL.RawQuery
+		assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
+		json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{
+			{ID: "proj-1", Name: "Mine", Slug: "mine"},
+			{ID: "proj-2", Name: "Shared", Slug: "shared"},
+		}})
+	})
+	linkTestUser(t, broker)
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("setup"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	assert.Empty(t, gotQuery, "picker should list the user's projects, not filter by owner")
+
+	require.Len(t, ms.sent, 1)
+	require.Len(t, ms.sent[0].Attachments, 1)
+	var card struct {
+		Actions []struct {
+			Data map[string]string `json:"data"`
+		} `json:"actions"`
+	}
+	raw, _ := json.Marshal(ms.sent[0].Attachments[0].Content)
+	require.NoError(t, json.Unmarshal(raw, &card))
+	require.Len(t, card.Actions, 2)
+	assert.Equal(t, "proj-1", card.Actions[0].Data["project_id"])
+	assert.Equal(t, "proj-2", card.Actions[1].Data["project_id"])
+}
+
+func TestSetupCommand_NoUserProjects(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, userProjectsHub(t))
+	linkTestUser(t, broker)
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("setup"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "user@example.com")
+	assert.Contains(t, ms.sent[0].Text, "isn't a member of any projects")
+}
+
+func TestSetupCommand_WithSlugOutsideUserProjects(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-1", Slug: "mine"}))
+	linkTestUser(t, broker)
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("setup someone-elses"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+
+	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, err)
+	assert.Nil(t, link)
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "not found among your Scion projects")
+}
+
+func TestSetupCommand_WithProjectName(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, userProjectsHub(t, hubProject{ID: "proj-1", Name: "Web App", Slug: "web-app"}))
+	linkTestUser(t, broker)
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("setup Web"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	link, err := broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, err)
+	assert.Nil(t, link, "partial names do not match")
+
+	handled, err = broker.commandHandler.Handle(context.Background(), testActivity("setup WEB-APP"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	link, err = broker.store.GetChannelLink(context.Background(), "conv-1")
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "proj-1", link.ProjectID)
+	assert.Equal(t, "web-app", link.ProjectSlug)
+}
+
+func TestSetupCommand_ProjectListDenialShowsActionableText(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":{"code":"forbidden","message":"on-behalf-of principal not found"}}`))
+	})
+	linkTestUser(t, broker)
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("setup"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, staleLinkText, ms.sent[0].Text)
+}
+
+func TestSetupCommand_UnlinkedUserInLinkedChannelGetsRegisterHint(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+	linkTestChannel(t, broker)
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("setup other"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "`register`")
+	assert.NotContains(t, ms.sent[0].Text, "test-project")
+}
+
+// mappingSaveErrorStore fails every user mapping write.
+type mappingSaveErrorStore struct {
+	Store
+}
+
+func (mappingSaveErrorStore) CreateUserMapping(context.Context, *TeamsUserMapping) error {
+	return errors.New("database unavailable")
+}
+
+func TestSaveConfirmedLink_SaveErrorAsksToRegisterAgain(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, nil)
+	broker.store = mappingSaveErrorStore{Store: broker.store}
+
+	broker.commandHandler.saveConfirmedLink(context.Background(), testActivity("register"), "aad-user-1", "scion-1", "user@example.com")
+
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, "Couldn't save your account link. Please run `register` again.", ms.sent[0].Text)
+	assert.NotContains(t, ms.sent[0].Text, "Linked!")
 }
