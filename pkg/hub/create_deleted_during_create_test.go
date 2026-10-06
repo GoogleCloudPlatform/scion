@@ -103,6 +103,48 @@ func TestSyncCreate_DeletedDuringCreate_Answers409(t *testing.T) {
 	}
 }
 
+// The same rule on the env-gather branch: a gatherEnv create whose broker
+// asks for env (202) answers 409 when a delete holds or removed the row by
+// then, and 202 with the agent and the env requirements when there is no
+// delete or it failed or expired (the agent is live). Nothing ran on the
+// broker, so there is no compensating delete either way.
+func TestSyncCreate_EnvGather_DeletedDuringCreate_Answers409(t *testing.T) {
+	for i, del := range landingDeletes {
+		t.Run(del.name, func(t *testing.T) {
+			srv, s, project, client, broker := newRunBrokerServer(t)
+			pub := recordCreatedEvents(t, srv)
+
+			var sent *RemoteCreateAgentRequest
+			client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				sent = req
+				require.False(t, req.AsyncLaunch, "the create is dispatched synchronously")
+				del.apply(t, s, req.ID)
+				return nil, &RemoteEnvRequirementsResponse{Required: []string{"API_KEY"}, Needs: []string{"API_KEY"}}, nil
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+				"name": "gather-" + string(rune('a'+i)), "projectId": project.ID, "task": "do it", "gatherEnv": true,
+			})
+			require.NotNil(t, sent, "dispatch ran: %d %s", rec.Code, rec.Body.String())
+			assert.Empty(t, broker.deletes, "nothing ran, so no compensating delete")
+
+			if !del.compensate {
+				require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+				var resp CreateAgentResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				require.NotNil(t, resp.Agent)
+				assert.Equal(t, sent.ID, resp.Agent.ID, "the agent body is returned")
+				assert.NotNil(t, resp.EnvGather, "the env requirements are returned")
+				assert.Equal(t, 1, pub.count("created"), "created is published: %v", pub.kinds())
+				return
+			}
+
+			requireDeletedDuringCreate(t, rec, sent.ID)
+			assert.Zero(t, pub.count("created"), "no created: %v", pub.kinds())
+		})
+	}
+}
+
 // Provision-only (what `scion create` sends to the hub) is a synchronous
 // create too: a delete that finished while the broker provisioned answers
 // 409. Nothing ran, so there is no compensating delete.
@@ -192,8 +234,11 @@ func TestSyncCreate_ReReadFails_Answers201(t *testing.T) {
 	client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 		sent = req
 		broker.land(req.RunID)
-		// The handler's store fails from here on; the dispatcher's own
-		// store (used by the compensation check) is unaffected.
+		// The handler's store fails from here on. That fails two handler
+		// reads: preserveTerminalPhase's (which falls back to leaving the
+		// phase alone on error) and the publish re-read that decides the
+		// answer. The dispatcher's own store (used by the compensation
+		// check) is unaffected.
 		fs.fail = true
 		return syncRunningAnswer(req), nil, nil
 	}
