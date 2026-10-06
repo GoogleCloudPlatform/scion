@@ -4201,20 +4201,23 @@ func isLockArtifactPath(path string) bool {
 	return base == provisionFileLockName || strings.HasPrefix(base, provisionFileLockName+".")
 }
 
-// resolveUID returns the NFS UID to use for chown, defaulting to 1000.
-func resolveUID(in ProvisionInput) int {
-	if in.NFSUID != 0 {
-		return in.NFSUID
+// DefaultOwnerID returns id, or the default owner id 1000 when id is 0
+// (unset).
+func DefaultOwnerID(id int) int {
+	if id != 0 {
+		return id
 	}
 	return 1000
 }
 
+// resolveUID returns the NFS UID to use for chown, defaulting to 1000.
+func resolveUID(in ProvisionInput) int {
+	return DefaultOwnerID(in.NFSUID)
+}
+
 // resolveGID returns the NFS GID to use for chown, defaulting to 1000.
 func resolveGID(in ProvisionInput) int {
-	if in.NFSGID != 0 {
-		return in.NFSGID
-	}
-	return 1000
+	return DefaultOwnerID(in.NFSGID)
 }
 
 // writeSentinel writes the provisioning sentinel file atomically using

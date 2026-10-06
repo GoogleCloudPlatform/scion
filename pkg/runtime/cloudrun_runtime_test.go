@@ -204,7 +204,7 @@ func TestCloudRunRuntime_LifecycleMethods(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{"Stop", func() error { return rt.Stop(ctx, "x") }},
+		{"Stop", func() error { return rt.Stop(ctx, RunRef{ID: "x"}) }},
 		{"Delete", func() error { return rt.Delete(ctx, RunRef{ID: "x"}) }},
 		{"Attach", func() error { return rt.Attach(ctx, "x") }},
 		{"Exec", func() error { _, e := rt.Exec(ctx, "x", []string{"ls"}); return e }},
