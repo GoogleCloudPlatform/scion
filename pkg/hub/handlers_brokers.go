@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,6 +97,13 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	if !ValidJoinTokenTTLSeconds(req.JoinTokenTTLSeconds) {
+		ValidationError(w, ErrJoinTokenTTLOutOfRange.Error(), map[string]interface{}{
+			"field": "joinTokenTtlSeconds",
+		})
+		return
+	}
+
 	// If this request matches an existing broker record (by name or by a
 	// caller-supplied ID), treat it as re-registration of that broker rather
 	// than a brand-new one. Re-registration mutates the existing record and
@@ -143,9 +151,20 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	}
 
 	// Log audit event
-	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r))
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r), joinTokenAuditDetails(resp))
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// joinTokenAuditDetails describes an issued join token for the register
+// audit event: when it expires, the lifetime it was issued with, and whether
+// it replaced an earlier token. The token itself is never included.
+func joinTokenAuditDetails(resp *CreateBrokerRegistrationResponse) map[string]string {
+	return map[string]string{
+		"join_token_expires_at": resp.ExpiresAt.UTC().Format(time.RFC3339),
+		"join_token_ttl":        resp.JoinTokenTTL.String(),
+		"reissued":              strconv.FormatBool(resp.Reissued),
+	}
 }
 
 // writeBrokerRegistrationError maps an error from
@@ -158,6 +177,10 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		Conflict(w, err.Error())
+		return
+	}
+	if errors.Is(err, ErrJoinTokenTTLOutOfRange) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "joinTokenTtlSeconds"})
 		return
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -363,15 +386,14 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error())
 
 		// Determine error type and return appropriate response
-		errMsg := err.Error()
-		switch errMsg {
-		case "invalid join token", "join token does not match broker":
-			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, errMsg, nil)
-		case "join token has expired":
-			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, errMsg, nil)
+		switch {
+		case errors.Is(err, ErrJoinTokenInvalid), errors.Is(err, ErrJoinTokenBrokerMismatch):
+			writeError(w, http.StatusUnauthorized, ErrCodeInvalidJoinToken, err.Error(), nil)
+		case errors.Is(err, ErrJoinTokenExpired):
+			writeError(w, http.StatusUnauthorized, ErrCodeExpiredJoinToken, err.Error(), nil)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"failed to complete broker join: "+errMsg, nil)
+				"failed to complete broker join: "+err.Error(), nil)
 		}
 		return
 	}

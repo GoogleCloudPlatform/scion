@@ -881,7 +881,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			markAttemptFailed(http.StatusInternalServerError, "failed to resolve global dir")
 			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to get global dir: "+err.Error())
+			// Fixed text only; the cause stays in the broker log
+			// (ptone/scion#3496).
+			s.agentLifecycleLog.Error("Create failed to resolve the global dir", "op", opGetGlobalDir,
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "error", err)
+			RuntimeError(w, failedOpText(opGetGlobalDir))
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
@@ -1687,14 +1691,40 @@ var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 // (ptone/scion#3422).
 var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
 
-// syncWorkspaceFromGCS downloads a workspace upload; a variable so tests
-// can substitute a fake for real GCS.
+// syncWorkspaceFromGCS downloads a workspace upload (the create-time
+// bootstrap and handleWorkspaceApply, through Server.workspaceDownloader);
+// a variable so tests can substitute a fake for real GCS.
 var syncWorkspaceFromGCS = gcp.SyncFromGCS
 
 // workspaceStorageUnconfiguredMessage is the user-facing text for
 // errWorkspaceStorageUnconfigured.
 const workspaceStorageUnconfiguredMessage = "Cannot download the uploaded workspace: the create request names no storage bucket and this runtime broker has no storage bucket configured. " +
 	"Update the hub so it sends the workspace bucket, or configure the broker's storage bucket (storage.bucket or --storage-bucket)."
+
+// GCS workspace bootstrap ops (failedOpText): each names one step of
+// downloadWorkspaceFromGCS in the fixed client text for its failure.
+const (
+	opGetGlobalDir       = "get global dir"
+	opCreateWorkspaceDir = "create workspace directory"
+	opDownloadWorkspace  = "download workspace from GCS"
+)
+
+// workspaceBootstrapFailed logs a runtime failure of the GCS workspace
+// bootstrap step op and returns downloadWorkspaceFromGCS's error triple for
+// it: the attempt status, the fixed client text, and cause wrapped for span
+// status and logging.
+func (s *Server) workspaceBootstrapFailed(req CreateAgentRequest, op string, cause error) (attemptMsg, httpMessage string, err error) {
+	s.logWorkspaceBootstrapFailure(req, op, cause)
+	return "failed to " + op, failedOpText(op), fmt.Errorf("failed to %s: %w", op, cause)
+}
+
+// logWorkspaceBootstrapFailure records a GCS workspace bootstrap failure's
+// cause at the broker, which the client text leaves out. It names the
+// agent, project and run, never the request's credentials.
+func (s *Server) logWorkspaceBootstrapFailure(req CreateAgentRequest, op string, cause error) {
+	s.agentLifecycleLog.Error("GCS workspace bootstrap failed", "op", op,
+		"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "error", cause)
+}
 
 // workspaceStorageBucket returns the bucket a create request's workspace
 // upload is downloaded from: the bucket the hub sent with the request, else
@@ -1723,11 +1753,20 @@ func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
 //
 // Returns opts unchanged when WorkspaceStoragePath is empty. On error it
 // returns: the short status string the synchronous caller records on the
-// dispatch attempt; httpMessage, the capitalized user-facing text the
-// synchronous path writes (no wrapped error); and err, a normal lowercase Go
-// error for the async path's failure report and logging. err is
-// errWorkspaceStorageUnconfigured when no bucket is known, which callers
-// answer with a 422 rather than a runtime error.
+// dispatch attempt; httpMessage, the capitalized client text; and err, a
+// normal lowercase Go error that wraps the cause, for span status and
+// logging only. err is errWorkspaceStorageUnconfigured when no bucket is
+// known, which callers answer with a 422 rather than a runtime error, and
+// wraps errInvalidWorkspaceDir for a directory that fails validation (400).
+//
+// For a runtime failure (resolving the global dir, creating the directory,
+// the GCS download) httpMessage is the fixed failedOpText lead only, never
+// the cause's own text: an os error names the broker's workspace path, and
+// a GCS sync error can carry bucket, object or credential detail
+// (ptone/scion#3496). The cause is logged here, with the agent, project and
+// run, so it reaches the broker log on both the synchronous and the async
+// path. Both paths send httpMessage to the client for every failure
+// (the async path under runtime_error), so their texts are identical.
 func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (updated api.StartOptions, attemptMsg string, httpMessage string, err error) {
 	if req.WorkspaceStoragePath == "" {
 		return opts, "", "", nil
@@ -1737,6 +1776,12 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	// creates or writes under the directory.
 	workspaceDir, attemptMsg, httpMessage, err := s.resolveGCSWorkspaceDir(req)
 	if err != nil {
+		if !errors.Is(err, errInvalidWorkspaceDir) {
+			// resolveGCSWorkspaceDir also runs at async admission, where any
+			// other error is left to this step, so the detail is logged here
+			// rather than there (once per attempt).
+			s.logWorkspaceBootstrapFailure(req, opGetGlobalDir, err)
+		}
 		return opts, attemptMsg, httpMessage, err
 	}
 
@@ -1750,8 +1795,8 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
-		return opts, "failed to create workspace directory", "Failed to create workspace directory: " + mkErr.Error(),
-			fmt.Errorf("failed to create workspace directory: %w", mkErr)
+		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opCreateWorkspaceDir, mkErr)
+		return opts, attemptMsg, httpMessage, err
 	}
 
 	if s.config.Debug {
@@ -1764,8 +1809,8 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 
 	if syncErr := s.workspaceDownloader()(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
-		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
-			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
+		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, syncErr)
+		return opts, attemptMsg, httpMessage, err
 	}
 
 	if req.ProjectSlug != "" {
@@ -1807,8 +1852,8 @@ func (s *Server) resolveGCSWorkspaceDir(req CreateAgentRequest) (resolvedDir str
 	if req.ProjectSlug != "" {
 		globalDir, gdErr := config.GetGlobalDir()
 		if gdErr != nil {
-			return "", "failed to resolve global dir", "Failed to get global dir: " + gdErr.Error(),
-				fmt.Errorf("failed to get global dir: %w", gdErr)
+			return "", "failed to resolve global dir", failedOpText(opGetGlobalDir),
+				fmt.Errorf("failed to %s: %w", opGetGlobalDir, gdErr)
 		}
 		workspaceRoot = filepath.Join(globalDir, "projects")
 		workspaceDir = filepath.Join(workspaceRoot, req.ProjectSlug)
@@ -6072,6 +6117,17 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// deleteProject ops (writeRuntimeOpError): a failed step answers with the
+// fixed "Failed to <op>" text only; the cause, which names broker paths,
+// stays in the broker log (ptone/scion#3496).
+const (
+	opResolveProjectPath     = "resolve project path"
+	opResolveProjectsBase    = "resolve base path"
+	opCheckSharedDirStorage  = "check project shared-dir storage"
+	opRemoveSharedDirStorage = "remove project shared-dir storage"
+	opRemoveProjectDir       = "remove project directory"
+)
+
 // deleteProject removes the local hub-managed project directory for the given
 // slug, together with its shared-dir storage when that lives under
 // ~/.scion/project-configs (see hubManagedProjectSharedDirsBase).
@@ -6079,7 +6135,7 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug string) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
-		RuntimeError(w, "Failed to get global dir: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opGetGlobalDir, err, "project_slug", slug)
 		return
 	}
 
@@ -6088,14 +6144,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// Path traversal protection: ensure the resolved path stays inside the
 	// projects base directory.
 	projectsBase := filepath.Join(globalDir, "projects")
-	absProject, err := filepath.Abs(projectPath)
+	absProject, err := s.projectAbs()(projectPath)
 	if err != nil {
-		RuntimeError(w, "Failed to resolve project path: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opResolveProjectPath, err, "project_slug", slug)
 		return
 	}
-	absProjectsBase, err := filepath.Abs(projectsBase)
+	absProjectsBase, err := s.projectAbs()(projectsBase)
 	if err != nil {
-		RuntimeError(w, "Failed to resolve base path: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opResolveProjectsBase, err, "project_slug", slug)
 		return
 	}
 	if !strings.HasPrefix(absProject, absProjectsBase+string(filepath.Separator)) {
@@ -6123,23 +6179,21 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
 		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
 	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); errors.Is(err, errSharedDirStorageUnreadable) {
-		s.agentLifecycleLog.Warn("project shared-dir storage could not be checked", "slug", slug, "project_id", requestedID, "error", err)
-		RuntimeError(w, "Failed to check project shared-dir storage: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opCheckSharedDirStorage, err, "project_slug", slug, "project_id", requestedID)
 		return
 	} else if err != nil {
 		s.agentLifecycleLog.Warn("project shared-dir storage not removed", "slug", slug, "project_id", requestedID, "reason", err)
 	} else if sharedDirsBase != "" {
 		if err := removeProjectConfigsSubtree(globalDir, sharedDirsBase); err != nil {
-			s.agentLifecycleLog.Warn("failed to remove project shared-dir storage", "slug", slug, "path", sharedDirsBase, "error", err)
-			RuntimeError(w, "Failed to remove project shared-dir storage: "+err.Error())
+			s.writeRuntimeOpError(w, r.Context(), opRemoveSharedDirStorage, err,
+				"project_slug", slug, "project_id", requestedID, "path", sharedDirsBase)
 			return
 		}
 		s.agentLifecycleLog.Info("Removed hub-managed project shared-dir storage", "slug", slug, "path", sharedDirsBase)
 	}
 
 	if err := os.RemoveAll(projectPath); err != nil {
-		s.agentLifecycleLog.Warn("failed to remove project directory", "slug", slug, "path", projectPath, "error", err)
-		RuntimeError(w, "Failed to remove project directory: "+err.Error())
+		s.writeRuntimeOpError(w, r.Context(), opRemoveProjectDir, err, "project_slug", slug, "path", projectPath)
 		return
 	}
 

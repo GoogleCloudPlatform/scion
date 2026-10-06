@@ -80,6 +80,44 @@ To verify which projects your broker is currently serving:
 scion runtime-broker status
 ```
 
+## Headless Registration with a Join Token
+
+`scion runtime-broker register` needs a Hub sign-in on the broker host. For a host where you do not want to sign in, such as a build machine or a VM provisioned by a script, split registration in two: create a join token on your own machine, then redeem it on the host. The host never holds a Hub user credential; it ends up with the same broker credentials `register` would have saved.
+
+**1. On your machine**, signed in to the Hub, create the broker and a token for it:
+
+```bash
+scion hub brokers join-token create build-host-3 --ttl 30m
+```
+
+The token is printed on stdout and the instructions, including the broker ID, on stderr. `--json` prints `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as one JSON object.
+
+- You need the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)), and you become the broker's owner. Creating a token with a [user access token](/scion/hosted/user/personal-access-tokens/) is not supported; use an interactive sign-in (`scion hub auth login`).
+- `--ttl` sets how long the token is valid, from `5m` to `24h`. The default is `1h`.
+- The token is single use.
+- Running the command again for the same broker issues a new token, and the previous unused one stops working. Only the broker's owner or a super-admin can do this.
+- The command never changes an existing broker's settings (auto-provide, labels, GCP host identity) and does not add the broker to any project.
+
+**2. Move the token to the host** through a channel you already trust for secrets, for example `scp` to a file readable only by the broker's user, or your secret manager.
+
+**3. On the host**, redeem it:
+
+```bash
+export SCION_HUB_ENDPOINT=https://hub.example.com
+scion runtime-broker join --broker-id <broker-id> --token-file /path/to/token
+```
+
+- The token is read from `--token-file` (`-` reads it from stdin), or else from the `SCION_BROKER_JOIN_TOKEN` environment variable. There is no flag that takes the token on the command line. If the file has any group or other permissions, `join` prints a warning and still uses it.
+- `--broker-id` can also come from `SCION_BROKER_ID`.
+- The broker server does not have to be running yet; `join` only warns if it is not.
+- `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the Hub endpoint and broker ID in global settings, as `register` does.
+- If the host already has credentials for this Hub connection, or its settings name a different broker ID, `join` stops. Pass `--force` to replace them.
+- `--name`, `--transport-mode` and `--transport-audience` work as for `register`.
+
+Redeeming a token replaces the broker's credentials. If another host has already joined as this broker, it is disconnected.
+
+**4. Start the broker** with `scion runtime-broker start`, then [provide it to a project](/scion/hosted/ha/runtime-broker/#3-provide-compute-for-a-project). Joining does not provide the broker to any project.
+
 ## Transport Auth for IAP-Protected Hubs
 
 When the Hub is behind [Google IAP](/scion/hosted/ha/auth-proxy-iap/), the broker must carry a transport-layer OIDC token on every request. Transport auth is configured either during registration or via environment variables.

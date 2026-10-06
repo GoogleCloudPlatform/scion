@@ -357,15 +357,7 @@ func TestUATGate_UnresolvableTargetDenied(t *testing.T) {
 
 // gateStages are the bearer stages a request denied by the bearer gate
 // reports. A request that passed the gate reports none of them.
-var gateStages = []string{BearerStageBoundaryInvalid, BearerStageTargetUnknown, BearerStageOutsideBoundary, BearerStageCeiling, BearerStageProjectAccess}
-
-func hubCollectionEvidence(permissionID string) TargetScopeEvidence {
-	return TargetScopeEvidence{IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: permissionID}
-}
-
-func projectCollectionEvidence(projectID, permissionID string) TargetScopeEvidence {
-	return TargetScopeEvidence{IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: projectID, PermissionID: permissionID}
-}
+var gateStages = []string{BearerStageBoundaryInvalid, BearerStageTargetUnknown, BearerStageOutsideBoundary, BearerStageCeiling, BearerStageBoundaryEligibility, BearerStageProjectAccess}
 
 // TestEvaluateBearerCeiling_TargetEvidenceClassifiesCollectionRequests pins
 // how collection-level evidence classifies a request that names no
@@ -403,7 +395,7 @@ func TestEvaluateBearerCeiling_TargetEvidenceClassifiesCollectionRequests(t *tes
 
 	t.Run("project evidence for the token project passes the gate", func(t *testing.T) {
 		target := Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}
-		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, projectBoundary(f.projectA), bearerCeiling(t, "agent:list"), "agent.list", target, BearerOptions{Evidence: projectCollectionEvidence(f.projectA, "agent.list")})
+		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, projectBoundary(f.projectA), bearerCeiling(t, "agent:list"), "agent.list", target, BearerOptions{Evidence: projectCollectionEvidence("agent.list", f.projectA)})
 		assert.NotContains(t, gateStages, eval.Stage, eval.Decision.Reason)
 		assert.Equal(t, projectScopeA, eval.TargetScope)
 	})
@@ -433,8 +425,8 @@ func TestEvaluateBearerCeiling_EvidenceMustNameEvaluatedPermission(t *testing.T)
 		evidence TargetScopeEvidence
 	}{
 		{"hub evidence for another permission", hubBoundary(), Resource{}, hubCollectionEvidence("skill.list")},
-		{"project evidence for another permission", projectBoundary(f.projectA), Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, projectCollectionEvidence(f.projectA, "agent.create")},
-		{"hub boundary with project evidence for another permission", hubBoundary(), Resource{}, projectCollectionEvidence(f.projectA, "skill.list")},
+		{"project evidence for another permission", projectBoundary(f.projectA), Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, projectCollectionEvidence("agent.create", f.projectA)},
+		{"hub boundary with project evidence for another permission", hubBoundary(), Resource{}, projectCollectionEvidence("skill.list", f.projectA)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -477,7 +469,7 @@ func TestUATGate_RequestTargetEvidence(t *testing.T) {
 	assert.False(t, mismatched.Allowed)
 	assert.Equal(t, bearerReasonTargetUnknown, mismatched.Reason)
 
-	project := decide(projectBoundary(f.projectA), "agent.list", Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, projectCollectionEvidence(f.projectA, "agent.list"))
+	project := decide(projectBoundary(f.projectA), "agent.list", Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, projectCollectionEvidence("agent.list", f.projectA))
 	assert.True(t, project.Allowed, project.Reason)
 }
 
