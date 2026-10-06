@@ -1,6 +1,6 @@
 # Administrative User Provisioning API
 
-**Status:** H.1 design for review ([ptone/scion#2133](https://github.com/ptone/scion/issues/2133)), revision r5. H.2 ([ptone/scion#2134](https://github.com/ptone/scion/issues/2134)) does not start until this design is approved, D.2 has merged, and the sign-in consistency item (reference TBD) has landed or ptone has waived it (§16.1). OD-1 (stored initial role) was **decided by ptone on 2026-09-28**: no stored role (§6, §19). Every other open decision in §19 (OD-2 to OD-10) is **pending ptone**; nothing else in this document is approved until ptone decides.
+**Status:** H.1 design approved ([ptone/scion#2133](https://github.com/ptone/scion/issues/2133), merged as GoogleCloudPlatform/scion#2064). H.2 ([ptone/scion#2134](https://github.com/ptone/scion/issues/2134)) is in implementation; its start gates are satisfied (§16.1): the D.2 shared admission mechanics it uses have merged, and the sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed. OD-1 (stored initial role) was **decided by ptone on 2026-09-28**: no stored role (§6, §19). OD-2 to OD-10 were **decided by ptone on 2026-10-04: option (a) for each** (§19, §20.2). H.2 PR-1 binds the A/D concepts to the merged code (§16.2, "Phase 0 binding").
 **Tracker:** H, [ptone/scion#2116](https://github.com/ptone/scion/issues/2116) (ptone approved continuing it on 2026-09-28 as a separate followup; it is not a core prerequisite and does not gate core UAT delivery)
 **Date:** 2026-09-28
 **Anchored at:** `origin/main` @ `acc5a4b`
@@ -94,6 +94,12 @@ criterion is met (§18).
 | Break-glass | `scion admin promote`, `cmd/admin.go:47` | None (promotes an existing user; direct DB) | Operator DB access |
 | `POST /api/v1/users` | `createUser`, `pkg/hub/handlers_users_core.go:99`-`:104` | None. Always `403 forbidden`: "user creation is managed through sign-in flows and cannot be performed via the API" | n/a |
 
+**Sign-in policy since [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths").** Activation of an `invited` record, whether it was created by invite or
+by provisioning, is subject to the existing sign-in policy that this change established: the
+signing-in email must be provider-verified, and every auth path applies the same live sign-in
+policy. A record whose email is never provider-verified therefore never activates. Provisioning does
+not change this policy.
+
 Invite codes (`/api/v1/admin/invites`, `invite_service.go`, redemption at `handlers_auth.go:1681`) are
 a separate flow. Redemption requires an already-authenticated user. Invite codes do not create user
 records.
@@ -176,7 +182,10 @@ records.
 
 ## 4. Proposed design overview (baseline)
 
-`POST /api/v1/users` stops returning 403 and implements operation **`user.admin.provision`**:
+`POST /api/v1/users` stops returning 403 and implements operation **`user.admin.provision`**.
+(Before H.2, main catalogued the refusing route as a placeholder operation `user.provision` with an
+out-of-scope bearer disposition. H.2 renames it to `user.admin.provision`, which matches the other
+`user.admin.*` operations; §13.3 rejects a *permission* named `user.provision`, not this operation.)
 
 ```text
 caller (session | dev | hub UAT after D.2)
@@ -220,7 +229,9 @@ which follows today's precedence at activation (OD-6). What provisioning adds ov
 route.
 
 - The handler `createUser` (`handlers_users_core.go:99`) is replaced by `handleProvisionUser`. The
-  new name avoids a collision with the sign-in `provisionUser` in `handlers_auth.go`.
+  new name avoids a collision with the sign-in `provisionUser` in `handlers_auth.go`. H.2 places it
+  in a new file, `pkg/hub/handlers_users_provision.go`, and `handleUsers` dispatches POST to it;
+  this keeps it apart from the D.2-owned functions of `handlers_users_core.go`.
 - The route stays `RoutePolicy`, like PATCH and DELETE.
 
 `POST /api/v1/users` does **not**:
@@ -409,6 +420,12 @@ email, status and note. H.2 proves this with characterization tests on each path
    `syncHubRoleGrants`.
 4. **Google external bearer and GE exchange.** H leaves these paths unchanged, and a provisioned
    record is treated on them exactly as an invite-created record.
+5. **Provider-verified email.** Activation of a provisioned record is subject to the existing
+   provider-verified-email sign-in policy ([GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths")), exactly as for an invite-created record. An
+   address that a configured provider never verifies never activates. Provisioning cannot tell at
+   creation time whether a provider will verify an address (that is a property of the person's
+   provider account at sign-in), so H.2 adds no verification warning; OD-9(a) keeps invite and
+   provision at parity.
 
 ## 6. Option R — stored initial role (not adopted; OD-1 decided)
 
@@ -488,8 +505,14 @@ operator. It exists whether or not a record was provisioned, and provisioning do
     DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialUserSuspended,
         DenialRoleAssignmentForbidden},
     TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestHandleProvisionUser"}},
+    // H.2 PR-1: token admission opens in Phase 2.
+    Bearer:      SessionOnly(ReasonGovernancePending),
 }
 ```
+
+The catalog is now split into per-area files; this entry lives in `pkg/hub/authzop/catalog_identity.go`,
+and references to `catalog.go` below mean that file for operation entries (the
+`MutationClassifications` table stays in `catalog.go`).
 
 The entry follows the full `OperationSpec` shape of `user.admin.invite` (`catalog.go:1019`-`:1049`),
 including `TestRefs`, which catalog validation requires (`authzop/validate_test.go:194`, "at least one
@@ -673,7 +696,7 @@ Notes on the table:
 - **Role-assignment rollback.** Not applicable, because no role is stored and no grants are written.
 - **Lifetime of the created record.** Once created, the record's lifetime is independent of the
   request. What happens to a record created through a hub UAT when the token or its owner later
-  changes is **OD-10**, which is pending ptone (§12).
+  changes is **OD-10**, decided by ptone on 2026-10-04 as option (a): the record persists (§12).
 
 ## 9. Transactionality
 
@@ -767,10 +790,10 @@ Labels are never treated as actor identity.
 - **Finding records created by a credential.** The `user_provision` mutation audit records
   `ActorCredentialID` and `ActorCredentialType`. An operator can list every record that a given token
   created, then withdraw any that are still `invited` through the operations above.
-- **Records created through a hub UAT, when the token or owner changes later (OD-10, pending ptone).**
+- **Records created through a hub UAT, when the token or owner changes later (OD-10, decided (a) by ptone on 2026-10-04).**
   The cases are: the source token is revoked or expires before first sign-in; the owner is suspended;
   the owner loses `user.invite`.
-  - Under OD-10(a), the recommendation, the record persists (invitation parity: session invites
+  - Under OD-10(a), the decision, the record persists (invitation parity: session invites
     survive the inviter's demotion today). Token expiry or revocation prevents new operations with the
     token; it does not undo the completed invitation. Creation must still have authorized the whole
     invitation effect for the scoped caller (§7.3 item 6). Durable provenance as defined by the
@@ -780,7 +803,7 @@ Labels are never treated as actor identity.
     active and still holding `user.invite`, token not revoked or expired) before the record admits
     sign-in. That is additional B.3-linked scope on the activation paths.
   - Under either option, the existing provider and access-policy checks at sign-in stay mandatory.
-  - Phase 2 (hub UAT admission) does not ship until ptone decides OD-10.
+  - OD-10 is decided (a), so Phase 2 implements the (a) behaviour; the (b) bullet is kept for the record.
 - **Suspending a pending record:** PATCH `status=suspended` (`user.suspend`). A suspended record blocks
   sign-in (`handlers_auth.go:1398`) and blocks re-provisioning (row 17).
 - **Expiry:** none (OD-5).
@@ -888,7 +911,8 @@ Mode availability (`AGENTS.md:92`, `.design/cli-modes.md`, `cmd/cli_mode.go`):
 - Under OD-8(a), `cmd/cli_mode.go` needs no map change; H.2 adds a mode test only. Under OD-8(b), H.2
   adds `hub.users.provision` to `assistantDenied`.
 
-AGENTS.md requires developer confirmation of this choice (OD-8).
+AGENTS.md requires developer confirmation of this choice. ptone decided OD-8 (a) on 2026-10-04; H.2
+adds the mode test (`TestHubUsersProvisionCmd_ModeAvailability`, `cmd/hub_users_test.go`).
 
 ### 14.4 Web UI
 
@@ -921,21 +945,22 @@ single-invite form (`renderInviteUserDialog`, `:1919`-`:1972`; submit handler `i
 
 ## 16. H.2 execution plan
 
-H.2 starts only after this design is approved and D.2 has merged, per the agreed decision that H.2 is
-blocked by H.1 and D.2. H.2 starts when the sign-in consistency item (reference TBD) has landed
-or ptone has waived it; its supporting decisions are **unresolved**.
+H.2 was blocked by H.1, D.2 and the sign-in item. These gates are **satisfied**: this design is
+approved (GoogleCloudPlatform/scion#2064); the D.2 shared admission mechanics H.2 uses have merged
+(GoogleCloudPlatform/scion#2579, #2639, #2647), and the D.2 owner confirmed that H.2 does not depend
+on the remaining D.2 admission batches; the sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed.
 
 ### 16.1 Dependencies
 
 | Contract | Needed for | Binding |
 | --- | --- | --- |
-| D.2 [ptone/scion#2124](https://github.com/ptone/scion/issues/2124): per-operation replacement for `requireSessionCredential`; bearer admission for user administration | Admission in every phase | **Hard gate for H.2** |
+| D.2 [ptone/scion#2124](https://github.com/ptone/scion/issues/2124): per-operation replacement for `requireSessionCredential`; bearer admission for user administration | Admission in every phase | Hard gate for H.2: **satisfied** (shared mechanics merged; the remaining D.2 batches are not needed by H.2) |
 | A.1 [ptone/scion#2117](https://github.com/ptone/scion/issues/2117): target-scope resolution including creation scopes, credential boundary check, explicit fail-closed selector-to-permission mapping, mint eligibility, route/catalog drift inventory | UAT boundary and exact-selector checks; catalog and registry | Concepts only; contract under review; bound in Phase 0 |
 | A.2 [ptone/scion#2118](https://github.com/ptone/scion/issues/2118): normalized frozen permission ceiling with interpretation version, used by runtime decisions and `CanDelegate` | Ceiling on `user.invite` | Concepts only; bound in Phase 0 |
 | E.1/E.2 [ptone/scion#2126](https://github.com/ptone/scion/issues/2126)/[ptone/scion#2127](https://github.com/ptone/scion/issues/2127) | Credential decoration in audit | Soft; use `buildAuditActorFromContext` until they land |
 | B.3 [ptone/scion#2121](https://github.com/ptone/scion/issues/2121): durable ceilings and provenance | (1) The invitation-effect contract for Phase 2, coordinated with D.2 (§7.3 item 6). (2) Activation re-checks, if ptone chooses OD-10(b). | For Phase 2: coordinate the invitation-effect contract with D.2/B.3 in Phase 0. B.3 is not assumed irrelevant just because no role is stored. |
-| **Sign-in consistency item (reference TBD)** | H.2 start (§16) | H.2 starts when the sign-in consistency item (reference TBD) has **landed or ptone has waived it**; its supporting decisions are unresolved. H does not change sign-in. |
-| OD-10 (pending ptone): lifetime of records created through a hub UAT | Phase 2 | Hard gate for Phase 2. No approval by timeout. |
+| Sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") | H.2 start (§16) | **Satisfied**: landed. H does not change sign-in. |
+| OD-10: lifetime of records created through a hub UAT | Phase 2 | **Satisfied**: decided (a) by ptone on 2026-10-04. |
 
 ### 16.2 Phases
 
@@ -981,11 +1006,13 @@ session and dev credentials only, through D.2's mechanism.
      (§5.2);
    - add characterization tests proving invite and bulk invite responses, audits and events are
      unchanged.
-2. `pkg/hub/handlers_users_core.go`: `handleProvisionUser`, covering strict decoding, validation,
+2. `pkg/hub/handlers_users_provision.go` (new; `handlers_users_core.go` only dispatches POST to it):
+   `handleProvisionUser`, covering strict decoding, validation,
    warnings, authorization, the transaction with audit, and the outcomes table.
 3. `pkg/hub/audit.go`: `InviteAuditUserProvisioned`.
 4. Registry and catalog:
-   - `pkg/hub/authzop/catalog.go`: `user.admin.provision`; replace the `handleAdminUserInvite`
+   - `pkg/hub/authzop/catalog_identity.go`: `user.admin.provision` (renamed from main's placeholder
+     `user.provision`); `pkg/hub/authzop/catalog.go`: replace the `handleAdminUserInvite`
      classification row with a `createPendingUserTx` row; keep the bulk row (§7.2);
    - `pkg/hub/permissions/registry.go`: the `user.invite` Enforcement entry, subject to the
      registry row obligations above;
@@ -1006,6 +1033,22 @@ authority, restrictions and invitation-effect governance. Implement the chosen O
 behaviour. Add the UAT credential kind to the catalog, then the P2 tests.
 
 **Phase 3 — web UI.** The display-name field and submit routing in `admin-users.ts`, plus web tests.
+
+**Phase 0 binding (H.2 PR-1, against main).** Each §7.3 concept is bound to merged code:
+
+| Concept | Bound to | PR-1 use |
+| --- | --- | --- |
+| per-operation admission and credential restrictions (D.2) | `requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)` (`session_only_gate.go`, D.2 M3) and the catalog `Bearer: SessionOnly(ReasonGovernancePending)` disposition | Interactive session and dev credentials only. Every other credential kind gets the session-only refusal. |
+| §8 row 5 (UAT before token admission) | the session-only refusal: `403 forbidden` with `details.reason: "GOV_PENDING"` and `details.credential: "session_required"` | Replaces the design's provisional `credential_insufficient` detail. Pinned by the bearer disposition matrix and `TestHandleProvisionUser`. |
+| target-scope resolution for user creation (A.1) | `ResolveTargetScope` with `hubCollectionEvidence("user.invite")` on `Resource{Type: "user"}` (`authz_hub_target.go`); `permissions.CollectionTargetClasses["user.invite"] = {hub_resource}` | Hub-scope collection target, the same creation-scope rule as project creation. |
+| credential boundary (A.1) | `PermissionAllowedBoundaries["user.invite"] = {Hub}`; the bearer gate in `AuthzService.Decide` | Unchanged; used in Phase 2. |
+| exact selector-to-permission mapping for `user:invite` (A.1) | `Registry` `UATScope: "user:invite"`, from which `SelectorRegistry` derives | Unchanged; used in Phase 2. |
+| frozen ceiling (A.2) | the token ceiling evaluated by `AuthzService.Decide` for UAT credentials | Phase 2. |
+| system authority for the exact permission on the actual target (A.1) | `AuthzService.Decide` with `Permission: "user.invite"` and the collection evidence above; detail authority uses `Permission: "user.read"` on `hubScopedResource("user", "hub")` | Seeded hub-member grants do not include `user.invite`, so hub members are refused (tested). |
+| governance and `CanDelegate` for the invitation effect (D.2 with B.3) | not used in PR-1 (session and dev only); bound in Phase 2 | Phase 2. |
+| per-method route metadata for `/api/v1/users` (A.1) | none: the method-agnostic `RoutePolicy` entry stays, and POST is handler-enforced (§16.3 default) | No `route_metadata.go` change. |
+| shared call-site classification (A.1) | `MutationClassifications` row `createPendingUserTx`/`CreateUser` with `ExemptionInternalOnly`, naming both callers (main's convention for shared helpers such as `replaceBindingTx`) | Replaces the `handleAdminUserInvite`/`CreateUser` row; the bulk row stays. |
+| registry row obligations (A.1) | `user.invite` gains `Enforcement: pkg/hub/handlers_users_provision.go:handleProvisionUser`; `UATScope`, `ProjectTargetApplicability` (false) and `PermissionAllowedBoundaries` ({Hub}) unchanged | Drift tests stay green. |
 
 ### 16.3 Files and shared ownership
 
@@ -1172,9 +1215,7 @@ Run:
   if ptone chooses it.
 - The governance and `CanDelegate` contract that D.2 and B.3 define for invitation-type effects
   (§7.3 item 6). H.2 needs it before Phase 2.
-- The sign-in consistency item (reference TBD): its reference and its supporting sign-in
-  decisions, which are **unresolved**. H.2 starts when the sign-in consistency item (reference TBD)
-  has landed or ptone has waived it (§16.1).
+- The sign-in item: resolved. [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed (§16.1).
 - A.1's final route-metadata convention for method-agnostic entries such as `/api/v1/users`
   (§16.3).
 
@@ -1194,7 +1235,8 @@ H.1 (this document):
 - [ ] OD-1 is recorded as decided by ptone (2026-09-28): no stored role, the role at activation
   follows the configured policy, `role` is rejected with 422, and Option R is marked not adopted with
   its rationale (§6, §13.4, §19). H.2 has no Option R phase, rows or tests (§16). Every other open
-  decision is pending ptone, and nothing else reads as approved.
+  decision is pending ptone, and nothing else reads as approved. (H.1 state; OD-2 to OD-10 have since
+  been decided, §19.)
 - [ ] The lifetime of UAT-created records is an explicit open decision (OD-10) with a test for each
   option (§12, §16.4).
 - [ ] Without detail authority, collision and replay responses carry no `userId`, no record `id` and no
@@ -1223,19 +1265,18 @@ H.2 (implementation):
 
 ## 19. Open decisions (for ptone)
 
-OD-1 is **decided**. Every other decision below (OD-2 to OD-10) is **pending ptone**. A
-recommendation is not an approval, and no decision is approved by timeout.
+OD-1 is **decided** (2026-09-28). OD-2 to OD-10 are **DECIDED by ptone on 2026-10-04: option (a)
+for each** ("go with recommendation, a"). The options are kept below for the record.
 
-**Sign-in dependency (not an H decision).** H.2 starts when the **sign-in consistency item
-(reference TBD)** has landed or ptone has waived it; its supporting decisions are unresolved (§16.1).
-H does not change sign-in.
+**Sign-in dependency (not an H decision).** Satisfied: [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed (§16.1). H does not change
+sign-in.
 
 **OD-1 — stored initial role (Option R). DECIDED by ptone, 2026-09-28 (relayed by pat-refactor).**
 Decision: the role at activation follows the current configured policy. There is no optional
 `member`/`viewer` selection before sign-in and no pending-role column. Option R is not adopted (§6,
 §13.4).
 
-**OD-2 — admin at provisioning.**
+**OD-2 — admin at provisioning. DECIDED by ptone (a), 2026-10-04.**
 - (a) Not provisionable (422). **Recommended**; pat-refactor concurs.
 - (b) Allow it with `user.promote` and CanDelegate(super-admin). This would select a role before
   sign-in, which the OD-1 decision excludes. Choosing (b) requires ptone to revisit OD-1 and a new
@@ -1243,32 +1284,32 @@ Decision: the role at activation follows the current configured policy. There is
 
 Under either option, `admin_emails` remains independent configured authority.
 
-**OD-3 — editing and withdrawing pending records.**
+**OD-3 — editing and withdrawing pending records. DECIDED by ptone (a), 2026-10-04.**
 - (a) No new capability. **Recommended.**
 - (b) Let `user.invite` holders delete invited records. This changes DELETE authorization and needs
   coordination with D.2.
 
-**OD-4 — initial group and project memberships.**
+**OD-4 — initial group and project memberships. DECIDED by ptone (a), 2026-10-04.**
 - (a) Out of scope. **Recommended.**
 - (b) Accept `groups[]` with per-group CanDelegate and B.3 provenance.
 
-**OD-5 — pending expiry.**
+**OD-5 — pending expiry. DECIDED by ptone (a), 2026-10-04.**
 - (a) None, matching invites. **Recommended.**
 - (b) Optional `expiresAt` with a sweeper.
 
-**OD-6 — display-name precedence at activation.**
+**OD-6 — display-name precedence at activation. DECIDED by ptone (a), 2026-10-04.**
 - (a) Keep today's rule: the provider name applies on activation. **Recommended**; no sign-in change.
 - (b) Keep the admin-provisioned name when one is set.
 
-**OD-7 — idempotency.**
+**OD-7 — idempotency. DECIDED by ptone (a), 2026-10-04.**
 - (a) Natural key only. **Recommended.**
 - (b) Add an `Idempotency-Key` header with stored responses.
 
-**OD-8 — CLI mode.**
+**OD-8 — CLI mode. DECIDED by ptone (a), 2026-10-04.**
 - (a) Available in human and assistant modes, absent in agent mode. **Recommended.**
 - (b) Also deny it in assistant mode.
 
-**OD-9 — stricter email policy at creation.**
+**OD-9 — stricter email policy at creation. DECIDED by ptone (a), 2026-10-04.**
 - (a) Warn only, keeping invite parity. **Recommended.**
 - (b) Tighten creation-time email policy for **both** invite and provision together. This changes
   invite. It covers:
@@ -1276,10 +1317,9 @@ Under either option, `admin_emails` remains independent configured authority.
   - requiring a bare address: the parsed `addr.Address` must equal the normalized input, so RFC 5322
     display-name forms such as `"Bob <bob@x.com>"` are rejected instead of stored.
 
-**OD-10 — lifetime of a pending record created through a hub UAT (Phase 2).** This covers what
-happens when, before first sign-in, the source token is revoked or expires, the token owner is
-suspended, or the owner loses `user.invite` (§12). pat-refactor is raising this with ptone. It stays
-open until ptone answers.
+**OD-10 — lifetime of a pending record created through a hub UAT (Phase 2). DECIDED by ptone (a),
+2026-10-04.** This covers what happens when, before first sign-in, the source token is revoked or
+expires, the token owner is suspended, or the owner loses `user.invite` (§12).
 - (a) **Recommended.** The record persists, which is invitation parity (session invites survive the
   inviter's demotion today). This does not rest on the invitation being inert: the record can enable
   later admission under `invite_only`, and that is a durable effect. Under (a), creation must still
@@ -1332,7 +1372,7 @@ withdrawal remain required; token expiry or revocation prevents new operations r
 the invitation. Under (b), B.3-linked source checks at activation are additional scope. B.3 is not
 irrelevant just because no pending role is stored; coordinate the invitation-effect contract with
 D.2/B.3. Existing provider and access-policy checks at activation remain mandatory either way.
-This choice is OD-10 (§19), pending ptone.
+This choice is OD-10 (§19), decided (a) by ptone on 2026-10-04.
 
 ### 20.2 Decisions by ptone
 
@@ -1341,4 +1381,6 @@ This choice is OD-10 (§19), pending ptone.
 | 2026-09-28 | **OD-1 decided:** the role at activation follows the current configured policy. There is no member/viewer selection before sign-in and no pending-role column (§6). | `agent:pat-refactor` |
 | 2026-09-28 | Continuing [ptone/scion#2116](https://github.com/ptone/scion/issues/2116) is approved as a separate followup. It is not a core prerequisite and does not gate core UAT delivery. | `agent:pat-refactor` |
 
-No other decision has been made. OD-2 to OD-10 (§19) are pending ptone.
+| 2026-10-04 | **OD-2 to OD-10 decided: option (a) for each** ("go with recommendation, a"). Admin is not provisionable (422 for any non-null role); no new edit/withdraw capability for pending records; no initial groups; no expiry; the provider name applies at activation; natural-key idempotency only; the CLI is available in human and assistant modes and absent in agent mode; warn-only email policy at invite parity; records created through a hub UAT persist (creation authorizes the whole invitation effect; mutation-audit credential attribution; audit and explicit withdrawal). | `agent:pat-h-lead` |
+
+No other decision has been made.
