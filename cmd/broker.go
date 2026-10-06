@@ -356,7 +356,7 @@ func init() {
 	brokerCmd.AddCommand(brokerHubsCmd)
 
 	// Restart flags
-	brokerRestartCmd.Flags().IntVar(&brokerRestartPort, "port", DefaultBrokerPort, "Runtime Broker API port; when not set, the port the running daemon was started with")
+	brokerRestartCmd.Flags().IntVar(&brokerRestartPort, "port", 0, "Runtime Broker API port; when not set, the port the running daemon was started with, else 9800")
 	brokerRestartCmd.Flags().BoolVar(&brokerRestartAutoProvide, "auto-provide", false, "Automatically add as provider for new projects; when not set, as the running daemon was started")
 	brokerRestartCmd.Flags().BoolVar(&brokerRestartDebug, "debug", false, "Enable debug logging (verbose output); when not set, as the running daemon was started")
 
@@ -2234,11 +2234,14 @@ func argsContain(args []string, flag string) bool {
 func resolveBrokerRestartOptions(cmd *cobra.Command, saved []string) (port int, autoProvide, debug bool) {
 	flags := cmd.Flags()
 	port, autoProvide, debug = brokerRestartPort, brokerRestartAutoProvide, brokerRestartDebug
+	if saved != nil && !flags.Changed("port") {
+		port = brokerPortFromArgs(saved)
+	}
+	if port <= 0 {
+		port = DefaultBrokerPort
+	}
 	if saved == nil {
 		return port, autoProvide, debug
-	}
-	if !flags.Changed("port") {
-		port = brokerPortFromArgs(saved)
 	}
 	if !flags.Changed("auto-provide") {
 		autoProvide = argsContain(saved, "--auto-provide")
