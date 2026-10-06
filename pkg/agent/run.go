@@ -1722,7 +1722,9 @@ authDone:
 		// package already sets from the same opts.GitClone for other
 		// purposes; previously nothing set GitCloneForInit at all, so the
 		// k8s init container never ran for ANY project, git or not.
-		GitCloneForInit:  opts.GitClone,
+		// A shared-plain git project has no GitClone; its workspace clone
+		// settings are used instead (nfsInitGitClone).
+		GitCloneForInit:  nfsInitGitClone(opts),
 		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead
