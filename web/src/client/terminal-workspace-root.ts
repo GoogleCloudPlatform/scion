@@ -1231,10 +1231,15 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
-    const statusLabel = `${disconnectLabel(
-      entry.state.connection,
-      entry.state.disconnectReason
-    )} · ${availabilityLabel(metadata.availability)}`;
+    // One list of status parts feeds both forms: the visible titles join them
+    // with a middle dot, the accessible label with a comma so screen readers
+    // pause between them instead of announcing or skipping the dot.
+    const statusParts = [
+      disconnectLabel(entry.state.connection, entry.state.disconnectReason),
+      availabilityLabel(metadata.availability),
+    ];
+    const statusLabel = statusParts.join(' · ');
+    const spokenStatus = statusParts.join(', ');
 
     const select = document.createElement('button');
     select.type = 'button';
@@ -1245,8 +1250,8 @@ export class TerminalWorkspaceRoot {
     select.setAttribute(
       'aria-label',
       projectLabel
-        ? `Show terminal for ${agentName} in ${projectLabel}, ${statusLabel}`
-        : `Show terminal for ${agentName}, ${statusLabel}`
+        ? `Show terminal for ${agentName} in ${projectLabel}, ${spokenStatus}`
+        : `Show terminal for ${agentName}, ${spokenStatus}`
     );
     if (visibleSlots.includes(entry.state.key)) select.setAttribute('aria-current', 'page');
     select.dataset.railFocusId = `${entry.state.key}:select`;

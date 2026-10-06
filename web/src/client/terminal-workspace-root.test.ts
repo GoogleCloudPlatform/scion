@@ -911,7 +911,7 @@ describe('idle entries', () => {
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
     expect(select.title).toBe('Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in A rather long project name, Not connected · metadata pending'
+      'Show terminal for test in A rather long project name, Not connected, metadata pending'
     );
     expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
   });
@@ -936,7 +936,7 @@ describe('idle entries', () => {
     const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
     expect(select.title).toBe('Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in project-id-2, Not connected · metadata pending'
+      'Show terminal for test in project-id-2, Not connected, metadata pending'
     );
   });
 
@@ -953,9 +953,11 @@ describe('idle entries', () => {
     expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
     const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
-    expect(status).toContain('Not connected');
+    expect(status).toBe('Not connected · metadata pending');
     expect(select.title).toBe(status);
-    expect(select.getAttribute('aria-label')).toBe(`Show terminal for ${agentId}, ${status}`);
+    expect(select.getAttribute('aria-label')).toBe(
+      `Show terminal for ${agentId}, Not connected, metadata pending`
+    );
   });
 
   it('selecting an idle entry connects it', async () => {
