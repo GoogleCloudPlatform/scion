@@ -145,6 +145,30 @@ describe('scion-health-broker-table cells', () => {
   });
 });
 
+describe('scion-health-broker-table neutral values', () => {
+  it('shows a dash in the agents cell when agents are not reported', async () => {
+    const root = await mount(list([broker({ agents: undefined })]));
+    expect(cell(rows(root)[0]!, 'agents')).toBe('—');
+  });
+
+  it('renders no empty title attributes', async () => {
+    const root = await mount(list([broker({ runtime: null, last_heartbeat: null })]));
+    const r = rows(root)[0]!;
+    expect(r.querySelector('td.runtime')?.hasAttribute('title')).toBe(false);
+    expect(r.querySelector('td.heartbeat')?.hasAttribute('title')).toBe(false);
+  });
+
+  it('titles the runtime with its profile and the heartbeat with its instant', async () => {
+    const at = '2026-10-06T11:59:30Z';
+    const root = await mount(
+      list([broker({ runtime: { type: 'docker', profile: 'fast' }, last_heartbeat: at })])
+    );
+    const r = rows(root)[0]!;
+    expect(r.querySelector('td.runtime')?.getAttribute('title')).toBe('profile fast');
+    expect(r.querySelector('td.heartbeat')?.getAttribute('title')).toBe(at);
+  });
+});
+
 describe('scion-health-broker-table ordering and truncation', () => {
   it('sorts problems first, then by name', () => {
     const sorted = sortBrokers([

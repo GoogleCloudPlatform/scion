@@ -25,6 +25,7 @@
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { ifDefined } from 'lit/directives/if-defined.js';
 
 import { formatRelative } from '../../utils/time.js';
 
@@ -280,14 +281,16 @@ export class ScionHealthBrokerTable extends LitElement {
     const runtime = b.runtime?.type;
     const profile = b.runtime?.profile;
     const agents = b.agents ?? {};
-    const total = agents.total ?? 0;
     return html`
       <tr data-broker-id=${b.id}>
         <td class="name"><a href="/brokers/${encodeURIComponent(b.id)}">${b.name || b.id}</a></td>
         <td class="status">
           <span class="pill tone-${statusTone(b.status)}">${b.status || 'unknown'}</span>
         </td>
-        <td class="runtime" title=${profile && profile !== runtime ? `profile ${profile}` : ''}>
+        <td
+          class="runtime"
+          title=${ifDefined(profile && profile !== runtime ? `profile ${profile}` : undefined)}
+        >
           ${runtime ? runtime : html`<span class="muted">—</span>`}
         </td>
         <td class="storage">
@@ -296,14 +299,16 @@ export class ScionHealthBrokerTable extends LitElement {
             : html`<span class="pill tone-${storage.tone}">${storage.text}</span>`}
         </td>
         <td class="agents num">
-          ${total}${typeof agents.running === 'number'
+          ${typeof agents.total === 'number'
+            ? agents.total
+            : html`<span class="muted">—</span>`}${typeof agents.running === 'number'
             ? html` <span class="muted">(${agents.running} running)</span>`
             : nothing}${agents.attention
             ? html` <span class="pill tone-warn">${agents.attention} need attention</span>`
             : nothing}
         </td>
         <td class="version">${b.version || html`<span class="muted">—</span>`}</td>
-        <td class="heartbeat" title=${b.last_heartbeat ?? ''}>
+        <td class="heartbeat" title=${ifDefined(b.last_heartbeat || undefined)}>
           ${formatHeartbeatAge(b.last_heartbeat)}
         </td>
       </tr>
