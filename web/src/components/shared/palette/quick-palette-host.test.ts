@@ -1290,19 +1290,31 @@ describe('QuickPaletteHost: opening again during the close animation', () => {
     const onSelect = vi.fn();
     const onSelectionSettled = vi.fn();
     const h = createHost({ onSelect, onSelectionSettled });
-    const palette = await openThenStartClosing(h, button());
-    h.open();
+    button().focus();
+    const palette = await openReady(h);
+    // A row picked while open stays active through the dismiss.
+    const input = await fireInitialFocus(palette);
+    typeAt(input, 'ArrowDown');
+    await palette.updateComplete;
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-hide');
 
-    const input = palette.shadowRoot!.querySelector('input')!;
-    input.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Enter',
-        bubbles: true,
-        composed: true,
-        cancelable: true,
-      })
-    );
+    // The reopen captures keys until its time limit; after that, Enter
+    // reaches the closing dialog, which commits its active row.
+    vi.useFakeTimers();
+    try {
+      h.open();
+      vi.advanceTimersByTime(PALETTE_TYPEAHEAD_MAX_MS);
+    } finally {
+      vi.useRealTimers();
+    }
+    await vi.waitFor(() => expect(palette.groups.agents?.status).toBe('ready'));
+    await palette.updateComplete;
+    const picks: Event[] = [];
+    palette.addEventListener('palette-select', (e) => picks.push(e));
+    typeAt(input, 'Enter');
 
+    expect(picks).toHaveLength(1);
     expect(onSelect).not.toHaveBeenCalled();
     expect(h.isOpen).toBe(true);
     fireFromDialog(palette, 'sl-after-hide');
