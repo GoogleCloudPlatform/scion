@@ -195,6 +195,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/messaging":                    "admin", // Admin messaging
 	"/api/v1/admin/messaging/divergence":         "admin", // Admin messaging divergence check
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
+	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID

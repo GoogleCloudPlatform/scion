@@ -29,7 +29,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -1130,6 +1129,10 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		return fmt.Errorf("failed to create .scion directory: %w", err)
 	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
+	}
 
 	// Seed default settings.yaml directly in scionDir. Hub-native projects
 	// bypass InitProject (which uses split storage for git repos) and keep
@@ -1192,11 +1195,17 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
-	// Seed the .scion project on top of the cloned workspace
+	// Seed the .scion project on top of the cloned workspace, with the hub
+	// project ID as the workspace project identity (replacing any identity
+	// the repository carries).
 	scionDir := filepath.Join(workspacePath, ".scion")
-	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true, ProjectID: project.ID}); err != nil {
 		s.projectsLogger().Warn("failed to initialize .scion in cloned workspace",
 			"project_id", project.ID, "error", err.Error())
+	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record for cloned workspace",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
 	}
 
 	// Write hub connection settings
@@ -1353,7 +1362,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		return
 	}
 
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
 			"agent_id", agent.ID,
 			"project_id", project.ID, "error", err)
@@ -2445,11 +2454,14 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		}
 	}
 
-	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
-		Limit:         limit,
-		Cursor:        cursor,
-		CursorBinding: cursorBinding,
-	})
+	// Agent-list rule (ptone/scion#3346): for a user caller, an agent appears
+	// in an agent list, its pages and its totalCount only if the caller can
+	// read that agent. listAgents and listProjectAgents both apply it, so the
+	// two endpoints return the same set for the same project. Passing the
+	// project-level agent.list gate above does not by itself make every
+	// agent in the project readable. Agent callers are outside this rule and
+	// keep the unfiltered sibling listing (listAgentsLegacyPage).
+	result, err := s.listAgentsLegacyPage(ctx, identity, filter, cursor, cursorBinding, limit)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -2458,43 +2470,18 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	// Enrich agents with project and broker names
 	s.enrichAgents(ctx, result.Items)
 
-	// Compute per-item and scope capabilities
+	// Compute per-item and scope capabilities. Every item is rendered: the
+	// user path above already holds only readable agents.
+	resources := make([]Resource, len(result.Items))
+	for i := range result.Items {
+		resources[i] = agentResource(&result.Items[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
 	agents := make([]AgentWithCapabilities, 0, len(result.Items))
-	switch {
-	case agentIdent != nil:
-		// Already confirmed above to be scoped to this project. Render every
-		// item, gating only per-item env visibility, exactly as before --
-		// this is the existing sibling-agent-listing use case agent tokens
-		// rely on this endpoint for.
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = agentResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-		for i := range result.Items {
-			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
-			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
-		}
-	case identity != nil:
-		// Per-item ActionRead filter: defense in depth so that passing the
-		// project-level agent.list gate above is not by itself treated as
-		// license to read every item the store returned, matching listAgents'
-		// pattern (handlers_agents_core.go) of computing and checking
-		// per-item capabilities rather than trusting the coarse scope alone.
-		resources := make([]Resource, len(result.Items))
-		for i := range result.Items {
-			resources[i] = agentResource(&result.Items[i])
-		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent")
-		for i := range result.Items {
-			if !capabilityAllows(caps[i], ActionRead) {
-				continue
-			}
-			item := result.Items[i]
-			item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
-			agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
-		}
+	for i := range result.Items {
+		item := result.Items[i]
+		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: caps[i]})
 	}
 	// identity == nil is unreachable here: the authorize call above already
 	// writes 401 for an unauthenticated non-agent caller before this point.
@@ -2505,11 +2492,12 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   result.NextCursor,
-		TotalCount:   result.TotalCount,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            result.NextCursor,
+		TotalCount:            result.TotalCount,
+		TotalCountApproximate: result.TotalCountApproximate,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	})
 }
 

@@ -1350,6 +1350,10 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// userScopedDataSweepDone is closed when the startup sweep of deleted
+	// users' user-scope data ends (startUserScopedDataSweep).
+	userScopedDataSweepDone <-chan struct{}
+
 	// decisionAuditWriter is the buffered decision audit writer wired into
 	// authzService. CleanupResources does not close it: it runs before
 	// the HTTP drain, and requests still being served then emit records.
@@ -2247,6 +2251,12 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	if cfg.DevAuthToken != "" {
 		seedDevUser(ctx, s, cfg.DevUserConfig)
 	}
+
+	// Remove user-scope secrets and env vars whose user no longer exists
+	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
+	// whole sweep, lookup and removal, runs in the background under one time
+	// budget and is non-fatal; see startUserScopedDataSweep.
+	srv.userScopedDataSweepDone = srv.startUserScopedDataSweep(srv.ctx)
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.
@@ -5310,6 +5320,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// and nothing at start depends on its result.
 	s.startStoredTimestampCheck(ctx)
 
+	// Record the workspaces this hub keeps as its own, and set the hub
+	// project ID as the workspace project identity of hub-cloned projects
+	// created with a locally generated one.
+	s.startClonedProjectIdentityAlignment(ctx)
+
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
 	s.startScheduler(ctx)
@@ -5831,6 +5846,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/project-defaults", s.guarded("/api/v1/admin/project-defaults", s.handleAdminProjectDefaults))
 	s.mux.HandleFunc("/api/v1/admin/messaging", s.guarded("/api/v1/admin/messaging", s.handleAdminMessaging))
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
+	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))

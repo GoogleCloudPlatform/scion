@@ -19,8 +19,8 @@
 // agent on failure, because the container that phase describes may
 // genuinely still be up. Two handler paths reach DispatchAgentStart with
 // agent.Phase == "running": the user-facing Restart action (stop-then-start,
-// and the stop leg is tolerated on failure), and the Start action dispatched
-// again at an already-running agent. See httpdispatcher_credential_revoke_test.go
+// where the stop leg may report no running instance), and the Start action
+// dispatched again at an already-running agent. See httpdispatcher_credential_revoke_test.go
 // for the dispatcher-level unit tests covering the same guard directly.
 package hub
 
@@ -35,12 +35,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAgentLifecycle_Restart_StopAndStartBothFailLeavesCredentialActive
-// covers a restart (stop, then start) where the stop leg fails
-// and the subsequent start leg also fails: this must not revoke the running
-// agent's credential — the handler's own comment notes the container may
-// still be running after a failed stop.
-func TestAgentLifecycle_Restart_StopAndStartBothFailLeavesCredentialActive(t *testing.T) {
+// TestAgentLifecycle_Restart_StopFailureLeavesCredentialActive covers a
+// restart whose stop leg fails: the container may still be running, so the
+// restart aborts before the start leg (ptone/scion#2710), mints nothing, and
+// must not revoke the running agent's credential.
+func TestAgentLifecycle_Restart_StopFailureLeavesCredentialActive(t *testing.T) {
 	srv, s := testServer(t)
 
 	agent := setupBrokerAgentInPhase(t, s, "restart-both-fail", state.PhaseRunning)
@@ -56,14 +55,11 @@ func TestAgentLifecycle_Restart_StopAndStartBothFailLeavesCredentialActive(t *te
 	insertTestAgentCredential(t, s, agent.ID, agent.ProjectID, "restart-both-fail-preexisting-jti")
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
-	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 
 	preexisting := getTestAgentCredential(t, s, "restart-both-fail-preexisting-jti")
-	assert.Nil(t, preexisting.RevokedAt, "a restart whose stop and start legs both fail must not revoke a running agent's credential")
-
-	require.Len(t, gen.jtis, 1, "the start leg still mints its own credential before failing")
-	minted := getTestAgentCredential(t, s, gen.lastJTI())
-	assert.Nil(t, minted.RevokedAt, "the credential minted for the failed start leg must also stay active — the running container may already be using it")
+	assert.Nil(t, preexisting.RevokedAt, "a restart whose stop leg fails must not revoke a running agent's credential")
+	assert.Empty(t, gen.jtis, "the start leg is never dispatched, so nothing is minted")
 }
 
 // TestAgentLifecycle_Start_RunningPhaseFailureLeavesCredentialActive covers
