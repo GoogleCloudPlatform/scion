@@ -513,8 +513,20 @@ export class ScionChatThread extends LitElement {
   /** The restore anchor already applied, so a re-load does not reuse it. */
   private _usedRestoreAnchor: ChatScrollAnchor | null = null;
 
-  /** Bumped by an explicit jump, so a restore still in flight stands down. */
-  private _restoreSeq = 0;
+  /**
+   * Bumped by each explicit jump, so a restore or an earlier jump still in
+   * flight stands down, and the initial load leaves the view to the jump.
+   */
+  private _jumpSeq = 0;
+
+  /** `_jumpSeq` when the current conversation was opened. */
+  private _jumpSeqAtOpen = 0;
+
+  /** The initial load left the view to a jump that has not landed yet. */
+  private _openScrollDeferred = false;
+
+  /** `_jumpSeq` of the last jump that reached its target. */
+  private _landedJumpSeq = 0;
 
   /** Latest scroll position, kept current from scroll events. */
   private _scrollAnchor: ChatScrollAnchor | null = null;
@@ -1473,6 +1485,9 @@ export class ScionChatThread extends LitElement {
 
     // Increment fetchId to invalidate any in-flight requests
     this.fetchId++;
+    // Jumps made before this point belong to the conversation left.
+    this._jumpSeqAtOpen = this._jumpSeq;
+    this._openScrollDeferred = false;
   }
 
   override disconnectedCallback(): void {
@@ -1773,7 +1788,9 @@ export class ScionChatThread extends LitElement {
     try {
       // A switch while the history loads hands over to the next
       // conversation's own load; this one stops here.
-      if (!(await this.fetchHistoryV2())) return;
+      // A jump that has already shown the page around its target keeps
+      // it: merging the latest page in as well would leave a gap.
+      if (!(await this.fetchHistoryV2(undefined, () => !this.viewingAroundMessage))) return;
       this.startStreamV2();
       // Set up read tracking
       window.addEventListener('focus', this._focusHandler);
@@ -1801,9 +1818,17 @@ export class ScionChatThread extends LitElement {
         // bottom yields to the unread divider: messages that arrived while the
         // user was away should be met at "New messages", not scrolled past.
         // The anchor is taken (used up) even when the hash wins.
-        const hashMsgId = this.parseMessageHash();
-        const restore = this.takeRestoreScrollAnchor();
-        if (hashMsgId) {
+        // An explicit jump made while loading (e.g. a search result in
+        // this conversation) outranks all of them, including the hash.
+        const jumped = this._jumpSeq !== this._jumpSeqAtOpen;
+        const hashMsgId = jumped ? '' : this.parseMessageHash();
+        const restore = jumped ? null : this.takeRestoreScrollAnchor();
+        if (jumped) {
+          // The jump owns the scroll position. Deferred only while it has
+          // not landed and no earlier jump has landed since the open.
+          this._openScrollDeferred =
+            this._landedJumpSeq !== this._jumpSeq && this._landedJumpSeq <= this._jumpSeqAtOpen;
+        } else if (hashMsgId) {
           void this.scrollToMessageById(hashMsgId, true);
         } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
           void this.restoreScrollPosition(restore);
@@ -1842,9 +1867,13 @@ export class ScionChatThread extends LitElement {
    * nothing, when the thread switched conversations before the page
    * arrived — including when the request then failed: that failure
    * belongs to the conversation left. Callers then leave the new
-   * conversation alone too.
+   * conversation alone too. When `shouldMerge` turns false while the page
+   * loads, the page is dropped but the result is still true.
    */
-  private async fetchHistoryV2(cursor?: string): Promise<boolean> {
+  private async fetchHistoryV2(
+    cursor?: string,
+    shouldMerge: () => boolean = () => true
+  ): Promise<boolean> {
     const currentId = this.fetchId;
     try {
       // Captured before the request starts: a response landing after the user
@@ -1883,6 +1912,7 @@ export class ScionChatThread extends LitElement {
       // The body can still be arriving after the headers; a conversation
       // switch in the meantime must not merge this page into the new one.
       if (currentId !== this.fetchId) return false;
+      if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
 
@@ -3406,7 +3436,7 @@ export class ScionChatThread extends LitElement {
    * does not include it. Falls back to the bottom if the message is gone.
    */
   private async restoreScrollPosition(anchor: ChatScrollAnchor): Promise<void> {
-    const restoreSeq = this._restoreSeq;
+    const jumpSeq = this._jumpSeq;
     // Until a real capture replaces it, the restore target is this thread's
     // position: leaving while the restore is still loading (slow network)
     // must hand it on rather than lose it. Seeded here, not where the anchor
@@ -3424,13 +3454,13 @@ export class ScionChatThread extends LitElement {
     await this.updateComplete;
     let msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(anchor.messageId, () => restoreSeq === this._restoreSeq);
+      await this.fetchAroundMessage(anchor.messageId, () => jumpSeq === this._jumpSeq);
       await this.updateComplete;
       msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
     }
     // Superseded by a thread switch or an explicit jump (e.g. a search
     // result in this conversation) made while the anchor was being located.
-    if (fetchId !== this.fetchId || restoreSeq !== this._restoreSeq) return;
+    if (fetchId !== this.fetchId || jumpSeq !== this._jumpSeq) return;
     if (!msgEl) {
       this.pinnedToBottom = true;
       this.scrollToBottomAfterRender();
@@ -3579,19 +3609,30 @@ export class ScionChatThread extends LitElement {
     // It also outranks a restored position: use the anchor up if the load
     // has not taken it yet, and stop a restore that is still in flight.
     this.takeRestoreScrollAnchor();
-    ++this._restoreSeq;
+    const jumpSeq = ++this._jumpSeq;
+    const fetchId = this.fetchId;
+    // A newer jump, or leaving the conversation, supersedes this one.
+    const isCurrent = () => jumpSeq === this._jumpSeq && fetchId === this.fetchId;
     this.cancelRestoreSettleWatch();
     await this.updateComplete;
-    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
-    if (!scrollEl) return;
+    if (!isCurrent()) return;
 
+    // Looked up after the target: while the initial load is still running
+    // the thread shows a spinner, not the scroll container.
     let msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     if (!msgEl) {
-      await this.fetchAroundMessage(messageId);
+      await this.fetchAroundMessage(messageId, isCurrent);
       await this.updateComplete;
+      if (!isCurrent()) return;
       msgEl = this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null;
     }
-    if (!msgEl) return;
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+    if (!msgEl || !scrollEl) {
+      this.handOpenScrollBack();
+      return;
+    }
+    this._openScrollDeferred = false;
+    this._landedJumpSeq = jumpSeq;
 
     const align: ScrollLogicalPosition = 'center';
     const containerRect = scrollEl.getBoundingClientRect();
@@ -3620,6 +3661,24 @@ export class ScionChatThread extends LitElement {
     if (highlight) {
       msgEl.classList.add('permalink-highlight');
       setTimeout(() => msgEl?.classList.remove('permalink-highlight'), 2000);
+    }
+  }
+
+  /**
+   * A jump that found no target gives the open-time scroll back: to the
+   * initial load if it is still running, else straight to the bottom if the
+   * load already left the view to this jump. Either way a later load (a
+   * Retry after a failed one) no longer counts this jump as started.
+   * Nothing to hand back once an earlier jump has landed since the open:
+   * the view stays on it.
+   */
+  private handOpenScrollBack(): void {
+    if (this._landedJumpSeq > this._jumpSeqAtOpen) return;
+    this._jumpSeqAtOpen = this._jumpSeq;
+    if (!this.loading && this._openScrollDeferred) {
+      this._openScrollDeferred = false;
+      this.pinnedToBottom = true;
+      this.scrollToBottomAfterRender();
     }
   }
 
