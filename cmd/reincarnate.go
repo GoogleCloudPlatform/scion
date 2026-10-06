@@ -185,7 +185,7 @@ flag. The local directory is never moved or deleted. The start
 refuses an empty nfs directory while the previous local directory is not
 empty (on Kubernetes, whenever the nfs directory is empty); add
 --allow-empty-shared-dir to start anyway. The shared dir flags cannot be
-combined with --broker.
+combined with a move to another broker.
 
 The broker checks the change (the dir is one of the agent's shared dirs,
 the nfs settings are complete, the broker supports it) after the hub has
