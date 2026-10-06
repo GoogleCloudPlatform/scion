@@ -18,10 +18,16 @@ package hub
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -477,7 +483,14 @@ func TestAlignClonedProjectIdentities_IdentityOutsideExpectedFormChangesNothing(
 			require.NoError(t, err)
 			assert.Equal(t, alignSkippedUnexpectedIdentity, res.Outcome)
 
-			assert.Equal(t, before, snapshotTree(t, home), "no file or directory changed")
+			after := snapshotTree(t, home)
+			recordsDir := filepath.Join(home, config.GlobalDir, config.HubWorkspacesDir)
+			for path := range after {
+				if path == recordsDir || strings.HasPrefix(path, recordsDir+string(filepath.Separator)) {
+					delete(after, path)
+				}
+			}
+			assert.Equal(t, before, after, "no file or directory changed apart from the hub workspace record")
 		})
 	}
 }
@@ -517,4 +530,230 @@ func TestAlignWorkspaceProjectIdentity_CompletesAfterMovedDir(t *testing.T) {
 	assert.False(t, res.Relocated)
 	assert.Equal(t, want, workspaceConfigRoot(t, workspacePath))
 	assert.Equal(t, "shared", readFile(t, filepath.Join(want, config.SharedDirsSubdir, "data", "file.txt")))
+}
+
+// stubHubWorkspaceDownload replaces the GCS download with one that writes
+// a file and a different project identity into the hub workspace, in the
+// form the workspace already has.
+func stubHubWorkspaceDownload(t *testing.T) {
+	t.Helper()
+	orig := syncFromGCSIntoHubWorkspace
+	t.Cleanup(func() { syncFromGCSIntoHubWorkspace = orig })
+	syncFromGCSIntoHubWorkspace = func(_ context.Context, _, _, workspacePath string) error {
+		if err := os.WriteFile(filepath.Join(workspacePath, "synced.txt"), []byte("synced"), 0644); err != nil {
+			return err
+		}
+		scionPath := filepath.Join(workspacePath, config.DotScion)
+		info, err := os.Lstat(scionPath)
+		switch {
+		case os.IsNotExist(err):
+			return config.WriteProjectMarker(scionPath, &config.ProjectMarker{
+				ProjectID: "copied-id", ProjectName: "copied", ProjectSlug: "copied",
+			})
+		case err != nil:
+			return err
+		case info.IsDir():
+			return config.WriteProjectID(scionPath, "copied-id")
+		default:
+			return config.WriteProjectMarker(scionPath, &config.ProjectMarker{
+				ProjectID: "copied-id", ProjectName: "copied", ProjectSlug: "copied",
+			})
+		}
+	}
+}
+
+// identitySnapshot returns the raw identity entry of a workspace: the marker
+// content, the project-id content, or a fixed value when absent.
+func identitySnapshot(t *testing.T, workspacePath string) string {
+	t.Helper()
+	scionPath := filepath.Join(workspacePath, config.DotScion)
+	info, err := os.Lstat(scionPath)
+	if os.IsNotExist(err) {
+		return "<none>"
+	}
+	require.NoError(t, err)
+	if !info.IsDir() {
+		return "marker:" + readFile(t, scionPath)
+	}
+	data, err := os.ReadFile(filepath.Join(scionPath, projectkeys.ProjectIDFile))
+	if os.IsNotExist(err) {
+		return "dir:<no project-id>"
+	}
+	require.NoError(t, err)
+	return "dir:" + string(data)
+}
+
+func TestSyncHubWorkspaceFromGCS_KeepsHubWorkspaceIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, scionPath string)
+	}{
+		{"project-id file", func(t *testing.T, p string) {
+			require.NoError(t, os.MkdirAll(p, 0755))
+			require.NoError(t, config.WriteProjectID(p, api.NewUUID()))
+		}},
+		{"directory without project-id", func(t *testing.T, p string) {
+			require.NoError(t, os.MkdirAll(p, 0755))
+		}},
+		{"marker file", func(t *testing.T, p string) {
+			require.NoError(t, config.WriteProjectMarker(p, &config.ProjectMarker{
+				ProjectID: api.NewUUID(), ProjectName: "hub", ProjectSlug: "hub",
+			}))
+		}},
+		{"no entry", func(t *testing.T, p string) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			identityTestHome(t)
+			srv, _ := testServer(t)
+			stubHubWorkspaceDownload(t)
+			workspacePath := t.TempDir()
+			tc.seed(t, filepath.Join(workspacePath, config.DotScion))
+			before := identitySnapshot(t, workspacePath)
+
+			require.NoError(t, srv.syncHubWorkspaceFromGCS(context.Background(), "bucket", "prefix", workspacePath))
+
+			assert.Equal(t, before, identitySnapshot(t, workspacePath))
+			assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")), "other files are downloaded")
+		})
+	}
+}
+
+func TestSyncHubManagedWorkspaceBack_KeepsHubWorkspaceIdentity(t *testing.T) {
+	identityForms(t, func(t *testing.T, markerForm bool) {
+		identityTestHome(t)
+		srv, st := testServer(t)
+		ctx := context.Background()
+		stubHubWorkspaceDownload(t)
+		srv.SetStorage(newMockStorage("bucket"))
+
+		project := sharedWorkspaceProject("sync-back")
+		require.NoError(t, st.CreateProject(ctx, project))
+		workspacePath, _ := seedWorkspaceIdentity(t, project.Slug, project.ID, markerForm)
+		before := identitySnapshot(t, workspacePath)
+
+		srv.syncHubManagedWorkspaceBack(ctx, &store.Agent{ID: "agent-1", ProjectID: project.ID}, "unused")
+
+		assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")))
+		assert.Equal(t, before, identitySnapshot(t, workspacePath))
+	})
+}
+
+func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
+	identityTestHome(t)
+	srv, st := testServer(t)
+	ctx := context.Background()
+	stubHubWorkspaceDownload(t)
+	srv.SetStorage(newMockStorage("bucket"))
+
+	project := sharedWorkspaceProject("cache-notify")
+	require.NoError(t, st.CreateProject(ctx, project))
+	workspacePath, _ := seedWorkspaceIdentity(t, project.Slug, project.ID, false)
+	before := identitySnapshot(t, workspacePath)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/workspace/cache/notify", nil)
+	rec := httptest.NewRecorder()
+	srv.handleProjectCacheNotify(rec, req, project)
+
+	assert.Equal(t, "synced", readFile(t, filepath.Join(workspacePath, "synced.txt")))
+	assert.Equal(t, before, identitySnapshot(t, workspacePath))
+}
+
+// TestHubWorkspaceDownloads_UseIdentityKeepingHelper checks that every hub
+// download of a workspace upload goes through syncHubWorkspaceFromGCS: the
+// only reference to gcp.SyncFromGCS in the hub package is the variable that
+// helper calls.
+func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	var refs []string
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		require.NoError(t, err, file)
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "SyncFromGCS" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "gcp" {
+				refs = append(refs, fset.Position(sel.Pos()).String())
+			}
+			return true
+		})
+	}
+	require.Len(t, refs, 1, "gcp.SyncFromGCS references: %v", refs)
+	assert.Contains(t, refs[0], "cloned_project_identity.go")
+}
+
+func TestRecordHubWorkspace(t *testing.T) {
+	identityTestHome(t)
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	clone := sharedWorkspaceProject("own-clone")
+	require.NoError(t, st.CreateProject(ctx, clone))
+	_, _ = seedWorkspaceIdentity(t, clone.Slug, clone.ID, false)
+
+	native := &store.Project{ID: api.NewUUID(), Name: "own-native", Slug: "own-native"}
+	require.NoError(t, st.CreateProject(ctx, native))
+	_, _ = seedWorkspaceIdentity(t, native.Slug, native.ID, true)
+
+	worktree := &store.Project{
+		ID: api.NewUUID(), Name: "own-worktree", Slug: "own-worktree",
+		GitRemote: "github.com/example/own-worktree",
+		Labels:    map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent},
+	}
+	require.NoError(t, st.CreateProject(ctx, worktree))
+	_, _ = seedWorkspaceIdentity(t, worktree.Slug, worktree.ID, false)
+
+	noWorkspace := sharedWorkspaceProject("no-workspace")
+	require.NoError(t, st.CreateProject(ctx, noWorkspace))
+
+	counts := srv.alignClonedProjectIdentities(ctx)
+	assert.Equal(t, 2, counts.hubWorkspaceRecorded)
+	assert.Zero(t, counts.hubWorkspaceRecordFailed)
+
+	for _, p := range []*store.Project{clone, native} {
+		path, err := config.HubWorkspaceRecordPath(p.Slug)
+		require.NoError(t, err)
+		got, err := config.ReadWorkspaceRecord(path)
+		require.NoError(t, err, p.Slug)
+		assert.Equal(t, p.ID, got, "record holds exactly the hub project ID")
+	}
+	for _, p := range []*store.Project{worktree, noWorkspace} {
+		path, err := config.HubWorkspaceRecordPath(p.Slug)
+		require.NoError(t, err)
+		assert.NoFileExists(t, path, p.Slug)
+	}
+}
+
+func TestCloneSharedWorkspaceProject_RecordsHubWorkspace(t *testing.T) {
+	identityTestHome(t)
+	srv, _ := testServer(t)
+
+	sourceDir := t.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "--allow-empty", "-m", "init"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = sourceDir
+		require.NoError(t, cmd.Run(), "git %v", args)
+	}
+	project := sharedWorkspaceProject("clone-record")
+	project.Labels[store.LabelCloneURL] = sourceDir
+	project.Labels[store.LabelDefaultBranch] = "master"
+
+	require.NoError(t, srv.cloneSharedWorkspaceProject(context.Background(), project))
+
+	path, err := config.HubWorkspaceRecordPath(project.Slug)
+	require.NoError(t, err)
+	got, err := config.ReadWorkspaceRecord(path)
+	require.NoError(t, err)
+	assert.Equal(t, project.ID, got)
 }

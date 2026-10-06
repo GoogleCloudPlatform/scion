@@ -28,7 +28,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -962,6 +961,10 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	if err := os.MkdirAll(scionDir, 0755); err != nil {
 		return fmt.Errorf("failed to create .scion directory: %w", err)
 	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
+	}
 
 	// Seed default settings.yaml directly in scionDir. Hub-native projects
 	// bypass InitProject (which uses split storage for git repos) and keep
@@ -1031,6 +1034,10 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true, ProjectID: project.ID}); err != nil {
 		s.projectsLogger().Warn("failed to initialize .scion in cloned workspace",
 			"project_id", project.ID, "error", err.Error())
+	}
+	if _, err := s.recordHubWorkspace(project); err != nil {
+		s.projectsLogger().Warn("failed to write hub workspace record for cloned workspace",
+			append([]any{"project_id", project.ID}, alignErrorAttrs(err)...)...)
 	}
 
 	// Write hub connection settings
@@ -1187,7 +1194,7 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		return
 	}
 
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", workspacePath); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: GCS download failed",
 			"agent_id", agent.ID,
 			"project_id", project.ID, "error", err)
