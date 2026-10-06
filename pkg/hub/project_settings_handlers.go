@@ -441,6 +441,10 @@ func profileDefaultSAIDsFromAnnotations(annotations map[string]string) map[strin
 // setProfileDefaultSAIDsAnnotation stores m as the per-profile default
 // service account annotation, or deletes the annotation when m is empty.
 func setProfileDefaultSAIDsAnnotation(annotations map[string]string, m map[string]string) {
+	if annotations == nil {
+		// Callers initialize the map; nothing can be stored without one.
+		return
+	}
 	if len(m) == 0 {
 		delete(annotations, projectSettingDefaultGCPIdentitySAIDByProfile)
 		return

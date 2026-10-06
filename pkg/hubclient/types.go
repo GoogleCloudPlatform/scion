@@ -224,8 +224,9 @@ type ProjectSettings struct {
 	// no explicit GCP identity, the entry for the profile the agent runs
 	// under assigns that service account, ahead of DefaultGCPIdentityMode and
 	// DefaultGCPIdentityServiceAccountID. On PUT, an absent (null) field
-	// keeps the stored map and an empty object clears it.
-	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile,omitempty"`
+	// keeps the stored map and an empty object clears it. No omitempty: a
+	// nil map marshals to null (keep) and an empty map to {} (clear).
+	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile"`
 
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
