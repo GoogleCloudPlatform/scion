@@ -144,7 +144,7 @@ func (s *MembershipLossCheckStore) ClaimMembershipLossChecks(ctx context.Context
 	}
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return nil, err
+		return nil, mapError(err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	claimed, err := claimMembershipLossChecks(ctx, tx.Client(), limit, lease)
@@ -152,7 +152,7 @@ func (s *MembershipLossCheckStore) ClaimMembershipLossChecks(ctx context.Context
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, mapError(err)
 	}
 	return claimed, nil
 }
