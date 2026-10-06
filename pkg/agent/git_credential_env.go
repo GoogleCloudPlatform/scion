@@ -37,10 +37,12 @@ import (
 // hub refuses that path's token refresh for such an agent too.
 //
 // One decision, gitCredentialsStripped, is made per start. Keys are removed
-// in one place, the final runtime.RunConfig, from Env, ResolvedAuth.EnvVars
-// and environment-type ResolvedSecrets, whatever layer supplied them
-// (stripGitCredentialRunConfig). Two earlier steps keep values from being
-// read or written where that final filter cannot see them:
+// in one place, the final runtime.RunConfig (stripGitCredentialRunConfig),
+// from Env, ResolvedAuth.EnvVars, and the environment-type and variable-type
+// ResolvedSecrets whose env name matches. File-type secrets are not covered:
+// they are projected to a path, which carries no env name to match. Two
+// earlier steps keep values from being read or written where that final
+// filter cannot see them:
 //   - the config layer: an empty-value passthrough marker or a ${VAR}
 //     reference never reads a matching name from the broker host env
 //     (buildAgentEnvWithPolicy);
@@ -82,12 +84,13 @@ var gitCredentialHelperEnvKeys = map[string]struct{}{
 }
 
 // isStrippedGitEnvKey reports whether key is removed from the container env
-// of an agent without the allowance: a credential key or a helper key.
+// of an agent without the allowance: a credential key or a helper key. Both
+// match ignoring ASCII case, like IsGitCredentialEnvKey.
 func isStrippedGitEnvKey(key string) bool {
 	if IsGitCredentialEnvKey(key) {
 		return true
 	}
-	_, ok := gitCredentialHelperEnvKeys[key]
+	_, ok := gitCredentialHelperEnvKeys[strings.ToUpper(key)]
 	return ok
 }
 
@@ -131,9 +134,11 @@ func removeStagedGitCredentialFiles(agentHome string) {
 }
 
 // stripGitCredentialRunConfig removes every matching key, and every
-// gitCredentialHelperEnvKeys key, from the env that cfg would put in the
-// container. Maps and slices are copied, never edited
-// in place, and the removed key names are returned.
+// gitCredentialHelperEnvKeys key, from cfg's Env and ResolvedAuth.EnvVars,
+// and every environment-type or variable-type ResolvedSecret whose env name
+// (secretEnvTarget) matches. File-type secrets are left alone. Maps and
+// slices are copied, never edited in place, and the removed key names are
+// returned.
 func stripGitCredentialRunConfig(cfg *runtime.RunConfig) (removed []string) {
 	if cfg == nil {
 		return nil
@@ -173,8 +178,8 @@ func stripGitCredentialRunConfig(cfg *runtime.RunConfig) (removed []string) {
 	if len(cfg.ResolvedSecrets) > 0 {
 		secrets := make([]api.ResolvedSecret, 0, len(cfg.ResolvedSecrets))
 		for _, s := range cfg.ResolvedSecrets {
-			if (s.Type == "environment" || s.Type == "") && isStrippedGitEnvKey(s.Target) {
-				note(s.Target)
+			if (s.Type == "environment" || s.Type == "variable" || s.Type == "") && isStrippedGitEnvKey(secretEnvTarget(s)) {
+				note(secretEnvTarget(s))
 				continue
 			}
 			secrets = append(secrets, s)

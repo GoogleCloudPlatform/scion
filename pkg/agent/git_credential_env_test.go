@@ -117,9 +117,13 @@ func TestStripGitCredentialRunConfig_DoesNotMutateInputs(t *testing.T) {
 		{Name: "b", Type: "", Target: "GH_ORG", Value: "fake-c"},
 		{Name: "c", Type: "file", Target: "/home/scion/GH_FILE", Value: "file-content"},
 		{Name: "d", Type: "environment", Target: "KEEP_ME", Value: "k"},
+		{Name: "e", Type: "variable", Target: "GH_VAR", Value: "fake-f"},
+		{Name: "f", Type: "variable", Target: "KEEP_VAR", Value: "v"},
+		{Name: "GH_NAMED", Type: "environment", Target: "", Value: "fake-g"},
+		{Name: "github_token", Type: "variable", Target: "", Value: "fake-h"},
 	}
 	cfg := runtime.RunConfig{
-		Env:             []string{"GITHUB_TOKEN=fake-d", "KEEP=1", "gh_lower=fake-e"},
+		Env:             []string{"GITHUB_TOKEN=fake-d", "KEEP=1", "gh_lower=fake-e", "scion_github_app_enabled=true"},
 		ResolvedAuth:    &api.ResolvedAuth{Method: "m", EnvVars: authEnv},
 		ResolvedSecrets: secrets,
 	}
@@ -127,7 +131,7 @@ func TestStripGitCredentialRunConfig_DoesNotMutateInputs(t *testing.T) {
 
 	removed := stripGitCredentialRunConfig(&cfg)
 
-	want := []string{"GH_ORG", "GH_TOKEN", "GITHUB_TOKEN", "gh_lower"}
+	want := []string{"GH_NAMED", "GH_ORG", "GH_TOKEN", "GH_VAR", "GITHUB_TOKEN", "gh_lower", "github_token", "scion_github_app_enabled"}
 	if strings.Join(removed, ",") != strings.Join(want, ",") {
 		t.Errorf("removed = %v, want %v", removed, want)
 	}
@@ -137,10 +141,14 @@ func TestStripGitCredentialRunConfig_DoesNotMutateInputs(t *testing.T) {
 	if _, ok := cfg.ResolvedAuth.EnvVars["GH_TOKEN"]; ok || cfg.ResolvedAuth.EnvVars["OTHER"] != "o" || cfg.ResolvedAuth.Method != "m" {
 		t.Errorf("ResolvedAuth = %+v", cfg.ResolvedAuth)
 	}
-	if len(cfg.ResolvedSecrets) != 2 || cfg.ResolvedSecrets[0].Name != "c" || cfg.ResolvedSecrets[1].Name != "d" {
-		t.Errorf("ResolvedSecrets = %+v, want the file secret and KEEP_ME", cfg.ResolvedSecrets)
+	var kept []string
+	for _, sec := range cfg.ResolvedSecrets {
+		kept = append(kept, sec.Name)
 	}
-	if origAuth.EnvVars["GH_TOKEN"] != "fake-a" || len(secrets) != 4 {
+	if strings.Join(kept, ",") != "c,d,f" {
+		t.Errorf("ResolvedSecrets = %+v, want the file secret, KEEP_ME and KEEP_VAR", cfg.ResolvedSecrets)
+	}
+	if origAuth.EnvVars["GH_TOKEN"] != "fake-a" || len(secrets) != 8 {
 		t.Errorf("inputs were mutated")
 	}
 }
@@ -248,9 +256,10 @@ func (f gitCredFixture) setup(t *testing.T) (projectScionDir, agentDir string) {
 	return projectScionDir, agentDir
 }
 
-// containerEnv is every env key=value the runtime would put in the
-// container from cfg: Env, ResolvedAuth.EnvVars and environment-type
-// ResolvedSecrets.
+// containerEnv is every key=value the runtime would hand the container
+// under an env name from cfg: Env, ResolvedAuth.EnvVars, environment-type
+// ResolvedSecrets and variable-type ResolvedSecrets (which land in the
+// container's secrets.json under the same name).
 func containerEnv(cfg runtime.RunConfig) map[string]string {
 	out := envListToMap(cfg.Env)
 	if cfg.ResolvedAuth != nil {
@@ -259,8 +268,8 @@ func containerEnv(cfg runtime.RunConfig) map[string]string {
 		}
 	}
 	for _, s := range cfg.ResolvedSecrets {
-		if s.Type == "environment" || s.Type == "" {
-			out[s.Target] = s.Value
+		if s.Type == "environment" || s.Type == "variable" || s.Type == "" {
+			out[secretEnvTarget(s)] = s.Value
 		}
 	}
 	return out
@@ -433,6 +442,34 @@ func TestStart_GitCredentials_AuthCandidateStripped(t *testing.T) {
 	}
 }
 
+// TestStart_GitCredentials_VariableSecretStripped pins that a variable-type
+// secret whose env name matches (Target, or Name when Target is empty) does
+// not reach the container's secrets.json, while a non-matching variable
+// secret and file-type secrets are delivered as before.
+func TestStart_GitCredentials_VariableSecretStripped(t *testing.T) {
+	project, _ := gitCredFixture{}.setup(t)
+	cfg := runCredStart(t, project, api.StartOptions{
+		BrokerMode: true,
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "proj-token", Type: "variable", Target: "GITHUB_TOKEN", Value: "fake-variable", Source: "project"},
+			{Name: "GH_OWNER", Type: "variable", Value: "fake-owner", Source: "user"},
+			{Name: "PLAIN_VARIABLE", Type: "variable", Target: "PLAIN_VARIABLE", Value: "pv", Source: "project"},
+			{Name: "cfg-file", Type: "file", Target: "/home/scion/.config/tool.conf", Value: "fc", Source: "project"},
+		},
+	})
+	env := assertNoCredentials(t, cfg)
+	if env["PLAIN_VARIABLE"] != "pv" {
+		t.Errorf("PLAIN_VARIABLE = %q, want pv", env["PLAIN_VARIABLE"])
+	}
+	var names []string
+	for _, sec := range cfg.ResolvedSecrets {
+		names = append(names, sec.Name)
+	}
+	if strings.Join(names, ",") != "PLAIN_VARIABLE,cfg-file" {
+		t.Errorf("ResolvedSecrets = %v, want PLAIN_VARIABLE and cfg-file", names)
+	}
+}
+
 func TestStart_GitCredentials_StagedAuthFileRemoved(t *testing.T) {
 	project, agentDir := gitCredFixture{agentCfgEnv: map[string]string{}, stagedSecret: "GH_TOKEN"}.setup(t)
 	runCredStart(t, project, api.StartOptions{BrokerMode: true, NoAuth: true})
@@ -446,7 +483,8 @@ func TestStart_GitCredentials_StagedAuthFileRemoved(t *testing.T) {
 }
 
 // TestStart_GitCredentials_AllowedIsUnchanged pins that with the hub's
-// allowance every source still delivers its credential key and value, as
+// allowance each covered source (env layers, auth, environment-type and
+// variable-type secrets) still delivers its credential key and value, as
 // before the policy existed, and that the staged file is left alone.
 func TestStart_GitCredentials_AllowedIsUnchanged(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", fakeHostCred)
@@ -461,6 +499,7 @@ func TestStart_GitCredentials_AllowedIsUnchanged(t *testing.T) {
 		Env: map[string]string{"GH_TOKEN": "fake-auth", "GH_SOMEORG": "fake-hub", "SCION_GITHUB_APP_ENABLED": "true"},
 		ResolvedSecrets: []api.ResolvedSecret{
 			{Name: "GH_SECRET", Type: "environment", Target: "GH_SECRET", Value: "fake-secret", Source: "project"},
+			{Name: "GH_VARIABLE", Type: "variable", Target: "GH_VARIABLE", Value: "fake-variable", Source: "project"},
 		},
 	}
 	allowed := containerEnv(runCredStart(t, project, opts))
@@ -472,6 +511,7 @@ func TestStart_GitCredentials_AllowedIsUnchanged(t *testing.T) {
 		"GH_TOKEN":       "fake-auth",
 		"GH_SOMEORG":     "fake-hub",
 		"GH_SECRET":      "fake-secret",
+		"GH_VARIABLE":    "fake-variable",
 
 		"SCION_GITHUB_APP_ENABLED": "true",
 	}

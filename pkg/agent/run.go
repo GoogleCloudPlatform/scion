@@ -2319,6 +2319,10 @@ func containerName(projectName, agentName string) string {
 // defaults, see api.HubAgentDefaults.DefaultEnv). Each entry is applied only
 // when the key is absent from the merged env or has an empty value, i.e. when
 // no layer would otherwise put it in the container.
+//
+// buildAgentEnv has no production caller; tests use it for the short
+// signature. It always passes stripGitCredentials=false (see
+// buildAgentEnvWithPolicy).
 func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
 	return buildAgentEnvWithPolicy(scionCfg, extraEnv, defaultEnv, brokerMode, false)
 }
