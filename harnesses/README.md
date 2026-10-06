@@ -50,18 +50,34 @@ when they were part of the default set), here's what you need to know:
    provisioning was introduced.
 
 2. **Legacy config on `provisioner.type: builtin`** — the compiled-in Go
-   implementation has been removed. Run the upgrade command to switch to
-   container-script provisioning:
+   implementation has been removed. Starting an agent from such a config
+   fails before the container is created, with an error that names the
+   fix for where the config lives. The same applies to a container-script
+   provisioner with an empty `command`. For a global harness-config
+   (`~/.scion/harness-configs/<name>`) of a bundled harness, run the
+   upgrade command to switch to container-script provisioning:
    ```sh
    scion harness-config upgrade <name> --activate-script
    ```
    If your config directory contains a `provision.py`, the upgrade
    auto-activates container-script provisioning even without the
-   `--activate-script` flag. If no `provision.py` exists, reinstall
-   from the bundle:
+   `--activate-script` flag. Alternatively, reinstall the bundled config
+   over it (`<harness>` is the harness type):
    ```sh
-   scion harness-config install harnesses/<name>
+   scion harness-config install --force --global --name <name> <scion-checkout>/harnesses/<harness>
    ```
+   `upgrade` only operates on global harness-configs. For a project-level
+   copy (`.scion/harness-configs/<name>`), a copy bundled in a template,
+   or a harness type with no bundled config, edit its `config.yaml`: set
+   `provisioner.type: container-script` with a non-empty
+   `provisioner.command`, or remove the `provisioner` block. When a
+   Runtime Broker launched from its own copy, repair that copy on the
+   broker host (or upload a working copy to the Hub, which the Hub then
+   sends with each dispatch). For a Hub harness-config, pull it
+   (`scion harness-config pull <name>`), repair it, and upload it to the
+   scope it came from with `scion harness-config sync <name>` (add
+   `--global` for a global record); for a template from the Hub, repair
+   the template itself and upload it again.
 
 3. **Fresh installs** — opencode, codex, and antigravity are no longer
    installed automatically. Restore any of them with a single command:
@@ -71,9 +87,10 @@ when they were part of the default set), here's what you need to know:
    scion harness-config install harnesses/antigravity
    ```
 
-4. **Existing agents are unaffected** — no agent-home rewrites are
-   performed. Already-created agents continue to work with their
-   existing harness-config directories.
+4. **Existing agents keep their harness-config directories** — no
+   agent-home rewrites are performed. An already-created agent whose
+   harness-config is still on `provisioner.type: builtin` fails to start
+   until the config is upgraded (item 2).
 
 ## Writing a New Harness
 

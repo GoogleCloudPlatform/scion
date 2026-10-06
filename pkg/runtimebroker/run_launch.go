@@ -265,14 +265,21 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	if lc.downloadWorkspaceFromGCS != nil {
 		download = lc.downloadWorkspaceFromGCS
 	}
-	opts, _, _, dlErr := download(ctx, lc.req, lc.opts)
+	opts, _, dlMessage, dlErr := download(ctx, lc.req, lc.opts)
 	if dlErr != nil {
 		if locallyCancelled(ctx) {
 			// Same rule as Start's local-cancel case below: keyed on ctx',
 			// not on the error the download returned.
 			return
 		}
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlErr.Error())
+		// Report the synchronous path's client text (dlMessage), never
+		// dlErr's own text, which names the workspace path or GCS detail;
+		// the download step has logged the cause (ptone/scion#3496). This
+		// holds for the invalid-directory and unconfigured-bucket refusals
+		// too: admission (beginAsyncLaunch) normally answers those with the
+		// sync 400/422, and one only found here reports the same text,
+		// under runtime_error.
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlMessage)
 		return
 	}
 	lc.opts = opts
@@ -515,6 +522,21 @@ func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), ttl)
 }
 
+// Async launch failure codes reported to the hub (alongside
+// ErrCodeHarnessConfigUnusable and ErrCodeSkillResolution).
+const (
+	// LaunchErrCodeHarnessConfigPolicy: the harness-config policy refused
+	// the launch (the synchronous paths answer 403 forbidden).
+	LaunchErrCodeHarnessConfigPolicy = "harness_config_policy"
+	// LaunchErrCodeAgentStateUnavailable: the agent's broker-side state
+	// directory is unavailable (config.ErrAgentStateDirUnavailable).
+	LaunchErrCodeAgentStateUnavailable = "agent_state_unavailable"
+	// LaunchErrCodeAgentStateConflict: the agent's broker-side state exists
+	// but cannot be used as recorded, e.g. an unusable image provenance
+	// record (config.ErrAgentStateConflict).
+	LaunchErrCodeAgentStateConflict = "agent_state_conflict"
+)
+
 // classifyStartError maps a Manager.Start failure to a launch error code
 // (design §3.9; full progress/error-code detail is P3 scope). ctx having
 // already expired (DeadlineExceeded) takes precedence: that is ctx', so it
@@ -523,6 +545,12 @@ func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
 func classifyStartError(ctx context.Context, err error, templateSlug string) (code, message string) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "launch_timeout", "launch timed out before the agent started"
+	}
+	if d, ok := harnessPolicyRefusalFrom(err); ok {
+		return LaunchErrCodeHarnessConfigPolicy, d.Message
+	}
+	if ue, ok := unusableProvisionerFrom(err); ok {
+		return ErrCodeHarnessConfigUnusable, ue.PublicMessage()
 	}
 	var skillErr *agent.SkillResolutionError
 	switch {
@@ -548,6 +576,10 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// or a content hash (ptone/scion#3113; see notFoundResourceText).
 		// The full error is logged by runLaunch.
 		return "template_not_found", notFoundMessage(opCreateAgent, err, templateSlug)
+	case errors.Is(err, config.ErrAgentStateDirUnavailable):
+		return LaunchErrCodeAgentStateUnavailable, err.Error()
+	case errors.Is(err, config.ErrAgentStateConflict):
+		return LaunchErrCodeAgentStateConflict, err.Error()
 	default:
 		// The same fixed text the synchronous create returns for a
 		// Manager.Start failure (runtimeOpError): the raw error routinely
