@@ -187,7 +187,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return nil, err
 				}
 			}
-			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: a.ContainerID, RunID: a.RunID}); err != nil {
+			if err := m.Runtime.Delete(ctx, runtime.RunRef{ID: runtime.AgentOperationID(a), RunID: a.RunID}); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
@@ -1722,7 +1722,9 @@ authDone:
 		// package already sets from the same opts.GitClone for other
 		// purposes; previously nothing set GitCloneForInit at all, so the
 		// k8s init container never ran for ANY project, git or not.
-		GitCloneForInit:  opts.GitClone,
+		// A shared-plain git project has no GitClone; its workspace clone
+		// settings are used instead (nfsInitGitClone).
+		GitCloneForInit:  nfsInitGitClone(opts),
 		TelemetryEnabled: telemetryEnabled,
 		Task: func() string {
 			// When task_flag is set, task is delivered via CommandArgs instead

@@ -737,6 +737,9 @@ func TestStartClaimWiring_CreateClaimRefusalKeepsTheRecord(t *testing.T) {
 			failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
 			require.NoError(t, err)
 			assert.Empty(t, failed, "a claim refusal is not rolled back as a failed create")
+			kept, err := s.GetAgentBySlug(context.Background(), project.ID, req.Name)
+			require.NoError(t, err, "the record is kept")
+			assert.Equal(t, req.Name, kept.Name)
 		})
 	}
 }

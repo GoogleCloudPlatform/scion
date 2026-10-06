@@ -454,6 +454,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// A reincarnation starts the agent (also one that was stopped): record
 	// that the agent is meant to run, now, before the worker's start, so a
 	// stop the user records during the reincarnation is newer and wins.
+	// Limits: the intent is written after the claim commits, so a stop
+	// recorded in that short gap is overwritten by this running intent; and
+	// if the write fails, the reincarnation proceeds with only a warning
+	// (the intent keeps its previous value).
 	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 		s.agentLifecycleLog.Warn("Reincarnate: failed to record run intent", "agent_id", agent.ID, "error", err)
 	}

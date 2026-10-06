@@ -256,6 +256,11 @@ func TestStartConduitRelay_StartupChecks(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.running, srv.conduit.Load() != nil)
+			assert.Equal(t, tc.running, srv.conduitServing(), "SCION_HUB_CONDUIT capability")
+			if tc.running {
+				setConduitExperiment(t, srv, false)
+				assert.False(t, srv.conduitServing(), "capability withdrawn when hub.conduit turns off")
+			}
 		})
 	}
 }
