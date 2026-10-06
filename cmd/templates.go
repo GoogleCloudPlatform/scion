@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -680,7 +682,8 @@ var templatesSyncCmd = &cobra.Command{
 	Use:   "sync [template]",
 	Short: "Create or update a template in the Hub (Hub only)",
 	Long: `Sync a local template to the Hub. Creates the template if it doesn't exist,
-or updates it with any changed files if it does.
+or updates it with any changed files if it does. Syncing an existing template
+mirrors the local directory: files deleted locally are removed from the Hub copy.
 
 The harness type is automatically detected from the template's configuration file.
 Use the root --global flag to sync to global scope instead of project scope.
@@ -1014,6 +1017,19 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 	return nil
 }
 
+// isTemplateNoFilesError reports whether err is the Hub's download-URL
+// rejection for a template record that has no files: a validation_error API
+// error whose message contains "has no files". The Hub embeds the template
+// name and ID in the message ("template NAME (ID) has no files ..."), so
+// only the fixed part is matched.
+func isTemplateNoFilesError(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Code == apiclient.ErrCodeValidationError && strings.Contains(apiErr.Message, "has no files")
+}
+
 // syncTemplateToHub creates or updates a template in the Hub.
 // If a template with the same name already exists, only changed files are uploaded.
 func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType string) error {
@@ -1032,6 +1048,11 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		return fmt.Errorf("failed to scan template files: %w", err)
 	}
 	fmt.Printf("Found %d files\n", len(files))
+	// Sync mirrors the local directory, so an empty one would mean deleting
+	// every file from the Hub record, which the Hub rejects. Refuse up front.
+	if len(files) == 0 {
+		return fmt.Errorf("no files to sync in %s; a template needs at least one file", localPath)
+	}
 
 	// Build file upload request
 	fileReqs := make([]hubclient.FileUploadRequest, len(files))
@@ -1092,9 +1113,9 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		// In this case, treat it like a new template that needs all files uploaded
 		templateNeedsFullUpload := false
 		if err != nil {
-			// Check for "template has no files" error - this means the template record exists
-			// but was never finalized (e.g., storage was misconfigured during initial sync)
-			if strings.Contains(err.Error(), "template has no files") {
+			// A "has no files" error means the template record exists but was
+			// never finalized (e.g., storage was misconfigured during initial sync)
+			if isTemplateNoFilesError(err) {
 				fmt.Printf("Template '%s' exists but has no files (possibly from incomplete previous sync).\n", name)
 				fmt.Printf("Uploading all files...\n")
 				templateNeedsFullUpload = true
@@ -1122,15 +1143,34 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 				}
 			}
 
+			// Sync mirrors the local directory: any remote path that is not
+			// in the local manifest (a file deleted locally) is dropped from
+			// the Hub record by finalizing with the local manifest.
+			var removed []string
+			for remotePath := range remoteHashes {
+				if _, local := localFileMap[remotePath]; !local {
+					removed = append(removed, remotePath)
+				}
+			}
+			sort.Strings(removed)
+
 			// Check if anything changed
-			if len(filesToUpload) == 0 {
+			if len(filesToUpload) == 0 && len(removed) == 0 {
 				fmt.Printf("Template '%s' is already up to date.\n", name)
 				fmt.Printf("  ID: %s\n", templateID)
 				fmt.Printf("  Content Hash: %s\n", truncateHash(existingTemplate.ContentHash))
 				return nil
 			}
 
-			fmt.Printf("Found %d changed file(s), updating template...\n", len(filesToUpload))
+			if len(removed) > 0 {
+				fmt.Printf("Removing %d file(s) no longer present locally from the Hub:\n", len(removed))
+				for _, p := range removed {
+					fmt.Printf("  - %s\n", p)
+				}
+			}
+			if len(filesToUpload) > 0 {
+				fmt.Printf("Found %d changed file(s), updating template...\n", len(filesToUpload))
+			}
 		}
 	} else {
 		// Create new template - upload all files
@@ -1154,34 +1194,38 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		filesToUpload = fileReqs
 	}
 
-	// Request upload URLs only for files that need uploading
-	fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
-	uploadResp, err := hubCtx.Client.Templates().RequestUploadURLs(ctx, templateID, filesToUpload)
-	if err != nil {
-		return fmt.Errorf("failed to get upload URLs: %w", err)
-	}
-
-	// Upload files
-	fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
-	for _, urlInfo := range uploadResp.UploadURLs {
-		fileInfo := localFileMap[urlInfo.Path]
-		if fileInfo == nil {
-			fmt.Printf("  Warning: no matching file for %s\n", urlInfo.Path)
-			continue
-		}
-
-		// Open and upload file
-		f, err := os.Open(fileInfo.FullPath)
+	// Request upload URLs only for files that need uploading. Skipped when
+	// files are only being dropped from the manifest: every file it lists is
+	// already stored, so Finalize alone replaces the manifest.
+	if len(filesToUpload) > 0 {
+		fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
+		uploadResp, err := hubCtx.Client.Templates().RequestUploadURLs(ctx, templateID, filesToUpload)
 		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", fileInfo.Path, err)
+			return fmt.Errorf("failed to get upload URLs: %w", err)
 		}
 
-		err = hubCtx.Client.Templates().UploadFile(ctx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
-		_ = f.Close()
-		if err != nil {
-			return fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
+		// Upload files
+		fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
+		for _, urlInfo := range uploadResp.UploadURLs {
+			fileInfo := localFileMap[urlInfo.Path]
+			if fileInfo == nil {
+				fmt.Printf("  Warning: no matching file for %s\n", urlInfo.Path)
+				continue
+			}
+
+			// Open and upload file
+			f, err := os.Open(fileInfo.FullPath)
+			if err != nil {
+				return fmt.Errorf("failed to open %s: %w", fileInfo.Path, err)
+			}
+
+			err = hubCtx.Client.Templates().UploadFile(ctx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
+			_ = f.Close()
+			if err != nil {
+				return fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
+			}
+			fmt.Printf("  Uploaded: %s\n", fileInfo.Path)
 		}
-		fmt.Printf("  Uploaded: %s\n", fileInfo.Path)
 	}
 
 	// Build manifest

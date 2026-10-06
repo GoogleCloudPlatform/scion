@@ -47,7 +47,10 @@ type RestartDispatchArgs struct{}
 // row's run ID as before.
 type StopDispatchArgs struct {
 	IntentAt *time.Time `json:"intentAt,omitempty"`
-	RunID    string     `json:"runId,omitempty"`
+	// SupersedesClaim is the start claim the agent held when the stop was
+	// recorded; the drain releases it once the stop is applied.
+	SupersedesClaim string `json:"supersedesClaim,omitempty"`
+	RunID           string `json:"runId,omitempty"`
 }
 
 // DeleteDispatchArgs carries the parameters for a cross-node agent delete.
