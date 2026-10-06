@@ -42,7 +42,7 @@ func seedScheduleAuthorAgent(t *testing.T, s store.Store, projectID string) {
 }
 
 // withAgentRevision returns evt carrying the recorded authorization revision
-// a create or re-save by the stored agent agentID writes: agent attribution
+// a create or resume by the stored agent agentID writes: agent attribution
 // and the agent's own write ceiling, computed at seed time from its stored row and
 // edge, as the authoring handler computes it.
 func withAgentRevision(t *testing.T, srv *Server, evt store.ScheduledEvent, agentID string) store.ScheduledEvent {

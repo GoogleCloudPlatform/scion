@@ -18,11 +18,13 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -97,10 +99,17 @@ func (f *schedFire) storedUAT(t *testing.T, selectors ...string) *store.UserAcce
 // storedUATExpiring is storedUAT with an explicit expiry.
 func (f *schedFire) storedUATExpiring(t *testing.T, exp time.Time, selectors ...string) *store.UserAccessToken {
 	t.Helper()
+	return f.storedUATOwnedBy(t, f.creator.ID, exp, selectors...)
+}
+
+// storedUATOwnedBy stores a live access token for userID holding selectors
+// and returns it.
+func (f *schedFire) storedUATOwnedBy(t *testing.T, userID string, exp time.Time, selectors ...string) *store.UserAccessToken {
+	t.Helper()
 	c := uatCeilingFromSelectors(t, selectors...)
 	tok := &store.UserAccessToken{
 		ID:                   api.NewUUID(),
-		UserID:               f.creator.ID,
+		UserID:               userID,
 		Name:                 "sched-uat",
 		Prefix:               "scion_pat_x",
 		KeyHash:              api.NewUUID(),
@@ -376,6 +385,36 @@ func TestSchedUATRevokedOrExpiredDeniesFire(t *testing.T) {
 	}
 }
 
+// A UAT revision fires only with a recorded token that belongs to the
+// revision principal. A live token of another admitted user, or a revision
+// with no recorded token, denies with no child.
+func TestSchedUATRevisionTokenMustMatchPrincipal(t *testing.T) {
+	t.Run("token owned by another user", func(t *testing.T) {
+		f := newSchedFire(t, "sched-uat-owner")
+		other := hubMemberUser(t, f.store, "sched-uat-owner-other")
+		grantFixtureRole(t, f.bypassAgentsFixture, other.ID, store.ProjectRoleMember)
+		tok := f.storedUATOwnedBy(t, other.ID, time.Now().Add(24*time.Hour), minimalSelectors(t)...)
+		evt := withUATRevision(f.event("sched-uat-owner-c"), tok)
+		evt.InitiatorPrincipalID = f.creator.ID
+
+		err := f.fire(t, evt)
+		require.ErrorIs(t, err, errScheduledAuthorityDenied)
+		assert.Contains(t, err.Error(), "owner does not match")
+		f.assertNoChild(t, "sched-uat-owner-c")
+	})
+	t.Run("no recorded token", func(t *testing.T) {
+		f := newSchedFire(t, "sched-uat-noid")
+		tok := f.storedUAT(t, minimalSelectors(t)...)
+		evt := withUATRevision(f.event("sched-uat-noid-c"), tok)
+		evt.InitiatorCredentialID = ""
+
+		err := f.fire(t, evt)
+		require.ErrorIs(t, err, errScheduledAuthorityDenied)
+		assert.Contains(t, err.Error(), "access token not recorded")
+		f.assertNoChild(t, "sched-uat-noid-c")
+	})
+}
+
 // --- recorded-revision rules -------------------------------------------------
 
 // An event materialized before a re-authorization fires under its own
@@ -421,7 +460,7 @@ func TestSchedLegacyDispatchAgentDenied(t *testing.T) {
 	evt.InitiatorAttribution = store.InitiatorAttribution{InitiatorCredentialKind: store.InitiatorCredentialKindLegacyUnknown}
 	err := f.fire(t, evt)
 	require.ErrorIs(t, err, errScheduledAuthorityUnrecorded)
-	assert.Contains(t, err.Error(), "re-save the schedule")
+	assert.Contains(t, err.Error(), "pause and resume the schedule, or recreate the event")
 	f.assertNoChild(t, "sched-legacy-c")
 }
 
@@ -457,6 +496,82 @@ func TestSchedRevisionWithoutCeilingDenied(t *testing.T) {
 	assert.Equal(t, store.ScheduledEventFailed, res.Items[0].Status)
 	assert.Contains(t, res.Items[0].Error, "schedule authority not recorded")
 	f.assertNoChild(t, "sched-noceil-r")
+}
+
+// The remedy errScheduledAuthorityUnrecorded names writes a revision that
+// fires. A recurring schedule with a recorded attribution and an unrecorded
+// ceiling (the shape of a schedule written before ceilings were recorded)
+// fails its fire; after a pause and a resume it fires and creates the
+// child. A one-shot event recreated through the handler fires too.
+func TestSchedUnrecordedCeilingRemedyFires(t *testing.T) {
+	f := newSchedFire(t, "sched-remedy")
+	ctx := context.Background()
+	// Pause and resume need scheduled_event.update, which the project
+	// owner role grants; the resumer becomes the revision principal.
+	ownerUser := hubMemberUser(t, f.store, "sched-remedy-owner")
+	grantFixtureRole(t, f.bypassAgentsFixture, ownerUser.ID, store.ProjectRoleOwner)
+	owner := authUser(ownerUser)
+	f.srv.scheduler = NewScheduler(f.store, slog.Default())
+	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+
+	sched := &store.Schedule{
+		ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "remedy", CronExpr: "0 * * * *",
+		EventType: "dispatch_agent", Payload: `{"agentName":"sched-remedy-r"}`,
+		Status: store.ScheduleStatusActive, CreatedBy: f.creator.ID,
+		InitiatorAttribution: withSessionRevision(store.ScheduledEvent{}, f.creator.ID).InitiatorAttribution,
+	}
+	require.NoError(t, f.store.CreateSchedule(ctx, sched))
+
+	// fireOnce runs one recurring fire and returns the event it materialized.
+	seen := map[string]bool{}
+	fireOnce := func(t *testing.T) store.ScheduledEvent {
+		t.Helper()
+		sc, err := f.store.GetSchedule(ctx, sched.ID)
+		require.NoError(t, err)
+		f.srv.executeSchedule(ctx, *sc, time.Now())
+		res, err := f.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{ScheduleID: sched.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		var fresh []store.ScheduledEvent
+		for _, e := range res.Items {
+			if !seen[e.ID] {
+				seen[e.ID] = true
+				fresh = append(fresh, e)
+			}
+		}
+		require.Len(t, fresh, 1)
+		return fresh[0]
+	}
+
+	failed := fireOnce(t)
+	assert.Equal(t, store.ScheduledEventFailed, failed.Status)
+	assert.Contains(t, failed.Error, errScheduledAuthorityUnrecorded.Error())
+	f.assertNoChild(t, "sched-remedy-r")
+
+	rec := doAuthoredScheduleRequest(t, f.srv, owner, f.proj.ID, sched.ID+"/pause", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doAuthoredScheduleRequest(t, f.srv, owner, f.proj.ID, sched.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resumed, err := f.store.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, resumed.AuthorityCeiling)
+	assert.Greater(t, resumed.AuthorizationRevision, sched.AuthorizationRevision)
+
+	fired := fireOnce(t)
+	assert.NotEqual(t, store.ScheduledEventFailed, fired.Status, fired.Error)
+	_, edge := f.child(t, "sched-remedy-r")
+	assert.Equal(t, ownerUser.ID, edge.DelegatorID)
+
+	t.Run("recreated one-shot event", func(t *testing.T) {
+		rec := doAuthoredEventRequest(t, f.srv, owner, f.proj.ID,
+			CreateScheduledEventRequest{EventType: "dispatch_agent", FireIn: "1h", AgentName: "sched-remedy-e"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var created store.ScheduledEvent
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+		stored, err := f.store.GetScheduledEvent(ctx, created.ID)
+		require.NoError(t, err)
+		require.NoError(t, f.fire(t, *stored))
+		f.child(t, "sched-remedy-e")
+	})
 }
 
 // --- dev_local revisions -----------------------------------------------------

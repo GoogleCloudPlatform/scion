@@ -110,8 +110,11 @@ func newScheduleAudit(ctx context.Context, mutationType, scheduleID string) *sto
 var (
 	// errScheduledAuthorityUnrecorded: the event carries no recorded
 	// authorization revision (legacy attribution), or a recorded revision
-	// without a recorded ceiling.
-	errScheduledAuthorityUnrecorded = errors.New("schedule authority not recorded; re-save the schedule")
+	// without a recorded ceiling. The remedy it names writes a new
+	// revision: resuming a paused schedule re-authorizes the resumer and
+	// records its ceiling, and creating an event records its author's. A
+	// metadata-only edit writes no revision, so it is not named.
+	errScheduledAuthorityUnrecorded = errors.New("schedule authority not recorded; pause and resume the schedule, or recreate the event")
 	// errScheduledAuthorityDenied: the revision's principal or credential no
 	// longer carries authority, or the revision is inconsistent.
 	errScheduledAuthorityDenied = errors.New("schedule authority denied")

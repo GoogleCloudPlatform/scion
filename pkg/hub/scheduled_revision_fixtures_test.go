@@ -24,7 +24,7 @@ import (
 // scheduled_authority_fixtures_test.go.
 
 // withSessionRevision returns evt carrying the recorded authorization
-// revision a session create or re-save by userID writes: session attribution
+// revision a session create or resume by userID writes: session attribution
 // for the user and the principal ceiling.
 func withSessionRevision(evt store.ScheduledEvent, userID string) store.ScheduledEvent {
 	evt.InitiatorAttribution = store.InitiatorAttribution{
