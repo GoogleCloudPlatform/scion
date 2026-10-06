@@ -174,7 +174,8 @@ start or stop was recorded first. With `--rm`, a queued stop does not remove the
     - `--rm`: Remove the agent after stopping. Once the removal is confirmed, the agent's local
       files (agent directory and worktree) are removed too, as with `scion delete`; its git branch
       is kept. If the Hub accepts the removal but cannot confirm it, or the removal fails, local
-      files are left in place.
+      files are left in place. If the local cleanup itself fails, the command still succeeds and
+      prints a warning suggesting `scion --no-hub delete --preserve-branch <agent-name>`.
     - `-a, --all`: Stop all running agents in the current project. If any agent fails to stop
       (or, with `--rm`, to be removed), the command exits 1. With `--format json` the result
       object (`"status": "partial"`) is still printed on stdout, and no separate error message is added.

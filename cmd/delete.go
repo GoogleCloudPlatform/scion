@@ -370,6 +370,16 @@ func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bo
 	return branchDeleted, err
 }
 
+// noHubDeleteCommand is the command that retries an agent's local cleanup
+// without the Hub. keepBranch adds --preserve-branch, so the retry does not
+// delete a git branch the original command kept.
+func noHubDeleteCommand(agentName string, keepBranch bool) string {
+	if keepBranch {
+		return "scion --no-hub delete --preserve-branch " + agentName
+	}
+	return "scion --no-hub delete " + agentName
+}
+
 // dedupeNames returns names without repeats, keeping the first occurrence
 // of each and the original order.
 func dedupeNames(names []string) []string {
@@ -436,7 +446,7 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	if err != nil {
 		job.lines = append(job.lines,
 			fmt.Sprintf("Warning: Hub record deleted but local cleanup failed for '%s': %v", agentName, err),
-			fmt.Sprintf("Run 'scion --no-hub delete %s' to retry targeted cleanup, or 'scion clean' to reset the project.", agentName))
+			fmt.Sprintf("Run '%s' to retry targeted cleanup, or 'scion clean' to reset the project.", noHubDeleteCommand(agentName, preserveBranch)))
 	}
 	if err == nil {
 		// Progress, printed now rather than in input order, so that after

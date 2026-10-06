@@ -15,9 +15,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -111,7 +113,89 @@ func TestStopAllViaHub_StopWithRmCleansUpLocalFiles(t *testing.T) {
 
 func TestStopRmCleanupWarning(t *testing.T) {
 	w := stopRmCleanupWarning("alpha", errors.New("boom"))
-	assert.Equal(t, "removed via Hub but local cleanup failed: boom; run 'scion --no-hub delete alpha' to retry", w)
+	assert.Equal(t, "removed via Hub but local cleanup failed: boom; run 'scion --no-hub delete --preserve-branch alpha' to retry", w,
+		"stop --rm keeps the branch, so the retry hint must too")
+}
+
+func TestNoHubDeleteCommand(t *testing.T) {
+	assert.Equal(t, "scion --no-hub delete --preserve-branch alpha", noHubDeleteCommand("alpha", true))
+	assert.Equal(t, "scion --no-hub delete alpha", noHubDeleteCommand("alpha", false))
+}
+
+// ptone/scion#2896: when the Hub confirms a stop --rm removal but local
+// cleanup fails, the command still succeeds and reports the failure as a
+// warning: on stderr in text mode, in "warnings" in JSON mode.
+func TestStopViaHub_RmLocalCleanupFailureWarns(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	const wantHint = "local cleanup failed"
+	const wantRetry = "scion --no-hub delete --preserve-branch alpha"
+	for _, tc := range []struct {
+		name string
+		all  bool
+		json bool
+	}{
+		{"single/text", false, false},
+		{"single/json", false, true},
+		{"all/text", true, false},
+		{"all/json", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withStopRm(t, true)
+			hubCtx, deletes := stopTestHub(t, http.StatusOK, `{"id":"a1","name":"alpha","phase":"stopped"}`)
+			agentDir := createAgentDir(t, projectPath, "alpha")
+			// A read-only agents dir makes removing the agent dir fail.
+			agentsDir := filepath.Dir(agentDir)
+			require.NoError(t, os.Chmod(agentsDir, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(agentsDir, 0o755) })
+			if tc.json {
+				outputFormat = "json"
+			}
+
+			var runErr error
+			var stdout string
+			stderr := captureStderr(t, func() {
+				stdout = captureStdout(t, func() {
+					if tc.all {
+						runErr = stopAllAgentsViaHub(hubCtx)
+					} else {
+						runErr = stopAgentViaHub(hubCtx, "alpha")
+					}
+				})
+			})
+			require.NoError(t, runErr, "a local cleanup failure does not fail the command")
+			assert.EqualValues(t, 1, deletes.Load())
+			assert.DirExists(t, agentDir, "cleanup failed, so the files are still there")
+
+			if !tc.json {
+				prefix := "Warning: "
+				if tc.all {
+					prefix = "Agent 'alpha': warning: "
+				}
+				assert.Contains(t, stderr, prefix+"removed via Hub but "+wantHint)
+				assert.Contains(t, stderr, wantRetry)
+				return
+			}
+			var warnings []interface{}
+			if tc.all {
+				var out jsonResultBody
+				require.NoError(t, json.Unmarshal([]byte(jsonBodyOf(stdout)), &out), stdout)
+				assert.Equal(t, "success", out.Status)
+				require.Len(t, out.Results, 1)
+				assert.Equal(t, true, out.Results[0]["removed"])
+				warnings, _ = out.Results[0]["warnings"].([]interface{})
+			} else {
+				var out map[string]interface{}
+				require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
+				assert.Equal(t, "success", out["status"])
+				warnings, _ = out["warnings"].([]interface{})
+			}
+			require.Len(t, warnings, 1, stdout)
+			assert.Contains(t, warnings[0], wantHint)
+			assert.Contains(t, warnings[0], wantRetry)
+		})
+	}
 }
 
 func TestStopAllViaHub_QueuedStopWithRmSkipsDelete(t *testing.T) {
