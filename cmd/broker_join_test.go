@@ -550,6 +550,9 @@ func TestResolveBrokerJoinToken_Sources(t *testing.T) {
 			_, err := resolveBrokerJoinToken(tc.file, strings.NewReader(tc.stdin), io.Discard)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
+			if tc.file != "" && tc.file != "-" {
+				assert.Contains(t, err.Error(), tc.file, "file errors name the path")
+			}
 			assert.NotContains(t, err.Error(), "scion_dev_x")
 			assert.NotContains(t, err.Error(), "hello")
 		})

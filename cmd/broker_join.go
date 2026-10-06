@@ -134,7 +134,7 @@ func resolveBrokerJoinToken(tokenFile string, stdin io.Reader, stderr io.Writer)
 		data, err := readBrokerJoinTokenInput(f)
 		_ = f.Close()
 		if err != nil {
-			return "", fmt.Errorf("failed to read the join token file: %w", err)
+			return "", fmt.Errorf("failed to read the join token file %s: %w", tokenFile, err)
 		}
 		token = data
 	}

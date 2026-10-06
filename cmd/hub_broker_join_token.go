@@ -175,7 +175,7 @@ func writeBrokerJoinTokenOutput(stdout, stderr io.Writer, out brokerJoinTokenOut
 	}
 	_, _ = fmt.Fprintln(stderr, "On the host run:")
 	_, _ = fmt.Fprintf(stderr, "  SCION_HUB_ENDPOINT=%s SCION_BROKER_JOIN_TOKEN=<token> scion runtime-broker join --broker-id %s\n", out.HubEndpoint, out.BrokerID)
-	_, _ = fmt.Fprintf(stderr, "or, with the token in a file (or '-' for stdin):\n")
+	_, _ = fmt.Fprintln(stderr, "or, with the token in a file (or '-' for stdin):")
 	_, _ = fmt.Fprintf(stderr, "  SCION_HUB_ENDPOINT=%s scion runtime-broker join --broker-id %s --token-file <path>\n", out.HubEndpoint, out.BrokerID)
 	_, err := fmt.Fprintln(stdout, out.JoinToken)
 	return err

@@ -6620,8 +6620,8 @@ func (s *Server) nonceCacheEvictionHandler() func(ctx context.Context) {
 }
 
 // brokerJoinTokenCleanupHandler returns a recurring handler, run hourly,
-// that removes expired broker join tokens, which would otherwise stay in the table until
-// someone tried to use them or the broker was deleted.
+// that removes expired broker join tokens. Without it they would stay in
+// the table until someone tried to use them or the broker was deleted.
 func (s *Server) brokerJoinTokenCleanupHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
