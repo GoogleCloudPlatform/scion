@@ -162,7 +162,7 @@ Examples:
   scion hub secret update API_KEY --type variable
   scion hub secret update API_KEY --allow-progeny
   scion hub secret update --project API_KEY --description "Project key"`,
-	Args: cobra.ExactArgs(1),
+	Args: secretUpdateArgs,
 	RunE: runSecretUpdate,
 }
 
@@ -238,7 +238,7 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 		setCount++
 	}
 	if setCount > 1 {
-		return "", "", fmt.Errorf("cannot specify more than one of --scope, --project, and --broker")
+		return "", "", newUsageError("cannot specify more than one of --scope, --project, and --broker")
 	}
 
 	if scopeSet {
@@ -248,7 +248,7 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (scope, s
 		case "user", "":
 			return "user", "", nil
 		default:
-			return "", "", fmt.Errorf("invalid --scope value %q: must be 'hub' or 'user'", secretScope)
+			return "", "", newUsageError("invalid --scope value %q: must be 'hub' or 'user'", secretScope)
 		}
 	}
 
@@ -304,10 +304,10 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 
 	// Validate key
 	if key == "" {
-		return fmt.Errorf("key cannot be empty")
+		return newUsageError("key cannot be empty")
 	}
 	if strings.ContainsAny(key, "= \t\n") {
-		return fmt.Errorf("key cannot contain spaces, tabs, newlines, or '='")
+		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
 	// Handle @filename prefix for file secrets: read file content and base64-encode
@@ -487,34 +487,33 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func runSecretUpdate(cmd *cobra.Command, args []string) error {
-	key := args[0]
-
-	// Validate key
-	if key == "" {
+// secretUpdateArgs is hub secret update's Args validator: exactly one
+// non-empty KEY, at least one metadata flag, and valid --injection-mode /
+// --type values. It runs before root's PersistentPreRunE, so these errors
+// keep the usage block (ptone/scion#2859).
+func secretUpdateArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	if args[0] == "" {
 		return fmt.Errorf("key cannot be empty")
 	}
 
 	// Check that at least one metadata flag is provided
-	descChanged := cmd.Flags().Changed("description")
-	injectionChanged := cmd.Flags().Changed("injection-mode")
-	typeChanged := cmd.Flags().Changed("type")
-	targetChanged := cmd.Flags().Changed("target")
-	progenyChanged := cmd.Flags().Changed("allow-progeny")
-
-	if !descChanged && !injectionChanged && !typeChanged && !targetChanged && !progenyChanged {
+	if !cmd.Flags().Changed("description") && !cmd.Flags().Changed("injection-mode") &&
+		!cmd.Flags().Changed("type") && !cmd.Flags().Changed("target") && !cmd.Flags().Changed("allow-progeny") {
 		return fmt.Errorf("at least one metadata flag must be provided (--description, --injection-mode, --type, --target, --allow-progeny)")
 	}
 
 	// Validate injection-mode if provided
 	injectionMode, _ := cmd.Flags().GetString("injection-mode")
-	if injectionChanged && injectionMode != "always" && injectionMode != "as_needed" {
+	if cmd.Flags().Changed("injection-mode") && injectionMode != "always" && injectionMode != "as_needed" {
 		return fmt.Errorf("injection-mode must be \"always\" or \"as_needed\"")
 	}
 
 	// Validate type if provided
-	secretTypeVal, _ := cmd.Flags().GetString("type")
-	if typeChanged {
+	if cmd.Flags().Changed("type") {
+		secretTypeVal, _ := cmd.Flags().GetString("type")
 		switch secretTypeVal {
 		case "environment", "variable", "file":
 			// valid
@@ -522,6 +521,20 @@ func runSecretUpdate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("type must be one of: environment, variable, file")
 		}
 	}
+	return nil
+}
+
+func runSecretUpdate(cmd *cobra.Command, args []string) error {
+	key := args[0]
+
+	// Arguments and flags were validated by secretUpdateArgs.
+	descChanged := cmd.Flags().Changed("description")
+	injectionChanged := cmd.Flags().Changed("injection-mode")
+	typeChanged := cmd.Flags().Changed("type")
+	targetChanged := cmd.Flags().Changed("target")
+	progenyChanged := cmd.Flags().Changed("allow-progeny")
+	injectionMode, _ := cmd.Flags().GetString("injection-mode")
+	secretTypeVal, _ := cmd.Flags().GetString("type")
 
 	client, scope, scopeID, ctx, cancel, err := resolveHubScope(cmd, resolveSecretScope)
 	if err != nil {

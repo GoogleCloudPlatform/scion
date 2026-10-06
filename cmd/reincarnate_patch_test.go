@@ -69,6 +69,7 @@ func TestValidateReincarnatePatchFlags(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.True(t, isUsageError(err), "a bad flag value is a usage error")
 		})
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -1119,6 +1120,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// the hub sent none, which is every local and file-mode dispatch.
 	ctx = withHubAgentDefaults(ctx, req.Config)
 
+	// Carry the broker-provisioned-worktree signal (set above inside
+	// buildStartContext's tryProvisionWorktree call) into provisioning/start.
+	// See api.ContextWithProvisionedWorktreeRepoRoot for what this unlocks.
+	// No-op unless tryProvisionWorktree actually provisioned a worktree for
+	// this dispatch. Applied before the async-launch branch below so a
+	// launch that goes async still carries the signal into its own
+	// goroutine via ctx.
+	if sc.ProvisionedWorktreeRepoRoot != "" {
+		ctx = api.ContextWithProvisionedWorktreeRepoRoot(ctx, sc.ProvisionedWorktreeRepoRoot)
+	}
+
 	// Non-blocking create (design t1-async-create-v11.md §3.8.2, §7 P1b-1).
 	// ProvisionOnly and Reprovision always stay synchronous (design §3.2).
 	// With AsyncLaunch absent, no LaunchID to track the launch by, or a
@@ -1780,6 +1792,22 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A delete the hub fenced with a deadline is refused once that deadline
+	// has passed, before anything below (the recorded-runtime check
+	// included) can act on it (ptone/scion#2906).
+	var fence deleteFence
+	if isBareDelete {
+		var err error
+		fence, err = parseDeleteNotAfter(r.URL.Query())
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		if s.refuseStaleDelete(w, fence, "arrival", id, projectID, r.URL.Query().Get("runId")) {
+			return
+		}
+	}
+
 	// Every request below except start acts on an existing agent: target the
 	// runtime that holds it, checking the runtime type the hub recorded for
 	// it first, and answer 503 only when no runtime lists the agent and this
@@ -1811,7 +1839,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.getAgent(w, r, id, projectID)
 	case http.MethodDelete:
-		s.deleteAgent(w, r, id, projectID)
+		s.deleteAgentFenced(w, r, id, projectID, fence)
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
@@ -1839,7 +1867,21 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 	NotFound(w, "Agent")
 }
 
+// deleteAgent deletes the agent, parsing the delete's deadline itself. For
+// callers that bypass handleAgentByID (tests); the route uses
+// deleteAgentFenced with the deadline it already parsed and checked.
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	fence, err := parseDeleteNotAfter(r.URL.Query())
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	s.deleteAgentFenced(w, r, id, projectID, fence)
+}
+
+// deleteAgentFenced deletes the agent. fence is the delete's deadline,
+// already parsed and checked on arrival by handleAgentByID.
+func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, projectID string, fence deleteFence) {
 	ctx := r.Context()
 
 	ctx, span := tracer.Start(ctx, "broker.agent.delete")
@@ -1880,6 +1922,10 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		return
 	}
 
+	// fence (notAfter, ptone/scion#2906) was checked on arrival by
+	// handleAgentByID; it is checked again below once the target is
+	// resolved.
+
 	// Cancel any in-flight start of this agent on this broker first, before
 	// resolving the delete target: a start still blocked in provisioning
 	// (for example, skill resolution) may have no container or listable
@@ -1893,6 +1939,16 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
 		"agent_id", id, "project_id", projectID, "run_id", runID)
 	target, err := s.resolveDeleteTarget(ctx, id, projectID, runID, query.Get("projectPath"), deleteFiles || softDelete)
+	// Resolution can be slow (it lists every runtime), so check the deadline
+	// again before the first side effect after it: the leftover cleanup of
+	// a not-found, the launch cancel, the soft-delete marking and
+	// DeleteTarget. Only a small marker-file read (agentFilesRunOwner) and
+	// in-memory launch-registry checks (otherRunInFlight) run between here
+	// and DeleteTarget.
+	if s.refuseStaleDelete(w, fence, "resolved", id, projectID, runID) {
+		span.SetStatus(codes.Error, "stale delete dispatch")
+		return
+	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetRunMismatch) {
@@ -2388,7 +2444,16 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if opts.ProjectPath != "" {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	// A saved profile names the runtime this existing agent was created
+	// on; if settings cannot resolve it, fail rather than start the agent
+	// on the default runtime (ptone/scion#2709). buildStartContext already
+	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
+	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "", slog.LevelDebug)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		writeSavedProfileUnresolved(w, err)
+		return
+	}
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(opts)
@@ -2965,7 +3030,17 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// a real side effect. A rejection here must leave the agent exactly as
 	// it was; running this after the stop would return 400 with the agent
 	// already stopped. See the identical re-check and comment in startAgent.
-	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
+	// As in startAgent, an unresolvable saved profile fails before the
+	// stop below instead of falling back to the default runtime.
+	// The profile is read by id but the recorded-runtime fallback reads
+	// agent-info.json by opts.Name (the container's name). If they differ
+	// the fallback cannot fire and the 503 is returned, which fails safe.
+	// buildStartContext already logged any fallback at Warn; Debug here.
+	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(opts, opts.Profile != "", slog.LevelDebug)
+	if err != nil {
+		writeSavedProfileUnresolved(w, err)
+		return
+	}
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(opts)
@@ -4934,16 +5009,51 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 // is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
+	mgr, runtimeType, _ := s.resolveManagerForOptsStrict(opts, false, slog.LevelWarn)
+	return mgr, runtimeType
+}
+
+// errSavedProfileUnresolved marks a start or restart of an existing agent
+// whose saved profile (agent-info.json) cannot be resolved against the
+// project's settings, so the broker cannot tell which runtime holds the
+// agent. Handlers return it as a retryable 503 (RuntimeUnavailable) rather
+// than running the agent on the broker's default runtime (ptone/scion#2709).
+var errSavedProfileUnresolved = errors.New("saved runtime profile cannot be resolved")
+
+// loadRuntimeSettings loads the settings resolveManagerForOptsStrict reads:
+// s.loadSettings when a test sets it, config.LoadEffectiveSettings otherwise.
+func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettings, []string, error) {
+	if s.loadSettings != nil {
+		return s.loadSettings(projectDir)
+	}
+	return config.LoadEffectiveSettings(projectDir)
+}
+
+// resolveManagerForOptsStrict is resolveManagerForOpts with an error result.
+// With strict set, used when opts.Profile is an existing agent's saved
+// profile, a settings load failure, missing settings or a profile/runtime
+// the settings do not define returns errSavedProfileUnresolved instead of
+// the broker's default manager, unless the agent's recorded runtime
+// (AgentInfo.Runtime) is the default runtime, in which case the default is
+// used (savedProfileUnresolved) and logged at fallbackLevel. Without
+// strict the error is always nil and those cases fall back to the
+// default, as for a fresh start.
+//
+// The returned error is sent to the client, so it names only the agent,
+// the profile and a fixed cause; it does not include file paths or
+// settings content. The full detail is logged here at Warn, once per
+// failure.
+func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool, fallbackLevel slog.Level) (agent.Manager, string, error) {
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
 			// A ForceRuntime naming the default runtime returns s.manager
 			// here, bypassing the per-profile resolution below entirely —
 			// a second profile of the same runtime type with its own
 			// runtime config is not reachable under ForceRuntime.
-			return s.manager, s.runtime.Name()
+			return s.manager, s.runtime.Name(), nil
 		}
 		if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
-			return aux.Manager, aux.Runtime.Name()
+			return aux.Manager, aux.Runtime.Name(), nil
 		}
 		s.agentLifecycleLog.Warn("ForceRuntime does not match default runtime, falling back to settings resolution", "force", s.config.ForceRuntime, "default", s.runtime.Name())
 	}
@@ -4954,13 +5064,27 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// back to the broker's default runtime either way, but a malformed
 	// settings file should leave a trace.
 	projectDir, _ := config.GetResolvedProjectDir(opts.ProjectPath)
-	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	vs, _, err := s.loadRuntimeSettings(projectDir)
+	if err != nil && strict {
+		return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, err,
+			fmt.Errorf("%w: agent %q profile %q: project settings could not be loaded",
+				errSavedProfileUnresolved, opts.Name, opts.Profile))
+	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("failed to load project settings for runtime resolution; using broker default runtime",
 			"projectDir", projectDir, "error", err)
 	}
 	if vs == nil {
-		return s.manager, s.runtime.Name()
+		// Defensive: LoadEffectiveSettings returns non-nil settings
+		// whenever err is nil (it layers the embedded defaults), so a
+		// project with no settings file reaches ResolveRuntime below and
+		// fails there with "profile not found" instead.
+		if strict {
+			return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, errors.New("no project settings found"),
+				fmt.Errorf("%w: agent %q profile %q: no project settings found",
+					errSavedProfileUnresolved, opts.Name, opts.Profile))
+		}
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// ResolveRuntime("") uses vs.ActiveProfile as the fallback. The
@@ -4976,8 +5100,14 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// default is also Kubernetes).
 	rtConfig, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
+		if strict {
+			// ResolveRuntime's errors name only the profile and runtime
+			// ("profile %q not found", "runtime %q not found for profile %q").
+			return s.savedProfileUnresolved(opts, projectDir, fallbackLevel, err,
+				fmt.Errorf("%w: agent %q: %v", errSavedProfileUnresolved, opts.Name, err))
+		}
 		// Profile or its runtime not found in settings; use default
-		return s.manager, s.runtime.Name()
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// Cheap pre-check: a profile matching the broker's own default runtime
@@ -5001,7 +5131,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// requested profile is the one the default runtime was built from; it
 	// relies on the capability instead.
 	if s.defaultRuntimeMatchesProfile(runtimeType, rtConfig) && !scionrt.HasPerProfileInstances(s.runtime) {
-		return s.manager, s.runtime.Name()
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// Resolve the profile's runtime so its true identity can be compared
@@ -5046,7 +5176,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 		// identity to compare or register. Wrap it in a manager so the
 		// caller's calls surface the underlying error, the same contract
 		// callers get for any other runtime construction failure.
-		return agent.NewManager(resolved), resolved.Name()
+		return agent.NewManager(resolved), resolved.Name(), nil
 	}
 
 	// A PerProfileInstancesRuntime default never short-circuits here either,
@@ -5056,7 +5186,7 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	// a runtime would otherwise collapse to one identity and incorrectly
 	// share the default manager.
 	if !scionrt.HasPerProfileInstances(s.runtime) && auxiliaryRuntimeIdentity(resolved) == auxiliaryRuntimeIdentity(s.runtime) {
-		return s.manager, s.runtime.Name()
+		return s.manager, s.runtime.Name(), nil
 	}
 
 	// Keyed by resolved IDENTITY, not type (see auxiliaryRuntimeIdentity):
@@ -5068,7 +5198,45 @@ func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, st
 	s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
 	s.auxiliaryRuntimesMu.Unlock()
 
-	return mgr, resolved.Name()
+	return mgr, resolved.Name(), nil
+}
+
+// savedProfileUnresolved handles a strict resolution failure. If the
+// agent's agent-info.json records that it last ran on the broker's default
+// runtime, that runtime is still the right one, so it returns the default
+// manager and logs the fallback at level. Otherwise it logs cause and
+// returns clientErr, which handlers write as the 503.
+//
+// agent-info.json records only the runtime type, so the fallback applies
+// only where a type match is an identity match: not for Kubernetes (the
+// identity includes context and namespace, see auxiliaryRuntimeIdentity)
+// and not for runtimes with per-profile instances. Those get the 503.
+func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
+	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
+		recorded == s.runtime.Name() &&
+		!scionrt.HasPerProfileInstances(s.runtime) &&
+		auxiliaryRuntimeIdentity(s.runtime) == s.runtime.Name() {
+		s.agentLifecycleLog.Log(context.Background(), level, "saved runtime profile cannot be resolved; agent last ran on the broker default runtime, using it",
+			"agent", opts.Name, "profile", opts.Profile, "runtime", recorded, "projectDir", projectDir, "error", cause)
+		return s.manager, s.runtime.Name(), nil
+	}
+	s.logSavedProfileUnresolved(opts, projectDir, cause)
+	return nil, "", clientErr
+}
+
+// logSavedProfileUnresolved records why a saved profile could not be
+// resolved, with the detail the client response leaves out.
+func (s *Server) logSavedProfileUnresolved(opts api.StartOptions, projectDir string, err error) {
+	s.agentLifecycleLog.Warn("saved runtime profile cannot be resolved; refusing to use the broker default runtime",
+		"agent", opts.Name, "profile", opts.Profile, "projectDir", projectDir, "error", err)
+}
+
+// writeSavedProfileUnresolved writes errSavedProfileUnresolved as a
+// retryable 503 (runtime_unavailable, Retry-After: 30): the agent's runtime
+// is not available on this broker until its profile resolves again.
+func writeSavedProfileUnresolved(w http.ResponseWriter, err error) {
+	w.Header().Set("Retry-After", recordedRuntimeRetryAfterSeconds)
+	RuntimeUnavailable(w, err.Error()+"; the agent's runtime is not available on this broker, retry once its profile is configured")
 }
 
 // recheckHubDefaultPassthrough re-runs the hub-default passthrough gate's
