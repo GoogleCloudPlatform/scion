@@ -89,7 +89,7 @@ func runRegistriesAdd(cmd *cobra.Command, args []string) error {
 
 	endpoint, _ := cmd.Flags().GetString("endpoint")
 	if endpoint == "" {
-		return fmt.Errorf("--endpoint is required")
+		return newUsageError("--endpoint is required")
 	}
 
 	trust, _ := cmd.Flags().GetString("trust")
@@ -265,7 +265,7 @@ func runRegistriesPin(cmd *cobra.Command, args []string) error {
 
 	hash, _ := cmd.Flags().GetString("hash")
 	if hash == "" {
-		return fmt.Errorf("--hash is required")
+		return newUsageError("--hash is required")
 	}
 
 	req := &hubclient.PinSkillHashRequest{
