@@ -170,6 +170,20 @@ func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
 		}
 	}
 
+	// Near-miss lengths and unanchored matches are names, not hashes: each
+	// keeps its own value (the pattern is exactly 64 hex, anchored at both
+	// ends).
+	for _, c := range []struct{ ref, want string }{
+		{hex[:63], hex[:63]},
+		{hex + "a", hex + "a"},
+		{"sha256:" + strings.ToUpper(hex[:63]), "sha256:" + strings.ToUpper(hex[:63])},
+		{"/var/cache/scion/templates/" + upperHex + "A", upperHex + "A"},
+	} {
+		if got := FriendlyTemplateName(c.ref); got != c.want {
+			t.Errorf("FriendlyTemplateName(%q) = %q, want %q (not a 64-hex hash)", c.ref, got, c.want)
+		}
+	}
+
 	// Through the typed error, as the broker sees it.
 	for _, dir := range []string{hex, upperHex, "sha256:" + upperHex, "SHA256:" + mixedHex} {
 		if n := NewTemplateNotFoundError("/var/cache/scion/templates/"+dir, "x").Name; n != "" {
