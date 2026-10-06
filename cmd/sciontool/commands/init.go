@@ -3026,8 +3026,9 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	}
 
 	// This switch deliberately follows the supervisor's own privilege-drop
-	// decision (pkg/sciontool/supervisor: drop only when UID > 0 && GID > 0,
-	// refuse when RequirePrivilegeDrop is set and it cannot drop), because the
+	// decision (the Credential block in supervisor.Supervisor.Run: drop only
+	// when UID > 0 && GID > 0, refuse with ErrPrivilegeDropRequired when
+	// RequirePrivilegeDrop is set and it cannot drop), because the
 	// harness that later reads this .gitconfig runs under exactly that
 	// identity. A uid>0 with gid==0 in unenforced mode is therefore NOT a
 	// distinct workload: the supervisor skips the drop, the harness runs as
@@ -3088,9 +3089,9 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	return nil
 }
 
-// configureGitCommandGetuid is os.Getuid, swappable in tests so the
-// root-init path (Credential set to the workload) can be exercised without
-// running the test process as root.
+// configureGitCommandGetuid is a test-only seam: production never reassigns
+// it. Tests stub it to 0 to reach configureGitCommand's root-init branch
+// without running as root.
 var configureGitCommandGetuid = os.Getuid
 
 // configureGitCommand points cmd's environment and (when this process is

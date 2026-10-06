@@ -3514,13 +3514,17 @@ func TestConfigureSharedWorkspaceGit_EnforcedRefusesWithoutUsableUID(t *testing.
 // both write into a 0700 t.TempDir owned by the test process. A dropped
 // child therefore never produces its file: as non-root, the Credential exec
 // itself fails with EPERM; as root, the dropped child cannot write into the
-// directory. An undropped child always can. getuid is stubbed to 0 for
+// directory. An undropped child always can. "drop" is only inferred from
+// that expected failure (EPERM at start, or a nonzero exit as root); any
+// other outcome fails the test rather than being read as a drop. getuid is
+// stubbed to 0 for
 // configureGitCommand so a non-root test process takes the same root-init
 // path production does.
 func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T) {
 	if os.Getuid() == 4242 {
 		t.Skip("test process uid collides with the workload uid used here")
 	}
+	runningAsRoot := os.Getuid() == 0
 	origGetuid := configureGitCommandGetuid
 	configureGitCommandGetuid = func() int { return 0 }
 	t.Cleanup(func() { configureGitCommandGetuid = origGetuid })
@@ -3551,13 +3555,25 @@ func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T)
 			marker := filepath.Join(t.TempDir(), "ran")
 			cfg := supervisor.DefaultConfig()
 			cfg.UID, cfg.GID, cfg.RequirePrivilegeDrop = tc.uid, tc.gid, tc.enforced
-			_, supErr := supervisor.New(cfg).Run(context.Background(), []string{"sh", "-c", "touch " + marker})
-			supGot := self
+			// touch is exec'd directly (no shell), so the temp path is
+			// passed as one argv element whatever characters it contains.
+			exit, supErr := supervisor.New(cfg).Run(context.Background(), []string{"touch", marker})
+			var supGot string
 			switch {
 			case errors.Is(supErr, supervisor.ErrPrivilegeDropRequired):
 				supGot = refuse
-			case !fileExists(marker):
+			case supErr == nil && exit == 0 && fileExists(marker):
+				supGot = self
+			case !runningAsRoot && errors.Is(supErr, syscall.EPERM):
+				// Non-root cannot set a Credential: the drop is the
+				// start failure itself.
 				supGot = drop
+			case runningAsRoot && supErr == nil && exit != 0 && !fileExists(marker):
+				// Root can drop; the dropped child then cannot write
+				// into the 0700 test-owned directory.
+				supGot = drop
+			default:
+				t.Fatalf("supervisor probe: unclassifiable outcome (exit=%d, err=%v, marker=%v)", exit, supErr, fileExists(marker))
 			}
 
 			// Git-config side: what identity does the .gitconfig write use?
@@ -3590,7 +3606,10 @@ func TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision(t *testing.T)
 
 // TestConfigureGitCommand_RootInitSetsWorkloadCredential pins the "runs as
 // the container user" half directly: from root init, a usable uid/gid pair
-// gets a Credential for exactly that pair; a uid<=0 gets none.
+// gets a Credential for exactly that pair; a uid<=0 gets none. A uid>0 with
+// gid==0 also gets a Credential (uid:0): configureSharedWorkspaceGit never
+// passes that input (its switch requires gid>0 first), but gitCloneWorkspace
+// can, so today's behaviour is pinned here.
 func TestConfigureGitCommand_RootInitSetsWorkloadCredential(t *testing.T) {
 	origGetuid := configureGitCommandGetuid
 	configureGitCommandGetuid = func() int { return 0 }
@@ -3603,6 +3622,15 @@ func TestConfigureGitCommand_RootInitSetsWorkloadCredential(t *testing.T) {
 	}
 	if c := cmd.SysProcAttr.Credential; c.Uid != 4242 || c.Gid != 4343 {
 		t.Errorf("Credential = %d:%d, want 4242:4343", c.Uid, c.Gid)
+	}
+
+	cmd = exec.Command("git")
+	configureGitCommand(cmd, 4242, 0)
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
+		t.Fatal("uid>0, gid 0: expected a Credential from root init")
+	}
+	if c := cmd.SysProcAttr.Credential; c.Uid != 4242 || c.Gid != 0 {
+		t.Errorf("uid>0, gid 0: Credential = %d:%d, want 4242:0", c.Uid, c.Gid)
 	}
 
 	cmd = exec.Command("git")
