@@ -141,7 +141,7 @@ type cancelingCreateDispatcher struct {
 	createErr     error
 
 	heldBeforeCleanup reservationsHeld
-	ctxNotCanceled    bool
+	dispatchCtxErr    error
 	delete            ctxObservation
 	// credJTI is a credential the mock records for the agent, standing in
 	// for the one a real dispatcher mints, so the test can observe whether
@@ -162,7 +162,9 @@ func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Co
 		ExpiresAt:    now.Add(time.Hour),
 	}))
 	d.cancelRequest()
-	d.ctxNotCanceled = !awaitCanceled(ctx) // the handler's ctx is the request's
+	// Since ptone/scion#1961 the dispatch runs detached from the request:
+	// the request is canceled, but the dispatch ctx must stay live.
+	d.dispatchCtxErr = ctx.Err()
 	if d.createErr != nil {
 		return nil, d.createErr
 	}
@@ -223,7 +225,7 @@ func TestCreateAgent_CanceledRequest_FailureCleanupStillRuns(t *testing.T) {
 			serve()
 
 			require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
-			require.False(t, disp.ctxNotCanceled, "the dispatcher must see the request ctx canceled")
+			require.NoError(t, disp.dispatchCtxErr, "the dispatch ctx must not follow the canceled request (ptone/scion#1961)")
 			agentID := disp.capturedAgent.ID
 			assertReservationsHeldBeforeCleanup(t, disp.heldBeforeCleanup)
 

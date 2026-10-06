@@ -1242,6 +1242,9 @@ func (s *Server) handleExistingAgent(
 		// The agent is marked starting for the dispatch so the quota
 		// reconcile keeps the slot (ptone/scion#2014); beginStartDispatch
 		// requires the lifecycle op.
+		// From the reservation on, the resume no longer follows the client
+		// (ptone/scion#1961); the dispatch is bounded by syncDispatch.
+		ctx = detachLaunchFromClient(ctx)
 		defer s.beginLifecycleOp(existingAgent.ID)()
 		sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 		if !ok {
@@ -1256,7 +1259,9 @@ func (s *Server) handleExistingAgent(
 			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
+		if err := syncDispatch(ctx, func(dctx context.Context) error {
+			return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, resume)
+		}); err != nil {
 			sd.rollback(ctx)
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
@@ -1365,6 +1370,10 @@ func (s *Server) handleExistingAgent(
 			// starting for the dispatch so the quota reconcile keeps the
 			// slot (ptone/scion#2014); beginStartDispatch requires the
 			// lifecycle op.
+			// From the reservation on, the restart no longer follows the
+			// client (ptone/scion#1961); the dispatch is bounded by
+			// syncDispatch.
+			ctx = detachLaunchFromClient(ctx)
 			defer s.beginLifecycleOp(existingAgent.ID)()
 			sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 			if !ok {
@@ -1375,7 +1384,9 @@ func (s *Server) handleExistingAgent(
 				writeRunIntentError(w, err, existingAgent.ID)
 				return existingAgentErrored
 			}
-			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
+			if err := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, forcedRecovery)
+			}); err != nil {
 				sd.rollback(ctx)
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
@@ -1527,11 +1538,16 @@ func (s *Server) handleExistingAgent(
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
+		// From here the start no longer follows the client
+		// (ptone/scion#1961); the dispatch is bounded by syncDispatch.
+		ctx = detachLaunchFromClient(ctx)
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+		if err := syncDispatch(ctx, func(dctx context.Context) error {
+			return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, false)
+		}); err != nil {
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
