@@ -1139,6 +1139,8 @@ describe('AgentStore delta probe', () => {
   });
 
   it('never brings back an agent deleted on an earlier feed that the next feed holds', async () => {
+    // A hard delete publishes `deleted` before it removes the record, so the
+    // server still lists the agent, and counts it, until the removal lands.
     const h = await loaded([row('a1', 1), row('a2', 2)]);
     await h.emitAgent('deleted', { agentId: 'a1' });
     const release = h.server.pause();
@@ -1156,13 +1158,13 @@ describe('AgentStore delta probe', () => {
     h.store.retain(HUB, (snapshot) => published.push(ids(snapshot)));
     const walks = h.server.walks();
     h.server.agents[0] = row('a1', 10);
-    h.server.totalCount = 1;
     await tick();
     expect(h.server.probes()).toBe(1);
+    // The server's count differs from the list, so one walk follows, and it
+    // keeps the agent out as well.
+    expect(h.server.walks()).toBe(walks + 1);
     expect(published.filter((list) => list.includes('a1'))).toEqual([]);
     expect(ids(h.store.peek(HUB))).toEqual(['a2']);
-    // The list matches the server's count, so no walk follows.
-    expect(h.server.walks()).toBe(walks);
   });
 
   it('never sets the completeness flag', async () => {
