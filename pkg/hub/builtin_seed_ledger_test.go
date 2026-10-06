@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/resources"
@@ -275,5 +276,45 @@ func TestIsBuiltinName(t *testing.T) {
 		if isBuiltinName(tc.kind, tc.slug) {
 			t.Errorf("isBuiltinName(%s, %q) = true, want false", tc.kind, tc.slug)
 		}
+	}
+}
+
+// TestIsBuiltinName_CoversEmbedOnlyHarnesses guards that every harness config
+// config.UpdateDefaultTemplates seeds onto disk is known to isBuiltinName.
+// Embed-only harnesses are seeded alongside the resources catalog; if that
+// list becomes non-empty, isBuiltinName must learn about it.
+func TestIsBuiltinName_CoversEmbedOnlyHarnesses(t *testing.T) {
+	for _, h := range harness.EmbedOnlyHarnesses() {
+		if !isBuiltinName(storage.ResourceKindHarnessConfig, api.Slugify(h.Name())) {
+			t.Errorf("embed-only harness %q is seeded on disk but isBuiltinName does not know it; deleting it would not stick on workstation hubs", h.Name())
+		}
+	}
+}
+
+// TestBuiltinSeedLedger_FailClosed verifies the fail-closed ledger used after
+// a load error: every name is seen and save never writes.
+func TestBuiltinSeedLedger_FailClosed(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	if _, err := s.UpsertHubSetting(ctx, builtinSeedLedgerSection, json.RawMessage(`"not-a-ledger"`), "test", -1, "seeded"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.loadBuiltinSeedLedger(ctx); err == nil {
+		t.Fatal("expected a decode error for a non-object ledger value")
+	}
+
+	l := newFailClosedBuiltinSeedLedger()
+	if !l.Seen(storage.ResourceKindHarnessConfig, "anything") || !l.Seen(storage.ResourceKindTemplate, "default") {
+		t.Error("fail-closed ledger must report every name as seen")
+	}
+	l.Mark(storage.ResourceKindHarnessConfig, "claude")
+	before, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err := srv.saveBuiltinSeedLedger(ctx, l); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if after.Revision != before.Revision {
+		t.Error("fail-closed ledger save must not write")
 	}
 }

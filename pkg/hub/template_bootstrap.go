@@ -54,9 +54,15 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 
 	// Seeded-built-ins ledger (ptone/scion#3544): a deleted built-in stays
 	// deleted even though UpdateDefaultTemplates re-materializes it on disk.
-	ledger, err := s.loadBuiltinSeedLedger(ctx)
-	if err != nil {
-		return fmt.Errorf("template bootstrap: %w", err)
+	// If the ledger cannot be loaded, fail closed for built-ins only: no
+	// missing built-in is created, but user dirs are still imported and
+	// existing rows still synced. The load error is returned at the end.
+	ledger, loadErr := s.loadBuiltinSeedLedger(ctx)
+	if loadErr != nil {
+		loadErr = fmt.Errorf("template bootstrap: %w", loadErr)
+		s.templateLog.Error("template bootstrap: cannot load built-in seed ledger; not creating missing built-ins this run",
+			"error", loadErr)
+		ledger = newFailClosedBuiltinSeedLedger()
 	}
 	const kind = storage.ResourceKindTemplate
 
@@ -96,6 +102,11 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			}
 			imported++
 		} else {
+			// A row exists, so the name counts as seeded even if the
+			// sync below fails (same rule as the hosted path).
+			if builtin {
+				ledger.Mark(kind, slug)
+			}
 			// Existing template — check if local files have changed
 			oldHash := existing.ContentHash
 			changed, err := s.syncExistingTemplate(ctx, existing, templatePath, false)
@@ -109,9 +120,6 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 				warnBootstrapOverwrite(s.templateLog, "template", name, existing.ID, templatePath, oldHash,
 					s.currentTemplateHash(ctx, existing.ID))
 			}
-			if builtin {
-				ledger.Mark(kind, slug)
-			}
 		}
 	}
 
@@ -120,6 +128,9 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			"imported", imported, "updated", updated)
 	}
 
+	if loadErr != nil {
+		return loadErr
+	}
 	return s.saveBuiltinSeedLedger(ctx, ledger)
 }
 

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1438,5 +1439,54 @@ func TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted(t *testing.T) {
 	doc := readBuiltinSeedLedgerDoc(t, s)
 	if doc == nil || !reflect.DeepEqual(doc.Templates, []string{"default"}) {
 		t.Errorf("ledger templates = %+v, want [default]", doc)
+	}
+}
+
+// TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins is the
+// template sibling of the harness-config corrupt-ledger test.
+func TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	templatesDir := filepath.Join(globalDir, "templates")
+	scope := string(store.TemplateScopeGlobal)
+
+	if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatal(err)
+	}
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.UpsertHubSetting(ctx, builtinSeedLedgerSection, json.RawMessage(`"not-a-ledger"`),
+		"test", -1, "seeded"); err != nil {
+		t.Fatal(err)
+	}
+	userTmpl := filepath.Join(templatesDir, "my-template")
+	if err := os.MkdirAll(userTmpl, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err == nil {
+		t.Fatal("expected an error for an unreadable ledger")
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "my-template", scope, ""); err != nil {
+		t.Errorf("user template not imported with a corrupt ledger: %v", err)
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted default template re-created with a corrupt ledger (err=%v)", err)
 	}
 }

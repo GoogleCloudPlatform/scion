@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -802,5 +803,65 @@ func TestBootstrapHarnessConfigsFromDir_UserDirStillImported(t *testing.T) {
 	}
 	if doc := readBuiltinSeedLedgerDoc(t, s); doc != nil {
 		t.Errorf("non-built-in import wrote the ledger: %+v", doc)
+	}
+}
+
+// TestBootstrapHarnessConfigsFromDir_CorruptLedgerFailsClosedForBuiltins
+// verifies that an unreadable ledger row does not stop user dirs from being
+// imported, does not let a deleted built-in come back, is not overwritten,
+// and is reported as an error.
+func TestBootstrapHarnessConfigsFromDir_CorruptLedgerFailsClosedForBuiltins(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	hcDir := filepath.Join(globalDir, "harness-configs")
+	const victim = "claude"
+	const userName = "my-custom-config"
+
+	if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, hcDir); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	hc, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Corrupt the ledger row (non-JSON value) and add a user dir.
+	if _, err := s.UpsertHubSetting(ctx, builtinSeedLedgerSection, json.RawMessage(`"not-a-ledger"`),
+		"test", -1, "seeded"); err != nil {
+		t.Fatalf("corrupt ledger: %v", err)
+	}
+	corrupt, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	userDir := filepath.Join(hcDir, userName)
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:latest\nuser: scion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = srv.BootstrapHarnessConfigsFromDir(ctx, hcDir)
+	if err == nil {
+		t.Fatal("expected an error for an unreadable ledger")
+	}
+	if _, err := s.GetHarnessConfigBySlug(ctx, userName, store.HarnessConfigScopeGlobal, ""); err != nil {
+		t.Errorf("user dir not imported with a corrupt ledger: %v", err)
+	}
+	if _, err := s.GetHarnessConfigBySlug(ctx, victim, store.HarnessConfigScopeGlobal, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted built-in %q re-created with a corrupt ledger (err=%v)", victim, err)
+	}
+	after, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if after.Revision != corrupt.Revision || string(after.Value) != string(corrupt.Value) {
+		t.Errorf("corrupt ledger row was overwritten: rev %d -> %d, value %s", corrupt.Revision, after.Revision, after.Value)
 	}
 }

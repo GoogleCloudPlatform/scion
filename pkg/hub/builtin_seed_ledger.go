@@ -64,6 +64,10 @@ type builtinSeedLedger struct {
 	added   map[storage.ResourceKind]map[string]bool
 	removed map[storage.ResourceKind]map[string]bool
 	dirty   bool
+	// failClosed is set when the stored ledger could not be loaded. Every
+	// name then reports as Seen, so no missing built-in is (re)created, and
+	// save is skipped so the unreadable row is never overwritten.
+	failClosed bool
 }
 
 func newBuiltinSeedLedger() *builtinSeedLedger {
@@ -72,6 +76,15 @@ func newBuiltinSeedLedger() *builtinSeedLedger {
 		added:   map[storage.ResourceKind]map[string]bool{},
 		removed: map[storage.ResourceKind]map[string]bool{},
 	}
+}
+
+// newFailClosedBuiltinSeedLedger returns a ledger for use when the stored
+// ledger could not be loaded: every name is treated as seen and save is a
+// no-op.
+func newFailClosedBuiltinSeedLedger() *builtinSeedLedger {
+	l := newBuiltinSeedLedger()
+	l.failClosed = true
+	return l
 }
 
 func setAdd(m map[storage.ResourceKind]map[string]bool, kind storage.ResourceKind, slug string) {
@@ -83,7 +96,7 @@ func setAdd(m map[storage.ResourceKind]map[string]bool, kind storage.ResourceKin
 
 // Seen reports whether slug of the given kind has ever been seeded.
 func (l *builtinSeedLedger) Seen(kind storage.ResourceKind, slug string) bool {
-	return l.seen[kind][slug]
+	return l.failClosed || l.seen[kind][slug]
 }
 
 // Mark records slug of the given kind as seeded. It marks the ledger dirty
@@ -170,7 +183,7 @@ func (s *Server) loadBuiltinSeedLedger(ctx context.Context) (*builtinSeedLedger,
 // example HA replicas, normally serialized by LockBundledResources) converge
 // on the union of their names.
 func (s *Server) saveBuiltinSeedLedger(ctx context.Context, l *builtinSeedLedger) error {
-	if l == nil || !l.dirty {
+	if l == nil || !l.dirty || l.failClosed {
 		return nil
 	}
 	rev := l.rev
@@ -224,6 +237,12 @@ func (s *Server) saveBuiltinSeedLedger(ctx context.Context, l *builtinSeedLedger
 
 // isBuiltinName reports whether slug names a bundled resource of the given
 // kind in this binary's catalog.
+//
+// It covers the resources catalog only. config.UpdateDefaultTemplates also
+// seeds harness.EmbedOnlyHarnesses() onto disk; that list is empty today.
+// If it ever becomes non-empty, those names must be added here or a deleted
+// embed-only harness config will be re-imported on workstation hubs.
+// TestIsBuiltinName_CoversEmbedOnlyHarnesses guards this.
 func isBuiltinName(kind storage.ResourceKind, slug string) bool {
 	switch kind {
 	case storage.ResourceKindHarnessConfig:

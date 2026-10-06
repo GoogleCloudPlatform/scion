@@ -50,9 +50,15 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 
 	// Seeded-built-ins ledger (ptone/scion#3544): a deleted built-in stays
 	// deleted even though UpdateDefaultTemplates re-materializes it on disk.
-	ledger, err := s.loadBuiltinSeedLedger(ctx)
-	if err != nil {
-		return fmt.Errorf("harness config bootstrap: %w", err)
+	// If the ledger cannot be loaded, fail closed for built-ins only: no
+	// missing built-in is created, but user dirs are still imported and
+	// existing rows still synced. The load error is returned at the end.
+	ledger, loadErr := s.loadBuiltinSeedLedger(ctx)
+	if loadErr != nil {
+		loadErr = fmt.Errorf("harness config bootstrap: %w", loadErr)
+		s.resourceLog.Error("harness config bootstrap: cannot load built-in seed ledger; not creating missing built-ins this run",
+			"error", loadErr)
+		ledger = newFailClosedBuiltinSeedLedger()
 	}
 	const kind = storage.ResourceKindHarnessConfig
 
@@ -98,6 +104,11 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			}
 			imported++
 		} else {
+			// A row exists, so the name counts as seeded even if the
+			// sync below fails (same rule as the hosted path).
+			if builtin {
+				ledger.Mark(kind, slug)
+			}
 			oldHash := existing.ContentHash
 			changed, err := s.syncExistingHarnessConfig(ctx, existing, dirPath, hcDir, false)
 			if err != nil {
@@ -110,9 +121,6 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 				warnBootstrapOverwrite(s.resourceLog, "harness-config", name, existing.ID, dirPath, oldHash,
 					s.currentHarnessConfigHash(ctx, existing.ID))
 			}
-			if builtin {
-				ledger.Mark(kind, slug)
-			}
 		}
 	}
 
@@ -121,6 +129,9 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 			"imported", imported, "updated", updated)
 	}
 
+	if loadErr != nil {
+		return loadErr
+	}
 	return s.saveBuiltinSeedLedger(ctx, ledger)
 }
 
