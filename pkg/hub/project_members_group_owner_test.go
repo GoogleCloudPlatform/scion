@@ -213,8 +213,12 @@ func TestBackfillClearProjectMembersGroupOwners(t *testing.T) {
 	require.NoError(t, s.UpdateGroup(ctx, hubKeyGroup))
 
 	ident := NewAuthenticatedUser(f.creator.ID, f.creator.Email, f.creator.DisplayName, "member", "api")
-	require.True(t, f.srv.authzService.CheckAccess(ctx, ident, groupResource(hubKeyGroup), ActionAddMember).Allowed,
-		"precondition: legacy OwnerID gives the removed creator group.addMember")
+	// The removed creator holds no project access, so the legacy OwnerID on
+	// this project-scoped group grants no group.addMember even before the
+	// backfill: the owner relationship requires active project access
+	// (ptone/scion#2141).
+	require.False(t, f.srv.authzService.CheckAccess(ctx, ident, groupResource(hubKeyGroup), ActionAddMember).Allowed,
+		"the removed creator has no group.addMember without project access")
 
 	// A second project whose members group carries only the entadapter key.
 	legacyProject := &store.Project{

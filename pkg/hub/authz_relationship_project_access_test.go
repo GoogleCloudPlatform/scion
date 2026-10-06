@@ -47,9 +47,29 @@ import (
 // store fault inside the admission lookup.
 type rpaStore struct {
 	store.Store
-	mu             sync.Mutex
-	getUserCalls   map[string]int
-	failGetUserFor string
+	mu              sync.Mutex
+	getUserCalls    map[string]int
+	failGetUserFor  string
+	failBindingsFor string
+}
+
+// ListRoleBindingsForPrincipals fails when the closure's first (direct)
+// principal is failBindingsFor: a binding lookup fault, a fault class
+// distinct from the GetUser fault.
+func (s *rpaStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+	s.mu.Lock()
+	fail := s.failBindingsFor != "" && len(principals) > 0 && principals[0].ID == s.failBindingsFor
+	s.mu.Unlock()
+	if fail {
+		return nil, errors.New("injected: binding lookup failure")
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+func (s *rpaStore) setBindingFault(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failBindingsFor = id
 }
 
 func (s *rpaStore) GetUser(ctx context.Context, id string) (*store.User, error) {
@@ -123,6 +143,19 @@ func (f *rpaFixture) expiringMember(t *testing.T, id string, expiresAt time.Time
 		ScopeType: store.RoleScopeProject, ScopeID: f.projectID, ExpiresAt: &expiresAt, CreatedBy: "test",
 	})
 	require.NoError(t, err)
+}
+
+// clearBindings removes every role binding held directly by userID (the
+// test server seeds system bindings for the dev user), so project access
+// comes only from what the test grants.
+func (f *rpaFixture) clearBindings(t *testing.T, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	bindings, err := f.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		require.NoError(t, f.store.DeleteRoleBinding(ctx, b.ID))
+	}
 }
 
 // rpaPrincipal names the two principal classes every row runs for.
@@ -242,7 +275,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 	for _, kind := range rpaPrincipals {
 		kind := kind
 
-		// an active direct project binding admits. The member reads
+		// An active direct project binding admits. The member reads
 		// another member's agent through the project role (no relationship
 		// involved); the admission source is the direct membership.
 		t.Run("DirectBindingAdmits_"+string(kind), func(t *testing.T) {
@@ -264,7 +297,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			}
 		})
 
-		// valid system authority with no membership row admits. The
+		// Valid system authority with no membership row admits. The
 		// super-admin created the agent; with Explain, the owner candidate
 		// is evaluated and passes the stage on system authority alone.
 		t.Run("SystemAuthorityWithoutMembershipAdmits_"+string(kind), func(t *testing.T) {
@@ -289,7 +322,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			}
 		})
 
-		// the creator/owner with current access admits through the
+		// The creator/owner with current access admits through the
 		// owner relationship (the member role does not grant attach).
 		t.Run("OwnerWithAccessAdmits_"+string(kind), func(t *testing.T) {
 			f := newRPAFixture(t, "a3"+string(kind))
@@ -301,7 +334,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			assertRelationshipAdmit(t, out, RelationshipRuleOwner)
 		})
 
-		// an ancestor with current access admits through the ancestor
+		// An ancestor with current access admits through the ancestor
 		// relationship.
 		t.Run("AncestorWithAccessAdmits_"+string(kind), func(t *testing.T) {
 			f := newRPAFixture(t, "a4"+string(kind))
@@ -313,7 +346,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			assertRelationshipAdmit(t, out, RelationshipRuleAncestor)
 		})
 
-		// the owner/creator with only historical ancestry (no current
+		// The owner/creator with only historical ancestry (no current
 		// project binding) is denied.
 		t.Run("OwnerWithHistoricalAncestryOnlyDenied_"+string(kind), func(t *testing.T) {
 			f := newRPAFixture(t, "b1"+string(kind))
@@ -325,7 +358,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			assertProjectAccessDeny(t, kind, out, RelationshipRuleOwner, RelationshipRejectProjectAccess)
 		})
 
-		// an ancestor with no current access is denied.
+		// An ancestor with no current access is denied.
 		t.Run("AncestorWithoutAccessDenied_"+string(kind), func(t *testing.T) {
 			f := newRPAFixture(t, "b2"+string(kind))
 			userID := tid("rpa-b2-user-" + string(kind))
@@ -336,7 +369,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			assertProjectAccessDeny(t, kind, out, RelationshipRuleAncestor, RelationshipRejectProjectAccess)
 		})
 
-		// removing the final qualifying binding denies on the next
+		// Removing the final qualifying binding denies on the next
 		// check. Admitted first, then the binding row is deleted.
 		t.Run("FinalBindingRemovedDenied_"+string(kind), func(t *testing.T) {
 			f := newRPAFixture(t, "b3"+string(kind))
@@ -356,7 +389,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			assertProjectAccessDeny(t, kind, after, RelationshipRuleAncestor, RelationshipRejectProjectAccess)
 		})
 
-		// expiry of the final qualifying binding denies on the next
+		// Expiry of the final qualifying binding denies on the next
 		// check. Admitted while the binding is live, then re-checked after
 		// its ExpiresAt has passed.
 		t.Run("FinalBindingExpiredDenied_"+string(kind), func(t *testing.T) {
@@ -379,7 +412,7 @@ func TestRelationshipProjectAccess(t *testing.T) {
 			assertProjectAccessDeny(t, kind, after, RelationshipRuleAncestor, RelationshipRejectProjectAccess)
 		})
 
-		// a store fault in the admission lookup fails closed with its
+		// A store fault in the admission lookup fails closed with its
 		// own reject kind and the resolution-error tag. Admitted first, then
 		// a GetUser fault is injected for the principal.
 		t.Run("LookupFaultDenied_"+string(kind), func(t *testing.T) {
@@ -589,6 +622,7 @@ func TestRelationshipProjectAccess_DevPrincipal(t *testing.T) {
 	if _, err := f.store.GetUser(ctx, dev.ID()); err != nil {
 		f.hubUser(t, dev.ID())
 	}
+	f.clearBindings(t, dev.ID())
 	res := agentResource(&store.Agent{ID: tid("rpa-dev-agent"), ProjectID: f.projectID, OwnerID: dev.ID()})
 
 	d := decidePerm(f.srv.authzService, dev, res, ActionAttach, "agent.attach", true)
@@ -841,4 +875,153 @@ func TestRelationshipProjectAccess_DecideRefusalIdentical(t *testing.T) {
 		"the former member's refusal must be identical to an unrelated user's")
 	assert.NotContains(t, formerRec.Body.String(), RelationshipRejectProjectAccess)
 	assert.NotContains(t, formerRec.Body.String(), "relationship grant")
+}
+
+// TestRelationshipProjectAccess_MessageFaultRefusalIdentical pins that a
+// lookup fault in the messaging ancestry admission produces exactly the
+// refusal an unrelated non-member gets from the message handler, for a
+// lineage-mode and a project-mode agent.
+func TestRelationshipProjectAccess_MessageFaultRefusalIdentical(t *testing.T) {
+	for _, mode := range []string{store.MessageModeLineage, store.MessageModeProject} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			f := newRPAFixture(t, "msgfaultsame"+mode)
+			ctx := context.Background()
+			memberID := tid("rpa-msgfaultsame-member-" + mode)
+			outsiderID := tid("rpa-msgfaultsame-outsider-" + mode)
+			uatpMember(t, f.store, f.projectID, memberID)
+			f.hubUser(t, outsiderID)
+			agent := f.messageAgent(t, "faultsame-"+mode, mode, memberID, f.ownerID)
+
+			member, err := f.store.GetUser(ctx, memberID)
+			require.NoError(t, err)
+			outsider, err := f.store.GetUser(ctx, outsiderID)
+			require.NoError(t, err)
+			body := map[string]interface{}{"message": "hello", "interrupt": false}
+			path := "/api/v1/agents/" + agent.ID + "/message"
+
+			// The fault is injected into the authorization store only.
+			f.counting.setFault(memberID)
+			before := f.counting.calls(memberID)
+			faultRec := doRequestAsUser(t, f.srv, member, http.MethodPost, path, body)
+			require.Greater(t, f.counting.calls(memberID), before, "the ancestry admission must have run and faulted")
+			outsiderRec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, path, body)
+
+			require.Equal(t, http.StatusForbidden, outsiderRec.Code, "outsider: %s", outsiderRec.Body.String())
+			assert.Equal(t, outsiderRec.Code, faultRec.Code)
+			assert.Equal(t, outsiderRec.Body.String(), faultRec.Body.String(),
+				"a lookup fault must be indistinguishable from an unrelated sender's refusal")
+		})
+	}
+}
+
+// TestRelationshipProjectAccess_MessageAncestorKinds pins which sender
+// kinds the messaging ancestry admission admits without a project check:
+// only a UAT holder (gated by uatMessageGate). A federated user, or any
+// other kind that is not a local user, is not admitted.
+func TestRelationshipProjectAccess_MessageAncestorKinds(t *testing.T) {
+	f := newRPAFixture(t, "msgkinds")
+	ctx := context.Background()
+	agent := f.messageAgent(t, "kinds", store.MessageModeLineage, f.ownerID)
+	res := agentResource(agent)
+
+	scoped := rpaIdentity(rpaUAT, f.ownerID, f.projectID)
+	admitted, fault := f.srv.authzService.messageAncestorProjectAccess(ctx, scoped, f.projectID, res)
+	assert.True(t, admitted, "a UAT holder is checked by uatMessageGate")
+	assert.False(t, fault)
+
+	fed := NewFederatedUserIdentity("https://peer.example", f.ownerID, "fed@test.com", "Fed", "member", nil)
+	admitted, fault = f.srv.authzService.messageAncestorProjectAccess(ctx, fed, f.projectID, res)
+	assert.False(t, admitted, "a non-local principal is not admitted")
+	assert.False(t, fault)
+
+	agentIdent := newFullAgentIdentity(tid("rpa-msgkinds-agent"), f.projectID, []string{f.ownerID}, allRegisteredAgentScopes())
+	admitted, fault = f.srv.authzService.messageAncestorProjectAccess(ctx, agentIdent, f.projectID, res)
+	assert.False(t, admitted, "an agent principal is not admitted")
+	assert.False(t, fault)
+}
+
+// TestRelationshipProjectAccess_MessageDevPrincipal pins that the dev
+// principal's ancestry allow requires project access. authorizeAgentMessage
+// admits the dev user earlier through the platform-admin shortcut (its role
+// is "admin"), so the user-sender path is called directly here.
+func TestRelationshipProjectAccess_MessageDevPrincipal(t *testing.T) {
+	f := newRPAFixture(t, "msgdev")
+	ctx := context.Background()
+	dev := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@test.com"})
+	if _, err := f.store.GetUser(ctx, dev.ID()); err != nil {
+		f.hubUser(t, dev.ID())
+	}
+	f.clearBindings(t, dev.ID())
+	agent := f.messageAgent(t, "dev", store.MessageModeLineage, dev.ID(), f.ownerID)
+
+	allowed, reason := f.srv.authorizeUserToAgent(ctx, dev, agent)
+	assert.False(t, allowed, "dev ancestor without access: %s", reason)
+
+	grantProjectAccessOnly(t, f.store, dev.ID(), f.projectID)
+
+	allowed, reason = f.srv.authorizeUserToAgent(ctx, dev, agent)
+	assert.True(t, allowed, "dev ancestor with access: %s", reason)
+	assert.Equal(t, "user in target ancestry", reason)
+}
+
+// TestRelationshipProjectAccess_RefusalSurfaces pins that the scheduled
+// message handler (whose error is stored as ScheduledEvent.Error) and the
+// broker-routed delivery result carry one constant public refusal for a
+// former-member ancestor, two distinct lookup fault classes, an unrelated
+// non-member and (scheduled) a target agent that does not exist.
+func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
+	for _, mode := range []string{store.MessageModeLineage, store.MessageModeProject} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			f := newRPAFixture(t, "surfaces"+mode)
+			ctx := context.Background()
+			formerID := tid("rpa-surfaces-former-" + mode)
+			userFaultID := tid("rpa-surfaces-userfault-" + mode)
+			bindingFaultID := tid("rpa-surfaces-bindingfault-" + mode)
+			outsiderID := tid("rpa-surfaces-outsider-" + mode)
+			for _, id := range []string{formerID, userFaultID, bindingFaultID} {
+				uatpMember(t, f.store, f.projectID, id)
+			}
+			f.hubUser(t, outsiderID)
+			agent := f.messageAgent(t, "surfaces-"+mode, mode, formerID, userFaultID, bindingFaultID, f.ownerID)
+
+			uatpDeleteProjectBinding(t, f.store, formerID, f.projectID)
+			f.counting.setFault(userFaultID)
+			f.counting.setBindingFault(bindingFaultID)
+
+			handler := f.srv.messageEventHandler()
+			fire := func(creatorID, agentID string) string {
+				t.Helper()
+				payload := `{"agentId":"` + agentID + `","message":"hello"}`
+				err := handler(ctx, store.ScheduledEvent{
+					ID: tid("rpa-surfaces-evt-" + creatorID + agentID), ProjectID: f.projectID,
+					EventType: "message", Payload: payload, CreatedBy: creatorID,
+				})
+				require.Error(t, err, "scheduled message from %s must be refused", creatorID)
+				return err.Error()
+			}
+			routed := func(userID string) routedDeliveryResult {
+				t.Helper()
+				return f.srv.dispatchRoutedRecipient(ctx, dispatchRoutedParams{
+					agent:  agent,
+					sender: rpaIdentity(rpaInteractive, userID, f.projectID),
+					now:    time.Now(),
+				})
+			}
+
+			want := errScheduledMessageRefused.Error()
+			assert.Equal(t, want, fire(outsiderID, agent.ID), "scheduled: outsider")
+			assert.Equal(t, want, fire(formerID, agent.ID), "scheduled: former member")
+			assert.Equal(t, want, fire(userFaultID, agent.ID), "scheduled: user lookup fault")
+			assert.Equal(t, want, fire(bindingFaultID, agent.ID), "scheduled: binding lookup fault")
+			assert.Equal(t, want, fire(outsiderID, tid("rpa-surfaces-missing-"+mode)), "scheduled: missing target")
+
+			outsiderRouted := routed(outsiderID)
+			assert.Equal(t, routedDeliveryResult{AgentSlug: agent.Slug, Type: "mention", Status: "unauthorized", Error: routedRefusalError}, outsiderRouted)
+			assert.Equal(t, outsiderRouted, routed(formerID), "routed: former member")
+			assert.Equal(t, outsiderRouted, routed(userFaultID), "routed: user lookup fault")
+			assert.Equal(t, outsiderRouted, routed(bindingFaultID), "routed: binding lookup fault")
+		})
+	}
 }
