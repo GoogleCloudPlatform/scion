@@ -269,7 +269,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
 				return nil, ref.dmError()
 			}
-			if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
+			if refusal := s.launchRefusalFromError(launchCtx, agent.ID, err); refusal != nil {
 				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
 					"agent_id", agent.ID, "code", refusal.Code)
 				return nil, refusal.dmError()
