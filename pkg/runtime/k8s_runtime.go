@@ -3301,8 +3301,10 @@ func (r *KubernetesRuntime) syncFromPod(ctx context.Context, namespace, podName,
 	return nil
 }
 
-func (r *KubernetesRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, RunRef{ID: id})
+// Stop is Delete on Kubernetes: ref.RunID is enforced by Delete (a pod of
+// another run is left untouched and ErrRunMismatch is returned).
+func (r *KubernetesRuntime) Stop(ctx context.Context, ref RunRef) error {
+	return r.Delete(ctx, ref)
 }
 
 // Delete removes the pod ref.ID and its secrets. ref.ID is the pod name, or
