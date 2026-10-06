@@ -620,3 +620,40 @@ func TestAskUser_ExpiredCleanupRunsOncePerInterval(t *testing.T) {
 
 	assert.Equal(t, len(steps), store.createCount(), "every question records a pending entry")
 }
+
+// TestAskUser_ExpiredCleanupRunsOnceForConcurrentSends checks that
+// questions posted at the same instant, once the cleanup interval has
+// passed, delete expired ask-user entries exactly once between them.
+func TestAskUser_ExpiredCleanupRunsOnceForConcurrentSends(t *testing.T) {
+	ctx := context.Background()
+	const channelID = "chan-ask"
+	const senders = 16
+	b, _, _, _ := newAskUserFixture(t, channelID)
+	store := &cleanupCountingStore{Store: b.store}
+	b.store = store
+
+	start := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	now := start
+	b.now = func() time.Time { return now }
+
+	topic := projectkeys.UserTopic("proj-1", "alice")
+	require.NoError(t, b.Publish(ctx, topic, askUserQuestion("First question?", `["yes","no"]`)))
+	require.Equal(t, 1, store.count(), "first send cleans up")
+
+	now = start.Add(askUserCleanupInterval)
+	var wg sync.WaitGroup
+	errs := make([]error, senders)
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = b.Publish(ctx, topic, askUserQuestion(fmt.Sprintf("Concurrent question %d?", i), `["yes","no"]`))
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		require.NoError(t, err, "send %d", i)
+	}
+	assert.Equal(t, 2, store.count(), "the concurrent sends clean up exactly once between them")
+}
