@@ -16,9 +16,7 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -433,10 +431,8 @@ func runEnvGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get environment variable: %w", err)
 	}
 
-	if envOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(envVar)
+	if wantJSON(envOutputJSON) {
+		return outputJSON(newEnvVarOutput(envVar))
 	}
 
 	if envVar.Sensitive {
@@ -464,10 +460,8 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to list environment variables: %w", err)
 	}
 
-	if envOutputJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(resp)
+	if wantJSON(envOutputJSON) {
+		return outputJSON(newEnvListOutput(scope, resp.EnvVars))
 	}
 
 	if len(resp.EnvVars) == 0 {
@@ -485,6 +479,46 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// envVarOutput is the JSON shape of one env var in "scion hub env get"
+// and "scion hub env list". It carries the fields the text output shows;
+// Value is left out when the variable is sensitive.
+type envVarOutput struct {
+	Key           string `json:"key"`
+	Value         string `json:"value,omitempty"`
+	Scope         string `json:"scope"`
+	Sensitive     bool   `json:"sensitive"`
+	InjectionMode string `json:"injectionMode,omitempty"`
+	Secret        bool   `json:"secret"`
+}
+
+// envListOutput is the JSON shape of "scion hub env list".
+type envListOutput struct {
+	Scope   string         `json:"scope"`
+	EnvVars []envVarOutput `json:"envVars"`
+}
+
+func newEnvVarOutput(v *hubclient.EnvVar) envVarOutput {
+	out := envVarOutput{
+		Key:           v.Key,
+		Scope:         v.Scope,
+		Sensitive:     v.Sensitive,
+		InjectionMode: v.InjectionMode,
+		Secret:        v.Secret,
+	}
+	if !v.Sensitive {
+		out.Value = v.Value
+	}
+	return out
+}
+
+func newEnvListOutput(scope string, vars []hubclient.EnvVar) envListOutput {
+	out := envListOutput{Scope: scope, EnvVars: make([]envVarOutput, 0, len(vars))}
+	for i := range vars {
+		out.EnvVars = append(out.EnvVars, newEnvVarOutput(&vars[i]))
+	}
+	return out
 }
 
 // formatEnvAnnotations builds an annotation string for injection mode and secret status.
