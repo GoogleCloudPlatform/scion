@@ -258,16 +258,16 @@ func TestDispatch_HubAgentDefaults_ProviderInstalledByServer(t *testing.T) {
 // call and is the only non-deterministic member. Everything else, including the
 // two derived UUIDs, is stable across runs.
 //
-// Golden updated: buildCreateRequest now always writes an explicit
-// SCION_METADATA_MODE (and a same-request SCION_METADATA_MODE_SOURCE marker)
-// into resolvedEnv/envClassifications instead of leaving the key absent when
-// the agent has no GCP identity configured, so this fixed input — which has
-// none — now carries both keys with the secure-default "block" value. This is
-// an intended change to the payload, not an incidental one.
+// Golden updated: buildCreateRequest always writes the
+// SCION_METADATA_MODE_SOURCE=hub marker into resolvedEnv/envClassifications.
+// This fixed input has no GCP identity configured, so SCION_METADATA_MODE
+// itself is absent and the broker applies its runtime default ("block" on
+// every runtime except Kubernetes, "passthrough" on Kubernetes). This is an
+// intended change to the payload, not an incidental one.
 func TestDispatch_FileMode_RequestJSONUnchanged(t *testing.T) {
-	const preChangeGolden = `{"config":{},"envClassifications":{"SCION_METADATA_MODE":"plain",` +
+	const preChangeGolden = `{"config":{},"envClassifications":{` +
 		`"SCION_METADATA_MODE_SOURCE":"plain"},"id":"8de2cea5-95b0-5ee2-a75a-c4d168aff6a7",` +
-		`"name":"test-agent","projectId":"","resolvedEnv":{"SCION_METADATA_MODE":"block",` +
+		`"name":"test-agent","projectId":"","resolvedEnv":{` +
 		`"SCION_METADATA_MODE_SOURCE":"hub"},"slug":"test-agent",` +
 		`"userId":"b88f5d8f-14e6-5a0a-8f6c-6b720a0f672c"}`
 
@@ -356,7 +356,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 // still marshal the key and would make the broker-side rung "fire" with zero
 // values, which is how file-mode parity would silently break.
 func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
-	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil); got != nil {
+	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil); got != nil {
 		t.Errorf("want nil for empty section, got %+v", got)
 	}
 	// The two hub-resolved fields alone must not put the field on the wire:
@@ -364,18 +364,18 @@ func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
 	d := opsettings.AgentDefaultsSettings{}
 	d.DefaultTemplate = "team-default"
 	d.DefaultHarnessConfig = "claude-vertex"
-	if got := remoteHubAgentDefaults(d, nil); got != nil {
+	if got := remoteHubAgentDefaults(d, nil, nil); got != nil {
 		t.Errorf("template/harness-config defaults must not travel here, got %+v", got)
 	}
 	// A single limit is enough to send.
 	d = opsettings.AgentDefaultsSettings{}
 	d.DefaultMaxTurns = 50
-	if got := remoteHubAgentDefaults(d, nil); got == nil || got.MaxTurns != 50 {
+	if got := remoteHubAgentDefaults(d, nil, nil); got == nil || got.MaxTurns != 50 {
 		t.Errorf("want MaxTurns 50 on the wire, got %+v", got)
 	}
 	// The hub auto-expose default alone is enough to send, false included.
 	off := false
-	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off)
+	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off, nil)
 	if got == nil || got.AutoExposePorts == nil || *got.AutoExposePorts {
 		t.Errorf("want autoExposePorts=false on the wire, got %+v", got)
 	}

@@ -50,10 +50,10 @@ var execSiteAllowlist = map[string]string{
 	// Runs before RunInit populates any workload-owned directory, so no
 	// workload-influenceable PATH entry exists yet: realigning the "scion"
 	// system account's uid/gid.
-	"cmd/sciontool/commands/init.go:2231": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2236": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2364": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
-	"cmd/sciontool/commands/init.go:2373": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2234": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2239": "before workload setup (host-user realignment); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2367": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
+	"cmd/sciontool/commands/init.go:2376": "before workload setup (direct /etc/passwd,/etc/group sed fallback); no workload-influenceable PATH entry exists yet",
 
 	// gitCloneWorkspace's clone-path git calls (including detectDefaultBranch,
 	// which it calls into): configureGitCommand sets a Credential to (uid,
@@ -66,18 +66,18 @@ var execSiteAllowlist = map[string]string{
 	// base. Either way the call is not otherwise reachable by a
 	// workload-influenceable PATH, which is what this guard itself checks
 	// for.
-	"cmd/sciontool/commands/init.go:2605": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2700": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2629": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2644": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2714": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2725": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2744": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2771": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2763": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2775": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:2785": "runs as the workload uid via Credential whenever uid>0",
-	"cmd/sciontool/commands/init.go:3132": "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
+	"cmd/sciontool/commands/init.go:2608": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2703": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2632": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2647": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2717": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2728": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2747": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2774": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2766": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2778": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:2788": "runs as the workload uid via Credential whenever uid>0",
+	"cmd/sciontool/commands/init.go:3135": "runs as the workload uid via Credential whenever uid>0 (git ls-remote for default-branch detection during clone)",
 
 	// The harness-provision subcommand's own subprocess: under
 	// RequirePrivilegeDrop, hooks.buildDroppedProvisionCmd sets Credential
@@ -100,7 +100,7 @@ var execSiteAllowlist = map[string]string{
 	// path is an absolute path built by the caller, not a bare name — PATH
 	// is never consulted for it, so there is nothing for this guard to
 	// resolve through rootexec.
-	"pkg/sciontool/hooks/lifecycle.go:310": "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
+	"pkg/sciontool/hooks/lifecycle.go:311": "non-enforced branch (EnforcePrivilegeDrop unset); path is an absolute path, not a bare name",
 
 	// supervisor.Run: args[0] is the operator/harness-selected entrypoint.
 	// Run() sets a Credential before Start() whenever UID/GID are supplied,
@@ -111,14 +111,14 @@ var execSiteAllowlist = map[string]string{
 	// happens in the (root) parent using its inherited PATH, and the
 	// resulting process runs as the workload's own uid whenever that
 	// happens.
-	"pkg/sciontool/supervisor/supervisor.go:145": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	"pkg/sciontool/supervisor/supervisor.go:146": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
 
 	// services.Manager.start: svc.spec.Command[0] comes from a workload-
 	// supplied services.yaml. start() itself requires uid/gid>0 (or fails
 	// closed with services.ErrPrivilegeDropRequired under
 	// requirePrivilegeDrop) before any service is started — the identical
 	// Go-level drop-before-exec model as supervisor.Run.
-	"pkg/sciontool/services/manager.go:392": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
+	"pkg/sciontool/services/manager.go:393": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
 
 	// runExec's shPath is assigned a few lines above from execResolve("sh")
 	// (production: rootexec.Resolve) and used here as both the exec target

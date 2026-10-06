@@ -116,9 +116,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	explicitSlug := baseSlug != ""
 	if !explicitSlug {
 		baseSlug = api.Slugify(req.Name)
+	} else if isReservedProjectSlug(baseSlug) {
+		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
 	}
 
-	slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -489,7 +492,7 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 				srcPath := srcHC.StoragePath + "/" + file.Path
 				dstPath := storagePath + "/" + file.Path
 				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-					_ = stor.DeletePrefix(ctx, storagePath)
+					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 					return err
 				}
 			}
@@ -497,7 +500,7 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 
 		if err := s.store.CreateHarnessConfig(ctx, newHC); err != nil {
 			if stor != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 			}
 			return err
 		}
@@ -509,7 +512,7 @@ func (s *Server) cloneProjectHarnessConfigs(ctx context.Context, srcProjectID st
 		stor := s.GetStorage()
 		if stor != nil {
 			prefix := storage.HarnessConfigStoragePath(s.HubID(), store.HarnessConfigScopeProject, clone.ID, "")
-			_ = stor.DeletePrefix(rbCtx, prefix)
+			_ = stor.DeletePrefix(rbCtx, storage.DirPrefix(prefix))
 		}
 		if _, err := s.store.DeleteHarnessConfigsByScope(rbCtx, store.HarnessConfigScopeProject, clone.ID); err != nil {
 			slog.Warn("project clone rollback: failed to delete harness configs",
@@ -568,7 +571,7 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 				srcPath := srcTmpl.StoragePath + "/" + file.Path
 				dstPath := storagePath + "/" + file.Path
 				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-					_ = stor.DeletePrefix(ctx, storagePath)
+					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 					return err
 				}
 			}
@@ -576,7 +579,7 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 
 		if err := s.store.CreateTemplate(ctx, newTmpl); err != nil {
 			if stor != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 			}
 			return err
 		}
@@ -588,7 +591,7 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 		stor := s.GetStorage()
 		if stor != nil {
 			prefix := storage.TemplateStoragePath(s.HubID(), store.TemplateScopeProject, clone.ID, "")
-			_ = stor.DeletePrefix(rbCtx, prefix)
+			_ = stor.DeletePrefix(rbCtx, storage.DirPrefix(prefix))
 		}
 		if _, err := s.store.DeleteTemplatesByScope(rbCtx, store.TemplateScopeProject, clone.ID); err != nil {
 			slog.Warn("project clone rollback: failed to delete templates",

@@ -39,9 +39,9 @@ import (
 // item when every field is populated.
 var compactItemAllowlist = []string{
 	"id", "slug", "name", "template", "projectId", "project", "labels",
-	"phase", "activity", "containerStatus", "messageMode", "ancestry",
+	"phase", "activity", "containerStatus", "message", "messageMode", "ancestry",
 	"createdBy", "creatorName", "created", "updated", "lastActivityEvent",
-	"_capabilities", "_messageability",
+	"_capabilities", "_messageability", "deletion",
 }
 
 // compactCaller is one identity class making requests through the real
@@ -373,7 +373,7 @@ func creatorNameOf(t *testing.T, fullItem map[string]json.RawMessage) json.RawMe
 //     item for the same agent with a byte-identical value (creatorName
 //     against appliedConfig.creatorName), so compact is a strict subset;
 //   - every allowlisted value the full item carries non-empty is present
-//     in the compact item, and _capabilities/_messageability are
+//     in the compact item, and _capabilities/_messageability/deletion are
 //     byte-identical including absence;
 //   - no appliedConfig key at any depth of the compact body;
 //   - identical decision audit records, in order.
@@ -432,7 +432,7 @@ func assertCompactParity(t *testing.T, label string, p viewPair) int {
 				assert.Contains(t, ci, k, "%s: item %d: full value of %q dropped from compact", label, i, k)
 			}
 		}
-		for _, k := range []string{"_capabilities", "_messageability"} {
+		for _, k := range []string{"_capabilities", "_messageability", "deletion"} {
 			assert.Equal(t, string(fi[k]), string(ci[k]), "%s: item %d %s (including absence)", label, i, k)
 		}
 	}
@@ -571,6 +571,120 @@ func TestAgentCompactView_ParityWithFullViewForEveryIdentityClassAndMode(t *test
 	}
 }
 
+// deletionParityModes is the subset of list modes the deletion parity test
+// walks: legacy, a sorted cursor walk, and a fit answer.
+var deletionParityModes = []string{
+	"",
+	"sort=updated&dir=desc&limit=3",
+	"sort=updated&fit=500",
+}
+
+// TestAgentCompactView_DeletionViewParityForEveryIdentityClass seeds a live
+// deleting view on one agent and a failed view on another, both readable to
+// every identity class that reads any agent of the project, and leaves every
+// other agent with no delete. For every identity class that reads the
+// project's agents on an endpoint (the fixture's classes, plus a project
+// admin), it checks that each compact item's deletion bytes equal the full
+// item's for the same agent and caller: the deleting view, the failed view,
+// and the explicit null both views emit when no delete is active or failed.
+// Every other cell, a runtime broker identity on both endpoints among them,
+// is checked to read nothing: both views answer the cell's exact status, a
+// 403 or a 200 with an empty list.
+func TestAgentCompactView_DeletionViewParityForEveryIdentityClass(t *testing.T) {
+	f := compactSetup(t)
+	deletingID, failedID := f.agentIDAt(1), f.agentIDAt(4)
+	seedAgentDeletion(t, f.store, deletingID, deleteSeed{state: store.DeletionStateDeleting, leaseIn: time.Hour})
+	seedAgentDeletion(t, f.store, failedID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+	errMsg := "broker unreachable"
+	n, err := f.store.UpdateAgentDeletion(context.Background(), failedID, store.DeletionPredicate{}, store.DeletionFields{Error: &errMsg})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	adminID := tid("cv-project-admin")
+	createTestUserWithProjectRole(t, f.store, adminID, "cv-project-admin@test.com", f.project.ID, store.ProjectRoleAdmin)
+	admin, err := f.store.GetUser(context.Background(), adminID)
+	require.NoError(t, err)
+	brokerIdent := NewBrokerIdentity(tid("cv-broker"))
+	callers := append(append([]compactCaller{}, f.callers...),
+		compactCaller{"project-admin", func(t *testing.T, path string) *httptest.ResponseRecorder {
+			return doRequestAsUser(t, f.srv, admin, http.MethodGet, path, nil)
+		}},
+		compactCaller{"runtime-broker", func(t *testing.T, path string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			ctx := contextWithBrokerIdentity(req.Context(), brokerIdent)
+			req = req.WithContext(contextWithIdentity(ctx, brokerIdent))
+			rec := httptest.NewRecorder()
+			f.srv.mux.ServeHTTP(rec, req)
+			return rec
+		}},
+	)
+
+	// Identity classes that read no agent of the project on an endpoint,
+	// each with the status both views answer: a 403, or a 200 with an
+	// empty list.
+	blind := map[string]int{
+		"hub-admin-non-member global":  http.StatusOK,
+		"hub-admin-non-member project": http.StatusForbidden,
+		"agent-jwt global":             http.StatusOK,
+		"runtime-broker global":        http.StatusOK,
+		"runtime-broker project":       http.StatusForbidden,
+	}
+	for _, c := range callers {
+		for _, ep := range []struct{ name, base string }{{"global", f.globalBase()}, {"project", f.projectBase()}} {
+			cell := c.name + " " + ep.name
+			for _, mode := range deletionParityModes {
+				f.walkParity(t, c, ep.name, ep.base, mode)
+			}
+			p := f.requestBothViews(t, c, ep.base, "sort=updated&fit=500")
+			if wantStatus, ok := blind[cell]; ok {
+				assert.Equal(t, wantStatus, p.full.Code, "%s: full view status: %s", cell, p.full.Body.String())
+				assert.Equal(t, wantStatus, p.compact.Code, "%s: compact view status: %s", cell, p.compact.Body.String())
+				if wantStatus == http.StatusOK {
+					assert.Empty(t, mustDecodeListAgentsResponse(t, p.full.Body).Agents, "%s: full view reads no agents", cell)
+					assert.Empty(t, mustDecodeListAgentsResponse(t, p.compact.Body).Agents, "%s: compact view reads no agents", cell)
+				}
+				continue
+			}
+			require.Equal(t, http.StatusOK, p.full.Code, "%s: %s", cell, p.full.Body.String())
+			require.Equal(t, http.StatusOK, p.compact.Code, "%s: %s", cell, p.compact.Body.String())
+			fullItems := decodeItems(t, decodeObject(t, p.full.Body.Bytes())["agents"])
+			compItems := decodeItems(t, decodeObject(t, p.compact.Body.Bytes())["agents"])
+			require.Len(t, compItems, len(fullItems), cell)
+			seen := map[string]bool{}
+			for i := range fullItems {
+				var id string
+				require.NoError(t, json.Unmarshal(compItems[i]["id"], &id))
+				fd, fok := fullItems[i]["deletion"]
+				cd, cok := compItems[i]["deletion"]
+				require.True(t, fok, "%s: full item %s carries deletion", cell, id)
+				require.True(t, cok, "%s: compact item %s carries deletion", cell, id)
+				assert.Equal(t, string(fd), string(cd), "%s: item %s deletion bytes", cell, id)
+				var d *store.DeletionInfo
+				require.NoError(t, json.Unmarshal(cd, &d))
+				switch id {
+				case deletingID:
+					seen[id] = true
+					if assert.NotNil(t, d, "%s: deleting view", cell) {
+						assert.Equal(t, store.DeletionStateDeleting, d.State, cell)
+						assert.NotNil(t, d.LeaseExpiresAt, "%s: deleting view lease", cell)
+					}
+				case failedID:
+					seen[id] = true
+					if assert.NotNil(t, d, "%s: failed view", cell) {
+						assert.Equal(t, store.DeletionStateFailed, d.State, cell)
+						assert.Equal(t, store.DeletionCodeRuntimeError, d.Code, cell)
+						assert.Equal(t, errMsg, d.Error, cell)
+					}
+				default:
+					assert.Equal(t, "null", string(cd), "%s: item %s has no delete", cell, id)
+				}
+			}
+			assert.True(t, seen[deletingID], "%s: reads the deleting agent", cell)
+			assert.True(t, seen[failedID], "%s: reads the failed agent", cell)
+		}
+	}
+}
+
 // TestAgentCompactView_ReadFilterAndConstraintAreAppliedBeforeProjection
 // pins that the identity classes in the parity test really see different
 // sets, so parity is not trivially comparing identical populations.
@@ -612,12 +726,13 @@ func TestAgentCompactView_KeySetIsAllowlist(t *testing.T) {
 		ID: tid("cv-allkeys"), Slug: "cv-allkeys", Name: "All Keys", Template: "claude",
 		ProjectID: f.project.ID, Labels: map[string]string{"k": "v"},
 		Phase: "running", Activity: "executing", ContainerStatus: "Up 5 minutes",
-		MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
+		Message: "Waiting for review", MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
 		CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
 		AppliedConfig: &store.AgentAppliedConfig{CreatorName: "All Keys Creator", Env: map[string]string{"A": "b"}},
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, full))
 	setRawAgentTimes(t, f.store, full.ID, "2026-03-04 05:07:00 +0000 UTC", "2026-03-04 05:08:00 +0000 UTC", "2026-03-04 05:09:00 +0000 UTC")
+	seedAgentDeletion(t, f.store, full.ID, deleteSeed{state: store.DeletionStateDeleting, leaseIn: time.Hour})
 
 	var tagNames []string
 	rt := reflect.TypeOf(AgentCompactItem{})
@@ -661,13 +776,15 @@ func sortedKeysOf(keys []string) []string {
 // TestAgentCompactView_ZeroLastActivityEventEmittedLikeFullView pins that
 // an unset lastActivityEvent is emitted as the zero time in compact, as in
 // the full view, and that omitempty fields are omitted when empty while
-// messageMode, ids and times are always present.
+// messageMode, ids, times and deletion (an explicit null, as in the full
+// view) are always present.
 func TestAgentCompactView_ZeroLastActivityEventEmittedLikeFullView(t *testing.T) {
 	item := toCompact(AgentWithCapabilities{Agent: store.Agent{ID: "a", Slug: "s", Name: "n", ProjectID: "p"}})
 	b, err := json.Marshal(item)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"id":"a","slug":"s","name":"n","projectId":"p","messageMode":"",`+
-		`"created":"0001-01-01T00:00:00Z","updated":"0001-01-01T00:00:00Z","lastActivityEvent":"0001-01-01T00:00:00Z"}`, string(b))
+		`"created":"0001-01-01T00:00:00Z","updated":"0001-01-01T00:00:00Z","lastActivityEvent":"0001-01-01T00:00:00Z",`+
+		`"deletion":null}`, string(b))
 
 	f := compactSetup(t)
 	rec := f.caller("owner").do(t, withQuery(f.projectBase(), "view=compact", "sort=created&dir=asc&limit=2"))

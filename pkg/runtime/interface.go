@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -90,6 +91,18 @@ type RunConfig struct {
 	Project              string   // Project name (e.g., "global" or "my-project")
 	ProjectID            string   // Project ID (e.g., "550e8400-e29b-41d4-a716-446655440000")
 
+	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
+	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
+	// runtime-specific mount narrowing in buildCommonRunArgs that cannot yet
+	// be applied uniformly across adapters — currently the narrowed read-only
+	// mount over the shared base repo's .git admin surface (config/hooks/info)
+	// for hub-native worktree-per-agent projects, which the broker-git
+	// worktree change currently applies to Docker only. Left empty by
+	// adapters that have not yet been extended (podman, apple); code gating on
+	// this field must fail closed (i.e. skip the mount narrowing) for any
+	// value it does not explicitly recognize.
+	RuntimeName string
+
 	// WorkspaceBackendName is the name of the backend chosen by the workspace
 	// backend selector: "local", "nfs", "cloudrun-volume" or
 	// "gke-shared-volume". Used to branch UID/GID injection and skip per-start
@@ -98,8 +111,11 @@ type RunConfig struct {
 	// HomeStorageBackend selects where the agent home lives on the
 	// Kubernetes runtime. Empty (or "local") keeps the home in the pod and
 	// the pod spec unchanged. HomeStorageNFS builds an NFS-home pod (see
-	// k8s_nfs_home.go). Nothing sets HomeStorageNFS yet.
+	// k8s_nfs_home.go); HomeStorage then describes the home.
 	HomeStorageBackend string
+	// HomeStorage describes the NFS agent home. Set exactly when
+	// HomeStorageBackend is HomeStorageNFS.
+	HomeStorage *HomeStorageRealization
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
@@ -114,6 +130,11 @@ type RunConfig struct {
 	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
 	// the volume mount — pod sees only its project subtree (design §9.4).
 	NFSSubPath string
+	// NFSSubPathRoot is workspace_storage.nfs.subpath_root, set when
+	// WorkspaceBackendName is "nfs". Empty means
+	// config.DefaultWorkspaceSubPathRoot. The Cloud Run runtime builds its
+	// NFS export and host paths from it (via config.ResolveSubPathRoot).
+	NFSSubPathRoot string
 	// NFSWorkspacePreCreated is true when, before the pod was built, the
 	// broker either created the NFSSubPath directory (and the directory of
 	// each shared dir served from the same claim) on its own mount of the
@@ -245,8 +266,33 @@ func (h launchHooks) created(handle api.ResourceHandle) {
 	h.createdFn(handle)
 }
 
+// HomeStorageRealization describes the NFS agent home of one start: the
+// agent's home directory <SubPathRoot>/<ProjectID>/agents/<AgentSlug>/home-<AgentID>
+// on the claim PVClaimName (see NFSHomeSubPaths). Computed in pkg/agent
+// from the agent's recorded home storage and consumed by the Kubernetes
+// runtime.
+type HomeStorageRealization struct {
+	PVClaimName string
+	SubPathRoot string
+	ProjectID   string
+	AgentSlug   string
+	AgentID     string
+	// Leaf is "pod" (the home-leaf init container creates the home
+	// directory) or "broker" (the broker created it before Run).
+	Leaf string
+	// GID is the export's group, which owns the agent and home directories.
+	GID int
+	// StopGraceSeconds is the pod's termination grace period;
+	// TerminationWaitSeconds the extra time a start waits for the previous
+	// pod to stop.
+	StopGraceSeconds       int
+	TerminationWaitSeconds int
+	// SkeletonMaxBytes caps the image home copied into a new home.
+	SkeletonMaxBytes int64
+}
+
 // SharedDirRealization holds the plan for realizing a project's shared
-// directories when server.shared_dir_storage.backend is "nfs" (design
+// directories that use the "nfs" shared-dir storage backend (design
 // deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
 // pkg/agent.resolveSharedDirs) and consumed by the K8s runtime's buildPod,
 // which mounts PVClaimName by subPath instead of creating per-dir dynamic
@@ -261,16 +307,38 @@ type SharedDirRealization struct {
 	// pv_name); buildPod must fail closed rather than fall back to EmptyDir
 	// (design G5).
 	PVClaimName string
-	// SubPaths maps each shared dir name to its subPath within PVClaimName,
-	// e.g. "projects/<pid>/shared-dirs/<name>".
+	// SubPaths maps each shared dir name served from the NFS export to its
+	// subPath within PVClaimName, e.g. "projects/<pid>/shared-dirs/<name>".
 	SubPaths map[string]string
+	// LocalDirs names the shared dirs that use the local backend instead
+	// (per-dir backends, shared_dir_storage_backends). Every other shared
+	// dir is served from the NFS export and must have a SubPaths entry;
+	// buildPod fails closed when one is missing.
+	LocalDirs map[string]bool
+	// SupplementalGroups are the owning group ids of the shared-dir leaves,
+	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
+	// and filtered by its guard. Kubernetes adds them to the pod's
+	// supplementalGroups; Docker and rootful Podman pass them as
+	// --group-add. Empty means no extra group (ptone/scion#3155).
+	SupplementalGroups []int64
 }
 
-// RunRef identifies the runtime entry a Delete targets. ID is the backend
-// handle returned by Run or reported by List (a container ID on Docker,
-// Podman and Apple; a pod or instance name on k8s, Cloud Run and Sandbox).
-// RunID is the scion.run_id label of the run the caller intends to remove;
-// it is empty for legacy entries created before run IDs existed.
+// Serves reports whether r serves the shared dir name from the NFS export:
+// r is an nfs realization and LocalDirs does not name name. It is false
+// for a nil r.
+func (r *SharedDirRealization) Serves(name string) bool {
+	if r == nil || r.Backend != "nfs" {
+		return false
+	}
+	return !r.LocalDirs[name]
+}
+
+// RunRef identifies the runtime entry a Stop or Delete targets. ID is the
+// backend handle returned by Run or reported by List (a container ID on
+// Docker, Podman and Apple; a pod or instance name on k8s, Cloud Run and
+// Sandbox). RunID is the scion.run_id label of the run the caller intends
+// to stop or remove; it is empty for legacy entries created before run IDs
+// existed.
 //
 // The signature change is deliberate (ptone/scion#2550): every backend must
 // decide how it honours RunID, rather than silently falling back to name
@@ -280,10 +348,24 @@ type RunRef struct {
 	RunID string
 }
 
+// ErrRunMismatch is returned (wrapped) by a Delete whose RunRef names a run
+// when the entry holding ref.ID belongs to a different run: nothing was
+// deleted, and the run the caller meant is already gone. Callers treat it
+// like the broker's own run mismatch (ptone/scion#2550): not found, touch
+// nothing.
+var ErrRunMismatch = errors.New("runtime entry belongs to a different run")
+
+// ErrRunConflict is returned (wrapped) by Run when an object it must
+// replace belongs to another run that is still live (a Kubernetes pod of
+// another run that is Pending or Running, or a per-agent Secret created by
+// a concurrent start). Run deletes nothing of that run and fails; the
+// start can be retried once the other run is gone.
+var ErrRunConflict = errors.New("agent name is held by another live run")
+
 type Runtime interface {
 	Name() string
 	Run(ctx context.Context, config RunConfig) (string, error)
-	Stop(ctx context.Context, id string) error
+	Stop(ctx context.Context, ref RunRef) error
 	Delete(ctx context.Context, ref RunRef) error
 	List(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)
 	GetLogs(ctx context.Context, id string) (string, error)

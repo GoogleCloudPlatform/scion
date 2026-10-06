@@ -24,7 +24,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { APP_FRAME_CLASS } from '../components/shared/app-frame.js';
-import { installViewportFrame, KEYBOARD_MIN_INSET_PX } from './viewport.js';
+import {
+  installViewportFrame,
+  KEYBOARD_MIN_INSET_PX,
+  SETTLE_RECHECK_MS,
+  SHORT_FRAME_MAX_PX,
+  TIGHT_FRAME_MAX_PX,
+} from './viewport.js';
 
 interface FakeVisualViewport extends EventTarget {
   scale: number;
@@ -40,6 +46,8 @@ interface FakeWindow extends EventTarget {
   scrollTo: ReturnType<typeof vi.fn>;
   requestAnimationFrame: (cb: FrameRequestCallback) => number;
   cancelAnimationFrame: ReturnType<typeof vi.fn>;
+  setTimeout: (cb: () => void, ms: number) => number;
+  clearTimeout: (id: number) => void;
 }
 
 const LAYOUT_HEIGHT = 812;
@@ -76,6 +84,7 @@ function install(): void {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers();
   frames = new Map();
   nextFrameId = 1;
   dispose = null;
@@ -94,6 +103,8 @@ beforeEach(() => {
     cancelAnimationFrame: vi.fn((id: number) => {
       frames.delete(id);
     }),
+    setTimeout: (cb: () => void, ms: number) => window.setTimeout(cb, ms),
+    clearTimeout: (id: number) => window.clearTimeout(id),
   });
   root().removeAttribute('style');
   root().removeAttribute('data-keyboard');
@@ -102,6 +113,8 @@ beforeEach(() => {
 
 afterEach(() => {
   dispose?.();
+  vi.useRealTimers();
+  document.body.replaceChildren();
   root().removeAttribute('style');
   root().removeAttribute('data-keyboard');
   root().classList.remove(APP_FRAME_CLASS);
@@ -308,6 +321,207 @@ describe('installViewportFrame: scroll reset', () => {
   });
 });
 
+/** Shrink the visual viewport without any event, as a late accessory bar can. */
+function shrinkSilently(height: number): void {
+  vv.height = height;
+}
+
+/** A textarea inside an open shadow root, like the chat composer's. */
+function shadowTextarea(): HTMLTextAreaElement {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const textarea = document.createElement('textarea');
+  host.attachShadow({ mode: 'open' }).appendChild(textarea);
+  return textarea;
+}
+
+describe('installViewportFrame: changes without a viewport event', () => {
+  it('catches a late accessory bar with a follow-up read after the keyboard opens', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+    // The AutoFill bar slides in above the keyboard; no viewport event follows.
+    shrinkSilently(430);
+    flushFrames();
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('480px');
+
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS);
+    flushFrames();
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('430px');
+  });
+
+  it('reads again shortly after the keyboard closes, too', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS);
+    flushFrames();
+    emit(vv, 'resize', { height: LAYOUT_HEIGHT });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    // The visible height changes again with no event (a bar sliding in).
+    shrinkSilently(480);
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS);
+    flushFrames();
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('480px');
+  });
+
+  it('keeps a single follow-up read when changes come faster than it', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS / 2);
+    emit(vv, 'resize', { height: 430 });
+
+    expect(vi.getTimerCount()).toBe(1);
+    // It was re-armed by the second change, not left on the first one's clock.
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS / 2);
+    expect(frames.size).toBe(0);
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS / 2);
+    expect(frames.size).toBe(1);
+  });
+
+  it('stops the follow-up reads once the height holds', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS);
+    flushFrames();
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(frames.size).toBe(0);
+  });
+
+  it('never arms a follow-up read on desktop', () => {
+    install();
+    emit(vv, 'resize', { height: LAYOUT_HEIGHT });
+    emit(win, 'resize');
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('re-reads the viewport on text input in a field inside a shadow root', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+    vi.advanceTimersByTime(SETTLE_RECHECK_MS);
+    flushFrames();
+    shrinkSilently(430);
+
+    shadowTextarea().dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    flushFrames();
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('430px');
+  });
+
+  it('re-reads the viewport when focus moves into a field', () => {
+    install();
+    shrinkSilently(480);
+
+    shadowTextarea().dispatchEvent(new FocusEvent('focusin', { bubbles: true, composed: true }));
+    flushFrames();
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('480px');
+    expect(root().dataset['keyboard']).toBe('open');
+  });
+
+  it('re-reads the viewport on a window resize', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+    shrinkSilently(430);
+
+    emit(win, 'resize');
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('430px');
+  });
+
+  it('the disposer removes the document listeners', () => {
+    install();
+    dispose!();
+    dispose = null;
+    shrinkSilently(480);
+
+    shadowTextarea().dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    expect(frames.size).toBe(0);
+  });
+});
+
+/** The short/tight frame state on the root, as one comparable value. */
+function frameState(): Record<string, string | undefined> {
+  const style = root().style;
+  const get = (name: string): string | undefined => style.getPropertyValue(name) || undefined;
+  return {
+    short: get('--scion-kb-short'),
+    shortDisplay: get('--scion-kb-short-display'),
+    tight: get('--scion-kb-tight'),
+    tightPosition: get('--scion-kb-tight-position'),
+    tightVisibility: get('--scion-kb-tight-visibility'),
+  };
+}
+
+const NO_FRAME_STATE = {
+  short: undefined,
+  shortDisplay: undefined,
+  tight: undefined,
+  tightPosition: undefined,
+  tightVisibility: undefined,
+};
+const SHORT_STATE = { ...NO_FRAME_STATE, short: '1', shortDisplay: 'none' };
+const TIGHT_STATE = {
+  short: '1',
+  shortDisplay: 'none',
+  tight: '1',
+  tightPosition: 'absolute',
+  tightVisibility: 'hidden',
+};
+
+describe('installViewportFrame: short and tight frames', () => {
+  it('marks nothing while the keyboard leaves a roomy frame', () => {
+    install();
+    emit(vv, 'resize', { height: SHORT_FRAME_MAX_PX });
+    expect(root().dataset['keyboard']).toBe('open');
+    expect(frameState()).toEqual(NO_FRAME_STATE);
+  });
+
+  it('marks a frame under the short limit as short', () => {
+    install();
+    emit(vv, 'resize', { height: SHORT_FRAME_MAX_PX - 1 });
+    expect(frameState()).toEqual(SHORT_STATE);
+
+    emit(vv, 'resize', { height: TIGHT_FRAME_MAX_PX });
+    expect(frameState()).toEqual(SHORT_STATE);
+  });
+
+  it('marks a frame under the tight limit as tight, which implies short', () => {
+    install();
+    emit(vv, 'resize', { height: TIGHT_FRAME_MAX_PX - 1 });
+    expect(frameState()).toEqual(TIGHT_STATE);
+  });
+
+  it('follows the frame back up through short to roomy', () => {
+    install();
+    emit(vv, 'resize', { height: 150 });
+    expect(frameState()).toEqual(TIGHT_STATE);
+    emit(vv, 'resize', { height: 300 });
+    expect(frameState()).toEqual(SHORT_STATE);
+    emit(vv, 'resize', { height: 480 });
+    expect(frameState()).toEqual(NO_FRAME_STATE);
+  });
+
+  it('clears the frame state when the keyboard closes', () => {
+    install();
+    emit(vv, 'resize', { height: 150 });
+    emit(vv, 'resize', { height: LAYOUT_HEIGHT });
+    expect(frameState()).toEqual(NO_FRAME_STATE);
+  });
+
+  it('clears the frame state when the page is zoomed', () => {
+    install();
+    emit(vv, 'resize', { height: 150 });
+    emit(vv, 'resize', { scale: 2, height: 100 });
+    expect(frameState()).toEqual(NO_FRAME_STATE);
+  });
+
+  it('the disposer clears the frame state', () => {
+    install();
+    emit(vv, 'resize', { height: 150 });
+    dispose!();
+    dispose = null;
+    expect(frameState()).toEqual(NO_FRAME_STATE);
+  });
+});
+
 describe('installViewportFrame: throttling and teardown', () => {
   it('coalesces a burst of events into one sync per animation frame', () => {
     install();
@@ -336,7 +550,7 @@ describe('installViewportFrame: throttling and teardown', () => {
     dispose = null;
 
     expect(vvRemove.mock.calls.map(([type]) => type).sort()).toEqual(['resize', 'scroll']);
-    expect(winRemove.mock.calls.map(([type]) => type)).toEqual(['scroll']);
+    expect(winRemove.mock.calls.map(([type]) => type).sort()).toEqual(['resize', 'scroll']);
 
     vv.height = 480;
     win.scrollY = 50;
@@ -360,6 +574,7 @@ describe('installViewportFrame: throttling and teardown', () => {
 
     expect(win.cancelAnimationFrame).toHaveBeenCalledTimes(1);
     expect(frames.size).toBe(0);
+    expect(vi.getTimerCount(), 'the follow-up read is cancelled').toBe(0);
     expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
     expect(root().dataset['keyboard']).toBeUndefined();
   });

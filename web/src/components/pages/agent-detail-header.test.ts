@@ -24,6 +24,7 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
+import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import type { ScionPageAgentDetail } from './agent-detail.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
@@ -209,5 +210,73 @@ describe('agent detail header actions order', () => {
     expect(
       headerActionLabels(makeAgent({ phase: 'running', _capabilities: { actions: ['read'] } }))
     ).toEqual([GRAPH]);
+  });
+});
+
+/**
+ * Status badges on the agent detail page (ptone/scion#2929): the header
+ * and the Phase badge show a provision-only agent as created (not
+ * started), and the Phase badge keeps the phase for a running agent.
+ */
+describe('agent detail status badges', () => {
+  beforeAll(async () => {
+    await import('./agent-detail.js');
+  }, 30_000);
+
+  function makePage(agent: Agent): ScionPageAgentDetail {
+    const el = document.createElement('scion-page-agent-detail') as ScionPageAgentDetail;
+    el.agentId = agent.id;
+    (el as unknown as { agent: Agent }).agent = agent;
+    return el;
+  }
+
+  function renderTo(tpl: TemplateResult): HTMLElement {
+    const host = document.createElement('div');
+    render(tpl, host);
+    return host;
+  }
+
+  /** The status badge in the page header title. */
+  function headerBadge(agent: Agent): Element {
+    const page = makePage(agent);
+    const tpl = (page as unknown as { renderHeader(): TemplateResult }).renderHeader();
+    const badge = renderTo(tpl).querySelector('.header-title-text > scion-status-badge');
+    expect(badge).not.toBeNull();
+    return badge!;
+  }
+
+  /** The status badge in the Phase item of the Current State card. */
+  function phaseBadge(agent: Agent): Element {
+    const page = makePage(agent);
+    const tpl = (
+      page as unknown as { renderCurrentStateCard(a: Agent): TemplateResult }
+    ).renderCurrentStateCard(agent);
+    const item = Array.from(renderTo(tpl).querySelectorAll('.info-item')).find(
+      (i) => i.querySelector('.info-label')?.textContent?.trim() === 'Phase'
+    );
+    const badge = item?.querySelector('scion-status-badge');
+    expect(badge).toBeTruthy();
+    return badge!;
+  }
+
+  const provisionOnly = () => makeAgent({ phase: 'created', provisionedOnly: true });
+
+  it('header: a provision-only agent shows the override label and start hint', () => {
+    const badge = headerBadge(provisionOnly());
+    expect(badge.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
+    expect(badge.getAttribute('title')).toContain('scion start agent-1');
+  });
+
+  it('Phase badge: a provision-only agent shows the override label and start hint', () => {
+    const badge = phaseBadge(provisionOnly());
+    expect(badge.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
+    expect(badge.getAttribute('title')).toContain('scion start agent-1');
+  });
+
+  it('Phase badge: a running agent keeps its phase, not its activity', () => {
+    const badge = phaseBadge(makeAgent({ phase: 'running', activity: 'thinking' }));
+    expect(badge.getAttribute('status')).toBe('running');
+    expect(badge.getAttribute('label')).toBe('running');
+    expect(badge.hasAttribute('title')).toBe(false);
   });
 });

@@ -13,15 +13,13 @@ import (
 	"testing"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
 func TestStatusCommand(t *testing.T) {
+	resetRootCmdState(t)
 	// Create a temp directory for test files
 	tempDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tempDir)
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	t.Setenv("HOME", tempDir)
 	scrubScionEnv(t)
 
 	tests := []struct {
@@ -94,7 +92,7 @@ func TestStatusCommand(t *testing.T) {
 			logFile := filepath.Join(tempDir, "agent.log")
 			_ = os.Remove(statusFile)
 			_ = os.Remove(logFile)
-			log.SetLogPath(logFile)
+			setTestLogPath(t, logFile)
 
 			rootCmd.SetArgs(tt.args)
 			err := rootCmd.Execute()
@@ -200,10 +198,9 @@ func TestStatusDefinitionHubUpdate(t *testing.T) {
 }
 
 func TestStatusCommandUnknownType(t *testing.T) {
+	resetRootCmdState(t)
 	tempDir := t.TempDir()
-	originalHome := os.Getenv("HOME")
-	_ = os.Setenv("HOME", tempDir)
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	t.Setenv("HOME", tempDir)
 	scrubScionEnv(t)
 
 	buf := new(bytes.Buffer)

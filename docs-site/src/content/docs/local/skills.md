@@ -88,7 +88,26 @@ skills:
 
 At provisioning time Scion resolves every required skill, downloads its files (using the [content-hash cache](#content-hash-caching)), and mounts them into the harness's skills directory (for example `.claude/skills/` or `.gemini/skills/`).
 
-When a Hub dispatches the agent, the Hub resolves Hub-registry skill references with the permissions of the principal creating the agent. That principal is the user, or the parent agent when an agent creates a child. The Runtime Broker's own identity is not used. A required non-public skill therefore provisions whenever the agent's creator can read it. If the creator cannot, provisioning fails with `the agent's creator does not have permission to access this skill`. The broker installs Hub-resolved skills as-is. It resolves only what the Hub did not cover itself, such as `gh://`, `gcp-skill://`, federated registries, and references found only in broker-local templates.
+When a Hub dispatches the agent, the Hub resolves Hub-registry skill references with the permissions of the principal creating the agent. That principal is the user, or the parent agent when an agent creates a child. The Runtime Broker's own identity is not used. A required skill provisions whenever the agent's creator can read it. A skill the creator cannot read is reported the same way as one that does not exist, so the failure does not reveal that the skill is there. The broker installs Hub-resolved skills as-is. It resolves only what the Hub did not cover itself, such as `gh://`, `gcp-skill://`, federated registries, and references found only in broker-local templates.
+
+### When a required skill cannot be resolved
+
+If a required skill cannot be resolved, the request fails with an error instead of reporting success. This applies to `scion create`, `scion start`, restart, and resuming a stopped or suspended agent. A new agent whose provisioning failed is removed. An existing agent keeps its record and is not started. Starting can re-provision the agent, which resolves its skills again. Skills marked `optional: true` are skipped instead.
+
+The error uses code `skill_resolution_failed`. Its message names the skill reference, and `details` has the reference (`skill`) and the cause (`cause`). The HTTP status depends on the cause:
+
+| Cause | Status | Meaning |
+| :--- | :--- | :--- |
+| `not_found` | 404 | The skill does not exist at that reference, or the agent's creator cannot read it. |
+| `forbidden` | 403 | The creator may not resolve `gh://` skills for this project. |
+| `rate_limited` | 429 | GitHub rate-limited the request. The response has a `Retry-After` header when GitHub sent one. |
+| `timeout` | 504 | GitHub did not respond before the deadline. |
+| `upstream_unavailable`, `unreachable` | 502 | GitHub returned repeated server errors, or could not be reached. |
+| any other cause | 500 | An internal failure while resolving the skill. |
+
+When a Hub dispatches `scion create` (which only provisions), a provisioning failure for any other reason is still reported as a warning on the created agent. Without a Hub, `scion create` fails with the error.
+
+On a Hub that runs several nodes, a create, start, restart or resume handed to another Hub node returns the same error, status and `Retry-After` as on a single node. For a create, this covers a failure the broker reports when it answers the request. A failure the broker reports after it has accepted an asynchronous launch is reported through that launch, as on a single node.
 
 ## Skill reference URIs
 
@@ -264,6 +283,7 @@ Because the cache is content-addressed, identical content is stored once regardl
 scion skills list
 scion skills list --scope global --search deploy
 scion skills list --tags ci,production          # comma-separated, AND semantics
+scion skills list --tags ci --tags production   # repeatable; same filter
 
 # Show a skill's details and its versions
 scion skills show deploy-checklist

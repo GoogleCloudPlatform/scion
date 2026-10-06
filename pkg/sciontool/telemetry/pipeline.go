@@ -49,7 +49,12 @@ type metricAdmission struct {
 
 // Pipeline orchestrates the telemetry collection and forwarding.
 type Pipeline struct {
-	config           *Config
+	config *Config
+	// loopbackConfig is a copy of config whose GRPCPort/HTTPPort are the
+	// ports the receiver actually bound (they differ when config asks for
+	// port 0). Set by Start once the receiver listens; config itself is
+	// never mutated so a restart re-binds against the configured ports.
+	loopbackConfig   atomic.Pointer[Config]
 	receiver         *Receiver
 	exporter         *CloudExporter
 	policy           *receiverPolicy
@@ -245,7 +250,15 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// p.usageDeriver is an atomic.Pointer: a log request can arrive
 	// concurrently with this Store, between receiver.Start returning above
 	// and this assignment running, and handleLogs's Load must never race it.
-	if deriver, err := NewUsageDeriver(ctx, p.config); err != nil {
+	// In-process loopback producers (this deriver, initSelfMetrics, and
+	// init.go's lifecycle providers via Config) dial the receiver's bound
+	// gRPC port, not the configured one: with SCION_OTEL_GRPC_PORT=0 the
+	// configured port is 0 and the receiver listens on an ephemeral port.
+	grpcPort, httpPort := p.receiver.BoundPorts()
+	loopbackConfig := *p.config
+	loopbackConfig.GRPCPort, loopbackConfig.HTTPPort = grpcPort, httpPort
+	p.loopbackConfig.Store(&loopbackConfig)
+	if deriver, err := NewUsageDeriver(ctx, &loopbackConfig); err != nil {
 		log.Error("Failed to create usage deriver: %v", err)
 	} else {
 		p.usageDeriver.Store(deriver)
@@ -272,7 +285,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		p.initSelfMetrics(ctx)
 	}
 
-	log.Info("Telemetry pipeline started (gRPC: %d, HTTP: %d)", p.config.GRPCPort, p.config.HTTPPort)
+	log.Info("Telemetry pipeline started (gRPC: %d, HTTP: %d)", grpcPort, httpPort)
 
 	return nil
 }
@@ -541,10 +554,16 @@ func (p *Pipeline) IsRunning() bool {
 	return p.running
 }
 
-// Config returns the pipeline configuration.
+// Config returns the pipeline configuration. Once Start has bound the
+// receiver, the returned copy carries the bound GRPCPort and HTTPPort, so
+// loopback providers built from it dial the live receiver even when the
+// configured ports were 0. Callers must not mutate the result.
 func (p *Pipeline) Config() *Config {
 	if p == nil {
 		return nil
+	}
+	if cfg := p.loopbackConfig.Load(); cfg != nil {
+		return cfg
 	}
 	return p.config
 }
@@ -1165,7 +1184,7 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 // initSelfMetrics creates a minimal MeterProvider for self-monitoring metrics
 // (pipeline health gauge and export error counter) and starts the health ticker.
 func (p *Pipeline) initSelfMetrics(ctx context.Context) {
-	providers, err := NewProviders(ctx, p.config, true)
+	providers, err := NewProviders(ctx, p.Config(), true)
 	if err != nil || providers == nil || providers.MeterProvider == nil {
 		log.Debug("Could not create MeterProvider for pipeline self-metrics: %v", err)
 		p.meter = noop.Meter{}

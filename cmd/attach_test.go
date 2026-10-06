@@ -147,6 +147,7 @@ func TestAttachCmd_RuntimeErrorSilencesUsage(t *testing.T) {
 	noHub = true
 	projectPath = t.TempDir() // no agents/ dir present -> deterministic "not found"
 	attachCmd.SilenceUsage = false
+	stubAttachTerminal(t, true)
 
 	err := attachCmd.RunE(attachCmd, []string{"does-not-exist"})
 
@@ -910,7 +911,7 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "no access token found for Hub"),
@@ -953,7 +954,7 @@ func TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
 	const wantMsg = "attach is not supported for agents on the noattach runtime"
@@ -1065,7 +1066,7 @@ func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 		ProjectPath: scionDir,
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
 	const wantMsg = "attach is not supported for agents on the noattach runtime"
@@ -1203,7 +1204,7 @@ func TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	// The function is expected to fail at the WebSocket dial step (the mock HTTP
 	// server does not handle WebSocket upgrades) — that confirms the gate was
