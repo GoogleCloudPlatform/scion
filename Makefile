@@ -152,6 +152,11 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# Since ptone/scion#2207 the job runs the FULL pkg/store/entadapter suite on
+# Postgres (no -run filter); the lists above document why particular groups
+# matter here, not what is selected. Every entadapter test now has to pass on
+# both backends.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -167,6 +172,10 @@ test-fixture-coverage:
 # SCION_TEST_WORKER_DSN set (see multiprocess_test.go's package comment),
 # not Postgres-availability skips. They are excluded by name so a genuine
 # new skip in that package still fails the target.
+#
+# In the entadapter run, TestListSchedulesLegacyText_* are the mirror image:
+# they exercise SQLite-only legacy text timestamps and skip by design when
+# enttest.Active() is true, so they are excluded from the skip check by name.
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -183,13 +192,13 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_)' \
+	@go test -tags integration -count=1 -timeout 25m -v \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
-	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log; then \
+	if grep -E '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log \
+		| grep -qvE 'TestListSchedulesLegacyText_'; then \
 		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
