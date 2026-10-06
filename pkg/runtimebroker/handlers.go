@@ -1254,7 +1254,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				// broker paths (ptone/scion#3113); the full error is logged.
 				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found",
 					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+notFoundResourceText(err, opts.TemplateName), nil)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("provision agent", err, opts.TemplateName), nil)
 				return
 			}
 			// A required skill reference that could not be resolved is mapped
@@ -1342,7 +1342,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.agentLifecycleLog.Error("Agent create failed",
-			"agent_id", req.ID, "project_id", req.ProjectID,
+			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
 			"name", req.Name, "slug", req.Slug,
 			"error", err)
 
@@ -1388,7 +1388,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case notFoundErr:
 			// Names the resource without err's own text, which can carry
 			// broker paths (ptone/scion#3113). The full error is logged above.
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+notFoundResourceText(err, opts.TemplateName), nil)
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr)
 		default:
@@ -2506,7 +2506,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		s.agentLifecycleLog.Error("Agent start failed",
-			"agent_id", id, "error", err)
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID, "error", err)
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
 		// the run the runtime holds now. Start can also re-provision the

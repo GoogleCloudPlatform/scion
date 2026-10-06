@@ -72,7 +72,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			// broker paths (ptone/scion#3113); the full error is logged.
 			s.agentLifecycleLog.Warn("Agent create failed: preflight: template or harness-config not found",
 				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+notFoundResourceText(err, opts.TemplateName), nil)
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 			return
 		}
 		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")

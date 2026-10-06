@@ -447,3 +447,66 @@ func TestSyncNotFound_NamesResourceWithoutPaths(t *testing.T) {
 			`Failed to create agent: template "secret" not found`)
 	})
 }
+
+// TestSyncStartFailureLogs_CarryProjectAndRun: now that the synchronous
+// create and start responses carry fixed text, their "failed" log lines are
+// the only record of the detail, so they name the project and run too
+// (ptone/scion#3113 review N3).
+func TestSyncStartFailureLogs_CarryProjectAndRun(t *testing.T) {
+	rawErr := fmt.Errorf("docker run scion-ctr-9e1d: %w", agent.ErrContainerNameInUse)
+	findRecord := func(t *testing.T, logs, msg string) map[string]any {
+		t.Helper()
+		for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
+			var r map[string]any
+			if json.Unmarshal([]byte(line), &r) == nil && r["msg"] == msg {
+				return r
+			}
+		}
+		t.Fatalf("no %q log record; logs: %s", msg, logs)
+		return nil
+	}
+	checkFields := func(t *testing.T, rec map[string]any, agentID string) {
+		t.Helper()
+		for key, want := range map[string]string{"agent_id": agentID, "project_id": startErrTextProjectID, "run_id": startErrTextRunID} {
+			if rec[key] != want {
+				t.Errorf("log record %s = %v, want %q", key, rec[key], want)
+			}
+		}
+		if got, _ := rec["error"].(string); !strings.Contains(got, "scion-ctr-9e1d") {
+			t.Errorf("log record error = %q, want the runtime detail", got)
+		}
+	}
+
+	t.Run("create", func(t *testing.T) {
+		const name = "agent-sync-create-log"
+		mgr := newAsyncManager()
+		mgr.setStartErr(rawErr)
+		srv, _ := newAsyncTestServer(t, mgr)
+		logs := &syncBuffer{}
+		srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+		w := postCreate(t, srv, map[string]any{
+			"id": name, "name": name, "projectId": startErrTextProjectID, "runId": startErrTextRunID,
+			"config": map[string]any{"template": "claude"},
+		})
+		if w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+		}
+		checkFields(t, findRecord(t, logs.String(), "Agent create failed"), name)
+	})
+
+	t.Run("start", func(t *testing.T) {
+		srv := newTestServer(t)
+		srv.manager.(*mockManager).startErr = rawErr
+		logs := &syncBuffer{}
+		srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start?projectId="+startErrTextProjectID,
+			strings.NewReader(`{"runId":"`+startErrTextRunID+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+		}
+		checkFields(t, findRecord(t, logs.String(), "Agent start failed"), "test-agent-1")
+	})
+}

@@ -19,8 +19,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -304,10 +307,22 @@ func FindTemplateInScope(name, scope string) *Template {
 // hash, which is not a template name, so it yields "".
 func templateNameFromDir(dir string) string {
 	base := filepath.Base(dir)
-	if transfer.IsContentHash(base) {
+	if isTemplateHashName(base) {
 		return ""
 	}
 	return base
+}
+
+// bareContentHashPattern matches a content hash without the "sha256:"
+// prefix (transfer.IsContentHash requires the prefix).
+var bareContentHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// isTemplateHashName reports whether s is a content hash rather than a
+// template name: the prefixed form cache directories use today, or a bare
+// 64-hex digest (a legacy or unprefixed hash), which must not be shown as a
+// template name either (ptone/scion#3113).
+func isTemplateHashName(s string) bool {
+	return transfer.IsContentHash(s) || bareContentHashPattern.MatchString(s)
 }
 
 // FriendlyTemplateName converts a raw template reference (cache path, URI, or
@@ -325,7 +340,7 @@ func FriendlyTemplateName(ref string) string {
 	if filepath.IsAbs(ref) {
 		return templateNameFromDir(ref)
 	}
-	if transfer.IsContentHash(ref) {
+	if isTemplateHashName(ref) {
 		return ""
 	}
 	return ref
@@ -345,16 +360,30 @@ func DeriveTemplateName(uri string) string {
 		return parts.Repo
 	}
 
-	// For archive URLs, extract filename without extension
-	if isArchiveURL(uri) {
-		base := filepath.Base(uri)
-		// Remove common extensions
-		for _, ext := range []string{".tar.gz", ".tgz", ".zip"} {
-			if len(base) > len(ext) && base[len(base)-len(ext):] == ext {
-				return base[:len(base)-len(ext)]
-			}
+	// For HTTP(S) URLs, use the last element of the URL path only: the
+	// query (e.g. a signed-URL token) and any userinfo never become part of
+	// the name, since it is shown to users (ptone/scion#3113).
+	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+		u, err := url.Parse(uri)
+		if err != nil {
+			return "remote"
 		}
-		return base
+		if u.Path == "" {
+			if host := u.Hostname(); host != "" {
+				return host
+			}
+			return "remote"
+		}
+		base := path.Base(u.Path)
+		if base == "/" || base == "." {
+			return "remote"
+		}
+		return trimArchiveExt(base)
+	}
+
+	// For archive paths, extract filename without extension
+	if isArchiveURL(uri) {
+		return trimArchiveExt(filepath.Base(uri))
 	}
 
 	// For rclone paths, use the last path component
@@ -372,6 +401,16 @@ func DeriveTemplateName(uri string) string {
 
 	// Fallback: use "remote"
 	return "remote"
+}
+
+// trimArchiveExt removes a .tar.gz, .tgz or .zip extension from base.
+func trimArchiveExt(base string) string {
+	for _, ext := range []string{".tar.gz", ".tgz", ".zip"} {
+		if len(base) > len(ext) && base[len(base)-len(ext):] == ext {
+			return base[:len(base)-len(ext)]
+		}
+	}
+	return base
 }
 
 // GetTemplateChain returns a list of templates in inheritance order (base first).

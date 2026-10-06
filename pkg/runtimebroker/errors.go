@@ -336,7 +336,21 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // going through writeRuntimeOpError — raw err still always reaches the
 // log on every path, just not through this one function.
 func runtimeOpError(op string, err error) *OpaqueError {
-	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
+	return NewOpaqueError(failedOpText(op), err)
+}
+
+// failedOpText is the fixed "Failed to <op>" lead every runtime-op error
+// message starts with (runtimeOpError, notFoundMessage).
+func failedOpText(op string) string {
+	return "Failed to " + op
+}
+
+// notFoundMessage is the full client message for a template or
+// harness-config that did not resolve during op: "Failed to <op>: " plus
+// notFoundResourceText. Every not-found response and launch report builds
+// its text here, so the sync and async spellings cannot drift.
+func notFoundMessage(op string, err error, templateSlug string) string {
+	return failedOpText(op) + ": " + notFoundResourceText(err, templateSlug)
 }
 
 // notFoundResourceText is the client text for a template or harness-config

@@ -114,3 +114,41 @@ func TestHarnessConfigNotFoundError_FromLookup(t *testing.T) {
 		t.Errorf("Error() lost the searched project path (diagnostics): %s", err.Error())
 	}
 }
+
+// TestFriendlyTemplateName_NoHashQueryOrUserinfo: a bare 64-hex digest is
+// treated like a prefixed content hash, and a URL reference never keeps its
+// query string or userinfo (ptone/scion#3113 review N1/N2).
+func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
+	hex := strings.Repeat("ab", 32)
+	cases := []struct {
+		ref  string
+		want string
+	}{
+		{hex, ""},
+		{"/var/cache/scion/templates/" + hex, ""},
+		{"/var/cache/scion/templates/sha256:" + hex, ""},
+		{"https://host.example/a/b.tgz?token=s3cr3t", "b"},
+		{"https://host.example/a/b?sig=x", "b"},
+		{"https://user:pw@host.example", "host.example"},
+		{"https://user:pw@host.example/a/tpl.zip?sig=x#frag", "tpl"},
+		{"https://github.com/user/repo/tree/main/templates/claude?token=s3cr3t", "claude"},
+		{"https://example.com/my-template.tar.gz", "my-template"},
+		{"claude", "claude"},
+	}
+	for _, c := range cases {
+		got := FriendlyTemplateName(c.ref)
+		if got != c.want {
+			t.Errorf("FriendlyTemplateName(%q) = %q, want %q", c.ref, got, c.want)
+		}
+		for _, secret := range []string{"s3cr3t", "sig", "token", "user", "pw@", hex} {
+			if strings.Contains(got, secret) {
+				t.Errorf("FriendlyTemplateName(%q) = %q leaks %q", c.ref, got, secret)
+			}
+		}
+	}
+
+	// Through the typed error, as the broker sees it.
+	if n := NewTemplateNotFoundError("/var/cache/scion/templates/"+hex, "x").Name; n != "" {
+		t.Errorf("TemplateNotFoundError.Name for a bare-hex cache dir = %q, want empty", n)
+	}
+}

@@ -547,7 +547,7 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// but not err's own text, which can name broker filesystem paths
 		// or a content hash (ptone/scion#3113; see notFoundResourceText).
 		// The full error is logged by runLaunch.
-		return "template_not_found", runtimeOpError(opCreateAgent, err).Error() + ": " + notFoundResourceText(err, templateSlug)
+		return "template_not_found", notFoundMessage(opCreateAgent, err, templateSlug)
 	default:
 		// The same fixed text the synchronous create returns for a
 		// Manager.Start failure (runtimeOpError): the raw error routinely
