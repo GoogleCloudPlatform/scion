@@ -1795,7 +1795,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		// after it, mentions included) at delivery, not at request time.
 		now = time.Now().UTC()
 		storeMsg.CreatedAt = now
-		msg.Timestamp = now.Format(time.RFC3339)
+		msg.Timestamp = now.UTC().Format(time.RFC3339)
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
