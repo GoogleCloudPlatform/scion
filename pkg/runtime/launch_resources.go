@@ -89,8 +89,7 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 	if h.UID == "" {
 		return errNoUID(h)
 	}
-	uid := types.UID(h.UID)
-	opts := metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}
+	opts := metav1.DeleteOptions{Preconditions: k8sUIDPrecondition(types.UID(h.UID))}
 
 	var err error
 	switch h.Kind {
@@ -110,7 +109,7 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 			return nil
 		}
 		if getErr == nil {
-			if pod.UID != uid {
+			if pod.UID != types.UID(h.UID) {
 				// The name now belongs to another pod, which this launch
 				// must not delete. The precondition below covers a
 				// recreate after this read.
@@ -119,7 +118,7 @@ func (r *KubernetesRuntime) DeleteResource(ctx context.Context, h api.ResourceHa
 				return nil
 			}
 			opts = podDeleteOptions(pod)
-			opts.Preconditions = &metav1.Preconditions{UID: &uid}
+			opts.Preconditions = k8sUIDPrecondition(pod.UID)
 		}
 		err = pods.Delete(ctx, h.Name, opts)
 	default:
