@@ -248,7 +248,7 @@ describe('scion-page-health-dashboard runtime brokers (ptone/scion#3582)', () =>
               last_heartbeat: null,
               runtime: null,
               workspace_storage: { backend: 'nfs', nfs_healthy: true },
-              agents: { running: 0, attention: 0, total: 0 },
+              agents: { total: 0 },
             },
             {
               id: 'b2',
@@ -258,7 +258,7 @@ describe('scion-page-health-dashboard runtime brokers (ptone/scion#3582)', () =>
               last_heartbeat: null,
               runtime: { type: 'docker', profile: 'docker' },
               workspace_storage: { backend: 'local' },
-              agents: { running: 0, attention: 0, total: 0 },
+              agents: { total: 0 },
             },
           ],
           total: 5,

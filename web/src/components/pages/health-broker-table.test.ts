@@ -40,7 +40,7 @@ function broker(over: Partial<HealthSummaryBroker> = {}): HealthSummaryBroker {
     last_heartbeat: null,
     runtime: { type: 'docker', profile: 'docker' },
     workspace_storage: { backend: 'local' },
-    agents: { running: 1, attention: 0, total: 2 },
+    agents: { total: 2 },
     ...over,
   };
 }
@@ -134,12 +134,10 @@ describe('scion-health-broker-table cells', () => {
     });
   });
 
-  it('shows agents, version and status', async () => {
-    const root = await mount(
-      list([broker({ agents: { running: 3, attention: 1, total: 4 }, version: '' })])
-    );
+  it('shows the agent total, version and status', async () => {
+    const root = await mount(list([broker({ agents: { total: 4 }, version: '' })]));
     const r = rows(root)[0]!;
-    expect(cell(r, 'agents')).toBe('4 (3 running) 1 need attention');
+    expect(cell(r, 'agents')).toBe('4');
     expect(cell(r, 'version')).toBe('—');
     expect(cell(r, 'status')).toBe('online');
   });

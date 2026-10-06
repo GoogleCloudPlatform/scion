@@ -33,8 +33,9 @@ import { formatRelative } from '../../utils/time.js';
 export interface HealthSummaryBroker {
   id: string;
   name: string;
-  version?: string;
-  /** Liveness: online or offline. */
+  /** Empty when the broker never reported a version. */
+  version: string;
+  /** Liveness: online, offline or degraded. */
   status: string;
   /** Null when the broker has never sent a heartbeat. */
   last_heartbeat: string | null;
@@ -42,8 +43,8 @@ export interface HealthSummaryBroker {
   runtime: { type: string; profile?: string } | null;
   /** Null when the broker never reported its workspace storage. */
   workspace_storage: { backend: string; nfs_healthy?: boolean } | null;
-  /** Per-broker agent counts: total from P1, running and attention from P3. */
-  agents?: { running?: number; attention?: number; total?: number };
+  /** Per-broker agent count. */
+  agents?: { total?: number };
 }
 
 /** The summary's runtime_brokers block. */
@@ -301,13 +302,7 @@ export class ScionHealthBrokerTable extends LitElement {
             : html`<span class="pill tone-${storage.tone}">${storage.text}</span>`}
         </td>
         <td class="agents num">
-          ${typeof total === 'number'
-            ? total
-            : html`<span class="muted">—</span>`}${typeof agents.running === 'number'
-            ? html` <span class="muted">(${agents.running} running)</span>`
-            : nothing}${agents.attention
-            ? html` <span class="pill tone-warn">${agents.attention} need attention</span>`
-            : nothing}
+          ${typeof total === 'number' ? total : html`<span class="muted">—</span>`}
         </td>
         <td class="version">${b.version || html`<span class="muted">—</span>`}</td>
         <td class="heartbeat" title=${ifDefined(b.last_heartbeat || undefined)}>
