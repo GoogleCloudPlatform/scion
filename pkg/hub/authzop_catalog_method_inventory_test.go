@@ -578,7 +578,8 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/groups/{id}/members/{memberType}/{memberId}": {"id": f.group, "memberType": "user", "memberId": f.member},
 
 		// --- user family ---
-		"/api/v1/users/{id}": {"id": f.user},
+		"/api/v1/users/{id}":                 {"id": f.user},
+		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}": {"id": f.skill},
