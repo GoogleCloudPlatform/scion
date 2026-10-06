@@ -416,26 +416,40 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			}
 		})
 
-		t.Run("a hold for the root ID skips the agent whatever the root type", func(t *testing.T) {
+		t.Run("SkipHeldForRoot requires a user root", func(t *testing.T) {
 			s := factory(t)
 			f := newDescFixture(t, ctx, s)
 			root := f.agent(t, ctx, f.project, nil)
 			held := f.agent(t, ctx, f.project, nil)
 			below := f.agent(t, ctx, f.project, nil)
+			f.userEdge(t, ctx, root)
 			f.agentEdge(t, ctx, root, held)
 			f.agentEdge(t, ctx, held, below)
-			// Holds always record a user root; the walk matches holds on
-			// the root ID, the same key the hold insert uses.
-			n, err := s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(f.project, held, root)})
+			n, err := s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(f.project, held, f.user)})
 			require.NoError(t, err)
 			require.Equal(t, 1, n)
 
+			// An agent root with SkipHeldForRoot is refused.
 			q := f.query()
 			q.RootType, q.RootID = store.DelegationPrincipalAgent, root
 			q.SkipHeldForRoot = true
 			res, err := listDescendants(t, s, q)
+			assert.ErrorIs(t, err, store.ErrInvalidInput, "an agent root with SkipHeldForRoot is refused")
+			assert.Empty(t, res.Agents)
+
+			// An agent root without SkipHeldForRoot returns every descendant.
+			q.SkipHeldForRoot = false
+			res, err = listDescendants(t, s, q)
 			require.NoError(t, err)
-			assert.Equal(t, []string{below}, refIDs(res.Agents))
+			assert.ElementsMatch(t, []string{held, below}, refIDs(res.Agents))
+
+			// A user root with SkipHeldForRoot leaves out the held agent and
+			// still reaches the agent below it.
+			q = f.query()
+			q.SkipHeldForRoot = true
+			res, err = listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{root, below}, refIDs(res.Agents))
 		})
 
 		t.Run("other-project edges and agents are excluded", func(t *testing.T) {

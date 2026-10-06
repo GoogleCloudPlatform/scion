@@ -358,6 +358,9 @@ func (s *DelegationEdgeStore) ListDelegationDescendants(ctx context.Context, q s
 	if q.RootType != store.DelegationPrincipalUser && q.RootType != store.DelegationPrincipalAgent {
 		return res, fmt.Errorf("%w: unknown root principal type %q", store.ErrInvalidInput, q.RootType)
 	}
+	if q.SkipHeldForRoot && q.RootType != store.DelegationPrincipalUser {
+		return res, fmt.Errorf("%w: SkipHeldForRoot requires a user root principal", store.ErrInvalidInput)
+	}
 	rootID, err := parseUUID(q.RootID)
 	if err != nil {
 		return res, fmt.Errorf("%w: descendant query requires a root principal UUID", store.ErrInvalidInput)

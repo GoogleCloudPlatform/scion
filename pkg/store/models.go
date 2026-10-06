@@ -3360,7 +3360,10 @@ type DescendantQuery struct {
 	// AgentHold whose root principal ID is RootID: they are still expanded
 	// (their descendants are still reached) but are not returned and do not
 	// count toward MaxNodes. A caller that holds the returned agents and
-	// calls again therefore continues further into the tree.
+	// calls again therefore continues further into the tree. Hold roots
+	// are users, so SkipHeldForRoot requires RootType
+	// DelegationPrincipalUser; with an agent root the query returns
+	// ErrInvalidInput.
 	SkipHeldForRoot bool
 	// MaxDepth bounds the walk depth (DefaultDescendantMaxDepth when zero).
 	MaxDepth int

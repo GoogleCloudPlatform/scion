@@ -2880,6 +2880,8 @@ type DelegationEdgeStore interface {
 	// that are not soft-deleted. With q.SkipHeldForRoot, agents that
 	// already have an active hold for q.RootID are expanded but not
 	// returned or counted. Every returned ref can therefore be held.
+	// q.SkipHeldForRoot requires a user root (hold roots are users); with
+	// an agent root the query returns ErrInvalidInput.
 	//
 	// q.RootID and q.ProjectID must be UUIDs (ErrInvalidInput otherwise);
 	// IDs are compared and returned in canonical form, so a braced or
@@ -2968,8 +2970,10 @@ type AgentHoldStore interface {
 // change, claimed with a lease and deleted on completion.
 type MembershipLossCheckStore interface {
 	// EnqueueMembershipLossCheck inserts check. Empty ID and zero
-	// CreatedAt are filled in. UserID and a non-empty ProjectID must be
-	// UUIDs and are stored (and written back to check) in canonical form.
+	// CreatedAt are filled in, and UserID and a non-empty ProjectID must be
+	// UUIDs and are stored in canonical form. ID, CreatedAt, UserID and
+	// ProjectID are written back to check only when the call returns without
+	// error, so a call that returns an error leaves check unchanged.
 	// Returns ErrInvalidInput for a missing or invalid user, an invalid
 	// project or an unknown trigger.
 	EnqueueMembershipLossCheck(ctx context.Context, check *MembershipLossCheck) error
