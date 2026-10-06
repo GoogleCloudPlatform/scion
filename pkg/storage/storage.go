@@ -100,6 +100,14 @@ type SignedURLOptions struct {
 	ContentType string
 	// ContentMD5 is the expected MD5 hash (for PUT).
 	ContentMD5 string
+	// ResponseContentType, when set on a GET URL, overrides the
+	// Content-Type the object store answers with. Providers that cannot
+	// override response headers ignore it.
+	ResponseContentType string
+	// ResponseContentDisposition, when set on a GET URL, overrides the
+	// Content-Disposition the object store answers with. Providers that
+	// cannot override response headers ignore it.
+	ResponseContentDisposition string
 }
 
 // SignedURL contains a signed URL for object access.

@@ -1162,3 +1162,28 @@ describe('focusTerminal()', () => {
     expect(document.activeElement).toBe(page);
   });
 });
+
+describe('pane navigation', () => {
+  it('"Open in graph" navigates through the shared helper (nav-click on document)', async () => {
+    await mountToFrame();
+    (page as unknown as { projectId: string }).projectId = 'proj 1';
+    page.requestUpdate();
+    await page.updateComplete;
+
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const button = page.shadowRoot!.querySelector<HTMLButtonElement>(
+        'button[title="Open in graph"]'
+      );
+      expect(button).not.toBeNull();
+      button!.click();
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+    expect(paths).toEqual([`/agents/graph?project=proj%201&focus=${agentId}`]);
+  });
+});

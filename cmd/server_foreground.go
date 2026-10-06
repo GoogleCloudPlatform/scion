@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -554,6 +555,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		var webStore hub.WebChatStore
 		if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
 			if rawDB := dbProvider.DB(); rawDB != nil {
+				// Artifact store: creates the artifact_* tables (outside
+				// the Ent migration graph, design D3) on every start,
+				// whether or not the hub.artifacts experiment is on.
+				as := artifacts.NewStore(rawDB, cfg.Database.Driver)
+				if err := as.Init(ctx); err != nil {
+					log.Printf("Warning: failed to initialize artifact store: %v", err)
+				} else {
+					hubSrv.SetArtifactStore(as)
+					log.Printf("Artifact store initialized")
+				}
+
 				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
 				if err := ws.Init(); err != nil {
 					log.Printf("Warning: failed to initialize webchat store: %v", err)
