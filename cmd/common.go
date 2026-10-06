@@ -120,14 +120,6 @@ func validateHarnessAuthFlag(v string) error {
 	}
 }
 
-// validateThinkingLevelFlag checks a --thinking-level value; -1 means unset.
-func validateThinkingLevelFlag(v int) error {
-	if v != -1 && (v < 0 || v > 100) {
-		return fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100", v)
-	}
-	return nil
-}
-
 func parseLabels(raw []string) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
