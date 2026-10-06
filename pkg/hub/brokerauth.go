@@ -280,16 +280,24 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 }
 
 // FindExistingBroker looks up the broker record, if any, that a registration
-// request for the given name and (optional) caller-supplied ID would match:
-// first by name, then by ID when no name match is found. It returns (nil,
-// nil) when no existing broker matches, which means the request describes a
-// brand-new registration. Callers that need to authorize a match before it
-// is acted upon (e.g. the HTTP handler's ownership gate) should use this
-// method rather than re-deriving the matching rule.
-func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, brokerID string) (*store.RuntimeBroker, error) {
-	existingBroker, err := s.store.GetRuntimeBrokerByName(ctx, name)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("failed to check existing broker: %w", err)
+// request for the given name and (optional) caller-supplied ID would match.
+// It returns (nil, nil) when no existing broker matches, which means the
+// request describes a brand-new registration. Callers that need to authorize
+// a match before it is acted upon (e.g. the HTTP handler's ownership gate)
+// should use this method rather than re-deriving the matching rule, and pin
+// the mutation to its result.
+//
+// A flat registration (target non-nil) is matched by ID only; a flat row is
+// never matched by name. A legacy registration (target nil) matches first by
+// name among legacy rows only (GetLegacyRuntimeBrokerByName), then by ID.
+func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, brokerID string, target *api.RuntimeTargetDescriptor) (*store.RuntimeBroker, error) {
+	var existingBroker *store.RuntimeBroker
+	if target == nil {
+		byName, err := s.store.GetLegacyRuntimeBrokerByName(ctx, name)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to check existing broker: %w", err)
+		}
+		existingBroker = byName
 	}
 
 	if existingBroker == nil && brokerID != "" {
@@ -377,7 +385,13 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	var brokerID string
 	var reregistered bool
 
-	existingBroker, err := s.FindExistingBroker(ctx, req.Name, req.BrokerID)
+	// Flat registrations go through Server.registerFlatRuntimeBroker; this
+	// service path handles legacy (profile-based) registrations only.
+	if req.RuntimeTarget != nil {
+		return nil, errors.New("flat Runtime Broker registrations are handled by the Hub's flat registration path")
+	}
+
+	existingBroker, err := s.FindExistingBroker(ctx, req.Name, req.BrokerID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -387,6 +401,17 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	}
 	if expectNoExistingMatch && existingBroker != nil {
 		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
+
+	// R4: a legacy registration never re-registers a flat row, and never
+	// creates a row next to a flat row with the same name or slug.
+	if existingBroker.IsFlat() {
+		return nil, runtimeTargetChangedRefusal(existingBroker.ID, existingBroker.RuntimeTarget.ID, "")
+	}
+	if existingBroker == nil {
+		if err := legacyRegistrationNameConflict(ctx, s.store, req.Name, req.BrokerID); err != nil {
+			return nil, err
+		}
 	}
 
 	if existingBroker != nil {
@@ -437,6 +462,15 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		}
 	}
 
+	return s.issueJoinToken(ctx, brokerID, createdBy, reregistered, nil)
+}
+
+// issueJoinToken mints and stores a join token for brokerID and builds the
+// registration response. When the token cannot be stored, a row this
+// registration just created (reregistered false) is deleted again. target is
+// the stored descriptor of a flat row (the activation acknowledgement), nil
+// for a legacy row.
+func (s *BrokerAuthService) issueJoinToken(ctx context.Context, brokerID, createdBy string, reregistered bool, target *api.RuntimeTargetDescriptor) (*CreateBrokerRegistrationResponse, error) {
 	// Generate join token
 	tokenBytes := make([]byte, s.config.JoinTokenLength)
 	if _, err := rand.Read(tokenBytes); err != nil {
@@ -468,10 +502,11 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	}
 
 	return &CreateBrokerRegistrationResponse{
-		BrokerID:     brokerID,
-		JoinToken:    joinToken,
-		ExpiresAt:    expiresAt,
-		Reregistered: reregistered,
+		BrokerID:      brokerID,
+		JoinToken:     joinToken,
+		ExpiresAt:     expiresAt,
+		Reregistered:  reregistered,
+		RuntimeTarget: copyRuntimeTarget(target),
 	}, nil
 }
 
@@ -509,6 +544,26 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 		return nil, fmt.Errorf("join token has expired")
 	}
 
+	// The descriptor check runs before the secret is rotated, so a refused
+	// join leaves the existing secret untouched: a flat row must be joined
+	// with its stored descriptor, and a legacy row without one.
+	joining, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get runtime broker: %w", err)
+	}
+	if joining.IsFlat() || req.RuntimeTarget != nil {
+		if !joining.IsFlat() || !sameRuntimeTarget(joining.RuntimeTarget, req.RuntimeTarget) {
+			stored, reported := "", ""
+			if joining.IsFlat() {
+				stored = joining.RuntimeTarget.ID
+			}
+			if req.RuntimeTarget != nil {
+				reported = req.RuntimeTarget.ID
+			}
+			return nil, runtimeTargetChangedRefusal(req.BrokerID, stored, reported)
+		}
+	}
+
 	// Generate shared secret
 	secretKey := make([]byte, s.config.SecretKeyLength)
 	if _, err := rand.Read(secretKey); err != nil {
@@ -543,8 +598,9 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	broker.LastHeartbeat = time.Now()
 	broker.Updated = time.Now()
 
-	// Update profiles if provided in the join request
-	if len(req.Profiles) > 0 {
+	// Update profiles if provided in the join request. A flat row never
+	// stores profiles.
+	if len(req.Profiles) > 0 && !broker.IsFlat() {
 		broker.Profiles = req.Profiles
 	}
 
@@ -563,8 +619,11 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	if req.WorkspaceStorage != nil {
 		broker.WorkspaceStorage = req.WorkspaceStorage
 	}
-	if req.DefaultProfile != nil {
+	if req.DefaultProfile != nil && !broker.IsFlat() {
 		broker.DefaultProfile = *req.DefaultProfile
+	}
+	if broker.IsFlat() {
+		broker.Profiles, broker.DefaultProfile = nil, ""
 	}
 
 	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
@@ -575,9 +634,10 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
 
 	return &BrokerJoinResponse{
-		SecretKey:   base64.StdEncoding.EncodeToString(secretKey),
-		HubEndpoint: hubEndpoint,
-		BrokerID:    req.BrokerID,
+		SecretKey:     base64.StdEncoding.EncodeToString(secretKey),
+		HubEndpoint:   hubEndpoint,
+		BrokerID:      req.BrokerID,
+		RuntimeTarget: copyRuntimeTarget(broker.RuntimeTarget),
 	}, nil
 }
 

@@ -18,6 +18,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -104,7 +105,11 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// created it. A first-time registration (no existing match) requires only
 	// the broker.create gate above; the caller becomes the new broker's
 	// owner.
-	existingBroker, err := s.brokerAuthService.FindExistingBroker(r.Context(), req.Name, req.BrokerID)
+	if req.RuntimeTarget != nil && (req.BrokerID == "" || req.RuntimeTarget.ID == "" || req.RuntimeTarget.Type == "") {
+		ValidationError(w, errFlatRegistrationIncomplete.Error(), map[string]interface{}{"field": "runtimeTarget"})
+		return
+	}
+	existingBroker, err := s.brokerAuthService.FindExistingBroker(r.Context(), req.Name, req.BrokerID, req.RuntimeTarget)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -131,12 +136,18 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// authorized against — whether that means reusing a specific existing
 	// broker, or, when none matched, creating a genuinely new one.
 	var resp *CreateBrokerRegistrationResponse
-	if existingBroker != nil {
+	switch {
+	case req.RuntimeTarget != nil:
+		resp, err = s.createFlatBrokerRegistration(r.Context(), req, user.ID(), existingBroker)
+	case existingBroker != nil:
 		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID)
-	} else {
+	default:
 		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID())
 	}
 	if err != nil {
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		writeBrokerRegistrationError(w, err)
 		return
 	}
@@ -145,6 +156,50 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r))
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// createFlatBrokerRegistration registers a flat Runtime Broker through the
+// shared flat registration path (pinned to the row the caller was authorized
+// against) and issues its join token. The response echoes the stored runtime
+// target as the activation acknowledgement.
+func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string, existing *store.RuntimeBroker) (*CreateBrokerRegistrationResponse, error) {
+	labels := map[string]string{}
+	for k, v := range req.Labels {
+		labels[k] = v
+	}
+	if _, ok := labels["scion.io/broker-type"]; !ok {
+		labels["scion.io/broker-type"] = "external"
+	}
+	saEmail := strings.ToLower(req.GCPHostServiceAccountEmail)
+	row, created, err := s.registerFlatRuntimeBroker(ctx, flatRegistration{
+		BrokerID:  req.BrokerID,
+		Name:      req.Name,
+		Target:    *req.RuntimeTarget,
+		CreatedBy: createdBy,
+		Existing:  existing,
+		Apply: func(b *store.RuntimeBroker, _ bool) {
+			b.AutoProvide = req.AutoProvide
+			b.GCPHostServiceAccountEmail = saEmail
+			b.GCPHostProjectID = req.GCPHostProjectID
+			if b.Labels == nil {
+				b.Labels = map[string]string{}
+			}
+			for k, v := range labels {
+				b.Labels[k] = v
+			}
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !created {
+		// A flat re-registration re-mints the join token: an outstanding
+		// one (for example left by a refused join) is replaced.
+		if err := s.store.DeleteJoinToken(ctx, row.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to replace the outstanding join token: %w", err)
+		}
+	}
+	return s.brokerAuthService.issueJoinToken(ctx, row.ID, createdBy, !created, row.RuntimeTarget)
 }
 
 // writeBrokerRegistrationError maps an error from
@@ -305,6 +360,9 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		// Log failed join attempt
 		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error())
 
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		// Determine error type and return appropriate response
 		errMsg := err.Error()
 		switch errMsg {

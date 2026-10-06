@@ -17,10 +17,9 @@
 package hub
 
 // Frozen group F (dispatch half) Hub tests of the flat Runtime Broker
-// contract (.design/flat-runtime-brokers-contract.md section 15). They are
-// written in full in P1.1 and skipped until P1.2 (ptone/scion#3268) wires
-// flat dispatch: P1.2 removes pendingFlatDispatch and must make them pass
-// unchanged, changing only the bodies of the named F-arrange helpers
+// contract (.design/flat-runtime-brokers-contract.md section 15). They were
+// written in full in P1.1; P1.2 (ptone/scion#3268) wired flat dispatch and
+// changed only the bodies of the named F-arrange helpers
 // (registerEmbeddedFlatForTest). Fields that P1.1 does not add to request
 // structs (expectedRuntimeTargetId on the Hub create request and on the
 // Runtime Broker request) are sent and asserted as raw JSON.
@@ -43,11 +42,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-const pendingFlatDispatch = "pending ptone/scion#3268: flat dispatch not wired yet"
 
 // --- fixture -------------------------------------------------------------
 
@@ -403,7 +402,6 @@ func flatMemberUser(t *testing.T, s store.Store, projectID, name string) *store.
 // --- create ----------------------------------------------------------------
 
 func TestFlatCreate_ExpectedTargetMismatchRejectedBeforeSideEffects(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	// The flat row is not linked, so a successful create would also have to
 	// link it: the refusal must come before any link.
@@ -434,7 +432,6 @@ func TestFlatCreate_ExpectedTargetMismatchRejectedBeforeSideEffects(t *testing.T
 }
 
 func TestFlatCreate_ExpectedTargetTowardLegacyBrokerRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	rec := f.create(t, map[string]interface{}{
 		"name": "toward-legacy", "runtimeBrokerId": f.legacy.ID, "task": "t",
@@ -455,7 +452,6 @@ func TestFlatCreate_ExpectedTargetTowardLegacyBrokerRejected(t *testing.T) {
 }
 
 func TestFlatCreate_CheckPrecedence(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	t.Run("new create: empty-per-agent capability 412 before experiment_disabled", func(t *testing.T) {
 		f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
@@ -501,7 +497,6 @@ func TestFlatCreate_CheckPrecedence(t *testing.T) {
 }
 
 func TestFlatCreate_ExplicitProfileRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	rec := f.create(t, map[string]interface{}{"name": "with-profile", "runtimeBrokerId": f.flat.ID, "task": "t", "profile": "local"})
 	d := requireAPIError(t, rec, http.StatusUnprocessableEntity, ErrCodeRuntimeProfileUnsupported)
@@ -511,7 +506,6 @@ func TestFlatCreate_ExplicitProfileRejected(t *testing.T) {
 }
 
 func TestFlatCreate_DefaultProfileNotAppliedWithWarning(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	setProjectAnnotations(t, f.s, f.project, map[string]string{projectSettingActiveProfile: "local"})
 	rec := f.create(t, map[string]interface{}{"name": "default-profile", "runtimeBrokerId": f.flat.ID, "task": "t"})
@@ -539,7 +533,6 @@ func TestFlatCreate_DefaultProfileNotAppliedWithWarning(t *testing.T) {
 }
 
 func TestFlatCreate_PassthroughGateUsesTargetType(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	f.srv.SetEmbeddedBrokerID(f.flat.ID)
 	allowed, pinnedProfile := f.srv.hubDefaultPassthroughAllowed(context.Background(), f.flat.ID, f.project.ID, "agent", "")
@@ -557,7 +550,6 @@ func TestFlatCreate_PassthroughGateUsesTargetType(t *testing.T) {
 }
 
 func TestFlatCreate_PinsPlacementAndSendsExpectedTarget(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	rec := f.create(t, map[string]interface{}{"name": "pinned", "runtimeBrokerId": f.flat.ID, "task": "t"})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -573,7 +565,6 @@ func TestFlatCreate_PinsPlacementAndSendsExpectedTarget(t *testing.T) {
 }
 
 func TestFlatCreate_ExperimentOffRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
 	rec := f.create(t, map[string]interface{}{"name": "off", "runtimeBrokerId": f.flat.ID, "task": "t"})
 	d := requireAPIError(t, rec, http.StatusPreconditionFailed, ErrCodeExperimentDisabled)
@@ -582,7 +573,6 @@ func TestFlatCreate_ExperimentOffRejected(t *testing.T) {
 }
 
 func TestFlatCreate_ExperimentOffExistingPinnedAgentLifecycleWorks(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
 	a := f.pinnedAgent(t, "resume-me", string(state.PhaseStopped))
 	// No runtimeBrokerId: the resolved default (legacy) differs from the
@@ -608,7 +598,6 @@ func TestFlatCreate_ExperimentOffExistingPinnedAgentLifecycleWorks(t *testing.T)
 }
 
 func TestFlatCreate_ExistingAgentChecksUseAgentBrokerNotResolved(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	f.pinnedAgent(t, "existing", string(state.PhaseStopped))
 	// The request names the legacy row explicitly, but a resumed existing
@@ -632,7 +621,6 @@ func TestFlatCreate_ExistingAgentChecksUseAgentBrokerNotResolved(t *testing.T) {
 }
 
 func TestFlatCreate_DeleteAndRecreateChecksBeforeDelete(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
 	// A legacy agent still provisioning, re-created with gatherEnv: the
 	// env-gather re-provisioning branch deletes and re-creates it. Re-creating
@@ -650,7 +638,6 @@ func TestFlatCreate_DeleteAndRecreateChecksBeforeDelete(t *testing.T) {
 }
 
 func TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 
@@ -707,7 +694,6 @@ func TestFlatCreate_ExistingAgentWithoutBrokerTreatedAsNewCreate(t *testing.T) {
 }
 
 func TestFlatCreate_LifecycleClientExpectedTargetComparedWithPin(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	f.pinnedAgent(t, "pinned-life", string(state.PhaseStopped))
 	rec := f.create(t, map[string]interface{}{"name": "pinned-life", "task": "t", "resume": true, "expectedRuntimeTargetId": "other"})
@@ -723,7 +709,6 @@ func TestFlatCreate_LifecycleClientExpectedTargetComparedWithPin(t *testing.T) {
 }
 
 func TestFlatCreate_RuntimeBrokerRejectionRelayed(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	cases := []struct {
 		status  int
 		code    string
@@ -761,7 +746,6 @@ func TestFlatCreate_RuntimeBrokerRejectionRelayed(t *testing.T) {
 }
 
 func TestFlatCreate_AccessCheckBeforeLink(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	// The caller is a project owner admitted to project update and agent
 	// create; dispatch admission on the non-auto-provide flat row comes only
@@ -782,7 +766,6 @@ func TestFlatCreate_AccessCheckBeforeLink(t *testing.T) {
 }
 
 func TestFlatCreate_UnlinkedFlatBrokerNotAutoLinked(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	rec := f.create(t, map[string]interface{}{"name": "unlinked", "runtimeBrokerId": f.flat.ID, "task": "t"})
 	d := requireAPIError(t, rec, http.StatusUnprocessableEntity, ErrCodeRuntimeBrokerNotLinked)
@@ -794,7 +777,6 @@ func TestFlatCreate_UnlinkedFlatBrokerNotAutoLinked(t *testing.T) {
 }
 
 func TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/providers", AddProviderRequest{BrokerID: f.flat.ID})
 	require.Truef(t, rec.Code == http.StatusOK || rec.Code == http.StatusCreated, "explicit link: %d %s", rec.Code, rec.Body.String())
@@ -809,7 +791,6 @@ func TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly(t *testing.T) {
 }
 
 func TestFlatCreate_UnlinkedFlatRowAuthorizationWins(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	owner := flatOwnerUser(t, f.s, f.project.ID, "flat-unlinked-owner")
 	rec := doRequestAsUser(t, f.srv, owner, http.MethodPost, "/api/v1/projects/"+f.project.ID+"/agents",
@@ -826,7 +807,6 @@ func TestFlatCreate_UnlinkedFlatRowAuthorizationWins(t *testing.T) {
 }
 
 func TestFlatCreate_UnlinkedFlatRowNotReachedThroughDefaults(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	t.Run("project default pointing at an unlinked flat row", func(t *testing.T) {
 		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
@@ -858,7 +838,6 @@ func TestFlatCreate_UnlinkedFlatRowNotReachedThroughDefaults(t *testing.T) {
 }
 
 func TestFlatCreate_AuthorizationBeforeFlatChecks(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	// Fixture: a linked flat row, experiment off, with a profile and a
 	// mismatching expected target: every flat check would fail.
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false, linkFlat: true})
@@ -880,7 +859,6 @@ func TestFlatCreate_AuthorizationBeforeFlatChecks(t *testing.T) {
 }
 
 func TestFlatCreate_FlatChecksDoNotGrantDispatch(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	member := flatMemberUser(t, f.s, f.project.ID, "flat-nogrant-member")
 	// Passes every flat check (experiment on, matching target, no profile).
@@ -901,7 +879,6 @@ func TestFlatCreate_FlatChecksDoNotGrantDispatch(t *testing.T) {
 }
 
 func TestLegacyCreate_AgentCallerCreateTimeLinkUnchanged(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := brokerLinkAuthzSetup(t)
 	f.unlinked.AutoProvide = false
 	require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), f.unlinked))
@@ -936,7 +913,6 @@ func decodeAPIErrorIfAny(rec *httptest.ResponseRecorder) string {
 }
 
 func TestLegacyCreate_ExperimentOffUnchanged(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false})
 	rec := f.create(t, map[string]interface{}{"name": "legacy", "runtimeBrokerId": f.legacy.ID, "task": "t", "profile": "local"})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -960,7 +936,6 @@ func requireStalePinDetails(t *testing.T, d map[string]interface{}, a *store.Age
 }
 
 func TestFlatStart_StalePinRefused_Handler(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "stale-start", string(state.PhaseStopped))
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
@@ -973,7 +948,6 @@ func TestFlatStart_StalePinRefused_Handler(t *testing.T) {
 }
 
 func TestFlatStart_StalePinRefused_Restart(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "stale-restart", string(state.PhaseRunning))
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
@@ -982,7 +956,6 @@ func TestFlatStart_StalePinRefused_Restart(t *testing.T) {
 }
 
 func TestFlatStart_StalePinRefused_Reconcile(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "stale-reconcile", string(state.PhaseStopped))
 	args, err := MarshalDispatchArgs(&StartDispatchArgs{Task: "t"})
@@ -1008,7 +981,6 @@ func TestFlatStart_StalePinRefused_Reconcile(t *testing.T) {
 }
 
 func TestFlatStart_StalePinRefused_WakeDM(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "stale-wake", string(state.PhaseSuspended))
 	_, dmErr := f.srv.wakeAgentForDM(context.Background(), a)
@@ -1020,7 +992,6 @@ func TestFlatStart_StalePinRefused_WakeDM(t *testing.T) {
 }
 
 func TestFlatRestart_StalePinRefusedBeforeStopLeg(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "stale-restart-stop", string(state.PhaseRunning))
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
@@ -1035,7 +1006,6 @@ func TestFlatRestart_StalePinRefusedBeforeStopLeg(t *testing.T) {
 }
 
 func TestFlatStart_StalePinRefusalIsConfirmedNotActedOn(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	refusal := &RuntimeTargetRefusal{Code: ErrCodeRuntimeTargetPinStale, Status: http.StatusConflict, Message: "stale"}
 	assert.True(t, isConfirmedStartNotActedOnError(refusal))
 	assert.True(t, isConfirmedStartNotActedOnError(fmt.Errorf("wrapped: %w", refusal)))
@@ -1058,7 +1028,6 @@ func TestFlatStart_StalePinRefusalIsConfirmedNotActedOn(t *testing.T) {
 }
 
 func TestFlatStart_UnpinnedAgentOnFlatRowIsStale(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.unpinnedAgentOn(t, "unpinned-on-flat", f.flat.ID, string(state.PhaseStopped))
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
@@ -1068,7 +1037,6 @@ func TestFlatStart_UnpinnedAgentOnFlatRowIsStale(t *testing.T) {
 }
 
 func TestFlatStart_RuntimeBrokerMismatchOnStartRelayed(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.pinnedAgent(t, "mismatch-start", string(state.PhaseStopped))
 	f.client.returnErr = &brokerStatusError{StatusCode: http.StatusConflict, Body: fmt.Sprintf(
@@ -1081,7 +1049,6 @@ func TestFlatStart_RuntimeBrokerMismatchOnStartRelayed(t *testing.T) {
 }
 
 func TestFlatStart_RefusalIsTerminalForIntent(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 
 	// Executor leg: a queued start reaches the refusal only in the executing
 	// node's dispatcher backstop. The row ends failed with the typed refusal
@@ -1163,7 +1130,6 @@ func TestFlatStart_RefusalIsTerminalForIntent(t *testing.T) {
 }
 
 func TestFlatStart_CrossNodeRefusalRebuiltFromEnvelope(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	refusal := &RuntimeTargetRefusal{
 		Code: ErrCodeRuntimeTargetPinStale, Status: http.StatusConflict, Message: "stale",
 		Details: map[string]interface{}{"agentId": "a", "pinnedRuntimeBrokerId": "p", "runtimeBrokerId": "r"},
@@ -1185,7 +1151,6 @@ func TestFlatStart_CrossNodeRefusalRebuiltFromEnvelope(t *testing.T) {
 // --- reincarnate / finalize-env ----------------------------------------------
 
 func TestFlatReincarnate_StalePinRefusedBeforeStop(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgentWith(t, "stale-reinc", string(state.PhaseRunning), reincarnationEligible)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{})
@@ -1200,7 +1165,6 @@ func TestFlatReincarnate_StalePinRefusedBeforeStop(t *testing.T) {
 }
 
 func TestFlatReincarnate_ReprovisionSendsExpectedTarget(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.pinnedAgent(t, "reprovision", string(state.PhaseStopped))
 	require.NoError(t, f.srv.GetDispatcher().DispatchAgentReprovision(context.Background(), a))
@@ -1209,7 +1173,6 @@ func TestFlatReincarnate_ReprovisionSendsExpectedTarget(t *testing.T) {
 }
 
 func TestFlatFinalizeEnv_SendsExpectedTarget(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.pinnedAgent(t, "finalize", string(state.PhaseProvisioning))
 	_, err := f.srv.GetDispatcher().DispatchFinalizeEnv(context.Background(), a, map[string]string{"K": "v"})
@@ -1219,7 +1182,6 @@ func TestFlatFinalizeEnv_SendsExpectedTarget(t *testing.T) {
 }
 
 func TestFlatReincarnate_MoveStillNotImplemented(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.pinnedAgent(t, "move", string(state.PhaseRunning))
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{TargetBroker: f.legacy.ID})
@@ -1227,7 +1189,6 @@ func TestFlatReincarnate_MoveStillNotImplemented(t *testing.T) {
 }
 
 func TestFlatReincarnate_MoveDryRunReportsPinnedIneligible(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.pinnedAgentWith(t, "move-dry", string(state.PhaseRunning), reincarnationEligible)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true, TargetBroker: f.legacy.ID})
@@ -1250,7 +1211,6 @@ func TestFlatReincarnate_MoveDryRunReportsPinnedIneligible(t *testing.T) {
 }
 
 func TestFlatReincarnate_DryRunMoveOfStalePinGetsPlanAnswer(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgentWith(t, "stale-move-dry", string(state.PhaseRunning), reincarnationEligible)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{DryRun: true, TargetBroker: f.flat.ID})
@@ -1259,7 +1219,6 @@ func TestFlatReincarnate_DryRunMoveOfStalePinGetsPlanAnswer(t *testing.T) {
 }
 
 func TestFlatReincarnate_ProfileNotRederived(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	setProjectAnnotations(t, f.s, f.project, map[string]string{projectSettingActiveProfile: "local"})
@@ -1335,7 +1294,6 @@ func (f *flatHubFixture) flatOnlyProject(t *testing.T) *store.Project {
 }
 
 func TestFlatScheduledCreate_PinsPlacement(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	p := f.flatOnlyProject(t)
 	f.srv.SetEmbeddedBrokerID(f.flat.ID) // the passthrough default could otherwise pin a profile
@@ -1357,7 +1315,6 @@ func TestFlatScheduledCreate_PinsPlacement(t *testing.T) {
 }
 
 func TestFlatScheduledCreate_ExperimentOffRefused(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: false})
 	p := f.flatOnlyProject(t)
 	err := fireScheduledCreate(t, f.srv, f.s, p.ID, "scheduled-off")
@@ -1373,7 +1330,6 @@ func TestFlatScheduledCreate_ExperimentOffRefused(t *testing.T) {
 // --- links and auto-provide --------------------------------------------------
 
 func TestFlatAutoProvide_NoAutomaticProjectLink(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	createProject := func(t *testing.T, f *flatHubFixture, name string) string {
 		t.Helper()
 		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", map[string]interface{}{"name": name})
@@ -1409,7 +1365,6 @@ func TestFlatAutoProvide_NoAutomaticProjectLink(t *testing.T) {
 }
 
 func TestRegisterProjectBrokerID_FlatRowRefused(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "linked-by-id", BrokerID: f.flat.ID})
 	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerLinkPathUnsupported)
@@ -1428,7 +1383,6 @@ func TestRegisterProjectBrokerID_FlatRowRefused(t *testing.T) {
 }
 
 func TestDeprecatedRegisterProject_DoesNotAdoptFlatRow(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	// A flat row found only by name: no adoption, no duplicate.
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
@@ -1454,7 +1408,6 @@ func TestDeprecatedRegisterProject_DoesNotAdoptFlatRow(t *testing.T) {
 }
 
 func TestAdminPatch_RenameCollidingWithFlatRowRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	rec := doRequest(t, f.srv, http.MethodPatch, "/api/v1/runtime-brokers/"+f.legacy.ID, map[string]interface{}{"name": f.flat.Name})
 	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
@@ -1468,7 +1421,6 @@ func TestAdminPatch_RenameCollidingWithFlatRowRejected(t *testing.T) {
 }
 
 func TestHeartbeat_DropsProfilesForFlatRow(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	grantDevUserRuntimeBrokerAccess(t, f.s)
 	logs := captureFlatSlog(t)
@@ -1539,7 +1491,6 @@ func (f *flatRegFixture) registerFlat(t *testing.T, id, name string) string {
 }
 
 func TestFlatRegistration_TargetChangeRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := f.registerFlat(t, tid("flat-reg-change"), "flat-change")
 	other := &api.RuntimeTargetDescriptor{ID: tid("other-target"), Type: "docker"}
@@ -1554,7 +1505,6 @@ func TestFlatRegistration_TargetChangeRejected(t *testing.T) {
 }
 
 func TestFlatRegistration_JoinDescriptorMismatchKeepsSecret(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	f := newFlatRegFixture(t, true)
 	id := f.registerFlat(t, tid("flat-reg-secret"), "flat-secret")
@@ -1584,7 +1534,6 @@ func TestFlatRegistration_JoinDescriptorMismatchKeepsSecret(t *testing.T) {
 }
 
 func TestFlatRegistration_ResponseEchoesRuntimeTarget(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: tid("flat-reg-echo"), Name: "flat-echo", RuntimeTarget: f.target})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -1610,7 +1559,6 @@ func TestFlatRegistration_ResponseEchoesRuntimeTarget(t *testing.T) {
 }
 
 func TestFlatRegistration_LegacyRowNotConverted(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	legacyID := tid("flat-reg-legacy-row")
 	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), &store.RuntimeBroker{
@@ -1627,7 +1575,6 @@ func TestFlatRegistration_LegacyRowNotConverted(t *testing.T) {
 }
 
 func TestFlatRegistration_LegacyReRegistrationOfFlatIDRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := f.registerFlat(t, tid("flat-reg-legacy-rereg"), "flat-legacy-rereg")
 	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-legacy-rereg"})
@@ -1638,7 +1585,6 @@ func TestFlatRegistration_LegacyReRegistrationOfFlatIDRejected(t *testing.T) {
 }
 
 func TestFlatRegistration_NameOrSlugCollisionOnCreateRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	f := newFlatRegFixture(t, true)
 	existing := &store.RuntimeBroker{ID: tid("taken-row"), Name: "Taken-Name", Slug: "taken-slug", Status: store.BrokerStatusOffline}
@@ -1653,7 +1599,6 @@ func TestFlatRegistration_NameOrSlugCollisionOnCreateRejected(t *testing.T) {
 }
 
 func TestFlatRegistration_ReRegistrationNotBlockedByLaterNameCollision(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := f.registerFlat(t, tid("flat-reg-later"), "flat-later")
 	// An older binary later created a legacy row with the same name.
@@ -1669,7 +1614,6 @@ func TestFlatRegistration_ReRegistrationNotBlockedByLaterNameCollision(t *testin
 }
 
 func TestFlatRegistration_NameChangeInConfigNotApplied(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := f.registerFlat(t, tid("flat-reg-rename"), "flat-original")
 	rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-renamed", RuntimeTarget: f.target})
@@ -1685,7 +1629,6 @@ func TestFlatRegistration_NameChangeInConfigNotApplied(t *testing.T) {
 }
 
 func TestFlatRegistration_ReRegistrationRequiresOwner(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := f.registerFlat(t, tid("flat-reg-owner"), "flat-owner")
 	rec := f.register(t, f.other, CreateBrokerRegistrationRequest{BrokerID: id, Name: "flat-owner", RuntimeTarget: f.target})
@@ -1703,7 +1646,6 @@ func TestFlatRegistration_ReRegistrationRequiresOwner(t *testing.T) {
 }
 
 func TestFlatRegistration_ExperimentOffRejectsNewAllowsExisting(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := f.registerFlat(t, tid("flat-reg-existing"), "flat-existing")
 	setFlatExperiment(t, f.srv, false)
@@ -1728,7 +1670,6 @@ func requireNameConflictDetails(t *testing.T, rec *httptest.ResponseRecorder, d 
 }
 
 func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Brokerauth(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	flatID := f.registerFlat(t, tid("flat-reg-collide"), "flat-collide")
 	rec := f.register(t, f.other, CreateBrokerRegistrationRequest{Name: "FLAT-COLLIDE"})
@@ -1746,10 +1687,20 @@ func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Brokerauth(t *testin
 // the activation result (the CheckActivationAck outcome for phase embedded).
 func registerEmbeddedFlatForTest(t *testing.T, srv *Server, brokerID, name string, target *api.RuntimeTargetDescriptor) (*store.RuntimeBroker, error) {
 	t.Helper()
-	_ = srv
-	_, _, _ = brokerID, name, target
-	t.Fatalf("P1.2 implements RegisterEmbeddedFlatRuntimeBroker")
-	return nil, nil
+	id := &brokeridentity.Identity{
+		SchemaVersion:   brokeridentity.SchemaVersion,
+		InstanceKey:     "local-docker",
+		RuntimeBrokerID: brokerID,
+		RuntimeTarget:   api.RuntimeTargetDescriptor{ID: target.ID, Type: target.Type},
+		ExecutionScope:  brokeridentity.ExecutionScope{Type: target.Type, Docker: &brokeridentity.DockerScope{DaemonID: "daemon-1"}},
+		CreatedAt:       time.Now(),
+	}
+	inst := config.V1RuntimeBrokerInstanceConfig{
+		Key:           "local-docker",
+		Name:          name,
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: target.Type, DisplayName: target.DisplayName},
+	}
+	return srv.RegisterEmbeddedFlatRuntimeBroker(context.Background(), id, inst)
 }
 
 // embeddedRegCode extracts a Hub error code from an embedded registration
@@ -1776,7 +1727,6 @@ func embeddedRegCode(err error) string {
 // TestFlatRegistration_EmbeddedPathUsesSharedRules is F-arrange: its act
 // step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 func TestFlatRegistration_EmbeddedPathUsesSharedRules(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, false)
 	// Experiment off: a new embedded flat registration is refused like an
 	// HTTP one.
@@ -1797,7 +1747,6 @@ func TestFlatRegistration_EmbeddedPathUsesSharedRules(t *testing.T) {
 // reported through EmbeddedBrokerRegistrationFailed (asserted here on the Hub
 // side), not embedded, and no legacy fallback.
 func TestFlatRegistration_EmbeddedSideDuties(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	f := newFlatRegFixture(t, true)
 	row, err := registerEmbeddedFlatForTest(t, f.srv, tid("embedded-duties"), "embedded-duties", f.target)
@@ -1830,7 +1779,6 @@ func TestFlatRegistration_EmbeddedSideDuties(t *testing.T) {
 // TestFlatRegistration_EmbeddedBoundResultRequired is F-arrange: its act
 // step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 func TestFlatRegistration_EmbeddedBoundResultRequired(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := tid("embedded-bound")
 	row, err := registerEmbeddedFlatForTest(t, f.srv, id, "embedded-bound", f.target)
@@ -1846,7 +1794,6 @@ func TestFlatRegistration_EmbeddedBoundResultRequired(t *testing.T) {
 // act step goes through registerEmbeddedFlatForTest, whose body P1.2
 // replaces.
 func TestFlatRegistration_EmbeddedConflictingRowNotActivated(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := tid("embedded-conflict")
 	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), &store.RuntimeBroker{
@@ -1867,7 +1814,6 @@ func TestFlatRegistration_EmbeddedConflictingRowNotActivated(t *testing.T) {
 // TestFlatRegistration_EmbeddedLegacyRowNotActivated is F-arrange: its act
 // step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 func TestFlatRegistration_EmbeddedLegacyRowNotActivated(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	id := tid("embedded-legacy")
 	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), &store.RuntimeBroker{
@@ -1884,7 +1830,6 @@ func TestFlatRegistration_EmbeddedLegacyRowNotActivated(t *testing.T) {
 // TestFlatRegistration_EmbeddedNameCollisionNotAdopted is F-arrange: its act
 // step goes through registerEmbeddedFlatForTest, whose body P1.2 replaces.
 func TestFlatRegistration_EmbeddedNameCollisionNotAdopted(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	existing := &store.RuntimeBroker{ID: tid("embedded-taken"), Name: "embedded-taken", Slug: "embedded-taken", Status: store.BrokerStatusOffline}
 	require.NoError(t, f.s.CreateRuntimeBroker(context.Background(), existing))
