@@ -505,6 +505,10 @@ In standalone mode, configuration is resolved with the following priority (highe
 
 Config changes made via the admin UI are delivered to the running service via Postgres LISTEN/NOTIFY without restart.
 
+## Upgrading
+
+Upgrade the Hub before this plugin. Older Hubs forward the retired end-of-turn `assistant-reply` mirror on every agent turn, and this plugin no longer filters it out, so a newer plugin on an older Hub posts each turn's text to linked channels.
+
 ## Troubleshooting
 
 ### Disallowed Gateway Intents (Error 4014)

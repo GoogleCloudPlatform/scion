@@ -213,6 +213,10 @@ Use `/settings` in a linked group to toggle:
 
 Use `/notifications` in a DM with the bot to subscribe to per-agent state change alerts. Subscriptions are per-user and per-agent — you choose which agents you want to monitor.
 
+## Upgrading
+
+Upgrade the Hub before this plugin. Older Hubs forward the retired end-of-turn `assistant-reply` mirror on every agent turn, and this plugin no longer filters it out, so a newer plugin on an older Hub posts each turn's text to linked channels.
+
 ## Troubleshooting
 
 ### Messages not delivered to agents
