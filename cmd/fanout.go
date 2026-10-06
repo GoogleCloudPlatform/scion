@@ -28,8 +28,10 @@ const maxFanOutConcurrency = 6
 
 // boundedFanOut calls run(i) for every i in [0, n), in index order, with at
 // most limit calls running at once, and returns once every call has
-// returned. Calls start in index order, so with an interrupt the recipients
-// that never started are always the tail of the list.
+// returned. Calls are dispatched in index order, and none is dispatched once
+// ctx is seen to be done. A dispatched call's goroutine may run late, so on
+// an interrupt the indices whose work never started are not strictly the
+// tail of the list; callers keep results by index instead of relying on it.
 //
 // Once ctx is done, no further call is started: skip(i) is called instead
 // for each remaining index, without waiting for a free slot, so an interrupt

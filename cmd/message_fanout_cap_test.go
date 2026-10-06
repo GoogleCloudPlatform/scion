@@ -15,10 +15,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -311,10 +313,145 @@ func TestBroadcastAll3521_FanOutIsCapped(t *testing.T) {
 func TestBoundedFanOut3521_StartOrderAndLimit(t *testing.T) {
 	var mu sync.Mutex
 	var started []int
+	inFlight, maxInFlight := 0, 0
 	boundedFanOut(t.Context(), 10, 1, nil, func(i int) {
 		mu.Lock()
 		started = append(started, i)
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		// Yield so that, without the limit, other calls would overlap.
+		runtime.Gosched()
+		mu.Lock()
+		inFlight--
 		mu.Unlock()
 	}, func(int) { t.Error("nothing should be skipped") })
-	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, started, "with limit 1, calls run one at a time in order")
+	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, started, "with limit 1, calls start in index order")
+	assert.Equal(t, 1, maxInFlight, "with limit 1, calls run one at a time")
+}
+
+// Once ctx is done, the indices still waiting for a slot are skipped at
+// once, without waiting for a running call to free its slot, even when that
+// call ignores ctx. An interrupt therefore never hangs on the limit.
+func TestBoundedFanOut3521_CancelSkipsQueuedWithoutWaitingForSlot(t *testing.T) {
+	const n = 5
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	queued := make(chan struct{}, n)
+	skipped := make(chan int, n)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		boundedFanOut(ctx, n, 1, func() { queued <- struct{}{} }, func(i int) {
+			if i != 0 {
+				t.Errorf("run(%d) started after cancel; only run(0) should run", i)
+				return
+			}
+			close(started)
+			<-release // ignores ctx: the slot frees only when the test says so
+		}, func(i int) { skipped <- i })
+	}()
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	defer func() { releaseOnce(); <-done }()
+
+	for _, ch := range []<-chan struct{}{started, queued} {
+		select {
+		case <-ch:
+		case <-time.After(fanOutStallGuard):
+			t.Fatal("run(0) did not start or index 1 was not queued")
+		}
+	}
+	cancel()
+
+	// run(0) still holds the only slot, so every skip must happen now.
+	for want := 1; want < n; want++ {
+		select {
+		case got := <-skipped:
+			assert.Equal(t, want, got, "queued indices are skipped in order")
+		case <-time.After(fanOutStallGuard):
+			t.Fatalf("index %d was not skipped while run(0) held the slot: the skip waited for a slot", want)
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("boundedFanOut returned while run(0) was still running")
+	default:
+	}
+
+	releaseOnce()
+	select {
+	case <-done:
+	case <-time.After(fanOutStallGuard):
+		t.Fatal("boundedFanOut did not return after run(0) finished")
+	}
+}
+
+// tripContext models an interrupt that lands just after the fan-out's own
+// check: its first Err call reports no error and then cancels it, so every
+// later Err call (and Done) sees the cancellation.
+type tripContext struct {
+	context.Context
+	once sync.Once
+	mu   sync.Mutex
+	err  error
+	done chan struct{}
+}
+
+func newTripContext() *tripContext {
+	return &tripContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *tripContext) Done() <-chan struct{} { return c.done }
+
+func (c *tripContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.err
+	c.once.Do(func() {
+		c.err = context.Canceled
+		close(c.done)
+	})
+	return err
+}
+
+func (c *tripContext) cancel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.once.Do(func() {
+		c.err = context.Canceled
+		close(c.done)
+	})
+}
+
+// An interrupt that arrives after a recipient's slot was taken but before
+// its request started still means the message was never sent: the send
+// checks for it and reports the recipient failed ("not sent", retryable),
+// not unknown, and makes no request.
+func TestSendGroupMessage3521_InterruptAfterSlotTakenIsNotSent(t *testing.T) {
+	groupTestState(t, "json")
+	names := fanOutNames(1)
+	h := newGateHub(t, names)
+	trip := newTripContext()
+	hooks := groupSendHooks{
+		fanOutContext: func(context.Context) (context.Context, context.CancelFunc) { return trip, trip.cancel },
+	}
+
+	var sendErr error
+	out := captureStdout(t, func() {
+		sendErr = sendGroupMessageViaHubCtx(h.hubCtx(t), agentRecipients(names...), "hi", false, hooks)
+	})
+
+	require.Error(t, sendErr)
+	assert.Zero(t, h.peakInFlight(), "no request may reach the Hub")
+	var got groupSendResult
+	require.NoError(t, json.Unmarshal([]byte(out), &got), "stdout must be one JSON document; got:\n%s", out)
+	require.Len(t, got.Results, 1)
+	assert.Equal(t, groupStatusFailed, got.Results[0].Status, "a send interrupted before its request started is not unknown")
+	assert.Contains(t, got.Results[0].Error, "not sent")
+	assertRetryRoundTrips(t, got.RetryRecipient, "agent:"+names[0])
 }
