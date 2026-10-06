@@ -122,6 +122,12 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
+		// Flat placement pre-check, before the reservation and the run
+		// intent: a stale pin is refused with its own status and details.
+		if err := s.checkPinnedPlacement(agent); err != nil {
+			return nil, runtimeTargetDMError(err)
+		}
+
 		// Hold a lifecycle op for the dispatch leg, as beginStartDispatch
 		// requires; it ends once the starting write below has landed, so the
 		// readiness wait still sees a heartbeat-reported exit.
@@ -194,6 +200,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
 					"agent_id", agent.ID, "code", refusal.Code)
 				return nil, refusal.dmError()
+			}
+			if dmErr := runtimeTargetDMErrorIfAny(err); dmErr != nil {
+				return nil, dmErr
 			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
 				// Fail closed like the other dispatch sites (design #2703 D3).

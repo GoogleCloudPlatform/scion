@@ -248,6 +248,17 @@ func (s *Server) hubDefaultRuntimeAllowed(ctx context.Context, runtimeBrokerID, 
 			"broker", runtimeBrokerID, "profile", profileName, "error", err)
 		return false, ""
 	}
+	// A flat Runtime Broker serves one runtime target: the gate evaluates
+	// its type and pins no profile.
+	if broker.IsFlat() {
+		if !hubDefaultPassthroughRuntimeTypes[broker.RuntimeTarget.Type] {
+			slog.Info("hub-default GCP passthrough denied: flat Runtime Broker target is not a local container runtime",
+				"surface", SurfaceHubDefault, "project_id", projectID, "agent", agentName,
+				"broker", runtimeBrokerID, "runtime_target_type", broker.RuntimeTarget.Type)
+			return false, ""
+		}
+		return true, ""
+	}
 	resolvedProfile, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
 	if !ok {
 		slog.Info("hub-default GCP passthrough denied: runtime profile could not be resolved",

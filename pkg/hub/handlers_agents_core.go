@@ -212,7 +212,11 @@ type CreateAgentRequest struct {
 	Name            string            `json:"name"`
 	ProjectID       string            `json:"projectId"`
 	RuntimeBrokerID string            `json:"runtimeBrokerId,omitempty"` // Optional: uses project's default if not specified
-	Template        string            `json:"template"`
+	// ExpectedRuntimeTargetID is an optional staleness guard: the runtime
+	// target the client expects the agent to land on (flat Runtime Brokers,
+	// .design/flat-runtime-brokers-contract.md section 9).
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+	Template                string `json:"template"`
 	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
 	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
 	Profile         string            `json:"profile,omitempty"`       // Settings profile for the runtime broker to use
@@ -1497,6 +1501,28 @@ func (s *Server) createAgentInProject(
 	// when an existing agent is started, resumed or recovered below.
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
 
+	// Flat Runtime Broker new-create checks (after dispatch authorization
+	// and the step-2 checks above, before any write). An existing agent's
+	// branch is checked inside handleExistingAgent, after its lifecycle
+	// authorization and before its own writes, including the
+	// delete-and-recreate delete.
+	var resolvedBroker *store.RuntimeBroker
+	if runtimeBrokerID != "" {
+		if b, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID); err == nil {
+			resolvedBroker = b
+		} else if !errors.Is(err, store.ErrNotFound) {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+	var placement store.PinnedPlacement
+	if existingAgent == nil {
+		if placement, err = s.flatCreatePlacement(ctx, resolvedBroker, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
+			writeRuntimeTargetRefusal(w, err)
+			return
+		}
+	}
+
 	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
@@ -1504,7 +1530,12 @@ func (s *Server) createAgentInProject(
 		Conflict(w, fmt.Sprintf("agent %q already exists in this project", slug))
 		return
 	case existingAgentDeleted:
-		// Fall through to create a new agent below.
+		// Fall through to create a new agent below. handleExistingAgent ran
+		// the same new-create checks before the delete.
+		if placement, err = s.flatCreatePlacement(ctx, resolvedBroker, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
+			writeRuntimeTargetRefusal(w, err)
+			return
+		}
 	case existingAgentNone:
 		// No existing agent — fall through to create.
 	}
@@ -1673,6 +1704,9 @@ func (s *Server) createAgentInProject(
 		// dispatchLaunching (launch_dispatch.go).
 		LaunchAsyncOptIn: req.AcceptAsyncLaunch,
 	}
+
+	// The flat placement is written in the CreateAgent transaction.
+	applyPinnedPlacement(agent, placement)
 
 	// Store human-friendly slug instead of UUID for display
 	if resolvedTemplate != nil && resolvedTemplate.Slug != "" {
@@ -4418,7 +4452,7 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	switch {
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-	case relaySkillResolutionError(w, err):
+	case relayDispatchRefusal(w, err):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()

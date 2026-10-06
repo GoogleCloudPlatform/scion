@@ -406,3 +406,231 @@ func (s *Server) ensureEmbeddedGlobalProject(ctx context.Context) error {
 	}
 	return nil
 }
+
+// --- create placement ----------------------------------------------------
+
+// flatCreatePlacement applies the new-create checks for a create on broker
+// (nil when no Runtime Broker was resolved) and returns the placement to set
+// on the agent: the pin for a flat row, the zero value for a legacy row. A
+// refusal is a *RuntimeTargetRefusal, in the frozen precedence: experiment
+// (412), expected target (409), explicit profile (422). Interactive creates,
+// scheduled creates and the first placement of an existing agent with no
+// Runtime Broker all call it, so the create paths cannot drift. It is
+// evaluated after dispatch authorization and writes nothing.
+func (s *Server) flatCreatePlacement(ctx context.Context, broker *store.RuntimeBroker, explicitProfile, expectedRuntimeTargetID string) (store.PinnedPlacement, error) {
+	_ = ctx
+	if !broker.IsFlat() {
+		if expectedRuntimeTargetID == "" {
+			return store.PinnedPlacement{}, nil
+		}
+		if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
+			return store.PinnedPlacement{}, experimentDisabledRefusal()
+		}
+		brokerID := ""
+		if broker != nil {
+			brokerID = broker.ID
+		}
+		return store.PinnedPlacement{}, runtimeTargetMismatchRefusal(api.CheckExpectedRuntimeTarget(brokerID, "", expectedRuntimeTargetID))
+	}
+	if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
+		return store.PinnedPlacement{}, experimentDisabledRefusal()
+	}
+	if m := api.CheckExpectedRuntimeTarget(broker.ID, broker.RuntimeTarget.ID, expectedRuntimeTargetID); m != nil {
+		return store.PinnedPlacement{}, runtimeTargetMismatchRefusal(m)
+	}
+	if explicitProfile != "" {
+		return store.PinnedPlacement{}, runtimeProfileUnsupportedRefusal(broker.ID, explicitProfile)
+	}
+	return store.PinnedPlacement{
+		RuntimeBrokerID:   broker.ID,
+		RuntimeTargetID:   broker.RuntimeTarget.ID,
+		RuntimeTargetType: broker.RuntimeTarget.Type,
+	}, nil
+}
+
+// applyPinnedPlacement sets placement p on a not-yet-stored agent model, so
+// CreateAgent writes the pin in the same transaction as the row.
+func applyPinnedPlacement(a *store.Agent, p store.PinnedPlacement) {
+	if p.RuntimeTargetID == "" {
+		return
+	}
+	a.RuntimeBrokerID = p.RuntimeBrokerID
+	a.PinnedRuntimeBrokerID = p.RuntimeBrokerID
+	a.PinnedRuntimeTargetID = p.RuntimeTargetID
+	a.PinnedRuntimeTargetType = p.RuntimeTargetType
+}
+
+// flatDefaultProfileDroppedWarning is the dispatch warning for a default
+// Runtime Broker Profile that was not applied because the target is flat.
+func flatDefaultProfileDroppedWarning(profile, brokerID string) string {
+	return fmt.Sprintf("default Runtime Broker Profile %q was not applied: Runtime Broker %s serves a single runtime target", profile, brokerID)
+}
+
+// --- pinned placement (lifecycle) ----------------------------------------
+
+func stalePinRefusal(a *store.Agent) *RuntimeTargetRefusal {
+	return &RuntimeTargetRefusal{
+		Code:   ErrCodeRuntimeTargetPinStale,
+		Status: http.StatusConflict,
+		Message: fmt.Sprintf("agent %s is pinned to Runtime Broker %q but assigned to Runtime Broker %s; its placement must be repaired explicitly (delete and recreate it)",
+			a.ID, a.PinnedRuntimeBrokerID, a.RuntimeBrokerID),
+		Details: map[string]interface{}{
+			"agentId":               a.ID,
+			"pinnedRuntimeBrokerId": a.PinnedRuntimeBrokerID,
+			"runtimeBrokerId":       a.RuntimeBrokerID,
+		},
+	}
+}
+
+// checkPinnedPlacement is the pure stale-pin pre-check for start-shaped
+// dispatches of an existing agent. It reads only the agent and its Runtime
+// Broker row. A pin is valid only while it names the agent's current
+// Runtime Broker; an agent on a flat row with no pin is stale too. A missing
+// Runtime Broker row is not a placement refusal (nil), so today's
+// missing-Runtime-Broker handling applies.
+func (s *Server) checkPinnedPlacement(agent *store.Agent) error {
+	_, err := s.pinnedPlacementBroker(context.Background(), agent)
+	return err
+}
+
+// pinnedPlacementBroker is checkPinnedPlacement returning the agent's
+// Runtime Broker row (nil when it has none or the row is missing).
+func (s *Server) pinnedPlacementBroker(ctx context.Context, agent *store.Agent) (*store.RuntimeBroker, error) {
+	return checkAgentPinnedPlacement(ctx, s.store, agent)
+}
+
+// checkAgentPinnedPlacement is the store-level body of checkPinnedPlacement,
+// shared with the dispatcher's start/restart backstop.
+func checkAgentPinnedPlacement(ctx context.Context, st store.Store, agent *store.Agent) (*store.RuntimeBroker, error) {
+	if agent == nil || agent.RuntimeBrokerID == "" || st == nil {
+		return nil, nil
+	}
+	broker, err := st.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if agent.IsPinned() && !agent.PinValid() {
+		return broker, stalePinRefusal(agent)
+	}
+	if broker.IsFlat() && !agent.IsPinned() {
+		return broker, stalePinRefusal(agent)
+	}
+	return broker, nil
+}
+
+// lifecyclePlacementCheck applies the lifecycle-branch checks for resuming or
+// starting an existing agent in place on its own Runtime Broker: stale pin
+// (409), then a client-supplied expected target compared with the agent's
+// valid pin (409), then an explicit profile toward a flat row (422). The
+// experiment plays no part.
+func (s *Server) lifecyclePlacementCheck(ctx context.Context, agent *store.Agent, explicitProfile, expectedRuntimeTargetID string) error {
+	broker, err := s.pinnedPlacementBroker(ctx, agent)
+	if err != nil {
+		return err
+	}
+	if expectedRuntimeTargetID != "" {
+		actual := ""
+		if agent.PinValid() {
+			actual = agent.PinnedRuntimeTargetID
+		}
+		if m := api.CheckExpectedRuntimeTarget(agent.RuntimeBrokerID, actual, expectedRuntimeTargetID); m != nil {
+			return runtimeTargetMismatchRefusal(m)
+		}
+	}
+	if explicitProfile != "" && broker.IsFlat() {
+		return runtimeProfileUnsupportedRefusal(broker.ID, explicitProfile)
+	}
+	return nil
+}
+
+// validPinnedTarget returns the agent's pinned runtime target when its pin is
+// valid, "" otherwise. Start and restart send it as expectedRuntimeTargetId.
+func validPinnedTarget(a *store.Agent) string {
+	if a.PinValid() {
+		return a.PinnedRuntimeTargetID
+	}
+	return ""
+}
+
+// --- relay ---------------------------------------------------------------
+
+// runtimeTargetRelayDetailKeys are the frozen details keys relayed for each
+// flat wire code a Runtime Broker returns.
+var runtimeTargetRelayDetailKeys = map[string][]string{
+	ErrCodeRuntimeTargetMismatch:     {"runtimeBrokerId", "expectedRuntimeTargetId", "actualRuntimeTargetId"},
+	ErrCodeRuntimeProfileUnsupported: {"runtimeBrokerId", "profile"},
+	ErrCodeRuntimeTargetRequired:     {"runtimeBrokerId"},
+}
+
+// relayRuntimeTargetError writes a flat Runtime Broker refusal with its own
+// status, code, message and frozen details, and reports whether it did: a
+// Hub *RuntimeTargetRefusal, or a Runtime Broker 409/412/422 carrying one of
+// the shared flat wire codes. Start markers are never relayed in a Hub
+// public envelope. Any other error is left to the caller.
+func relayRuntimeTargetError(w http.ResponseWriter, err error) bool {
+	if writeRuntimeTargetRefusal(w, err) {
+		return true
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	code := se.brokerErrorCode()
+	keys, ok := runtimeTargetRelayDetailKeys[code]
+	if !ok {
+		return false
+	}
+	brokerDetails := se.brokerErrorDetails()
+	details := make(map[string]interface{}, len(keys))
+	for _, k := range keys {
+		if v, ok := brokerDetails[k]; ok {
+			details[k] = v
+		}
+	}
+	writeError(w, se.StatusCode, code, se.brokerErrorMessage(), details)
+	return true
+}
+
+// relayDispatchRefusal relays the Runtime Broker answers a create, start or
+// restart error switch passes through verbatim instead of mapping them to
+// 502: flat Runtime Broker refusals and required-skill resolution failures.
+func relayDispatchRefusal(w http.ResponseWriter, err error) bool {
+	return relayRuntimeTargetError(w, err) || relaySkillResolutionError(w, err)
+}
+
+// runtimeTargetDMErrorIfAny maps a flat Runtime Broker refusal (a Hub
+// *RuntimeTargetRefusal, or a Runtime Broker 409/412/422 with a shared flat
+// code) to the wake path's AgentDMError with its own status, code and
+// details; nil for any other error.
+func runtimeTargetDMErrorIfAny(err error) *AgentDMError {
+	var refusal *RuntimeTargetRefusal
+	if errors.As(err, &refusal) {
+		return &AgentDMError{Code: refusal.Code, Message: refusal.Message, HTTPStatus: refusal.Status, Details: refusal.Details}
+	}
+	var se *brokerStatusError
+	if errors.As(err, &se) {
+		if keys, ok := runtimeTargetRelayDetailKeys[se.brokerErrorCode()]; ok {
+			bd := se.brokerErrorDetails()
+			details := make(map[string]interface{}, len(keys))
+			for _, k := range keys {
+				if v, ok := bd[k]; ok {
+					details[k] = v
+				}
+			}
+			return &AgentDMError{Code: se.brokerErrorCode(), Message: se.brokerErrorMessage(), HTTPStatus: se.StatusCode, Details: details}
+		}
+	}
+	return nil
+}
+
+// runtimeTargetDMError is runtimeTargetDMErrorIfAny for a pre-check error,
+// falling back to an internal error for anything else.
+func runtimeTargetDMError(err error) *AgentDMError {
+	if dmErr := runtimeTargetDMErrorIfAny(err); dmErr != nil {
+		return dmErr
+	}
+	return &AgentDMError{Code: ErrCodeInternalError, Message: "Failed to wake agent: " + err.Error(), HTTPStatus: http.StatusInternalServerError}
+}

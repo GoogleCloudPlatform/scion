@@ -54,6 +54,18 @@ type dispatchFailureEnvelope struct {
 	BrokerError     *dispatchBrokerError           `json:"brokerError,omitempty"`
 	EnvStillMissing *RemoteEnvRequirementsResponse `json:"envStillMissing,omitempty"`
 	HubErrors       []string                       `json:"hubErrors,omitempty"`
+	// RuntimeTargetRefusal is a Hub flat Runtime Broker refusal raised by
+	// the executing node's dispatcher backstop, rebuilt as the typed
+	// *RuntimeTargetRefusal on the requesting node.
+	RuntimeTargetRefusal *dispatchRuntimeTargetRefusal `json:"runtimeTargetRefusal,omitempty"`
+}
+
+// dispatchRuntimeTargetRefusal is the wire form of a *RuntimeTargetRefusal.
+type dispatchRuntimeTargetRefusal struct {
+	Code    string                 `json:"code"`
+	Status  int                    `json:"status"`
+	Message string                 `json:"message"`
+	Details map[string]interface{} `json:"details,omitempty"`
 }
 
 // dispatchHubSentinels are the hub sentinel errors the HTTP handlers answer
@@ -104,7 +116,13 @@ func dispatchFailureResult(execErr error) string {
 			env.HubErrors = append(env.HubErrors, hs.name)
 		}
 	}
-	if env.BrokerError == nil && env.EnvStillMissing == nil && len(env.HubErrors) == 0 {
+	var refusal *RuntimeTargetRefusal
+	if errors.As(execErr, &refusal) {
+		env.RuntimeTargetRefusal = &dispatchRuntimeTargetRefusal{
+			Code: refusal.Code, Status: refusal.Status, Message: refusal.Message, Details: refusal.Details,
+		}
+	}
+	if env.BrokerError == nil && env.EnvStillMissing == nil && len(env.HubErrors) == 0 && env.RuntimeTargetRefusal == nil {
 		return ""
 	}
 	out, err := json.Marshal(env)
@@ -121,6 +139,12 @@ func dispatchFailureResult(execErr error) string {
 // the row's error text is returned, as before.
 func dispatchFailureError(d *store.BrokerDispatch) error {
 	env := decodeDispatchFailure(d.Result)
+	if env != nil && env.RuntimeTargetRefusal != nil && env.RuntimeTargetRefusal.Code != "" {
+		r := env.RuntimeTargetRefusal
+		return fmt.Errorf("dispatch %s failed: %w", d.Op, &RuntimeTargetRefusal{
+			Code: r.Code, Status: r.Status, Message: r.Message, Details: r.Details,
+		})
+	}
 	if se := brokerErrorFromEnvelope(env); se != nil {
 		return fmt.Errorf("dispatch %s failed: %w", d.Op, se)
 	}

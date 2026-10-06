@@ -374,7 +374,17 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// own harness-config fill is a no-op here in practice (the rung above
 	// already applied the same annotation), kept for parity with the
 	// non-harness-config fields it also fills.
+	// A pinned (flat) agent takes no default Runtime Broker Profile: the
+	// project active profile is dropped with a dispatch warning.
+	priorProfile := agent.AppliedConfig.Profile
 	applyProjectDefaults(agent.AppliedConfig, project)
+	if agent.IsPinned() && agent.AppliedConfig.Profile != priorProfile {
+		dropped := agent.AppliedConfig.Profile
+		agent.AppliedConfig.Profile = priorProfile
+		addDispatchWarnings(ctx, flatDefaultProfileDroppedWarning(dropped, agent.PinnedRuntimeBrokerID))
+		slog.Warn("default Runtime Broker Profile not applied to a flat Runtime Broker agent",
+			"agent", agent.Name, "agent_id", agent.ID, "profile", dropped, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
+	}
 
 	// Hub operational agent_defaults — strictly between applyProjectDefaults
 	// and populateAgentConfig. See applyHubAgentDefaults for why that
@@ -1078,6 +1088,112 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 	return phase == string(state.PhaseStopped), false
 }
 
+// existingAgentBranch is the branch handleExistingAgent takes for a request,
+// decided without executing it.
+type existingAgentBranch int
+
+const (
+	// existingBranchNone: no dispatch (a duplicate-name conflict).
+	existingBranchNone existingAgentBranch = iota
+	// existingBranchStart: resume or start the agent in place.
+	existingBranchStart
+	// existingBranchRecreate: delete the agent and create it anew.
+	existingBranchRecreate
+)
+
+// classifyExistingAgent mirrors handleExistingAgent's decision tree
+// read-only.
+func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgentBranch {
+	switch {
+	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
+		return existingBranchStart
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError)):
+		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
+			return existingBranchStart
+		}
+		return existingBranchNone
+	case req.GatherEnv && a.Phase == string(state.PhaseProvisioning):
+		return existingBranchRecreate
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseCreated) || a.Phase == string(state.PhaseProvisioning)):
+		return existingBranchStart
+	}
+	return existingBranchNone
+}
+
+// existingAgentFlatChecks applies the flat Runtime Broker checks for the
+// branch handleExistingAgent is about to take:
+//   - starting in place on the agent's own Runtime Broker: the lifecycle
+//     checks against that Runtime Broker and the agent's pin (no
+//     experiment refusal);
+//   - starting an agent that has no Runtime Broker on the resolved one: the
+//     new-create checks; when the resolved row is flat, the pin and
+//     runtime_broker_id are written together (bumping state_version) before
+//     any dispatch, and *agent is replaced with the stored row;
+//   - delete and recreate: the new-create checks, before the delete.
+//
+// It reports done=true after writing a response.
+func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWriter, agent **store.Agent, runtimeBrokerID string, req CreateAgentRequest) (existingAgentResult, bool) {
+	a := *agent
+	branch := classifyExistingAgent(a, req)
+	newCreate := func() (store.PinnedPlacement, bool) {
+		var broker *store.RuntimeBroker
+		if runtimeBrokerID != "" {
+			b, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				writeErrorFromErr(w, err, "")
+				return store.PinnedPlacement{}, false
+			}
+			broker = b
+		}
+		p, err := s.flatCreatePlacement(ctx, broker, req.Profile, req.ExpectedRuntimeTargetID)
+		if err != nil {
+			writeRuntimeTargetRefusal(w, err)
+			return store.PinnedPlacement{}, false
+		}
+		return p, true
+	}
+	switch branch {
+	case existingBranchStart:
+		if a.RuntimeBrokerID != "" {
+			if err := s.lifecyclePlacementCheck(ctx, a, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return existingAgentErrored, true
+			}
+			return existingAgentNone, false
+		}
+		if runtimeBrokerID == "" {
+			return existingAgentNone, false
+		}
+		p, ok := newCreate()
+		if !ok {
+			return existingAgentErrored, true
+		}
+		if p.RuntimeTargetID == "" {
+			return existingAgentNone, false
+		}
+		// First placement of an agent with no Runtime Broker on a flat row.
+		// It stays persisted even if the start below fails.
+		updated, err := s.store.SetAgentPinnedRuntimeTarget(ctx, a.ID, store.PinnedPlacement{}, p)
+		if err != nil {
+			if errors.Is(err, store.ErrPinnedPlacementChanged) {
+				Conflict(w, "agent placement changed concurrently; retry")
+			} else {
+				writeErrorFromErr(w, err, "")
+			}
+			return existingAgentErrored, true
+		}
+		*agent = updated
+		return existingAgentNone, false
+	case existingBranchRecreate:
+		if _, ok := newCreate(); !ok {
+			return existingAgentErrored, true
+		}
+	}
+	return existingAgentNone, false
+}
+
 // handleExistingAgent encapsulates the full decision tree for an agent that
 // already exists when a create/start request arrives.
 //
@@ -1130,6 +1246,12 @@ func (s *Server) handleExistingAgent(
 		}
 		ref.write(w)
 		return existingAgentErrored
+	}
+
+	// Flat Runtime Broker checks for the branch this request takes, before
+	// any of the branch's writes (section 9 step 4 of the flat contract).
+	if res, done := s.existingAgentFlatChecks(ctx, w, &existingAgent, runtimeBrokerID, req); done {
+		return res
 	}
 
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
@@ -1206,7 +1328,7 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			case relaySkillResolutionError(w, err):
+			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
@@ -1319,7 +1441,7 @@ func (s *Server) handleExistingAgent(
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-				case relaySkillResolutionError(w, err):
+				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
 				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
@@ -1468,7 +1590,7 @@ func (s *Server) handleExistingAgent(
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			case relaySkillResolutionError(w, err):
+			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
@@ -1637,6 +1759,20 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				if p.BrokerID == broker.ID {
 					return acceptProvider(broker.ID, broker)
 				}
+			}
+
+			// A flat Runtime Broker is never linked here: it reaches a
+			// project only through an explicit link. Dispatch authorization
+			// (canDispatchToBroker) is answered first, then the create is
+			// refused without writing anything.
+			if broker.IsFlat() {
+				if !s.canDispatchToBroker(ctx, broker) {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"You don't have permission to create agents on this broker", nil)
+					return "", store.ErrNotFound
+				}
+				writeRuntimeTargetRefusal(w, runtimeBrokerNotLinkedRefusal(broker.ID, project.ID))
+				return "", store.ErrNotFound
 			}
 
 			// Linking a new provider (and possibly setting it as the project

@@ -350,6 +350,10 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, kind st
 	if dispatcher == nil {
 		return errors.New("no dispatcher")
 	}
+	// Flat placement pre-check, before the start claim.
+	if err := s.checkPinnedPlacement(agent); err != nil {
+		return err
+	}
 	return s.withStartClaim(ctx, agent, kind, existing, func(ctx context.Context) (bool, error) {
 		return false, dispatcher.DispatchAgentStart(ctx, agent, task, resume)
 	})

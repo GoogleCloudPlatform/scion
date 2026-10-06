@@ -579,6 +579,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					"agent_id", agent.ID, "agent", agent.Name, "container_status", agent.ContainerStatus)
 			}
 			resume := agent.Phase == string(state.PhaseSuspended) || forcedRecovery
+			// Flat placement pre-check: a stale pin is refused before the
+			// reservation, the run intent and any credential or run-ID
+			// write.
+			if err := s.checkPinnedPlacement(agent); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
 			// Re-reserve the per-broker ceiling before dispatch, exactly as
 			// create does, so a start that would exceed the cap is rejected
 			// up front rather than after the container is already running
@@ -675,6 +684,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
 			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+				return
+			}
+			// Flat placement pre-check, before the reservation, the run
+			// intent and the stop leg: a refused restart never stops the
+			// agent.
+			if err := s.checkPinnedPlacement(agent); err != nil {
+				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
 				return
 			}
 			// Check the broker cap before the run intent write and the
@@ -797,7 +815,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
 			return
 		}
-		if relaySkillResolutionError(w, dispatchErr) {
+		if relayDispatchRefusal(w, dispatchErr) {
 			return
 		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())

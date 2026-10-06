@@ -695,6 +695,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		SharedDirs:    projectInfo.sharedDirs,
 		WorkspaceMode: projectInfo.workspaceMode,
 	}
+	// The single setter of the expected runtime target on create-shaped
+	// requests: any non-NULL pin. A stale pin sends the old target, which the
+	// receiving Runtime Broker refuses before any side effect.
+	if agent.IsPinned() {
+		req.ExpectedRuntimeTargetID = agent.PinnedRuntimeTargetID
+	}
 
 	// Propagate attach mode from applied config
 	if agent.AppliedConfig != nil {
@@ -3165,6 +3171,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
+	// Flat placement backstop, before the launch guard, credential mint and
+	// beginRun: a stale pin is refused here for every caller.
+	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
 	// Start guard: no broker call
 	// while a create launch is in flight, or after one did not complete.
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentStart"); err != nil {
@@ -3309,12 +3322,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 	// for a given agent is the same whether the creator, an admin, or a
 	// project owner starts it.
 	extras := StartExtras{
-		HubEndpoint:          d.effectiveAgentHubEndpoint(),
-		UserID:               agent.OwnerID,
-		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
-		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
-		TemplateName:         agent.Template,
+		HubEndpoint:             d.effectiveAgentHubEndpoint(),
+		UserID:                  agent.OwnerID,
+		ProvisionCredentials:    d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
+		Workspace:               startEnv.workspace,
+		HubAgentDefaults:        startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:            agent.Template,
+		ExpectedRuntimeTargetID: validPinnedTarget(agent),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3407,6 +3421,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	// Flat placement backstop (see DispatchAgentStart).
+	if _, err := checkAgentPinnedPlacement(ctx, d.store, agent); err != nil {
+		return err
+	}
 	// Start guard.
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentRestart"); err != nil {
 		return err
@@ -3443,11 +3461,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// exactly as create does (#1960), always as the agent's creator
 	// regardless of who is dispatching this restart (ptone/scion#1994).
 	extras := StartExtras{
-		HubEndpoint:          d.effectiveAgentHubEndpoint(),
-		UserID:               agent.OwnerID,
-		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
-		TemplateName:         agent.Template,
+		HubEndpoint:             d.effectiveAgentHubEndpoint(),
+		UserID:                  agent.OwnerID,
+		ProvisionCredentials:    d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
+		HubAgentDefaults:        startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:            agent.Template,
+		ExpectedRuntimeTargetID: validPinnedTarget(agent),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)

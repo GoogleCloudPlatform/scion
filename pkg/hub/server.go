@@ -620,6 +620,10 @@ type StartExtras struct {
 	// agent-info.json), never to locate or load a template. A content hash
 	// is not a template name and is not sent.
 	TemplateName string
+	// ExpectedRuntimeTargetID is the agent's valid pinned runtime target,
+	// sent to a flat Runtime Broker (wire key expectedRuntimeTargetId).
+	// Empty for an unpinned agent.
+	ExpectedRuntimeTargetID string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -660,6 +664,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.TemplateName != "" && !transfer.IsContentHash(extras.TemplateName) {
 		payload["templateName"] = extras.TemplateName
+	}
+	if extras.ExpectedRuntimeTargetID != "" {
+		payload["expectedRuntimeTargetId"] = extras.ExpectedRuntimeTargetID
 	}
 }
 
@@ -782,14 +789,19 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.
 type RemoteCreateAgentRequest struct {
-	RequestID   string             `json:"requestId,omitempty"`
-	ID          string             `json:"id,omitempty"` // Hub UUID for status reporting
-	Slug        string             `json:"slug"`         // URL-safe identifier for the agent
-	Name        string             `json:"name"`
-	ProjectID   string             `json:"projectId"`
-	UserID      string             `json:"userId,omitempty"`
-	Config      *RemoteAgentConfig `json:"config,omitempty"`
-	ResolvedEnv map[string]string  `json:"resolvedEnv,omitempty"`
+	// ExpectedRuntimeTargetID is the agent's pinned runtime target. It is set
+	// only by buildCreateRequest, from any non-NULL pin, so every
+	// create-shaped dispatch to a flat Runtime Broker carries it and none to
+	// a legacy one does.
+	ExpectedRuntimeTargetID string             `json:"expectedRuntimeTargetId,omitempty"`
+	RequestID               string             `json:"requestId,omitempty"`
+	ID                      string             `json:"id,omitempty"` // Hub UUID for status reporting
+	Slug                    string             `json:"slug"`         // URL-safe identifier for the agent
+	Name                    string             `json:"name"`
+	ProjectID               string             `json:"projectId"`
+	UserID                  string             `json:"userId,omitempty"`
+	Config                  *RemoteAgentConfig `json:"config,omitempty"`
+	ResolvedEnv             map[string]string  `json:"resolvedEnv,omitempty"`
 	// EnvClassifications records the classification (plain, secret-fetchable,
 	// secret-injected) for each key in ResolvedEnv. Parallel structure:
 	// same key names, independent lifecycle (#127, P3a).
