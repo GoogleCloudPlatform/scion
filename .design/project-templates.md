@@ -121,21 +121,25 @@ constants at the top of `pkg/hub/project_settings_handlers.go`:
 | --- | --- |
 | `scion.io/default-template` | `defaultTemplate` |
 | `scion.io/default-harness-config` | `defaultHarnessConfig` |
+| `scion.io/default-harness-auth` | `defaultHarnessAuth` |
 | `scion.io/default-model` | `defaultModel` |
 | `scion.io/default-thinking-level` | `defaultThinkingLevel` |
 | `scion.io/telemetry-enabled` | `telemetryEnabled` |
+| `scion.io/auto-expose-ports-enabled` | `autoExposePortsEnabled` |
 | `scion.io/active-profile` | `activeProfile` |
 | `scion.io/default-max-turns` | `defaultMaxTurns` |
 | `scion.io/default-max-model-calls` | `defaultMaxModelCalls` |
 | `scion.io/default-max-duration` | `defaultMaxDuration` |
-| `scion.io/default-gcp-identity-mode` | `defaultGcpIdentityMode` |
-| `scion.io/default-gcp-identity-service-account-id` | `defaultGcpIdentityServiceAccountId` |
+| `scion.io/default-gcp-identity-mode` | `defaultGCPIdentityMode` |
+| `scion.io/default-gcp-identity-service-account-id` | `defaultGCPIdentityServiceAccountID` |
 | `scion.io/default-gcp-identity-service-account-id-by-profile` | `defaultGCPIdentityServiceAccountIDByProfile` (JSON object, profile name to SA ID; kept on PUT when absent, cleared by `{}`) |
 | `scion.io/default-resources-cpu-request` | `defaultResources.cpuRequest` |
 | `scion.io/default-resources-memory-request` | `defaultResources.memoryRequest` |
 | `scion.io/default-resources-cpu-limit` | `defaultResources.cpuLimit` |
 | `scion.io/default-resources-memory-limit` | `defaultResources.memoryLimit` |
 | `scion.io/default-resources-disk` | `defaultResources.disk` |
+| `scion.io/max-agent-role` | `maxAgentRole` |
+| `scion.io/default-agent-role` | `defaultAgentRole` |
 
 `setOrDelete` / `setOrDeleteInt` mean an empty or zero value *removes* the
 annotation rather than storing a zero. Unset is genuinely absent, which is what
@@ -329,8 +333,8 @@ Only the fields for which a hub-level fallback actually exists in
 `telemetryEnabled`.
 
 Fields with **no** hub-level counterpart — `defaultModel`,
-`defaultThinkingLevel`, `activeProfile`, `defaultGcpIdentityMode`,
-`defaultGcpIdentityServiceAccountId` — are still emitted, with
+`defaultThinkingLevel`, `activeProfile`, `defaultGCPIdentityMode`,
+`defaultGCPIdentityServiceAccountID` — are still emitted, with
 `hubValue: null` and `source: "project"` or `"unset"`. Emitting them uniformly
 lets the UI iterate one map instead of maintaining a parallel allowlist, and
 makes it a one-line server change if a hub-level default is added later.

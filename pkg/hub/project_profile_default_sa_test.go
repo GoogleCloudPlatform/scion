@@ -213,6 +213,20 @@ func TestProfileDefaultSA_StaleUnverifiedEntryFailsCreate(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `project default for profile \"remote\" GCP service account is not verified`)
 }
 
+// A deleted (or otherwise unreachable) entry fails the create with the
+// not-available message naming the profile and the setting to update.
+func TestProfileDefaultSA_DeletedEntryFailsCreate(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "remote")
+	pf.setProjectDefaultAssignBroad(t)
+	pf.setProfileDefaults(t, map[string]string{"remote": "deleted-sa-id"})
+
+	rec := createAgentAsOwner(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "profile-default-deleted"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(),
+		`project default for profile \"remote\" GCP service account is not available in this project; `+
+			`update the project's per-profile default service account for profile \"remote\"`)
+}
+
 // The authorization gate applies to the per-profile default as it does to
 // the project default.
 func TestProfileDefaultSA_CreatorWithoutActAsDenied(t *testing.T) {
@@ -412,7 +426,7 @@ func TestProjectSettings_ProfileDefaultSA_BoundsAcceptMaximums(t *testing.T) {
 	assert.Len(t, getProjectSettings(t, srv, project.ID).DefaultGCPIdentityServiceAccountIDByProfile, 64)
 }
 
-// F2: the scheduled per-profile rung runs the same authorization gate.
+// The scheduled per-profile rung runs the same authorization gate.
 func TestScheduledDispatch_ProfileDefaultSA_ActAsDenied(t *testing.T) {
 	pf := newProfileDefaultFixture(t, "remote")
 	pf.setProjectDefaultAssignBroad(t)
@@ -440,7 +454,7 @@ func TestScheduledDispatch_ProfileDefaultSA_StaleUnverifiedFails(t *testing.T) {
 	assert.ErrorIs(t, getErr, store.ErrNotFound)
 }
 
-// F8: the per-profile default wins over a hub-default assign when the
+// The per-profile default wins over a hub-default assign when the
 // project has no default of its own, on both paths.
 func TestProfileDefaultSA_WinsOverHubDefaultAssign(t *testing.T) {
 	pf := newProfileDefaultFixture(t, "remote")
@@ -471,7 +485,7 @@ func TestProfileDefaultSA_NoEntryKeepsHubDefaultAssign(t *testing.T) {
 	assertAssigned(t, agent, pf.broad, "with no entry for local, the hub default must apply")
 }
 
-// F3: projectProfileDefaultSA's broker-resolution branches, directly.
+// projectProfileDefaultSA's broker-resolution branches, directly.
 func TestProjectProfileDefaultSA_BrokerResolution(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	ctx := context.Background()
@@ -499,6 +513,17 @@ func TestProjectProfileDefaultSA_BrokerResolution(t *testing.T) {
 		profile, saID := f.srv.projectProfileDefaultSA(ctx, "", withActive, "")
 		assert.Equal(t, "local", profile)
 		assert.Equal(t, "sa-local", saID)
+	})
+	t.Run("known broker that does not list the named profile uses the named profile", func(t *testing.T) {
+		markBrokerStockProfiles(t, f, "remote")
+		gkeMap, err := json.Marshal(map[string]string{"gke": "sa-gke", "remote": "sa-remote"})
+		require.NoError(t, err)
+		withGKE := &store.Project{ID: f.proj.ID, Annotations: map[string]string{
+			projectSettingDefaultGCPIdentitySAIDByProfile: string(gkeMap),
+		}}
+		profile, saID := f.srv.projectProfileDefaultSA(ctx, f.broker.ID, withGKE, "gke")
+		assert.Equal(t, "gke", profile, "the agent is dispatched under the named profile either way")
+		assert.Equal(t, "sa-gke", saID)
 	})
 	t.Run("broker with two profiles and no default is empty", func(t *testing.T) {
 		markBrokerStockProfiles(t, f, "")
