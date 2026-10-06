@@ -152,6 +152,15 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# A separate step runs the Postgres case of the schedule authority ceiling
+# migration test (TestMigrationExistingSchedulesUnrecorded/postgres): rows
+# written before the ceiling columns must read back unrecorded after the
+# migration on Postgres as on SQLite. It runs on its own -run pattern because
+# the same test's sqlite subtest skips under -tags integration with Postgres
+# active, and adding it to the regex above would trip the skip check. The
+# step also requires that subtest's PASS line, so a renamed test cannot pass
+# by selecting nothing.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -191,6 +200,20 @@ test-launch-store-postgres:
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log; then \
 		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^TestMigrationExistingSchedulesUnrecorded$$/^postgres$$' \
+		./pkg/store/entadapter/ > /tmp/test-launch-store-postgres-migration.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-migration.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-migration.log; then \
+		echo "ERROR: the Postgres schedule migration test was skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestMigrationExistingSchedulesUnrecorded/postgres' /tmp/test-launch-store-postgres-migration.log; then \
+		echo "ERROR: TestMigrationExistingSchedulesUnrecorded/postgres did not run." >&2; \
 		exit 1; \
 	fi
 
