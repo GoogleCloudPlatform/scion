@@ -1379,11 +1379,6 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 	// just above: a transient constraint-table load failure must surface as
 	// an error here too, not as an indistinguishable "constraint stripped
 	// it" denial.
-	if principal.Kind == PrincipalKindFederatedUser {
-		if err := a.requireReadableProjectConstraints(ctx, projectID); err != nil {
-			return false, err
-		}
-	}
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
 	if err != nil {
 		return false, projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
