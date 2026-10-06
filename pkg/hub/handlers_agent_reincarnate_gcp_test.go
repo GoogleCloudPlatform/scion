@@ -71,6 +71,7 @@ func TestReincarnateAgent_RefusedBeforeStopForInadmissibleGCPSA(t *testing.T) {
 				srv.handleReincarnateAgent(rec, req, agent.ID)
 
 				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
 				assert.Contains(t, rec.Body.String(), "Cannot reincarnate agent")
 				assert.Contains(t, rec.Body.String(), tc.reason)
 
@@ -148,24 +149,36 @@ func setAgentGCPIdentityEmail(t *testing.T, s store.Store, agentID, email string
 
 // A dry-run move applies the same GCP identity refusal as start and an
 // in-place reincarnate: 400 with the same message, and nothing written.
+// The refusal comes before the move verdict, so a move the verdict would
+// also refuse still gets the GCP identity 400, as start does.
 func TestReincarnateMove_DryRun_RefusedForInadmissibleGCPSA(t *testing.T) {
 	cases := []struct {
-		name     string
-		verified bool
-		status   string
-		mutate   func(t *testing.T, s store.Store, agent *store.Agent)
-		reason   string
+		name           string
+		verified       bool
+		status         string
+		mutate         func(t *testing.T, s store.Store, agent *store.Agent)
+		dstNoAgentMove bool
+		reason         string
 	}{
 		{name: "unverified", status: store.GCPVerificationUnverified, reason: "not verified"},
 		{name: "email changed", verified: true, status: store.GCPVerificationVerified, reason: "no longer matches",
 			mutate: func(t *testing.T, s store.Store, agent *store.Agent) {
 				setAgentGCPIdentityEmail(t, s, agent.ID, "other@p.iam.gserviceaccount.com")
 			}},
+		{name: "unverified, target without agent move", status: store.GCPVerificationUnverified,
+			dstNoAgentMove: true, reason: "not verified"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			f := setupMoveFixture(t, true, nil)
+			var mutateDst func(dst *store.RuntimeBroker)
+			if tc.dstNoAgentMove {
+				// On its own, this target gives the 412 capability verdict.
+				mutateDst = func(dst *store.RuntimeBroker) {
+					dst.Capabilities = &store.BrokerCapabilities{Reprovision: true, AgentMove: false}
+				}
+			}
+			f := setupMoveFixture(t, true, mutateDst)
 			assignAgentGCPSA(t, f.s, f.agent, fmt.Sprintf("move-%d", i), tc.verified, tc.status)
 			if tc.mutate != nil {
 				tc.mutate(t, f.s, f.agent)
@@ -181,6 +194,7 @@ func TestReincarnateMove_DryRun_RefusedForInadmissibleGCPSA(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
 			assert.Contains(t, rec.Body.String(), "Cannot reincarnate agent")
 			assert.Contains(t, rec.Body.String(), tc.reason)
+			assert.NotContains(t, rec.Body.String(), ErrCodeUnsupportedCapability)
 			f.assertNoMoveSideEffects(t, count)
 		})
 	}
