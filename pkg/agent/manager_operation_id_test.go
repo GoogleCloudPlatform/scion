@@ -16,8 +16,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	corev1 "k8s.io/api/core/v1"
@@ -32,14 +34,18 @@ import (
 
 // newNamespacedPodManager returns a manager over a Kubernetes runtime that
 // lists all namespaces with "default" as its default namespace, where every
-// request is Forbidden, and an agent pod in scion-agents.
-func newNamespacedPodManager(t *testing.T) (Manager, *k8sfake.Clientset, *[]string) {
+// request is Forbidden, and an agent pod in scion-agents, labelled with run
+// runID when it is not empty.
+func newNamespacedPodManager(t *testing.T, runID string) (Manager, *k8sfake.Clientset, *[]string) {
 	t.Helper()
 	cs := k8sfake.NewClientset()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name: "my-agent", Namespace: "scion-agents",
 		Labels: map[string]string{"scion.name": "my-agent", "scion.agent": "true"},
 	}}
+	if runID != "" {
+		pod.Labels[api.LabelRunID] = runID
+	}
 	if _, err := cs.CoreV1().Pods("scion-agents").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +66,7 @@ func newNamespacedPodManager(t *testing.T) (Manager, *k8sfake.Clientset, *[]stri
 func TestManagerStopAndDelete_KubernetesPodAddressedByNamespace(t *testing.T) {
 	for _, op := range []string{"stop", "delete"} {
 		t.Run(op, func(t *testing.T) {
-			mgr, cs, defaultRequests := newNamespacedPodManager(t)
+			mgr, cs, defaultRequests := newNamespacedPodManager(t, "")
 			ctx := context.Background()
 			var err error
 			if op == "stop" {
@@ -79,4 +85,37 @@ func TestManagerStopAndDelete_KubernetesPodAddressedByNamespace(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A run-scoped Manager.Stop addresses the pod by its namespace-qualified
+// operation ID too (manager.go's run-scoped branch, merge review 6 N2): the
+// pod of the requested run is stopped and nothing goes to "default". A stop
+// naming another run finds no target and leaves the pod alone.
+func TestManagerStop_RunScoped_KubernetesPodAddressedByNamespace(t *testing.T) {
+	t.Run("own run", func(t *testing.T) {
+		mgr, cs, defaultRequests := newNamespacedPodManager(t, "run-1")
+		ctx := context.Background()
+		if err := mgr.Stop(ctx, "my-agent", "", "run-1"); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+		if _, err := cs.CoreV1().Pods("scion-agents").Get(ctx, "my-agent", metav1.GetOptions{}); !k8serrors.IsNotFound(err) {
+			t.Fatalf("pod still present after stop (err=%v)", err)
+		}
+		if len(*defaultRequests) != 0 {
+			t.Fatalf("requests sent to the default namespace: %v", *defaultRequests)
+		}
+	})
+	t.Run("other run", func(t *testing.T) {
+		mgr, cs, defaultRequests := newNamespacedPodManager(t, "run-1")
+		ctx := context.Background()
+		if err := mgr.Stop(ctx, "my-agent", "", "run-0"); !errors.Is(err, ErrStopRunNotFound) {
+			t.Fatalf("stop: err = %v, want ErrStopRunNotFound", err)
+		}
+		if _, err := cs.CoreV1().Pods("scion-agents").Get(ctx, "my-agent", metav1.GetOptions{}); err != nil {
+			t.Fatalf("pod of run-1 removed by a run-0 stop (err=%v)", err)
+		}
+		if len(*defaultRequests) != 0 {
+			t.Fatalf("requests sent to the default namespace: %v", *defaultRequests)
+		}
+	})
 }

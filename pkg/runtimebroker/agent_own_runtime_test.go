@@ -366,6 +366,35 @@ func TestStopAgent_ProfileRuntimeListsAllNamespaces_StopsByPodNamespace(t *testi
 	}
 }
 
+// A run-scoped stop through the same all-namespaces profile runtime (merge
+// review 6, N3): the pod's own run stops it in its namespace; another run
+// is refused with the run-mismatch 404 and the pod is kept. Neither sends
+// anything to the default namespace.
+func TestStopAgent_ProfileRuntimeListsAllNamespaces_RunScopedStopsByPodNamespace(t *testing.T) {
+	f := newOwnRTFixtureWith(t, ownRTOptions{savedProfile: "agents", withPod: true, podRunID: "run-1"})
+	f.ownListAll = true
+	stopPath := "/api/v1/agents/" + ownRTAgent + "/stop?projectId=" + ownRTProjectID + "&runtime=kubernetes"
+
+	w := f.do(t, http.MethodPost, stopPath+"&runId=run-0")
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), api.BrokerErrorCodeRunMismatch) {
+		t.Fatalf("stop of another run: status = %d, body %s; want 404 %s", w.Code, w.Body.String(), api.BrokerErrorCodeRunMismatch)
+	}
+	if !f.podExists(t) {
+		t.Fatal("pod of run-1 removed by a run-0 stop")
+	}
+
+	w = f.do(t, http.MethodPost, stopPath+"&runId=run-1")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("stop of the pod's run: status = %d, body %s; want 202", w.Code, w.Body.String())
+	}
+	if f.podExists(t) {
+		t.Fatal("pod still present after stop")
+	}
+	if got := f.requests("default"); len(got) != 0 {
+		t.Fatalf("requests sent to the default namespace: %v", got)
+	}
+}
+
 // Stop and status after a restart also use the agent's own runtime.
 func TestStopAndGetAgent_ProfileNamespace_AfterBrokerRestart(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", true)
