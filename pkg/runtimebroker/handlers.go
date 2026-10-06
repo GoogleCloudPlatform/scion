@@ -4390,8 +4390,14 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 // execCommandExitCode reports the exit code when err means the command ran
 // inside the container and exited non-zero: an os/exec.ExitError (docker,
 // podman, apple and cloudrun-sandbox exec run a CLI) or the k8s client-go
-// util/exec.ExitError returned by remotecommand. Mirrors classifyProbeErr.
+// util/exec.ExitError returned by remotecommand, or a runtime.CommandExitError
+// (substrate, whose exec is an HTTP call to the actor). Mirrors
+// classifyProbeErr.
 func execCommandExitCode(err error) (int, bool) {
+	var cmdExitErr *scionrt.CommandExitError
+	if errors.As(err, &cmdExitErr) {
+		return cmdExitErr.ExitStatus(), true
+	}
 	var stdExitErr *exec.ExitError
 	if errors.As(err, &stdExitErr) {
 		return stdExitErr.ExitCode(), true

@@ -1387,6 +1387,97 @@ func TestSubstrateExec_ErrorMapping(t *testing.T) {
 	}
 }
 
+// TestSubstrateExec_NonZeroExitIsCommandExitError pins that a command which
+// ran in a live actor and exited non-zero comes back as a typed
+// *CommandExitError, with or without cached secrets (redactExecErr must keep
+// the type), and with the same message as before. The broker classifies it as
+// a command result; a plain error here whose stderr says "not found" was
+// reported as agent_not_found and the agent marked container_missing
+// (ptone/scion#3470). A non-2xx control-server response is not a command
+// exit and must stay untyped.
+func TestSubstrateExec_NonZeroExitIsCommandExitError(t *testing.T) {
+	const id = "scion-proj/agent-a"
+	const secret = "sk-exit-typed-secret-value-0123"
+	tests := []struct {
+		name       string
+		secrets    bool
+		status     int
+		resp       execResponse
+		wantTyped  bool
+		wantCode   int
+		wantErrMsg string
+	}{
+		{
+			name:       "command not found in live actor",
+			resp:       execResponse{Stderr: "sh: 1: foo: not found", ExitCode: 127},
+			wantTyped:  true,
+			wantCode:   127,
+			wantErrMsg: "substrate: exec on scion-proj/agent-a exited 127: sh: 1: foo: not found",
+		},
+		{
+			name:       "command not found with cached secrets redacts and stays typed",
+			secrets:    true,
+			resp:       execResponse{Stderr: "Error: container not found key=" + secret, ExitCode: 1},
+			wantTyped:  true,
+			wantCode:   1,
+			wantErrMsg: "substrate: exec on scion-proj/agent-a exited 1: Error: container not found key=[value of ANTHROPIC_API_KEY redacted]",
+		},
+		{
+			name:      "refused setup or timeout reports -1",
+			resp:      execResponse{Stderr: "exec timed out", ExitCode: -1},
+			wantTyped: true,
+			wantCode:  -1,
+		},
+		{
+			name:   "non-2xx control-server response is not a command exit",
+			status: http.StatusNotFound,
+			resp:   execResponse{Stderr: "actor not found"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &callRecorder{}
+			rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+			defer closeServer()
+
+			substrateAgentStateMu.Lock()
+			substrateControlTokens[id] = "tok-123"
+			if tt.secrets {
+				substrateExecSecrets[id] = map[string]string{"ANTHROPIC_API_KEY": secret}
+			}
+			substrateAgentStateMu.Unlock()
+			t.Cleanup(func() {
+				substrateAgentStateMu.Lock()
+				delete(substrateExecSecrets, id)
+				substrateAgentStateMu.Unlock()
+			})
+			fa.execStatus = tt.status
+			fa.execResp = tt.resp
+
+			_, err := rt.Exec(context.Background(), id, []string{"foo"})
+			if err == nil {
+				t.Fatal("Exec() expected an error, got nil")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("Exec() error leaks the cached secret: %v", err)
+			}
+			var exitErr *CommandExitError
+			if got := errors.As(err, &exitErr); got != tt.wantTyped {
+				t.Fatalf("errors.As(*CommandExitError) = %v, want %v (err %T: %v)", got, tt.wantTyped, err, err)
+			}
+			if !tt.wantTyped {
+				return
+			}
+			if exitErr.ExitStatus() != tt.wantCode {
+				t.Errorf("ExitStatus() = %d, want %d", exitErr.ExitStatus(), tt.wantCode)
+			}
+			if tt.wantErrMsg != "" && err.Error() != tt.wantErrMsg {
+				t.Errorf("Error() = %q, want %q", err.Error(), tt.wantErrMsg)
+			}
+		})
+	}
+}
+
 func TestSubstrateExec_NoCachedToken(t *testing.T) {
 	rec := &callRecorder{}
 	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)

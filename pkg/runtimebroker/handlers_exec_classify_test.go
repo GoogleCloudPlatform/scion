@@ -93,6 +93,39 @@ func TestExecCommand_ErrorClassification(t *testing.T) {
 			wantCode:   ErrCodeRuntimeError,
 		},
 		{
+			name: "substrate command exits non-zero with not found on stderr",
+			execErr: &runtime.CommandExitError{
+				Runtime: "substrate", Target: "ns/actor", Code: 127,
+				Output: "sh: 1: foo: not found",
+			},
+			wantStatus: http.StatusOK,
+			wantExit:   127,
+		},
+		{
+			name: "substrate command output says container not found",
+			execErr: &runtime.CommandExitError{
+				Runtime: "substrate", Target: "ns/actor", Code: 1,
+				Output: "Error: container not found",
+			},
+			wantStatus: http.StatusOK,
+			wantExit:   1,
+		},
+		{
+			name: "substrate refused setup or timeout",
+			execErr: &runtime.CommandExitError{
+				Runtime: "substrate", Target: "ns/actor", Code: -1,
+				Output: "exec timed out",
+			},
+			wantStatus: http.StatusOK,
+			wantExit:   -1,
+		},
+		{
+			name:       "substrate actor gone (control server unreachable)",
+			execErr:    errors.New("substrate: exec on ns/actor failed: status 404: actor not found"),
+			wantStatus: http.StatusNotFound,
+			wantCode:   ErrCodeAgentNotFound,
+		},
+		{
 			name:       "runtime binary missing",
 			execErr:    fmt.Errorf("docker failed: %w", &exec.Error{Name: "docker", Err: exec.ErrNotFound}),
 			wantStatus: http.StatusInternalServerError,

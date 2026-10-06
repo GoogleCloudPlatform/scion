@@ -1297,6 +1297,18 @@ func (r *SubstrateRuntime) redactExecErr(id string, err error) error {
 	if !ok {
 		return err
 	}
+	// Keep doExec's command exit typed so callers can still tell a command
+	// result from a runtime failure. Its Output was already redacted before
+	// truncation in doExec; redacting the fields again is idempotent.
+	var exitErr *CommandExitError
+	if errors.As(err, &exitErr) && error(exitErr) == err {
+		return &CommandExitError{
+			Runtime: exitErr.Runtime,
+			Target:  redactEnvValues(exitErr.Target, secrets),
+			Code:    exitErr.Code,
+			Output:  redactEnvValues(exitErr.Output, secrets),
+		}
+	}
 	return errors.New(redactEnvValues(err.Error(), secrets))
 }
 
