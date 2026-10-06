@@ -241,14 +241,7 @@ func metricKind(m *metricpb.Metric) (string, metricpb.AggregationTemporality, bo
 
 func (s *metricStreams) add(rms []*metricpb.ResourceMetrics) error {
 	if s.streams == nil {
-		// Keep the provider mode and clock: losing gcp here would silently
-		// drop every GCP-only guard and the hook collector epoch.
-		gcp, now := s.gcp, s.now
 		*s = *newMetricStreams()
-		s.gcp = gcp
-		if now != nil {
-			s.now = now
-		}
 	}
 	s.expireDeliveredIdle()
 	for _, rm := range rms {

@@ -774,46 +774,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// same as this field's zero-value contract.
 	lifecycleManager.WorkloadWorkingDir = opts.WorkingDir
 
-	// Load the env overlay produced by the pre-start provisioner. Resolve
-	// any from_file references to in-memory values so secrets are not
-	// written back to logs or persistent JSON. Fail startup when the
-	// overlay is malformed or references missing files for a required
-	// container-script harness — the child would otherwise launch without
-	// its credentials.
-	var harnessEnvOverlay map[string]string
-	var nativeTelemetryPolicy string
-	if harnessReq.EnvOverlayPath != "" {
-		overlayPath, allowedRoots, err := harnessReq.ResolveEnvOverlay(agentHome)
-		var overlay map[string]string
-		if err == nil {
-			overlay, err = hooks.LoadEnvOverlay(overlayPath, allowedRoots)
-		}
-		if err != nil {
-			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
-			if harnessReq.Required {
-				reportInitFailure(agentHome, fmt.Errorf("invalid harness env overlay: %w", err))
-				return 1
-			}
-		} else if len(overlay) > 0 {
-			if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
-				if policy != "enabled" && policy != "disabled" {
-					log.Error("Invalid native telemetry policy marker")
-					reportInitFailure(agentHome, errors.New("invalid native telemetry policy marker in harness env overlay"))
-					return 1
-				}
-				nativeTelemetryPolicy = policy
-				delete(overlay, hooks.NativeTelemetryPolicyKey)
-			}
-			harnessEnvOverlay = overlay
-			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
-		}
+	// Load the env overlay produced by the pre-start provisioner and hand
+	// it to the running telemetry pipeline (see loadHarnessEnvOverlay).
+	harnessEnvOverlay, nativeTelemetryPolicy, err := loadHarnessEnvOverlay(harnessReq, agentHome, telemetryPipeline)
+	if err != nil {
+		reportInitFailure(agentHome, err)
+		return 1
 	}
-
-	// The telemetry pipeline started above, before pre-start provisioning
-	// produced the overlay, so its usage deriver only saw init's own env.
-	// A harness declares SCION_USAGE_SOURCE in that overlay, so re-select
-	// the deriver now, before the child starts emitting native events.
-	applyHarnessOverlayToTelemetry(telemetryPipeline, harnessEnvOverlay)
 
 	// Configure git credentials for shared-workspace projects (git-workspace hybrid).
 	// The workspace is pre-cloned on the host; agents need credentials to push/pull.
@@ -3771,16 +3738,56 @@ func parseCapBit(statusContent string, bit uint) bool {
 	return false
 }
 
-// applyHarnessOverlayToTelemetry hands the harness env overlay to a running
-// telemetry pipeline so usage derivation reflects the harness's declared
-// SCION_USAGE_SOURCE (see telemetry.Pipeline.ApplyHarnessEnvOverlay). It
-// never mutates init's own environment, and a failure only costs derived
-// usage, so it is logged rather than aborting startup.
-func applyHarnessOverlayToTelemetry(pipeline *telemetry.Pipeline, overlay map[string]string) {
-	if pipeline == nil {
-		return
+// loadHarnessEnvOverlay loads the env overlay produced by the pre-start
+// provisioner and applies it to the running telemetry pipeline. from_file
+// references are resolved to in-memory values so secrets are not written
+// back to logs or persistent JSON. The native telemetry policy marker is
+// validated and removed from the returned overlay.
+//
+// A non-nil error is fatal for startup: the overlay is malformed or
+// references missing files for a required container-script harness (the
+// child would otherwise launch without its credentials), or the policy
+// marker is invalid. An overlay that fails to load for a non-required
+// harness is logged and treated as empty.
+//
+// The telemetry pipeline started before pre-start provisioning produced the
+// overlay, so its usage deriver only saw init's own env. A harness declares
+// SCION_USAGE_SOURCE in that overlay, so the deriver is re-selected here,
+// before the child starts emitting native events. That never mutates init's
+// own environment, and a failure only costs derived usage, so it is logged
+// rather than aborting startup.
+func loadHarnessEnvOverlay(harnessReq hooks.HarnessManifestRequirement, agentHome string, pipeline *telemetry.Pipeline) (map[string]string, string, error) {
+	var harnessEnvOverlay map[string]string
+	var nativeTelemetryPolicy string
+	if harnessReq.EnvOverlayPath != "" {
+		overlayPath, allowedRoots, err := harnessReq.ResolveEnvOverlay(agentHome)
+		var overlay map[string]string
+		if err == nil {
+			overlay, err = hooks.LoadEnvOverlay(overlayPath, allowedRoots)
+		}
+		if err != nil {
+			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
+			if harnessReq.Required {
+				return nil, "", fmt.Errorf("invalid harness env overlay: %w", err)
+			}
+		} else if len(overlay) > 0 {
+			if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
+				if policy != "enabled" && policy != "disabled" {
+					log.Error("Invalid native telemetry policy marker")
+					return nil, "", errors.New("invalid native telemetry policy marker in harness env overlay")
+				}
+				nativeTelemetryPolicy = policy
+				delete(overlay, hooks.NativeTelemetryPolicyKey)
+			}
+			harnessEnvOverlay = overlay
+			log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
+		}
 	}
-	if err := pipeline.ApplyHarnessEnvOverlay(context.Background(), overlay); err != nil {
-		log.Error("Failed to apply harness env overlay to telemetry: %v", err)
+
+	if pipeline != nil {
+		if err := pipeline.ApplyHarnessEnvOverlay(context.Background(), harnessEnvOverlay); err != nil {
+			log.Error("Failed to apply harness env overlay to telemetry: %v", err)
+		}
 	}
+	return harnessEnvOverlay, nativeTelemetryPolicy, nil
 }
