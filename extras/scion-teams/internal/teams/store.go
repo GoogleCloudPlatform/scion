@@ -62,7 +62,6 @@ type Store interface {
 
 	// Agent cache
 	SetProjectAgents(ctx context.Context, pa *ProjectAgents) error
-	GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error)
 
 	// Pending ask-user requests
 	// CreatePendingAskUser stores req unless a request with the same ID
@@ -467,29 +466,6 @@ ON CONFLICT(project_id) DO UPDATE SET
 	agent_slugs=excluded.agent_slugs, refreshed_at=excluded.refreshed_at`
 	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC().Format(time.RFC3339))
 	return err
-}
-
-func (s *sqliteStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`
-	row := s.db.QueryRowContext(ctx, q, projectID)
-
-	var pa ProjectAgents
-	var slugsJSON, refreshedAt string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs); err != nil {
-		return nil, fmt.Errorf("unmarshal agent_slugs: %w", err)
-	}
-	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
-	if err != nil {
-		return nil, fmt.Errorf("parse refreshed_at: %w", err)
-	}
-	return &pa, nil
 }
 
 // --- PendingAskUser ---

@@ -16,6 +16,8 @@ package teams
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -595,8 +597,30 @@ func TestConversationContext(t *testing.T) {
 
 // --- ProjectAgents ---
 
+// readCachedProjectAgents reads the cached agent list of projectID straight
+// from the sqlite table, or nil when there is none.
+func readCachedProjectAgents(t *testing.T, store Store, projectID string) (*ProjectAgents, error) {
+	t.Helper()
+	s, ok := store.(*sqliteStore)
+	require.True(t, ok, "unsupported store %T", store)
+	row := s.db.QueryRow(`SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`, projectID)
+	var pa ProjectAgents
+	var slugsJSON, refreshedAt string
+	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	require.NoError(t, json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs))
+	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
+	require.NoError(t, err)
+	return &pa, nil
+}
+
 func TestProjectAgents(t *testing.T) {
-	t.Run("SetAndGet", func(t *testing.T) {
+	t.Run("Set", func(t *testing.T) {
 		store := newTestStore(t)
 		ctx := context.Background()
 
@@ -607,7 +631,7 @@ func TestProjectAgents(t *testing.T) {
 		}
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "proj-1", got.ProjectID)
@@ -615,11 +639,10 @@ func TestProjectAgents(t *testing.T) {
 		assert.Equal(t, 2026, got.RefreshedAt.Year())
 	})
 
-	t.Run("GetNotFound", func(t *testing.T) {
+	t.Run("NotCached", func(t *testing.T) {
 		store := newTestStore(t)
-		ctx := context.Background()
 
-		got, err := store.GetProjectAgents(ctx, "nonexistent")
+		got, err := readCachedProjectAgents(t, store, "nonexistent")
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
@@ -639,7 +662,7 @@ func TestProjectAgents(t *testing.T) {
 		pa.RefreshedAt = time.Now().UTC().Add(time.Hour)
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, []string{"coder", "reviewer"}, got.AgentSlugs)
@@ -656,7 +679,7 @@ func TestProjectAgents(t *testing.T) {
 		}
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, []string{}, got.AgentSlugs)

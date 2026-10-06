@@ -472,7 +472,7 @@ func TestAgentsCommand(t *testing.T) {
 	require.NotEmpty(t, ms.sent)
 
 	// Verify agents were cached.
-	cached, err := broker.store.GetProjectAgents(context.Background(), "proj-1")
+	cached, err := readCachedProjectAgents(t, broker.store, "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, cached)
 	assert.ElementsMatch(t, []string{"dev-1", "reviewer"}, cached.AgentSlugs)

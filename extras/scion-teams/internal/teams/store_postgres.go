@@ -359,25 +359,6 @@ ON CONFLICT(project_id) DO UPDATE SET
 	return err
 }
 
-func (s *postgresStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM teams_project_agents WHERE project_id = $1`
-	row := s.db.QueryRowContext(ctx, q, projectID)
-
-	var pa ProjectAgents
-	var slugsJSON string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &pa.RefreshedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs); err != nil {
-		return nil, fmt.Errorf("unmarshal agent_slugs: %w", err)
-	}
-	return &pa, nil
-}
-
 // --- PendingAskUser ---
 
 func (s *postgresStore) CreatePendingAskUser(ctx context.Context, req *PendingAskUser) error {
