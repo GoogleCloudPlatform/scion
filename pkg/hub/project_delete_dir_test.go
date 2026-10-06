@@ -321,7 +321,8 @@ func TestRemoveProjectDirUnderProjectsRoot_EmptyNFSMountRootRemovesNothing(t *te
 
 // TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty checks the value
 // the hub-managed removal returns: the resolved path when one was resolved,
-// whether or not it was removed, and "" when the slug fails the slug rule.
+// whether or not it was removed, and "" when the slug fails the slug rule or
+// the path cannot be resolved.
 func TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
