@@ -1267,6 +1267,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		req.PrincipalID = resolvedUser.ID
 	}
 
+	// principalIsMembersGroup records whether the group principal is a
+	// project members group. The refusal is applied below, after routing:
+	// built-in project roles are refused by the membership service once the
+	// actor is authorized; the remaining routes are already behind hub-level
+	// role_binding.create.
+	principalIsMembersGroup := false
+
 	// Verify group exists for group principals.
 	// Try UUID first, fall back to slug lookup (mirrors email→UUID for users).
 	if req.PrincipalType == store.RoleBindingPrincipalGroup {
@@ -1288,6 +1295,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			}
 		}
 		req.PrincipalID = g.ID
+		principalIsMembersGroup = store.IsProjectMembersGroup(g)
 	}
 
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
@@ -1382,7 +1390,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			if denial != nil && !denial.Allowed {
 				// Error contract: membership-service 403s surfaced through the
 				// role-binding endpoint include structured details.
-				var details map[string]interface{}
+				details := legacyMembershipDenialDetails(denial)
 				if denial.HTTPStatus == http.StatusForbidden {
 					details = map[string]interface{}{
 						"resource_type": "role_binding",
@@ -1396,6 +1404,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		// Custom project-scoped role — fall through to CanDelegate path.
+	}
+
+	// Project members groups cannot be granted roles, on any scope.
+	if principalIsMembersGroup {
+		writeError(w, http.StatusBadRequest, ErrCodePrincipalIneligible,
+			projectMembersGroupPrincipalMessage, projectMembersGroupPrincipalDetails(req.PrincipalID))
+		return
 	}
 
 	// CanDelegate check: security invariant — the actor must hold all

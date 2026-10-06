@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,30 @@ type fakeHubClient struct {
 	mu       sync.Mutex
 	projects []ProjectOption
 	agents   map[string][]AgentInfo // projectID → agents
+
+	// userProjects, when non-nil, is returned by ListProjectsForUser keyed
+	// by principal instead of projects.
+	userProjects map[string][]ProjectOption
+	// listAgentsErr, when set, is returned by ListAgents.
+	listAgentsErr error
+	// listUserProjectsErr, when set, is returned by ListProjectsForUser.
+	listUserProjectsErr error
+	// listUserProjectsGate, when set, is waited on by ListProjectsForUser
+	// after recording the call.
+	listUserProjectsGate chan struct{}
+	// listUserProjectsEntered, when set, receives a value each time
+	// ListProjectsForUser is entered.
+	listUserProjectsEntered chan struct{}
+
+	// Calls recorded for assertions: the principal passed on each call.
+	listAgentsCalls       []fakeListAgentsCall
+	listUserProjectsCalls []string
+	listFreshCalls        int
+}
+
+type fakeListAgentsCall struct {
+	ProjectID  string
+	OnBehalfOf string
 }
 
 func newFakeHubClient() *fakeHubClient {
@@ -49,28 +74,60 @@ func newFakeHubClient() *fakeHubClient {
 	}
 }
 
-func (f *fakeHubClient) ListProjects(_ context.Context) ([]ProjectOption, error) {
+func (f *fakeHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
+	f.mu.Lock()
+	f.listUserProjectsCalls = append(f.listUserProjectsCalls, onBehalfOf)
+	gate := f.listUserProjectsGate
+	entered := f.listUserProjectsEntered
+	f.mu.Unlock()
+	if entered != nil {
+		entered <- struct{}{}
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.projects, nil
-}
-
-func (f *fakeHubClient) ListProjectsForUser(_ context.Context, _ string) ([]ProjectOption, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	if f.listUserProjectsErr != nil {
+		return nil, f.listUserProjectsErr
+	}
+	if f.userProjects != nil {
+		return f.userProjects[onBehalfOf], nil
+	}
 	return f.projects, nil
 }
 
 func (f *fakeHubClient) ListProjectsFresh(_ context.Context) ([]ProjectOption, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listFreshCalls++
 	return f.projects, nil
 }
 
-func (f *fakeHubClient) ListAgents(_ context.Context, projectID string) ([]AgentInfo, error) {
+func (f *fakeHubClient) ListAgents(_ context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listAgentsCalls = append(f.listAgentsCalls, fakeListAgentsCall{ProjectID: projectID, OnBehalfOf: onBehalfOf})
+	if f.listAgentsErr != nil {
+		return nil, f.listAgentsErr
+	}
 	return f.agents[projectID], nil
+}
+
+func (f *fakeHubClient) userProjectCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.listUserProjectsCalls...)
+}
+
+func (f *fakeHubClient) agentCalls() []fakeListAgentsCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeListAgentsCall(nil), f.listAgentsCalls...)
 }
 
 func (f *fakeHubClient) HubBaseURL() string {
@@ -88,6 +145,41 @@ type fakeTGServerV2 struct {
 	answeredCallbacks []answerCallbackQueryRequest
 	nextSendMessageID int64
 	webhookURL        string
+	// chatMembers maps chatID → userID → member status for getChatMember.
+	chatMembers map[int64]map[int64]string
+	// failChatMember makes getChatMember fail with a server error for
+	// these chats.
+	failChatMember map[int64]bool
+	// chatMemberErrors makes getChatMember fail with a given Telegram error
+	// for these chats.
+	chatMemberErrors map[int64]apiResponse
+	// chatMemberCalls counts getChatMember requests.
+	chatMemberCalls int
+	// chatMemberDelay, when set, delays each getChatMember response;
+	// chatMemberInFlight/chatMemberMaxInFlight track concurrency.
+	chatMemberDelay       time.Duration
+	chatMemberInFlight    int
+	chatMemberMaxInFlight int
+}
+
+// chatMemberStats returns the getChatMember call count and peak concurrency.
+func (f *fakeTGServerV2) chatMemberStats() (calls, maxInFlight int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.chatMemberCalls, f.chatMemberMaxInFlight
+}
+
+// setChatMember records a user's status in a chat for getChatMember.
+func (f *fakeTGServerV2) setChatMember(chatID, userID int64, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.chatMembers == nil {
+		f.chatMembers = make(map[int64]map[int64]string)
+	}
+	if f.chatMembers[chatID] == nil {
+		f.chatMembers[chatID] = make(map[int64]string)
+	}
+	f.chatMembers[chatID][userID] = status
 }
 
 func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
@@ -199,6 +291,38 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			f.mu.Unlock()
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
+		case "/bottest-token/getChatMember":
+			chatID, _ := strconv.ParseInt(r.URL.Query().Get("chat_id"), 10, 64)
+			userID, _ := strconv.ParseInt(r.URL.Query().Get("user_id"), 10, 64)
+			f.mu.Lock()
+			f.chatMemberCalls++
+			f.chatMemberInFlight++
+			if f.chatMemberInFlight > f.chatMemberMaxInFlight {
+				f.chatMemberMaxInFlight = f.chatMemberInFlight
+			}
+			delay := f.chatMemberDelay
+			fail := f.failChatMember[chatID]
+			apiErr, hasAPIErr := f.chatMemberErrors[chatID]
+			status, ok := f.chatMembers[chatID][userID]
+			f.mu.Unlock()
+			time.Sleep(delay)
+			f.mu.Lock()
+			f.chatMemberInFlight--
+			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
+			if hasAPIErr {
+				json.NewEncoder(w).Encode(apiErr)
+				return
+			}
+			if !ok {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 400, Description: "Bad Request: user not found"})
+				return
+			}
+			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, TGChatMember{Status: status})})
+
 		case "/bottest-token/setMyCommands":
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
@@ -241,6 +365,12 @@ func (f *fakeTGServerV2) getEditedTexts() []editMessageTextRequest {
 	result := make([]editMessageTextRequest, len(f.editedTexts))
 	copy(result, f.editedTexts)
 	return result
+}
+
+func (f *fakeTGServerV2) getEditedMarkups() []editMessageReplyMarkupRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]editMessageReplyMarkupRequest(nil), f.editedMarkups...)
 }
 
 func (f *fakeTGServerV2) getAnsweredCallbacks() []answerCallbackQueryRequest {
@@ -321,6 +451,47 @@ func TestV2_Configure(t *testing.T) {
 	assert.NotNil(t, b.commands)
 	assert.NotNil(t, b.callbacks)
 	assert.NotNil(t, b.registration)
+}
+
+func TestV2_Configure_AgentCacheTTL(t *testing.T) {
+	cases := map[string]struct {
+		value string
+		want  time.Duration
+	}{
+		"default":                   {"", defaultAgentCacheTTL},
+		"within retention":          {"10m", 10 * time.Minute},
+		"at the limit":              {maxAgentCacheTTL.String(), maxAgentCacheTTL},
+		"longer is clamped":         {"2h", maxAgentCacheTTL},
+		"negative uses the default": {"-1m", defaultAgentCacheTTL},
+		"zero disables reuse":       {"0s", 0},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tgSrv := newFakeTGServerV2(t)
+			b := NewV2(slog.Default())
+			defer b.Close()
+			cfg := map[string]string{
+				"bot_token":    "test-token",
+				"api_base_url": tgSrv.srv.URL,
+				"db_path":      filepath.Join(t.TempDir(), "test.db"),
+			}
+			if tc.value != "" {
+				cfg["agent_cache_ttl"] = tc.value
+			}
+			require.NoError(t, b.Configure(cfg))
+			assert.Equal(t, tc.want, b.agentCacheTTL)
+		})
+	}
+}
+
+func TestAgentCacheTTLsFitWithinRetention(t *testing.T) {
+	for name, ttl := range map[string]time.Duration{
+		"default routing TTL": defaultAgentCacheTTL,
+		"max routing TTL":     maxAgentCacheTTL,
+		"notifications TTL":   notificationAgentCacheTTL,
+	} {
+		assert.LessOrEqual(t, 3*ttl, agentCacheRetention, "%s: a fresh entry must outlive its TTL in the store", name)
+	}
 }
 
 func TestV2_Configure_MissingBotToken(t *testing.T) {
@@ -538,6 +709,7 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -600,6 +772,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -650,6 +823,7 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -726,6 +900,7 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -790,6 +965,7 @@ func TestV2_HandleGroupMessage_SenderIDUsesHubUserID(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -852,6 +1028,7 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -911,6 +1088,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -975,6 +1153,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -1035,6 +1214,7 @@ func TestV2_HandleGroupMessage_ReplyConversationContextFallback(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}},
 		RefreshedAt: time.Now(),
@@ -1106,7 +1286,9 @@ func TestV2_Publish_DirectChatID(t *testing.T) {
 
 func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -1127,7 +1309,7 @@ func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 		Sender:    "agent:coder",
 		Recipient: "user:alice@example.com",
 		Msg:       "reply to alice",
-		Type:      messages.TypeAssistantReply,
+		Type:      messages.TypeInstruction,
 	}
 
 	err := b.Publish(ctx, "scion.project.proj-1.agent.coder.messages", msg)
@@ -1252,7 +1434,7 @@ func TestV2_Publish_ReplyToMessageID(t *testing.T) {
 		Version: messages.Version,
 		Sender:  "agent:coder",
 		Msg:     "reply message",
-		Type:    messages.TypeAssistantReply,
+		Type:    messages.TypeInstruction,
 		Metadata: map[string]string{
 			"telegram_chat_id":    "-200",
 			"telegram_message_id": "42",
@@ -1329,6 +1511,50 @@ func TestV2_HandleCallback_AskUserResponse(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, pending)
 	assert.True(t, pending.Responded)
+}
+
+// A Commentary button on a settings card sent before the setting was
+// retired must be answered as a no-op, not fail, and the card refreshed.
+func TestV2_HandleCallback_RetiredCommentarySettingIsNoOp(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2WithHub(t, tgSrv, newFakeHubClient())
+	ctx := context.Background()
+	require.NoError(t, b.store.SaveGroupLink(ctx, &GroupLink{
+		ChatID: -200, ProjectID: "proj-1", LinkedAt: time.Now().UTC(),
+		Active: true, ShowAgentToAgent: true,
+	}))
+
+	b.handleCallbackQuery(ctx, &CallbackQuery{
+		ID:      "cb-com",
+		From:    &TGUser{ID: 456, Username: "alice"},
+		Message: &TGMessage{MessageID: 51, Chat: TGChat{ID: -200, Type: "group"}},
+		Data:    "settings:commentary:off",
+	})
+
+	callbacks := tgSrv.getAnsweredCallbacks()
+	require.Len(t, callbacks, 1)
+	assert.Equal(t, "cb-com", callbacks[0].CallbackQueryID)
+	assert.Contains(t, callbacks[0].Text, "removed")
+
+	// The card is refreshed in place without the stale Commentary row.
+	tgSrv.mu.Lock()
+	edits := append([]editMessageReplyMarkupRequest(nil), tgSrv.editedMarkups...)
+	tgSrv.mu.Unlock()
+	require.Len(t, edits, 1, "the settings card must be refreshed")
+	assert.Equal(t, int64(-200), edits[0].ChatID)
+	assert.Equal(t, int64(51), edits[0].MessageID)
+	require.NotNil(t, edits[0].ReplyMarkup)
+	require.Len(t, edits[0].ReplyMarkup.InlineKeyboard, 2, "observer and group-notification rows only")
+	for _, row := range edits[0].ReplyMarkup.InlineKeyboard {
+		for _, btn := range row {
+			assert.NotContains(t, btn.CallbackData, "commentary")
+		}
+	}
+
+	link, err := b.store.GetGroupLink(ctx, -200)
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.True(t, link.ShowAgentToAgent, "other settings must be unchanged")
 }
 
 func TestV2_HandleCallback_AskUserWithMapping(t *testing.T) {
@@ -1423,7 +1649,9 @@ func TestV2_HandleCallback_ExpiredRequest(t *testing.T) {
 
 func TestV2_Publish_StateChange_RoutedToDM(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -1702,7 +1930,7 @@ func TestFormatMessageV2(t *testing.T) {
 			name: "assistant reply",
 			msg: &messages.StructuredMessage{
 				Msg:  "here is the result",
-				Type: messages.TypeAssistantReply,
+				Type: messages.TypeInstruction,
 			},
 			agentSlug: "",
 			contains:  []string{"here is the result"},
@@ -1946,6 +2174,7 @@ func TestV2_WebhookMode_InboundMessageDelivery(t *testing.T) {
 		LinkedAt:       time.Now().UTC(),
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2150,6 +2379,7 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2221,6 +2451,7 @@ func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2598,6 +2829,7 @@ func TestV2_HandleIncoming_AudioMessageDelivered(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2694,6 +2926,7 @@ func TestV2_HandleGroupMessage_CodeSpanPreserved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2753,6 +2986,7 @@ func TestV2_HandleGroupMessage_MultipleCodeSpans(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2812,6 +3046,7 @@ func TestV2_HandleGroupMessage_PreBlockPreserved(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2870,6 +3105,7 @@ func TestV2_HandleGroupMessage_PreBlockWithLanguage(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2931,6 +3167,7 @@ func TestV2_HandleIncoming_CaptionlessAudioRoutesToDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -2996,6 +3233,7 @@ func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -3225,6 +3463,7 @@ func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
 		Active:       true,
 	}))
 	require.NoError(t, b.store.SaveProjectAgents(ctx, &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
 		RefreshedAt: time.Now(),
@@ -3281,37 +3520,40 @@ func TestResolveRecipientChats(t *testing.T) {
 		LastMessageAt:  time.Now(),
 	}))
 
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
 	b := &TelegramBrokerV2{
-		log:   slog.New(slog.NewTextHandler(os.Stdout, nil)),
-		store: store,
+		log:       slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		store:     store,
+		hubClient: hub,
 	}
 
 	t.Run("email lookup succeeds", func(t *testing.T) {
-		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:alice@example.com", "", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 
 	t.Run("display name with recipientID fallback", func(t *testing.T) {
 		// Hub rewrites recipient to display name; email lookup fails,
 		// but recipientID-based fallback finds the correct mapping.
-		chats := b.resolveRecipientChats(ctx, "user:Alice", "scion-uuid-456", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:Alice", "scion-uuid-456", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 
 	t.Run("display name without recipientID returns nil", func(t *testing.T) {
 		// No recipientID provided — fallback cannot execute.
-		chats := b.resolveRecipientChats(ctx, "user:Alice", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:Alice", "", "proj-1", "coder")
 		assert.Nil(t, chats)
 	})
 
 	t.Run("non-user recipient returns nil", func(t *testing.T) {
-		chats := b.resolveRecipientChats(ctx, "agent:coder", "", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "agent:coder", "", "proj-1", "coder")
 		assert.Nil(t, chats)
 	})
 
 	t.Run("email lookup preferred over recipientID", func(t *testing.T) {
 		// When email lookup succeeds, recipientID is not used.
-		chats := b.resolveRecipientChats(ctx, "user:alice@example.com", "scion-uuid-456", "proj-1", "coder")
+		chats, _ := b.resolveRecipientChats(ctx, "user:alice@example.com", "scion-uuid-456", "proj-1", "coder")
 		assert.Equal(t, []int64{12345}, chats)
 	})
 }
@@ -3441,5 +3683,58 @@ func TestV2_ResolveAttachmentPath_SharedDirPaths(t *testing.T) {
 			assert.True(t, strings.HasSuffix(got, filepath.FromSlash(tt.wantEnd)),
 				"resolveAttachmentPath(%q) = %q, want suffix %q", tt.path, got, tt.wantEnd)
 		})
+	}
+}
+
+// The retired assistant-reply mirror is discarded even if an older hub still
+// forwards it; the same message as an instruction is the control.
+func TestV2_Publish_DiscardsRetiredAssistantReply(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	b := newTestBrokerV2(t, tgSrv)
+	meta := map[string]string{"telegram_chat_id": "-200", "telegram_message_id": "42"}
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "turn text",
+			Type: messages.TypeAssistantReply, Metadata: meta}))
+	assert.Empty(t, tgSrv.getSentMessages(), "assistant-reply must be discarded")
+
+	require.NoError(t, b.Publish(context.Background(), "scion.project.proj-1.agent.coder.messages",
+		&messages.StructuredMessage{Version: messages.Version, Sender: "agent:coder", Msg: "deliberate",
+			Type: messages.TypeInstruction, Metadata: meta}))
+	assert.Len(t, tgSrv.getSentMessages(), 1, "control: an instruction is sent")
+}
+
+func TestV2_ImportV1ChatRoutes_ResolvesSlugFromBrokerProjectList(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	b.importV1ChatRoutes(ctx, `{"-789": "scion.project.proj1.agent.coder.messages"}`)
+
+	link, err := b.store.GetGroupLink(ctx, -789)
+	require.NoError(t, err)
+	require.NotNil(t, link)
+	assert.Equal(t, "alpha", link.ProjectSlug)
+	assert.Equal(t, 1, hub.listFreshCalls)
+	assert.Empty(t, hub.listUserProjectsCalls, "migration does not act as a user")
+}
+
+func TestV2_ImportV1ChatRoutes_ListsBrokerProjectsOnce(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj1", Slug: "alpha"}, {ID: "proj2", Name: "Beta"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
+
+	ctx := context.Background()
+	b.importV1ChatRoutes(ctx, `{"-1": "scion.project.proj1.agent.coder.messages", "-2": "scion.project.proj2.broadcast", "-3": "scion.project.proj1.agent.reviewer.messages"}`)
+
+	assert.Equal(t, 1, hub.listFreshCalls)
+	for chatID, want := range map[int64]string{-1: "alpha", -2: "Beta", -3: "alpha"} {
+		link, err := b.store.GetGroupLink(ctx, chatID)
+		require.NoError(t, err)
+		require.NotNil(t, link)
+		assert.Equal(t, want, link.ProjectSlug)
 	}
 }

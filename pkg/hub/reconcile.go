@@ -92,7 +92,9 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 		result, execErr := s.execDispatch(dispatchCtx, d)
 		if execErr != nil {
 			s.agentLifecycleLog.Warn("reconcile: dispatch op failed", append(initiatorLogArgs, "error", execErr)...)
-			if err := s.store.FailBrokerDispatch(ctx, d.ID, execErr.Error()); err != nil {
+			// The error text stays execErr.Error(): nodes that predate the
+			// result envelope read only that column.
+			if err := s.store.FailBrokerDispatch(ctx, d.ID, execErr.Error(), dispatchFailureResult(execErr)); err != nil {
 				s.agentLifecycleLog.Error("reconcile: fail dispatch failed", "id", d.ID, "error", err)
 			}
 			if rec := s.dispatchMetrics; rec != nil {
@@ -279,6 +281,9 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		removeBranch = args.RemoveBranch
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
+		if len(args.PreviousRunIDs) > 0 {
+			agent.PreviousRunIDs = args.PreviousRunIDs
+		}
 	}
 	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
 		return "", fmt.Errorf("dispatch delete: %w", err)

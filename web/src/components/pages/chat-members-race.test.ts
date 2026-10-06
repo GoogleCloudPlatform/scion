@@ -61,6 +61,10 @@ import { apiFetch } from '../../client/api.js';
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
   stateManager: {
     getAgents: () => [],
     getDeletedAgentIds: () => new Set<string>(),
@@ -129,6 +133,25 @@ function membersBody(tag: string) {
 }
 
 describe('members sidebar stale-response guard', () => {
+  it("aborts the previous view's members request when another view claims the sidebar", async () => {
+    const page = createPage();
+    const signalFor = (projectId: string): AbortSignal | undefined => {
+      const call = vi.mocked(apiFetch).mock.calls.find((c) => String(c[0]).includes(projectId)) as
+        | unknown[]
+        | undefined;
+      return (call?.[1] as RequestInit | undefined)?.signal ?? undefined;
+    };
+
+    void page.loadV2Members('project-a');
+    void page.loadV2Members('project-b');
+    expect(signalFor('project-a')?.aborted).toBe(true);
+    expect(signalFor('project-b')?.aborted).toBe(false);
+
+    // Leaving for the hub view stops the project request as well.
+    page.loadHubMembers();
+    expect(signalFor('project-b')?.aborted).toBe(true);
+  });
+
   it('keeps project B members when project A resolves after B (out of order)', async () => {
     const page = createPage();
 

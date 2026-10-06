@@ -183,6 +183,15 @@ func (m *mockUserStore) GetUser(_ context.Context, id string) (*store.User, erro
 	}
 	return u, nil
 }
+func (m *mockUserStore) GetUsersByIDs(_ context.Context, ids []string) (map[string]*store.User, error) {
+	out := make(map[string]*store.User, len(ids))
+	for _, id := range ids {
+		if u, ok := m.users[id]; ok {
+			out[id] = u
+		}
+	}
+	return out, nil
+}
 func (m *mockUserStore) GetUserByEmail(context.Context, string) (*store.User, error) {
 	return nil, store.ErrNotFound
 }

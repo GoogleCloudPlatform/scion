@@ -333,6 +333,9 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 			p.log.Error("Failed to unmarshal agent created event", "error", err)
 			return
 		}
+		if !p.createdAgentLive(created) {
+			return
+		}
 		p.subscribeAgent(created.ProjectID, created.Slug)
 		p.subscribeProjectBroadcast(created.ProjectID)
 		p.subscribeProjectUserMessages(created.ProjectID)
@@ -369,6 +372,41 @@ func (p *MessageBrokerProxy) handleLifecycleEvent(evt Event) {
 		p.log.Debug("Agent deleted, broker subscriptions will be cleaned on next project rebuild",
 			"agent_id", deleted.AgentID, "project_id", deleted.ProjectID)
 	}
+}
+
+// createdAgentLive reports whether an agent.created event still names a live
+// agent, by the same rule publishAgentCreatedIfLive applies before it
+// publishes (ptone/scion#2972): the row exists, is not soft-deleted, and no
+// delete claim holds it. A stale created (one that lost the publish's
+// residual window, or a replay) must not subscribe a deleted agent's slug,
+// because agent.deleted does not remove subscriptions (ptone/scion#3056).
+// The row is looked up by ID, so a stale created never matches a same-slug
+// successor. A read error other than not-found subscribes, as before: the
+// subscribe helpers are idempotent and a missed subscription drops messages.
+// A delete that later fails leaves the agent unsubscribed until it reports
+// running (ensureSubscriptionsForRunningAgent).
+func (p *MessageBrokerProxy) createdAgentLive(created AgentCreatedEvent) bool {
+	if created.AgentID == "" {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
+	defer cancel()
+	agent, err := p.store.GetAgent(ctx, created.AgentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		p.log.Debug("Skipping subscriptions for created event: agent deleted", "agent_id", created.AgentID)
+		return false
+	case err != nil:
+		p.log.Warn("Failed to read created agent for broker subscriptions; subscribing",
+			"agent_id", created.AgentID, "error", err)
+		return true
+	}
+	if deletedOrDeleteHeld(agent) {
+		p.log.Debug("Skipping subscriptions for created event: agent deleted or being deleted",
+			"agent_id", created.AgentID, "deletion_state", agent.DeletionState)
+		return false
+	}
+	return true
 }
 
 // ensureSubscriptionsForRunningAgent subscribes a running agent's topic and

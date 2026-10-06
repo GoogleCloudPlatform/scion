@@ -78,8 +78,8 @@ type Scheduler struct {
 	// Event type handlers for one-shot events
 	eventHandlers map[string]EventHandler
 
-	// Tick counter (monotonically increasing). Written by the ticker
-	// goroutine and read by Status from request goroutines, so it is atomic.
+	// Tick counter (monotonically increasing). Written by the ticker loop and
+	// read concurrently by handler goroutines and Status(), so it is atomic.
 	tickCount atomic.Uint64
 
 	// One-shot timers (in-memory)
@@ -428,9 +428,10 @@ const maxJitter = 30 * time.Second
 // across ALL ticks — slow handlers from tick N still hold slots when tick N+1
 // fires, preventing cross-tick concurrency blow-up.
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
-	// Collect eligible handlers for this tick. The tick is captured once so
-	// the handler goroutines below log the tick they were scheduled on.
+	// Snapshot the tick once so eligibility and logging agree on it.
 	tick := s.tickCount.Load()
+
+	// Collect eligible handlers for this tick.
 	var eligible []RecurringHandler
 	for _, h := range s.recurring {
 		if tick%uint64(h.Interval) == 0 {
