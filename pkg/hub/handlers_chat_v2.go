@@ -1253,14 +1253,15 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		s.threadMessageUnaddressed(ctx, members, plan.MentionNames, body.ReplyToID, user.ID())
 	mentionNames := plan.MentionNames
 	if noRecipient {
-		// Address the reply to the most recent other human poster (or the
-		// thread creator) with a note instead of leaving it unseen; no
-		// agent is invoked. Without such a person it stays no_recipient.
+		// When an agent has posted in the thread, address the reply to the
+		// most recent other human poster (or the thread creator) with a
+		// note instead of leaving it unseen; no agent is invoked.
+		// Otherwise it stays no_recipient.
 		creatorID := ""
 		if threadTopic != nil {
 			creatorID = threadTopic.CreatedBy
 		}
-		if noted, token, ok := s.unmentionedHumanNote(ctx, members, key, creatorID, user.ID(), content); ok {
+		if noted, token, ok := s.unmentionedHumanNote(ctx, members, projectID, key, creatorID, user.ID(), content); ok {
 			content = noted
 			mentionNames = append(append([]string(nil), mentionNames...), token)
 			noRecipient = false

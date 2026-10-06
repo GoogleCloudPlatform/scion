@@ -29,12 +29,15 @@ import (
 // reply-to agent, and no @mention that names an agent or a project member;
 // a mention of nobody, such as a typo, counts as none) may have been meant
 // for the agent that last posted in the thread. It is never silently routed
-// to that agent. Instead the hub appends a note to the stored body that
-// @mentions the most recent human poster other than the sender (else the
-// thread creator), who gets the ordinary human mention notification, and
-// names the most recent agent poster by plain slug so that agent does not
-// read as addressed. No agent is invoked. A reply that reaches a live
-// default agent is left untouched.
+// to that agent. Instead, when an agent has posted in the thread, the hub
+// appends a note to the stored body that @mentions the most recent human
+// poster other than the sender (else the thread creator), who gets the
+// ordinary human mention notification, and names the most recent agent
+// poster by plain slug so that agent does not read as addressed. No agent
+// is invoked. In a thread where no agent has posted there is no agent the
+// reply could have been meant for, so it gets no note and stays
+// no_recipient. A reply that reaches a live default agent is left
+// untouched.
 //
 // The note is a suffix on the message body rather than a separate message
 // so it reuses the existing persist, publish and mention notification
@@ -107,9 +110,11 @@ func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID stri
 // resolves to m, and to no other member, through the human mention path:
 // the hyphenated display name the web autocomplete inserts, else the email
 // local part, else the full email. Uniqueness matters because the mention
-// notifier resolves each token to a single member. It returns "" when no
-// candidate survives mention extraction intact and uniquely.
-func memberMentionToken(m chatMemberEntry, members []chatMemberEntry) string {
+// notifier resolves each token to a single member. A candidate equal to a
+// project agent slug (agentSlugs, lower-cased) is skipped so the note never
+// reads as addressing that agent. It returns "" when no candidate survives
+// mention extraction intact and uniquely.
+func memberMentionToken(m chatMemberEntry, members []chatMemberEntry, agentSlugs map[string]bool) string {
 	var candidates []string
 	if m.DisplayName != "" {
 		candidates = append(candidates, strings.ReplaceAll(m.DisplayName, " ", "-"))
@@ -119,7 +124,7 @@ func memberMentionToken(m chatMemberEntry, members []chatMemberEntry) string {
 	}
 	for _, c := range candidates {
 		got := messages.ExtractMentions("@" + c)
-		if len(got) != 1 || got[0] != c || !mentionMatchesMember(c, m) {
+		if len(got) != 1 || got[0] != c || !mentionMatchesMember(c, m) || agentSlugs[strings.ToLower(c)] {
 			continue
 		}
 		unique := true
@@ -141,15 +146,24 @@ func memberMentionToken(m chatMemberEntry, members []chatMemberEntry) string {
 // first of these who is a project member other than the sender and can be
 // mentioned unambiguously: the human posters in the thread, most recent
 // first, then the thread creator (creatorID). ok is false, and content is
-// unchanged, when there is no such person or a lookup fails.
-func (s *Server) unmentionedHumanNote(ctx context.Context, members func() ([]chatMemberEntry, error), key, creatorID, senderUserID, content string) (string, string, bool) {
+// unchanged, when no agent has posted in the thread, there is no such
+// person, or a lookup fails.
+func (s *Server) unmentionedHumanNote(ctx context.Context, members func() ([]chatMemberEntry, error), projectID, key, creatorID, senderUserID, content string) (string, string, bool) {
 	all, err := members()
 	if err != nil || len(all) == 0 {
 		return content, "", false
 	}
 	poster, humans, err := s.recentThreadPosters(ctx, key, senderUserID)
+	if err != nil || poster == "" {
+		return content, "", false
+	}
+	agents, err := listAllProjectAgents(ctx, s.store, projectID)
 	if err != nil {
 		return content, "", false
+	}
+	agentSlugs := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		agentSlugs[strings.ToLower(a.Slug)] = true
 	}
 	if creatorID != "" && creatorID != senderUserID {
 		humans = append(humans, creatorID)
@@ -163,7 +177,7 @@ func (s *Server) unmentionedHumanNote(ctx context.Context, members func() ([]cha
 		if !ok {
 			continue
 		}
-		token := memberMentionToken(m, all)
+		token := memberMentionToken(m, all, agentSlugs)
 		if token == "" {
 			continue
 		}

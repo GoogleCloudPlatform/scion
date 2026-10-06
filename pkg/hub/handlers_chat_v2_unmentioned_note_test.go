@@ -79,7 +79,7 @@ func TestUnmentionedReplyNote_MemberMentionToken(t *testing.T) {
 		{chatMemberEntry{ID: "1", DisplayName: "Dan."}, ""},
 	}
 	for _, c := range cases {
-		if got := memberMentionToken(c.m, []chatMemberEntry{c.m}); got != c.want {
+		if got := memberMentionToken(c.m, []chatMemberEntry{c.m}, nil); got != c.want {
 			t.Errorf("%+v: got %q, want %q", c.m, got, c.want)
 		}
 	}
@@ -91,18 +91,18 @@ func TestUnmentionedReplyNote_MemberMentionToken(t *testing.T) {
 func TestUnmentionedReplyNote_MemberMentionTokenUnique(t *testing.T) {
 	bob1 := chatMemberEntry{ID: "1", DisplayName: "Bob Jones", Email: "bob1@example.com"}
 	bob2 := chatMemberEntry{ID: "2", DisplayName: "Bob Jones", Email: "bob2@example.com"}
-	if got := memberMentionToken(bob1, []chatMemberEntry{bob1, bob2}); got != "bob1" {
+	if got := memberMentionToken(bob1, []chatMemberEntry{bob1, bob2}, nil); got != "bob1" {
 		t.Fatalf("shared display name: got %q, want bob1", got)
 	}
 	ann := chatMemberEntry{ID: "3", DisplayName: "Ann Lee", Email: "ann@example.com"}
 	clash := chatMemberEntry{ID: "4", DisplayName: "Ann Lee", Email: "ann-lee@example.org"}
 	other := chatMemberEntry{ID: "5", DisplayName: "Ann", Email: "x@example.net"}
-	if got := memberMentionToken(clash, []chatMemberEntry{ann, clash, other}); got != "ann-lee@example.org" {
+	if got := memberMentionToken(clash, []chatMemberEntry{ann, clash, other}, nil); got != "ann-lee@example.org" {
 		t.Fatalf("local part clash: got %q, want full email", got)
 	}
 	twin := chatMemberEntry{ID: "6", DisplayName: "Zed", Email: "zed@example.com"}
 	twin2 := chatMemberEntry{ID: "7", DisplayName: "Zed", Email: "ZED@example.com"}
-	if got := memberMentionToken(twin, []chatMemberEntry{twin, twin2}); got != "" {
+	if got := memberMentionToken(twin, []chatMemberEntry{twin, twin2}, nil); got != "" {
 		t.Fatalf("no unique token: got %q, want empty", got)
 	}
 }
@@ -227,16 +227,17 @@ func TestUnmentionedReplyNote_NoDefaultMentionsRecentHuman(t *testing.T) {
 	assertNotNotified(t, s, carol.ID, DevUserID)
 }
 
-// No default agent and no agent poster: the agent clause is omitted.
+// No default agent and no agent poster: there is no agent the reply could
+// have been meant for, so no note and still no_recipient, even with another
+// human in the thread.
 func TestUnmentionedReplyNote_NoDefaultNoAgentPoster(t *testing.T) {
 	srv, s, topicID, d, projectID := humanOnlyTopic(t, "dev")
 	bob := addHumanMember(t, s, projectID, "bob@example.com", "Bob Jones")
 	seedThreadMsgAt(t, s, projectID, topicID, "user:bob@example.com", bob.ID, time.Now().UTC().Add(-time.Minute))
 
 	_, _, m := unreachableSend(t, srv, s, topicID, "ok")
-	want := "ok\n\n" + unmentionedReplyNote("Bob-Jones", "")
-	if m == nil || m.Msg != want || m.DispatchState != store.MessageDispatchDispatched {
-		t.Fatalf("got %+v, want body %q dispatched", m, want)
+	if m == nil || m.Msg != "ok" || m.DispatchState != store.MessageDispatchNoRecipient {
+		t.Fatalf("expected unchanged no_recipient row, got %+v", m)
 	}
 	if n := len(d.getMessages()); n != 0 {
 		t.Fatalf("expected no agent dispatch, got %d", n)
@@ -334,35 +335,69 @@ func TestUnmentionedReplyNote_DuplicateDisplayNames(t *testing.T) {
 // With no other human poster, the note falls back to the thread creator.
 // A creator who is the sender is no fallback: still no_recipient.
 func TestUnmentionedReplyNote_ThreadCreatorFallback(t *testing.T) {
-	t.Run("creator is another member", func(t *testing.T) {
-		srv, s, wcs, proj, db := setupSendTest(t)
-		d := &brokerMockDispatcher{}
-		srv.SetDispatcher(d)
-		owner := addHumanMember(t, s, proj.ID, "owner@example.com", "Olive Owner")
-		topicID := tid("creator-topic")
-		if err := wcs.CreateTopic(t.Context(), WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "c",
-			CreatedBy: owner.ID, CreatedAt: time.Now().UTC()}); err != nil {
-			t.Fatal(err)
-		}
-		setTopicConversationID(t, db, s, topicID, proj.ID)
+	for _, tc := range []struct {
+		name            string
+		creatorIsSender bool
+	}{{"creator is another member", false}, {"creator is the sender", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, wcs, proj, db := setupSendTest(t)
+			d := &brokerMockDispatcher{}
+			srv.SetDispatcher(d)
+			owner := addHumanMember(t, s, proj.ID, "owner@example.com", "Olive Owner")
+			creator := owner.ID
+			if tc.creatorIsSender {
+				creator = DevUserID
+			}
+			topicID := tid("creator-topic")
+			if err := wcs.CreateTopic(t.Context(), WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "c",
+				CreatedBy: creator, CreatedAt: time.Now().UTC()}); err != nil {
+				t.Fatal(err)
+			}
+			setTopicConversationID(t, db, s, topicID, proj.ID)
+			a := otherAgent(t, s, proj.ID, "creator-agent")
+			seedThreadMsgAt(t, s, proj.ID, topicID, "agent:"+a.Slug, a.ID, time.Now().UTC().Add(-time.Minute))
 
-		_, _, m := unreachableSend(t, srv, s, topicID, "hi")
-		want := "hi\n\n" + unmentionedReplyNote("Olive-Owner", "")
-		if m == nil || m.Msg != want || m.DispatchState != store.MessageDispatchDispatched {
-			t.Fatalf("got %+v, want body %q dispatched", m, want)
-		}
-		if n := len(d.getMessages()); n != 0 {
-			t.Fatalf("expected no agent dispatch, got %d", n)
-		}
-		waitMentionNotified(t, s, owner.ID)
-	})
-	t.Run("creator is the sender", func(t *testing.T) {
-		srv, s, topicID, _, _ := humanOnlyTopic(t, DevUserID)
-		_, _, m := unreachableSend(t, srv, s, topicID, "hi")
-		if m == nil || m.Msg != "hi" || m.DispatchState != store.MessageDispatchNoRecipient {
-			t.Fatalf("expected unchanged no_recipient row, got %+v", m)
-		}
-	})
+			_, _, m := unreachableSend(t, srv, s, topicID, "hi")
+			if n := len(d.getMessages()); n != 0 {
+				t.Fatalf("expected no agent dispatch, got %d", n)
+			}
+			if tc.creatorIsSender {
+				if m == nil || m.Msg != "hi" || m.DispatchState != store.MessageDispatchNoRecipient {
+					t.Fatalf("expected unchanged no_recipient row, got %+v", m)
+				}
+				return
+			}
+			want := "hi\n\n" + unmentionedReplyNote("Olive-Owner", a.Slug)
+			if m == nil || m.Msg != want || m.DispatchState != store.MessageDispatchDispatched {
+				t.Fatalf("got %+v, want body %q dispatched", m, want)
+			}
+			waitMentionNotified(t, s, owner.ID)
+		})
+	}
+}
+
+// A token equal to a project agent slug is skipped: a member whose email
+// local part is an agent's slug is mentioned by full email instead.
+func TestUnmentionedReplyNote_TokenSkipsAgentSlug(t *testing.T) {
+	ada := chatMemberEntry{ID: "1", Email: "ada@x.com"}
+	if got := memberMentionToken(ada, []chatMemberEntry{ada}, map[string]bool{"ada": true}); got != "ada@x.com" {
+		t.Fatalf("unit: got %q, want ada@x.com", got)
+	}
+
+	srv, s, topicID, a, d, projectID := noRecipientSetupProject(t)
+	otherAgent(t, s, projectID, "ada")
+	human := addHumanMember(t, s, projectID, "ada@x.com", "")
+	seedThreadMsgAt(t, s, projectID, topicID, "user:ada@x.com", human.ID, time.Now().UTC().Add(-time.Second))
+
+	_, _, m := unreachableSend(t, srv, s, topicID, "thanks")
+	want := "thanks\n\n" + unmentionedReplyNote("ada@x.com", a.Slug)
+	if m == nil || m.Msg != want || m.DispatchState != store.MessageDispatchDispatched {
+		t.Fatalf("got %+v, want body %q dispatched", m, want)
+	}
+	if n := len(d.getMessages()); n != 0 {
+		t.Fatalf("expected no agent dispatch, got %d", n)
+	}
+	waitMentionNotified(t, s, human.ID)
 }
 
 // A mention that resolves to nobody (a typo) addresses no one, so with no
