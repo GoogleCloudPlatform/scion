@@ -1135,7 +1135,7 @@ func (s *Server) openSharedDirRoot(resolution *sharedDirResolution, createIfMiss
 // matching the path used by agent provisioning (config.GetSharedDirPath).
 // For git-based projects with a co-located broker that has a LocalPath, the path is
 // resolved via config.GetSharedDirPath(localPath, dirName). Otherwise, the path is
-// resolved via the .scion marker in the hub-managed workspace directory.
+// derived from the hub's project record (resolveHubProjectSharedDirPath).
 func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Project, dirName string) (*sharedDirResolution, error) {
 	// Phase 2 item 4 (design deploy-config-explore §3.2.5): if the hub's
 	// own global settings carry server.shared_dir_storage: nfs, every
@@ -1158,9 +1158,9 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 	}
 
 	if project.GitRemote == "" {
-		// Hub-managed project: resolve via the .scion marker in the workspace directory
-		// to find the project-configs path where shared dirs actually live.
-		sdPath, err := resolveHubProjectSharedDirPath(project.Slug, dirName)
+		// Hub-managed project: derive the project-configs path from the
+		// project record.
+		sdPath, err := resolveHubProjectSharedDirPath(project, dirName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
@@ -1199,10 +1199,10 @@ func (s *Server) resolveSharedDirPath(ctx context.Context, project *store.Projec
 	}
 
 	// Fallback: embedded broker is a provider but has no LocalPath recorded
-	// (e.g. auto-linked or shared-workspace project). Resolve via the .scion marker
-	// in the hub workspace to find the project-configs path.
+	// (e.g. auto-linked or shared-workspace project). Derive the project-configs
+	// path from the project record.
 	if embeddedIsProvider {
-		sdPath, err := resolveHubProjectSharedDirPath(project.Slug, dirName)
+		sdPath, err := resolveHubProjectSharedDirPath(project, dirName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve shared directory path: %w", err)
 		}
@@ -1367,21 +1367,75 @@ func (s *Server) resolveNFSSharedDirPath(dirName, projectID string) (resolution 
 	}, true, nil
 }
 
-// resolveHubProjectSharedDirPath resolves the project-configs shared dir path for
-// a project whose workspace lives at ~/.scion/projects/<slug>/. It reads the .scion
-// marker (or project-id for git clones) to find the external project-configs path,
-// then returns the shared-dirs/<name> subdirectory within it.
-func resolveHubProjectSharedDirPath(projectSlug, dirName string) (string, error) {
-	workspacePath, err := hubManagedProjectPath(projectSlug)
+// errSharedDirProjectRecordMismatch is returned when the project identity
+// recorded in a hub-managed workspace resolves to a different shared directory
+// than the hub's own project record. Its message is fixed and carries no path.
+var errSharedDirProjectRecordMismatch = errors.New("workspace project identity does not match the project record")
+
+// projectRecordSharedDirPath returns the host path of shared dir dirName for a
+// project, derived only from the hub's project record (slug and ID):
+// ~/.scion/project-configs/<slug>__<short-id>/shared-dirs/<dirName>.
+func projectRecordSharedDirPath(project *store.Project, dirName string) (string, error) {
+	if err := validateProjectSlug(project.Slug); err != nil {
+		return "", err
+	}
+	if !shareddirs.ValidProjectID(project.ID) {
+		return "", fmt.Errorf("invalid project ID")
+	}
+	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: dirName}}); err != nil {
+		return "", err
+	}
+	marker := config.ProjectMarker{ProjectID: project.ID, ProjectSlug: project.Slug}
+	externalPath, err := marker.ExternalProjectPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(externalPath), config.SharedDirsSubdir, dirName), nil
+}
+
+// resolveHubProjectSharedDirPath resolves the shared dir path for a project
+// whose workspace lives at ~/.scion/projects/<slug>/. The path always comes from
+// the hub's project record (projectRecordSharedDirPath).
+//
+// The workspace's .scion entry (a marker file, or a directory holding a
+// project-id file) is consulted only as a consistency check: when it records a
+// project identity, the shared dir that identity resolves to must equal the
+// record-derived path, otherwise errSharedDirProjectRecordMismatch is
+// returned. A workspace that records no identity yet uses the record-derived
+// path.
+func resolveHubProjectSharedDirPath(project *store.Project, dirName string) (string, error) {
+	expected, err := projectRecordSharedDirPath(project, dirName)
+	if err != nil {
+		return "", err
+	}
+	workspacePath, err := hubManagedProjectPath(project.Slug)
 	if err != nil {
 		return "", err
 	}
 	scionPath := filepath.Join(workspacePath, config.DotScion)
+	if !workspaceRecordsProjectIdentity(scionPath) {
+		return expected, nil
+	}
 	projectDir, _, err := config.ResolveProjectPath(scionPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve project path for %s: %w", projectSlug, err)
+		return "", errSharedDirProjectRecordMismatch
 	}
-	return config.GetSharedDirPath(projectDir, dirName)
+	recorded, err := config.GetSharedDirPath(projectDir, dirName)
+	if err != nil || filepath.Clean(recorded) != expected {
+		return "", errSharedDirProjectRecordMismatch
+	}
+	return expected, nil
+}
+
+// workspaceRecordsProjectIdentity reports whether the .scion entry at
+// scionPath records a project identity: either it is a marker file, or it is
+// a directory holding a non-empty project-id.
+func workspaceRecordsProjectIdentity(scionPath string) bool {
+	if config.IsProjectMarkerFile(scionPath) {
+		return true
+	}
+	id, err := config.ReadProjectID(scionPath)
+	return err == nil && id != ""
 }
 
 // validateWorkspaceFilePath validates that a file path is safe for workspace operations.
