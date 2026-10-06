@@ -36,6 +36,7 @@ import { apiFetch } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
 import {
   buildStallConfigUpdate,
+  formatHeartbeatAge,
   ScionPageHealthDashboard,
   type ServerConfigSnapshot,
 } from './health-dashboard.js';
@@ -187,5 +188,36 @@ describe('scion-page-health-dashboard stall settings save', () => {
       vi.mocked(apiFetch).mock.calls.some(([, init]) => (init as RequestInit)?.method === 'PUT')
     ).toBe(false);
     expect(vi.mocked(showToast).mock.calls[0]?.[1]).toBe('danger');
+  });
+});
+
+describe('formatHeartbeatAge', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('shows never for a null, undefined or empty heartbeat', () => {
+    expect(formatHeartbeatAge(null)).toBe('never');
+    expect(formatHeartbeatAge(undefined)).toBe('never');
+    expect(formatHeartbeatAge('')).toBe('never');
+  });
+
+  it('shows never for the Go zero time', () => {
+    expect(formatHeartbeatAge('0001-01-01T00:00:00Z')).toBe('never');
+    expect(formatHeartbeatAge('1970-01-01T00:00:00Z')).toBe('never');
+  });
+
+  it('still formats a recent heartbeat as a relative age', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-06T12:00:00Z'));
+    expect(formatHeartbeatAge('2026-10-06T11:55:00Z')).toBe('5m ago');
+    expect(formatHeartbeatAge('2026-10-04T12:00:00Z')).toBe('2d ago');
+  });
+
+  it('shows just now for a future instant and unknown for garbage', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-06T12:00:00Z'));
+    expect(formatHeartbeatAge('2026-10-06T12:01:00Z')).toBe('just now');
+    expect(formatHeartbeatAge('not-a-date')).toBe('unknown');
   });
 });
