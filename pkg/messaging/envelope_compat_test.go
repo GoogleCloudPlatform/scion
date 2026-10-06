@@ -992,6 +992,21 @@ func TestRoundTrip_OldToNewToOld(t *testing.T) {
 			expectedType: messages.TypeChat,
 		},
 		{
+			// A historical assistant-reply row reads back as chat: the
+			// retired type is never emitted again.
+			name: "assistant-reply (historical)",
+			old: &messages.StructuredMessage{
+				Version:   1,
+				Timestamp: "2026-08-27T10:00:00Z",
+				Sender:    "agent:builder",
+				SenderID:  "agent:builder",
+				Recipient: "user:alice",
+				Msg:       "Done",
+				Type:      messages.TypeAssistantReply,
+			},
+			expectedType: messages.TypeChat,
+		},
+		{
 			name: "state-change",
 			old: &messages.StructuredMessage{
 				Version:   1,
