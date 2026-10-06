@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -102,11 +103,11 @@ func TestHTTPHubClient_IAPTransport_UsedOnAllPaths(t *testing.T) {
 	client := NewHTTPHubClient(hub.URL, "", "", httpClient)
 	ctx := context.Background()
 
-	// Test ListProjects (uses httpClient).
-	_, err := client.ListProjects(ctx)
+	// Test ListProjectsForUser (uses httpClient).
+	_, err := client.ListProjectsForUser(ctx, luPrincipal)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), transport.calls.Load(),
-		"ListProjects should use the custom transport")
+		"ListProjectsForUser should use the custom transport")
 
 	// Test CreateAgent (uses longHTTPClient).
 	_, err = client.CreateAgent(ctx, "p1", CreateAgentRequest{
@@ -132,7 +133,7 @@ func TestHTTPHubClient_PlainClient_WhenNoIAP(t *testing.T) {
 	ctx := context.Background()
 
 	// Should work without IAP transport.
-	projects, err := client.ListProjects(ctx)
+	projects, err := client.ListProjectsForUser(ctx, luPrincipal)
 	require.NoError(t, err)
 	assert.Len(t, projects, 1)
 	assert.Equal(t, "test", projects[0].Slug)
@@ -159,7 +160,7 @@ func TestHTTPHubClient_ListSecrets(t *testing.T) {
 	defer hub.Close()
 
 	client := NewHTTPHubClient(hub.URL, "", "", nil)
-	secrets, err := client.ListSecrets(context.Background(), "project", "proj-1")
+	secrets, err := client.ListSecrets(context.Background(), "project", "proj-1", "")
 	require.NoError(t, err)
 	assert.Len(t, secrets, 2)
 	assert.Equal(t, "API_KEY", secrets[0].Key)
@@ -174,7 +175,7 @@ func TestHTTPHubClient_ListSecrets_Error(t *testing.T) {
 	defer hub.Close()
 
 	client := NewHTTPHubClient(hub.URL, "", "", nil)
-	_, err := client.ListSecrets(context.Background(), "project", "proj-1")
+	_, err := client.ListSecrets(context.Background(), "project", "proj-1", "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "status 500")
 }
@@ -196,7 +197,7 @@ func TestHTTPHubClient_GetSecret(t *testing.T) {
 	defer hub.Close()
 
 	client := NewHTTPHubClient(hub.URL, "", "", nil)
-	info, err := client.GetSecret(context.Background(), "MY_KEY", "project", "proj-1")
+	info, err := client.GetSecret(context.Background(), "MY_KEY", "project", "proj-1", "")
 	require.NoError(t, err)
 	assert.Equal(t, "MY_KEY", info.Key)
 	assert.Equal(t, 3, info.Version)
@@ -209,7 +210,7 @@ func TestHTTPHubClient_GetSecret_NotFound(t *testing.T) {
 	defer hub.Close()
 
 	client := NewHTTPHubClient(hub.URL, "", "", nil)
-	_, err := client.GetSecret(context.Background(), "MISSING", "project", "proj-1")
+	_, err := client.GetSecret(context.Background(), "MISSING", "project", "proj-1", "")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -295,4 +296,153 @@ func TestHTTPHubClient_SetSecret_NoOnBehalfOf(t *testing.T) {
 	client := NewHTTPHubClient(hub.URL, "", "", nil)
 	err := client.SetSecret(context.Background(), "KEY", "val", "project", "p1", "")
 	assert.NoError(t, err)
+}
+
+// headerRecorder is a fake hub that records the linked-user headers of each
+// request and serves minimal JSON bodies for the read endpoints.
+type headerRecorder struct {
+	mu    sync.Mutex
+	calls []recordedHubCall
+}
+
+type recordedHubCall struct {
+	Method        string
+	Path          string
+	RawQuery      string
+	OnBehalfOf    string
+	SignedHeaders string
+}
+
+func (hr *headerRecorder) snapshot() []recordedHubCall {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+	return append([]recordedHubCall(nil), hr.calls...)
+}
+
+func (hr *headerRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	hr.mu.Lock()
+	hr.calls = append(hr.calls, recordedHubCall{
+		Method:        r.Method,
+		Path:          r.URL.Path,
+		RawQuery:      r.URL.RawQuery,
+		OnBehalfOf:    r.Header.Get("X-Scion-On-Behalf-Of"),
+		SignedHeaders: r.Header.Get("X-Scion-Signed-Headers"),
+	})
+	hr.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	switch r.URL.Path {
+	case "/api/v1/projects":
+		_ = json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p1", Slug: "proj-one"}}})
+	case "/api/v1/projects/p1/agents":
+		_ = json.NewEncoder(w).Encode(hubAgentsResponse{Agents: []hubAgent{{ID: "a1", Slug: "worker"}}})
+	case "/api/v1/templates":
+		_ = json.NewEncoder(w).Encode(hubTemplatesResponse{Templates: []hubTemplate{{Slug: "default", Name: "Default"}}})
+	case "/api/v1/secrets":
+		_ = json.NewEncoder(w).Encode(hubListSecretsResponse{Secrets: []SecretInfo{{Key: "API_KEY"}}})
+	case "/api/v1/secrets/API_KEY":
+		_ = json.NewEncoder(w).Encode(SecretInfo{Key: "API_KEY", Scope: "project"})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func TestHTTPHubClient_ReadsSendLinkedUser(t *testing.T) {
+	const principal = "user:alice@example.com"
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		call      func(c HubClient, onBehalfOf string) error
+		wantPaths []string
+	}{
+		{
+			name: "ListProjectsForUser",
+			call: func(c HubClient, ob string) error {
+				_, err := c.ListProjectsForUser(ctx, ob)
+				return err
+			},
+			wantPaths: []string{"/api/v1/projects"},
+		},
+		{
+			name: "ListAgents",
+			call: func(c HubClient, ob string) error {
+				_, err := c.ListAgents(ctx, "p1", ob)
+				return err
+			},
+			wantPaths: []string{"/api/v1/projects/p1/agents"},
+		},
+		{
+			name: "ListTemplates",
+			call: func(c HubClient, ob string) error {
+				_, err := c.ListTemplates(ctx, "p1", ob)
+				return err
+			},
+			// Global and project-scoped template lists.
+			wantPaths: []string{"/api/v1/templates", "/api/v1/templates"},
+		},
+		{
+			name: "ListSecrets",
+			call: func(c HubClient, ob string) error {
+				_, err := c.ListSecrets(ctx, "project", "p1", ob)
+				return err
+			},
+			wantPaths: []string{"/api/v1/secrets"},
+		},
+		{
+			name: "GetSecret",
+			call: func(c HubClient, ob string) error {
+				_, err := c.GetSecret(ctx, "API_KEY", "project", "p1", ob)
+				return err
+			},
+			wantPaths: []string{"/api/v1/secrets/API_KEY"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name+"/with_user", func(t *testing.T) {
+			rec := &headerRecorder{}
+			hub := httptest.NewServer(rec)
+			defer hub.Close()
+
+			require.NoError(t, tt.call(NewHTTPHubClient(hub.URL, "", "", nil), principal))
+
+			calls := rec.snapshot()
+			require.Len(t, calls, len(tt.wantPaths))
+			for idx, c := range calls {
+				assert.Equal(t, http.MethodGet, c.Method)
+				assert.Equal(t, tt.wantPaths[idx], c.Path)
+				assert.Equal(t, principal, c.OnBehalfOf)
+				assert.Equal(t, "x-scion-on-behalf-of", c.SignedHeaders)
+			}
+		})
+
+		t.Run(tt.name+"/without_user", func(t *testing.T) {
+			rec := &headerRecorder{}
+			hub := httptest.NewServer(rec)
+			defer hub.Close()
+
+			require.NoError(t, tt.call(NewHTTPHubClient(hub.URL, "", "", nil), ""))
+
+			for _, c := range rec.snapshot() {
+				assert.Empty(t, c.OnBehalfOf)
+				assert.Empty(t, c.SignedHeaders)
+			}
+		})
+	}
+}
+
+func TestHTTPHubClient_ListProjectsForUser_NoOwnerQuery(t *testing.T) {
+	rec := &headerRecorder{}
+	hub := httptest.NewServer(rec)
+	defer hub.Close()
+
+	projects, err := NewHTTPHubClient(hub.URL, "", "", nil).ListProjectsForUser(context.Background(), "user:alice@example.com")
+	require.NoError(t, err)
+	require.Len(t, projects, 1)
+	assert.Equal(t, "p1", projects[0].ID)
+
+	calls := rec.snapshot()
+	require.Len(t, calls, 1)
+	assert.Empty(t, calls[0].RawQuery, "projects are scoped by the linked user, not an ownerId filter")
 }

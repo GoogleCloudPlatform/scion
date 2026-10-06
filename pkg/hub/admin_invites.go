@@ -106,7 +106,9 @@ func (s *Server) handleAdminInvitesList(w http.ResponseWriter, r *http.Request) 
 
 	result, err := s.store.ListInviteCodes(r.Context(), opts)
 	if err != nil {
-		InternalError(w)
+		// writeErrorFromErr maps a malformed or unknown ?cursor
+		// (store.ErrInvalidInput) to 400; anything else stays a 500.
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
