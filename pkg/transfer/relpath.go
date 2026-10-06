@@ -23,10 +23,11 @@ import (
 	"strings"
 )
 
-// ValidateRelPath reports whether p is a canonical, slash-separated relative
-// path: non-empty, not "." itself, not absolute, already clean
-// (path.Clean(p) == p), with no ".." element and no backslash or NUL byte.
-// The returned error describes the rule that failed and never includes p.
+// ValidateRelPath returns an error unless p is a canonical, slash-separated
+// relative path: non-empty, not "." itself, not absolute, already clean
+// (path.Clean(p) == p), local on the current platform (filepath.IsLocal), with
+// no ".." element and no backslash or NUL byte. The returned error describes
+// the rule that failed and never includes p.
 func ValidateRelPath(p string) error {
 	switch {
 	case p == "":
@@ -46,6 +47,9 @@ func ValidateRelPath(p string) error {
 		if elem == ".." {
 			return errors.New("path contains a parent directory element")
 		}
+	}
+	if !filepath.IsLocal(filepath.FromSlash(p)) {
+		return errors.New("path is not local")
 	}
 	return nil
 }
