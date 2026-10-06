@@ -70,23 +70,26 @@ func TestRegisterRoutesOnServeMux(t *testing.T) {
 	}
 }
 
-func TestServiceAnswers404ForEverything(t *testing.T) {
+func TestUnconfiguredServiceRoutes(t *testing.T) {
 	h := NewService(nil).Handler()
-	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/api/v1/artifacts"},
-		{http.MethodPost, "/api/v1/artifacts"},
-		{http.MethodGet, "/api/v1/artifacts/abc"},
-		{http.MethodDelete, "/api/v1/artifacts/abc"},
-		{http.MethodGet, "/api/v1/artifacts/shared/token"},
+	for _, tc := range []struct {
+		method, path string
+		status       int
+	}{
+		{http.MethodGet, "/api/v1/artifacts/shared/token", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/artifacts/abc/unknown", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/artifacts", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/abc", http.StatusNotFound},
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s %s: status %d, want 404", tc.method, tc.path, rec.Code)
+		if rec.Code != tc.status {
+			t.Errorf("%s %s: status %d, want %d", tc.method, tc.path, rec.Code, tc.status)
 		}
 		var body errorResponse
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error.Code != "not_found" {
-			t.Errorf("%s %s: body %q, want not_found JSON error", tc.method, tc.path, rec.Body.String())
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Error.Code == "" {
+			t.Errorf("%s %s: body %q, want a JSON error", tc.method, tc.path, rec.Body.String())
 		}
 	}
 }

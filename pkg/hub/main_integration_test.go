@@ -31,6 +31,7 @@ import (
 func TestMain(m *testing.M) {
 	stopMemGuard := startMemGuard()
 	teardown := testutil.IsolateHome("scion-hub-test-home-*")
+	clearAmbientGCPProjectEnv()
 	enttest.MainSetup()
 	code := m.Run()
 	enttest.MainTeardown()

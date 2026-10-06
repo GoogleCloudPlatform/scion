@@ -255,10 +255,22 @@ interface V1TelemetryConfig {
   local?: V1TelemetryLocalConfig;
 }
 
+// Keys match CloudRunConfig JSON tags in pkg/config/settings_v1.go.
 interface V1CloudRunConfig {
-  project?: string;
+  project_id?: string;
+  location?: string;
+}
+
+// Keys match V1CloudRunInstancesConfig JSON tags in
+// pkg/config/settings_v1.go.
+interface V1CloudRunInstancesConfig {
+  project_id?: string;
   region?: string;
 }
+
+// The two Cloud Run fields the runtime editor shows. Each maps to a
+// different block and key depending on the runtime type.
+type CloudRunEditorField = 'project' | 'region';
 
 interface V1RuntimeConfig {
   type?: string;
@@ -270,10 +282,32 @@ interface V1RuntimeConfig {
   list_all_namespaces?: boolean;
   env?: Record<string, string>;
   cloudrun?: V1CloudRunConfig;
+  cloudrun_instances?: V1CloudRunInstancesConfig;
   safe_to_evict?: boolean;
   shared_dir_storage_backend?: string;
   home_storage_backend?: string;
   home_storage_leaf?: string;
+}
+
+// Sets or clears one key in a runtime's Cloud Run block, and drops the
+// block when it becomes empty.
+function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
+  rt: V1RuntimeConfig,
+  block: B,
+  key: keyof NonNullable<V1RuntimeConfig[B]>,
+  value: string
+): void {
+  const next: Record<string, string> = { ...rt[block] };
+  if (value) {
+    next[key as string] = value;
+  } else {
+    delete next[key as string];
+  }
+  if (Object.keys(next).length > 0) {
+    rt[block] = next as V1RuntimeConfig[B];
+  } else {
+    delete rt[block];
+  }
 }
 
 interface V1ProfileConfig {
@@ -622,6 +656,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Default GCP identity (hub-wide fallback)
   @state() private defaultGCPIdentityMode = '';
   @state() private defaultGCPIdentitySAID = '';
+  /** Account as loaded from the server; used to detect admin edits. */
+  private loadedGCPIdentitySAID = '';
   @state() private hubGCPServiceAccounts: GCPServiceAccount[] = [];
 
   // Agent defaults sub-tab
@@ -1689,6 +1725,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
+    this.loadedGCPIdentitySAID = this.defaultGCPIdentitySAID;
 
     // Server
     const srv = data.server;
@@ -1974,6 +2011,28 @@ export class ScionPageAdminServerConfig extends LitElement {
     return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
   }
 
+  /**
+   * Service account value to save, or undefined to leave it out of the
+   * payload. The account only applies in "assign" mode, so it is cleared
+   * when the admin picks another mode in the form.
+   *
+   * When the mode itself is read-only (env-pinned or deployment-managed),
+   * the form mode is not the effective mode and the page cannot see the
+   * effective one, so the form mode must not drive clearing
+   * (ptone/scion#2720). In that case the account is sent only when the
+   * admin edited it. An unchanged account is left out, so the server
+   * neither clears it nor re-checks it on unrelated saves. In the db tier
+   * both GCP keys are in one settings section and lock together, so this
+   * branch is file-tier (env-pinned) in practice.
+   */
+  private gcpIdentitySAIDForPayload(ok: (key: string) => boolean): string | undefined {
+    const said = this.defaultGCPIdentitySAID || '';
+    if (!ok('default_gcp_identity_mode')) {
+      return said === this.loadedGCPIdentitySAID ? undefined : said;
+    }
+    return this.defaultGCPIdentityMode === 'assign' ? said : '';
+  }
+
   private buildLayer1Payload(): Record<string, unknown> {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
@@ -2034,8 +2093,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id =
-        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
     const server: Record<string, unknown> = {};
@@ -2344,8 +2403,8 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
     if (ok('default_gcp_identity_service_account_id')) {
-      payload.default_gcp_identity_service_account_id =
-        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+      const said = this.gcpIdentitySAIDForPayload(ok);
+      if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
     // Server
@@ -4508,7 +4567,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Project</label>
                   <sl-input
-                    value=${rt.cloudrun?.project || ''}
+                    value=${this.cloudRunFieldValue(rt, 'project')}
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
                       this.updateRuntimeCloudRun(
@@ -4522,7 +4581,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <div class="form-field">
                   <label>GCP Region</label>
                   <sl-input
-                    value=${rt.cloudrun?.region || ''}
+                    value=${this.cloudRunFieldValue(rt, 'region')}
                     placeholder="e.g. us-central1"
                     ?disabled=${readOnly}
                     @sl-input=${(e: Event) => {
@@ -4560,9 +4619,16 @@ export class ScionPageAdminServerConfig extends LitElement {
         delete rt.gke;
         delete rt.list_all_namespaces;
         delete rt.safe_to_evict;
+        // Each Cloud Run type reads its own block; drop the other one.
+        if (value === 'cloudrun-instances') {
+          delete rt.cloudrun;
+        } else {
+          delete rt.cloudrun_instances;
+        }
       } else {
-        // Switching away from Cloud Run — clear cloudrun sub-object
+        // Switching away from Cloud Run — clear both Cloud Run blocks
         delete rt.cloudrun;
+        delete rt.cloudrun_instances;
       }
     }
     updated[name] = rt;
@@ -4648,19 +4714,30 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.runtimes = updated;
   }
 
-  private updateRuntimeCloudRun(name: string, field: 'project' | 'region', value: string): void {
+  // The hub reads cloudrun-instances runtimes from cloudrun_instances
+  // (project_id, region) and cloudrun runtimes from cloudrun
+  // (project_id, location).
+  private cloudRunFieldValue(rt: V1RuntimeConfig, field: CloudRunEditorField): string {
+    if (rt.type === 'cloudrun-instances') {
+      const ci = rt.cloudrun_instances;
+      return (field === 'project' ? ci?.project_id : ci?.region) || '';
+    }
+    const cr = rt.cloudrun;
+    return (field === 'project' ? cr?.project_id : cr?.location) || '';
+  }
+
+  private updateRuntimeCloudRun(name: string, field: CloudRunEditorField, value: string): void {
     const updated = { ...this.runtimes };
     const rt = { ...updated[name] };
-    const cr = { ...(rt.cloudrun || {}) };
-    if (value) {
-      cr[field] = value;
+    if (rt.type === 'cloudrun-instances') {
+      setCloudRunKey(
+        rt,
+        'cloudrun_instances',
+        field === 'project' ? 'project_id' : 'region',
+        value
+      );
     } else {
-      delete cr[field];
-    }
-    if (Object.keys(cr).length > 0) {
-      rt.cloudrun = cr;
-    } else {
-      delete rt.cloudrun;
+      setCloudRunKey(rt, 'cloudrun', field === 'project' ? 'project_id' : 'location', value);
     }
     updated[name] = rt;
     this.runtimes = updated;

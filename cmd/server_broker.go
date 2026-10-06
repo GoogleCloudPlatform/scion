@@ -142,7 +142,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 				Reprovision:            true,
 				AsyncLaunch:            true,
 				EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
-				AgentMove:              false,
+				AgentMove:              true,
 			},
 			Profiles:         profiles,
 			DefaultProfile:   defaultProfile,
@@ -187,7 +187,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			Reprovision:            true,
 			AsyncLaunch:            true,
 			EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
-			AgentMove:              false,
+			AgentMove:              true,
 		}
 		// A nil descriptor (not reported) keeps the stored one; the
 		// broker's heartbeats refresh it either way.

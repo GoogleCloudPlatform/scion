@@ -219,6 +219,14 @@ type ProjectSettings struct {
 	// Default GCP identity for new agents
 	DefaultGCPIdentityMode             string `json:"defaultGCPIdentityMode,omitempty"`             // "block", "passthrough", or "assign"
 	DefaultGCPIdentityServiceAccountID string `json:"defaultGCPIdentityServiceAccountID,omitempty"` // Required when mode is "assign"
+	// DefaultGCPIdentityServiceAccountIDByProfile maps a broker profile name
+	// to a registered GCP service account ID. When an agent is created with
+	// no explicit GCP identity, the entry for the profile the agent runs
+	// under assigns that service account, ahead of DefaultGCPIdentityMode and
+	// DefaultGCPIdentityServiceAccountID. On PUT, an absent (null) field
+	// keeps the stored map and an empty object clears it. No omitempty: a
+	// nil map marshals to null (keep) and an empty map to {} (clear).
+	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile"`
 
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
@@ -364,6 +372,16 @@ type BrokerProfile struct {
 	// the field was never reported (an older broker or profile record),
 	// which must be read as supported, not as an explicit false.
 	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings and MappingsReported mirror
+	// store.BrokerProfile: the GCP service accounts this profile maps to a
+	// Kubernetes ServiceAccount, and whether the list was reported at all.
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	MappingsReported       bool                     `json:"mappingsReported,omitempty"`
+}
+
+// BrokerProfileSAMapping mirrors store.BrokerProfileSAMapping.
+type BrokerProfileSAMapping struct {
+	GSA string `json:"gsa"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
