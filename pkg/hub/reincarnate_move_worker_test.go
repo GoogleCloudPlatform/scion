@@ -249,18 +249,41 @@ func TestMoveBrokerQuota_TargetFullRestoresSource(t *testing.T) {
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "only the occupant")
 }
 
-// The worker re-checks eligibility before its first side effect: a target
-// that stopped advertising AgentMove since the request is refused.
+// The worker re-checks eligibility before its first side effect, on fresh
+// records, and returns the agent it validated: a target that stopped
+// advertising AgentMove, or a clone-per-agent agent no longer on
+// Kubernetes, is refused.
 func TestRecheckMoveEligibility_RefusesChangedFacts(t *testing.T) {
-	f := setupMoveFixture(t, true, nil)
-	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
-	require.NoError(t, f.srv.recheckMoveEligibility(context.Background(), f.agent.ID, mv))
-
-	f.dst.Capabilities = &store.BrokerCapabilities{Reprovision: true}
-	require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), f.dst))
-	err := f.srv.recheckMoveEligibility(context.Background(), f.agent.ID, mv)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not support agent move")
+	mv := func(f *moveFixture) *reincarnationMove {
+		return &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
+	}
+	t.Run("eligible returns the validated agent", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		a, err := f.srv.recheckMoveEligibility(context.Background(), f.agent.ID, mv(f))
+		require.NoError(t, err)
+		require.NotNil(t, a)
+		assert.Equal(t, f.agent.ID, a.ID)
+		assert.Equal(t, f.src.ID, a.RuntimeBrokerID)
+	})
+	t.Run("target lost AgentMove", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		f.dst.Capabilities = &store.BrokerCapabilities{Reprovision: true}
+		require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), f.dst))
+		_, err := f.srv.recheckMoveEligibility(context.Background(), f.agent.ID, mv(f))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support agent move")
+	})
+	t.Run("clone-per-agent agent no longer on kubernetes", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		ctx := context.Background()
+		a, err := f.s.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		a.Runtime = "docker"
+		require.NoError(t, f.s.UpdateAgent(ctx, a))
+		_, err = f.srv.recheckMoveEligibility(ctx, f.agent.ID, mv(f))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "only on Kubernetes")
+	})
 }
 
 // A4: an empty-per-agent agent with placement export on the same export
@@ -651,4 +674,139 @@ func TestSweepFailedMove_ReconcilesReservation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// R2-1: when the provisioning advance is lost (another owner took the
+// record, no error), the worker returns before moving the reservation, so
+// it stays on the source with the agent (no failure path or reconcile runs
+// to repair it).
+func TestReincarnateMove_ProvisioningAdvanceLostKeepsReservation(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	f.srv.store = &moveFaultStore{Store: f.s, failAdvance: func(rec *store.AgentReincarnation, _ string) (bool, error, bool) {
+		if rec.State == store.AgentReincarnationStateProvisioning {
+			return false, nil, true
+		}
+		return false, nil, false
+	}}
+	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		f.disp.mu.Lock()
+		defer f.disp.mu.Unlock()
+		return f.disp.stopCalls == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	// The worker returns right after losing the advance; give it a moment
+	// to prove it moves nothing.
+	time.Sleep(300 * time.Millisecond)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.src.ID, a.RuntimeBrokerID)
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID))
+	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID))
+}
+
+// runMoveWorkerDirect drives the worker synchronously for a pending move
+// record of the fixture agent.
+func runMoveWorkerDirect(t *testing.T, f *moveFixture, mv *reincarnationMove) *store.AgentReincarnation {
+	t.Helper()
+	ctx := context.Background()
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	a.ReincarnationState = store.ReincarnationStatePending
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	rec := &store.AgentReincarnation{
+		AgentID: a.ID, FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStatePending,
+		PreviousAppliedConfig: a.AppliedConfig, SourceBrokerID: mv.SourceBrokerID, TargetBrokerID: mv.TargetBrokerID,
+	}
+	require.NoError(t, f.s.CreateAgentReincarnation(ctx, rec))
+	fresh := *a.AppliedConfig
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv)
+	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
+	require.NoError(t, err)
+	return got
+}
+
+// R2-2 (MX3): a self-move whose target stopped serving the project after
+// the request is refused by the worker before anything is stopped.
+func TestReincarnationWorker_SelfMoveTargetNoLongerServingRefused(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	require.NoError(t, f.s.RemoveProjectProvider(context.Background(), f.project.ID, f.dst.ID))
+
+	got := runMoveWorkerDirect(t, f, &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID,
+		ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true})
+	assert.Equal(t, store.AgentReincarnationStateFailed, got.State)
+	assert.Contains(t, got.Error, "does not serve this project")
+	f.disp.mu.Lock()
+	assert.Zero(t, f.disp.stopCalls, "nothing is stopped")
+	f.disp.mu.Unlock()
+}
+
+// R2-2 (MX1): the worker carries the self-move flag: a self-move whose
+// target stops serving the project after the re-check never links it.
+func TestReincarnateMove_SelfMoveNeverLinksInWorker(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	ctx := context.Background()
+	f.disp.stopHook = func() {
+		_ = f.s.RemoveProjectProvider(ctx, f.project.ID, f.dst.ID)
+	}
+
+	_, _ = startMove(t, f)
+	_, err := f.s.GetProjectProvider(ctx, f.project.ID, f.dst.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a self-move must never link the target")
+}
+
+// N2-1: when another owner (the stale sweep) already failed the record,
+// the worker's failure path neither rolls the agent back nor deletes on
+// the target: only the CAS winner rolls back.
+func TestReincarnateMove_RecordAlreadyFailedSkipsRollback(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	f.disp.moveProvisionErr = errors.New("broker returned 409")
+	f.srv.store = &moveFaultStore{Store: f.s, failAdvance: func(rec *store.AgentReincarnation, _ string) (bool, error, bool) {
+		if rec.State == store.AgentReincarnationStateFailed {
+			return false, nil, true // the sweep won
+		}
+		return false, nil, false
+	}}
+	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		provisions, _, _ := f.disp.moveSnapshot()
+		return len(provisions) == 1
+	}, 5*time.Second, 5*time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
+	_, deletes, _ := f.disp.moveSnapshot()
+	assert.Empty(t, deletes, "no target delete without winning the record")
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the agent row is not rolled back")
+	assert.NotEqual(t, store.ReincarnationStateFailed, a.ReincarnationState, "the agent row is not written")
+}
+
+// N2-3 (MX4): when the rollback cannot restore the assignment, the
+// reservation stays on the target with the agent.
+func TestReincarnateMove_RollbackAssignmentRestoreFailureKeepsReservation(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	f.disp.moveProvisionErr = errors.New("broker returned 409")
+	f.srv.store = &moveFaultStore{Store: f.s, failUpdate: func(a *store.Agent) error {
+		// The rollback's write: back to the source while still provisioning.
+		if a.RuntimeBrokerID == f.src.ID && a.ReincarnationState == store.ReincarnationStateProvisioning {
+			return errors.New("injected failure")
+		}
+		return nil
+	}}
+	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "h", TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	waitForMoveSourceCleanup(t, f.s, r.ID)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID, "the assignment could not be restored")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "the reservation stays with the agent")
+	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.src.ID))
 }

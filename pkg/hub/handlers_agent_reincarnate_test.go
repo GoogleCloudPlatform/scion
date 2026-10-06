@@ -95,6 +95,8 @@ type reincarnateTestDispatcher struct {
 	// startPlacement (when set), like a target's start report.
 	runStore       store.Store
 	startPlacement string
+	// stopHook, when set, runs inside DispatchAgentStop.
+	stopHook func()
 
 	rerenderErr error
 	// rerenderEcho, when set, runs on a successful re-render against the
@@ -198,7 +200,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentStop(_ context.Context, _ *stor
 	d.mu.Lock()
 	d.stopCalls++
 	err := d.stopErr
+	hook := d.stopHook
 	d.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return err
 }
 func (d *reincarnateTestDispatcher) DispatchAgentRestart(context.Context, *store.Agent) error {

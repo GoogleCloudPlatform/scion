@@ -55,22 +55,23 @@ func (m *reincarnationMove) expectedNFSWorkspace() string {
 // facts may have changed since the request was accepted. Caller access was
 // decided at request time (the worker has no request identity), so the
 // access check re-confirms only that a self-move's target still serves the
-// project; the capacity limit is enforced when the slot is reserved.
-func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv *reincarnationMove) error {
+// project; the capacity limit is enforced when the slot is reserved. It
+// returns the agent it validated, as it is on the source broker.
+func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv *reincarnationMove) (*store.Agent, error) {
 	a, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
-		return fmt.Errorf("load agent: %w", err)
+		return nil, fmt.Errorf("load agent: %w", err)
 	}
 	if a.RuntimeBrokerID != mv.SourceBrokerID {
-		return fmt.Errorf("agent is no longer on broker %s", mv.SourceBrokerID)
+		return nil, fmt.Errorf("agent is no longer on broker %s", mv.SourceBrokerID)
 	}
 	src, err := s.store.GetRuntimeBroker(ctx, mv.SourceBrokerID)
 	if err != nil {
-		return fmt.Errorf("load source broker: %w", err)
+		return nil, fmt.Errorf("load source broker: %w", err)
 	}
 	dst, err := s.store.GetRuntimeBroker(ctx, mv.TargetBrokerID)
 	if err != nil {
-		return fmt.Errorf("load target broker: %w", err)
+		return nil, fmt.Errorf("load target broker: %w", err)
 	}
 	allowed := func(*store.RuntimeBroker) bool { return true }
 	_, ref := evaluateMoveEligibility(moveEligibilityInput{
@@ -91,9 +92,9 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		},
 	})
 	if ref != nil {
-		return fmt.Errorf("move no longer eligible: %s", ref.Message)
+		return nil, fmt.Errorf("move no longer eligible: %s", ref.Message)
 	}
-	return nil
+	return a, nil
 }
 
 // withBroker returns a copy of a with its runtime broker replaced, for
@@ -146,8 +147,8 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 // the target created; the agent's broker, runtime, run and workspace
 // placement restored from src (the agent as it was on the source); and,
 // only once that assignment is restored, the broker reservation moved back.
-// The caller then marks the reincarnation failed, which restores the
-// previous applied config.
+// The caller runs it only after winning the record's CAS to failed, then
+// writes the failed agent with the previous applied config.
 func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agentID string, mv *reincarnationMove, src *store.Agent) {
 	cur, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -159,15 +160,6 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 		s.agentLifecycleLog.Warn("move rollback: could not remove the agent's state on the target broker; left in place",
 			"agent_id", agentID, "target_broker_id", mv.TargetBrokerID, "error", err)
 	}
-	// The target's start may have recorded its own run; put the source's
-	// back (unless a newer run was recorded since), so later deletes and
-	// launch reports address the run that exists on the source.
-	if cur.RunID != src.RunID {
-		if _, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, cur.RunID, src.RunID); err != nil {
-			s.agentLifecycleLog.Warn("move rollback: failed to restore the agent's source run ID",
-				"agent_id", agentID, "error", err)
-		}
-	}
 	srcID, srcRuntime := mv.SourceBrokerID, src.Runtime
 	if _, err := s.updateReincarnationStep(ctx, agentID, reincarnationStepUpdate{
 		reincarnationState: cur.ReincarnationState,
@@ -177,6 +169,17 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 		s.agentLifecycleLog.Error("move rollback: failed to restore the agent to the source broker; the reservation stays on the target",
 			"agent_id", agentID, "source_broker_id", mv.SourceBrokerID, "error", err)
 		return
+	}
+	// The target's start may have recorded its own run; put the source's
+	// back (unless a newer run was recorded since), so later deletes and
+	// launch reports address the run that exists on the source. Only once
+	// the agent is assigned to the source again, so the row never pairs the
+	// target with the source's run.
+	if cur.RunID != src.RunID {
+		if _, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, cur.RunID, src.RunID); err != nil {
+			s.agentLifecycleLog.Warn("move rollback: failed to restore the agent's source run ID",
+				"agent_id", agentID, "error", err)
+		}
 	}
 	if src.WorkspacePlacement != "" {
 		if err := s.store.SetAgentWorkspacePlacement(ctx, agentID, src.WorkspacePlacement); err != nil {

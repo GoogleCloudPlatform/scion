@@ -515,13 +515,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "the dispatcher cannot move agents between brokers", previous)
 			return
 		}
-		if err := s.recheckMoveEligibility(ctx, agentID, move); err != nil {
-			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, err.Error(), previous)
-			return
-		}
-		a, err := s.store.GetAgent(ctx, agentID)
+		a, err := s.recheckMoveEligibility(ctx, agentID, move)
 		if err != nil {
-			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, "failed to load agent: "+err.Error(), previous)
+			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStatePending, err.Error(), previous)
 			return
 		}
 		srcAgent = a
@@ -532,8 +528,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// re-renders the previous config on its broker.
 	failAfterProvision := func(fromState, errMsg string) {
 		if move != nil {
-			s.rollbackMove(ctx, md, agentID, move, srcAgent)
-			s.failReincarnation(ctx, agentID, reincarnationID, fromState, errMsg, previous)
+			s.failMoveAndRollBack(ctx, md, agentID, reincarnationID, fromState, errMsg, previous, move, srcAgent)
 			return
 		}
 		s.failAfterReprovision(ctx, dispatcher, agentID, reincarnationID, fromState, errMsg, previous)
@@ -1029,6 +1024,27 @@ func (s *Server) failReincarnation(ctx context.Context, agentID, reincarnationID
 // Amendment A8.1): it goes through tryAdvanceReincarnationUnknownState
 // instead, which rejects an already-terminal record up front rather than
 // trust a fresh read as expectState.
+// failMoveAndRollBack fails a move after the agent was assigned to the
+// target: it CASes the record to failed first, and only the CAS winner
+// rolls the agent back to the source and writes the failed agent row (with
+// previous), so a record another owner (the stale sweep) already resolved
+// never has its agent rolled back from under it.
+func (s *Server) failMoveAndRollBack(ctx context.Context, md agentMoveDispatcher, agentID, reincarnationID, fromState, errMsg string, previous *store.AgentAppliedConfig, move *reincarnationMove, srcAgent *store.Agent) {
+	s.agentLifecycleLog.Error("reincarnation failed",
+		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)
+	failNow, ok, err := s.tryAdvanceReincarnation(ctx, reincarnationID, fromState, store.AgentReincarnationStateFailed, reincarnationStepMaxAttempts+3, func(rec *store.AgentReincarnation, _ time.Time) {
+		rec.Error = errMsg
+	})
+	if err != nil || !ok {
+		s.agentLifecycleLog.Warn("move: record no longer owned by this worker; not rolling the agent back",
+			"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
+		return
+	}
+	s.rollbackMove(ctx, md, agentID, move, srcAgent)
+	s.writeFailedAgent(ctx, agentID, errMsg, previous, failNow)
+	s.reconcileFailedMove(ctx, reincarnationID)
+}
+
 func (s *Server) failReincarnationUnknownState(ctx context.Context, agentID, reincarnationID, errMsg string, restoreConfig *store.AgentAppliedConfig) {
 	s.agentLifecycleLog.Error("reincarnation failed",
 		"agent_id", agentID, "reincarnation_id", reincarnationID, "error", errMsg)
