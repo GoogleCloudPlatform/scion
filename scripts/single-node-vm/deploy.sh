@@ -21,7 +21,8 @@
 # enables IAP, configures the hub for proxy auth, and prints the access URL.
 #
 # The VM has no public IP; authenticated access is via the Cloud Run IAP proxy.
-# Agents running on the VM connect via localhost (no IAP needed).
+# Agents running on the VM reach the hub directly on the VM's port 8080 over
+# the Docker bridge (hostname scion-hub.internal), bypassing IAP.
 #
 # The script is idempotent: re-running converges without duplication.
 #
@@ -3136,7 +3137,7 @@ echo "  ${PROXY_URL}"
 echo ""
 echo "You will be prompted to authenticate via Google IAP."
 echo ""
-echo "Agents running on the VM connect via localhost:8080 (no IAP needed)."
+echo "Agents running on the VM reach the hub at http://scion-hub.internal:8080 over the Docker bridge (no IAP needed)."
 echo ""
 echo "To view service logs:"
 echo ""

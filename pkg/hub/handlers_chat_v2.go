@@ -1248,9 +1248,26 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Human-to-human message ---
 	// No agent recipient was resolved. A thread message is no_recipient
 	// unless a lookup failed or it is addressed to a person.
+	members := s.projectMembersOnce(ctx, projectID)
 	noRecipient := !isDM && !routingLookupFailed &&
-		s.threadMessageUnaddressed(ctx, projectID, plan.MentionNames, body.ReplyToID, user.ID())
-	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, noRecipient, plan.MentionNames, attachmentRefs, now, body.ReplyToID, nil)
+		s.threadMessageUnaddressed(ctx, members, plan.MentionNames, body.ReplyToID, user.ID())
+	mentionNames := plan.MentionNames
+	if noRecipient {
+		// When an agent has posted in the thread, address the reply to the
+		// most recent other human poster (or the thread creator) with a
+		// note instead of leaving it unseen; no agent is invoked.
+		// Otherwise it stays no_recipient.
+		creatorID := ""
+		if threadTopic != nil {
+			creatorID = threadTopic.CreatedBy
+		}
+		if noted, token, ok := s.unmentionedHumanNote(ctx, members, projectID, key, creatorID, user.ID(), content); ok {
+			content = noted
+			mentionNames = append(slices.Clone(mentionNames), token)
+			noRecipient = false
+		}
+	}
+	msgID := s.sendHumanToHuman(w, r, key, projectID, user, content, senderLabel, isDM, noRecipient, mentionNames, attachmentRefs, now, body.ReplyToID, nil)
 	if msgID == "" {
 		return // error response already written by sendHumanToHuman
 	}
@@ -3130,6 +3147,8 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// returned only when the viewer is a conversation participant. For
 	// canonical (cross-project) rows, strip the body if the viewer has
 	// no participant relationship with the message's conversation.
+	// A row whose provenance stamps name different projects but which has
+	// no conversation ID cannot be checked, so its body is stripped too.
 	seen := make(map[string]bool, len(result.Items))
 	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
 	viewerID := user.ID()
@@ -3141,12 +3160,16 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 			return
 		}
 		seen[m.ID] = true
-		if ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "" {
+		switch {
+		case isCrossProjectRow(&m) && m.ConversationID == "":
+			// No conversation to check participation against: fail closed.
+			m.Msg = ""
+		case ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "":
 			decision := s.AuthorizeCrossProjectContentAccess(
 				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
 			)
 			if !decision.Allowed {
-				// Strip body — viewer is not a participant.
+				// Strip body — participation not verified.
 				m.Msg = ""
 			}
 		}

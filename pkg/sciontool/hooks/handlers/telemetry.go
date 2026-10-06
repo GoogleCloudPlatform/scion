@@ -505,7 +505,7 @@ func usageHookRecordingEnabled() bool {
 	// typo (e.g. "HOOKS" or a trailing space) rather than a deliberate choice.
 	// The safe D10 default (no usage) still applies either way; this only
 	// makes an unrecognized value visible for debugging.
-	if v != "" && v != "native" {
+	if v != "" && v != telemetry.UsageSourceNative {
 		log.Debug("SCION_USAGE_SOURCE=%q is not a recognized usage source (want \"hooks\" or \"native\"); hook usage stays suppressed", v)
 	}
 	return false
@@ -728,6 +728,21 @@ func (h *TelemetryHandler) Flush() {
 func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 	if h.aggregator == nil {
 		return
+	}
+
+	// Events that feed the summary also carry the session ID. Observing it
+	// means a missed session-start does not leave the summary without an
+	// ID or start time (the session-end event itself usually has the ID).
+	// Lifecycle and other events are not observed, so they cannot open a
+	// session ahead of the real session-start.
+	//
+	// ObserveSession and the Record*/Finalize calls below take the lock
+	// separately. That is safe only because events reach a handler one at
+	// a time: HarnessProcessor.dispatchEvent and LifecycleManager.runHooks
+	// both dispatch serially, and a hook process handles a single event.
+	switch event.Name {
+	case hooks.EventToolEnd, hooks.EventModelEnd, hooks.EventAgentEnd, hooks.EventSessionEnd:
+		h.aggregator.ObserveSession(event.Data.SessionID)
 	}
 
 	switch event.Name {

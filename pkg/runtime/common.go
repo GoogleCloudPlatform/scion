@@ -329,6 +329,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	fullRepoRootMounted := false
+	// sharedWorkspaceAgentsMasked is set when the shared workspace mount
+	// (workspace == repo root) contains a .scion directory, whose agents/
+	// subdirectory is shadowed with a tmpfs below.
+	sharedWorkspaceAgentsMasked := false
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the
 		// cloned repo is visible on the host for debugging and persistence.
@@ -378,11 +382,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// (config.GetAgentDir with sharedWorkspace=true), so there is
 			// nothing to leak through this mount. See
 			// .design/hub-shared-workspace-isolation.md (defense by absence).
-			// If the threat model ever requires in-container shadowing, mirror
-			// the /repo-root/.scion tmpfs pattern below at
-			// /workspace/.scion/agents.
+			// Agent state for shared-workspace projects is always resolved
+			// from the broker-side agent dir (pkg/agent agentStateDir), never
+			// from the in-project agents root under this mount; that is the
+			// control on every runtime. On Docker/Podman the in-project
+			// agents root is additionally shadowed with a tmpfs (below) when
+			// <workspace>/.scion is a directory.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
+			if info, err := os.Stat(filepath.Join(config.Workspace, ".scion")); err == nil && info.IsDir() {
+				sharedWorkspaceAgentsMasked = true
+			}
 		} else {
 			// Fallback if workspace is outside repo root or relative path is not straightforward.
 			// Still mount RepoRoot so that .git worktree pointers can potentially be resolved if
@@ -562,6 +572,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// agents' home directories and secrets via the host filesystem.
 	if fullRepoRootMounted {
 		addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
+	}
+	// Docker/Podman: shadow the in-project agents root of a shared workspace
+	// mount the same way, so it is empty in the container. The Apple runtime
+	// drops --mount arguments (stripUnsupportedAppleFlags), and Kubernetes and
+	// Cloud Run build their own mounts; for those, agent state resolving only
+	// from the broker-side agent dir is the control.
+	if sharedWorkspaceAgentsMasked {
+		addArg("--mount", "type=tmpfs,destination=/workspace/.scion/agents")
 	}
 
 	// Add NET_ADMIN capability for iptables-based metadata server interception

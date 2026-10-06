@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -214,10 +215,165 @@ func TestJoinToken_CleanExpired(t *testing.T) {
 	require.NoError(t, bs.CreateJoinToken(ctx, expired))
 	require.NoError(t, bs.CreateJoinToken(ctx, valid))
 
-	require.NoError(t, bs.CleanExpiredJoinTokens(ctx))
+	removed, err := bs.CleanExpiredJoinTokens(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
 
-	_, err := bs.GetJoinTokenByBrokerID(ctx, expired.BrokerID)
+	_, err = bs.GetJoinTokenByBrokerID(ctx, expired.BrokerID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "expired token should be cleaned")
 	_, err = bs.GetJoinTokenByBrokerID(ctx, valid.BrokerID)
 	assert.NoError(t, err, "valid token should remain")
+}
+
+func TestJoinToken_UpsertReplaces(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+
+	first := &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "hash-first", ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "user-a"}
+	replaced, err := bs.UpsertJoinToken(ctx, first)
+	require.NoError(t, err)
+	assert.False(t, replaced, "nothing to replace on the first token")
+
+	second := &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "hash-second", ExpiresAt: time.Now().Add(2 * time.Hour), CreatedBy: "user-b"}
+	replaced, err = bs.UpsertJoinToken(ctx, second)
+	require.NoError(t, err, "a second token for the same broker must not fail")
+	assert.True(t, replaced)
+
+	_, err = bs.GetJoinToken(ctx, "hash-first")
+	assert.ErrorIs(t, err, store.ErrNotFound, "the replaced token no longer resolves")
+
+	got, err := bs.GetJoinToken(ctx, "hash-second")
+	require.NoError(t, err)
+	assert.Equal(t, brokerID, got.BrokerID)
+	assert.Equal(t, "user-b", got.CreatedBy)
+	assert.WithinDuration(t, second.ExpiresAt, got.ExpiresAt, time.Second)
+	assert.WithinDuration(t, second.CreatedAt, got.CreatedAt, time.Second, "created records the re-mint time")
+
+	byBroker, err := bs.GetJoinTokenByBrokerID(ctx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, "hash-second", byBroker.TokenHash)
+}
+
+func TestJoinToken_UpsertInsideWithTx(t *testing.T) {
+	client := enttest.NewClient(t)
+	composite := NewCompositeStore(client)
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+
+	err := composite.WithTx(ctx, func(tx store.Store) error {
+		if _, err := tx.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "h1", ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "u"}); err != nil {
+			return err
+		}
+		replaced, err := tx.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "h2", ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "u"})
+		assert.True(t, replaced)
+		return err
+	})
+	require.NoError(t, err)
+	got, err := composite.GetJoinTokenByBrokerID(ctx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, "h2", got.TokenHash)
+}
+
+func TestJoinToken_UpsertInvalid(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	_, err := bs.UpsertJoinToken(context.Background(), &store.BrokerJoinToken{TokenHash: "h"})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = bs.UpsertJoinToken(context.Background(), &store.BrokerJoinToken{BrokerID: uuid.NewString()})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestJoinToken_Consume(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+	now := time.Now()
+	_, err := bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "consume-hash", ExpiresAt: now.Add(time.Hour), CreatedBy: "u"})
+	require.NoError(t, err)
+
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", uuid.NewString(), now), store.ErrNotFound, "wrong broker")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", "not-a-uuid", now), store.ErrNotFound, "broker ID that is not a UUID")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "unknown-hash", brokerID, now), store.ErrNotFound, "unknown hash")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "", brokerID, now), store.ErrNotFound, "empty hash")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", brokerID, now.Add(2*time.Hour)), store.ErrNotFound, "expired at the given time")
+
+	_, err = bs.GetJoinToken(ctx, "consume-hash")
+	require.NoError(t, err, "failed consumes leave the token in place")
+
+	require.NoError(t, bs.ConsumeJoinToken(ctx, "consume-hash", brokerID, now))
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", brokerID, now), store.ErrNotFound, "a token is consumed once")
+	_, err = bs.GetJoinToken(ctx, "consume-hash")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestJoinToken_ConsumeConcurrent: of 16 concurrent consumers of one token,
+// exactly one succeeds and the rest get ErrNotFound. Runs on Postgres too
+// when the enttest Postgres harness is active.
+func TestJoinToken_ConsumeConcurrent(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	const workers, iterations = 16, 20
+
+	for iter := 0; iter < iterations; iter++ {
+		brokerID := uuid.NewString()
+		hash := "concurrent-hash-" + brokerID
+		_, err := bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: hash, ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "u"})
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		results := make(chan error, workers)
+		start := make(chan struct{})
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				results <- bs.ConsumeJoinToken(ctx, hash, brokerID, time.Now())
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		succeeded := 0
+		for err := range results {
+			if err == nil {
+				succeeded++
+				continue
+			}
+			require.ErrorIs(t, err, store.ErrNotFound, "iteration %d", iter)
+		}
+		require.Equal(t, 1, succeeded, "iteration %d: exactly one consumer succeeds", iter)
+	}
+}
+
+func TestJoinToken_DeleteExpired(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	brokerID := uuid.NewString()
+	_, err := bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "old-hash", ExpiresAt: now.Add(-time.Minute), CreatedBy: "u"})
+	require.NoError(t, err)
+
+	// A token that has not expired at the given time is kept.
+	assert.ErrorIs(t, bs.DeleteExpiredJoinToken(ctx, "old-hash", now.Add(-time.Hour)), store.ErrNotFound)
+	_, err = bs.GetJoinToken(ctx, "old-hash")
+	require.NoError(t, err)
+
+	// A re-mint replaces the hash on the same broker row; deleting the old
+	// hash must not remove the new token.
+	_, err = bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "new-hash", ExpiresAt: now.Add(time.Hour), CreatedBy: "u"})
+	require.NoError(t, err)
+	assert.ErrorIs(t, bs.DeleteExpiredJoinToken(ctx, "old-hash", now), store.ErrNotFound)
+	_, err = bs.GetJoinToken(ctx, "new-hash")
+	require.NoError(t, err, "the re-minted token survives")
+
+	// An expired token with the given hash is deleted.
+	other := uuid.NewString()
+	_, err = bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: other, TokenHash: "expired-hash", ExpiresAt: now.Add(-time.Second), CreatedBy: "u"})
+	require.NoError(t, err)
+	require.NoError(t, bs.DeleteExpiredJoinToken(ctx, "expired-hash", now))
+	_, err = bs.GetJoinToken(ctx, "expired-hash")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.ErrorIs(t, bs.DeleteExpiredJoinToken(ctx, "", now), store.ErrNotFound)
 }

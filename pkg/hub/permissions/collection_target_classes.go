@@ -181,6 +181,9 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"hub.allow_list.update": {TargetClassKindHubResource}, "hub.project_defaults.read": {TargetClassKindHubResource},
 	"hub.project_defaults.update": {TargetClassKindHubResource}, "hub.messaging.update": {TargetClassKindHubResource},
 	"hub.experiments.update": {TargetClassKindHubResource},
+
+	"hub.conduit_grant_keys.execute": {TargetClassKindHubResource},
+
 	"hub.auth_reset.execute": {TargetClassKindHubResource}, "hub.scheduler.read": {TargetClassKindHubResource},
 	"hub.scheduler.update": {TargetClassKindHubResource}, "hub.federation.read": {TargetClassKindHubResource},
 	"hub.federation.update": {TargetClassKindHubResource}, "hub.teams_manifest.read": {TargetClassKindHubResource},
@@ -243,6 +246,10 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// every entry is reviewed empty, matching project.secret_read above.
 	"secret.deliver": {}, "env_var.deliver": {}, "skill_injection.deliver": {},
 	"secret.use": {}, "gcp_service_account.use": {},
+
+	// Self-scoped permissions — always the holder's own existing records,
+	// never a collection-level target.
+	"inbox.read": {}, "inbox.write": {}, "user_skill_injection.update": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID
