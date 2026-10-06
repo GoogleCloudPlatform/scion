@@ -77,6 +77,7 @@ var scheduleCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a one-shot scheduled event",
 	Long:  `Create a one-shot scheduled event. Requires timing (--in or --at), --agent, and --message.`,
+	Args:  scheduleCreateArgs,
 	RunE:  runScheduleCreate,
 }
 
@@ -489,7 +490,11 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	})
 }
 
-func runScheduleCreate(cmd *cobra.Command, args []string) error {
+// scheduleCreateArgs validates schedule create's flags (timing and the
+// type-specific flags). It is the command's Args validator, so it runs
+// before root's PersistentPreRunE and its errors keep the usage block
+// (ptone/scion#2859). Positional args are not checked, as before.
+func scheduleCreateArgs(_ *cobra.Command, _ []string) error {
 	if scheduleIn == "" && scheduleAt == "" {
 		return fmt.Errorf("either --in or --at is required")
 	}
@@ -509,7 +514,10 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unsupported event type: %q (supported: message)", scheduleType)
 	}
+	return nil
+}
 
+func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
@@ -547,22 +555,22 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 
 func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	if scheduleName == "" {
-		return fmt.Errorf("--name is required")
+		return newUsageError("--name is required")
 	}
 	if scheduleCron == "" {
-		return fmt.Errorf("--cron is required")
+		return newUsageError("--cron is required")
 	}
 	// Validate type-specific flags
 	switch scheduleType {
 	case "message":
 		if scheduleAgent == "" {
-			return fmt.Errorf("--agent is required for message schedules")
+			return newUsageError("--agent is required for message schedules")
 		}
 		if scheduleMessage == "" {
-			return fmt.Errorf("--message is required for message schedules")
+			return newUsageError("--message is required for message schedules")
 		}
 	default:
-		return fmt.Errorf("unsupported event type: %q (supported: message)", scheduleType)
+		return newUsageError("unsupported event type: %q (supported: message)", scheduleType)
 	}
 
 	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
@@ -693,7 +701,7 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 
 	if len(args) == 0 {
 		// No schedule ID - list all events (already done via 'schedule list --type events')
-		return fmt.Errorf("schedule ID is required for history (usage: scion schedule history <id>)")
+		return newUsageError("schedule ID is required for history (usage: scion schedule history <id>)")
 	}
 
 	scheduleID := args[0]

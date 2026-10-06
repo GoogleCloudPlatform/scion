@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -79,6 +80,12 @@ const (
 	// Either way this constant lets broker-level callers and tests branch on
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
+
+	// ErrCodeStaleDispatch marks a delete refused because it arrived after
+	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
+	// hub's claim on the delete may have lapsed, so acting could remove an
+	// agent the user started again. Nothing was done.
+	ErrCodeStaleDispatch = "stale_dispatch"
 
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
@@ -236,6 +243,12 @@ func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods 
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// StaleDispatch writes a 409 Conflict response with the stable
+// ErrCodeStaleDispatch code.
+func StaleDispatch(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeStaleDispatch, message, nil)
 }
 
 // AgentIdentityUnknown writes a 409 Conflict response with the stable
@@ -488,7 +501,10 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior.
+// behavior. The one exception is errSavedProfileUnresolved (a saved profile
+// that no longer resolves), which is checked ahead of every other case and
+// written as the retryable 503 from writeSavedProfileUnresolved; its text is
+// client-safe by construction.
 //
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
@@ -509,6 +525,12 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // so the detail reaches the broker's own diagnostics before being redacted
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
+	// errSavedProfileUnresolved's text names only the agent, the profile
+	// and a fixed or ResolveRuntime cause, and is client-safe as is.
+	if errors.Is(err, errSavedProfileUnresolved) {
+		writeSavedProfileUnresolved(w, err)
+		return http.StatusServiceUnavailable
+	}
 	sce, ok := err.(*startContextError)
 	if !ok {
 		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", err)

@@ -1816,6 +1816,13 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only listed sub-route segments dispatch; any other first segment
+	// after the project ID is not a project route.
+	if !projectSubRouteListed(subPath) {
+		NotFound(w, "Project route")
+		return
+	}
+
 	// Parse project ID to extract UUID (supports {uuid}__{slug} format)
 	projectID := resolveProjectID(projectIDRaw)
 

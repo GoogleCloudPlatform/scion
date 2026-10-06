@@ -2891,6 +2891,32 @@ func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func
 		}
 		logf("%s", line)
 	}
+	// Per-dir entries: one line per profile and shared dir whose backend
+	// comes from a shared_dir_storage_backends entry.
+	for _, name := range names {
+		dirSet := map[string]bool{}
+		p := gs.Profiles[name]
+		for dir := range p.SharedDirStorageBackends {
+			dirSet[dir] = true
+		}
+		if rt, ok := gs.Runtimes[p.Runtime]; ok {
+			for dir := range rt.SharedDirStorageBackends {
+				dirSet[dir] = true
+			}
+		}
+		dirs := make([]string, 0, len(dirSet))
+		for dir := range dirSet {
+			dirs = append(dirs, dir)
+		}
+		sort.Strings(dirs)
+		for _, dir := range dirs {
+			backend, source, perDir := gs.ResolveSharedDirStorageBackend(name, dir)
+			if !perDir {
+				continue
+			}
+			logf("shared_dir_storage for profile %s, shared dir %s: backend=%s (from %s)", name, dir, backend, source)
+		}
+	}
 }
 
 // sharedDirBackendLabel is the backend a resolved config selects, with

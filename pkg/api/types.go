@@ -503,6 +503,17 @@ type ScionConfig struct {
 	// ExplicitWorkspace records that /workspace is a user-provided --workspace
 	// path, bind-mounted directly with no git worktree/branch, even when inside a
 	// repo. Persisted so resume/restart honors the same contract as first start.
+	//
+	// Also true for a broker-provisioned worktree-per-agent workspace
+	// (tryProvisionWorktree sets opts.Workspace too, so it takes the same
+	// branch in ProvisionAgent): both cases mount from a Volumes-derived path
+	// rather than GetAgent's managed <agentDir>/workspace recovery. RepoRoot
+	// resolution, not this flag, is what tells the two cases apart — see
+	// pkg/agent's readProvisionedWorktreeRepoRoot. That value is deliberately
+	// not a field on ScionConfig (populated by unmarshaling templates, hub
+	// inline config, and --config files) nor on AgentInfo (persisted in
+	// agentHome, which the container can write) — see
+	// ContextWithProvisionedWorktreeRepoRoot below.
 	ExplicitWorkspace bool `json:"explicit_workspace,omitempty" yaml:"explicit_workspace,omitempty"`
 
 	// EmptyPerAgentWorkspace records that the agent's workspace is its
@@ -976,6 +987,46 @@ func IsReprovisionFromContext(ctx context.Context) bool {
 // never creates, clones, pulls, resets, or removes a workspace.
 func ReincarnateEligible(hasGitClone bool, workspace string) bool {
 	return hasGitClone || workspace != ""
+}
+
+type provisionedWorktreeRepoRootContextKey struct{}
+
+// ContextWithProvisionedWorktreeRepoRoot records that the workspace at hand
+// (opts.Workspace) is a broker-provisioned worktree-per-agent checkout —
+// created by runtimebroker's tryProvisionWorktree, not by a user's
+// --workspace override — whose git repo root is repoRoot. Modelled on
+// ContextWithGitClone / ContextWithSharedWorkspace: broker-local, never on
+// the wire.
+//
+// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext)
+// to set RunConfig.RepoRoot directly, skipping detectRepoRoot's "an explicit
+// workspace skips git detection" rule — that rule exists for a user's own
+// --workspace override and must not swallow the broker's own
+// provisioning. This doc is the canonical statement of that rationale; other
+// call sites point back here.
+//
+// The value is never a ScionConfig field (populated by unmarshaling
+// templates, hub inline config, and --config files) or an AgentInfo field
+// (agent-info.json lives in agentHome, which the container can write). The
+// broker persists it in a broker-owned file under agentDir instead — see
+// pkg/agent's writeProvisionedWorktreeRepoRoot/readProvisionedWorktreeRepoRoot
+// — and run.go independently validates it against the real filesystem
+// (provision.ValidateWorktreeForBase) before trusting it either way.
+func ContextWithProvisionedWorktreeRepoRoot(ctx context.Context, repoRoot string) context.Context {
+	return context.WithValue(ctx, provisionedWorktreeRepoRootContextKey{}, repoRoot)
+}
+
+// ProvisionedWorktreeRepoRootFromContext returns the repo root recorded by
+// ContextWithProvisionedWorktreeRepoRoot, or "" if none was set (including
+// every non-broker dispatch and every broker dispatch that is not a
+// provisioned worktree — e.g. clone-per-agent or a user --workspace
+// override).
+func ProvisionedWorktreeRepoRootFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(provisionedWorktreeRepoRootContextKey{}).(string)
+	return v
 }
 
 type harnessConfigPathContextKey struct{}
