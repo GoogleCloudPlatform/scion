@@ -60,6 +60,7 @@
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 - [user.admin.invite](#useradmininvite) — Invite a user to the platform
+- [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
 - [group.read](#groupread) — Read group details or list groups
@@ -70,7 +71,6 @@
 - [role.read](#roleread) — Read role definitions and permission registry
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
-- [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
@@ -2259,6 +2259,51 @@
 
 ---
 
+## user.admin.provision
+
+**Domain:** user.admin
+
+**Description:** Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `user.invite`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `issue-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Pre-registration admits sign-in under invite_only, identical to user.admin.invite
+
+### Audit
+
+- **Event Type:** `user.admin.provision`
+- **Context Fields:** actor_id, credential_id, credential_kind
+- **After Fields:** target_user_id, email, status, display_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `role_assignment_forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestHandleProvisionUser`
+
+---
+
 ## user.admin.promote
 
 **Domain:** user.admin
@@ -2590,40 +2635,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-
----
-
-## user.provision
-
-**Domain:** user
-
-**Description:** Create a user directly through the API; refused for every caller, because sign-in flows create users
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/users` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`
-
-**Bearer:** `out_of_scope` (owner `user-provisioning`)
-
-**Resource Resolver:** none
-
-**Effects:** `create-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
-
-### Exemptions
-
-- **internal_only:** Direct user creation is refused for every caller; user records come from sign-in flows (scope: direct user creation) — waives: `base_permission`
 
 ---
 
