@@ -228,8 +228,9 @@ func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_FallbackAppliesPha
 // removing 1+perRow, so the cost rises while pEff holds and falls when it
 // drops. The worst case is therefore the largest n that keeps pEff at its
 // value for the first paged n: n = ceiling-5 - perRow*pEff(first paged n).
-// The test also checks that choice against every n up to the candidate
-// ceiling.
+// The test also checks both choices against every n from 1 up to the
+// candidate ceiling. Wherever the complete branch applies, it takes the
+// larger of the two branch costs.
 func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_RacedWorstCase_WithinRaceAllowance(t *testing.T) {
 	perRow := scopedPageRowDecisions
 	raceAllowance := sortedProjectDecisionCeiling + maxSortedLimit
@@ -242,11 +243,21 @@ func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_RacedWorstCase_Wit
 		}
 		return 5 + n + (1+perRow)*rows
 	}
+	completeCost := func(n int) int {
+		return 5 + n*(2+perRow)
+	}
 	firstPagedRows := effectivePagedPageSize(maxSortedLimit, completeMax+1, perRow)
 	pagedWorst := sortedProjectDecisionCeiling - 5 - perRow*firstPagedRows
 	require.Greater(t, pagedWorst, completeMax)
-	for n := completeMax + 1; n <= authorizedListMaxCandidates; n++ {
-		require.LessOrEqual(t, pagedCost(n), pagedCost(pagedWorst), "n=%d: the paged worst case is the largest raced cost", n)
+	worst := max(completeCost(completeMax), pagedCost(pagedWorst))
+	for n := 1; n <= authorizedListMaxCandidates; n++ {
+		cost := pagedCost(n)
+		if n <= completeMax {
+			cost = max(cost, completeCost(n))
+		} else {
+			require.LessOrEqual(t, cost, pagedCost(pagedWorst), "the paged worst case is the largest paged raced cost")
+		}
+		require.LessOrEqual(t, cost, worst, "the two worst cases bound every raced cost")
 	}
 
 	cases := []struct {
