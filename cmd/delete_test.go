@@ -646,6 +646,9 @@ func TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode(t *testing.T) {
 	projectPath = projectDir
 
 	projectID := "project-force-5"
+	// projectPath stands in for an explicit --project flag, whose own
+	// project ID wins over SCION_PROJECT_ID (ptone/scion#3123).
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "project-id"), []byte(projectID+"\n"), 0644))
 	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
 	defer server.Close()
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
