@@ -892,7 +892,7 @@ func TestReincarnateAgent_SameBrokerEmptyPerAgent_Eligible(t *testing.T) {
 			require.True(t, project.IsEmptyPerAgent(), "fixture check: project must be empty-per-agent")
 
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: empty-per-agent has no GitClone")
 			require.Empty(t, probe.AppliedConfig.Workspace, "fixture check: empty-per-agent has no Workspace")
 
