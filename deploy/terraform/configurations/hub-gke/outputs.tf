@@ -57,6 +57,6 @@ output "bucket_name" {
 }
 
 output "neg_zones" {
-  description = "Zones the hub's NEGs are created in (the NEG annotation's \"zones\") and read from: var.neg_zones, or the cluster's node_locations when that is null."
+  description = "Zones the hub's NEGs are created in (the NEG annotation's \"zones\") and read from: always the cluster's node_locations."
   value       = local.neg_zones
 }

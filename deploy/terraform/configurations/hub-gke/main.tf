@@ -92,8 +92,9 @@ locals {
     name      = "scion-hub"
   }
 
-  # Operator override, else every zone the cluster's nodes may run in.
-  neg_zones = sort(coalesce(var.neg_zones, tolist(data.google_container_cluster.agents.node_locations)))
+  # Every zone the cluster's nodes may run in. There is deliberately no
+  # override: a subset would leave pods in unattached zones (README, "NEG zones").
+  neg_zones = sort(tolist(data.google_container_cluster.agents.node_locations))
 
   # 1.36.2-gke.3104000 as [major, minor, patch, gke build]: the first GKE
   # version whose NEG controller honours the annotation's "zones" field.

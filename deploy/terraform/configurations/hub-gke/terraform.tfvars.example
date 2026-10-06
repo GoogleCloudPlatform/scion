@@ -20,10 +20,6 @@ hostname = "tfha-gke-h3.example.com"
 # pushed to. Change it to roll a new build.
 hub_image_digest = "sha256:REPLACE_ME_WITH_64_LOWERCASE_HEX_CHARS"
 
-# Optional. Zones the hub's NEGs are created in and read from. Unset (null)
-# means the cluster's node_locations. See the README, "NEG zones".
-# neg_zones = ["us-central1-a", "us-central1-b"]
-
 # Leave unset (null) for a first install in a project with no known client
 # ID: the first apply then builds everything except the hub itself
 # (hub_installed = false). Discover the ID (README, "First install"), set it

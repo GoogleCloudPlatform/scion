@@ -99,7 +99,10 @@ resource "google_compute_health_check" "this" {
 # No target tags: Autopilot nodes carry no tags Terraform controls, so the
 # rule is scoped by port, source range and destination range instead. The
 # destination is the cluster's pod range, so the rule never opens the port
-# on other VMs or alias IPs in the shared VPC.
+# on other VMs or alias IPs in the shared VPC. It does admit these ranges to
+# the port on EVERY pod in the cluster (all hubs and all agents), not only
+# this hub's. That is accepted: Autopilot offers no tighter scope without
+# manual steps.
 resource "google_compute_firewall" "health_check" {
   project   = var.project_id
   name      = "${local.prefix}-allow-lb-hc"

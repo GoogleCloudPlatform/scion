@@ -169,7 +169,7 @@ run "fresh_gke_hub_plans_clean" {
 
   assert {
     condition     = output.neg_zones == tolist(["us-central1-a", "us-central1-b", "us-central1-c"])
-    error_message = "with neg_zones unset, NEG zones must come from the cluster's node_locations."
+    error_message = "NEG zones must come from the cluster's node_locations."
   }
 
   # The zones the front door reads are exactly the zones the NEG Service
@@ -291,51 +291,6 @@ run "hub_name_must_match_state_prefix" {
   }
 
   expect_failures = [var.hub_name]
-}
-
-# Operator override: neg_zones replaces node_locations everywhere, in the
-# annotation and in hub-lb's reads alike.
-run "neg_zones_override" {
-  command = plan
-
-  variables {
-    neg_zones = ["us-central1-f", "us-central1-b"]
-  }
-
-  assert {
-    condition     = output.neg_zones == tolist(["us-central1-b", "us-central1-f"])
-    error_message = "neg_zones must override the cluster's node_locations (sorted)."
-  }
-
-  assert {
-    condition     = tolist(jsondecode(module.hub_gke.neg_annotation).zones) == output.neg_zones
-    error_message = "the NEG annotation's zones must follow the override."
-  }
-
-  assert {
-    condition     = module.hub_lb.neg_zones_read == tolist(["us-central1-b", "us-central1-f"])
-    error_message = "hub-lb must read NEGs from the override zones only."
-  }
-}
-
-run "neg_zone_outside_region_rejected" {
-  command = plan
-
-  variables {
-    neg_zones = ["europe-west1-b"]
-  }
-
-  expect_failures = [var.neg_zones]
-}
-
-run "empty_neg_zones_rejected" {
-  command = plan
-
-  variables {
-    neg_zones = []
-  }
-
-  expect_failures = [var.neg_zones]
 }
 
 # Older than 1.36.2-gke.3104000 in the last field only. A string comparison

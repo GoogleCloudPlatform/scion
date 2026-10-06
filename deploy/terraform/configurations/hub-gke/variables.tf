@@ -9,7 +9,7 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "Zone the shared Filestore instance was created in (must match shared-infra). Used only to resolve shared infra; the hub's NEG zones come from neg_zones (default: the cluster's node_locations)."
+  description = "Zone the shared Filestore instance was created in (must match shared-infra). Used only to resolve shared infra; the hub's NEG zones always come from the cluster's node_locations."
   type        = string
 }
 
@@ -62,22 +62,6 @@ variable "hub_image_digest" {
   validation {
     condition     = can(regex("^sha256:[0-9a-f]{64}$", var.hub_image_digest))
     error_message = "hub_image_digest must be sha256:<64 lowercase hex>."
-  }
-}
-
-variable "neg_zones" {
-  description = "Zones the hub's standalone NEGs are created in and read from. Default null means the cluster's node_locations. Each zone must be in the cluster's region. The list is written into the NEG Service's cloud.google.com/neg annotation (\"zones\"), so the GKE NEG controller creates a NEG in each listed zone even when it has no nodes; that field needs GKE 1.36.2-gke.3104000 or later. Set this to override the zone list, for example to a subset of node_locations."
-  type        = list(string)
-  default     = null
-
-  validation {
-    condition     = var.neg_zones == null || try(length(var.neg_zones) > 0 && !contains(var.neg_zones, "*"), false)
-    error_message = "neg_zones must be null (use the cluster's node_locations) or list at least one explicit zone (no \"*\" wildcard)."
-  }
-
-  validation {
-    condition     = var.neg_zones == null || alltrue([for z in coalesce(var.neg_zones, []) : startswith(z, "${var.region}-")])
-    error_message = "every zone in neg_zones must be in var.region (the cluster's region)."
   }
 }
 

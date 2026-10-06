@@ -149,7 +149,7 @@ hand. See "Destroy".
 default, the GKE NEG controller creates a standalone NEG only in the zones
 where the cluster has nodes." The cluster's `node_locations` lists every zone
 nodes *may* run in, and a small Autopilot cluster often has no nodes in some of
-them. Without an override, `hub-lb`'s read of the NEG in such a zone fails with
+them. Without the `zones` field below, `hub-lb`'s read of the NEG in such a zone fails with
 a not-found error on every apply, and re-running does not help.
 
 So `hub-gke` adds the optional `zones` field to the NEG annotation:
@@ -170,19 +170,23 @@ Source: <https://docs.cloud.google.com/kubernetes-engine/docs/how-to/standalone-
   `master_version` as numbers (major, minor, patch, GKE build) and fails the
   plan on anything older or unparseable.
 - The page marks pre-provisioning as **Preview**.
-- Every listed zone must be in the cluster's region. The `neg_zones` variable
-  checks that against `region`.
+- Every listed zone must be in the cluster's region. The list comes from the
+  cluster's own `node_locations`, so it always is.
 - A malformed `zones` value is not an error: the controller falls back to
   nodes-only zones and raises a Warning event on the Service. If an apply fails
   at a NEG read, run `kubectl -n <hub>-system describe service <hub>-neg`
   and check its events.
 - Empty NEGs count against the project's NEG quota.
 
-**Override: `neg_zones`.** Unset (null), the zone list is the cluster's
-`node_locations`. Set `neg_zones` to a list of zones in the cluster's region to
-use that list instead, in both the annotation and `hub-lb`'s reads, for
-example a subset of `node_locations`. The `neg_zones` output shows the
-list in effect.
+**There is no zone override.** The zone list is always the cluster's
+`node_locations`, used in both the annotation and `hub-lb`'s reads. The
+`neg_zones` output shows it. An override is left out on purpose. The
+annotation's `zones` field only adds zones: the controller still creates a NEG
+in every zone that has nodes, but `hub-lb` attaches only the listed zones. With
+a subset, a hub pod scheduled in an unlisted zone would sit in a NEG the load
+balancer never sends traffic to. Requests routed to it would get 503s, while
+helm still reports the release as healthy. Listing every zone the nodes may
+run in rules that out.
 
 ### NEG race (known failure mode)
 
@@ -234,6 +238,13 @@ so the rule reaches the pods and no other VM or alias IP in the shared VPC.
 Autopilot nodes carry no tags Terraform controls, so the rule is scoped by
 port, source range and destination range rather than by target tag.
 
+That scope is the whole pod range, not just this hub. The rule admits the
+Google health-check and GFE ranges to tcp/8080 on **every pod in the
+cluster**: every hub's pods and every agent pod, not only this hub's. This is
+accepted because Autopilot offers no tighter scope without manual steps.
+A single shared-infra rule, replacing the per-hub rules, is tracked in
+ptone/scion#3519.
+
 ## Outputs
 
 | Output | Meaning |
@@ -245,7 +256,7 @@ port, source range and destination range rather than by target tag.
 | `backend_service` | name, `timeout_sec`, health-check path and port |
 | `hub_image` | `<repo>/scion-hub-gke@<digest>` |
 | `chart_values` | every non-secret value handed to the chart |
-| `neg_zones` | zones the NEGs are created in and read from (`neg_zones`, else `node_locations`) |
+| `neg_zones` | zones the NEGs are created in and read from (the cluster's `node_locations`) |
 
 ## Destroy
 
@@ -267,6 +278,6 @@ terraform test
 The tests run with mock providers and need no credentials. They prove the root
 composes and plans, the front-door contract, the LB's timeout and health check,
 the digest pin, `auth=password`, `create_hub_rbac = false`, both
-first-install states, the NEG zones (default and override) and the GKE version
+first-install states, the NEG zones (from `node_locations`) and the GKE version
 check, and the firewall's pod-range destination. They cannot prove the APIs accept the resources, the NEG
 timing, or that the hub boots. Those are live checks.
