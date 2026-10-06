@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -89,12 +90,19 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	if err != nil && err != store.ErrNotFound {
 		return brokerID, fmt.Errorf("failed to check for runtime broker: %w", err)
 	}
+	// A flat Runtime Broker row is never re-registered by this legacy path
+	// (flat contract R4): its target, name and profiles stay as stored.
+	if broker.IsFlat() {
+		return brokerID, fmt.Errorf("%s: Runtime Broker %s is a flat Runtime Broker serving runtime target %s; the legacy embedded registration cannot re-register it",
+			hub.ErrCodeRuntimeTargetChanged, brokerID, broker.RuntimeTarget.ID)
+	}
 
 	// If not found by ID, try to find an existing broker with the same name
 	// to prevent duplicate registrations when the broker ID changes (e.g.,
-	// settings file recreated, format migration, or database reset).
+	// settings file recreated, format migration, or database reset). Only
+	// legacy rows are candidates: a flat row is never adopted by name.
 	if broker == nil && brokerName != "" {
-		existingByName, nameErr := s.GetRuntimeBrokerByName(ctx, brokerName)
+		existingByName, nameErr := s.GetLegacyRuntimeBrokerByName(ctx, brokerName)
 		if nameErr != nil && nameErr != store.ErrNotFound {
 			return brokerID, fmt.Errorf("failed to check for runtime broker by name: %w", nameErr)
 		}
@@ -124,6 +132,16 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	}
 
 	if broker == nil {
+		// Creating a legacy row next to a flat row with the same name or
+		// slug is refused (flat contract R4): no duplicate is created.
+		conflict, conflictErr := store.RuntimeBrokerNameConflict(ctx, s, brokerName, api.Slugify(brokerName), brokerID, true)
+		if conflictErr != nil {
+			return brokerID, fmt.Errorf("failed to check Runtime Broker name conflicts: %w", conflictErr)
+		}
+		if conflict != nil {
+			return brokerID, fmt.Errorf("%s: Runtime Broker name %q (slug %q) is already used by a flat Runtime Broker; choose another name",
+				hub.ErrCodeRuntimeBrokerNameConflict, brokerName, api.Slugify(brokerName))
+		}
 		broker = &store.RuntimeBroker{
 			ID:                         brokerID,
 			Name:                       brokerName,

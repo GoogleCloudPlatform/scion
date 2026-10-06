@@ -136,7 +136,8 @@ func (s *Server) ownRuntimeFor(ctx context.Context) *agentOwnRuntime {
 // server check) only on the first request for a configuration, or after
 // that configuration changes.
 func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, projectPathHint string) context.Context {
-	if s.manager == nil || s.runtime == nil {
+	// A flat instance has one runtime and never resolves a saved profile.
+	if s.manager == nil || s.runtime == nil || s.isFlat() {
 		return ctx
 	}
 	projectDir := s.knownAgentProjectDir(id, projectID, projectPathHint)

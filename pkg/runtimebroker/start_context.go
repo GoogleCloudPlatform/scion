@@ -369,7 +369,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
 	}
-	if gcpIdentityProfile == "" && in.Operation != opCreate {
+	if gcpIdentityProfile == "" && in.Operation != opCreate && !s.isFlat() {
 		gcpIdentityProfile = agent.GetSavedProfile(in.Name, in.ProjectPath)
 	}
 	mgr, dispatchRuntimeType := s.resolveManagerForOpts(api.StartOptions{

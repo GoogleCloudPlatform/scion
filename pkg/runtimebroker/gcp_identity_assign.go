@@ -62,6 +62,10 @@ func (s *Server) resolveDispatchProfileSelection(opts api.StartOptions) dispatch
 // resolveDispatchProfileSelectionWithError is resolveDispatchProfileSelection
 // returning the project settings load error instead of logging it.
 func (s *Server) resolveDispatchProfileSelectionWithError(opts api.StartOptions) (dispatchProfileSelection, error) {
+	// A flat instance selects no profile and no settings runtime entry.
+	if s.isFlat() {
+		return dispatchProfileSelection{}, nil
+	}
 	if _, forced := s.forcedRuntime(); forced {
 		return dispatchProfileSelection{RuntimeEntryName: s.config.ForceRuntime}, nil
 	}

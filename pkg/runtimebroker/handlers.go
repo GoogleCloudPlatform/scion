@@ -707,6 +707,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Flat Runtime Broker target checks (target required, mismatch,
+	// explicit profile) run after decode and validation and before
+	// beginCreateAttempt, so a refusal has no side effect.
+	if refusal := s.createRuntimeTargetRefusal(&req); refusal != nil {
+		span.SetStatus(codes.Error, refusal.code)
+		refusal.write(w)
+		return
+	}
+
 	agentKey := req.ID
 	if agentKey == "" {
 		agentKey = req.Name
@@ -2236,11 +2245,29 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// HubAgentDefaults carries the hub defaults a start applies at its
 		// lowest tier (today the auto-expose default, for buildAgentEnv).
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// ExpectedRuntimeTargetID is the agent's pinned runtime target
+		// (flat Runtime Brokers; see CreateAgentRequest).
+		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&startReq); err != nil {
+			// A flat instance must not read an undecodable body as "no
+			// expectedRuntimeTargetId". Unknown keys still decode.
+			if s.isFlat() {
+				span.SetStatus(codes.Error, "invalid start request body")
+				BadRequest(w, "Invalid request body: "+err.Error())
+				return
+			}
 			s.agentLifecycleLog.Debug("No task in start request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
+	}
+	// The expected runtime target is checked before beginSyncStart and any
+	// runtime call. A start without it is accepted: it can only use the
+	// server's own target.
+	if refusal := s.expectedTargetRefusal(startReq.ExpectedRuntimeTargetID, false); refusal != nil {
+		span.SetStatus(codes.Error, refusal.code)
+		refusal.write(w)
+		return
 	}
 	// Inject skill resolver from Hub connection for skill provisioning, same
 	// as createAgent (#1960). ProjectID comes from the URL-scoped function
@@ -2385,7 +2412,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// Kubernetes only at this later point. This runs before any side effect
 	// below (applyInlineConfigUpdate's scion-agent.json write), so a
 	// rejection here does not leave a partial update applied.
-	if opts.ProjectPath != "" {
+	if opts.ProjectPath != "" && !s.isFlat() {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
@@ -2862,11 +2889,22 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		TemplateName string `json:"templateName,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+		// ExpectedRuntimeTargetID mirrors the same field on the start path.
+		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
 	}
 	if r.Body != nil && r.ContentLength != 0 {
 		if err := json.NewDecoder(r.Body).Decode(&restartReq); err != nil {
+			if s.isFlat() {
+				BadRequest(w, "Invalid request body: "+err.Error())
+				return
+			}
 			s.agentLifecycleLog.Debug("No resolvedEnv in restart request body (ignoring decode error)", "agent_id", id, "error", err)
 		}
+	}
+	// Checked before the stop leg and any runtime call, as on start.
+	if refusal := s.expectedTargetRefusal(restartReq.ExpectedRuntimeTargetID, false); refusal != nil {
+		refusal.write(w)
+		return
 	}
 
 	// Inject skill resolver from Hub connection for skill provisioning, same
@@ -2955,7 +2993,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 	opts := sc.Opts
 
-	if opts.ProjectPath != "" {
+	if opts.ProjectPath != "" && !s.isFlat() {
 		opts.Profile = agent.GetSavedProfile(id, opts.ProjectPath)
 	}
 
@@ -4880,6 +4918,9 @@ func (s *Server) resolveRuntimeForAgent(ctx context.Context, id, projectID strin
 // promised — it only turns a would-be preflight message into a later
 // runtime-error message instead.
 func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
+	if s.isFlat() {
+		return s.runtime.Name()
+	}
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
 			return s.runtime.Name()
@@ -4934,6 +4975,11 @@ func (s *Server) resolveRuntimeNameForOpts(opts api.StartOptions) string {
 // is used. This ensures the broker respects the project's configured runtime
 // even when no explicit --profile flag is passed.
 func (s *Server) resolveManagerForOpts(opts api.StartOptions) (agent.Manager, string) {
+	// A flat instance serves exactly one runtime target: it never consults
+	// the saved agent profile or the settings active_profile.
+	if s.isFlat() {
+		return s.manager, s.runtime.Name()
+	}
 	if s.config.ForceRuntime != "" {
 		if s.config.ForceRuntime == s.runtime.Name() {
 			// A ForceRuntime naming the default runtime returns s.manager

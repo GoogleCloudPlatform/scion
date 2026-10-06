@@ -14,7 +14,11 @@
 
 package store
 
-import "errors"
+import (
+	"context"
+	"errors"
+	"strings"
+)
 
 // Flat Runtime Broker placement (.design/flat-runtime-brokers-contract.md
 // sections 7 and 8).
@@ -78,4 +82,34 @@ func (a *Agent) Placement() PinnedPlacement {
 // IsFlat reports whether the Runtime Broker row stores a runtime target.
 func (b *RuntimeBroker) IsFlat() bool {
 	return b != nil && b.RuntimeTarget != nil && b.RuntimeTarget.ID != ""
+}
+
+// RuntimeBrokerNameConflict returns a Runtime Broker row, other than
+// excludeID, whose name equals name case-insensitively or whose slug equals
+// slug exactly (the flat contract's name/slug comparison). With flatOnly, only
+// rows that store a runtime target are candidates. It returns nil when there
+// is no such row. It is a read-only scan used by the creation-time
+// collision checks; existing rows may already share names, so it is not a
+// uniqueness guarantee.
+func RuntimeBrokerNameConflict(ctx context.Context, s RuntimeBrokerStore, name, slug, excludeID string, flatOnly bool) (*RuntimeBroker, error) {
+	cursor := ""
+	for {
+		page, err := s.ListRuntimeBrokers(ctx, RuntimeBrokerFilter{}, ListOptions{Limit: 200, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		for i := range page.Items {
+			b := &page.Items[i]
+			if b.ID == excludeID || (flatOnly && !b.IsFlat()) {
+				continue
+			}
+			if (name != "" && strings.EqualFold(b.Name, name)) || (slug != "" && b.Slug == slug) {
+				return b, nil
+			}
+		}
+		if page.NextCursor == "" || len(page.Items) == 0 {
+			return nil, nil
+		}
+		cursor = page.NextCursor
+	}
 }

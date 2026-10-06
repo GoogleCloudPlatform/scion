@@ -30,9 +30,8 @@ import (
 
 // Frozen group F tests of the flat Runtime Broker contract for the embedded
 // legacy registration (.design/flat-runtime-brokers-contract.md section 6,
-// R4 and the writer table). Skipped until P1.2 (ptone/scion#3268); P1.2
-// removes pendingFlatDispatch and the assertions must pass unchanged.
-const pendingFlatDispatch = "pending ptone/scion#3268: flat dispatch not wired yet"
+// R4 and the writer table). Wired by P1.2 (ptone/scion#3268); the
+// assertions are unchanged.
 
 func createFlatRuntimeBrokerRow(t *testing.T, s store.Store, id, name, slug string) *store.RuntimeBroker {
 	t.Helper()
@@ -67,7 +66,6 @@ func assertFlatRowUntouched(t *testing.T, s store.Store, before *store.RuntimeBr
 }
 
 func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Embedded(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	s := newTestStore(t)
 	flat := createFlatRuntimeBrokerRow(t, s, tid("flat-broker"), "test-broker", "test-broker")
@@ -103,7 +101,6 @@ func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Embedded(t *testing.
 }
 
 func TestLegacyEmbeddedRegistration_SkipsFlatRowByName(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	ctx := context.Background()
 	s := newTestStore(t)
 	// The flat row is created first, so a plain first-match name lookup

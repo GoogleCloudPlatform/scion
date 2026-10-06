@@ -230,6 +230,13 @@ type CreateAgentRequest struct {
 	HubEndpoint string             `json:"hubEndpoint,omitempty"`
 	AgentToken  string             `json:"agentToken,omitempty"`
 
+	// ExpectedRuntimeTargetID is the runtime target the Hub pinned the agent
+	// to (.design/flat-runtime-brokers-contract.md section 9). A flat
+	// Runtime Broker instance requires it and refuses a different value; a
+	// legacy Runtime Broker refuses any non-empty value. Checked before any
+	// side effect.
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+
 	// ResolvedEnv contains the fully merged environment variables and secrets
 	// from all applicable scopes (user, project, runtime broker). These are resolved
 	// by the Hub before dispatching the agent creation request.

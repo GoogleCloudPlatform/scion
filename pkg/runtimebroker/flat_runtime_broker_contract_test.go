@@ -27,16 +27,16 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // Frozen group F tests of the flat Runtime Broker contract, Runtime Broker
-// half (.design/flat-runtime-brokers-contract.md section 15). Every test is
-// skipped until P1.2 (ptone/scion#3268) wires flat dispatch. P1.2 removes
-// pendingFlatDispatch and may change only the body of the arrange helper
-// newFlatInstanceTestServer; assertions and act steps must pass unchanged.
-const pendingFlatDispatch = "pending ptone/scion#3268: flat dispatch not wired yet"
+// half (.design/flat-runtime-brokers-contract.md section 15). P1.2
+// (ptone/scion#3268) wired flat dispatch and changed only the body of the
+// arrange helper newFlatInstanceTestServer; assertions and act steps are
+// unchanged.
 
 const (
 	flatInstanceKey  = "local-docker"
@@ -148,12 +148,29 @@ func newFlatInstanceTestServer(t *testing.T, opts flatInstanceOpts) *flatInstanc
 	}
 	_ = config.CheckRuntimeBrokerInstanceHosting(instances, opts.hubInProcess)
 
-	// P1.2 completes this helper: it constructs the flat instance from
-	// instances[0] and id, keeps ForceRuntime cleared, and, for a co-located
-	// instance (hubInProcess), installs the embedded registration's in-memory
-	// Hub credentials for id.RuntimeBrokerID (so a Hub connection exists),
-	// never the legacy multi-store or broker-credentials.json.
-	t.Fatalf("newFlatInstanceTestServer: P1.2 (ptone/scion#3268) wires the flat instance into the Runtime Broker server")
+	// Construct the flat instance from instances[0] and id, with
+	// ForceRuntime cleared. A co-located instance (hubInProcess) gets the
+	// embedded registration's in-memory Hub credentials for
+	// id.RuntimeBrokerID, never the legacy multi-store or
+	// broker-credentials.json. The Hub endpoint is a closed local port, so
+	// no connection attempt leaves the host.
+	cfg := srv.config
+	cfg.ForceRuntime = ""
+	cfg.BrokerID = id.RuntimeBrokerID
+	cfg.BrokerName = instances[0].Name
+	cfg.HubEnabled = true
+	cfg.HubEndpoint = "http://127.0.0.1:1"
+	// The tests drive Handler() directly without HMAC-signed requests.
+	cfg.BrokerAuthStrictMode = false
+	cfg.FlatInstance = &FlatInstanceConfig{Identity: id, Instance: instances[0], HubInProcess: opts.hubInProcess}
+	if opts.hubInProcess {
+		cfg.InMemoryCredentials = &brokercredentials.BrokerCredentials{
+			BrokerID:    id.RuntimeBrokerID,
+			SecretKey:   "c2VjcmV0",
+			HubEndpoint: cfg.HubEndpoint,
+		}
+	}
+	srv = New(cfg, mgr, srv.runtime)
 	return &flatInstanceFixture{srv: srv, mgr: mgr, identity: id, instances: instances, globalDir: globalDir}
 }
 
@@ -253,7 +270,6 @@ func expectNoCreateSideEffects(t *testing.T, f *flatInstanceFixture, requestID s
 }
 
 func TestFlatInstanceCreate_ExpectedTargetMismatchBeforeAttempt(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	const reqID = "req-flat-mismatch"
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents",
@@ -272,7 +288,6 @@ func TestFlatInstanceCreate_ExpectedTargetMismatchBeforeAttempt(t *testing.T) {
 }
 
 func TestFlatInstanceCreate_MissingExpectedTargetRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	const reqID = "req-flat-missing"
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody(reqID, "flat-agent", nil))
@@ -287,7 +302,6 @@ func TestFlatInstanceCreate_MissingExpectedTargetRejected(t *testing.T) {
 }
 
 func TestFlatInstanceCreate_NonEmptyProfileRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	const reqID = "req-flat-profile"
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody(reqID, "flat-agent", map[string]interface{}{
@@ -302,7 +316,6 @@ func TestFlatInstanceCreate_NonEmptyProfileRejected(t *testing.T) {
 }
 
 func TestFlatInstanceCreate_CheckPrecedence(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	profile := map[string]interface{}{"profile": "local"}
 	cases := []struct {
@@ -328,7 +341,6 @@ func TestFlatInstanceCreate_CheckPrecedence(t *testing.T) {
 }
 
 func TestFlatInstanceCreate_EmptyProfileIgnoresSettingsActiveProfile(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	// The settings active_profile names a Kubernetes runtime; the flat
 	// instance never consults it and uses its single Docker target.
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, activeProfile: "batch"})
@@ -348,7 +360,6 @@ func TestFlatInstanceCreate_EmptyProfileIgnoresSettingsActiveProfile(t *testing.
 }
 
 func TestFlatInstanceStart_ExpectedTargetMismatchRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start", `{"expectedRuntimeTargetId":"another-target"}`)
 	e := expectFlatRefusal(t, w, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
@@ -361,7 +372,6 @@ func TestFlatInstanceStart_ExpectedTargetMismatchRejected(t *testing.T) {
 }
 
 func TestFlatInstanceStart_UndecodableBodyRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	for _, body := range []string{`{"task": `, `{"expectedRuntimeTargetId": 42}`} {
 		w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start", body)
@@ -379,7 +389,6 @@ func TestFlatInstanceStart_UndecodableBodyRejected(t *testing.T) {
 }
 
 func TestFlatInstanceStart_WithoutExpectedTargetUsesOnlyTarget(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	// The settings active profile names a Kubernetes runtime; the start
 	// still runs on the single target's manager.
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, activeProfile: "batch"})
@@ -395,7 +404,6 @@ func TestFlatInstanceStart_WithoutExpectedTargetUsesOnlyTarget(t *testing.T) {
 }
 
 func TestFlatInstanceStart_IgnoresSavedProfile(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, activeProfile: "batch"})
 	projectDir, err := config.GetResolvedProjectDir("")
 	if err != nil {
@@ -416,7 +424,6 @@ func TestFlatInstanceStart_IgnoresSavedProfile(t *testing.T) {
 }
 
 func TestFlatInstanceStart_MismatchKeepsRunIDFencing(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
 		`{"runId":"run-refused","expectedRuntimeTargetId":"another-target"}`)
@@ -438,7 +445,6 @@ func TestFlatInstanceStart_MismatchKeepsRunIDFencing(t *testing.T) {
 }
 
 func TestFlatInstanceCreate_FromUnawareReplicaRefused(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	// After activation by a capable Hub replica, an unaware replica sends a
 	// create without expectedRuntimeTargetId.
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
@@ -450,7 +456,6 @@ func TestFlatInstanceCreate_FromUnawareReplicaRefused(t *testing.T) {
 }
 
 func TestFlatInstanceServer_RemoteModeNeverActivates(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: false, legacyCredentials: true, instanceCredentials: true})
 	if err := config.CheckRuntimeBrokerInstanceHosting(f.instances, false); err == nil {
 		t.Fatal("remote flat hosting must be refused")
@@ -480,7 +485,6 @@ func TestFlatInstanceServer_RemoteModeNeverActivates(t *testing.T) {
 }
 
 func TestFlatInstanceServer_LoadsNoLegacyCredentials(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, legacyCredentials: true})
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -525,7 +529,6 @@ func TestFlatInstanceServer_LoadsNoLegacyCredentials(t *testing.T) {
 // TestLegacyInstanceCreate_NonEmptyExpectedTargetRejected: a current-binary
 // legacy Runtime Broker never ignores a non-empty expectedRuntimeTargetId.
 func TestLegacyInstanceCreate_NonEmptyExpectedTargetRejected(t *testing.T) {
-	t.Skip(pendingFlatDispatch)
 	srv := newTestServer(t)
 	mgr := srv.manager.(*mockManager)
 	const reqID = "req-legacy-expected-target"
