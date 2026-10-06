@@ -1434,7 +1434,8 @@ func TestDeprecatedRegisterProject_DoesNotAdoptFlatRow(t *testing.T) {
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "deprecated-by-name", Broker: &RegisterProjectBrokerInfo{Name: strings.ToUpper(f.flat.Name)},
 	})
-	requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
+	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
+	requireNameConflictDetails(t, rec, d, f.flat.ID)
 	// A flat row found by ID.
 	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
 		Name: "deprecated-by-id", Broker: &RegisterProjectBrokerInfo{ID: f.flat.ID, Name: "whatever",
@@ -1456,9 +1457,11 @@ func TestAdminPatch_RenameCollidingWithFlatRowRejected(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true})
 	rec := doRequest(t, f.srv, http.MethodPatch, "/api/v1/runtime-brokers/"+f.legacy.ID, map[string]interface{}{"name": f.flat.Name})
-	requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
+	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
+	requireNameConflictDetails(t, rec, d, f.flat.ID)
 	rec = doRequest(t, f.srv, http.MethodPatch, "/api/v1/runtime-brokers/"+f.flat.ID, map[string]interface{}{"name": f.legacy.Name})
-	requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
+	d = requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
+	requireNameConflictDetails(t, rec, d, f.legacy.ID)
 	got, err := f.s.GetRuntimeBroker(context.Background(), f.legacy.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "legacy-broker", got.Name)
