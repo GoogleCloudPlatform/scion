@@ -252,3 +252,46 @@ func TestAddProjectMember_AgentUpperCaseIDStoredCanonical(t *testing.T) {
 	assert.Equal(t, agentID, info.PrincipalID)
 	assert.Len(t, mmrBindingsFor(t, f.store, "agent", agentID, f.projectID), 1)
 }
+
+// Role-binding create on a built-in project role stores an upper-case
+// UUID spelling under its canonical lower-case ID.
+func TestCreateRoleBinding_BuiltInRoleUpperCaseIDStoredCanonical(t *testing.T) {
+	f := setupMMRFixture(t)
+
+	user := pcvSeedUser(t, f.store, t.Name()+"-user")
+	agentID := tid(t.Name() + "-agent")
+	require.NoError(t, f.store.CreateAgent(context.Background(), &store.Agent{
+		ID: agentID, Slug: agentID, Name: "pcv-rb-agent", ProjectID: f.projectID,
+		Phase: "running", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
+	}))
+
+	for _, tc := range []struct{ principalType, id string }{
+		{"user", user.ID},
+		{"agent", agentID},
+	} {
+		rb := createBindingViaAPI(t, f.srv, createRoleBindingRequest{
+			RoleDefinitionID: f.memberRD.ID,
+			PrincipalType:    tc.principalType,
+			PrincipalID:      strings.ToUpper(tc.id),
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          f.projectID,
+		})
+		assert.Equal(t, tc.id, rb.PrincipalID, tc.principalType)
+		assert.Len(t, mmrBindingsFor(t, f.store, tc.principalType, tc.id, f.projectID), 1, tc.principalType)
+	}
+}
+
+// Members POST answers a malformed agent ID with the principal-address
+// message, also when the requested role is the owner role.
+func TestAddProjectMember_OwnerRoleMalformedAgentIDAddressMessage(t *testing.T) {
+	f := setupMMRFixture(t)
+
+	for _, bad := range pcvMalformedIDs {
+		rec := pcvPostMember(t, f, "agent", bad, f.ownerRD.ID)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "%q: %s", bad, rec.Body.String())
+		got := pcvError(t, rec)
+		assert.Equal(t, ErrCodeInvalidRequest, got.Code, "%q", bad)
+		assert.Equal(t, "agent principal must be addressed by agent ID: "+bad, got.Message, "%q", bad)
+		assert.Empty(t, mmrBindingsFor(t, f.store, "agent", bad, f.projectID), "%q", bad)
+	}
+}
