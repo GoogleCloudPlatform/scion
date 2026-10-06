@@ -1181,11 +1181,61 @@ func TestFlatFinalizeEnv_SendsExpectedTarget(t *testing.T) {
 	assert.Equal(t, f.flat.RuntimeTarget.ID, jsonField(t, f.client.lastCreateReq, "expectedRuntimeTargetId"))
 }
 
-func TestFlatReincarnate_MoveStillNotImplemented(t *testing.T) {
-	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	a := f.pinnedAgent(t, "move", string(state.PhaseRunning))
-	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/reincarnate", ReincarnateAgentRequest{TargetBroker: f.legacy.ID})
-	requireAPIError(t, rec, http.StatusNotImplemented, ErrCodeNotImplemented)
+// TestFlatReincarnate_MoveRefusedBeforeMoveWork: with real moves, a
+// non-dry-run move of a pinned agent off its flat Runtime Broker gets 409
+// runtime_target_move_unsupported (verdict: runtime_target failed, the rest
+// not evaluated) before any move work. The move is otherwise fully
+// eligible (the move fixture), so only the runtime_target check stands
+// between the request and the claim: no reincarnation or move record, no
+// worker, no stop or other dispatch, and the agent row (runtime_broker_id,
+// pin, state_version) unchanged.
+func TestFlatReincarnate_MoveRefusedBeforeMoveWork(t *testing.T) {
+	ctx := context.Background()
+	f := setupMoveFixture(t, true, nil)
+	// The flat source mirrors the fixture's source (same export, move
+	// capability, online), so every other check would pass.
+	target := &api.RuntimeTargetDescriptor{ID: tid("move-flat-target-" + t.Name()), Type: "docker", DisplayName: "Local Docker"}
+	src := &store.RuntimeBroker{
+		ID:               tid("move-flat-src-" + t.Name()),
+		Name:             "move-flat-src",
+		Slug:             "move-flat-src-" + tidSlugSafe(t.Name()),
+		Status:           store.BrokerStatusOnline,
+		Capabilities:     &store.BrokerCapabilities{Reprovision: true, AgentMove: true},
+		WorkspaceStorage: moveFixtureStorage(),
+		RuntimeTarget:    target,
+	}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, src))
+	require.True(t, src.IsFlat(), "the source is a flat Runtime Broker")
+	require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: f.project.ID, BrokerID: src.ID, BrokerName: src.Name, Status: store.BrokerStatusOnline,
+	}))
+	pin := store.PinnedPlacement{RuntimeBrokerID: src.ID, RuntimeTargetID: target.ID, RuntimeTargetType: target.Type}
+	pinned, err := f.s.SetAgentPinnedRuntimeTarget(ctx, f.agent.ID, store.PinnedPlacement{RuntimeBrokerID: f.src.ID}, pin)
+	require.NoError(t, err)
+	require.True(t, pinned.IsPinned())
+	f.agent = pinned
+	agents := f.agentCount(t)
+
+	rec := f.reincarnate(t, ReincarnateAgentRequest{Handoff: "moving on", TargetBroker: f.dst.ID})
+	code, _, verdict := decodeMoveRefusal(t, rec)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Equal(t, ErrCodeRuntimeTargetMoveUnsupported, code)
+	require.NotEmpty(t, verdict.Checks)
+	assert.Equal(t, moveCheckRuntimeTarget, verdict.Checks[0].Name)
+	assert.Equal(t, MoveCheckFailed, verdict.Checks[0].Result)
+	for _, c := range verdict.Checks[1:] {
+		assert.Equal(t, MoveCheckNotEvaluated, c.Result, "check %s", c.Name)
+	}
+
+	f.assertNoMoveSideEffects(t, agents)
+	after, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, src.ID, after.RuntimeBrokerID)
+	assert.Equal(t, pin, store.PinnedPlacement{RuntimeBrokerID: after.PinnedRuntimeBrokerID, RuntimeTargetID: after.PinnedRuntimeTargetID, RuntimeTargetType: after.PinnedRuntimeTargetType}, "the pin is unchanged")
+	provisions, deletes, starts := f.disp.moveSnapshot()
+	assert.Empty(t, provisions, "no move provision")
+	assert.Empty(t, deletes, "no source cleanup")
+	assert.Empty(t, starts, "no start on any broker")
 }
 
 func TestFlatReincarnate_MoveDryRunReportsPinnedIneligible(t *testing.T) {
