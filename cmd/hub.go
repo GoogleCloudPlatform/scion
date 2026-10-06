@@ -1564,12 +1564,12 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	gitURL, ok := util.CutQueryAndFragment(args[0])
 	if !ok {
 		// A '?' or '#' inside the userinfo; do not echo the URL.
-		return fmt.Errorf("invalid git URL: remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)")
+		return newUsageError("invalid git URL: remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)")
 	}
 
 	// Validate URL format. The URL is not echoed: it may carry credentials.
 	if !util.IsGitURL(gitURL) {
-		return fmt.Errorf("invalid git URL\n\nAccepted formats:\n  https://github.com/org/repo.git\n  git@github.com:org/repo.git\n  ssh://git@github.com/org/repo")
+		return newUsageError("invalid git URL\n\nAccepted formats:\n  https://github.com/org/repo.git\n  git@github.com:org/repo.git\n  ssh://git@github.com/org/repo")
 	}
 
 	normalized := util.NormalizeGitRemote(gitURL)
@@ -1577,7 +1577,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		// NormalizeGitRemote drops ordinary userinfo; an '@' left over means a
 		// password or an extra '@' in scp form. The hub refuses it too, so do
 		// not send it (and do not echo the URL).
-		return fmt.Errorf("invalid git URL: remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)")
+		return newUsageError("invalid git URL: remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)")
 	}
 
 	// Display name
@@ -1603,6 +1603,10 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	// Detect default branch
 	defaultBranch := hubProjectCreateBranch
 	if defaultBranch == "" {
+		// Probe over HTTPS, the same URL the clone-url label records below:
+		// an HTTPS ls-remote cannot hit an SSH host-key or passphrase prompt
+		// (HTTPS credential prompts are still possible; ptone/scion#3411),
+		// and a failed probe only falls back to "main".
 		cloneURL := util.ToHTTPSCloneURL(gitURL)
 		defaultBranch = detectDefaultBranch(cloneURL)
 		if defaultBranch == "" {
@@ -1675,7 +1679,17 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create project on the hub (server assigns ID)
+	// Create project on the hub (server assigns ID).
+	//
+	// The clone-url label is always https, whatever scheme the remote uses
+	// (ptone/scion#2862). Agents and shared-workspace init clone from it
+	// with the hub/broker token, and token auth only works over HTTPS:
+	// util.authenticatedCloneURL injects the token only for https URLs, and
+	// the broker's git credential helper supplies GITHUB_TOKEN for HTTP(S)
+	// clones only (see hubCloneTransportNote). An ssh:// or git:// label
+	// would clone without credentials, or stall on an SSH host-key prompt.
+	// This matches the other writers of the label: the web create form and
+	// pkg/hub/project_clone.go.
 	project, err := client.Projects().Create(ctx, &hubclient.CreateProjectRequest{
 		Name:          displayName,
 		Slug:          slug,
@@ -1722,10 +1736,10 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 // Hub to validate (e.g. worktree-per-agent without git is a 400).
 func runHubProjectCreateHubManaged() error {
 	if strings.TrimSpace(hubProjectCreateName) == "" {
-		return fmt.Errorf("--name is required when creating a project without a git URL")
+		return newUsageError("--name is required when creating a project without a git URL")
 	}
 	if hubProjectCreateBranch != "" {
-		return fmt.Errorf("--branch requires a git URL; hub-managed projects have no git branch")
+		return newUsageError("--branch requires a git URL; hub-managed projects have no git branch")
 	}
 
 	displayName := strings.TrimSpace(hubProjectCreateName)
@@ -2064,7 +2078,7 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 func runHubBrokersDelete(cmd *cobra.Command, args []string) error {
 	// Broker name is required for delete
 	if len(args) == 0 {
-		return fmt.Errorf("broker name or ID is required.\n\nUsage: scion hub brokers delete <broker-name>")
+		return newUsageError("broker name or ID is required.\n\nUsage: scion hub brokers delete <broker-name>")
 	}
 
 	brokerNameOrID := args[0]

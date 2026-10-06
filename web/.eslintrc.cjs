@@ -92,6 +92,7 @@ module.exports = {
                 'e2e/chat-palette/palette-button.pw.ts',
                 'e2e/chat-palette/playwright.config.ts',
                 'e2e/chat-palette/reopen-race.pw.ts',
+                'e2e/chat-palette/shortcut-then-enter.pw.ts',
                 'e2e/chat-palette/terminal-and-modal.pw.ts',
                 'e2e/chat-palette/terminal-guard-under-shell.pw.ts',
                 'e2e/chat-palette/thread-navigation.pw.ts',
