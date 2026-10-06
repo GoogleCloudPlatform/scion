@@ -1248,13 +1248,9 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		BadRequest(w, "principalId is required")
 		return
 	}
-	// Same principal-address check as members PUT: a user must be an email
-	// or a well-formed user ID, an agent a well-formed agent ID
-	// (ptone/scion#3478). The canonical spelling is stored.
-	var ok bool
-	if req.PrincipalID, ok = validateMemberPrincipalAddress(w, req.PrincipalType, req.PrincipalID); !ok {
-		return
-	}
+	// requestedPrincipalID is the principal ID as the request sent it; the
+	// principal-address check below runs on it once permissions are decided.
+	requestedPrincipalID := req.PrincipalID
 
 	// Resolve email to UUID for user principals (mirrors addGroupMember pattern).
 	if req.PrincipalType == store.RoleBindingPrincipalUser && strings.Contains(req.PrincipalID, "@") {
@@ -1433,6 +1429,19 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			writeForbiddenStructured(w, "cannot create binding: "+decision.Reason, "role_binding", Action("create"))
 			return
 		}
+	}
+
+	// Same principal-address check as members PUT: a user must be an email
+	// or a well-formed user ID, an agent a well-formed agent ID
+	// (ptone/scion#3478). The canonical spelling is stored. Built-in
+	// project roles get the same check from the membership service above.
+	principalID, ok := validateMemberPrincipalAddress(w, req.PrincipalType, requestedPrincipalID)
+	if !ok {
+		return
+	}
+	if req.PrincipalID == requestedPrincipalID {
+		// Not replaced by email or group resolution above.
+		req.PrincipalID = principalID
 	}
 
 	rb := &store.RoleBinding{

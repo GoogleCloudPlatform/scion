@@ -405,6 +405,7 @@ func TestRolesAPI_CreateRoleBinding_InvalidScopeType(t *testing.T) {
 		ScopeType:        "invalid",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "scopeType must be")
 }
 
 func TestRolesAPI_CreateRoleBinding_SuperAdmin_Blocked(t *testing.T) {

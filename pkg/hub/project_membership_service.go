@@ -805,6 +805,21 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		}
 	}
 
+	// Principal address: a user must be an email or a well-formed user ID,
+	// an agent a well-formed agent ID, as on members PUT
+	// (ptone/scion#3478). Checked once the actor is authorized; the
+	// canonical spelling is stored.
+	principalID, ok := canonicalMemberPrincipalID(req.PrincipalType, req.PrincipalID)
+	if !ok {
+		return nil, &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeInvalidRequest,
+			Reason:     memberPrincipalAddressMessage(req.PrincipalType, req.PrincipalID),
+			HTTPStatus: 400,
+		}
+	}
+	req.PrincipalID = principalID
+
 	// Project members groups cannot be granted roles. Checked after the
 	// actor is authorized (so the refusal is only visible to callers who may
 	// manage this project) and before the transaction: the marker

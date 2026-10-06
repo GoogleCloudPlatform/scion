@@ -32,7 +32,8 @@ import (
 // Principal-ID format checks on the create paths (ptone/scion#3478):
 // POST /api/v1/admin/role-bindings and POST /api/v1/projects/{id}/members
 // apply the same principal-address check as the members PUT, so a
-// malformed user or agent ID gets the same 400 (code and message) there.
+// malformed user or agent ID gets the same 400 (code and message) there,
+// once the caller's permissions are decided.
 
 // pcvMalformedIDs are user/agent principal IDs that are neither an email
 // nor a well-formed UUID.
@@ -80,24 +81,83 @@ func pcvSeedUser(t *testing.T, s store.Store, name string) *store.User {
 
 func TestCreateRoleBinding_MalformedPrincipalIDMatchesMembersPut(t *testing.T) {
 	f := setupMMRFixture(t)
-	role := pcvSystemRole(t, f)
+	systemRole := pcvSystemRole(t, f)
+
+	cases := []struct {
+		name          string
+		principalType string
+		roleID        string
+		scopeType     string
+		scopeID       string
+	}{
+		{"user/system role", "user", systemRole.ID, store.RoleScopeSystem, ""},
+		{"user/custom project role", "user", f.withinCeiling.ID, store.RoleScopeProject, f.projectID},
+		{"agent/custom project role", "agent", f.withinCeiling.ID, store.RoleScopeProject, f.projectID},
+		{"user/built-in project role", "user", f.memberRD.ID, store.RoleScopeProject, f.projectID},
+		{"agent/built-in project role", "agent", f.memberRD.ID, store.RoleScopeProject, f.projectID},
+	}
+	for _, tc := range cases {
+		for _, bad := range pcvMalformedIDs {
+			want := pcvPutError(t, f, tc.principalType, bad)
+
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+				RoleDefinitionID: tc.roleID,
+				PrincipalType:    tc.principalType,
+				PrincipalID:      bad,
+				ScopeType:        tc.scopeType,
+				ScopeID:          tc.scopeID,
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, "%s %q: %s", tc.name, bad, rec.Body.String())
+			got := pcvError(t, rec)
+			assert.Equal(t, ErrCodeInvalidRequest, got.Code, "%s %q", tc.name, bad)
+			assert.Equal(t, want.Code, got.Code, "%s %q: same code as members PUT", tc.name, bad)
+			assert.Equal(t, want.Message, got.Message, "%s %q: same message as members PUT", tc.name, bad)
+			if tc.scopeType == store.RoleScopeProject {
+				assert.Empty(t, mmrBindingsFor(t, f.store, tc.principalType, bad, f.projectID), "%s %q", tc.name, bad)
+			}
+		}
+	}
+}
+
+// A caller who may not create the binding gets 403 for a malformed principal
+// ID too: role-binding create decides permissions before checking the
+// principal ID, as members PUT does.
+func TestCreateRoleBinding_BuiltInRoleWithoutRightsMalformedPrincipalIDForbidden(t *testing.T) {
+	f := setupMMRFixture(t)
 
 	for _, principalType := range []string{"user", "agent"} {
 		for _, bad := range pcvMalformedIDs {
-			want := pcvPutError(t, f, principalType, bad)
-
-			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
-				RoleDefinitionID: role.ID,
+			rec := doRequestAsUser(t, f.srv, f.member, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+				RoleDefinitionID: f.memberRD.ID,
 				PrincipalType:    principalType,
 				PrincipalID:      bad,
-				ScopeType:        store.RoleScopeSystem,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          f.projectID,
 			})
-			require.Equal(t, http.StatusBadRequest, rec.Code, "%s %q: %s", principalType, bad, rec.Body.String())
-			got := pcvError(t, rec)
-			assert.Equal(t, ErrCodeInvalidRequest, got.Code, "%s %q", principalType, bad)
-			assert.Equal(t, want.Code, got.Code, "%s %q: same code as members PUT", principalType, bad)
-			assert.Equal(t, want.Message, got.Message, "%s %q: same message as members PUT", principalType, bad)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s %q: %s", principalType, bad, rec.Body.String())
 		}
+	}
+}
+
+func TestCreateRoleBinding_CustomRoleWithoutRightsMalformedPrincipalIDForbidden(t *testing.T) {
+	srv, st := testServer(t)
+
+	// Holds role_binding.create, but not every permission of the role.
+	caller := setupNonAdminUser(t, st, []string{"role_binding.create", "role_binding.read", "agent.read"})
+	role := createRoleViaAPI(t, srv, createRoleDefinitionRequest{
+		Name:        "pcv-unheld-" + tid(t.Name())[:8],
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"agent.read", "user.suspend"},
+	})
+
+	for _, bad := range pcvMalformedIDs {
+		rec := doRequestAsIdentity(t, srv, caller, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+			RoleDefinitionID: role.ID,
+			PrincipalType:    "user",
+			PrincipalID:      bad,
+			ScopeType:        store.RoleScopeSystem,
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%q: %s", bad, rec.Body.String())
 	}
 }
 
@@ -174,4 +234,21 @@ func TestAddProjectMember_WellFormedAndEmailPrincipalsAccepted(t *testing.T) {
 	rec := pcvPostMember(t, f, "user", "nobody-pcv@test.com", f.memberRD.ID)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "user not found with email: nobody-pcv@test.com", pcvError(t, rec).Message)
+}
+
+func TestAddProjectMember_AgentUpperCaseIDStoredCanonical(t *testing.T) {
+	f := setupMMRFixture(t)
+
+	agentID := tid(t.Name() + "-agent")
+	require.NoError(t, f.store.CreateAgent(context.Background(), &store.Agent{
+		ID: agentID, Slug: agentID, Name: "pcv-agent", ProjectID: f.projectID,
+		Phase: "running", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
+	}))
+
+	rec := pcvPostMember(t, f, "agent", strings.ToUpper(agentID), f.memberRD.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var info projectMemberInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &info), rec.Body.String())
+	assert.Equal(t, agentID, info.PrincipalID)
+	assert.Len(t, mmrBindingsFor(t, f.store, "agent", agentID, f.projectID), 1)
 }
