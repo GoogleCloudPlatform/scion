@@ -82,6 +82,10 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// Reincarnation stops and restarts the container in place; the agent
 	// is meant to keep running throughout.
 	"Server.runReincarnationWorker": {kind: intentUnchanged},
+	// Removes a run that landed after its agent was deleted or a delete
+	// claimed it: the row is gone, or the delete engine records the stopped
+	// intent itself (ptone/scion#3055).
+	"HTTPAgentDispatcher.compensateLandedRun": {kind: intentUnchanged},
 }
 
 // funcDeclKey names a function declaration as Recv.Name, or Name for a
