@@ -62,17 +62,35 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			BadRequest(w, httpMessage)
 			return
 		}
+		// Likewise a broker with no bucket for the upload refuses here with
+		// the synchronous path's 422, before accepting a launch that could
+		// only fail (ptone/scion#3422).
+		if s.workspaceStorageBucket(req) == "" {
+			span.SetStatus(codes.Error, errWorkspaceStorageUnconfigured.Error())
+			markAttemptFailed(http.StatusUnprocessableEntity, "storage bucket not configured")
+			writeWorkspaceStorageUnconfigured(w)
+			return
+		}
 	}
 
 	if err := mgr.Preflight(ctx, opts); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+			// Names the resource without err's own text, which can carry
+			// broker paths (ptone/scion#3113); the full error is logged.
+			s.agentLifecycleLog.Warn("Agent create failed: preflight: template or harness-config not found",
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 			return
 		}
 		markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
-		RuntimeError(w, "Failed to create agent: "+err.Error())
+		// Fixed text, as the synchronous create gives for a Manager.Start
+		// failure (ptone/scion#3113): the raw error can carry runtime
+		// detail. The full error reaches only the broker log.
+		s.agentLifecycleLog.Error("Agent create failed: preflight",
+			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+		RuntimeError(w, runtimeOpError(opCreateAgent, err).Error())
 		return
 	}
 

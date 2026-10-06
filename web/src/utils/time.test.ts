@@ -37,6 +37,8 @@ import {
   getPreferredTimeZone,
   effectiveTimeZone,
   zoneLabel,
+  dayBucketZoneLabel,
+  dayBucketAxisTitle,
   DISPLAY_TIMEZONE_CHANGED_EVENT,
   formatInstant,
   formatInstantWithZone,
@@ -386,6 +388,30 @@ describe('effective-zone store', () => {
         window.removeEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, handler);
       }
     });
+  });
+});
+
+describe('dayBucketZoneLabel / dayBucketAxisTitle (ptone/scion#3370)', () => {
+  it('names the zone the hub reports', () => {
+    expect(dayBucketZoneLabel('America/Chicago')).toBe('America/Chicago');
+    expect(dayBucketAxisTitle('America/Chicago')).toBe('Day (America/Chicago)');
+    expect(dayBucketAxisTitle('Asia/Kathmandu')).toBe('Day (Asia/Kathmandu)');
+  });
+
+  it('keeps "(UTC)" for UTC and for a hub that reports no zone', () => {
+    expect(dayBucketAxisTitle('UTC')).toBe('Day (UTC)');
+    expect(dayBucketAxisTitle('')).toBe('Day (UTC)');
+    expect(dayBucketAxisTitle(undefined)).toBe('Day (UTC)');
+    expect(dayBucketAxisTitle(null)).toBe('Day (UTC)');
+  });
+
+  it('ignores the display-zone preference: the label is what the hub bucketed by', () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    try {
+      expect(dayBucketAxisTitle('UTC')).toBe('Day (UTC)');
+    } finally {
+      setPreferredTimeZone('');
+    }
   });
 });
 

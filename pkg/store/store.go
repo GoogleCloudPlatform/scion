@@ -990,6 +990,14 @@ type AgentStatusUpdate struct {
 	// stop dispatched for run X sets it to X, so the stop never marks a
 	// newer run stopped. Internal to the hub — json:"-".
 	IfRunID string `json:"-"`
+	// StartWrite marks a start's own post-dispatch status write. Its delete
+	// guard uses the start-block rule (DeletionHoldsRow) instead of the
+	// lease-aware active rule: a finalizing row holds even with its lease
+	// expired (teardown already ran; only a retry or force moves it on), so
+	// a start that landed after such a delete keeps the delete's phase, as
+	// the hub's deleteWonAfterLanding check answers. A status report
+	// (heartbeat) keeps the lease-aware rule. Internal to the hub — json:"-".
+	StartWrite bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -1688,6 +1696,20 @@ type GroupStore interface {
 	// Used by delegation checks to compute the full authority inherited
 	// through group membership.
 	GetParentGroups(ctx context.Context, groupID string) ([]string, error)
+
+	// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+	// child group of parentGroupID. It returns ErrNotFound when no edge row
+	// was deleted, including when another transaction removed it first.
+	// It refuses project_agents parent groups with ErrInvalidInput, as
+	// RemoveGroupMember does, but unlike RemoveGroupMember it does not bump
+	// the parent group's updated timestamp.
+	RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error
+
+	// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+	// given group as a direct child group (one level only, no ancestors). A
+	// group with a self-edge is included in its own result. The result is
+	// sorted and empty, not ErrNotFound, when there are none.
+	GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error)
 
 	// CountGroupMembersByRole counts how many members of a group have the given role.
 	// Only memberships that still reference a user or an agent are counted;

@@ -379,6 +379,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	} else if isReservedProjectSlug(baseSlug) {
 		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
 		return
+	} else if !requireProjectSlugFormat(w, baseSlug) {
+		return
 	}
 
 	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
@@ -937,14 +939,19 @@ func hubManagedProjectPath(slug string) (string, error) {
 	return localProjectPath(slug)
 }
 
-// validateProjectSlug rejects empty slugs and slugs containing path-traversal
-// characters (/, \, ..) to prevent directory-traversal attacks.
+// validateProjectSlug accepts only slugs that name a single directory directly
+// under a projects root: non-empty, free of path separators, ":" and "..",
+// not ".", and unchanged by path cleaning. The character rules apply the same
+// way on every platform.
 func validateProjectSlug(slug string) error {
 	if slug == "" {
 		return fmt.Errorf("project slug must not be empty")
 	}
-	if strings.Contains(slug, "/") || strings.Contains(slug, "\\") || strings.Contains(slug, "..") {
+	if strings.ContainsAny(slug, "/\\:") || strings.Contains(slug, "..") {
 		return fmt.Errorf("project slug contains invalid characters")
+	}
+	if slug == "." || filepath.Clean(slug) != slug || filepath.Base(slug) != slug {
+		return fmt.Errorf("project slug must name a single directory directly under the projects root")
 	}
 	return nil
 }
@@ -1588,7 +1595,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			matched := embeddedBroker
 			callerUser := GetUserIdentityFromContext(ctx)
 			brokerIdent := GetBrokerIdentityFromContext(ctx)
-			allowed, err := s.authorizedForBrokerOwnerAction(ctx, callerUser, brokerIdent, matched.ID,
+			allowed, err := s.authorizedForBrokerRotate(ctx, callerUser, brokerIdent, matched.ID,
 				func() (*store.RuntimeBroker, error) { return matched, nil })
 			if err != nil {
 				writeErrorFromErr(w, err, "")
@@ -2932,16 +2939,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		project.Name = updates.Name
 	}
 	if updates.Slug != "" {
-		newSlug := api.Slugify(updates.Slug)
-		if newSlug == "" {
-			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
-			return
-		}
-		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
-			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
-			return
-		}
+		newSlug := updates.Slug
 		if newSlug != oldSlug {
+			if isReservedProjectSlug(newSlug) {
+				ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+				return
+			}
+			if !requireProjectSlugFormat(w, newSlug) {
+				return
+			}
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
 				writeErrorFromErr(w, err, "")
@@ -3263,15 +3269,8 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
-			if err := util.RemoveAllSafe(projectPath); err != nil {
-				s.projectsLogger().Warn("failed to remove hub-managed project directory",
-					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
-			}
-		} else {
-			s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
-				"project_id", projectID, "slug", project.Slug, "error", err)
-		}
+		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
+		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
 	}
 	s.webdavLocks.Delete(projectID)
 
@@ -3295,6 +3294,137 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 8: Publish project-deleted event.
 	s.events.PublishProjectDeleted(ctx, projectID)
+}
+
+// removeHubManagedProjectDir removes the hub-managed workspace directory of a
+// deleted project, subject to removeProjectDirUnderProjectsRoot. When the slug
+// does not name a direct child of a projects root, or the directory cannot be
+// resolved, nothing is removed and a warning is logged.
+//
+// It returns the resolved hub-managed path, or "" when the slug fails the slug
+// rule or the path cannot be resolved.
+func (s *Server) removeHubManagedProjectDir(projectID, slug string) string {
+	if err := validateProjectSlug(slug); err != nil {
+		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
+			"project_id", projectID, "error", err)
+		return ""
+	}
+	projectPath, err := s.hubManagedProjectPath(slug)
+	if err != nil {
+		s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
+			"project_id", projectID)
+		return ""
+	}
+	s.removeProjectDirUnderProjectsRoot(projectID, projectPath)
+	return projectPath
+}
+
+// removeProjectDirUnderProjectsRoot removes projectPath only when it is a
+// direct child of one of the projects roots the server resolves hub-managed
+// project directories under. Any other path is left in place and a warning is
+// logged; no other path is tried instead.
+func (s *Server) removeProjectDirUnderProjectsRoot(projectID, projectPath string) {
+	if !isDirectChildOfAny(projectPath, s.hubManagedProjectsRoots()) {
+		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
+			"project_id", projectID)
+		return
+	}
+	if err := util.RemoveAllSafe(projectPath); err != nil {
+		s.projectsLogger().Warn("failed to remove hub-managed project directory",
+			"project_id", projectID, "path", projectPath, "error", err)
+	}
+}
+
+// hubManagedProjectsRoots returns the projects roots that hubManagedProjectPath
+// resolves hub-managed project directories under for the current workspace
+// storage configuration: the local ~/.scion/projects root, which is always a
+// possible result (directly or as a fallback), and the configured backend's
+// hub-projects root, if any.
+func (s *Server) hubManagedProjectsRoots() []string {
+	var roots []string
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		roots = append(roots, filepath.Join(globalDir, "projects"))
+	}
+
+	wsCfg := s.config.WorkspaceStorageConfig
+	if wsCfg == nil {
+		return roots
+	}
+	switch {
+	case wsCfg.Backend == "nfs" && wsCfg.NFS != nil && len(wsCfg.NFS.Shares) > 0:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			roots = append(roots, filepath.Join(mountRoot, "hub-projects"))
+		}
+	case wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := config.SubPathRootOrDefault(wsCfg.CloudRunVolume.SubPathRoot)
+			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
+		}
+	case wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil:
+		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
+			subPathRoot := config.SubPathRootOrDefault(wsCfg.GKESharedVolume.SubPathRoot)
+			roots = append(roots, filepath.Join(mountRoot, subPathRoot, "hub-projects"))
+		}
+	}
+	return roots
+}
+
+// isDirectChildOfAny reports whether target, once cleaned, is a direct child
+// of one of roots: its parent is the cleaned root and it is not the root
+// itself. Only absolute paths qualify: a target that is not absolute never
+// matches, and a root that is empty or not absolute is never matched against.
+func isDirectChildOfAny(target string, roots []string) bool {
+	if !filepath.IsAbs(target) {
+		return false
+	}
+	cleaned := filepath.Clean(target)
+	for _, root := range roots {
+		if root == "" || !filepath.IsAbs(root) {
+			continue
+		}
+		cleanedRoot := filepath.Clean(root)
+		if cleaned != cleanedRoot && filepath.Dir(cleaned) == cleanedRoot {
+			return true
+		}
+	}
+	return false
+}
+
+// removeEmbeddedBrokerProjectDir removes the co-located broker's local
+// project directory, ~/.scion/projects/<slug>, after a project is deleted.
+//
+// The embedded broker shares this process's filesystem and materializes
+// hub-native projects at that path whatever workspace storage backend the hub
+// uses, and the broker cleanup step leaves this directory to the hub. With the
+// default local backend the hub-managed path is that same directory, so it has
+// already been removed (removedPath) and nothing more is done. With a
+// configured backend the hub-managed path may be on the backend mount, and
+// this removes the local directory as well. Only a single direct child of the
+// projects root is removed. An absent directory is not an error.
+func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
+	if s.GetEmbeddedBrokerID() == "" {
+		return
+	}
+	if err := validateProjectSlug(slug); err != nil {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return
+	}
+	projectsRoot := filepath.Join(globalDir, "projects")
+	localPath := filepath.Join(projectsRoot, slug)
+	if filepath.Dir(localPath) != projectsRoot {
+		return
+	}
+	// An empty removedPath means no hub-managed path was removed, so the
+	// local directory is still to be removed.
+	if removedPath != "" && localPath == filepath.Clean(removedPath) {
+		return
+	}
+	if err := util.RemoveAllSafe(localPath); err != nil {
+		s.projectsLogger().Warn("embedded broker project directory removal did not complete")
+	}
 }
 
 // dispatchAgentDeletions dispatches agent deletion to runtime brokers

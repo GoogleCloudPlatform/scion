@@ -3022,12 +3022,13 @@ var errSharedWorkspaceGitPrivilegeDropRequired = errors.New(
 // directly against gitconfigPath under this process's own identity, no
 // Credential override.
 //
-// Independently of all three cases above, gitconfigPath is stat'd (never
-// opened) before every run: a FIFO planted there would make git's own open
-// block forever with no writer, hanging RunInit, and stat — unlike open —
-// never blocks on one. A hung startup is a concrete, self-contained failure
-// mode any of the three cases above can hit, not a symlink-specific
-// privilege question the uid separation above already answers.
+// Independently of which identity case above applies, gitconfigPath is
+// stat'd (never opened) before every run: a FIFO planted there would make
+// git's own open block forever with no writer, hanging RunInit, and stat —
+// unlike open — never blocks on one. A hung startup is a concrete,
+// self-contained failure mode any of those cases can hit, not a
+// symlink-specific privilege question the uid separation above already
+// answers.
 func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivilegeDrop bool) error {
 	log.Info("Configuring git credentials for shared workspace")
 
@@ -3038,6 +3039,17 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		return nil
 	}
 
+	// This switch deliberately follows the supervisor's own privilege-drop
+	// decision (the Credential block in supervisor.Supervisor.Run: drop only
+	// when UID > 0 && GID > 0, refuse with ErrPrivilegeDropRequired when
+	// RequirePrivilegeDrop is set and it cannot drop), because the
+	// harness that later reads this .gitconfig runs under exactly that
+	// identity. A uid>0 with gid==0 in unenforced mode is therefore NOT a
+	// distinct workload: the supervisor skips the drop, the harness runs as
+	// this process (root), and root writing its own credential.helper and
+	// identity here is what lets it push. Skipping the write in that case
+	// would protect nothing and break git for the harness. See
+	// TestConfigureSharedWorkspaceGit_FollowsSupervisorDropDecision.
 	var configureCmd func(cmd *exec.Cmd)
 	switch {
 	case uid > 0 && gid > 0:
@@ -3091,6 +3103,11 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 	return nil
 }
 
+// configureGitCommandGetuid is a test-only seam: production never reassigns
+// it. Tests stub it to 0 to reach configureGitCommand's root-init branch
+// without running as root.
+var configureGitCommandGetuid = os.Getuid
+
 // configureGitCommand points cmd's environment and (when this process is
 // root and uid/gid name someone else) its Credential at the workload
 // identity. It has no opinion on RequirePrivilegeDrop: a caller that needs
@@ -3105,7 +3122,7 @@ func configureGitCommand(cmd *exec.Cmd, uid, gid int) {
 		return
 	}
 
-	currentUID := os.Getuid()
+	currentUID := configureGitCommandGetuid()
 	currentGID := os.Getgid()
 	if currentUID == uid && currentGID == gid {
 		return
