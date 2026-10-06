@@ -802,3 +802,43 @@ func TestRelationshipProjectAccess_MessageRefusalIdentical(t *testing.T) {
 		})
 	}
 }
+
+// TestRelationshipProjectAccess_DecideRefusalIdentical pins that, at an
+// endpoint authorized through Decide (agent PTY attach), a former-member
+// owner/ancestor gets exactly the refusal an unrelated non-member gets, and
+// the relationship reject kind never reaches the response body.
+func TestRelationshipProjectAccess_DecideRefusalIdentical(t *testing.T) {
+	f := newRPAFixture(t, "decidesame")
+	ctx := context.Background()
+	formerID := tid("rpa-decidesame-former")
+	outsiderID := tid("rpa-decidesame-outsider")
+	uatpMember(t, f.store, f.projectID, formerID)
+	f.hubUser(t, outsiderID)
+	agent := uatpAgent(t, f.store, f.projectID, formerID, "decidesame", formerID)
+
+	former, err := f.store.GetUser(ctx, formerID)
+	require.NoError(t, err)
+	outsider, err := f.store.GetUser(ctx, outsiderID)
+	require.NoError(t, err)
+	path := "/api/v1/agents/" + agent.ID + "/pty"
+
+	rec := doRequestAsUser(t, f.srv, former, http.MethodGet, path, nil)
+	requireAuthorizedPTY(t, rec, "precondition: owner with access may attach")
+
+	uatpDeleteProjectBinding(t, f.store, formerID, f.projectID)
+
+	// The former member's own decision is denied at the relationship stage.
+	d := decidePerm(f.srv.authzService, rpaIdentity(rpaInteractive, formerID, f.projectID), agentResource(agent), ActionAttach, "agent.attach", true)
+	require.False(t, d.Allowed)
+	require.Equal(t, RelationshipRejectProjectAccess, relationshipResult(t, d, RelationshipRuleOwner).RejectedBy)
+
+	formerRec := doRequestAsUser(t, f.srv, former, http.MethodGet, path, nil)
+	outsiderRec := doRequestAsUser(t, f.srv, outsider, http.MethodGet, path, nil)
+
+	require.Equal(t, http.StatusForbidden, outsiderRec.Code, "outsider: %s", outsiderRec.Body.String())
+	assert.Equal(t, outsiderRec.Code, formerRec.Code)
+	assert.Equal(t, outsiderRec.Body.String(), formerRec.Body.String(),
+		"the former member's refusal must be identical to an unrelated user's")
+	assert.NotContains(t, formerRec.Body.String(), RelationshipRejectProjectAccess)
+	assert.NotContains(t, formerRec.Body.String(), "relationship grant")
+}
