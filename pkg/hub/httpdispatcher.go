@@ -3594,6 +3594,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 // which counts as success; any other error stops and is returned, and the
 // caller's failure handling applies as for the current-run delete.
 //
+// notAfter is computed once per dispatch (by the engine, or by the
+// executing node for an intent), not per run, so a loop over many previous
+// runs that outlasts it has its later deletes refused as stale even while
+// the engine's lease is still being renewed. That is safe and self-healing:
+// the engine abandons the claim without finalizing, and a retry re-claims
+// with a fresh deadline (runs already deleted are then the broker's 404).
+//
 // The empty-RunID guard is defensive: a stored list implies a run ID
 // (SetAgentRunID always writes one, and a settle to "" clears the list),
 // but a delete with no run ID resolves by name and already covers every

@@ -644,7 +644,8 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	// Fence the dispatch (ptone/scion#2906): the broker refuses it once
 	// past notAfter, after which this claim may have lapsed and the user
 	// started the agent again. A cross-node dispatch carries the claim
-	// instead and gets its deadline where it is sent.
+	// instead and gets its deadline where it is sent. The one deadline
+	// covers the previous-run deletes too (see deletePreviousRuns).
 	now := deleteClock()
 	notAfter := deleteNotAfter(now, e.currentLease())
 	ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: e.plan.claim, notAfter: notAfter})
