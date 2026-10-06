@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -278,4 +279,68 @@ func TestJoinToken_UpsertInvalid(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 	_, err = bs.UpsertJoinToken(context.Background(), &store.BrokerJoinToken{BrokerID: uuid.NewString()})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestJoinToken_Consume(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+	now := time.Now()
+	_, err := bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "consume-hash", ExpiresAt: now.Add(time.Hour), CreatedBy: "u"})
+	require.NoError(t, err)
+
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", uuid.NewString(), now), store.ErrNotFound, "wrong broker")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", "not-a-uuid", now), store.ErrNotFound, "broker ID that is not a UUID")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "unknown-hash", brokerID, now), store.ErrNotFound, "unknown hash")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "", brokerID, now), store.ErrNotFound, "empty hash")
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", brokerID, now.Add(2*time.Hour)), store.ErrNotFound, "expired at the given time")
+
+	_, err = bs.GetJoinToken(ctx, "consume-hash")
+	require.NoError(t, err, "failed consumes leave the token in place")
+
+	require.NoError(t, bs.ConsumeJoinToken(ctx, "consume-hash", brokerID, now))
+	assert.ErrorIs(t, bs.ConsumeJoinToken(ctx, "consume-hash", brokerID, now), store.ErrNotFound, "a token is consumed once")
+	_, err = bs.GetJoinToken(ctx, "consume-hash")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestJoinToken_ConsumeConcurrent: of 16 concurrent consumers of one token,
+// exactly one succeeds and the rest get ErrNotFound. Runs on Postgres too
+// when the enttest Postgres harness is active.
+func TestJoinToken_ConsumeConcurrent(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	const workers, iterations = 16, 20
+
+	for iter := 0; iter < iterations; iter++ {
+		brokerID := uuid.NewString()
+		hash := "concurrent-hash-" + brokerID
+		_, err := bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: hash, ExpiresAt: time.Now().Add(time.Hour), CreatedBy: "u"})
+		require.NoError(t, err)
+
+		var wg sync.WaitGroup
+		results := make(chan error, workers)
+		start := make(chan struct{})
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				results <- bs.ConsumeJoinToken(ctx, hash, brokerID, time.Now())
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		succeeded := 0
+		for err := range results {
+			if err == nil {
+				succeeded++
+				continue
+			}
+			require.ErrorIs(t, err, store.ErrNotFound, "iteration %d", iter)
+		}
+		require.Equal(t, 1, succeeded, "iteration %d: exactly one consumer succeeds", iter)
+	}
 }

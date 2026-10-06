@@ -288,6 +288,36 @@ func upsertJoinToken(ctx context.Context, client *ent.Client, uid uuid.UUID, tok
 	return replaced, nil
 }
 
+// ConsumeJoinToken deletes the join token with tokenHash if it belongs to
+// brokerID and expires after now. The check and the delete are one DELETE
+// statement, so of several concurrent callers only one deletes the row: on
+// Postgres a second DELETE waits on the row lock and then matches nothing,
+// and SQLite serializes writers.
+func (s *BrokerSecretStore) ConsumeJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error {
+	if tokenHash == "" {
+		return store.ErrNotFound
+	}
+	uid, err := parseUUID(brokerID)
+	if err != nil {
+		// No token can belong to a broker ID that is not a UUID.
+		return store.ErrNotFound
+	}
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(
+			brokerjointoken.TokenHashEQ(tokenHash),
+			brokerjointoken.IDEQ(uid),
+			brokerjointoken.ExpiresAtGT(now),
+		).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // GetJoinToken retrieves a join token by token hash.
 func (s *BrokerSecretStore) GetJoinToken(ctx context.Context, tokenHash string) (*store.BrokerJoinToken, error) {
 	t, err := s.client.BrokerJoinToken.Query().

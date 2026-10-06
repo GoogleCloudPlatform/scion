@@ -1836,6 +1836,12 @@ type BrokerSecretStore interface {
 	// whether a token for the broker already existed.
 	UpsertJoinToken(ctx context.Context, token *BrokerJoinToken) (replaced bool, err error)
 
+	// ConsumeJoinToken deletes the join token with the given hash, but only
+	// if it belongs to brokerID and expires after now, in a single
+	// statement. It returns nil when a token was deleted and ErrNotFound
+	// otherwise, so exactly one of several concurrent callers succeeds.
+	ConsumeJoinToken(ctx context.Context, tokenHash, brokerID string, now time.Time) error
+
 	// GetJoinToken retrieves a join token by token hash.
 	// Returns ErrNotFound if the token doesn't exist.
 	GetJoinToken(ctx context.Context, tokenHash string) (*BrokerJoinToken, error)
