@@ -25,6 +25,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import type { ApiFetchOptions } from '../../client/api.js';
+import { paginateAll } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -63,9 +65,26 @@ export function hasCronZonePrefix(expr: string): boolean {
 }
 
 interface ListResponse {
-  schedules: Schedule[];
+  schedules?: Schedule[];
+  nextCursor?: string;
   totalCount?: number;
   serverTime?: string;
+}
+
+/** Page size requested when loading the schedule list; every page is followed. */
+export const SCHEDULE_PAGE_SIZE = 100;
+
+/**
+ * Issues one schedule list page request. A failed page is thrown with the
+ * hub's error message, which paginateAll passes through, rather than a bare
+ * status code.
+ */
+async function fetchSchedulePage(path: string, options: ApiFetchOptions): Promise<Response> {
+  const res = await apiFetch(path, options);
+  if (!res.ok) {
+    throw new Error(await extractApiError(res, `HTTP ${res.status}: ${res.statusText}`));
+  }
+  return res;
 }
 
 @customElement('scion-schedule-list')
@@ -132,29 +151,37 @@ export class ScionScheduleList extends LitElement {
     void this.loadSchedules();
   }
 
+  /** Bumped on every load, so a slower, older walk never overwrites a newer result. */
+  private loadGeneration = 0;
+
   private async loadSchedules(): Promise<void> {
     if (!this.projectId) return;
+    const generation = ++this.loadGeneration;
     this.loading = true;
     this.error = null;
 
     try {
-      const response = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules`
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
-      }
-
-      const data = (await response.json()) as ListResponse;
-      this.schedules = data.schedules || [];
+      // Follow nextCursor to the end: the hub pages the list, and a single
+      // request showed only the first page (ptone/scion#2643).
+      const schedules = await paginateAll<Schedule>({
+        path: `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules`,
+        pageSize: SCHEDULE_PAGE_SIZE,
+        label: 'schedules list',
+        fetch: fetchSchedulePage,
+        parsePage: (body) => {
+          const data = body as ListResponse;
+          return { items: data.schedules ?? [], nextCursor: data.nextCursor ?? '' };
+        },
+        shouldContinue: () => generation === this.loadGeneration,
+      });
+      if (generation !== this.loadGeneration) return;
+      this.schedules = schedules;
     } catch (err) {
+      if (generation !== this.loadGeneration) return;
       console.error('Failed to load schedules:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load schedules';
     } finally {
-      this.loading = false;
+      if (generation === this.loadGeneration) this.loading = false;
     }
   }
 

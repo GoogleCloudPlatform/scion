@@ -256,3 +256,80 @@ describe('scion-schedule-list next-run in the display zone', () => {
     expect(rowFor(el, 'paused-one').querySelector('.next-run-absolute')).toBeNull();
   });
 });
+
+// ptone/scion#2643: the list follows nextCursor instead of showing page one only.
+describe('scion-schedule-list pagination', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  /** Serves `pages` by cursor ("" for the first); a page set to a Response is returned as is. */
+  function stubPages(pages: Record<string, Record<string, unknown>[] | Response>): string[] {
+    const urls: string[] = [];
+    const cursors = Object.keys(pages);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        const cursor = new URL(url, 'http://x').searchParams.get('cursor') ?? '';
+        const page = pages[cursor];
+        if (page instanceof Response) return Promise.resolve(page);
+        const next = cursors[cursors.indexOf(cursor) + 1];
+        return Promise.resolve(json({ schedules: page, ...(next ? { nextCursor: next } : {}) }));
+      })
+    );
+    return urls;
+  }
+
+  async function mountList(): Promise<HTMLElement> {
+    const el = document.createElement('scion-schedule-list') as HTMLElement & {
+      projectId: string;
+      updateComplete: Promise<unknown>;
+    };
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await settle(el);
+    return el;
+  }
+
+  it('loads every page and renders all rows', async () => {
+    const urls = stubPages({
+      '': [schedule({ id: 'a', name: 'first-page' })],
+      c2: [schedule({ id: 'b', name: 'second-page' })],
+      c3: [schedule({ id: 'c', name: 'third-page' })],
+    });
+    const el = await mountList();
+
+    for (const name of ['first-page', 'second-page', 'third-page']) rowFor(el, name);
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toContain(`limit=${mod.SCHEDULE_PAGE_SIZE}`);
+    expect(urls[0]).not.toContain('cursor=');
+    expect(urls[1]).toContain('cursor=c2');
+    expect(urls[2]).toContain('cursor=c3');
+  });
+
+  it('shows the hub error and no partial list when a later page fails', async () => {
+    stubPages({
+      '': [schedule({ id: 'a', name: 'first-page' })],
+      c2: json({ error: { code: 'internal', message: 'store unavailable' } }, 500),
+    });
+    const el = await mountList();
+    const root = el.shadowRoot as ShadowRoot;
+    expect(root.querySelector('tbody')).toBeNull();
+    expect(root.querySelector('.error-details')?.textContent).toContain('store unavailable');
+  });
+});
