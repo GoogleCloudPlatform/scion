@@ -408,7 +408,8 @@ func notFoundResourceText(err error, templateSlug string) string {
 const opCreateAgent = "create agent"
 
 // writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
-// delete, exec, message, logs, list) make on failure: it logs err
+// delete, exec, message, logs, list, and the workspace upload/apply
+// handlers in workspace_handlers.go) make on failure: it logs err
 // at scope op (plus any extra key/value pairs the caller has on hand — an
 // agent or project ID, for instance) via s.agentLifecycleLog, records err on
 // ctx's active span (trace.SpanFromContext(ctx) is a documented no-op when
