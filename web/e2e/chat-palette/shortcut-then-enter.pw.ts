@@ -122,8 +122,10 @@ test('the shortcut then Enter on an empty query keeps the palette open and the c
 
   await page.keyboard.press('Control+k');
   await expect(paletteInput(page)).toBeFocused();
-  // The newest activity is highlighted, but not chosen.
-  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
+  // The newest activity ranks first, but no row is selected until the user
+  // picks one.
+  await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toBeVisible();
+  await expect(page.locator('scion-quick-palette .palette-option.active')).toHaveCount(0);
   await page.keyboard.press('Enter');
   await page.waitForTimeout(300);
 
@@ -131,9 +133,8 @@ test('the shortcut then Enter on an empty query keeps the palette open and the c
   await expect(paletteDialog(page)).toBeVisible();
   await expect(paletteInput(page)).toBeFocused();
 
-  // Picking the highlighted row with the arrow keys, then Enter, opens it.
+  // ArrowDown picks the top row, the newest activity, and Enter opens it.
   await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('ArrowUp');
   await expect(paletteOptions(page).filter({ hasText: AGENT_WITH_DM.name })).toHaveClass(/active/);
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(

@@ -110,7 +110,7 @@ export class ScionQuickPalette extends LitElement {
   @state() private activeId: string | null = null;
   /**
    * True once Up/Down/Tab/click has picked a candidate; a query edit clears
-   * it back to "auto". Enter on an empty query commits only once it is set.
+   * it back to "auto". With an empty query, only a pick makes a row active.
    */
   private manualSelection = false;
   /** True once Enter has committed a selection this open, so a stray repeat can't double-fire. */
@@ -437,23 +437,19 @@ export class ScionQuickPalette extends LitElement {
    * Recompute the active (globally-selected) candidate after the ranked list
    * changes (query edit or a group finishing/refreshing load).
    *
-   * A query edit always resets to the new global best. A group refresh
-   * preserves a manual selection by stable ID when it is still present, so
-   * a row arriving above it never takes its place. Otherwise the highlight
-   * falls back to the new global best, which is not the user's pick: it
-   * keeps following the ranking, and Enter on an empty query does not
-   * commit it.
+   * A group refresh preserves the user's pick by stable ID while it is still
+   * present, so a row arriving above it never takes its place. Otherwise
+   * (a query edit, no pick, or a picked row that went away) the selection
+   * follows the ranking: the best match for a typed query, and no row at
+   * all for an empty query. An empty query ranks by newest activity, which
+   * is not a choice the user made, so nothing is selected and Enter commits
+   * nothing until the user picks a row with the arrow keys or Tab.
    */
   private reconcileActiveId(
     ranked: Array<RankedCandidate<PaletteCandidate>>,
     queryChanged: boolean
   ): void {
-    if (queryChanged) {
-      this.manualSelection = false;
-      this.setActiveId(ranked[0]?.candidate.id ?? null);
-      return;
-    }
-    if (this.manualSelection && this.activeId !== null) {
+    if (!queryChanged && this.manualSelection && this.activeId !== null) {
       const stillPresent = ranked.some((r) => r.candidate.id === this.activeId);
       if (stillPresent) {
         // A background refresh (new candidates loaded) may have moved this
@@ -467,7 +463,8 @@ export class ScionQuickPalette extends LitElement {
       }
     }
     this.manualSelection = false;
-    this.setActiveId(ranked[0]?.candidate.id ?? null);
+    const hasQuery = this.queryText.trim() !== '';
+    this.setActiveId(hasQuery ? (ranked[0]?.candidate.id ?? null) : null);
   }
 
   override willUpdate(changed: PropertyValues<ScionQuickPalette>): void {
@@ -726,17 +723,6 @@ export class ScionQuickPalette extends LitElement {
     );
   }
 
-  /**
-   * Whether Enter commits the highlighted row: once the user has typed a
-   * query, or has picked a row. With an empty query the highlight is the
-   * newest activity, which a shortcut pressed while typing elsewhere, then
-   * Enter, would otherwise open by accident. Enter then leaves the palette
-   * open, so the user still sees it and can pick a row.
-   */
-  private enterCommits(): boolean {
-    return this.manualSelection || this.queryText.trim() !== '';
-  }
-
   private dismissPalette(reason: PaletteDismissReason): void {
     this.dispatchEvent(
       new CustomEvent<{ reason: PaletteDismissReason }>('palette-dismiss', {
@@ -785,7 +771,6 @@ export class ScionQuickPalette extends LitElement {
         if (this.composing || e.isComposing) return;
         e.preventDefault();
         if (e.repeat) return;
-        if (!this.enterCommits()) return;
         this.commitActivePaletteCandidate();
         return;
       case 'Escape':

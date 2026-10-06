@@ -102,17 +102,24 @@ async function openPaletteReady(
   expected: { threads: number; people: number }
 ): Promise<void> {
   await page.keyboard.press('Control+k');
+  await expect(groupOptions(page, 'agents')).toHaveCount(2);
   await expect(groupOptions(page, 'threads')).toHaveCount(expected.threads);
   await expect(groupOptions(page, 'people')).toHaveCount(expected.people);
 }
 
-test('one global best is selected across Agents/Threads/People on open', async ({ page }) => {
+test('no row is selected on open across Agents/Threads/People until the user picks one', async ({
+  page,
+}) => {
   await gotoChat(page);
   await openPaletteReady(page, { threads: 2, people: 2 });
   await expect(paletteInput(page)).toBeFocused();
-  // Empty query, recency order: AGENT_WITH_DM's DM has the only real
-  // activity timestamp in the fixture (2026-09-28T12:00:00Z); everything
-  // else defaults to activityMs=0, so it must be the single active row.
+  // Empty query: nothing is active, so the input points at no option.
+  await expect(page.locator('scion-quick-palette .palette-option.active')).toHaveCount(0);
+  await expect(paletteInput(page)).not.toHaveAttribute('aria-activedescendant', /.+/);
+  // Recency order: AGENT_WITH_DM's DM has the only real activity timestamp
+  // in the fixture (2026-09-28T12:00:00Z); everything else defaults to
+  // activityMs=0, so the first ArrowDown picks it as the single active row.
+  await page.keyboard.press('ArrowDown');
   await expect(activeOption(page)).toContainText(AGENT_WITH_DM.name);
   // Every group actually rendered — this fixture isn't accidentally still
   // Agents-only.
@@ -126,6 +133,8 @@ test('Tab/Shift+Tab cycle Agents -> Threads -> People in reading order, skip emp
 }) => {
   await gotoChat(page);
   await openPaletteReady(page, { threads: 2, people: 2 });
+  // With nothing active, the first Tab picks the first group, Agents.
+  await page.keyboard.press('Tab');
   await expect(activeOption(page)).toContainText(AGENT_WITH_DM.name);
 
   await page.keyboard.press('Tab');
@@ -169,6 +178,7 @@ test('Up/Down wrap within the active group only; Left/Right keep editing the que
 }) => {
   await gotoChat(page);
   await openPaletteReady(page, { threads: 2, people: 2 });
+  await page.keyboard.press('Tab');
   await expect(activeOption(page)).toContainText(AGENT_WITH_DM.name);
   // Threads has two rows (General/THREAD_ALPHA, Planning/THREAD_BETA), tied
   // at activityMs=0 — Tab lands on the group's best-ranked (label-ascending)
@@ -257,14 +267,15 @@ test('the active option is visible (in the scrollable viewport) after expanding 
     threadsByProjectId: { [SPACE_ALPHA.projectId]: manyThreads },
   });
   // Scoped to the Threads group specifically — setupApiMocks always serves
-  // its fixed 2-viable-agent fixture regardless of overrides, and that
-  // fixture's AGENT_WITH_DM has real DM activity, so it — not a thread — is
-  // the global best and starts active. Waiting for the Threads group's own
-  // capped count (10, since 12 > the visible limit) is the actual readiness
-  // signal here, not just "Agents has an active row".
+  // its fixed 2-viable-agent fixture regardless of overrides, so Agents is
+  // the first group and the first Tab picks it. Waiting for the Threads
+  // group's own capped count (10, since 12 > the visible limit) is the
+  // actual readiness signal here.
   await page.keyboard.press('Control+k');
   const threadOptions = groupOptions(page, 'threads');
   await expect(threadOptions).toHaveCount(10);
+  await expect(groupOptions(page, 'agents')).toHaveCount(2);
+  await page.keyboard.press('Tab');
   await expect(page.locator('scion-quick-palette .palette-option.active')).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.locator('scion-quick-palette .palette-show-more')).toBeVisible();
@@ -308,6 +319,9 @@ test('an asynchronous group refresh preserves a manually-selected row that the r
   await page.keyboard.press('Control+k');
   const threadOptions = groupOptions(page, 'threads');
   await expect(threadOptions).toHaveCount(10);
+  await expect(groupOptions(page, 'agents')).toHaveCount(2);
+  // The first Tab picks Agents, the second Threads.
+  await page.keyboard.press('Tab');
   await page.keyboard.press('Tab');
   // Navigate to the last (10th) row without ever exceeding the cap yet.
   await page.keyboard.press('ArrowUp');
@@ -346,6 +360,7 @@ test('an asynchronous group refresh preserves the manually-selected row by ID', 
 }) => {
   await gotoChat(page);
   await openPaletteReady(page, { threads: 2, people: 2 });
+  await page.keyboard.press('Tab'); // picks Agents' top row
   await expect(activeOption(page)).toContainText(AGENT_WITH_DM.name);
   await page.keyboard.press('Tab'); // manually select Threads' best-ranked row, General
   await expect(activeOption(page)).toContainText(THREAD_ALPHA.name);

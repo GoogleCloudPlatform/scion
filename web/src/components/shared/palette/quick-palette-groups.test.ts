@@ -126,6 +126,10 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
       threads: ready([threadCandidate('t1', 'Thread One')]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    // Nothing is active on an empty query until the first Tab picks Agents.
+    expect(activeText(el)).toBeUndefined();
+    press(el, 'Tab');
+    await el.updateComplete;
     expect(activeText(el)).toContain('Agent One');
 
     press(el, 'Tab');
@@ -141,13 +145,14 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
     expect(activeText(el)).toContain('Agent One');
   });
 
-  it('Shift+Tab cycles backward: Agents -> People -> Threads -> Agents', async () => {
+  it('Shift+Tab cycles backward: People -> Threads -> Agents', async () => {
     const el = await mountPalette({
       agents: ready([agentCandidate('a1', 'Agent One')]),
       threads: ready([threadCandidate('t1', 'Thread One')]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
-    expect(activeText(el)).toContain('Agent One');
+    // With nothing active, the first Shift+Tab picks the last group.
+    expect(activeText(el)).toBeUndefined();
 
     press(el, 'Tab', { shiftKey: true });
     await el.updateComplete;
@@ -168,6 +173,9 @@ describe('Tab/Shift+Tab: group cycling in reading order', () => {
       threads: ready([]), // no candidates at all -> empty group
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    press(el, 'Tab');
+    await el.updateComplete;
+    expect(activeText(el)).toContain('Agent One');
     press(el, 'Tab');
     await el.updateComplete;
     // Threads has no matches, so Tab from Agents must land on People, not Threads.
@@ -257,6 +265,8 @@ describe('Up/Down: wraps within the active group only', () => {
       ]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    press(el, 'ArrowDown');
+    await el.updateComplete;
     expect(activeText(el)).toContain('Agent Alpha');
 
     press(el, 'ArrowDown');
@@ -277,6 +287,8 @@ describe('Up/Down: wraps within the active group only', () => {
       ]),
       people: ready([personCandidate('p1', 'Person One')]),
     });
+    press(el, 'ArrowDown');
+    await el.updateComplete;
     expect(activeText(el)).toContain('Thread Alpha');
     press(el, 'ArrowUp');
     await el.updateComplete;
