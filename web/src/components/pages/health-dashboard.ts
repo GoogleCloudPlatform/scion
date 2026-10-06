@@ -64,7 +64,8 @@ interface HealthSummary {
     runtime_available: boolean;
     agent_count: number;
     agent_healthy: number;
-    last_heartbeat: string;
+    /** Null or the Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
+    last_heartbeat: string | null;
   }>;
   agents: {
     total: number;
@@ -406,7 +407,8 @@ export class ScionPageHealthDashboard extends LitElement {
     }
 
     .broker-card {
-      background: var(--scion-surface-alt, #f8fafc);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
       padding: 1rem;
@@ -416,6 +418,7 @@ export class ScionPageHealthDashboard extends LitElement {
 
     .broker-name {
       font-weight: 600;
+      color: var(--scion-text, #1e293b);
       margin-bottom: 0.5rem;
     }
 
@@ -755,11 +758,7 @@ export class ScionPageHealthDashboard extends LitElement {
                   <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
                     NFS: not reported
                   </div>
-                  ${b.last_heartbeat
-                    ? html`<div class="broker-stat">
-                        Heartbeat: ${this.timeAgo(b.last_heartbeat)}
-                      </div>`
-                    : nothing}
+                  <div class="broker-stat">Heartbeat: ${formatHeartbeatAge(b.last_heartbeat)}</div>
                 </div>
               `
             )}
@@ -920,13 +919,21 @@ export class ScionPageHealthDashboard extends LitElement {
       </div>
     `;
   }
+}
 
-  private timeAgo(isoDate: string): string {
-    if (!isoDate) return 'never';
-    const ms = new Date(isoDate).getTime();
-    if (Number.isNaN(ms)) return 'unknown';
-    // A future instant is clock skew between hub and browser.
-    if (ms > Date.now()) return 'just now';
-    return formatRelative(isoDate, { style: 'narrow' });
-  }
+/**
+ * Formats a broker heartbeat as a relative age. A null, undefined or
+ * empty value, the Go zero time (`0001-01-01T00:00:00Z`), or any other
+ * non-positive instant (the Unix epoch itself or any earlier time) means
+ * the heartbeat was never reported and renders as "never". An unparsable
+ * value renders as "unknown" and a future instant as "just now".
+ */
+export function formatHeartbeatAge(isoDate: string | null | undefined): string {
+  if (!isoDate) return 'never';
+  const ms = new Date(isoDate).getTime();
+  if (Number.isNaN(ms)) return 'unknown';
+  if (ms <= 0) return 'never';
+  // A future instant is clock skew between hub and browser.
+  if (ms > Date.now()) return 'just now';
+  return formatRelative(isoDate, { style: 'narrow' });
 }

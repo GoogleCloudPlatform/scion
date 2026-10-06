@@ -128,8 +128,9 @@ type InitRunOptions struct {
 	DisablePortForwarding bool
 
 	// DisableConduit keeps the legacy port-forward tunnel even when the hub
-	// advertises conduit (SCION_HUB_CONDUIT=true). The zero value dials the
-	// conduit endpoint when, and only when, the hub advertises it.
+	// advertises conduit (hub.conduit in SCION_HUB_EXPERIMENTS). The zero
+	// value dials the conduit endpoint when, and only when, the hub
+	// advertises it.
 	DisableConduit bool
 
 	// DisableReExec skips RunInit's environ-purge re-exec (see
@@ -664,8 +665,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 	harnessReq, harnessReqErr := hooks.LoadHarnessManifestRequirement(agentHome)
 	if harnessReqErr != nil {
 		log.Error("Failed to load harness manifest: %v", harnessReqErr)
-		// Treat parse errors on a present manifest as fatal — the harness
-		// staged something we cannot interpret.
+		// Fatal: the staged manifest cannot be interpreted, or names a
+		// provisioner that cannot run (legacy "builtin").
 		reportInitFailure(agentHome, fmt.Errorf("failed to load harness manifest: %w", harnessReqErr))
 		return 1
 	}
