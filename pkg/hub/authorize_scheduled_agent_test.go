@@ -23,11 +23,11 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied checks the
-// dispatch_agent authoring gate directly for every scoped UAT shape: a
-// project-scoped and a hub-scoped (empty project) UAT are both denied, and
-// the same unscoped user is allowed.
-func TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied(t *testing.T) {
+// TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
+// dispatch_agent authoring precondition directly: it requires an identity and
+// admits every credential shape, scoped UATs included, since a revision
+// records the token's ceiling and every fire applies it.
+func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 	srv := &Server{}
 	user := NewAuthenticatedUser("gate-user", "gate-user@test.com", "Gate User", "member", "api")
 	scopes := []string{"scheduled_event:create", "agent:create"}
@@ -35,25 +35,24 @@ func TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied(t *testing.
 	cases := []struct {
 		name     string
 		identity Identity
-		allowed  bool
+		want     int
 	}{
-		{"unscoped user allowed", user, true},
-		{"project-scoped UAT denied", NewScopedUserIdentity(user, "project-1", scopes), false},
-		{"hub-scoped UAT denied", NewScopedUserIdentity(user, "", scopes), false},
+		{"unscoped user", user, http.StatusOK},
+		{"project-scoped UAT", NewScopedUserIdentity(user, "project-1", scopes), http.StatusOK},
+		{"hub-scoped UAT", NewScopedUserIdentity(user, "", scopes), http.StatusOK},
+		{"no identity", nil, http.StatusUnauthorized},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", nil)
-			req = req.WithContext(contextWithIdentity(context.Background(), tc.identity))
+			if tc.identity != nil {
+				req = req.WithContext(contextWithIdentity(context.Background(), tc.identity))
+			}
 			rec := httptest.NewRecorder()
 
 			got := srv.authorizeScheduledDispatchAgentAuthoring(rec, req)
-			assert.Equal(t, tc.allowed, got)
-			if !tc.allowed {
-				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-				assert.Contains(t, rec.Body.String(),
-					"scheduled agent creation requires a credential whose scope can be applied at execution time")
-			}
+			assert.Equal(t, tc.want == http.StatusOK, got)
+			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
 		})
 	}
 }

@@ -514,7 +514,7 @@ func (m *mockScheduledEventStore) CreateAgent(_ context.Context, agent *store.Ag
 // WithTx runs fn directly against m: this mock has no real transactions, and
 // none of the tests that use it exercise rollback behavior. Needed because
 // the scheduler's create path now writes the agent row and its identity-key
-// row inside WithTx (createAgentWithIdentityKey); without this override that
+// row inside WithTx (commitAgentCreate); without this override that
 // call panics on the embedded nil store.Store, same as any other unhandled
 // method here.
 func (m *mockScheduledEventStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {

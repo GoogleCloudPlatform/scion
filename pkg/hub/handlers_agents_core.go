@@ -1081,7 +1081,7 @@ func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) 
 	}
 }
 
-// errInvalidDisplayName is returned by createAgentWithIdentityKey when slug
+// errInvalidDisplayName is returned by commitAgentCreate when slug
 // fails api.ValidateDisplayName. It is deliberately distinct from
 // store.ErrInvalidInput: the transaction that follows can also fail with
 // store.ErrInvalidInput for unrelated reasons (e.g. a foreign-key violation
@@ -1089,37 +1089,6 @@ func dispatchDeleteFailedCreate(dispatcher AgentDispatcher, agent *store.Agent) 
 // text comes from the store layer, not from validating the display name --
 // it must not be reported to the caller as if it were one.
 var errInvalidDisplayName = errors.New("invalid display name")
-
-// createAgentWithIdentityKey validates slug as the identity key agent.Name
-// will hold at creation (callers set Name to Slug before
-// calling this), then writes agent and its identity-key row in the same
-// transaction: the key row is what makes the key's per-project uniqueness a
-// database invariant, so it must never be able to drift from the row it was
-// computed from. Both production create paths (createAgentInProject and the
-// scheduler's dispatchAgentEventHandler) write the same rows through
-// commitAgentCreate, which applies the same validation and key write inside
-// the agent-create transaction.
-//
-// A validation failure is wrapped in errInvalidDisplayName so a caller that
-// wants the specific, safe-to-surface message can distinguish it with
-// errors.Is before falling through to the transaction's own errors, which
-// include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
-// for reasons unrelated to the display name itself.
-func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
-	if _, err := api.ValidateDisplayName(slug); err != nil {
-		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
-	}
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.CreateAgent(ctx, agent); err != nil {
-			return err
-		}
-		// Callers set Name to slug before calling this, so
-		// api.IdentityKeysFor(slug, agent.Name) collapses to the single
-		// {slug} row -- the same function rename, restore, and the backfill
-		// migration use, rather than a separately-maintained literal here.
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(slug, agent.Name))
-	})
-}
 
 // applyCreateEffectCeiling computes the source credential's frozen ceiling
 // and provenance for an interactive agent create, and caps role to what the

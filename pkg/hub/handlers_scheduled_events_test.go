@@ -110,13 +110,11 @@ func TestScheduledEvent_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// TestScheduledEvent_CreateDispatchAgentScopedUATDenied covers the dispatch_agent
-// authoring gate: a scoped UAT cannot author a dispatch_agent event even when
-// the underlying user holds full project-owner authority, because the
-// scheduler persists only the creator ID and cannot re-apply the token's
-// scope at fire time. The same unscoped user identity must keep working,
-// confirming the gate is specific to scoped credentials.
-func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
+// TestScheduledEvent_CreateDispatchAgentScopedUAT covers dispatch_agent event
+// authoring by a scoped UAT: the event records the token's frozen ceiling,
+// which the fire applies, so a project-scoped UAT covering agent creation may
+// author it. A hub-scoped UAT is refused by the project-scoped access check.
+func TestScheduledEvent_CreateDispatchAgentScopedUAT(t *testing.T) {
 	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()
 
@@ -146,18 +144,19 @@ func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
-	t.Run("scoped UAT for the same user denied", func(t *testing.T) {
+	t.Run("scoped UAT for the same user allowed with its ceiling recorded", func(t *testing.T) {
 		scoped := NewScopedUserIdentity(ownerUser, projectID, []string{"scheduled_event:create", "agent:create"})
 		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(),
-			"scheduled agent creation requires a credential whose scope can be applied at execution time")
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var created store.ScheduledEvent
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+		stored, err := s.GetScheduledEvent(context.Background(), created.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.EffectCeilingBounded, stored.AuthorityCeiling.Kind)
 	})
 
 	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {
-		// A hub-scoped UAT is refused by the project-scoped access check;
-		// TestAuthorizeScheduledDispatchAgentAuthoring_HubScopedUATDenied
-		// covers the authoring gate itself for this credential shape.
+		// A hub-scoped UAT is refused by the project-scoped access check.
 		scoped := NewScopedUserIdentity(ownerUser, "", []string{"scheduled_event:create", "agent:create"})
 		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())

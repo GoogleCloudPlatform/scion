@@ -311,7 +311,8 @@ func TestResumeScopedUATDenied_DispatchAgent(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update", "agent:create"})
+	// A scoped UAT that does not cover agent creation cannot resume it.
+	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update"})
 	rec := doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
