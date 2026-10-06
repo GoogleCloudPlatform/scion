@@ -82,38 +82,19 @@ func TestMoveVerdictFromError_NoVerdict(t *testing.T) {
 
 // --broker without --dry-run is refused before any hub call, so an old hub
 // that ignores --broker can never run a real in-place reincarnation.
-func TestValidateReincarnateBrokerFlags(t *testing.T) {
-	err := validateReincarnateBrokerFlags("b2", false)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--broker requires --dry-run")
-	assert.NoError(t, validateReincarnateBrokerFlags("b2", true))
-	assert.NoError(t, validateReincarnateBrokerFlags("", false))
-}
-
-// The command refuses --broker without --dry-run before resolving a hub.
-// The environment points at no real hub, so a regression cannot reach one.
-func TestReincarnateCmd_BrokerWithoutDryRun_RefusedBeforeHub(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SCION_HUB_ENDPOINT", "http://127.0.0.1:1")
-	t.Setenv("SCION_AGENT_NAME", "")
-	prevBroker, prevDryRun, prevPath, prevHandoff := reincarnateBroker, reincarnateDryRun, projectPath, reincarnateHandoffFile
-	t.Cleanup(func() {
-		reincarnateBroker, reincarnateDryRun, projectPath, reincarnateHandoffFile = prevBroker, prevDryRun, prevPath, prevHandoff
-	})
-	reincarnateBroker, reincarnateDryRun, projectPath, reincarnateHandoffFile = "b2", false, t.TempDir(), ""
-
-	err := reincarnateCmd.RunE(reincarnateCmd, []string{"agent-1"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--broker requires --dry-run")
-}
-
 // TestReincarnateMove_OldHubIgnoringBroker_Fails: a hub that predates
 // --broker answers a dry run with a plain plan and no targetBrokerId. The
 // CLI must fail rather than present that plan as the move.
 func TestReincarnateMove_OldHubIgnoringBroker_Fails(t *testing.T) {
 	calls := 0
+	var dryRuns []bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
+		var body struct {
+			DryRun bool `json:"dryRun"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		dryRuns = append(dryRuns, body.DryRun)
 		if !strings.HasSuffix(r.URL.Path, "/reincarnate") {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -129,21 +110,135 @@ func TestReincarnateMove_OldHubIgnoringBroker_Fails(t *testing.T) {
 	prevBroker, prevDryRun := reincarnateBroker, reincarnateDryRun
 	t.Cleanup(func() { reincarnateBroker, reincarnateDryRun = prevBroker, prevDryRun })
 
-	// --broker without --dry-run never reaches the hub, which would run a
-	// real in-place reincarnation.
+	// A real --broker move is dry-run first; the old hub's answer stops it
+	// there, so the hub never receives a real request (which it would run
+	// as an in-place reincarnation).
 	reincarnateBroker, reincarnateDryRun = "b2", false
 	err = reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--broker requires --dry-run")
-	assert.Equal(t, 0, calls, "the hub must receive no request")
+	assert.Equal(t, "this hub does not support --broker; upgrade the hub", err.Error())
+	assert.Equal(t, []bool{true}, dryRuns, "only the handshake dry run reaches the hub")
 
 	reincarnateBroker, reincarnateDryRun = "b2", true
 	err = reincarnateAgentViaHub(hubCtx, "agent-1", "", false)
 	require.Error(t, err)
 	assert.Equal(t, "this hub does not support --broker; upgrade the hub", err.Error())
-	assert.Equal(t, 1, calls)
+	assert.Equal(t, 2, calls)
 
 	// Without --broker the same response is a normal dry-run plan.
 	reincarnateBroker = ""
 	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "", false))
+}
+
+// moveHub answers reincarnate requests with dryRunBody for a dry run and
+// realBody otherwise (status for each), recording the dry-run flags.
+func moveHub(t *testing.T, dryStatus int, dryRunBody string, realBody string) (*HubContext, *[]bool) {
+	t.Helper()
+	var dryRuns []bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			DryRun bool `json:"dryRun"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		dryRuns = append(dryRuns, body.DryRun)
+		w.Header().Set("Content-Type", "application/json")
+		if body.DryRun {
+			w.WriteHeader(dryStatus)
+			_, _ = w.Write([]byte(dryRunBody))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(realBody))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}, &dryRuns
+}
+
+func withBrokerFlags(t *testing.T, broker string, dryRun bool) {
+	t.Helper()
+	prevBroker, prevDryRun := reincarnateBroker, reincarnateDryRun
+	t.Cleanup(func() { reincarnateBroker, reincarnateDryRun = prevBroker, prevDryRun })
+	reincarnateBroker, reincarnateDryRun = broker, dryRun
+}
+
+// An eligible move: the handshake dry run, then the real request.
+func TestReincarnateMove_HandshakeThenMove(t *testing.T) {
+	withBrokerFlags(t, "b2", false)
+	hubCtx, dryRuns := moveHub(t, http.StatusOK,
+		`{"agentId":"agent-1","generation":2,"state":"planned","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2","moveVerdict":{"eligible":true,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"checks":[]}}`,
+		`{"agentId":"agent-1","generation":2,"state":"pending","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2"}`)
+	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false))
+	assert.Equal(t, []bool{true, false}, *dryRuns)
+}
+
+// A refused move stops at the handshake: no real request.
+func TestReincarnateMove_HandshakeRefusalStops(t *testing.T) {
+	withBrokerFlags(t, "b2", false)
+	hubCtx, dryRuns := moveHub(t, http.StatusConflict,
+		`{"error":{"code":"conflict","message":"target broker b2 does not serve this project","details":{"verdict":{"eligible":false,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"checks":[{"name":"access","result":"failed"}]}}}}`,
+		`{}`)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not possible")
+	assert.Equal(t, []bool{true}, *dryRuns)
+}
+
+// A hub that names the target but gives no verdict for another broker does
+// not support the move.
+func TestReincarnateMove_HandshakeWithoutVerdictStops(t *testing.T) {
+	withBrokerFlags(t, "b2", false)
+	hubCtx, dryRuns := moveHub(t, http.StatusOK,
+		`{"agentId":"agent-1","generation":2,"state":"planned","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2"}`,
+		`{}`)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Equal(t, "this hub does not support --broker; upgrade the hub", err.Error())
+	assert.Equal(t, []bool{true}, *dryRuns)
+}
+
+// A patched --broker move makes one dry run of the whole request (patch and
+// target broker), checks both the patch and the move on it, then sends the
+// real request.
+func TestReincarnateMove_PatchedMoveSingleDryRun(t *testing.T) {
+	setReincarnatePatchFlags(t, "", "", "", -1, "", "img:v2")
+	withBrokerFlags(t, "b2", false)
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		if body["dryRun"] == true {
+			_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"planned","plan":{"patched":["image"]},"sourceBrokerId":"b1","targetBrokerId":"b2","moveVerdict":{"eligible":true,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"checks":[]}}`))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"pending","plan":{"patched":["image"]},"sourceBrokerId":"b1","targetBrokerId":"b2"}`))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	require.NoError(t, reincarnateAgentViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}, "agent-1", "handoff", false))
+	require.Len(t, bodies, 2, "one dry run, then the real request")
+	for i, b := range bodies {
+		assert.Equal(t, "b2", b["targetBroker"], "request %d carries the target broker", i)
+		assert.Equal(t, "img:v2", b["image"], "request %d carries the patch", i)
+	}
+	assert.Equal(t, true, bodies[0]["dryRun"])
+	assert.Nil(t, bodies[1]["dryRun"])
+}
+
+// A patched --broker move whose dry run does not show the patch applied
+// stops before the real request, like a patched in-place reincarnation.
+func TestReincarnateMove_PatchedMoveIgnoredPatchStops(t *testing.T) {
+	setReincarnatePatchFlags(t, "", "", "", -1, "", "img:v2")
+	withBrokerFlags(t, "b2", false)
+	hubCtx, dryRuns := moveHub(t, http.StatusOK,
+		`{"agentId":"agent-1","generation":2,"state":"planned","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2","moveVerdict":{"eligible":true,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"checks":[]}}`,
+		`{}`)
+	require.Error(t, reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false))
+	assert.Equal(t, []bool{true}, *dryRuns)
 }

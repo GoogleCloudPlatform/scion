@@ -568,7 +568,7 @@ func (s *Server) removeProjectMember(w http.ResponseWriter, r *http.Request, pro
 		slog.Info("project member removal denied",
 			"project_id", projectID, "actor", user.Email(),
 			"denial_code", decision.DenialCode, "reason", decision.Reason)
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
 
@@ -645,7 +645,7 @@ func (s *Server) handleTransferOwnership(w http.ResponseWriter, r *http.Request,
 		slog.Info("project ownership transfer denied",
 			"project_id", projectID, "actor", user.Email(),
 			"denial_code", decision.DenialCode, "reason", decision.Reason)
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
 

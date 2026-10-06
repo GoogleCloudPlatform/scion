@@ -41,6 +41,7 @@ import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
+import { navigateTo } from '../../client/navigation.js';
 
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
@@ -1965,21 +1966,10 @@ export class ScionTerminalPane extends LitElement {
     );
   }
 
-  /** Dispatch SPA navigation via the document-level nav-click listener. */
-  private navigateToPath(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', {
-        detail: { path },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
   /** Navigate to the agent graph view for this pane's agent. */
   private openInGraph(): void {
     const path = `/agents/graph?project=${encodeURIComponent(this.projectId)}&focus=${encodeURIComponent(this.agentId)}`;
-    this.navigateToPath(path);
+    navigateTo(path);
   }
 
   /** Navigate to the DM chat conversation with this pane's agent. */
@@ -1987,7 +1977,7 @@ export class ScionTerminalPane extends LitElement {
     const dmKey = buildAgentDMKey(this.agentId, this.userId);
     if (!dmKey) return;
     const path = chatConversationPath({ conversationKey: dmKey });
-    if (path) this.navigateToPath(path);
+    if (path) navigateTo(path);
   }
 
   // --- SVG icon helpers ---

@@ -143,21 +143,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -181,14 +181,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.AgentRoleDefBaseline,
 			Description: "Baseline agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleBaseline),
 		},
 		{
 			Name:        store.AgentRoleDefFull,
 			Description: "Full agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleFull),
 		},
 	}
@@ -279,6 +279,12 @@ func hubViewerPermissionIDs() []string {
 // bumped.
 func projectOwnerPermissionIDs() []string {
 	return []string{
+		// Artifacts (pkg/artifacts): read the project's artifacts and
+		// publish new ones homed in the project. Writing to, deleting or
+		// managing grants on an existing artifact belongs to its owner or
+		// an explicit grant, not to project roles (design D7).
+		"artifact.create",
+		"artifact.read",
 		// Agent lifecycle and operations — human control-plane permissions.
 		// Agent-self credential permissions (status_update, log_append,
 		// token_refresh, identity_token, port_forward, notify) are excluded:
@@ -367,6 +373,12 @@ func projectOwnerPermissionIDs() []string {
 // added here and the role revision bumped.
 func projectAdminPermissionIDs() []string {
 	return []string{
+		// Artifacts (pkg/artifacts): read the project's artifacts and
+		// publish new ones homed in the project. Writing to, deleting or
+		// managing grants on an existing artifact belongs to its owner or
+		// an explicit grant, not to project roles (design D7).
+		"artifact.create",
+		"artifact.read",
 		// Agent lifecycle and operations (no delete, no set_message_mode,
 		// no agent-self credential permissions, no attach — see
 		// projectOwnerPermissionIDs for the rationale)
@@ -430,6 +442,12 @@ func projectAdminPermissionIDs() []string {
 // added here and the role revision bumped.
 func projectMemberCuratedPermissionIDs() []string {
 	return []string{
+		// Artifacts (pkg/artifacts): read the project's artifacts and
+		// publish new ones homed in the project. Writing to, deleting or
+		// managing grants on an existing artifact belongs to its owner or
+		// an explicit grant, not to project roles (design D7).
+		"artifact.create",
+		"artifact.read",
 		// Agent operations (create, read, list)
 		"agent.create",
 		"agent.list",

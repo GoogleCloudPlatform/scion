@@ -392,7 +392,9 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
-		Conflict(w, err.Error())
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			Conflict(w, err.Error())
+		}
 		return
 	}
 
@@ -754,7 +756,9 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
 	workspacePath, err := s.resolveProjectWebDAVPath(ctx, project)
 	if err != nil {
-		Conflict(w, err.Error())
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			Conflict(w, err.Error())
+		}
 		return
 	}
 
@@ -1429,7 +1433,9 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 
 	workspacePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		InternalError(w)
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
 		return
 	}
 
