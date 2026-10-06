@@ -118,12 +118,20 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 		// A start can take the agent between the re-read and the release;
 		// its own reserve was a no-op on the reservation just released.
 		// Read once more: if the queued stop is no longer the intent, put
-		// the reservation back (without the cap check: the slot was held
-		// throughout) and leave the start's status alone.
-		if after, err := s.store.GetAgent(ctx, a.ID); err != nil || !queuedStopStillIntended(after) || !sameTime(after.RunIntentAt, a.RunIntentAt) {
-			if err == nil {
-				s.reassertBrokerReservation(ctx, after)
-			}
+		// the reservation back without the cap check. The slot was this
+		// agent's when the release ran; as with a restart, a start that
+		// took it in between can leave the broker one over its cap until a
+		// slot frees.
+		after, err := s.store.GetAgent(ctx, a.ID)
+		if err != nil {
+			// Unknown: put the reservation back (idempotent). If no start
+			// took the agent, the next settle releases it again.
+			s.reassertBrokerReservation(ctx, a)
+			s.agentLifecycleLog.Warn("Queued stop: re-reading the agent after the release failed; reservation put back", "agent_id", a.ID, "error", err)
+			continue
+		}
+		if !queuedStopStillIntended(after) || !sameTime(after.RunIntentAt, a.RunIntentAt) {
+			s.reassertBrokerReservation(ctx, after)
 			s.agentLifecycleLog.Info("Queued stop: a start superseded it during the release; reservation kept", "agent_id", a.ID)
 			continue
 		}

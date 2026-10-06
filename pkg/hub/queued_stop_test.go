@@ -506,12 +506,56 @@ func TestQueuedStop_SettleGuard_RereadSeesAStart(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f, _, a, _ := queuedStopFixture(t)
 			var fired atomic.Bool
+			var releases atomic.Int32
 			f.srv.store = rereadChangesStore{Store: f.s, agentID: a.ID, change: change, fired: &fired}
+			f.srv.quotaService.store = countingReleaseStore{Store: f.s, releases: &releases}
 			f.heartbeat(completeInventory())
 			require.True(t, fired.Load(), "the settle re-read the row")
 			assertNotSettled(t, f, a, name)
+			assert.Equal(t, int32(0), releases.Load(), "the re-read before the release stops it: nothing is released")
 		})
 	}
+}
+
+// countingReleaseStore counts reservation releases.
+type countingReleaseStore struct {
+	store.Store
+	releases *atomic.Int32
+}
+
+func (s countingReleaseStore) ReleaseReservation(ctx context.Context, limitID, resourceID string) error {
+	s.releases.Add(1)
+	return s.Store.ReleaseReservation(ctx, limitID, resourceID)
+}
+
+// failSecondGetAgentStore fails the second GetAgent of agentID: the settle's
+// read after the release.
+type failSecondGetAgentStore struct {
+	store.Store
+	agentID string
+	calls   *atomic.Int32
+}
+
+func (s failSecondGetAgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if id == s.agentID && s.calls.Add(1) == 2 {
+		return nil, errors.New("database is locked")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// When the read after the release fails, the reservation is put back and no
+// stopped status is written; a later settle releases it.
+func TestQueuedStop_FailedReadAfterTheReleasePutsTheReservationBack(t *testing.T) {
+	f, _, a, _ := queuedStopFixture(t)
+	var calls atomic.Int32
+	f.srv.store = failSecondGetAgentStore{Store: f.s, agentID: a.ID, calls: &calls}
+	f.heartbeat(completeInventory())
+	require.GreaterOrEqual(t, calls.Load(), int32(2), "the settle read the row after the release")
+	assertNotSettled(t, f, a, "the read after the release failed")
+
+	f.srv.store = f.s
+	f.heartbeat(completeInventory())
+	assert.False(t, reserved(t, f, a.ID), "the next settle releases it")
 }
 
 // claimAfterRereadStore takes a user start claim right after the settle's
@@ -547,7 +591,9 @@ func TestQueuedStop_StartClaimedDuringTheReleaseKeepsItsReservation(t *testing.T
 }
 
 // A start after a queued stop whose broker reports a container status keeps
-// that status; only the queued-stop notice is cleared.
+// that status; the queued-stop notice is cleared. Every start path clears the
+// notice with its started write (a new generation), so this pins the started
+// write and that the queued-stop clear then leaves the row alone.
 func TestQueuedStop_StartAfterQueuedStopKeepsTheBrokersStatus(t *testing.T) {
 	f, d, a := newClaimFixture(t)
 	queueStop(t, f, a, "")
