@@ -87,8 +87,9 @@ on: # zizmor: ignore[dangerous-triggers] -- no PR code checked out or run; see S
 # is not active, awaiting approval, or completed with a gate result, its
 # guard re-runs that newest run; otherwise a live-head run is still to come
 # or already fine. That attempt joins the group while this run holds the
-# slot, so it is now the last arrival and (1) applies to it. If the guard
-# fails or its attempt backstop fires, the repair stops with a warning.
+# slot, so it is now the last arrival and (1) applies to it. Exceptions: a
+# live-head run is awaiting approval (left for a maintainer), or the guard
+# fails or its attempt backstop fires (the repair stops with a warning).
 #
 # Do NOT set cancel-in-progress to true: a later arrival could cancel the
 # latest head's run mid-run, and the guard cannot repair that because it
@@ -159,9 +160,10 @@ jobs:
       # not depend on mutual exclusion.) As a hard backstop it never re-runs
       # when the newest run for the live head is already at attempt
       # MAX_ATTEMPT or later, so it cannot re-queue the same run
-      # indefinitely. Only the newest live-head run (the one GitHub shows as
-      # the PR's check) is judged and re-run; older live-head runs are left
-      # alone, except that any action_required one suppresses the repair.
+      # indefinitely. Only the newest live-head run by latest-attempt start
+      # time (the one GitHub shows as the PR's check, which can be an older
+      # run re-run by hand) is judged and re-run; other live-head runs are
+      # left alone, except that any action_required one suppresses the repair.
       #
       # Any failed command (for example an API error) stops the guard with a
       # warning via the ERR trap.
@@ -176,7 +178,7 @@ jobs:
           MAX_ATTEMPT: "3"
         run: |
           set -euo pipefail
-          trap 'echo "::warning title=Live-head guard::Guard failed; if the latest head of this PR shows a cancelled gate, push an update or re-run that run by hand."' ERR
+          trap 'echo "::warning title=Live-head guard::Guard failed; if the latest head of this PR shows a gate with no result (for example cancelled), push an update or re-run that run by hand."' ERR
 
           pr=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '{state, sha: .head.sha}')
           pr_state=$(jq -r '.state' <<<"$pr")
@@ -198,13 +200,18 @@ jobs:
             exit 0
           fi
 
-          # Gate runs for the live head, newest first. Keyed by SHA: a run
-          # for another PR with the same head SHA counts too, so a repair this
-          # PR needed can be skipped (rare; accepted). The API cannot narrow
-          # this: a run's `pull_requests` lists every open PR matching its
-          # head, not the PR that triggered it, and is empty for fork PRs.
+          # Gate runs for the live head, newest first by the start time of
+          # each run's latest attempt (`run_started_at`), because a re-run
+          # keeps its run ID but becomes the PR's check. A run with no start
+          # time yet falls back to its `created_at`; ties are broken by the
+          # higher run ID. ISO 8601 UTC timestamps sort correctly as strings.
+          # Keyed by SHA: a run for another PR with the same head SHA counts
+          # too, so a repair this PR needed can be skipped (rare; accepted).
+          # The API cannot narrow this: a run's `pull_requests` lists every
+          # open PR matching its head, not the PR that triggered it, and is
+          # empty for fork PRs.
           runs=$(gh api "repos/${REPO}/actions/workflows/${workflow_id}/runs?event=pull_request_target&head_sha=${live}&per_page=100" \
-            --jq '[.workflow_runs[] | {id, run_attempt, conclusion}] | sort_by(.id) | reverse')
+            --jq '[.workflow_runs[] | {id, run_attempt, conclusion, run_started_at, created_at}] | sort_by([(.run_started_at // .created_at // ""), .id]) | reverse')
           # No run yet: the live head's own event run arrives later and completes.
           # Judged on the newest run only, since that is the PR's check. Fine
           # (allow-list): still active (null conclusion), completed with a gate
