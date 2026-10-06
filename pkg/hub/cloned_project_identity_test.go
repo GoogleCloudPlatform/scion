@@ -1004,3 +1004,48 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestAlignWorkspaceProjectIdentity_EntryAddedToEmptyRecordDirIsKept(t *testing.T) {
+	identityTestHome(t)
+	project := sharedWorkspaceProject("entry-added")
+	localID := api.NewUUID()
+	workspacePath, previous := seedWorkspaceIdentity(t, project.Slug, localID, false)
+
+	want, err := projectConfigRoot(project.Slug, project.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(want, config.DotScion, "agents"), 0755))
+
+	// A file appears in the destination after it was inspected and found
+	// to hold only empty directories.
+	added := filepath.Join(want, config.DotScion, "agents", "added.txt")
+	inUse := func() (bool, error) {
+		return false, os.WriteFile(added, []byte("added"), 0644)
+	}
+
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, inUse)
+	require.NoError(t, err)
+	assert.Equal(t, alignSkippedTargetExists, res.Outcome)
+	assert.False(t, res.Changed())
+	assert.Equal(t, "added", readFile(t, added), "the file is kept")
+	ident, err := config.ReadWorkspaceIdentity(workspacePath)
+	require.NoError(t, err)
+	assert.Equal(t, localID, ident.ID, "identity is unchanged")
+	assert.Equal(t, "shared", readFile(t, filepath.Join(previous, config.SharedDirsSubdir, "data", "file.txt")))
+}
+
+func TestRemoveEmptyDirs_RemovesOnlyDirectories(t *testing.T) {
+	t.Run("empty tree", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "root")
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0755))
+		require.NoError(t, removeEmptyDirs(root))
+		assert.NoDirExists(t, root)
+	})
+	t.Run("tree with a file", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "root")
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "a", "b"), 0755))
+		file := filepath.Join(root, "a", "keep.txt")
+		require.NoError(t, os.WriteFile(file, []byte("keep"), 0644))
+		require.ErrorIs(t, removeEmptyDirs(root), errConfigRootNotEmpty)
+		assert.Equal(t, "keep", readFile(t, file))
+	})
+}

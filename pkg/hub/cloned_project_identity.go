@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -157,6 +158,9 @@ func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse 
 	res := identityAlignment{Outcome: alignAligned}
 	if move == moveReplaceEmpty {
 		if err := removeEmptyDirs(target); err != nil {
+			if errors.Is(err, errConfigRootNotEmpty) {
+				return identityAlignment{Outcome: alignSkippedTargetExists}, nil
+			}
 			return identityAlignment{}, alignFailed("clear empty project config directory", err)
 		}
 	}
@@ -237,15 +241,24 @@ func onlyEmptyDirs(root string) (bool, error) {
 	return empty, err
 }
 
-// removeEmptyDirs removes a tree made up only of directories, deepest first.
-// os.Remove fails on any directory that is not empty, so no file is removed.
+// errConfigRootNotEmpty reports that a project config directory expected to
+// hold only empty directories holds an entry that is not one.
+var errConfigRootNotEmpty = errors.New("project config directory is not empty")
+
+// removeEmptyDirs removes the empty directories of the tree at root, deepest
+// first. Only directories are ever removed: entries of any other type are
+// left in place, and a directory that is not empty (for example because an
+// entry appeared after the tree was inspected) stops the removal with
+// errConfigRootNotEmpty.
 func removeEmptyDirs(root string) error {
 	var dirs []string
 	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		dirs = append(dirs, path)
+		if d.IsDir() {
+			dirs = append(dirs, path)
+		}
 		return nil
 	}); err != nil {
 		return err
@@ -253,6 +266,9 @@ func removeEmptyDirs(root string) error {
 	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
 	for _, dir := range dirs {
 		if err := os.Remove(dir); err != nil {
+			if errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+				return errConfigRootNotEmpty
+			}
 			return err
 		}
 	}
