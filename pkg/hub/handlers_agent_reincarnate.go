@@ -25,15 +25,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// reincarnatePatchNeedsUpdateMsg is the 403 body for a user caller whose
+// reincarnate request has patch flags but who lacks agent.update.
+const reincarnatePatchNeedsUpdateMsg = "Reincarnate patch flags (--service-account, --role, --model, --thinking-level, --harness-auth, --image) need permission to update the agent (agent.update) in addition to lifecycle; a user access token cannot grant it, so use a signed-in session"
+
 // maxHandoffBytes bounds the reincarnate request's handoff text (design §3.2).
 const maxHandoffBytes = 256 * 1024
 
 // ReincarnateAgentRequest is the request body for
 // POST /api/v1/projects/{projectId}/agents/{agentIdOrSlug}/reincarnate and
 // its ID-addressed twin POST /api/v1/agents/{agentId}/reincarnate (design
-// §3.2). Phase 1 supports only Handoff and DryRun; every override field is
-// accepted on the wire (so a Phase-3-aware CLI talking to a Phase-1 hub gets
-// a clear 400) but rejected if set.
+// §3.2). Besides Handoff and DryRun it accepts the patch fields of
+// ptone/scion#3302 (ServiceAccount, Role, Image, Model, ThinkingLevel,
+// HarnessAuth). The remaining override fields are accepted on the wire (so
+// a newer CLI gets a clear 400) but rejected if set.
 type ReincarnateAgentRequest struct {
 	Handoff string `json:"handoff,omitempty"`
 	DryRun  bool   `json:"dryRun,omitempty"`
@@ -44,22 +49,33 @@ type ReincarnateAgentRequest struct {
 	// 501.
 	TargetBroker string `json:"targetBroker,omitempty"`
 
-	// Phase 3 overrides — not yet supported; any non-zero value here is a 400.
-	Image          string            `json:"image,omitempty"`
+	// Patch fields (ptone/scion#3302): each changes the next generation's
+	// setting and is kept by later reincarnations. Empty (nil for
+	// ThinkingLevel) means unchanged.
+	//
+	// ServiceAccount is a GCP service account ID to assign ("assign"
+	// metadata mode), checked exactly as create checks it.
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	// Role is the agent role (none, readonly, baseline, full), checked
+	// exactly as create checks an explicit role.
+	Role          string `json:"role,omitempty"`
+	Image         string `json:"image,omitempty"`
+	Model         string `json:"model,omitempty"`
+	ThinkingLevel *int   `json:"thinkingLevel,omitempty"`
+	HarnessAuth   string `json:"harnessAuth,omitempty"`
+
+	// Overrides not yet supported; any non-zero value here is a 400.
 	HarnessConfig  string            `json:"harnessConfig,omitempty"`
-	HarnessAuth    string            `json:"harnessAuth,omitempty"`
-	Model          string            `json:"model,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TemplateHash   string            `json:"templateHash,omitempty"`
 	ResetOverrides bool              `json:"resetOverrides,omitempty"`
 	Rollback       bool              `json:"rollback,omitempty"`
 }
 
-// hasUnsupportedOverrides reports whether the request sets any Phase 3
-// override field.
+// hasUnsupportedOverrides reports whether the request sets any override
+// field that is not yet supported.
 func (r ReincarnateAgentRequest) hasUnsupportedOverrides() bool {
-	return r.Image != "" || r.HarnessConfig != "" || r.HarnessAuth != "" || r.Model != "" ||
-		len(r.Env) > 0 || r.TemplateHash != "" || r.ResetOverrides || r.Rollback
+	return r.HarnessConfig != "" || len(r.Env) > 0 || r.TemplateHash != "" || r.ResetOverrides || r.Rollback
 }
 
 // ReincarnateAgentResponse is the response body for a reincarnate request:
@@ -102,6 +118,16 @@ type ReincarnationPlan struct {
 	EnvKeys    KeyDiff     `json:"envKeys"`
 	Branch     string      `json:"branch"`
 	Warnings   []string    `json:"warnings,omitempty"`
+
+	// Patched lists the request's patch fields (ptone/scion#3302), in
+	// display order. Its presence also tells a CLI the hub applied them.
+	Patched []string `json:"patched,omitempty"`
+	// Old and new values of patch fields not otherwise on the plan, set
+	// only when the request patched that field.
+	Role           *FieldChange `json:"role,omitempty"`
+	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
+	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
+	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
 }
 
 // authorizeAgentReincarnate gates POST .../reincarnate for every caller kind
@@ -118,10 +144,10 @@ type ReincarnationPlan struct {
 //     within its own project and agent.lifecycle on the target, same as
 //     stop/start (authorizeAgentLifecycle).
 //   - An agent reincarnating ITSELF is allowed for any role, with no scope
-//     check. Phase 1 accepts no request overrides, so the "no override"
-//     condition D2 attaches to the self exemption always holds; a Phase 3
-//     override on a self-reincarnation will need its own, stricter check
-//     (design §3.6a) added at that handler, not here.
+//     check, as long as the request patches nothing (D2's "no override"
+//     condition). A self request with a patch flag gets the full lifecycle
+//     check in handleReincarnateAgent once the body is read
+//     (ptone/scion#3302, decision D1).
 func (s *Server) authorizeAgentReincarnate(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity != nil && identity.Type() == "agent" {
@@ -181,10 +207,55 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"config overrides are not yet supported for scion reincarnate", nil)
 		return
 	}
+	if !validateReincarnatePatchRequest(w, req) {
+		return
+	}
+	// Decision D1 (ptone/scion#3302): the D2 self exemption in
+	// authorizeAgentReincarnate holds only for a request that patches
+	// nothing. A self request with a patch flag needs the same lifecycle
+	// authority as reincarnating another agent.
+	if req.hasPatch() && isSelfRequest(ctx, agent) {
+		if !s.authorizeAgentLifecycle(w, r, agent, ActionLifecycle) {
+			return
+		}
+	}
+	// Decision D4 (ptone/scion#3302): a patch flag edits the agent's
+	// config, so a user caller (session or UAT) also needs ActionUpdate on
+	// the target, the same gate the agent PATCH applies (applyAgentUpdate).
+	// agent.update has no UAT scope, so a UAT cannot patch. Agent callers
+	// stay on the lifecycle check (D1). Runs before any side effect, for a
+	// dry run too.
+	if req.hasPatch() && GetUserIdentityFromContext(ctx) != nil {
+		if !s.authorizeMsg(w, r, agentResource(agent), ActionUpdate, reincarnatePatchNeedsUpdateMsg) {
+			return
+		}
+	}
 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// Patch access checks (ptone/scion#3302): --role runs create's role
+	// lattice, --service-account create's assignment gate. Then the
+	// authority re-record: a requester other than the agent itself becomes
+	// the agent's recorded delegator, so it must pass CanDelegate and its
+	// ceiling must cover the role the next generation runs with (the
+	// patched role, else the stored one). All of this runs before the
+	// broker and the agent state are examined and before anything is
+	// written, so a refused request claims nothing and a dry run reports
+	// the same refusal.
+	patch, ok := s.resolveReincarnatePatch(w, r, agent, project, req)
+	if !ok {
+		return
+	}
+	targetRole, _ := agentRoleAndScopes(agent)
+	if req.Role != "" {
+		targetRole = AgentRole(req.Role)
+	}
+	auth, ok := s.reincarnateAuthorityFor(w, r, agent, targetRole, req.Role != "")
+	if !ok {
 		return
 	}
 
@@ -303,7 +374,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		workspaceModeErr = "reincarnate --broker does not support linked projects; the workspace is local to the current broker"
 	}
 	if moveTarget != nil {
-		s.planReincarnateMove(w, r, agent, project, moveTarget, workspaceModeErr, hasGitClone)
+		s.planReincarnateMove(w, r, agent, project, moveTarget, workspaceModeErr, hasGitClone, req, patch)
 		return
 	}
 	if workspaceModeErr != "" {
@@ -358,7 +429,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
 	imageRegistry := dispatchImageRegistry(dispatcher)
-	fresh, warnings, err := s.buildFreshAppliedConfig(ctx, agent, project, imageRegistry)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -368,6 +439,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
+	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	targetGeneration := agent.Generation + 1
 
 	if req.DryRun {
@@ -383,40 +455,21 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// AC-8 / design §3.4 Amendment A3: claim the agent BEFORE creating the
-	// reincarnation record, guarded by the agent row's own optimistic lock
-	// (state_version).
-	// The previous order — create the record, then a guarded UpdateAgent —
-	// was check-then-act: a version conflict (or any error) on that second
-	// write left the just-created record stuck in "pending" forever, with no
-	// worker running for it and no API to clear it, wedging every later
-	// request behind a permanent 409. Claiming first means a conflict here
-	// happens before anything else is written, so there is nothing to leave
-	// behind: the request simply fails, unclaimed.
+	// The claim is guarded by the agent row's own optimistic lock
+	// (state_version), and the claim and the reincarnation record commit
+	// together, so a version conflict or any other failure leaves no record
+	// stuck in "pending".
 	//
-	// The already-pending/already-starting check itself now lives above,
-	// before the plan is computed, so it also gates --dry-run (design §3.4
-	// Amendment A11 item 3); a concurrent real request could still slip in
-	// between that check and this claim, but UpdateAgent's own state_version
-	// CAS below catches that race exactly as it always has.
-	previousReincarnationState := agent.ReincarnationState
-	previousReincarnationUpdatedAt := agent.ReincarnationUpdatedAt
+	// The already-pending/already-starting check itself lives above, before
+	// the plan is computed, so it also gates --dry-run; a concurrent real
+	// request could slip in between that check and this claim, and the
+	// claim's state_version CAS catches that race.
 	agent.ReincarnationState = store.ReincarnationStatePending
 	// Design §3.4 Amendment A6.6: ReincarnationUpdatedAt (not Updated) is
 	// what the replica-safe sweep's agent-state backstop keys its staleness
-	// check on, because Updated is also bumped by every broker heartbeat —
-	// which would keep a claim that never got a worker (see the revert
-	// below) looking fresh forever.
+	// check on, because Updated is also bumped by every broker heartbeat.
 	claimedAt := time.Now()
 	agent.ReincarnationUpdatedAt = &claimedAt
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
-		if errors.Is(err, store.ErrVersionConflict) {
-			Conflict(w, "agent was concurrently modified; retry")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	requestedBy := ""
 	requesterIdentity := GetIdentityFromContext(ctx)
@@ -433,17 +486,31 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		PreviousAppliedConfig: agent.AppliedConfig,
 		Handoff:               req.Handoff,
 	}
-	if err := s.store.CreateAgentReincarnation(ctx, rec); err != nil {
-		// The claim above already landed. Revert it so this failure does not
-		// wedge the agent behind a permanent 409 with no record to show for
-		// it. Best effort: if the revert itself fails, log loudly — an
-		// operator can clear agents.reincarnation_state by hand, which is a
-		// far smaller recovery than an unrecoverable stuck claim.
-		agent.ReincarnationState = previousReincarnationState
-		agent.ReincarnationUpdatedAt = previousReincarnationUpdatedAt
-		if revertErr := s.store.UpdateAgent(ctx, agent); revertErr != nil {
-			s.agentLifecycleLog.Error("handleReincarnateAgent: failed to revert claimed reincarnation_state after record creation failure",
-				"agent_id", agent.ID, "revert_error", revertErr, "original_error", err)
+	// The claim, the reincarnation record, the authority re-record, the
+	// reincarnate-claim hooks and the audit record commit in one
+	// transaction (reincarnateClaimTx), so a failure at any step leaves the
+	// agent unclaimed with no record behind it.
+	// The claim also requires that no start claim is held, live or
+	// unconfirmed: a start whose outcome is unknown may still create a
+	// container this reincarnation would then compete with.
+	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, auditActorFromContext(ctx)); err != nil {
+		var held *store.ClaimHeldError
+		if errors.Is(err, store.ErrVersionConflict) {
+			Conflict(w, "agent was concurrently modified; retry")
+			return
+		}
+		if errors.As(err, &held) {
+			Conflict(w, "a start is in progress for this agent; retry once it completes")
+			return
+		}
+		if errors.Is(err, store.ErrClaimPredicate) {
+			Conflict(w, "a reincarnation is already pending for this agent")
+			return
+		}
+		if errors.Is(err, errAgentCreateWriteInvalid) {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: incomplete authority re-record", "agent_id", agent.ID, "error", err)
+			InternalError(w)
+			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
@@ -484,6 +551,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
+// isSelfRequest reports whether the caller is the agent itself.
+func isSelfRequest(ctx context.Context, agent *store.Agent) bool {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil || identity.Type() != "agent" {
+		return false
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	return ok && agentIdent.ID() == agent.ID
+}
+
 // brokerIDIfSet returns id when target is non-empty, else "".
 func brokerIDIfSet(target, id string) string {
 	if target == "" {
@@ -497,7 +574,7 @@ func brokerIDIfSet(target, id string) string {
 // reincarnation plan and the verdict. It writes no agent, broker, project or
 // quota state; the passthrough re-check may record its authorization
 // decision in the audit log and call IAM, like every passthrough gate.
-func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool) {
+func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool, req ReincarnateAgentRequest, patch *reincarnatePatch) {
 	ctx := r.Context()
 	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -510,6 +587,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 		Dst:                dst,
 		WorkspaceModeError: workspaceModeErr,
 		CloneMode:          cloneMode,
+		SelfMove:           isSelfRequest(ctx, agent),
 		Probes:             s.moveProbesFor(r, project, agent.AppliedConfig),
 	}
 	if workspaceModeErr != "" {
@@ -532,7 +610,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 	// buildFreshAppliedConfig only reads; the plan and the profile the
 	// agent would run under come from the same call the real path uses.
 	imageRegistry := dispatchImageRegistry(dispatcher)
-	fresh, warnings, err := s.buildFreshAppliedConfig(ctx, agent, project, imageRegistry)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -541,6 +619,8 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
+	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
 	v, ref := evaluateMoveEligibility(in)
 	if ref != nil {
@@ -551,7 +631,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 		AgentID:        agent.ID,
 		Generation:     agent.Generation + 1,
 		State:          "planned",
-		Plan:           computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry),
+		Plan:           plan,
 		SourceBrokerID: src.ID,
 		TargetBrokerID: dst.ID,
 		MoveVerdict:    &v,
@@ -636,4 +716,92 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 	}
 
 	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// reincarnateAuthorityFor decides what authority a reincarnation of agent
+// re-records. role is the role the next generation runs with: the stored
+// role, or the --role patch (roleChanged). A self-reincarnation re-records
+// nothing: it returns nil, and the existing edge with its frozen provenance
+// and ceiling stays in force; when it changes the role it must still pass
+// CanDelegate and the ceiling for the new role, as create requires of an
+// agent granting a role. Any other requester becomes the recorded
+// delegator, so it must pass CanDelegate for role, and its source ceiling
+// must cover role (childRoleWithinCeiling, role explicit). On a refusal the
+// response is written (403, 503 for a ceiling lookup fault, or 500 for a
+// nil agent) and ok is false; nothing has been written to the store.
+func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent, role AgentRole, roleChanged bool) (auth *reincarnateAuthority, ok bool) {
+	if agent == nil {
+		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
+		InternalError(w)
+		return nil, false
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	agentIdent := GetAgentIdentityFromContext(ctx)
+	self := agentIdent != nil && agentIdent.ID() == agent.ID
+	if self && !roleChanged {
+		return nil, true
+	}
+	resource := Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}
+	if identity == nil {
+		writeForbidden(w, "Reincarnation requires an authenticated requester")
+		return nil, false
+	}
+	if s.authzService == nil {
+		s.agentLifecycleLog.Error("handleReincarnateAgent: no authorization service to re-record authority", "agent_id", agent.ID)
+		InternalError(w)
+		return nil, false
+	}
+
+	decision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(role),
+		ProjectID: agent.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   agent.ProjectID,
+	})
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionLifecycle, "CanDelegate denied: "+decision.Reason)
+		writeForbidden(w, "Cannot delegate agent authority you do not hold: "+decision.Reason)
+		return nil, false
+	}
+
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	if err != nil {
+		cause, structural := ceilingDenyCauseForError(err)
+		if !structural {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: effect ceiling lookup failed",
+				"agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
+			return nil, false
+		}
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+err.Error())
+		writeForbiddenDenial(w, ceilingSourceDenialMessage(cause), DeniedByDelegationCeiling)
+		return nil, false
+	}
+	if _, cause, allowed := childRoleWithinCeiling(ceiling, role, true); !allowed {
+		msg := fmt.Sprintf("the credential's scopes do not cover the agent's role %q", role)
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+msg)
+		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
+		return nil, false
+	}
+	if self {
+		// Decision D1: a self request does not re-record the edge.
+		return nil, true
+	}
+
+	delegatorType := store.DelegationPrincipalUser
+	if GetAgentIdentityFromContext(ctx) != nil {
+		delegatorType = store.DelegationPrincipalAgent
+	}
+	return &reincarnateAuthority{
+		DelegatorType: delegatorType,
+		DelegatorID:   identity.ID(),
+		Role:          string(role),
+		Ceiling:       ceiling,
+		Provenance:    prov,
+	}, true
 }

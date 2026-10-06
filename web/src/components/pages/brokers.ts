@@ -78,6 +78,14 @@ export class ScionPageBrokers extends LitElement {
         margin-bottom: 1rem;
       }
 
+      /* The header's first child holds the name and version. As a flex item
+         it defaults to min-width:auto and grows to fit a long unbroken name,
+         pushing it past the card edge; min-width:0 lets it shrink so the
+         shared wrapping rules can break the name instead. */
+      .broker-header > div {
+        min-width: 0;
+      }
+
       .broker-version {
         font-size: 0.875rem;
         color: var(--scion-text-muted, #64748b);
@@ -352,7 +360,7 @@ export class ScionPageBrokers extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="hdd-rack"></sl-icon>
-              ${broker.name} ${this.renderBrokerTypeBadge(broker)}
+              <span>${broker.name} ${this.renderBrokerTypeBadge(broker)}</span>
             </h3>
             ${broker.version ? html`<div class="broker-version">v${broker.version}</div>` : ''}
           </div>

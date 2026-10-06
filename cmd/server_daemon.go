@@ -113,6 +113,7 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if cmd.Flags().Changed("storage-dir") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--storage-dir=%s", storageDir))
 	}
+	daemonArgs = appendConduitDaemonArgs(cmd, daemonArgs)
 	// String/int flags registered only on serverStartCmd: forward when explicitly
 	// set so they survive the re-exec into the --foreground child rather than
 	// falling back to defaults (e.g. --session-secret would otherwise be
@@ -178,6 +179,9 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 
 	// Check if hosted mode is set in config (settings.yaml server.mode).
 	// LoadServerMode() normalizes the legacy "production" value to "hosted".
+	if err := config.ValidateServerMode(config.LoadServerMode()); err != nil {
+		return err
+	}
 	if !cmd.Flags().Changed("hosted") && !cmd.Flags().Changed("production") {
 		if config.LoadServerMode() == "hosted" {
 			hostedMode = true

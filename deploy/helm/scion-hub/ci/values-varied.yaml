@@ -109,11 +109,21 @@ probes:
     # liveness block and its coupling to hub.webPort render nowhere else.
     enabled: true
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   sessionSecret: ci-varied-session-secret-not-real
   # The false branch of the ternary. Every other permutation renders true (the
   # new default); this is the only one that tests the other arm.
   requireStableSigningKey: false
+  # PROBE VALUE. The global backendServices form, with a trailing slash: the
+  # chart renders it stripped, as the hub's preflight reads it.
+  proxy:
+    iap:
+      audience: /projects/123456789012/global/backendServices/1111111111111111111/
 
 database:
   # Four rendered settings keys that otherwise carry one value each forever.

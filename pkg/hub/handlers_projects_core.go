@@ -736,7 +736,8 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 
 // hasProjectMembersGroupMarker reports whether g carries either
 // project-members-group marker key and belongs to any project. It is used by
-// the owner-clearing backfill and the group PATCH guards.
+// the owner-clearing backfill, the group PATCH guards and the slug-rename
+// migration (isRenamableProjectMembersGroup).
 //
 // Its semantics differ from isSystemProjectMembersGroup on purpose:
 // isSystemProjectMembersGroup matches only the canonical key
@@ -748,11 +749,7 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 // during a rolling upgrade, so the guards keep protecting such a group
 // (ptone/scion#2556).
 func hasProjectMembersGroupMarker(g *store.Group) bool {
-	if g == nil || g.ProjectID == "" || g.Annotations == nil {
-		return false
-	}
-	return g.Annotations[store.AnnotationProjectMembersGroup] == "true" ||
-		g.Annotations[store.LegacyAnnotationProjectMembersGroup] == "true"
+	return store.IsProjectMembersGroup(g)
 }
 
 // changesProjectMembersGroupMarker reports whether replacing the stored
@@ -1938,6 +1935,13 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only listed sub-route segments dispatch; any other first segment
+	// after the project ID is not a project route.
+	if !projectSubRouteListed(subPath) {
+		NotFound(w, "Project route")
+		return
+	}
+
 	// Parse project ID to extract UUID (supports {uuid}__{slug} format)
 	projectID := resolveProjectID(projectIDRaw)
 
@@ -2959,6 +2963,35 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, http.StatusOK, project)
 }
 
+// isRenamableProjectAgentsGroup reports whether group, found at the
+// project's old agents slug, is this project's system agents group and may be
+// re-slugged on rename: matching ProjectID and the agents GroupType. The
+// marker is deliberately not required. Only the system writes project_agents
+// groups with a ProjectID (POST /groups rejects that type and no group API
+// sets ProjectID or GroupType), so ProjectID + GroupType already identify the
+// genuine group. Requiring the marker stranded an unmarked genuine group (for
+// example after a PATCH replaced its annotations) at the old slug, and the
+// next createProjectGroup then created a second project_agents group for the
+// project, breaking every GroupType+ProjectID .Only() lookup.
+func isRenamableProjectAgentsGroup(group *store.Group, projectID string) bool {
+	return group != nil &&
+		group.ProjectID == projectID &&
+		group.GroupType == store.GroupTypeProjectAgents
+}
+
+// isRenamableProjectMembersGroup reports whether group, found at the
+// project's old members slug, is this project's members group and may be
+// re-slugged on rename. Unlike isSystemProjectMembersGroup it also accepts
+// the legacy marker key: a rename is not an adoption decision, and skipping
+// a legacy-marked group (e.g. if the startup marker migration has not run
+// yet) would strand it at the old slug and let createProjectMembersGroup
+// create a duplicate at the new one.
+func isRenamableProjectMembersGroup(group *store.Group, projectID string) bool {
+	return group != nil &&
+		group.ProjectID == projectID &&
+		hasProjectMembersGroupMarker(group)
+}
+
 // migrateProjectSlug updates group slugs and filesystem paths after a project slug change.
 // This is best-effort: failures are logged but don't roll back the rename.
 func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project, oldSlug string) {
@@ -2967,14 +3000,22 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// Migrate the project agents group slug.
 	oldAgentsSlug := "project:" + oldSlug + ":agents"
 	newAgentsSlug := "project:" + newSlug + ":agents"
-	if group, err := s.store.GetGroupBySlug(ctx, oldAgentsSlug); err == nil {
-		group.Slug = newAgentsSlug
-		group.Name = project.Name + " Agents"
-		if err := s.store.UpdateGroup(ctx, group); err != nil {
-			s.projectsLogger().Warn("failed to migrate project agents group slug",
-				"project_id", project.ID, "old_slug", oldAgentsSlug, "new_slug", newAgentsSlug, "error", err)
+	// The group is found by slug, so check it is this project's system
+	// agents group before re-slugging it (ptone/scion#2683).
+	if group, err := s.store.GetGroupBySlug(ctx, oldAgentsSlug); err == nil && group != nil {
+		if !isRenamableProjectAgentsGroup(group, project.ID) {
+			s.projectsLogger().Warn("skipping project agents group slug migration: group at old slug is not this project's system agents group",
+				"project_id", project.ID, "old_slug", oldAgentsSlug, "group_id", group.ID,
+				"group_project_id", group.ProjectID, "group_type", group.GroupType)
+		} else {
+			group.Slug = newAgentsSlug
+			group.Name = project.Name + " Agents"
+			if err := s.store.UpdateGroup(ctx, group); err != nil {
+				s.projectsLogger().Warn("failed to migrate project agents group slug",
+					"project_id", project.ID, "old_slug", oldAgentsSlug, "new_slug", newAgentsSlug, "error", err)
+			}
 		}
-	} else if err != store.ErrNotFound {
+	} else if !errors.Is(err, store.ErrNotFound) {
 		s.projectsLogger().Warn("failed to retrieve project agents group for migration",
 			"project_id", project.ID, "old_slug", oldAgentsSlug, "error", err)
 	}
@@ -2982,14 +3023,22 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// Migrate the project members group slug.
 	oldMembersSlug := "project:" + oldSlug + ":members"
 	newMembersSlug := "project:" + newSlug + ":members"
-	if group, err := s.store.GetGroupBySlug(ctx, oldMembersSlug); err == nil {
-		group.Slug = newMembersSlug
-		group.Name = project.Name + " Members"
-		if err := s.store.UpdateGroup(ctx, group); err != nil {
-			s.projectsLogger().Warn("failed to migrate project members group slug",
-				"project_id", project.ID, "old_slug", oldMembersSlug, "new_slug", newMembersSlug, "error", err)
+	// The group is found by slug, so check it is this project's system
+	// members group before re-slugging it (ptone/scion#2683).
+	if group, err := s.store.GetGroupBySlug(ctx, oldMembersSlug); err == nil && group != nil {
+		if !isRenamableProjectMembersGroup(group, project.ID) {
+			s.projectsLogger().Warn("skipping project members group slug migration: group at old slug is not this project's system members group",
+				"project_id", project.ID, "old_slug", oldMembersSlug, "group_id", group.ID,
+				"group_project_id", group.ProjectID)
+		} else {
+			group.Slug = newMembersSlug
+			group.Name = project.Name + " Members"
+			if err := s.store.UpdateGroup(ctx, group); err != nil {
+				s.projectsLogger().Warn("failed to migrate project members group slug",
+					"project_id", project.ID, "old_slug", oldMembersSlug, "new_slug", newMembersSlug, "error", err)
+			}
 		}
-	} else if err != store.ErrNotFound {
+	} else if !errors.Is(err, store.ErrNotFound) {
 		s.projectsLogger().Warn("failed to retrieve project members group for migration",
 			"project_id", project.ID, "old_slug", oldMembersSlug, "error", err)
 	}
@@ -3250,7 +3299,7 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	}
 	for _, tmpl := range templates {
 		if tmpl.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
+			if err := stor.DeletePrefix(ctx, storage.DirPrefix(tmpl.StoragePath)); err != nil {
 				s.projectsLogger().Warn("failed to delete template storage files",
 					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}
@@ -3258,7 +3307,7 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	}
 	for _, hc := range harnesses {
 		if hc.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
+			if err := stor.DeletePrefix(ctx, storage.DirPrefix(hc.StoragePath)); err != nil {
 				s.projectsLogger().Warn("failed to delete harness config storage files",
 					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
 			}

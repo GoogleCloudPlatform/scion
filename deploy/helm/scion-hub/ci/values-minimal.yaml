@@ -19,8 +19,9 @@
 # Everything else in this file is deliberately absent. Keys for Cloud SQL,
 # Filestore and Ingress do not exist yet, and the schema rejects keys the chart
 # does not understand. The configuration-intake keys do now exist, and this file
-# still omits them on purpose: it is the permutation that proves the chart
-# renders a usable settings.yaml from the hub's own defaults.
+# still omits them on purpose, except agents.imageRegistry, which the hub
+# requires: it is the permutation that proves the chart renders a usable
+# settings.yaml from the hub's own defaults.
 #
 # CI: EVERY helm lint AND helm template INVOCATION MUST PASS -f ON THIS FILE.
 #
@@ -58,5 +59,16 @@ image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   sessionSecret: ci-minimal-session-secret-not-real-do-not-use
+  # PROBE VALUE, not a real resource. auth.mode defaults to proxy, and the hub
+  # refuses to start in proxy mode without an IAP audience, so every proxy
+  # fixture carries one. Cloud Run form.
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-ci-minimal

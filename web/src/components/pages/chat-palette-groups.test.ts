@@ -35,7 +35,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
-import { navigateTo } from '../../client/main.js';
+import { navigateTo, pushRoute } from '../../client/main.js';
 import type { PaletteCandidate, PaletteTarget } from '../../client/chat-palette-types.js';
 import {
   AGENT_DMS_CACHE_MS,
@@ -67,6 +67,10 @@ const fakeState = vi.hoisted(() => {
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
   replaceRoute: vi.fn((path: string) => {
     window.history.replaceState(window.history.state, '', path);
     return Promise.resolve();
@@ -258,21 +262,22 @@ describe('navigateToThread: routing when a project has no known slug', () => {
       vi.unstubAllEnvs();
     });
 
-    it('prefixes the fallback (missing-slug) route with a non-root BASE_URL exactly once', () => {
+    // The router owns the base path (it prefixes the browser URL), so the
+    // page must hand it an app-relative path — prefixing here as well would
+    // double it.
+    it('hands the router the fallback (missing-slug) route without the base path', () => {
       vi.stubEnv('BASE_URL', '/scion/');
       const el = createPage();
       el.navigateToThread({ conversationKey: 'topic-x', projectId: 'p2', threadName: 'General' });
-      expect(window.location.pathname).toBe('/scion/chat/space/p2/thread/topic-x');
-      expect(window.location.pathname).not.toContain('/scion/scion/');
+      expect(pushRoute).toHaveBeenLastCalledWith('/chat/space/p2/thread/topic-x');
     });
 
-    it('prefixes the canonical (known-slug) route with a non-root BASE_URL exactly once', () => {
+    it('hands the router the canonical (known-slug) route without the base path', () => {
       vi.stubEnv('BASE_URL', '/scion/');
       const el = createPage();
       el._projectIdToSlug.set('p2', 'beta');
       el.navigateToThread({ conversationKey: 'topic-x', projectId: 'p2', threadName: 'General' });
-      expect(window.location.pathname).toBe('/scion/chat/beta/topic-x');
-      expect(window.location.pathname).not.toContain('/scion/scion/');
+      expect(pushRoute).toHaveBeenLastCalledWith('/chat/beta/topic-x');
     });
   });
 

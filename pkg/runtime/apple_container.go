@@ -95,6 +95,8 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 
 	// Skip the original 'run', '-d', and '-i' from buildCommonRunArgs (indices 0, 1, 2)
 	// then strip flags that the Apple container CLI does not support.
+	// Apple's container CLI has no --group-add: warn and start unchanged.
+	newArgs = appendSharedDirGroupArgs(newArgs, config, "container", false)
 	newArgs = append(newArgs, stripUnsupportedAppleFlags(args[3:])...)
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
@@ -123,8 +125,12 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	return id, nil
 }
 
-func (r *AppleContainerRuntime) Stop(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// Stop stops the container ref.ID and ignores ref.RunID, with the same
+// caveat as Delete: Apple's ID is the container name, so the caller's
+// run_id filter narrows but does not close the List-to-Stop window.
+// P4: enforce ref.RunID (ptone/scion#2550).
+func (r *AppleContainerRuntime) Stop(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	return err
 }
 

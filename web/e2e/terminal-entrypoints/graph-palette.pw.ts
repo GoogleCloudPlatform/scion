@@ -22,6 +22,7 @@
 
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
 import { projectId, setup, type AgentFixture } from './fixtures.js';
+import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
 
 const USER = 'fixture-user';
 
@@ -339,6 +340,58 @@ for (const host of hosts) {
     });
   });
 }
+
+/**
+ * After `open`, types `gam` without waiting for the palette and checks it all
+ * became the query: the input has focus right after the open, and the
+ * results are filtered.
+ */
+async function expectTypingRightAfterOpenFilters(
+  page: Page,
+  open: () => Promise<void>
+): Promise<void> {
+  await open();
+  await page.keyboard.type('gam');
+
+  await expect(paletteDialog(page)).toBeVisible();
+  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('gam');
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/gamma-target/]);
+}
+
+for (const host of hosts) {
+  test(`${host.name}: typing straight after the shortcut becomes the query, while the palette module loads`, async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await openHost(page, host.path, host.storage);
+    await expect(graphNode(page, targetId)).toBeVisible();
+
+    await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Control+k'));
+  });
+}
+
+test('typing straight after the header button becomes the query, while the palette module loads', async ({
+  page,
+}) => {
+  await slowPaletteModule(page);
+  await openHost(page, '/agents/graph', {});
+  await expect(graphNode(page, targetId)).toBeVisible();
+
+  await expectTypingRightAfterOpenFilters(page, () => paletteButton(page).click());
+});
+
+test('typing straight after a reopen becomes the new query', async ({ page }) => {
+  await openHost(page, '/agents/graph', {});
+  await expect(graphNode(page, targetId)).toBeVisible();
+  await page.keyboard.press('Control+k');
+  await page.keyboard.type('root');
+  await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('root');
+  await page.keyboard.press('Escape');
+  await expect(paletteDialog(page)).toBeHidden();
+
+  await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Control+k'));
+});
 
 test('a jump expands the collapsed ancestors of the picked agent', async ({ page }) => {
   await openHost(page, '/agents', { 'scion-view-agents': 'graph' });

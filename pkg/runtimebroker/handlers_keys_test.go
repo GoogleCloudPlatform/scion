@@ -138,7 +138,7 @@ func TestSendKeys_HTTP_OutcomeMapping(t *testing.T) {
 		// OutcomeKeysUnavailable}, HTTP 503": disabling the handler's
 		// ErrKeysNotStarted case leaves every other keys-route test green,
 		// so this mapping needs its own row.
-		{"keys_not_started", fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded), http.StatusServiceUnavailable, agentkeys.OutcomeKeysUnavailable, "admission deadline expired before dispatch"},
+		{"keys_not_started", fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded), http.StatusServiceUnavailable, agentkeys.OutcomeKeysUnavailable, "keys did not start before the admission deadline or cancellation"},
 	}
 
 	for _, tc := range cases {
@@ -965,7 +965,7 @@ func TestSendKeys_ViaControlChannelDispatch(t *testing.T) {
 				log:            slog.Default(),
 				streams:        make(map[string]*StreamHandler),
 				dispatchSem:    make(chan struct{}, defaultMaxConcurrentDispatches),
-				cancels:        make(map[string]context.CancelFunc),
+				cancels:        make(map[string]*requestCancel),
 				ctx:            ctx,
 				cancel:         cancel,
 			}

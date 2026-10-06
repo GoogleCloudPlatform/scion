@@ -427,7 +427,7 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		slog.Info("project member add denied",
 			"project_id", projectID, "actor", user.Email(),
 			"denial_code", decision.DenialCode, "reason", decision.Reason)
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
 
@@ -506,7 +506,7 @@ func (s *Server) updateProjectMemberRole(w http.ResponseWriter, r *http.Request,
 		slog.Info("project member role change denied",
 			"project_id", projectID, "actor", user.Email(),
 			"denial_code", decision.DenialCode, "reason", decision.Reason)
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, legacyMembershipDenialDetails(decision))
 		return
 	}
 

@@ -20,7 +20,7 @@ import (
 
 // offloadPolicy returns the current messaging.OffloadPolicy derived from
 // operational settings (ptone/scion#2257). When OperationalSettings is
-// unavailable (e.g. file/SQLite mode init failure), the threshold is 0
+// unavailable (e.g. a hub with no DB-backed settings), the threshold is 0
 // (disabled) — the same fail-safe default as every other opsettings-backed
 // feature. PreviewBudgetBytes is left at its zero value, so
 // OffloadForDelivery falls back to messaging.DefaultPreviewBudgetBytes; the

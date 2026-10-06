@@ -33,6 +33,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { apiFetch } from '../../../client/api.js';
 import { formatInstant, formatInstantWithZone, formatRelative } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+import { focusElement } from '../focus-moved.js';
 
 /** Ages under this are shown relative; older ones as an absolute date. */
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -313,7 +314,7 @@ export class ScionChatSearch extends LitElement {
     // Focus the input after render.
     requestAnimationFrame(() => {
       const input = this.shadowRoot?.querySelector('.search-input') as HTMLInputElement;
-      input?.focus();
+      focusElement(input);
     });
   }
 

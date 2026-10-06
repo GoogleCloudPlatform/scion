@@ -232,6 +232,7 @@ func TestRunSubstrateServe_CallsSelfBinaryIntegrityCheckBeforeListening(t *testi
 }
 
 func TestSubstrateServeCommand_Help(t *testing.T) {
+	resetRootCmdState(t)
 	var buf bytes.Buffer
 	rootCmd.SetOut(&buf)
 	rootCmd.SetArgs([]string{"substrate-serve", "--help"})

@@ -108,7 +108,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 // V1RuntimeConfig, not on the legacy RuntimeConfig. A file using any of them
 // without schema_version is loaded as v1 so the key is not dropped by the
 // legacy loader.
-var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict", "shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf"}
+var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict", "shared_dir_storage_backend", "shared_dir_storage_backends", "home_storage_backend", "home_storage_leaf"}
 
 // hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only
 // runtime fields (v1RuntimeIndicatorKeys) that are absent from the legacy
@@ -186,12 +186,16 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 	var vs struct {
 		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
 		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
+		Server   struct {
+			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
+		} `yaml:"server"`
 	}
 	if yaml.Unmarshal(data, &vs) != nil {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
-	return append(warnings, HomeStorageIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	warnings = append(warnings, HomeStorageIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
+	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)
 }
 
 // ValidateAgentConfig validates raw agent config data (YAML or JSON) against

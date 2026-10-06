@@ -147,6 +147,7 @@ func TestAttachCmd_RuntimeErrorSilencesUsage(t *testing.T) {
 	noHub = true
 	projectPath = t.TempDir() // no agents/ dir present -> deterministic "not found"
 	attachCmd.SilenceUsage = false
+	stubAttachTerminal(t, true)
 
 	err := attachCmd.RunE(attachCmd, []string{"does-not-exist"})
 

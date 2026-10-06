@@ -121,6 +121,11 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 // which uses an NFS home only when it is on.
 const K8sNFSHome = "hub.k8s_nfs_home"
 
+// Artifacts gates the artifact service (pkg/artifacts): the hub's
+// /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
+// every artifact surface.
+const Artifacts = "hub.artifacts"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -159,9 +164,20 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-04",
 	},
 	{
+		Name:        Artifacts,
+		Title:       "Artifacts",
+		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates both the web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off. In development: the routes have no behaviour yet.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3202",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-05",
+	},
+	{
 		Name:        "hub.conduit",
 		Title:       "Conduit connection layer",
-		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants and the GET /api/v1/conduit/grant-keys endpoint. Phase 1 is library-only; no existing connection path changes.",
+		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants, the GET /api/v1/conduit/grant-keys endpoint, the agent conduit session endpoint GET /api/v1/conduit and the in-process relay (read at startup; turning it on or off for the relay needs a restart). No existing connection path changes.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

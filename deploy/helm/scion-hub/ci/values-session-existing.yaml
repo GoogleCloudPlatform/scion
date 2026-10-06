@@ -38,6 +38,11 @@ image:
   repository: us-docker.pkg.dev/example-project/example-repo/scion-hub-gke
   tag: ci
 
+# Required: the hub refuses to start its in-process broker without a
+# registry, so the chart refuses the render.
+agents:
+  imageRegistry: us-docker.pkg.dev/example-project/example-repo
+
 auth:
   # The chart renders NO Secret for this. It binds the key below out of a Secret
   # the operator creates, by secretKeyRef rather than envFrom - see
@@ -61,3 +66,8 @@ auth:
   # assuming they are the same string - a chart that ignored this key would
   # still render a working-looking manifest against the default.
   existingSecretKey: session-secret
+
+  # PROBE VALUE, not a real resource. The global backendServices form.
+  proxy:
+    iap:
+      audience: /projects/123456789012/global/backendServices/2222222222222222222
