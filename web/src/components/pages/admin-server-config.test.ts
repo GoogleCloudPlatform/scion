@@ -2059,6 +2059,7 @@ describe('scion-page-admin-server-config', () => {
       expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
     });
   });
+
   describe('Cloud Run runtime editor field names (ptone/scion#3475)', () => {
     function cloudRunConfig(tier: Record<string, unknown>) {
       return makeBaseConfig({

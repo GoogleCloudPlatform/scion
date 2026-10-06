@@ -255,7 +255,7 @@ interface V1TelemetryConfig {
   local?: V1TelemetryLocalConfig;
 }
 
-// Keys match the hub's CloudRunConfig (pkg/config/settings_v1.go).
+// Keys match CloudRunConfig JSON tags in pkg/config/settings_v1.go.
 interface V1CloudRunConfig {
   project_id?: string;
   location?: string;
