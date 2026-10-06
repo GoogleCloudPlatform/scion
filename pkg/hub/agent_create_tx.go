@@ -134,6 +134,9 @@ const (
 	createStageDispatch          = "dispatch"
 	createStageMissingEnv        = "missing_env"
 	createStageProvision         = "provision"
+	// createStageWorkspaceUpload: the hub-managed workspace upload ran past
+	// its own budget (hubWorkspaceUploadTimeout).
+	createStageWorkspaceUpload = "workspace_upload"
 )
 
 // createCompensation is the input of compensateAgentCreate.

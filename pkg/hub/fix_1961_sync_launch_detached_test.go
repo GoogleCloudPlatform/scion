@@ -63,6 +63,12 @@ type launchProbeDispatcher struct {
 	createAgentDispatcher
 	mode          launchProbeMode
 	cancelRequest context.CancelFunc
+	// s, when set, is read at create-dispatch time to record what the row
+	// held when the launch began.
+	s store.Store
+	// rowStoragePath is the row's WorkspaceStoragePath when the create
+	// dispatch began.
+	rowStoragePath string
 
 	createCalls int
 	startCalls  int
@@ -106,6 +112,11 @@ func (d *launchProbeDispatcher) probe(ctx context.Context) error {
 func (d *launchProbeDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.createCalls++
 	d.capturedAgent = agent
+	if d.s != nil {
+		if row, err := d.s.GetAgent(context.Background(), agent.ID); err == nil && row.AppliedConfig != nil {
+			d.rowStoragePath = row.AppliedConfig.WorkspaceStoragePath
+		}
+	}
 	if err := d.probe(ctx); err != nil {
 		return nil, err
 	}
@@ -486,6 +497,19 @@ func TestSyncLaunch_WorkspaceBootstrapFinalize_ClientCancelDuringDispatch(t *tes
 	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the post-dispatch write must land despite the cancel")
 }
 
+// requireFailedStillProvisioning checks a launch of an existing
+// provisioning agent that ran past its own deadline: the request fails, and
+// the row stays provisioning with no launch in flight, so it can be retried.
+func requireFailedStillProvisioning(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	assert.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	require.NotNil(t, disp.capturedAgent)
+	got, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseProvisioning), got.Phase)
+	assert.False(t, got.IsInFlight(), "no launch is left in flight")
+}
+
 // Own-deadline cases for the remaining sites: each dispatch ctx is done at
 // syncDispatchTimeout.
 func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
@@ -493,6 +517,7 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 		name string
 		// setup returns the request to send.
 		setup     func(t *testing.T, s store.Store, project *store.Project) (method, path string, body any)
+		storage   bool // configure workspace storage
 		wantCalls int
 		// check runs extra assertions on the outcome.
 		check func(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder)
@@ -554,6 +579,17 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 				return http.MethodPost, "/api/v1/agents/" + a.ID + "/env", SubmitEnvRequest{Env: map[string]string{"K": "v"}}
 			},
 			wantCalls: 1,
+			check:     requireFailedStillProvisioning,
+		},
+		{
+			name: "workspace-bootstrap-finalize",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-bootstrap", state.PhaseProvisioning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/workspace/sync-to/finalize", SyncToFinalizeRequest{Manifest: &transfer.Manifest{Version: "1.0"}}
+			},
+			storage:   true,
+			wantCalls: 1,
+			check:     requireFailedStillProvisioning,
 		},
 	}
 	for _, tc := range cases {
@@ -561,6 +597,9 @@ func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
 			shortenSyncDispatchTimeout(t, 50*time.Millisecond)
 			disp := &launchProbeDispatcher{mode: probeBlock}
 			srv, s, project := setupCreateAgentServer(t, disp)
+			if tc.storage {
+				srv.SetStorage(newContentMockStorage("test-bucket"))
+			}
 			method, path, body := tc.setup(t, s, project)
 			rec := doRequest(t, srv, method, path, body)
 
@@ -589,6 +628,7 @@ func TestSyncLaunch_HubManagedWorkspaceUpload_ClientCancel(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			disp := &launchProbeDispatcher{mode: probeCancelRequest}
 			srv, s, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
+			disp.s = s
 			srv.SetStorage(newContentMockStorage("test-bucket"))
 			t.Cleanup(func() {
 				if p, err := hubManagedProjectPath(project.Slug); err == nil {
@@ -628,9 +668,61 @@ func TestSyncLaunch_HubManagedWorkspaceUpload_ClientCancel(t *testing.T) {
 			if uploadFails {
 				assert.Empty(t, got.AppliedConfig.WorkspaceStoragePath, "a failed upload leaves the workspace unswapped, as before")
 			} else {
-				assert.NotEmpty(t, got.AppliedConfig.WorkspaceStoragePath, "the swap write must land despite the cancel")
+				// Read at dispatch time: the post-dispatch write rewrites
+				// AppliedConfig, so the row after the create cannot show
+				// whether the swap write itself landed.
+				assert.NotEmpty(t, disp.rowStoragePath, "the swap write must land despite the cancel")
 				assert.NotEmpty(t, disp.capturedAgent.AppliedConfig.WorkspaceStoragePath, "the launch uses the uploaded workspace")
 			}
 		})
 	}
+}
+
+// An upload that runs past our own budget fails the create through the
+// cleanup: nothing is launched with the hub-local workspace.
+func TestSyncLaunch_HubManagedWorkspaceUpload_OwnBudgetExpired(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prevBudget := hubWorkspaceUploadTimeout
+	hubWorkspaceUploadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { hubWorkspaceUploadTimeout = prevBudget })
+
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
+	srv.SetStorage(newContentMockStorage("test-bucket"))
+	setAgentQuotaLimits(t, s)
+	t.Cleanup(func() {
+		if p, err := hubManagedProjectPath(project.Slug); err == nil {
+			_ = os.RemoveAll(p)
+		}
+	})
+
+	var uploadCalled bool
+	prev := syncToGCSForWorkspaceUpload
+	syncToGCSForWorkspaceUpload = func(uctx context.Context, _, _, _ string) error {
+		uploadCalled = true
+		if !awaitCanceled(uctx) {
+			return errProbeNeverDone
+		}
+		return uctx.Err()
+	}
+	t.Cleanup(func() { syncToGCSForWorkspaceUpload = prev })
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "upload-budget-expired", ProjectID: project.ID, Task: "work",
+	})
+	require.True(t, uploadCalled, "fixture check: the upload branch must be reached")
+	assert.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.Zero(t, disp.createCalls, "nothing is launched after the upload budget expired")
+
+	result, err := s.ListAgents(context.Background(), store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Items, "the create is rolled back")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "the broker reservation is released")
+
+	failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+	require.NoError(t, err)
+	require.Len(t, failed, 1)
+	var sum compensationSummary
+	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
+	assert.Equal(t, createStageWorkspaceUpload, sum.Stage)
 }

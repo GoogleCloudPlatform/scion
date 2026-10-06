@@ -2117,9 +2117,15 @@ func (s *Server) createAgentInProject(
 	// a remote broker can download it. Empty-per-agent projects have no
 	// project workspace to ship: each agent's directory is broker-local.
 	if syncsHubProjectWorkspace(project) && agent.AppliedConfig != nil && agent.AppliedConfig.Workspace != "" {
+		// The local-path read, the upload and the swap write run detached
+		// from the client (ptone/scion#1961) under their own budget: a
+		// client that gives up here must not make a broker with a local
+		// path read as one without, or leave the launch below to go ahead
+		// with the unswapped hub-local workspace.
+		uctx, ucancel := context.WithTimeout(detachLaunchFromClient(ctx), hubWorkspaceUploadTimeout)
 		hasLocalPath := false
 		if runtimeBrokerID != "" {
-			provider, err := s.store.GetProjectProvider(ctx, project.ID, runtimeBrokerID)
+			provider, err := s.store.GetProjectProvider(uctx, project.ID, runtimeBrokerID)
 			if err == nil && provider.LocalPath != "" {
 				hasLocalPath = true
 			}
@@ -2135,13 +2141,17 @@ func (s *Server) createAgentInProject(
 						"project_id", project.ID, "error", workspaceErr)
 				} else {
 					storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-					// The upload and the swap write run detached from the
-					// client (ptone/scion#1961) under their own budget: a
-					// client that gives up mid-upload must not leave the
-					// launch below to go ahead with the unswapped hub-local
-					// workspace.
-					uctx, ucancel := context.WithTimeout(detachLaunchFromClient(ctx), hubWorkspaceUploadTimeout)
 					if err := syncToGCSForWorkspaceUpload(uctx, resolvedWorkspace, stor.Bucket(), storagePath+"/files"); err != nil {
+						if errors.Is(err, context.DeadlineExceeded) && uctx.Err() != nil {
+							// The upload ran past our own budget: fail the
+							// create rather than launch with the hub-local
+							// workspace. Nothing was dispatched and no
+							// credential minted yet.
+							ucancel()
+							corrID := cleanup(createRollback{Stage: createStageWorkspaceUpload, Cause: err})
+							writeCreateFailure(w, corrID, func() { RuntimeError(w, "Timed out uploading the project workspace: "+err.Error()) })
+							return
+						}
 						s.agentLifecycleLog.Warn("Failed to upload hub-managed project workspace to GCS",
 							"agent_id", agent.ID,
 							"project_id", project.ID, "error", err)
@@ -2153,10 +2163,10 @@ func (s *Server) createAgentInProject(
 							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
 						}
 					}
-					ucancel()
 				}
 			}
 		}
+		ucancel()
 	}
 
 	// Managed agent path: bypass broker dispatch entirely and handle directly.
