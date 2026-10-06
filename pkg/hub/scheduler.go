@@ -717,7 +717,21 @@ func (s *Scheduler) Status() SchedulerStatus {
 // CancelEvent cancels a pending scheduled event. The in-memory timer is
 // stopped and the database record is marked as cancelled.
 func (s *Scheduler) CancelEvent(ctx context.Context, id string) error {
+	s.StopEventTimer(id)
+
+	if s.store == nil {
+		return fmt.Errorf("scheduler has no store configured")
+	}
+
+	return s.store.CancelScheduledEvent(ctx, id)
+}
+
+// StopEventTimer stops and forgets the in-memory timer of a scheduled event,
+// if one is armed. It does not change the stored event; a caller that
+// cancels the stored event itself calls it after that write commits.
+func (s *Scheduler) StopEventTimer(id string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if st, ok := s.timers[id]; ok {
 		st.Timer.Stop()
 		if st.Cancel != nil {
@@ -725,11 +739,4 @@ func (s *Scheduler) CancelEvent(ctx context.Context, id string) error {
 		}
 		delete(s.timers, id)
 	}
-	s.mu.Unlock()
-
-	if s.store == nil {
-		return fmt.Errorf("scheduler has no store configured")
-	}
-
-	return s.store.CancelScheduledEvent(ctx, id)
 }

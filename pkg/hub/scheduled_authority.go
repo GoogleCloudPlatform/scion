@@ -35,8 +35,9 @@ import (
 
 // Mutation types of the schedule lifecycle writes that change no authority.
 const (
-	mutationTypeSchedulePause  = "schedule_pause"
-	mutationTypeScheduleDelete = "schedule_delete"
+	mutationTypeSchedulePause        = "schedule_pause"
+	mutationTypeScheduleDelete       = "schedule_delete"
+	mutationTypeScheduledEventCancel = "scheduled_event_cancel"
 )
 
 // revisionAuthorityCeiling returns the frozen effect ceiling to record on a
@@ -95,10 +96,21 @@ func scheduleCeilingDenialMessage(cause DenyCause) string {
 // with the request's actor applied. It is written in the same transaction as
 // the write it records.
 func newScheduleAudit(ctx context.Context, mutationType, scheduleID string) *store.MutationAuditRecord {
+	return newSchedulingAudit(ctx, mutationType, "schedule", scheduleID)
+}
+
+// newScheduledEventAudit returns the audit record of a one-shot scheduled
+// event lifecycle write (a cancel), with the request's actor applied. It is
+// written in the same transaction as the write it records.
+func newScheduledEventAudit(ctx context.Context, mutationType, eventID string) *store.MutationAuditRecord {
+	return newSchedulingAudit(ctx, mutationType, "scheduled_event", eventID)
+}
+
+func newSchedulingAudit(ctx context.Context, mutationType, targetType, targetID string) *store.MutationAuditRecord {
 	record := &store.MutationAuditRecord{
 		MutationType: mutationType,
-		TargetType:   "schedule",
-		TargetID:     scheduleID,
+		TargetType:   targetType,
+		TargetID:     targetID,
 		Timestamp:    time.Now(),
 	}
 	auditActorFromContext(ctx).ApplyActor(record)

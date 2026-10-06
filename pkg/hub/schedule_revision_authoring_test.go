@@ -550,6 +550,74 @@ func TestSchedulePauseDeleteAuditInTransaction(t *testing.T) {
 	assert.Equal(t, owner.ID(), recs[0].ActorPrincipalID)
 }
 
+// A cancel's audit is written in the cancel's transaction: a failed audit
+// write fails the cancel and leaves the event pending with its timer armed.
+// The record has the same shape as before: mutation type, target and the
+// request's actor and credential, matching a pause audit by the same
+// caller.
+func TestCancelScheduledEventAuditInTransaction(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-cancel-tx-owner"))
+
+	rec := doAuthoredEventRequest(t, srv, owner, projectID,
+		CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentName: authzHelperAgentSlug, Message: "ping"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created store.ScheduledEvent
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	timerArmed := func() bool {
+		srv.scheduler.mu.Lock()
+		defer srv.scheduler.mu.Unlock()
+		_, ok := srv.scheduler.timers[created.ID]
+		return ok
+	}
+	require.True(t, timerArmed())
+
+	cancel := func() *httptest.ResponseRecorder {
+		req := authoredRequest(t, owner, http.MethodDelete, "/api/v1/projects/"+projectID+"/scheduled-events/"+created.ID, nil)
+		rec := httptest.NewRecorder()
+		srv.handleScheduledEvents(rec, req, projectID, created.ID)
+		return rec
+	}
+
+	srv.store = &createTxFaultStore{Store: s, auditErrFor: mutationTypeScheduledEventCancel}
+	rec = cancel()
+	assert.NotEqual(t, http.StatusNoContent, rec.Code)
+	evt, err := s.GetScheduledEvent(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventPending, evt.Status, "a failed cancel audit rolls the cancel back")
+	assert.True(t, timerArmed(), "a failed cancel leaves the timer armed")
+	srv.store = s
+
+	rec = cancel()
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	evt, err = s.GetScheduledEvent(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventCancelled, evt.Status)
+	assert.False(t, timerArmed(), "a committed cancel stops the timer")
+
+	recs, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutationTypeScheduledEventCancel})
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	got := recs[0]
+	assert.Equal(t, "scheduled_event_cancel", got.MutationType)
+	assert.Equal(t, "scheduled_event", got.TargetType)
+	assert.Equal(t, created.ID, got.TargetID)
+	assert.Equal(t, owner.ID(), got.ActorPrincipalID)
+
+	// The actor and credential fields match a pause audit by the same caller.
+	id := createOwnerSchedule(t, srv, owner, projectID, "cancel-shape", "message")
+	pauseSchedule(t, srv, owner, projectID, id)
+	pauses, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutationTypeSchedulePause, TargetID: id})
+	require.NoError(t, err)
+	require.Len(t, pauses, 1)
+	assert.Equal(t, pauses[0].ActorPrincipalKind, got.ActorPrincipalKind)
+	assert.Equal(t, pauses[0].ActorPrincipalID, got.ActorPrincipalID)
+	assert.Equal(t, pauses[0].ActorCredentialType, got.ActorCredentialType)
+	assert.Equal(t, pauses[0].ActorCredentialID, got.ActorCredentialID)
+	assert.NotEmpty(t, got.ActorCredentialType)
+}
+
 // A recurring fire copies the schedule's ceiling onto the materialized
 // event together with its attribution.
 func TestExecuteScheduleCopiesAuthorityCeiling(t *testing.T) {

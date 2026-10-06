@@ -425,18 +425,24 @@ func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	if err := s.scheduler.CancelEvent(r.Context(), eventID); err != nil {
+	// No future dispatch remains after a cancel, so there is no
+	// re-attribution — just a record of who cancelled it, written in the
+	// same transaction as the cancel. The in-memory timer is stopped only
+	// once the cancel commits, so a failed cancel leaves the event pending
+	// and armed.
+	audit := newScheduledEventAudit(r.Context(), mutationTypeScheduledEventCancel, eventID)
+	if err := s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := tx.CancelScheduledEvent(r.Context(), eventID); err != nil {
+			return err
+		}
+		return tx.CreateMutationAudit(r.Context(), audit)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-
-	// No future dispatch remains after a cancel, so there is no
-	// re-attribution — just a record of who cancelled it.
-	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
-		MutationType: "scheduled_event_cancel",
-		TargetType:   "scheduled_event",
-		TargetID:     eventID,
-	})
+	if s.scheduler != nil {
+		s.scheduler.StopEventTimer(eventID)
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
