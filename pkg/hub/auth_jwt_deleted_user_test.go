@@ -66,6 +66,9 @@ func newDeletedUserTokenFixture(t *testing.T, name string) *deletedUserTokenFixt
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 	srv.seedProjectCreatorMembership(ctx, project)
+	// The member's owner relationship on its agent requires active project
+	// access (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, user.ID, project.ID)
 
 	agentID := tid(name + "-agent")
 	createCredTestAgent(t, s, agentID, project.ID, user.ID)

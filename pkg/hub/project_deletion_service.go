@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -86,6 +87,10 @@ type ProjectDeleteDecision struct {
 	DenialCode string
 	Reason     string
 	HTTPStatus int
+	// Details carries structured denial context. The credential refusal
+	// sets the session-only reason fields (session_only_gate.go); every
+	// other denial leaves it nil.
+	Details map[string]interface{}
 }
 
 // ProjectDeleteResult is the outcome of a successful project deletion.
@@ -221,6 +226,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	// 5. Credential ceiling — project deletion is restricted to full session.
 	// Scoped UATs and agent JWTs are not admitted.
 	// Dev credentials (local development mode) are equivalent to interactive.
+	// Session-only with the IRREVERSIBLE_CASCADE reason.
 	credential := GetCredentialContextFromContext(ctx)
 	if credential.Kind != "" && credential.Kind != CredentialKindInteractive && credential.Kind != CredentialKindDev {
 		return nil, &ProjectDeleteDecision{
@@ -228,6 +234,7 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 			DenialCode: ErrCodeCredentialInsufficient,
 			Reason:     "project deletion requires a full session credential",
 			HTTPStatus: 403,
+			Details:    sessionOnlyDenialDetails(authzop.ReasonIrreversibleCascade),
 		}
 	}
 

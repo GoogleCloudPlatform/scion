@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -561,7 +562,8 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 	// for a UAT also requires live project access).
 	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
 		if _, scoped := userIdent.(*ScopedUserIdentity); scoped {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", nil)
+			// Session-only with the GOV_PENDING reason (session_only_gate.go).
+			writeSessionOnlyDenial(w, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", authzop.ReasonGovernancePending)
 			return nil, false
 		}
 	}
