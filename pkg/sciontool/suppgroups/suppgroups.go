@@ -13,7 +13,11 @@
 // limitations under the License.
 
 // Package suppgroups decides which supplementary groups sciontool keeps
-// when it drops from root to the agent user (ptone/scion#3155).
+// when it drops from root to the agent user, and whether it applies umask
+// 002 for nfs shared-dir writers (ptone/scion#3155). Both runtimes set
+// EnvVar: Docker/Podman with --group-add, Kubernetes with exactly the pod's
+// supplementalGroups (pods start as the agent user, so there it only
+// drives the umask).
 //
 // Go's exec with SysProcAttr.Credential calls setgroups(Groups), so an
 // empty Groups clears every supplementary group, including those the
@@ -29,6 +33,13 @@ import (
 	"strconv"
 	"strings"
 )
+
+// sharedDirUmaskGroupBits are the umask bits cleared when the runtime
+// granted nfs shared-dir groups: new files are group-writable, so agents of
+// different kinds can modify each other's files in a shared dir even when
+// the export cannot hold the leaf's default ACL (for example NFSv4.1 on
+// Linux clients).
+const sharedDirUmaskGroupBits = 0o070
 
 // EnvVar mirrors runtime.SupplementalGIDsEnvVar (pkg/runtime/common.go).
 const EnvVar = "SCION_SUPPLEMENTAL_GIDS"
