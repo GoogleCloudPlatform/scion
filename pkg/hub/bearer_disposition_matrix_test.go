@@ -121,7 +121,10 @@ type bearerMatrixFixture struct {
 	ids          idFixtures
 	adminID      string
 	otherProject string
-	tokens       map[string]string
+	// hubPreStartHook is a seeded hub pre-start hook, for the hub hook
+	// entry points the live method inventory does not probe.
+	hubPreStartHook string
+	tokens          map[string]string
 }
 
 func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
@@ -140,7 +143,13 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// bound to it.
 	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", other, store.ProjectRoleOwner)
 
-	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
+	hook, err := s.CreateHubPreStartHook(ctx, &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeHub, Name: "bdm-hub-hook", Slug: "bdm-hub-hook",
+		Script: "#!/bin/sh\necho bdm\n", CreatedBy: adminID + "@test.com", UpdatedBy: adminID + "@test.com",
+	})
+	require.NoError(t, err)
+
+	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, hubPreStartHook: hook.ID, tokens: map[string]string{}}
 }
 
 // mint returns a real token for the super-admin, minted through
@@ -222,7 +231,7 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	id := string(e.Spec.ID)
 	params := opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
 	if params == nil {
-		params = bearerMatrixPatternOverrides(m.ids)[ep.Pattern]
+		params = m.patternOverrides()[ep.Pattern]
 	}
 	if params == nil {
 		params = patternOverrides(m.ids)[ep.Pattern]
@@ -256,13 +265,36 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	return rec
 }
 
-// bearerMatrixPatternOverrides holds path parameters for entry points the
-// live method inventory does not probe (it covers HTTP routes only), so
-// that the matrix addresses a seeded record.
-func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
+// patternOverrides holds path parameters for entry points the live method
+// inventory does not probe (it covers HTTP routes only, and only
+// catalogued ones), so that the matrix addresses a seeded record.
+func (m *bearerMatrixFixture) patternOverrides() map[string]map[string]string {
 	return map[string]map[string]string{
-		"/api/v1/agents/{id}/pty": {"id": f.agent},
+		"/api/v1/agents/{id}/pty":               {"id": m.ids.agent},
+		"/api/v1/pre-start-hooks/{id}":          {"id": m.hubPreStartHook},
+		"/api/v1/pre-start-hooks/{id}/activate": {"id": m.hubPreStartHook},
 	}
+}
+
+// bearerMatrixGuardSelector returns the selector of the permission the
+// hub-admin route guard checks on the entry point's route, or "" when the
+// route has no such guard. A write behind a guard on a read permission
+// needs both selectors, so the admitting token carries this one too.
+func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
+	best := ""
+	var guard RouteMetadata
+	for key, meta := range routeMetadataTable {
+		_, path := splitRouteKey(key)
+		if path == ep.Pattern || (strings.HasSuffix(path, "/") && strings.HasPrefix(ep.Pattern, path)) {
+			if len(path) > len(best) {
+				best, guard = path, meta
+			}
+		}
+	}
+	if best == "" || guard.Classification != RouteHubAdmin || guard.Permission == "" {
+		return ""
+	}
+	return bearerMatrixSelector(guard.Permission)
 }
 
 // bearerMatrixBodyOverrides holds request bodies the matrix sends in place
@@ -296,8 +328,9 @@ func sessionOnlyDetailsOf(rec *httptest.ResponseRecorder) (reason, credential st
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through
 // every catalogued HTTP, SSE and WebSocket entry point and checks the
 // result against the operation's recorded bearer disposition:
-//   - admit: a hub token with the selector and live authority is not
-//     refused and reaches the seeded target (no 401, 403 or 404; a 5xx
+//   - admit: a hub token with the selector (plus the route guard's
+//     selector when the hub-admin guard checks a different permission) and
+//     live authority is not refused and reaches the seeded target (no 401, 403 or 404; a 5xx
 //     only on a row listed in bearerMatrixPositiveServerErrors); a token
 //     of the same user with an unrelated selector, and a project token for
 //     another project, are refused (403, or 404 on a GET, where read
@@ -400,8 +433,13 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			if !bearerMatrixHasBoundary(d, authzop.BearerBoundaryHub) {
 				boundary = projectBoundary(m.ids.project)
 			}
-			rec := m.request(t, e, m.mint(t, boundary, []string{sel}))
-			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d", label, ceilingRec.Code, boundaryStatus, rec.Code)
+			positive := []string{sel}
+			if guardSel := bearerMatrixGuardSelector(ep); guardSel != "" && guardSel != sel {
+				positive = append(positive, guardSel)
+				sort.Strings(positive)
+			}
+			rec := m.request(t, e, m.mint(t, boundary, positive))
+			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d with %v", label, ceilingRec.Code, boundaryStatus, rec.Code, positive)
 			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 				t.Errorf("%s: a %s token with %s got %d, want neither 401 nor 403: %s", label, boundary.Kind, sel, rec.Code, rec.Body.String())
 			}

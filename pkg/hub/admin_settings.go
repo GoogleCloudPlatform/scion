@@ -265,6 +265,12 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	// is gated on hub.config.update, so it must not be a second way to clear
 	// every experiment override (ptone/scion#2217). Rejected before any
 	// store call.
+	// A user access token resets only a section with no refused key.
+	if !serverConfigSectionTokenResettable(sectionName) &&
+		writeTokenRefusedSettingsKeys(w, r.Context(), []string{sectionName}) {
+		return
+	}
+
 	if sectionName == "experiments" {
 		writeError(w, http.StatusBadRequest, "validation_failed",
 			"use DELETE /api/v1/admin/experiments", nil)
@@ -435,6 +441,10 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before settings.yaml is touched.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// A user access token writes configuration keys only.
+	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
 	}
 	// Any other key the typed decode drops (unknown, misspelt, or a flat

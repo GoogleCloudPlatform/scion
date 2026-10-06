@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 )
 
@@ -465,12 +466,20 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 
 	for _, route := range routes {
 		t.Run(route, func(t *testing.T) {
-			// Skip routes that have Permission set — they require an authzService
-			// to exercise the Decide path. These are tested in
-			// TestRouteGuardOpsPermissions with a full server.
-			if meta, ok := routeMetadataTable[route]; ok && meta.Permission != "" {
-				t.Skipf("skipping permission-based route %s (tested in TestRouteGuardOpsPermissions)", route)
-				return
+			// A permission route admits a token only through its catalog
+			// disposition: an operation on a hub resource route admits the
+			// hub boundary only, so this project token is outside it.
+			if meta, ok := routeMetadataTable[route]; ok && meta.Permission != "" && meta.Resource == permissions.ResourceHub {
+				for _, spec := range hubAdminRouteCatalogOperations(route) {
+					if !spec.Bearer.Kind.AdmitsToken() {
+						continue
+					}
+					for _, b := range spec.Bearer.Boundaries {
+						if b == authzop.BearerBoundaryProject {
+							t.Errorf("%s admits a project token on hub resource route %s", spec.ID, route)
+						}
+					}
+				}
 			}
 
 			method, path, body := scopedAdminUATRouteRequest(route)
@@ -488,6 +497,27 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 			}
 		})
 	}
+}
+
+// hubAdminRouteCatalogOperations returns the catalog operations with an
+// HTTP, SSE or WebSocket entry point on route; a route ending in "/" also
+// matches every entry point below it.
+func hubAdminRouteCatalogOperations(route string) []authzop.OperationSpec {
+	var out []authzop.OperationSpec
+	for _, spec := range authzop.Catalog {
+		for _, ep := range spec.EntryPoints {
+			switch ep.Kind {
+			case authzop.EntryPointHTTPRoute, authzop.EntryPointSSE, authzop.EntryPointWebSocket:
+			default:
+				continue
+			}
+			if ep.Pattern == route || (strings.HasSuffix(route, "/") && strings.HasPrefix(ep.Pattern, route)) {
+				out = append(out, spec)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func scopedAdminUATRouteRequest(route string) (string, string, *bytes.Reader) {
