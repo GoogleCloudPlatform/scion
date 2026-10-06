@@ -206,6 +206,56 @@ func writeSavedAgentProfile(t *testing.T, dotScionDir, agentName, profile string
 	}
 }
 
+// TestBuildStartContext_LaunchIDEnv pins SCION_LAUNCH_ID as broker-owned:
+// a resolved-env value and its classification are always dropped, because
+// Manager.Start sets the variable from the run ID it labels the container
+// with.
+func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
+	tests := []struct {
+		name        string
+		resolvedEnv map[string]string
+		envCls      map[string]api.EnvKind
+	}{
+		{name: "absent"},
+		{name: "resolved env value dropped", resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"}},
+		{
+			name:        "resolved env value and classification dropped",
+			resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"},
+			envCls:      map[string]api.EnvKind{"SCION_LAUNCH_ID": api.EnvKindPlain},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:               "my-agent",
+				AgentID:            "uuid-1",
+				RunID:              "run-1",
+				ProjectPath:        filepath.Join(t.TempDir(), "my-project"),
+				ResolvedEnv:        tt.resolvedEnv,
+				EnvClassifications: tt.envCls,
+				HTTPRequest:        httptest.NewRequest("POST", "/api/v1/agents", nil),
+				Operation:          opCreate,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := sc.Opts.Env["SCION_LAUNCH_ID"]; ok {
+				t.Errorf("SCION_LAUNCH_ID = %q, want it unset in the start options", got)
+			}
+			if _, ok := sc.EnvClassifications["SCION_LAUNCH_ID"]; ok {
+				t.Errorf("SCION_LAUNCH_ID classification kept")
+			}
+			if sc.Opts.RunID != "run-1" {
+				t.Errorf("RunID = %q, want %q", sc.Opts.RunID, "run-1")
+			}
+		})
+	}
+}
+
 func TestBuildStartContext_BasicFields(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
@@ -5358,7 +5408,7 @@ func TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemoves
 // provision.ProvisionShared's own self-heal expects for a first-time
 // provision), but this agent's worktree already exists on disk with
 // un-pushed work, the start must fail with a clear error instead of letting
-// ProvisionShared's gitCloneWorkspace -> removeDirContents wipe the shared
+// ProvisionShared re-clone over the shared
 // base — and everything under it, including this worktree — while still
 // returning success.
 func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSelfHeal(t *testing.T) {
@@ -5420,7 +5470,7 @@ func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSel
 	}
 
 	// The worktree and its un-pushed file must survive: ProvisionShared's
-	// self-heal (removeDirContents on the shared base) must never have run.
+	// clone step on the shared base must never have run.
 	if _, statErr := os.Stat(worktreePath); statErr != nil {
 		t.Errorf("expected the existing worktree to survive, stat error: %v", statErr)
 	}

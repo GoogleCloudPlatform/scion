@@ -1,0 +1,86 @@
+{
+  "agent_block": {
+    "create": {
+      "gcpIdentityMode": "block",
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    },
+    "start": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    }
+  },
+  "hub_default_block": {
+    "create": {
+      "gcpIdentityMode": "block",
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    },
+    "start": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    }
+  },
+  "hub_default_passthrough_denied_kubernetes": {
+    "create": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    },
+    "start": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    }
+  },
+  "no_identity": {
+    "create": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    },
+    "start": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    }
+  },
+  "project_default_assign_without_sa": {
+    "create": {
+      "gcpIdentityMode": "block",
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    },
+    "start": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    }
+  },
+  "project_default_block": {
+    "create": {
+      "gcpIdentityMode": "block",
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    },
+    "start": {
+      "resolvedEnv": {
+        "SCION_METADATA_MODE": "block",
+        "SCION_METADATA_MODE_SOURCE": "hub"
+      }
+    }
+  }
+}

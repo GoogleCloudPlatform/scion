@@ -263,29 +263,34 @@ func TestMappingDialect_Parse_MissingEventName(t *testing.T) {
 	})
 }
 
-func TestMappingDialect_Parse_AssistantTextField(t *testing.T) {
-	spec := MappingDialectSpec{
-		Dialect:        "test",
-		EventNameField: "event",
-		Mappings: map[string]MappingEntrySpec{
-			"AgentStop": {
-				Event: hooks.EventAgentEnd,
-				Fields: map[string]string{
-					"assistant_text": ".response.text",
-				},
-			},
-		},
-	}
-	md := NewMappingDialect(spec)
+// TestLoadMappingDialect_IgnoresRetiredAssistantTextField verifies that a
+// dialect file written before the assistant_text field was retired still
+// loads and parses: the unknown field is ignored, other fields still map.
+func TestLoadMappingDialect_IgnoresRetiredAssistantTextField(t *testing.T) {
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "dialect.yaml")
+	require.NoError(t, os.WriteFile(specPath, []byte(`
+dialect: old-harness
+event_name_field: event
+mappings:
+  AgentStop:
+    event: agent-end
+    fields:
+      message: title
+      assistant_text: last_assistant_message
+`), 0o644))
+
+	md, err := LoadMappingDialect(specPath)
+	require.NoError(t, err)
 
 	event, err := md.Parse(map[string]interface{}{
-		"event": "AgentStop",
-		"response": map[string]interface{}{
-			"text": "Here is the answer.",
-		},
+		"event":                  "AgentStop",
+		"title":                  "turn done",
+		"last_assistant_message": "Here is the answer.",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "Here is the answer.", event.Data.AssistantText)
+	assert.Equal(t, hooks.EventAgentEnd, event.Name)
+	assert.Equal(t, "turn done", event.Data.Message)
 }
 
 func TestMappingDialect_Parse_TokenFieldMappings(t *testing.T) {
