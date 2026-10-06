@@ -2135,6 +2135,14 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		},
 		SupplementalGroups: sharedDirSupplementalGroups(config, fsGroupGID),
 	}
+	// SCION_SUPPLEMENTAL_GIDS is broker-owned: drop any template, user env
+	// or secret value, and set it to the nfs leaf gids the pod holds (its
+	// supplementalGroups plus a leaf gid skipped there because it equals
+	// fsGroup, which the pod holds through fsGroup), so sciontool clears the
+	// umask group bits for nfs shared-dir writers (ptone/scion#3155). Pods start
+	// as the agent user via runAsUser, so sciontool does no privilege drop
+	// here; the variable only drives the umask.
+	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))
 
 	// Determine image pull policy
 	pullPolicy := corev1.PullIfNotPresent
@@ -4307,4 +4315,26 @@ func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
 		out = append(out, gid)
 	}
 	return out
+}
+
+// withSupplementalGIDsEnv removes every SupplementalGIDsEnvVar entry from
+// env and, when groups is non-empty, appends the broker's own value listing
+// exactly those gids (ptone/scion#3155).
+func withSupplementalGIDsEnv(env []corev1.EnvVar, groups []int64) []corev1.EnvVar {
+	// A new backing array (room for the broker's own entry), so the
+	// caller's slice is never modified.
+	out := make([]corev1.EnvVar, 0, len(env)+1)
+	for _, ev := range env {
+		if ev.Name != SupplementalGIDsEnvVar {
+			out = append(out, ev)
+		}
+	}
+	if len(groups) == 0 {
+		return out
+	}
+	ids := make([]string, 0, len(groups))
+	for _, gid := range groups {
+		ids = append(ids, strconv.FormatInt(gid, 10))
+	}
+	return append(out, corev1.EnvVar{Name: SupplementalGIDsEnvVar, Value: strings.Join(ids, ",")})
 }

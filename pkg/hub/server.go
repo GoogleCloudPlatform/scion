@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -1338,6 +1339,9 @@ type Server struct {
 	// Web chat store for webchat_* tables (thread prefs, chat threads, etc.) — nil = disabled.
 	webChatStore WebChatStore
 
+	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
+	artifactStore artifacts.Store
+
 	// Chat notifier for human mention + DM received notifications (W6). Nil-safe.
 	chatNotifier *ChatNotifier
 
@@ -2149,6 +2153,13 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Seed system limit definitions for the quota/limits subsystem (Phase 2B).
 	// Shipped with unlimited defaults (DefaultValue=0) per sponsor decision OQ-2.
 	seedLimitDefinitions(ctx, s)
+
+	// Remove group memberships whose user and agent were both deleted
+	// (ON DELETE SET NULL leaves the row with both IDs NULL). Such rows are
+	// always orphans and would otherwise count toward group roles
+	// (ptone/scion#2769). Idempotent; runs on every startup, before the
+	// role-binding backfill reads group memberships. Non-fatal.
+	sweepOrphanedGroupMemberships(ctx, s)
 
 	// Backfill role bindings from existing User.Role and project group memberships.
 	// Must run after reconcileBuiltInRoles so the role definitions exist.
@@ -6601,4 +6612,23 @@ func (s *Server) a2aBridgeSweepHandler(externalURL string) func(ctx context.Cont
 				"status", resp.StatusCode, "url", externalURL)
 		}
 	}
+}
+
+// sweepOrphanedGroupMemberships deletes group memberships whose user and
+// agent are both NULL and logs how many it removed. It runs on every startup
+// and is idempotent. A failure is logged at Warn and startup continues: the
+// rows are inert apart from role counts, and the next startup retries. The
+// count is logged at Info only when rows were removed; the usual no-op run
+// logs at Debug.
+func sweepOrphanedGroupMemberships(ctx context.Context, s store.Store) {
+	n, err := s.DeleteOrphanedGroupMemberships(ctx)
+	if err != nil {
+		slog.Warn("failed to delete orphaned group memberships", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.Info("deleted orphaned group memberships", "count", n)
+		return
+	}
+	slog.Debug("deleted orphaned group memberships", "count", n)
 }

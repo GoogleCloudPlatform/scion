@@ -330,6 +330,45 @@ func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
 	return out
 }
 
+// loadHeartbeatMappingSettings loads the broker's global settings plus the
+// DB-backed overlay, the source of kubernetes_service_account_mappings at
+// dispatch (resolveKubernetesAssignIdentity). A variable so tests can
+// substitute settings.
+var loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	return vs, err
+}
+
+// heartbeatProfileSAMappings returns, sorted by profile name, the GSA
+// mappings of each Kubernetes profile (by resolved runtime type) in the
+// broker's global settings, for the heartbeat's ProfileSAMappings field.
+// Nil when the settings cannot be read, so the hub keeps what it has; an
+// empty result when there are no Kubernetes profiles.
+func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState {
+	vs, err := loadHeartbeatMappingSettings()
+	if err != nil || vs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(vs.Profiles))
+	for name := range vs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := []hubclient.ProfileSAMappingsState{}
+	for _, name := range names {
+		gsas, isKubernetes, _ := vs.ProfileKubernetesSAMappings(name)
+		if !isKubernetes {
+			continue
+		}
+		state := hubclient.ProfileSAMappingsState{Name: name, ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}}
+		for _, gsa := range gsas {
+			state.ServiceAccountMappings = append(state.ServiceAccountMappings, hubclient.BrokerProfileSAMapping{GSA: gsa})
+		}
+		out = append(out, state)
+	}
+	return out
+}
+
 // resolveLiveRuntimeInstance returns the already-built Runtime instance
 // backing a profile resolving to rtType, without constructing anything new:
 // s.runtime for the default type, or an auxiliary runtime some prior
