@@ -293,6 +293,49 @@ func TestHandleUserMessage_RoutesNonInstructionToNotification(t *testing.T) {
 	}
 }
 
+// The retired assistant-reply mirror carries one user's turn text. An older
+// hub may still forward it; it must not reach any space or user.
+func TestHandleUserMessage_DiscardsRetiredAssistantReply(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "users/12345",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "test@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("setting user mapping: %v", err)
+	}
+	if err := store.SetSpaceLink(&state.SpaceLink{
+		SpaceID:     "spaces/AAQAx",
+		Platform:    "googlechat",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
+		LinkedBy:    "test",
+	}); err != nil {
+		t.Fatalf("setting space link: %v", err)
+	}
+
+	fm := &fakeMessenger{}
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	relay := NewNotificationRelay(store, fm, log)
+
+	msg := &messages.StructuredMessage{
+		Sender:      "agent:simon",
+		RecipientID: "hub-user-1",
+		Msg:         "private end-of-turn text",
+		Type:        messages.TypeAssistantReply,
+	}
+	if err := relay.HandleBrokerMessage(context.Background(),
+		"scion.project.project-abc.user.hub-user-1.messages", msg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fm.messages) != 0 {
+		t.Fatalf("assistant-reply must be discarded, got %d message(s) sent (first to %q)",
+			len(fm.messages), fm.messages[0].SpaceID)
+	}
+}
+
 func TestExtractActivity_UsesStatusField(t *testing.T) {
 	tests := []struct {
 		name    string
