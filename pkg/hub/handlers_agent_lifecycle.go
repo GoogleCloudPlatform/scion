@@ -737,7 +737,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// quota reconcile keeps the slot (ptone/scion#2014).
 			var err error
 			if sd, err = s.reserveStartCapacity(ctx, agent); err != nil {
-				if !s.writeStartClaimError(w, err, agent.ID) && !writeStartQuotaError(w, err) {
+				if !s.writeStartClaimError(ctx, w, err, agent.ID) && !writeStartQuotaError(w, err) {
 					writeErrorFromErr(w, err, "")
 				}
 				return
@@ -750,7 +750,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				run, err := s.acquireStartClaim(ctx, agent, store.StartClaimRestart)
 				if err != nil {
 					sd.rollback(ctx)
-					if !s.writeStartClaimError(w, err, agent.ID) {
+					if !s.writeStartClaimError(ctx, w, err, agent.ID) {
 						writeErrorFromErr(w, err, "")
 					}
 					return
@@ -858,7 +858,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If dispatch failed, return error. A required-skill resolution failure
 	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
-		if s.writeStartClaimError(w, dispatchErr, agent.ID) || writeStartQuotaError(w, dispatchErr) {
+		if s.writeStartClaimError(ctx, w, dispatchErr, agent.ID) || writeStartQuotaError(w, dispatchErr) {
 			return
 		}
 		if ref := deleteClaimedDuringDispatch(dispatchErr, agent.ID); ref != nil {
@@ -931,8 +931,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// again (compensateLandedRun), so answer 409 delete_in_progress as the
 	// mid-dispatch case does, rather than writing the status and answering
 	// 200 (delete-claimed or soft-deleted row) or 404 (row gone). The
-	// delete engine owns the row and its reservation; nothing is written or
-	// published here. Reached only after a successful dispatch
+	// delete engine owns the row and its reservation. A start through
+	// startAgentCore has already written its started status, under its
+	// claim, through UpdateAgentStatus: on a delete-held row the store's
+	// delete guard keeps the delete's phase and marker (and a row that is
+	// gone takes no write), so that write is harmless. Nothing more is
+	// written or published here. Reached only after a successful dispatch
 	// (dispatchErr == nil above). A restart's start leg holds sd; a start
 	// dispatched through startAgentCore sets startDispatched.
 	landed := (sd != nil || startDispatched) && (action == api.AgentActionStart || action == api.AgentActionRestart)

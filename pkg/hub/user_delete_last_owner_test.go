@@ -307,12 +307,20 @@ func TestDeleteUser_OtherOwnerInactiveDenied(t *testing.T) {
 // for the target on grantProjectID, a project the guard never checked.
 type concurrentGrantStore struct {
 	store.Store
+	fault          *storeFaultSwitch // nil: always active
 	targetUserID   string
 	grantProjectID string
 	injected       bool
 }
 
+func newConcurrentGrantStore(inner store.Store, fault *storeFaultSwitch) *concurrentGrantStore {
+	return &concurrentGrantStore{Store: inner, fault: fault}
+}
+
 func (c *concurrentGrantStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !c.fault.Active() {
+		return c.Store.WithTx(ctx, fn)
+	}
 	return c.Store.WithTx(ctx, func(tx store.Store) error {
 		return fn(&concurrentGrantTx{Store: tx, parent: c})
 	})
@@ -376,7 +384,7 @@ func TestDeleteUser_ConcurrentBindingChangeAbortsWithConflict(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, s, alice, bob, project := setupDemoPolicyTest(t)
+			srv, s, alice, bob, project, raced, fault := setupDemoPolicyTestWithFault(t, newConcurrentGrantStore)
 			ctx := context.Background()
 			// alice co-owns project with bob, so the guard itself allows
 			// her delete; carol (invited) holds a member binding.
@@ -399,11 +407,10 @@ func TestDeleteUser_ConcurrentBindingChangeAbortsWithConflict(t *testing.T) {
 			before := allBindingsFor(t, s, target.ID)
 			require.NotEmpty(t, before)
 
-			raced := &concurrentGrantStore{Store: s, targetUserID: target.ID, grantProjectID: other.ID}
-			srv.store = raced
+			raced.targetUserID, raced.grantProjectID = target.ID, other.ID
+			fault.Arm()
 
 			rec := doRequest(t, srv, http.MethodDelete, tc.path(target), nil)
-			srv.store = s
 			require.True(t, raced.injected, "precondition: the concurrent grant was injected")
 			requireConflictRetry(t, rec)
 
@@ -441,12 +448,16 @@ func TestDeleteUser_ConcurrentBindingChangeAbortsWithConflict(t *testing.T) {
 //     UPDATE under the same ID (ptone/scion#2770 review r3 L1).
 type bindingSwapStore struct {
 	store.Store
+	fault              *storeFaultSwitch // nil: always active
 	target, bob, other string
 	mode               string
 	injected           bool
 }
 
 func (c *bindingSwapStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !c.fault.Active() {
+		return c.Store.WithTx(ctx, fn)
+	}
 	return c.Store.WithTx(ctx, func(tx store.Store) error {
 		return fn(&bindingSwapTx{Store: tx, parent: c})
 	})
@@ -564,10 +575,16 @@ func projectOwnerIDs(t *testing.T, s store.Store, projectID string) []string {
 // setupBindingSwap prepares, for each delete path, a target that co-owns
 // `project` with bob (users path) or is an invited member of it
 // (allow-list path), plus a member binding on `other`, which bob solely
-// owns and the guard therefore never locks or checks.
-func setupBindingSwap(t *testing.T, path string) (srv *Server, s store.Store, target, bob *store.User, other *store.Project, url string) {
+// owns and the guard therefore never locks or checks. It returns the
+// installed bindingSwapStore (in the given mode, aimed at the target) and
+// its disarmed switch; the caller arms it right before the delete.
+func setupBindingSwap(t *testing.T, path, mode string) (srv *Server, s store.Store, target, bob *store.User, other *store.Project, url string, raced *bindingSwapStore, fault *storeFaultSwitch) {
 	t.Helper()
-	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	var alice *store.User
+	var project *store.Project
+	srv, s, alice, bob, project, raced, fault = setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *bindingSwapStore {
+		return &bindingSwapStore{Store: inner, fault: f, mode: mode}
+	})
 	ctx := context.Background()
 	addProjectOwner(t, srv, s, alice, bob, project.ID)
 	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
@@ -584,7 +601,8 @@ func setupBindingSwap(t *testing.T, path string) (srv *Server, s store.Store, ta
 		ScopeType: store.RoleScopeProject, ScopeID: other.ID, CreatedBy: "test",
 	})
 	require.NoError(t, err)
-	return srv, s, target, bob, other, url
+	raced.target, raced.bob, raced.other = target.ID, bob.ID, other.ID
+	return srv, s, target, bob, other, url, raced, fault
 }
 
 // A concurrent TransferOwnership of an unchecked project to the target swaps
@@ -594,13 +612,11 @@ func setupBindingSwap(t *testing.T, path string) (srv *Server, s store.Store, ta
 func TestDeleteUser_ConcurrentBindingSwapAbortsWithConflict(t *testing.T) {
 	for _, path := range []string{"users", "allow-list"} {
 		t.Run(path, func(t *testing.T) {
-			srv, s, target, bob, other, url := setupBindingSwap(t, path)
+			srv, s, target, bob, other, url, raced, fault := setupBindingSwap(t, path, "transfer")
 			ctx := context.Background()
 
-			raced := &bindingSwapStore{Store: s, target: target.ID, bob: bob.ID, other: other.ID, mode: "transfer"}
-			srv.store = raced
+			fault.Arm()
 			rec := doRequest(t, srv, http.MethodDelete, url, nil)
-			srv.store = s
 			require.True(t, raced.injected, "precondition: the concurrent transfer was injected")
 			requireConflictRetry(t, rec)
 
@@ -625,13 +641,11 @@ func TestDeleteUser_ConcurrentBindingSwapAbortsWithConflict(t *testing.T) {
 func TestDeleteUser_ConcurrentBindingInPlaceChangeAbortsWithConflict(t *testing.T) {
 	for _, path := range []string{"users", "allow-list"} {
 		t.Run(path, func(t *testing.T) {
-			srv, s, target, bob, other, url := setupBindingSwap(t, path)
+			srv, s, target, bob, other, url, raced, fault := setupBindingSwap(t, path, "sameid")
 			ctx := context.Background()
 
-			raced := &bindingSwapStore{Store: s, target: target.ID, bob: bob.ID, other: other.ID, mode: "sameid"}
-			srv.store = raced
+			fault.Arm()
 			rec := doRequest(t, srv, http.MethodDelete, url, nil)
-			srv.store = s
 			require.True(t, raced.injected, "precondition: the in-place change was injected")
 			requireConflictRetry(t, rec)
 
@@ -650,13 +664,11 @@ func TestDeleteUser_ConcurrentBindingInPlaceChangeAbortsWithConflict(t *testing.
 func TestDeleteUser_ConcurrentBindingRevokeStillDeletes(t *testing.T) {
 	for _, path := range []string{"users", "allow-list"} {
 		t.Run(path, func(t *testing.T) {
-			srv, s, target, bob, other, url := setupBindingSwap(t, path)
+			srv, s, target, bob, other, url, raced, fault := setupBindingSwap(t, path, "revoke")
 			ctx := context.Background()
 
-			raced := &bindingSwapStore{Store: s, target: target.ID, bob: bob.ID, other: other.ID, mode: "revoke"}
-			srv.store = raced
+			fault.Arm()
 			rec := doRequest(t, srv, http.MethodDelete, url, nil)
-			srv.store = s
 			require.True(t, raced.injected, "precondition: the concurrent revoke was injected")
 			require.Less(t, rec.Code, 300, rec.Body.String())
 
@@ -674,10 +686,14 @@ func TestDeleteUser_ConcurrentBindingRevokeStillDeletes(t *testing.T) {
 // (GoogleCloudPlatform/scion#2414 review).
 type missingOwnerRoleTxStore struct {
 	store.Store
+	fault  *storeFaultSwitch // nil: always active
 	nilNil bool
 }
 
 func (m *missingOwnerRoleTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !m.fault.Active() {
+		return m.Store.WithTx(ctx, fn)
+	}
 	return m.Store.WithTx(ctx, func(tx store.Store) error {
 		return fn(&missingOwnerRoleTx{Store: tx, nilNil: m.nilNil})
 	})
@@ -708,7 +724,9 @@ func TestDeprecatedAllowListDelete_GuardNotFoundIsInternalError(t *testing.T) {
 		nilNil bool
 	}{{"err-not-found", false}, {"nil-nil", true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, s, alice, _, project := setupDemoPolicyTest(t)
+			srv, s, alice, _, project, _, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *missingOwnerRoleTxStore {
+				return &missingOwnerRoleTxStore{Store: inner, fault: f, nilNil: tc.nilNil}
+			})
 			ctx := context.Background()
 			carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
 			memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
@@ -719,10 +737,9 @@ func TestDeprecatedAllowListDelete_GuardNotFoundIsInternalError(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			srv.store = &missingOwnerRoleTxStore{Store: s, nilNil: tc.nilNil}
+			fault.Arm()
 			logs := captureSpaceMembersLogs(t)
 			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/allow-list/"+carol.Email, nil)
-			srv.store = s
 			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 			// The panic-recovery middleware also answers 500, so check the
 			// guard failed closed instead of dereferencing a nil role.

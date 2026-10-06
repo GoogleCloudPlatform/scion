@@ -59,9 +59,6 @@ func (s *Server) reapStartClaims(ctx context.Context) {
 		slog.Warn("Start claim reaper: listing claims failed", "error", err)
 		return
 	}
-	if len(agents) == 0 {
-		return
-	}
 	now, err := s.store.StoreClock(ctx)
 	if err != nil {
 		slog.Warn("Start claim reaper: reading the store clock failed", "error", err)
@@ -78,6 +75,7 @@ func (s *Server) reapStartClaims(ctx context.Context) {
 		return
 	}
 	views := map[string]*reaperBrokerView{}
+	defer s.reapProvisionedStartsLeftRunning(ctx, now, holds, views)
 	for _, a := range agents {
 		view, ok := views[a.RuntimeBrokerID]
 		if !ok {
@@ -186,6 +184,9 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 	gone := obs.State == store.ObservedAbsent || obs.State == store.ObservedPresentTerminal
 	if gone && !inFlight && !obs.ObservedAt.Before(a.StartClaimUnconfirmedAt.Add(unconfirmedObservationLag)) {
 		release("runtime shows nothing running")
+		if a.Phase == string(state.PhaseCreated) && a.RunIntent == store.RunIntentRunning && a.RunIntentAt != nil {
+			s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, provisionedStartNotCompletedMessage)
+		}
 		return
 	}
 	if exp, ok := holds.HoldExpiry(a); ok && !now.Before(exp) && (obs.State == store.ObservedPresentRunning || inFlight) {
@@ -269,5 +270,68 @@ func (s *Server) demoteOwnClaimsOnRestart(ctx context.Context) {
 	}
 	if n > 0 {
 		slog.Info("Demoted start claims of a previous process of this pod", "count", n)
+	}
+}
+
+// provisionedStartNotCompletedMessage is the message a provisioned agent gets
+// when the runtime shows its start never produced a container.
+const provisionedStartNotCompletedMessage = "Start did not complete: the runtime shows no container for this agent. " + provisionedRestingNote
+
+// reapProvisionedStartsLeftRunning is the backstop for a provisioned agent
+// (phase created) whose start left run intent running with no claim, no
+// active launch and no message: a start whose failure was not written. Once
+// a fresh complete inventory shows its target has no container and no start
+// in flight, it gets the message and its intent goes back to stopped (its
+// resting state); it can be started again. A provisioned agent at rest
+// (intent stopped) is never touched, and neither is one changed within the
+// create hold.
+func (s *Server) reapProvisionedStartsLeftRunning(ctx context.Context, now time.Time, holds store.StartClaimHolds, views map[string]*reaperBrokerView) {
+	var candidates []store.Agent
+	opts := store.ListOptions{SkipTotalCount: true}
+	for {
+		res, err := s.store.ListAgents(ctx, store.AgentFilter{Phase: string(state.PhaseCreated)}, opts)
+		if err != nil {
+			slog.Warn("Start claim reaper: listing provisioned agents failed", "error", err)
+			return
+		}
+		for _, a := range res.Items {
+			if a.RunIntent == store.RunIntentRunning && a.RunIntentAt != nil && a.StartClaimID == "" &&
+				a.LaunchState != store.LaunchStateActive && a.DeletedAt.IsZero() &&
+				now.Sub(a.Updated) > holds.Create {
+				candidates = append(candidates, a)
+			}
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		opts.Cursor = res.NextCursor
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(candidates))
+	for _, a := range candidates {
+		ids = append(ids, a.ID)
+	}
+	obs, err := s.store.GetRecoveryObservations(ctx, ids)
+	if err != nil {
+		return
+	}
+	for i := range candidates {
+		a := &candidates[i]
+		view, ok := views[a.RuntimeBrokerID]
+		if !ok {
+			view = s.reaperBrokerView(ctx, a.RuntimeBrokerID)
+			views[a.RuntimeBrokerID] = view
+		}
+		o, ok := obs[a.ID]
+		if view == nil || !ok || o.Target == "" || o.Target != reaperTarget(a, view) || !observationFresh(o, view.inv, now) {
+			continue
+		}
+		if o.State != store.ObservedAbsent || o.InFlight {
+			continue
+		}
+		slog.Info("Start claim reaper: provisioned agent's start left no container; back at rest", "agent_id", a.ID)
+		s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, provisionedStartNotCompletedMessage)
 	}
 }

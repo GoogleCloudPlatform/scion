@@ -44,9 +44,7 @@ type ReincarnateAgentRequest struct {
 	DryRun  bool   `json:"dryRun,omitempty"`
 	// TargetBroker (a broker ID, name or slug) asks to move the agent to
 	// that broker; it must mount the same NFS export as the current one.
-	// Empty, or the agent's current broker, is a plain reincarnation. Only
-	// a dry run is carried out for a different broker; a real move returns
-	// 501.
+	// Empty, or the agent's current broker, is a plain reincarnation.
 	TargetBroker string `json:"targetBroker,omitempty"`
 
 	// Patch fields (ptone/scion#3302): each changes the next generation's
@@ -288,12 +286,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			moveTarget = dst
 		}
 	}
-	if moveTarget != nil && !req.DryRun {
-		writeError(w, http.StatusNotImplemented, ErrCodeNotImplemented,
-			"moving an agent to another broker is not yet implemented; use --dry-run to check eligibility", nil)
-		return
-	}
-
 	// Design §3.4 Amendments A2/A4/A23/A23.1/A23.2: eligible workspaces are
 	// clone-per-agent (a real GitClone, on a project that is neither
 	// worktree-per-agent nor shared — A23.1 R3: a project can be switched to
@@ -343,8 +335,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// Empty-per-agent workspaces are broker-local, unsynced state: the only
 	// possible reincarnation would be a fresh empty directory, silently
 	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	// A4 (ptone/scion#2727): an empty-per-agent workspace can move when it
+	// is on the shared export (placement export) and both brokers see the
+	// same export (equal identity markers): the target finds it in place.
+	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() && s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget)
 	workspaceModeErr := ""
-	if project.IsEmptyPerAgent() {
+	if project.IsEmptyPerAgent() && !emptyPerAgentMove {
 		workspaceModeErr = `reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`
 	}
 
@@ -357,10 +353,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	}
 	switchedToCloneOnly := !hasGitClone && project.GitRemote != "" && !project.IsSharedWorkspace() &&
 		linkedProjectPath == "" && effectiveWorkspace != ""
-	if workspaceModeErr == "" && (agent.AppliedConfig == nil || project.IsWorktreePerAgent() ||
+	if workspaceModeErr == "" && (agent.AppliedConfig == nil || (!emptyPerAgentMove && (project.IsWorktreePerAgent() ||
 		(hasGitClone && project.IsSharedWorkspace()) ||
 		switchedToCloneOnly ||
-		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)) {
+		!api.ReincarnateEligible(hasGitClone, effectiveWorkspace)))) {
 		// FYI-6 (review p1b-r1): the generic message now covers every
 		// eligible mode, not just clone-per-agent.
 		workspaceModeErr = "reincarnate requires a clone-per-agent, shared-workspace or hub-managed workspace"
@@ -374,7 +370,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		workspaceModeErr = "reincarnate --broker does not support linked projects; the workspace is local to the current broker"
 	}
 	if moveTarget != nil {
-		s.planReincarnateMove(w, r, agent, project, moveTarget, workspaceModeErr, hasGitClone, req, patch)
+		s.planReincarnateMove(w, r, req, agent, auth, project, moveTarget, workspaceModeErr, hasGitClone || emptyPerAgentMove, admittedDeletionClaim, patch)
 		return
 	}
 	if workspaceModeErr != "" {
@@ -455,6 +451,18 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	s.startReincarnation(w, r, agent, auth, fresh, plan, targetGeneration, req.Handoff, admittedDeletionClaim,
+		brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID), targetBrokerID, nil)
+}
+
+// startReincarnation claims the agent, records the reincarnation (with the
+// authority re-record auth, nil for a self-reincarnation) and starts the
+// detached worker, answering 202. sourceBrokerID and targetBrokerID are
+// echoed in the response (both empty unless the request named a target);
+// move is non-nil for a cross-broker move.
+func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
+	ctx := r.Context()
+
 	// The claim is guarded by the agent row's own optimistic lock
 	// (state_version), and the claim and the reincarnation record commit
 	// together, so a version conflict or any other failure leaves no record
@@ -484,7 +492,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		RequestedBy:           requestedBy,
 		State:                 store.AgentReincarnationStatePending,
 		PreviousAppliedConfig: agent.AppliedConfig,
-		Handoff:               req.Handoff,
+		Handoff:               handoff,
+		SourceBrokerID:        moveSourceID(move),
+		TargetBrokerID:        moveTargetID(move),
 	}
 	// The claim, the reincarnation record, the authority re-record, the
 	// reincarnate-claim hooks and the audit record commit in one
@@ -548,15 +558,14 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// this exact claim instant, not rec.RequestedAt — the store stamps that
 	// a few ms later inside CreateAgentReincarnation, after the gate in the
 	// three delivery paths could already have started deferring messages.
-	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim)
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim, move)
 
 	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
-		AgentID:    agent.ID,
-		Generation: targetGeneration,
-		State:      store.AgentReincarnationStatePending,
-		Plan:       plan,
-		// A named target here is the agent's current broker.
-		SourceBrokerID: brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID),
+		AgentID:        agent.ID,
+		Generation:     targetGeneration,
+		State:          store.AgentReincarnationStatePending,
+		Plan:           plan,
+		SourceBrokerID: sourceBrokerID,
 		TargetBrokerID: targetBrokerID,
 	})
 }
@@ -571,6 +580,20 @@ func isSelfRequest(ctx context.Context, agent *store.Agent) bool {
 	return ok && agentIdent.ID() == agent.ID
 }
 
+func moveSourceID(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.SourceBrokerID
+}
+
+func moveTargetID(m *reincarnationMove) string {
+	if m == nil {
+		return ""
+	}
+	return m.TargetBrokerID
+}
+
 // brokerIDIfSet returns id when target is non-empty, else "".
 func brokerIDIfSet(target, id string) string {
 	if target == "" {
@@ -579,12 +602,16 @@ func brokerIDIfSet(target, id string) string {
 	return id
 }
 
-// planReincarnateMove answers a dry-run move of agent to dst: it runs the
-// move eligibility checks and returns the first refusal, or 200 with the
-// reincarnation plan and the verdict. It writes no agent, broker, project or
-// quota state; the passthrough re-check may record its authorization
-// decision in the audit log and call IAM, like every passthrough gate.
-func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool, req ReincarnateAgentRequest, patch *reincarnatePatch) {
+// planReincarnateMove answers a move of agent to dst: it runs the move
+// eligibility checks and returns the first refusal. Otherwise a dry run gets
+// 200 with the reincarnation plan and the verdict, writing no agent, broker,
+// project or quota state, and a real request starts the move (202; the
+// worker re-checks eligibility before its first side effect). The
+// passthrough re-check may record its authorization decision in the audit
+// log and call IAM, like every passthrough gate. A patch (validated and
+// authorized by the caller) is part of the plan and of the config the agent
+// is provisioned with on the target.
+func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req ReincarnateAgentRequest, agent *store.Agent, auth *reincarnateAuthority, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool, admittedDeletionClaim int64, patch *reincarnatePatch) {
 	ctx := r.Context()
 	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -632,20 +659,55 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
+	// The access probes judge the config the next generation runs with: a
+	// --service-account patch replaces a passthrough identity, so the
+	// passthrough gate (and the self-move passthrough refusal) follow the
+	// patched GCP identity, not the outgoing one.
+	in.Probes = s.moveProbesFor(r, project, fresh)
 	v, ref := evaluateMoveEligibility(in)
 	if ref != nil {
 		writeMoveRefusal(w, ref, v)
 		return
 	}
-	writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
-		AgentID:        agent.ID,
-		Generation:     agent.Generation + 1,
-		State:          "planned",
-		Plan:           plan,
-		SourceBrokerID: src.ID,
-		TargetBrokerID: dst.ID,
-		MoveVerdict:    &v,
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
+			AgentID:        agent.ID,
+			Generation:     agent.Generation + 1,
+			State:          "planned",
+			Plan:           plan,
+			SourceBrokerID: src.ID,
+			TargetBrokerID: dst.ID,
+			MoveVerdict:    &v,
+		})
+		return
+	}
+	s.startReincarnation(w, r, agent, auth, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
+		SourceBrokerID:    src.ID,
+		TargetBrokerID:    dst.ID,
+		ProjectID:         project.ID,
+		SelfMove:          in.SelfMove,
+		AgentDirWorkspace: cloneMode,
+		Profile:           in.Profile,
 	})
+}
+
+// emptyPerAgentWorkspaceMovable reports whether an empty-per-agent agent's
+// workspace can move to dst: its last start placed it on the shared export,
+// and the source and dst report the same export with equal identity
+// markers.
+func (s *Server) emptyPerAgentWorkspaceMovable(ctx context.Context, agent *store.Agent, dst *store.RuntimeBroker) bool {
+	if !isWorkspacePlacementOnExport(agent.WorkspacePlacement) {
+		return false
+	}
+	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return false
+	}
+	if !api.SameWorkspaceExport(src.WorkspaceStorage, dst.WorkspaceStorage) {
+		return false
+	}
+	srcID, dstID := src.WorkspaceStorage.NFS.ExportID, dst.WorkspaceStorage.NFS.ExportID
+	return srcID != "" && srcID == dstID
 }
 
 // linkedProjectPath resolves the local path a runtime broker has registered

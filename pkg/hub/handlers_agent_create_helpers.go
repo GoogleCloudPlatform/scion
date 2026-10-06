@@ -1245,7 +1245,14 @@ func (s *Server) handleExistingAgent(
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
 		var afterErr error // a post-start write error, answered after the start
+		var answered bool  // the post-start step answered a delete that won
 		afterStart := func(ctx context.Context, _ startedState) error {
+			// A delete that won while the broker call was in flight: answer it
+			// before writing anything to the row.
+			if s.existingAgentDeleteWon(ctx, w, existingAgent.ID) {
+				answered = true
+				return nil
+			}
 			if existingAgent.Phase == string(state.PhaseSuspended) {
 				existingAgent.Phase = string(state.PhaseRunning)
 			}
@@ -1270,8 +1277,11 @@ func (s *Server) handleExistingAgent(
 		// reserves the broker capacity and marks the agent starting for the
 		// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
 		// start fails) and runs afterStart while the claim is held.
-		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart, SyncDispatchBound: true}); err != nil {
-			if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: resume, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+			if answered {
+				return existingAgentErrored
+			}
+			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 				return existingAgentErrored
 			}
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
@@ -1293,11 +1303,8 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
-		if s.existingAgentDeleteWon(ctx, w, nil, existingAgent.ID) {
-			return existingAgentErrored
-		}
 
-		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, nil, existingAgent.ID, afterErr) {
+		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
 			return existingAgentErrored
 		}
 
@@ -1364,7 +1371,14 @@ func (s *Server) handleExistingAgent(
 			// The post-start write runs inside the start claim, before it is
 			// released, so it never overwrites a newer start's status.
 			var afterErr error // a post-start write error, answered after the start
+			var answered bool  // the post-start step answered a delete that won
 			afterStart := func(ctx context.Context, _ startedState) error {
+				// A delete that won while the broker call was in flight: answer it
+				// before writing anything to the row.
+				if s.existingAgentDeleteWon(ctx, w, existingAgent.ID) {
+					answered = true
+					return nil
+				}
 				existingAgent.Phase = string(state.PhaseRunning)
 				// Clear any exit reason/code left from the prior generation —
 				// including a disruption reason recorded while the agent was
@@ -1389,8 +1403,11 @@ func (s *Server) handleExistingAgent(
 			// reserves the broker capacity and marks the agent starting for the
 			// dispatch (ptone/scion#1963, ptone/scion#2014; rolled back if the
 			// start fails) and runs afterStart while the claim is held.
-			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true}); err != nil {
-				if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+				if answered {
+					return existingAgentErrored
+				}
+				if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 					return existingAgentErrored
 				}
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
@@ -1412,11 +1429,8 @@ func (s *Server) handleExistingAgent(
 				}
 				return existingAgentErrored
 			}
-			if s.existingAgentDeleteWon(ctx, w, nil, existingAgent.ID) {
-				return existingAgentErrored
-			}
 
-			if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, nil, existingAgent.ID, afterErr) {
+			if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
 				return existingAgentErrored
 			}
 
@@ -1533,7 +1547,14 @@ func (s *Server) handleExistingAgent(
 		// The post-start write runs inside the start claim, before it is
 		// released, so it never overwrites a newer start's status.
 		var afterErr error // a post-start write error, answered after the start
+		var answered bool  // the post-start step answered a delete that won
 		afterStart := func(ctx context.Context, _ startedState) error {
+			// A delete that won while the broker call was in flight: answer it
+			// before writing anything to the row.
+			if s.existingAgentDeleteWon(ctx, w, existingAgent.ID) {
+				answered = true
+				return nil
+			}
 			// If the broker didn't set a running phase, default to running.
 			if existingAgent.Phase == string(state.PhaseCreated) ||
 				existingAgent.Phase == string(state.PhaseProvisioning) {
@@ -1553,8 +1574,11 @@ func (s *Server) handleExistingAgent(
 		// The start runs under a start claim, which records run intent running,
 		// reserves the broker capacity (rolled back if the start fails) and
 		// runs afterStart while the claim is held.
-		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true}); err != nil {
-			if s.writeStartClaimError(w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
+		if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: false, AfterStart: afterStart, SyncDispatchBound: true}); answered || err != nil {
+			if answered {
+				return existingAgentErrored
+			}
+			if s.writeStartClaimError(ctx, w, err, existingAgent.ID) || writeStartQuotaError(w, err) {
 				return existingAgentErrored
 			}
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
@@ -1576,11 +1600,8 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
-		if s.existingAgentDeleteWon(ctx, w, nil, existingAgent.ID) {
-			return existingAgentErrored
-		}
 
-		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, nil, existingAgent.ID, afterErr) {
+		if afterErr != nil && s.existingAgentGoneAfterLanding(ctx, w, existingAgent.ID, afterErr) {
 			return existingAgentErrored
 		}
 
@@ -2313,13 +2334,13 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 // flight (deleteWonAfterLanding), as the lifecycle start does
 // (ptone/scion#3255). The dispatch has already tried to remove the landed run
 // (compensateLandedRun); its outcome is in the dispatch warnings. The delete
-// engine owns the row and its reservation, so sd is settled, not rolled
-// back, and nothing is written. It reports whether it answered.
-func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string) bool {
+// engine owns the row and its reservation. Called from the post-start step,
+// before the full-row write, so nothing is written for a delete that won.
+// It reports whether it answered.
+func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, agentID string) bool {
 	if !s.deleteWonAfterLanding(ctx, agentID) {
 		return false
 	}
-	sd.settle()
 	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
 	return true
 }
@@ -2327,11 +2348,10 @@ func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWrit
 // existingAgentGoneAfterLanding is the same answer when the post-start write
 // finds the row gone (hard-deleted after the re-read). It reports whether it
 // answered.
-func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string, err error) bool {
+func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.ResponseWriter, agentID string, err error) bool {
 	if !errors.Is(err, store.ErrNotFound) {
 		return false
 	}
-	sd.settle()
 	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
 	return true
 }
