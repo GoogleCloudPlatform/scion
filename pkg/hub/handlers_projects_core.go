@@ -3069,12 +3069,14 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		if projectPath, err := s.hubManagedProjectPath(project.Slug); err == nil {
+		projectPath, err := s.hubManagedProjectPath(project.Slug)
+		if err == nil {
 			if err := util.RemoveAllSafe(projectPath); err != nil {
 				s.projectsLogger().Warn("failed to remove hub-managed project directory",
 					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
 			}
 		}
+		s.removeEmbeddedBrokerProjectDir(projectID, project.Slug, projectPath)
 	}
 	s.webdavLocks.Delete(projectID)
 
@@ -3098,6 +3100,39 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 8: Publish project-deleted event.
 	s.events.PublishProjectDeleted(ctx, projectID)
+}
+
+// removeEmbeddedBrokerProjectDir removes the co-located broker's local
+// project directory, ~/.scion/projects/<slug>, after a project is deleted.
+//
+// The embedded broker shares this process's filesystem and materializes
+// hub-native projects at that path whatever workspace storage backend the hub
+// uses, and the broker cleanup step leaves this directory to the hub. With the
+// default local backend the hub-managed path is that same directory, so it has
+// already been removed (removedPath) and nothing more is done. With a
+// configured backend the hub-managed path may be on the backend mount, and
+// this removes the local directory as well. Only a single direct child of the
+// projects root is removed. An absent directory is not an error.
+func (s *Server) removeEmbeddedBrokerProjectDir(projectID, slug, removedPath string) {
+	if s.GetEmbeddedBrokerID() == "" {
+		return
+	}
+	if err := validateProjectSlug(slug); err != nil {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return
+	}
+	projectsRoot := filepath.Join(globalDir, "projects")
+	localPath := filepath.Join(projectsRoot, slug)
+	if filepath.Dir(localPath) != projectsRoot || localPath == filepath.Clean(removedPath) {
+		return
+	}
+	if err := util.RemoveAllSafe(localPath); err != nil {
+		s.projectsLogger().Warn("failed to remove embedded broker project directory",
+			"project_id", projectID, "slug", slug, "path", localPath, "error", err)
+	}
 }
 
 // dispatchAgentDeletions dispatches agent deletion to runtime brokers
