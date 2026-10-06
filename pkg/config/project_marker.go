@@ -17,6 +17,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -275,8 +276,11 @@ func checkedProjectID(path, id string) (string, error) {
 }
 
 // mkdirUnderProjectConfigs creates dir and any missing parents. dir must be
-// below ~/.scion/project-configs; everything below that directory is created
-// through an os.Root opened on it, so creation stays within it.
+// below ~/.scion/project-configs. The first element below that directory
+// (the <slug>__<short-uuid> project dir) is created through an os.Root opened
+// on it, so it is created inside project-configs; an existing entry of that
+// name, including a symlink, is accepted as is. The rest of dir is then
+// created with os.MkdirAll.
 func mkdirUnderProjectConfigs(dir string, perm os.FileMode) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -295,7 +299,11 @@ func mkdirUnderProjectConfigs(dir string, perm os.FileMode) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	return root.MkdirAll(rel, perm)
+	first, _, _ := strings.Cut(rel, string(filepath.Separator))
+	if err := root.Mkdir(first, perm); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	return os.MkdirAll(dir, perm)
 }
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.

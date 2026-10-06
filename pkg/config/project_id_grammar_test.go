@@ -33,7 +33,7 @@ var malformedProjectIDs = []struct {
 	{"dot dot", ".."},
 	{"forward slash", "a/b"},
 	{"leading dot dot element", "../abcdef12"},
-	{"nested dot dot elements", "../../outside"},
+	{"nested dot dot elements", "../../other"},
 	{"leading slash", "/../../x"},
 	{"backslash", `a\b`},
 	{"nul byte", "abc\x00def"},
@@ -275,5 +275,63 @@ func TestInitInRepoProject_RequiresWellFormedProjectID(t *testing.T) {
 		if e.Name() != ProjectConfigsDir {
 			t.Errorf("unexpected entry %q created in %s", e.Name(), filepath.Join(tmpHome, GlobalDir))
 		}
+	}
+}
+
+func TestMkdirUnderProjectConfigs_RequiresTargetBelowProjectConfigs(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	parent := filepath.Join(tmpHome, GlobalDir, ProjectConfigsDir)
+
+	for name, dir := range map[string]string{
+		"parent itself":     parent,
+		"sibling":           filepath.Join(tmpHome, GlobalDir, "other"),
+		"dot-dot relative":  parent + string(filepath.Separator) + ".." + string(filepath.Separator) + "other",
+		"outside home tree": filepath.Join(t.TempDir(), "other"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := mkdirUnderProjectConfigs(dir, 0755); err == nil {
+				t.Errorf("mkdirUnderProjectConfigs(%q) = nil, want an error", dir)
+			}
+		})
+	}
+
+	ok := filepath.Join(parent, "proj__abcd1234", DotScion, "agents")
+	if err := mkdirUnderProjectConfigs(ok, 0755); err != nil {
+		t.Fatalf("mkdirUnderProjectConfigs(%q) error: %v", ok, err)
+	}
+	if info, err := os.Stat(ok); err != nil || !info.IsDir() {
+		t.Fatalf("expected directory at %s: %v", ok, err)
+	}
+}
+
+func TestInitInRepoProject_ExistingSymlinkedProjectConfigDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	projectDir := filepath.Join(t.TempDir(), "my-repo", ".scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectID(projectDir, "550e8400-e29b-41d4-a716-446655440000"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The project's config dir lives elsewhere and is linked into place.
+	elsewhere := t.TempDir()
+	parent := filepath.Join(tmpHome, GlobalDir, ProjectConfigsDir)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(parent, "my-repo__550e8400")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := initInRepoProject(projectDir, InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+		t.Fatalf("initInRepoProject() error: %v", err)
+	}
+	want := filepath.Join(elsewhere, DotScion, "agents")
+	if info, err := os.Stat(want); err != nil || !info.IsDir() {
+		t.Fatalf("expected agents dir at %s: %v", want, err)
 	}
 }
