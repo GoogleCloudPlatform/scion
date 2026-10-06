@@ -29,7 +29,16 @@
 
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+  type MockInstance,
+} from 'vitest';
 import { html, nothing, render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
@@ -1979,6 +1988,32 @@ describe('chat page — startup after the page is removed', () => {
     let unhandled: unknown[];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
 
+    /**
+     * Wait until initV2 has caught the failed import, by the log its catch
+     * writes. The rejection's timing is up to the test runner: a vi.doMock
+     * is resolved by the runner's main process, which may answer after any
+     * number of macrotask turns, so a fixed flush() is not enough.
+     */
+    async function untilStartupFails(errorSpy: MockInstance): Promise<void> {
+      await vi.waitFor(() =>
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Chat page failed to load its components:',
+          // Vitest wraps an error thrown by a mock factory.
+          expect.objectContaining({ cause: chunkError })
+        )
+      );
+    }
+
+    /**
+     * Import the members module and ignore the result. Vitest applies a
+     * vi.doMock or vi.doUnmock at the next import, and drops any queued
+     * while that import is still being resolved; importing here applies
+     * each one before the next step, so none leaks into another test.
+     */
+    async function applyMembersMock(): Promise<void> {
+      await import('../shared/chat/chat-members.js').catch(() => undefined);
+    }
+
     beforeEach(async () => {
       // Load the real modules first, so these tests time the same whether
       // or not an earlier test already did: only the mocked import differs.
@@ -1989,10 +2024,12 @@ describe('chat page — startup after the page is removed', () => {
       vi.doMock('../shared/chat/chat-members.js', () => {
         throw chunkError;
       });
+      await applyMembersMock();
     });
 
-    afterEach(() => {
+    afterEach(async () => {
       vi.doUnmock('../shared/chat/chat-members.js');
+      await applyMembersMock();
       process.off('unhandledRejection', onUnhandled);
     });
 
@@ -2005,13 +2042,9 @@ describe('chat page — startup after the page is removed', () => {
       try {
         document.body.appendChild(el);
 
-        await flush();
+        await untilStartupFails(errorSpy);
 
         expect(unhandled).toEqual([]);
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Chat page failed to load its components:',
-          expect.anything()
-        );
         expect(el.v2SpaceRailLoaded).toBe(false);
         expect(el.v2SpaceRailLoadFailed).toBe(true);
         expect(dmListLoads()).toBe(0);
@@ -2031,13 +2064,9 @@ describe('chat page — startup after the page is removed', () => {
         document.body.appendChild(el);
         el.remove();
 
-        await flush();
+        await untilStartupFails(errorSpy);
 
         expect(unhandled).toEqual([]);
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Chat page failed to load its components:',
-          expect.anything()
-        );
         expect(el.v2SpaceRailLoadFailed).toBe(false);
         expect(el.v2SpaceRailLoaded).toBe(false);
       } finally {
@@ -2053,8 +2082,9 @@ describe('chat page — startup after the page is removed', () => {
       window.history.replaceState({}, '', '/chat');
       try {
         document.body.appendChild(el);
-        await flush();
+        await untilStartupFails(errorSpy);
 
+        expect(unhandled).toEqual([]);
         const rail = renderToFragment(el.renderV2Rail());
         const alert = rail.querySelector('[role="alert"]');
         expect(alert).not.toBeNull();
