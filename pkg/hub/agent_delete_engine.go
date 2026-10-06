@@ -682,6 +682,19 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 			"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339), "error", err)
 		return e.abandonWith(staleDispatchMessage), false
 	}
+	var refused *DeleteRunMismatchError
+	if errors.As(err, &refused) && refuseDeleteRunMismatch(req.Force, bestEffort) {
+		// The broker holds a different run of the agent than the row
+		// records, and deleted nothing (ptone/scion#3080): finalizing would
+		// leave that run's container running with no row. Fail the delete
+		// as a conflict and restore the prior phase, as for a broker 409.
+		// A retry sends the same run and is refused again until the row
+		// and the broker agree on the run.
+		s.agentLifecycleLog.Warn("delete engine: broker holds a different run than the hub recorded; not finalizing",
+			"agent_id", agent.ID, "claim", e.plan.claim, "hub_run_id", refused.RequestedRunID,
+			"broker_run_id", refused.CurrentRunID, "force", req.Force, "best_effort", bestEffort)
+		return e.rollback(store.DeletionCodeConflict, deleteRunMismatchMessage(refused)), false
+	}
 	switch {
 	case bestEffort:
 		s.agentLifecycleLog.Warn("Failed to dispatch created-phase agent delete to broker (continuing)",
@@ -695,6 +708,26 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 
 	s.agentLifecycleLog.Error("Failed to dispatch agent delete to broker", "agent_id", agent.ID, "error", err)
 	return e.classifyDispatchFailure(err, startedAt)
+}
+
+// refuseDeleteRunMismatch reports whether the delete engine refuses to
+// finalize when the broker answers its dispatch with ErrDeleteRunMismatch
+// (ptone/scion#3080), given the request's force flag and whether the
+// dispatch was best-effort (a created row with no launch in flight). It
+// refuses in every case, force and best-effort included: the other run's
+// container is on the broker either way. When it returns false, the
+// refusal falls through to the force or best-effort handling, which
+// finalizes as for any other dispatch error.
+func refuseDeleteRunMismatch(force, bestEffort bool) bool {
+	_, _ = force, bestEffort
+	return true
+}
+
+// deleteRunMismatchMessage is the failed delete's message when the broker
+// refused it because it holds a different run (ptone/scion#3080).
+func deleteRunMismatchMessage(refused *DeleteRunMismatchError) string {
+	return fmt.Sprintf("The runtime broker holds run %s of this agent, not run %s that the hub recorded; nothing was deleted",
+		refused.CurrentRunID, refused.RequestedRunID)
 }
 
 // classifyDispatchFailure decides a non-force dispatch error from the

@@ -2266,7 +2266,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// again before the first side effect after it: the leftover cleanup of
 	// a not-found, the launch cancel, the soft-delete marking and
 	// DeleteTarget. Only a small marker-file read (agentFilesRunOwner) and
-	// in-memory launch-registry checks (otherRunInFlight) run between here
+	// in-memory launch-registry checks (deleteInFlightRunID) run between here
 	// and DeleteTarget.
 	if s.refuseStaleDelete(w, fence, "resolved", id, projectID, runID) {
 		span.SetStatus(codes.Error, "stale delete dispatch")
@@ -2278,10 +2278,18 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// Only entries of a different run hold this name: the run the
 			// hub meant is already gone. Touch nothing -- not even leftover
 			// per-agent objects, which belong to the live run -- and answer
-			// 404, which the hub treats as an idempotent success.
+			// the run-mismatch 404 naming the run that holds the name, so
+			// the hub does not finalize a row whose agent still runs here
+			// (ptone/scion#3080). With no current run known, the hub
+			// treats it as an idempotent success, as any delete 404.
+			var mm *deleteRunMismatchError
+			current := ""
+			if errors.As(err, &mm) {
+				current = mm.current
+			}
 			s.agentLifecycleLog.Info("Agent delete: no entry for the requested run; leaving the other run untouched",
-				"agent_id", id, "project_id", projectID, "run_id", runID)
-			NotFound(w, "Agent")
+				"agent_id", id, "project_id", projectID, "run_id", runID, "current_run_id", current)
+			RunMismatch(w, runID, current)
 			return
 		}
 		if errors.Is(err, errDeleteTargetNotFound) {
@@ -2293,12 +2301,14 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// under this name right now (ptone/scion#2675): leave them.
 			// Launch keys use the request's slug; also check the
 			// slugified id, the name cleanupLeftoverAgentResources acts on.
-			if s.otherRunInFlight(runID,
+			// That start's run holds the name: report it as the current
+			// run (ptone/scion#3080), as a run-scoped stop does.
+			if current := s.deleteInFlightRunID(runID,
 				launchKey{ProjectID: projectID, Slug: id},
-				launchKey{ProjectID: projectID, Slug: api.Slugify(id)}) {
+				launchKey{ProjectID: projectID, Slug: api.Slugify(id)}); current != "" {
 				s.agentLifecycleLog.Info("Agent delete: no matching agent in project; a start of another run is in flight, leaving per-agent objects untouched",
-					"agent_id", id, "project_id", projectID, "run_id", runID)
-				NotFound(w, "Agent")
+					"agent_id", id, "project_id", projectID, "run_id", runID, "current_run_id", current)
+				RunMismatch(w, runID, current)
 				return
 			}
 			s.cleanupLeftoverAgentResources(ctx, id, projectID)
@@ -2353,24 +2363,28 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// agent-info.json, or a start of another run still in flight on this
 	// broker (which may not have recorded its run on disk yet). Without a
 	// run ID, or with no run recorded (legacy files), nothing changes.
-	var filesOwnerRun string
-	var otherRunInFlight bool
+	var filesOwnerRun, inFlightRun string
 	if runID != "" && isSingleCleanPathElement(target.name) {
 		filesOwnerRun = agentFilesRunOwner(target.name, projectPath, runID)
-		otherRunInFlight = s.otherRunInFlight(runID,
+		inFlightRun = s.deleteInFlightRunID(runID,
 			launchKey{ProjectID: projectID, Slug: id},
 			launchKey{ProjectID: agentProjectID, Slug: target.name})
 	}
+	otherRunInFlight := inFlightRun != ""
 	filesOfOtherRun := filesOwnerRun != "" || otherRunInFlight
 	if filesOfOtherRun {
 		if target.containerID == "" {
 			// Files only: they are the other run's, and so is anything
 			// left beside them. The run the hub meant is gone; touch
-			// nothing and answer 404, as for errDeleteTargetRunMismatch.
+			// nothing and answer the run-mismatch 404, as for
+			// errDeleteTargetRunMismatch. Only a start of the other run
+			// in flight here is reported as the current run
+			// (ptone/scion#3080); files alone are not a running agent,
+			// as in currentRunID, so the hub may still finalize.
 			s.agentLifecycleLog.Info("Agent delete: the agent's files belong to another run; leaving them untouched",
 				"agent_id", id, "project_id", agentProjectID, "run_id", runID,
-				"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight)
-			NotFound(w, "Agent")
+				"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight, "current_run_id", inFlightRun)
+			RunMismatch(w, runID, inFlightRun)
 			return
 		}
 		// Remove the requested run's entry, but not the other run's files.
@@ -2443,9 +2457,23 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		// undone, since agent-info.json now describes the newer run.
 		span.SetStatus(codes.Error, err.Error())
 		s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
+		// Re-list to name the run that now holds the name for the hub
+		// (ptone/scion#3080); "" (several runs, nothing listed, a list
+		// failure) leaves the hub's handling as for any delete 404.
+		// A delete naming no run answers the plain 404, as before.
+		if runID == "" {
+			s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
+				"agent_id", id, "project_id", projectID, "error", err)
+			NotFound(w, "Agent")
+			return
+		}
+		current, _ := s.currentRunID(ctx, target.mgr, id, projectID)
+		if current == runID {
+			current = ""
+		}
 		s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
-			"agent_id", id, "project_id", projectID, "run_id", runID, "error", err)
-		NotFound(w, "Agent")
+			"agent_id", id, "project_id", projectID, "run_id", runID, "current_run_id", current, "error", err)
+		RunMismatch(w, runID, current)
 		return
 	}
 	if err != nil {
@@ -3325,7 +3353,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 				s.agentLifecycleLog.Info("Agent stop: runtime entry now belongs to another run; leaving it untouched",
 					"agent_id", id, "project_id", projectID, "run_id", runID,
 					"resolved_run_id", stopRef.RunID, "error", err)
-				StopRunMismatch(w, runID, "")
+				RunMismatch(w, runID, "")
 				return
 			}
 			// A legacy stop names no run: the entry it resolved is gone,
@@ -3438,7 +3466,7 @@ func (s *Server) refuseStopRunMismatch(w http.ResponseWriter, span trace.Span, k
 	s.agentLifecycleLog.Info("Agent stop: no entry for the requested run; leaving the other run untouched",
 		"agent_id", id, "project_id", key.ProjectID, "run_id", runID, "current_run_id", current)
 	span.SetStatus(codes.Error, "run mismatch")
-	StopRunMismatch(w, runID, current)
+	RunMismatch(w, runID, current)
 	return true
 }
 
@@ -6271,6 +6299,38 @@ var errDeleteTargetNotFound = errors.New("agent not found in project")
 // cleanup at all: whatever remains belongs to the live, newer run.
 var errDeleteTargetRunMismatch = errors.New("no entry for the requested run")
 
+// deleteRunMismatchError is resolveDeleteTarget's errDeleteTargetRunMismatch,
+// carrying the run that holds the name (current): the single run of the
+// container entries the run filter dropped, or "" when they carry more than
+// one run or none of them is a container (ptone/scion#3080). The delete's
+// run-mismatch 404 reports it so the hub does not finalize a row whose
+// agent still runs here under another run.
+type deleteRunMismatchError struct {
+	current string
+}
+
+func (e *deleteRunMismatchError) Error() string { return errDeleteTargetRunMismatch.Error() }
+func (e *deleteRunMismatchError) Unwrap() error { return errDeleteTargetRunMismatch }
+
+// otherRunContainerID returns the run of the container entries in cands
+// labelled with a run other than runID, when they all carry the same one;
+// "" when there are none or they carry more than one run. File-only entries
+// do not count, as in currentRunID.
+func otherRunContainerID(cands []agentCandidate, runID string) string {
+	current := ""
+	for _, c := range cands {
+		r := c.entry.RunID
+		if c.entry.ContainerID == "" || r == "" || r == runID {
+			continue
+		}
+		if current != "" && current != r {
+			return ""
+		}
+		current = r
+	}
+	return current
+}
+
 // undoSoftDeleteMark restores agent-info.json's Phase and DeletedAt to
 // their values before a soft-delete mark (preMark), after a delete that
 // removed nothing. It is a no-op when there was no snapshot (ok false) or
@@ -6607,6 +6667,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 	}
 
 	if runID != "" {
+		all := matches
 		var otherRun bool
 		matches, otherRun = filterDeleteCandidatesByRun(matches, runID, func(c agentCandidate) api.AgentInfo { return c.entry })
 		if len(matches) == 0 && otherRun {
@@ -6616,7 +6677,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 			if listErr != nil {
 				return nil, errDeleteTargetUnknown
 			}
-			return nil, errDeleteTargetRunMismatch
+			return nil, &deleteRunMismatchError{current: otherRunContainerID(all, runID)}
 		}
 	}
 

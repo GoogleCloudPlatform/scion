@@ -3555,6 +3555,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 }
 
 // DispatchAgentDelete deletes an agent from the runtime broker.
+//
+// When the broker refuses the current run's delete because a different run
+// holds the agent's name there (ptone/scion#3080), it returns a
+// *DeleteRunMismatchError (errors.Is ErrDeleteRunMismatch), on a direct
+// and a cross-node dispatch alike, and deletes no previous runs: nothing
+// was deleted, and the caller must not finalize the agent's row.
 func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
@@ -3602,6 +3608,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
 	}
 	if err != nil {
+		if refused, ok := deleteRunMismatch(err, agent.RunID); ok {
+			d.log.Warn("Dispatcher: broker holds a different run than the hub recorded; nothing was deleted",
+				"agent_id", agent.ID, "agent", agent.Slug, "broker_id", agent.RuntimeBrokerID,
+				"hub_run_id", refused.RequestedRunID, "broker_run_id", refused.CurrentRunID)
+		}
 		return err
 	}
 	return d.deletePreviousRuns(ctx, agent, endpoint, opts)
@@ -3625,8 +3636,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 // ptone/scion#2906), and
 // is always run-scoped, never by name, so it cannot remove a same-name
 // successor. Newest run first. A run with no entry is the broker's 404,
-// which counts as success; any other error stops and is returned, and the
-// caller's failure handling applies as for the current-run delete.
+// which counts as success, and so is the broker's refusal because another
+// run holds the name (ErrDeleteRunMismatch, ptone/scion#3080): that is
+// expected here, since the current run may still hold it. Any other error
+// stops and is returned, and the caller's failure handling applies as for
+// the current-run delete.
 //
 // notAfter is computed once per dispatch (by the engine, or by the
 // executing node for an intent), not per run, so a loop over many previous
@@ -3661,6 +3675,11 @@ func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *sto
 			rest := *agent
 			rest.PreviousRunIDs = append([]string(nil), agent.PreviousRunIDs[:i+1]...)
 			return d.deferredDelete(ctx, &rest, opts.DeleteFiles, opts.RemoveBranch, opts.SoftDelete, opts.DeletedAt)
+		}
+		if errors.Is(err, ErrDeleteRunMismatch) {
+			d.log.Debug("Dispatcher: previous run has no entry; another run holds the name",
+				"agent_id", agent.ID, "agent", agent.Slug, "previous_run_id", prev, "error", err)
+			continue
 		}
 		if err != nil {
 			return fmt.Errorf("failed to delete previous run %s of agent %s: %w", prev, agent.Slug, err)
@@ -3888,7 +3907,11 @@ func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.
 
 // deferredDelete handles a cross-node agent delete: subscribe → write intent →
 // signal → wait for the dispatch row to reach terminal state. Delete is
-// idempotent: 404 from the owner is treated as success.
+// idempotent: 404 from the owner is treated as success. The exception is
+// the broker's refusal because another run holds the name
+// (ErrDeleteRunMismatch, ptone/scion#3080): the executing node fails the
+// row with the broker's answer recorded, and it is returned here as the
+// same *DeleteRunMismatchError a direct dispatch returns.
 func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	args := &DeleteDispatchArgs{
 		DeleteFiles:    deleteFiles,
@@ -3903,7 +3926,29 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 	if fence, ok := deleteDispatchFenceFrom(ctx); ok {
 		args.Claim = fence.claim
 	}
-	return d.deferredDataOp(ctx, agent, "delete", args)
+	return deferredDeleteError(d.deferredDataOp(ctx, agent, "delete", args))
+}
+
+// deferredDeleteError rebuilds the refusal of a cross-node delete
+// (*DeleteRunMismatchError) from the failed dispatch row's broker error:
+// the executing node fails the row only for the refusal, not for a plain
+// 404 (deleteAgentError). The requested run is the one the broker names
+// (api.BrokerErrorDetailRunID): the executing node sends the run of the row
+// it re-read, which may differ from this node's copy. Any other error,
+// including a run-mismatch 404 that does not refuse, is returned unchanged.
+func deferredDeleteError(err error) error {
+	if err == nil || errors.Is(err, ErrDeleteRunMismatch) {
+		return err
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return err
+	}
+	requested, _ := se.brokerErrorDetails()[api.BrokerErrorDetailRunID].(string)
+	if refused, ok := deleteRunMismatch(err, requested); ok {
+		return refused
+	}
+	return err
 }
 
 // deferredDataOp is the common flow for cross-node ops that return a result
