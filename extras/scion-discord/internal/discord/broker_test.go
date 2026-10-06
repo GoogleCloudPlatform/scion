@@ -450,7 +450,7 @@ func TestHubError_UserFacingMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := tt.err.userFacingMessage()
+			msg := tt.err.userFacingMessage("", "")
 			assert.Contains(t, msg, tt.contains)
 		})
 	}
@@ -649,6 +649,29 @@ func TestPublish_ForumChannelWithoutThreadID_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forum/media channel")
 	assert.Contains(t, err.Error(), "thread ID is required")
+}
+
+// The retired assistant-reply mirror is discarded before any send, even if
+// an older hub still forwards it. A forum channel without a thread makes
+// any send attempt fail, so a nil error proves nothing was attempted; the
+// same message as an instruction is the control.
+func TestPublish_DiscardsRetiredAssistantReply(t *testing.T) {
+	session := stubSession([]*discordgo.Channel{
+		{ID: "forum123", Type: discordgo.ChannelTypeGuildForum},
+	})
+	b := testBroker(session)
+	msg := &messages.StructuredMessage{
+		Version:  messages.Version,
+		Channel:  "discord",
+		Sender:   "agent:test",
+		Msg:      "turn text",
+		Type:     messages.TypeAssistantReply,
+		Metadata: map[string]string{"discord_channel_id": "forum123"},
+	}
+	require.NoError(t, b.Publish(context.Background(), "test-topic", msg))
+
+	msg.Type = messages.TypeInstruction
+	require.Error(t, b.Publish(context.Background(), "test-topic", msg), "control: an instruction is attempted")
 }
 
 func TestPublish_MediaChannelWithoutThreadID_ReturnsError(t *testing.T) {
@@ -1924,8 +1947,10 @@ func TestConfigure_SessionReplacement_ClearsSubs(t *testing.T) {
 	// Calling Configure with bot_token should close old session and clear subs.
 	err := b.Configure(map[string]string{
 		"bot_token": "Bot fake-token-for-test",
+		"db_path":   filepath.Join(t.TempDir(), "discord.db"),
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
 
 	// After Phase 1 reconfigure:
 	// - Old subs should be cleared (so Subscribe("*") would trigger startGateway)
@@ -1953,6 +1978,7 @@ func TestConfigure_BootstrapSkippedWhenDone(t *testing.T) {
 	err := b.Configure(map[string]string{
 		"hub_url":  "http://localhost:8080",
 		"hmac_key": "test-key",
+		"db_path":  filepath.Join(t.TempDir(), "discord.db"),
 	})
 	require.NoError(t, err)
 
@@ -1983,4 +2009,24 @@ func TestParseTopicComponents(t *testing.T) {
 			assert.Equal(t, tt.agentSlug, slug)
 		})
 	}
+}
+
+func TestGetProjectAgents_RefreshCarriesLinkedUser(t *testing.T) {
+	rec := &headerRecorder{}
+	hub := httptest.NewServer(rec)
+	defer hub.Close()
+
+	b := testBroker(nil)
+	b.store = newTestStore(t)
+	b.hubClient = NewHTTPHubClient(hub.URL, "", "", nil)
+	b.agentCacheTTL = 0
+
+	slugs, err := b.getProjectAgents(context.Background(), "p1", "user:alice@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"worker"}, slugs)
+
+	calls := rec.snapshot()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "/api/v1/projects/p1/agents", calls[0].Path)
+	assert.Equal(t, "user:alice@example.com", calls[0].OnBehalfOf)
 }

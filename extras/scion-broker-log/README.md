@@ -77,14 +77,14 @@ Start `scion-broker-log` before the hub. The hub connects to it as a self-manage
 ```
 10:23:01.123 PUB scion.project.abc.user.def.messages
   sender=agent:code-reviewer → recipient=user:alice
-  type=assistant-reply  [urgent]
+  type=instruction  [urgent]
   msg="I'll analyze this carefully... Here is my resp..." [2048 bytes]
 ```
 
 ### JSON Lines (`--json`)
 
 ```json
-{"ts":"2026-05-07T10:23:01.123Z","topic":"scion.project.abc.user.def.messages","sender":"agent:code-reviewer","recipient":"user:alice","type":"assistant-reply","urgent":true,"msg_len":2048,"msg":"I'll analyze this carefully..."}
+{"ts":"2026-05-07T10:23:01.123Z","topic":"scion.project.abc.user.def.messages","sender":"agent:code-reviewer","recipient":"user:alice","type":"instruction","urgent":true,"msg_len":2048,"msg":"I'll analyze this carefully..."}
 ```
 
 ## How It Works
