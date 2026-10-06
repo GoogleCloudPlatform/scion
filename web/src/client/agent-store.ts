@@ -1151,6 +1151,10 @@ export class AgentStore {
         const body = (await response.json()) as ProbePage;
         if (signal.aborted || entry.probe !== controller) return;
         const rows = Array.isArray(body.agents) ? body.agents : [];
+        // The abort and identity check above already covers a feed swap
+        // today (a swap starts a walk, which aborts this probe). The feed
+        // check only guards a future path that swaps the feed without
+        // aborting the probe.
         if (this.feed === feed) this.releaseRestored(rows);
         if (typeof body.totalCount === 'number') total = body.totalCount;
         for (const row of rows) {
@@ -1376,12 +1380,11 @@ export class AgentStore {
    * Forget the tombstones that earlier feeds carried for agents these listing
    * rows (walk or probe pages) show restored (see
    * {@link listedWithoutActiveDelete}). The restore event went out while no
-   * feed was open. Every walk and probe on the current feed starts after
-   * those tombstones were carried, so its rows were read after
-   * the deletes were seen. A hard delete is published before its row is
-   * removed, so a row still deleting keeps the tombstone. The current feed's
-   * own tombstones are left alone: a page read before a delete on this feed
-   * can still list the agent.
+   * feed was open. Every walk and probe on the current feed starts after those
+   * tombstones were carried, so its rows were read after the deletes were
+   * seen. A hard delete is published before its row is removed, so a row still
+   * deleting keeps the tombstone. The current feed's own tombstones are left
+   * alone: a page read before a delete on this feed can still list the agent.
    */
   private releaseRestored(rows: readonly Agent[]): void {
     if (this.carriedTombstones.size === 0) return;
