@@ -25,6 +25,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
+import { navigateTo } from '../../client/navigation.js';
 import '../shared/unified-log-viewer.js';
 
 interface HealthResponse {
@@ -245,16 +246,6 @@ export class ScionPageDiagnostics extends LitElement {
     return `https://console.cloud.google.com/logs/query;query=${encoded}?project=${this.gcpProjectId}`;
   }
 
-  private handleNavClick(path: string): void {
-    this.dispatchEvent(
-      new CustomEvent('nav-click', {
-        detail: { path },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
   override render() {
     return html`
       <div class="page-header">
@@ -339,7 +330,7 @@ export class ScionPageDiagnostics extends LitElement {
             : nothing}
         </div>
         <div class="status-right">
-          <a class="health-link" @click=${() => this.handleNavClick('/health')}> View Health → </a>
+          <a class="health-link" @click=${() => navigateTo('/health')}> View Health → </a>
         </div>
       </div>
     `;
