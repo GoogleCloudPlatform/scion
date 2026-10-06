@@ -409,7 +409,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		return nil, runtimeTargetChangedRefusal(existingBroker.ID, existingBroker.RuntimeTarget.ID, "")
 	}
 	if existingBroker == nil {
-		if err := legacyRegistrationNameConflict(ctx, s.store, req.Name, req.BrokerID); err != nil {
+		if err := legacyRegistrationNameConflict(ctx, s.store, req.Name, slugify(req.Name), req.BrokerID); err != nil {
 			return nil, err
 		}
 	}

@@ -2125,6 +2125,12 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 	}
 
 	for _, autoBroker := range autoProviders.Items {
+		// A flat Runtime Broker never receives an automatic link or
+		// default, whatever the experiment state: it is linked only by an
+		// explicit link action.
+		if autoBroker.IsFlat() {
+			continue
+		}
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   autoBroker.ID,

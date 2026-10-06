@@ -147,8 +147,7 @@ func copyRuntimeTarget(d *api.RuntimeTargetDescriptor) *api.RuntimeTargetDescrip
 
 // legacyRegistrationNameConflict refuses a legacy writer that would create a
 // Runtime Broker row whose name or slug collides with a flat row (R4).
-func legacyRegistrationNameConflict(ctx context.Context, s store.Store, name, excludeID string) error {
-	slug := slugify(name)
+func legacyRegistrationNameConflict(ctx context.Context, s store.Store, name, slug, excludeID string) error {
 	conflict, err := store.RuntimeBrokerNameConflict(ctx, s, name, slug, excludeID, true)
 	if err != nil {
 		return fmt.Errorf("failed to check Runtime Broker name conflicts: %w", err)
