@@ -62,7 +62,11 @@ func TestSpaceMembers_MemoizedAttachMatchesUnmemoized(t *testing.T) {
 		wants = append(wants, want{agents[i].ID, allowed})
 	}
 	require.True(t, sawAllow && sawDeny, "fixture: need both attachable and non-attachable agents")
-	require.Equal(t, nAgents, legacyGroupLoads, "unmemoized: one group load per attach decision")
+	// Unmemoized, each decision loads groups once for the kernel and once
+	// more for the project-access check of an owner or ancestor
+	// relationship (the member's own agents).
+	require.Equal(t, nAgents+len(memberAgents), legacyGroupLoads,
+		"unmemoized: one group load per attach decision, plus one per relationship project-access check")
 
 	// Count group loads made after the agent walk, i.e. by the attach phase.
 	walkDone := false
