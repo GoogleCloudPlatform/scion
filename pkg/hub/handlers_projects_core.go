@@ -3076,7 +3076,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 					"project_id", projectID, "slug", project.Slug, "path", projectPath, "error", err)
 			}
 		}
-		s.removeEmbeddedBrokerProjectDir(projectID, project.Slug, projectPath)
+		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
 	}
 	s.webdavLocks.Delete(projectID)
 
@@ -3113,7 +3113,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 // configured backend the hub-managed path may be on the backend mount, and
 // this removes the local directory as well. Only a single direct child of the
 // projects root is removed. An absent directory is not an error.
-func (s *Server) removeEmbeddedBrokerProjectDir(projectID, slug, removedPath string) {
+func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
 	if s.GetEmbeddedBrokerID() == "" {
 		return
 	}

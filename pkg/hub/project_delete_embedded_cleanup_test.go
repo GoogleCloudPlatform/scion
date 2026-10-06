@@ -303,7 +303,7 @@ func TestRemoveEmbeddedBrokerProjectDir_RemovedPathCases(t *testing.T) {
 			f := newEmbeddedCleanupFixture(t, "removed-path", nil, true)
 			writeTree(t, f.localPath, "README.md")
 
-			f.srv.removeEmbeddedBrokerProjectDir(f.project.ID, f.project.Slug, tt.removedPath(f.localPath, f.home))
+			f.srv.removeEmbeddedBrokerProjectDir(f.project.Slug, tt.removedPath(f.localPath, f.home))
 
 			_, err := os.Stat(f.localPath)
 			if tt.wantRemoved {
