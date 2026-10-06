@@ -269,3 +269,27 @@ func TestHandleACLSetError_WarnsOnlyOncePerProcess(t *testing.T) {
 	assert.Len(t, *records, 1,
 		"the process-wide ENOTSUP/EOPNOTSUPP warning must be logged exactly once regardless of how many ACL set calls hit it")
 }
+
+// TestHandleACLSetError_WarningNamesConsequence pins the ENOTSUP warning to
+// the consequence for mixed writers (ptone/scion#3155): files follow each
+// writer's umask and are not group-writable across agent kinds.
+func TestHandleACLSetError_WarningNamesConsequence(t *testing.T) {
+	aclUnsupportedWarnOnce = sync.Once{}
+	records := captureSlog(t)
+
+	require.NoError(t, handleACLSetError("default", unix.ENOTSUP))
+	require.Len(t, *records, 1)
+	r := (*records)[0]
+	assert.Equal(t, slog.LevelWarn, r.Level)
+	assert.Equal(t, ACLUnsupportedWarning, r.Message)
+	for _, want := range []string{"does not support POSIX ACLs", "umask", "not group-writable", "Docker agents and Kubernetes pods"} {
+		assert.Contains(t, r.Message, want)
+	}
+	attrs := map[string]string{}
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	assert.Equal(t, "files_not_group_writable", attrs["consequence"])
+	assert.Equal(t, "default", attrs["acl_type"])
+}
