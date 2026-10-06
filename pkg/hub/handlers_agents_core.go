@@ -3192,7 +3192,8 @@ func (s *Server) authorizeSingleAgentRead(w http.ResponseWriter, r *http.Request
 	decision := s.authzService.CheckAccess(ctx, identity, resource, ActionRead)
 	if !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionRead, decision.Reason)
-		// Existence timing may differ; accepted for agent-ID existence, revisit if IDs become higher-value.
+		// Existence timing may differ; accepted for agent-ID existence,
+		// revisit if IDs become higher-value.
 		writeAgentNotFound(w)
 		return false
 	}
