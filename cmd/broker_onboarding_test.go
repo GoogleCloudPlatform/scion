@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,4 +155,38 @@ func TestCleanupAfterDeregister_PurgeSkipped(t *testing.T) {
 		assert.DirExists(t, filepath.Join(home, "runtime-broker-state", "b-1"))
 		assert.Contains(t, out.String(), "the broker is running")
 	})
+}
+
+func TestConfirmProvide(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		autoConfirm bool
+		isTTY       bool
+		want        bool
+		wantErr     bool
+	}{
+		{name: "global --yes", autoConfirm: true, want: true},
+		{name: "global --yes without a terminal", autoConfirm: true, isTTY: false, want: true},
+		{name: "no terminal aborts", isTTY: false, wantErr: true},
+		{name: "EOF aborts", isTTY: true, input: "", wantErr: true},
+		{name: "enter is yes", isTTY: true, input: "\n", want: true},
+		{name: "y", isTTY: true, input: "y\n", want: true},
+		{name: "yes without newline before EOF", isTTY: true, input: "yes", want: true},
+		{name: "n", isTTY: true, input: "n\n", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var out bytes.Buffer
+			got, err := confirmProvide(strings.NewReader(tt.input), &out, "proj", "host", tt.autoConfirm, tt.isTTY)
+			if tt.wantErr {
+				require.ErrorIs(t, err, errProvideNeedsConfirmation)
+				assert.Contains(t, err.Error(), "--yes")
+				assert.False(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

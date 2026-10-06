@@ -15,11 +15,13 @@
 package cmd
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
@@ -211,4 +213,39 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining int, broke
 		}
 	}
 	return nil
+}
+
+// errProvideNeedsConfirmation is returned when runtime-broker provide cannot
+// ask for confirmation: stdin is not a terminal, or input ended.
+var errProvideNeedsConfirmation = errors.New("cannot confirm adding the broker as a provider without an interactive terminal; re-run with --yes to confirm")
+
+// confirmProvide asks the runtime-broker provide confirmation. With
+// autoConfirm (global --yes) it confirms without reading. Without a terminal
+// on stdin it does not prompt, and an end of input (or read error) at the
+// prompt aborts rather than counting as the default answer: both return
+// errProvideNeedsConfirmation, so a provide run from a script or over ssh
+// without a TTY fails fast with a 'use --yes' message instead of blocking
+// on 'Continue? (Y/n)'. An empty answer is yes.
+func confirmProvide(in io.Reader, out io.Writer, projectName, brokerName string, autoConfirm, isTTY bool) (bool, error) {
+	if autoConfirm {
+		_, _ = fmt.Fprintf(out, "Add broker '%s' as a provider for project '%s': auto-confirmed Yes\n", brokerName, projectName)
+		return true, nil
+	}
+	if !isTTY {
+		return false, errProvideNeedsConfirmation
+	}
+	_, _ = fmt.Fprintf(out, "\nAdd broker '%s' as a provider for project '%s'?\n\n", brokerName, projectName)
+	_, _ = fmt.Fprintln(out, "This will allow the broker to execute agents for this project.")
+	_, _ = fmt.Fprint(out, "Continue? (Y/n): ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && (line == "" || !errors.Is(err, io.EOF)) {
+		_, _ = fmt.Fprintln(out)
+		return false, errProvideNeedsConfirmation
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "", "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }

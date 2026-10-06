@@ -1281,8 +1281,13 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		localProjectPath = explicitPath
 	}
 
-	// Show confirmation prompt
-	if !hubsync.ShowProvidePrompt(projectName, brokerName, autoConfirm) {
+	// Show confirmation prompt. Without a terminal, or at end of input, it
+	// aborts with a 'use --yes' message instead of blocking.
+	confirmed, confirmErr := confirmProvide(os.Stdin, os.Stdout, projectName, brokerName, autoConfirm, util.IsTerminal())
+	if confirmErr != nil {
+		return confirmErr
+	}
+	if !confirmed {
 		return fmt.Errorf("operation cancelled")
 	}
 
