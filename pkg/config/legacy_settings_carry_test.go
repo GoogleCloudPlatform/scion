@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -346,6 +347,7 @@ func TestDeleteHubConnection_JSONKeepsV1OnlyTopLevelKeys(t *testing.T) {
 }
 
 func TestDeleteHubConnection_VersionedFileUnaffected(t *testing.T) {
+	// No hub_connections to delete: the file is not rewritten.
 	dir := carryTestDir(t, "settings.yaml", versionedWithV1KeysYAML)
 	if err := DeleteHubConnection(dir, "hub-prod", false); err != nil {
 		t.Fatalf("DeleteHubConnection: %v", err)
@@ -353,6 +355,116 @@ func TestDeleteHubConnection_VersionedFileUnaffected(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(dir, "settings.yaml"))
 	if string(data) != versionedWithV1KeysYAML {
 		t.Errorf("versioned file changed:\n%s", data)
+	}
+}
+
+// A real delete in a versioned file edits it in place: schema_version, the
+// v1 keys, comments and key order survive. Before ptone/scion#3497 the file
+// was rewritten as a legacy file, losing all of them.
+func TestDeleteHubConnection_VersionedFileEditedInPlace(t *testing.T) {
+	const content = `schema_version: "1"
+# broker settings
+image_registry: ghcr.io/example/scion
+hub_connections:
+  hub-prod:
+    endpoint: https://hub.prod.example.com # prod hub
+  hub-staging:
+    endpoint: https://hub.staging.example.com
+server:
+  broker:
+    port: 19800
+    instances:
+      - key: local-docker
+        name: local-docker
+        runtime_target:
+          type: docker
+`
+	const want = `schema_version: "1"
+# broker settings
+image_registry: ghcr.io/example/scion
+hub_connections:
+  hub-staging:
+    endpoint: https://hub.staging.example.com
+server:
+  broker:
+    port: 19800
+    instances:
+      - key: local-docker
+        name: local-docker
+        runtime_target:
+          type: docker
+`
+	dir := carryTestDir(t, "settings.yaml", content)
+	if err := DeleteHubConnection(dir, "hub-prod", false); err != nil {
+		t.Fatalf("DeleteHubConnection: %v", err)
+	}
+	path := filepath.Join(dir, "settings.yaml")
+	data, _ := os.ReadFile(path)
+	if string(data) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", data, want)
+	}
+	assertV1KeysKept(t, readSettingsMap(t, path))
+
+	// Deleting the last connection removes hub_connections entirely.
+	if err := DeleteHubConnection(dir, "hub-staging", false); err != nil {
+		t.Fatalf("DeleteHubConnection: %v", err)
+	}
+	m := readSettingsMap(t, path)
+	if _, ok := m["hub_connections"]; ok {
+		t.Error("empty hub_connections was not removed")
+	}
+	if m["schema_version"] != "1" {
+		t.Errorf("schema_version = %v, want \"1\"", m["schema_version"])
+	}
+	assertV1KeysKept(t, m)
+}
+
+// A wrongly typed v1-only key is not the delete path's to fix: the file
+// stays unversioned and the key is kept as it was, so it still loads the
+// way it did before.
+func TestDeleteHubConnection_UndecodableV1KeyKept(t *testing.T) {
+	const content = `active_profile: local
+server: hello
+hub_connections:
+  hub-prod:
+    endpoint: https://hub.prod.example.com
+`
+	dir := carryTestDir(t, "settings.yaml", content)
+	if err := DeleteHubConnection(dir, "hub-prod", false); err != nil {
+		t.Fatalf("DeleteHubConnection: %v", err)
+	}
+	m := readSettingsMap(t, filepath.Join(dir, "settings.yaml"))
+	if m["server"] != "hello" {
+		t.Errorf("server = %v, want hello kept", m["server"])
+	}
+	if _, ok := m["schema_version"]; ok {
+		t.Error("delete path changed the file's format (schema_version added)")
+	}
+	if _, ok := m["hub_connections"]; ok {
+		t.Error("hub_connections not removed")
+	}
+}
+
+// When the delete cannot be made safely (hub_connections is an anchored
+// node another key aliases), it fails and the file is left byte-for-byte
+// unchanged.
+func TestDeleteHubConnection_FailureLeavesFileUntouched(t *testing.T) {
+	const content = `image_registry: ghcr.io/example/scion
+server:
+  broker:
+    port: 19800
+hub_connections: &conns
+  hub-prod:
+    endpoint: https://hub.prod.example.com
+backup_connections: *conns
+`
+	dir := carryTestDir(t, "settings.yaml", content)
+	if err := DeleteHubConnection(dir, "hub-prod", false); err == nil {
+		t.Fatal("DeleteHubConnection through an anchored node: want error, got nil")
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "settings.yaml"))
+	if string(data) != content {
+		t.Errorf("file changed after a failed delete:\n%s", data)
 	}
 }
 
@@ -383,4 +495,134 @@ func TestLegacySettingsTopLevelKeys(t *testing.T) {
 			t.Errorf("v1-only key %q treated as legacy", k)
 		}
 	}
+}
+
+// undecodableLegacyFiles are unversioned settings files whose v1-only keys
+// have a type the v1 loaders cannot decode. hub.lastSyncedAt checks the
+// state.yaml side effect is not written either.
+var undecodableLegacyFiles = []struct {
+	name, content, key string
+}{
+	{"server scalar", "active_profile: local\nhub:\n  lastSyncedAt: \"2026-01-01T00:00:00Z\"\nserver: hello\n", "server"},
+	{"broker port string", "active_profile: local\nhub:\n  lastSyncedAt: \"2026-01-01T00:00:00Z\"\nserver:\n  broker:\n    port: abc\n", "server"},
+	{"image_registry list", "active_profile: local\nimage_registry: [a, b]\nserver:\n  broker:\n    port: 19800\n", "image_registry"},
+}
+
+// assertDirUntouched checks dir still holds only settings.yaml, unchanged.
+func assertDirUntouched(t *testing.T, dir, content string) {
+	t.Helper()
+	data, _ := os.ReadFile(filepath.Join(dir, "settings.yaml"))
+	if string(data) != content {
+		t.Errorf("settings.yaml changed:\n%s", data)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() != "settings.yaml" {
+			t.Errorf("unexpected file %s written", e.Name())
+		}
+	}
+}
+
+func TestMigrateSettingsFile_UndecodableCarriedKeyLeavesFileUntouched(t *testing.T) {
+	for _, tc := range undecodableLegacyFiles {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := carryTestDir(t, "settings.yaml", tc.content)
+			_, err := MigrateSettingsFile(dir, false)
+			if err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error %q does not name key %q", err, tc.key)
+			}
+			assertDirUntouched(t, dir, tc.content)
+
+			// A dry run reports the same error.
+			if _, err := MigrateSettingsFile(dir, true); err == nil {
+				t.Error("dry run: want error, got nil")
+			}
+		})
+	}
+}
+
+func TestUpdateSetting_UndecodableCarriedKeyLeavesFileUntouched(t *testing.T) {
+	for _, tc := range undecodableLegacyFiles {
+		t.Run(tc.name, func(t *testing.T) {
+			// Global scope: LoadGlobalSettings must load the same way
+			// before and after the failed write.
+			dir := carryTestDir(t, "settings.yaml", tc.content)
+			if _, _, err := LoadGlobalSettings(); err != nil {
+				t.Fatalf("LoadGlobalSettings before: %v", err)
+			}
+			err := UpdateSetting("", "default_template", "custom", true)
+			if err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error %q does not name key %q", err, tc.key)
+			}
+			assertDirUntouched(t, dir, tc.content)
+			if _, _, err := LoadGlobalSettings(); err != nil {
+				t.Errorf("LoadGlobalSettings after the failed write: %v", err)
+			}
+		})
+	}
+}
+
+// json.Unmarshal matches legacy fields case-insensitively, so a "Hub" key
+// is converted and must not also be carried. A key the legacy struct does
+// not have, in any case, is carried.
+func TestMigrateSettingsFile_JSONKeyCaseNotCarriedTwice(t *testing.T) {
+	dir := carryTestDir(t, "settings.json", `{"Active_Profile": "local", "Hub": {"endpoint": "https://hub.example.com"}, "Image_Registry": "r"}`)
+	if _, err := MigrateSettingsFile(dir, false); err != nil {
+		t.Fatalf("MigrateSettingsFile: %v", err)
+	}
+	m := readSettingsMap(t, filepath.Join(dir, "settings.yaml"))
+	for _, k := range []string{"Hub", "Active_Profile"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("legacy key %q carried as well as converted", k)
+		}
+	}
+	if ep, _ := lookupPath(m, "hub", "endpoint"); ep != "https://hub.example.com" {
+		t.Errorf("hub.endpoint = %v, want it converted", ep)
+	}
+	if m["Image_Registry"] != "r" {
+		t.Errorf("Image_Registry = %v, want carried", m["Image_Registry"])
+	}
+}
+
+// legacySettingsTopLevelKeys reads only direct yaml tags; an embedded or
+// inline field would hide its keys from it.
+func TestLegacySettingsTopLevelKeys_NoEmbeddedFields(t *testing.T) {
+	typ := reflect.TypeOf(Settings{})
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		tag := f.Tag.Get("yaml")
+		name, opts, _ := strings.Cut(tag, ",")
+		if f.Anonymous || strings.Contains(opts, "inline") || name == "" || name == "-" {
+			t.Errorf("Settings.%s (yaml %q) is embedded, inline or untagged; legacySettingsTopLevelKeys must handle it", f.Name, tag)
+		}
+	}
+	if len(legacySettingsTopLevelKeys) != typ.NumField() {
+		t.Errorf("legacySettingsTopLevelKeys has %d keys, Settings has %d fields", len(legacySettingsTopLevelKeys), typ.NumField())
+	}
+}
+
+// scion broker deregister holds LockSettingsFile while it calls
+// DeleteHubConnection for a legacy file, so DeleteHubConnection must not
+// take the (non-reentrant) lock itself.
+func TestDeleteHubConnection_CallableUnderSettingsLock(t *testing.T) {
+	dir := carryTestDir(t, "settings.yaml", legacyWithV1KeysYAML)
+	unlock := LockSettingsFile()
+	defer unlock()
+	done := make(chan error, 1)
+	go func() { done <- DeleteHubConnection(dir, "hub-prod", false) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DeleteHubConnection: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DeleteHubConnection blocked on the settings lock its caller holds")
+	}
+	assertV1KeysKept(t, readSettingsMap(t, filepath.Join(dir, "settings.yaml")))
 }

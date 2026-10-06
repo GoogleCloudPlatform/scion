@@ -25,6 +25,9 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	koanfyaml "github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/rawbytes"
+	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
@@ -49,7 +52,9 @@ var legacySettingsTopLevelKeys = func() map[string]bool {
 // (AdaptLegacySettings) never sees these, so MigrateSettingsFile carries them
 // into the migrated file unchanged instead of dropping them
 // (ptone/scion#3497). Keys the legacy struct decodes are converted by
-// AdaptLegacySettings and are not returned.
+// AdaptLegacySettings and are not returned. For JSON the match is
+// case-insensitive, as json.Unmarshal matches struct fields, so a "Hub" key
+// that the legacy decode converted is not carried a second time.
 func legacyCarriedTopLevelKeys(data []byte, isJSON bool) (map[string]interface{}, error) {
 	var raw map[string]interface{}
 	var err error
@@ -63,12 +68,29 @@ func legacyCarriedTopLevelKeys(data []byte, isJSON bool) (map[string]interface{}
 	}
 	carried := make(map[string]interface{})
 	for k, v := range raw {
-		if legacySettingsTopLevelKeys[k] || k == "schema_version" {
+		if k == "schema_version" || isLegacySettingsTopLevelKey(k, isJSON) {
 			continue
 		}
 		carried[k] = v
 	}
 	return carried, nil
+}
+
+// isLegacySettingsTopLevelKey reports whether the legacy Settings decode
+// consumes the top-level key k: an exact match for YAML, a case-insensitive
+// one for JSON.
+func isLegacySettingsTopLevelKey(k string, isJSON bool) bool {
+	if legacySettingsTopLevelKeys[k] {
+		return true
+	}
+	if isJSON {
+		for lk := range legacySettingsTopLevelKeys {
+			if strings.EqualFold(k, lk) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mergeCarriedSettings adds the carried top-level entries to the mapping
@@ -124,6 +146,48 @@ func marshalMigratedSettings(vs *VersionedSettings, carried map[string]interface
 	return encodeYAMLDocument(&yamlv3.Node{Kind: yamlv3.DocumentNode, Content: []*yamlv3.Node{&root}}, 4)
 }
 
+// checkMigratedSettingsDecode reports whether data, migrated v1 settings
+// YAML, loads the way the settings loaders read it: a yaml.v3 decode into
+// VersionedSettings (LoadSingleFileVersioned, UpdateVersionedSetting) and
+// the koanf/mapstructure decode (LoadSettingsKoanf, LoadGlobalSettings).
+// Unknown keys are not errors for either; a wrongly typed value (for
+// example "server: hello") is.
+func checkMigratedSettingsDecode(data []byte) error {
+	var vs VersionedSettings
+	if err := yamlv3.Unmarshal(data, &vs); err != nil {
+		return err
+	}
+	k := koanf.New(".")
+	if err := k.Load(rawbytes.Provider(data), koanfyaml.Parser()); err != nil {
+		return err
+	}
+	_, err := decodeCollectingUnused(k, &VersionedSettings{})
+	return err
+}
+
+// checkCarriedSettingsDecode returns an error when the migrated output
+// (vs with the carried keys merged in) would not load as v1 settings. The
+// error names each carried key that fails on its own, so the user knows
+// what to fix in the original file.
+func checkCarriedSettingsDecode(vs *VersionedSettings, carried map[string]interface{}, merged []byte) error {
+	mergedErr := checkMigratedSettingsDecode(merged)
+	if mergedErr == nil {
+		return nil
+	}
+	var bad []string
+	for k, v := range carried {
+		data, err := marshalMigratedSettings(vs, map[string]interface{}{k: v})
+		if err != nil || checkMigratedSettingsDecode(data) != nil {
+			bad = append(bad, k)
+		}
+	}
+	sort.Strings(bad)
+	if len(bad) == 0 {
+		return mergedErr
+	}
+	return fmt.Errorf("top-level key(s) %s would not load as v1 settings: %w", strings.Join(bad, ", "), mergedErr)
+}
+
 // saveVersionedSettingsData writes already-marshalled v1 settings YAML to dir
 // the way SaveVersionedSettings writes a struct: to newSettingsFilePath(dir),
 // atomically, under the settings-file lock, and not at all when the bytes
@@ -148,10 +212,11 @@ func saveVersionedSettingsData(dir string, data []byte) error {
 // becomes empty. A YAML file is rewritten in place only when it changes; a
 // JSON file is converted to YAML in newSettingsFilePath(dir) and removed, as
 // before. A missing file is left missing.
+//
+// It does not take LockSettingsFile: its caller (scion broker deregister,
+// via DeleteHubConnection) already holds it from its own read to this
+// write, and the lock is not reentrant.
 func deleteHubConnectionFromFile(dir, name string) error {
-	unlock := LockSettingsFile()
-	defer unlock()
-
 	existingPath := GetSettingsPath(dir)
 	if existingPath == "" {
 		return nil

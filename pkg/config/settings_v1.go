@@ -5337,19 +5337,11 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		}
 	}
 
-	// 5. Handle hub.lastSyncedAt: migrate to state.yaml
+	// 5. Handle hub.lastSyncedAt: migrate to state.yaml (written in step 7b,
+	// once the output has passed every check, so a failed migration leaves
+	// nothing changed).
 	if legacy.Hub != nil && legacy.Hub.LastSyncedAt != "" {
 		result.StateMigrated = true
-		if !dryRun {
-			state, err := LoadProjectState(dir)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load project state: %w", err)
-			}
-			state.LastSyncedAt = legacy.Hub.LastSyncedAt
-			if err := SaveProjectState(dir, state); err != nil {
-				return nil, fmt.Errorf("failed to save project state: %w", err)
-			}
-		}
 	}
 
 	// 6. Validate the output
@@ -5371,12 +5363,16 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	}
 
 	// 6b. Merge the carried keys into the output. They are the file's own
-	// data, so a schema mismatch in them is a warning: dropping them is
-	// the data loss this step prevents, and refusing to migrate would
-	// block every settings write.
+	// data, so a value the loaders cannot decode (a wrong type, such as
+	// "server: hello") fails the migration with the file untouched, while
+	// any other schema mismatch (such as an unknown key) is a warning:
+	// dropping such a key is the data loss this step prevents.
 	if len(carried) > 0 {
 		if outputData, err = marshalMigratedSettings(vs, carried); err != nil {
 			return nil, fmt.Errorf("failed to marshal converted settings: %w", err)
+		}
+		if err := checkCarriedSettingsDecode(vs, carried, outputData); err != nil {
+			return nil, fmt.Errorf("cannot migrate %s (left unchanged): %w; fix or remove the key and retry", settingsPath, err)
 		}
 		carriedErrors, err := ValidateSettings(outputData, "1")
 		if err != nil {
@@ -5391,6 +5387,18 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	// 7. If dryRun, return result without writing
 	if dryRun {
 		return result, nil
+	}
+
+	// 7b. Write hub.lastSyncedAt to state.yaml (see step 5).
+	if result.StateMigrated {
+		state, err := LoadProjectState(dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load project state: %w", err)
+		}
+		state.LastSyncedAt = legacy.Hub.LastSyncedAt
+		if err := SaveProjectState(dir, state); err != nil {
+			return nil, fmt.Errorf("failed to save project state: %w", err)
+		}
 	}
 
 	// 8. Back up the original settings file

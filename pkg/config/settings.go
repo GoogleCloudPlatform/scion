@@ -576,8 +576,12 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 			// Legacy format detected — auto-migrate to v1 before updating
 			fmt.Fprintf(os.Stderr, "Warning: settings file %s uses legacy format. Auto-migrating to v1 schema.\n", existingPath)
 			fmt.Fprintf(os.Stderr, "  You can also run 'scion config migrate' to migrate manually.\n")
-			if _, err := MigrateSettingsFile(dir, false); err != nil {
+			result, err := MigrateSettingsFile(dir, false)
+			if err != nil {
 				return fmt.Errorf("auto-migration of legacy settings failed: %w\n  Run 'scion config migrate' to migrate manually", err)
+			}
+			for _, w := range result.Warnings {
+				fmt.Fprintf(os.Stderr, "  Migration warning: %s\n", w)
 			}
 			return UpdateVersionedSetting(dir, key, value)
 		}
@@ -855,6 +859,9 @@ func (s *Settings) IsHubLocalOnly() bool {
 // v1-only keys such as server and image_registry in an unversioned file, and
 // the whole content of a versioned file (ptone/scion#3497). A JSON file is
 // converted to settings.yaml, as before. A missing file is left missing.
+//
+// It does not take LockSettingsFile, as before; a caller that needs the
+// read-modify-write serialised holds the lock around the call.
 func DeleteHubConnection(projectPath string, name string, global bool) error {
 	var dir string
 	if global {
