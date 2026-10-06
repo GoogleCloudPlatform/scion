@@ -352,10 +352,16 @@ func mergeDispatchedConfig(dst, src *store.Agent) {
 // launchRelationship names, for the async launch log line, how the
 // launcher relates to the new agent: "direct_launcher_agent" when an agent
 // launched it (that agent may read its status through the single-agent
-// GET routes), "direct_launcher_user" when a user did.
+// GET routes), "direct_launcher_user" when a user launched it as a root
+// agent, and "other" for any other stored record.
 func launchRelationship(agent *store.Agent) string {
-	if n := len(agent.Ancestry); n > 1 && agent.Ancestry[n-1] == agent.CreatedBy {
+	n := len(agent.Ancestry)
+	switch {
+	case n == 1 && agent.Ancestry[0] == agent.CreatedBy:
+		return "direct_launcher_user"
+	case n > 1 && agent.Ancestry[n-1] == agent.CreatedBy:
 		return "direct_launcher_agent"
+	default:
+		return "other"
 	}
-	return "direct_launcher_user"
 }

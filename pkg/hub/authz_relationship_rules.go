@@ -139,8 +139,8 @@ func isHubScopedServiceAccount(resource Resource) bool {
 	return resource.Type == "gcp_service_account" && resource.ParentType == "" && resource.ParentID == ""
 }
 
-// relationshipCandidates lists, in a stable order (ancestor, owner,
-// hub-member assign, creator skill, progeny), the relationships that
+// relationshipCandidates lists, in a stable order (ancestor, launcher,
+// owner, hub-member assign, creator skill, progeny), the relationships that
 // structurally hold for this principal and resource.
 func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resource Resource, action Action, permissionID string) []relationshipCandidate {
 	var out []relationshipCandidate

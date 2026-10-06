@@ -66,7 +66,7 @@ func launcherStatusReadHolds(caller AgentIdentity, resource Resource, action Act
 		return false
 	}
 	projectID := caller.ProjectID()
-	return projectID != "" && target.ProjectID == projectID && resource.ParentID == projectID
+	return projectID != "" && target.ProjectID == projectID
 }
 
 // launcherCandidate returns the launcher relationship candidate when

@@ -999,9 +999,9 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 9: Relationship candidates ───────────────────────────────
-	// On a kernel deny, named relationships (owner, ancestor, progeny,
-	// hub-member assign) are evaluated as typed candidates through the
-	// common stages in authz_relationship_rules.go:
+	// On a kernel deny, named relationships (owner, ancestor, launcher,
+	// progeny, hub-member assign) are evaluated as typed candidates
+	// through the common stages in authz_relationship_rules.go:
 	// relationship policy, hub-attested ancestry, relationship fact, source
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the

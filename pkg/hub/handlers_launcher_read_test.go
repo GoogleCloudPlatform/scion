@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -214,6 +215,126 @@ func TestLauncherRead_DecidesFromStoredTarget(t *testing.T) {
 }
 
 func TestLaunchRelationship_NamesLauncherKind(t *testing.T) {
-	assert.Equal(t, "direct_launcher_agent", launchRelationship(&store.Agent{CreatedBy: "a1", Ancestry: []string{"u1", "a1"}}))
-	assert.Equal(t, "direct_launcher_user", launchRelationship(&store.Agent{CreatedBy: "u1", Ancestry: []string{"u1"}}))
+	cases := []struct {
+		name  string
+		agent *store.Agent
+		want  string
+	}{
+		{"agent launched it", &store.Agent{CreatedBy: "a1", Ancestry: []string{"u1", "a1"}}, "direct_launcher_agent"},
+		{"user launched a root agent", &store.Agent{CreatedBy: "u1", Ancestry: []string{"u1"}}, "direct_launcher_user"},
+		{"single entry is not the creator", &store.Agent{CreatedBy: "u1", Ancestry: []string{"u2"}}, "other"},
+		{"creator is not the last entry", &store.Agent{CreatedBy: "u1", Ancestry: []string{"u1", "a1"}}, "other"},
+		{"no stored chain", &store.Agent{CreatedBy: "u1"}, "other"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, launchRelationship(tc.agent))
+		})
+	}
+}
+
+// launcherRuleFixture is a launcher identity and an agent it launched,
+// for the rule-level tests below.
+func launcherRuleFixture() (*agentIdentityWrapper, *store.Agent) {
+	projectID := tid("launcher-rule-project")
+	launcherID := tid("launcher-rule-agent")
+	launcher := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: launcherID},
+		ProjectID: projectID,
+		Scopes:    []AgentTokenScope{ScopeProjectRead},
+	}}
+	child := &store.Agent{
+		ID:        tid("launcher-rule-child"),
+		ProjectID: projectID,
+		Ancestry:  []string{tid("launcher-rule-root"), launcherID},
+	}
+	return launcher, child
+}
+
+// TestLauncherStatusReadHolds_Refusals checks the callers and resources
+// the rule refuses even though the stored target names the caller as its
+// launcher.
+func TestLauncherStatusReadHolds_Refusals(t *testing.T) {
+	launcher, child := launcherRuleFixture()
+	require.True(t, launcherStatusReadHolds(launcher, agentStatusReadResource(child), ActionRead, permissionAgentRead),
+		"the launcher reads its child")
+
+	t.Run("hub delivery identity", func(t *testing.T) {
+		delivery := &hubDeliveryIdentity{
+			agentID:      launcher.ID(),
+			projectID:    launcher.ProjectID(),
+			boundAgentID: launcher.ID(),
+		}
+		assert.False(t, launcherStatusReadHolds(delivery, agentStatusReadResource(child), ActionRead, permissionAgentRead))
+	})
+
+	t.Run("self in its own last slot", func(t *testing.T) {
+		self := &store.Agent{
+			ID:        launcher.ID(),
+			ProjectID: launcher.ProjectID(),
+			Ancestry:  []string{tid("launcher-rule-root"), launcher.ID()},
+		}
+		assert.False(t, launcherStatusReadHolds(launcher, agentStatusReadResource(self), ActionRead, permissionAgentRead))
+	})
+
+	t.Run("resource ID differs from the stored target", func(t *testing.T) {
+		res := agentStatusReadResource(child)
+		res.ID = tid("launcher-rule-other")
+		assert.False(t, launcherStatusReadHolds(launcher, res, ActionRead, permissionAgentRead))
+	})
+}
+
+// TestLauncherCandidate_PrincipalMustBeTheIdentity checks that the
+// candidate is produced only when the principal ID is the ID of the
+// identity the rule decides for.
+func TestLauncherCandidate_PrincipalMustBeTheIdentity(t *testing.T) {
+	launcher, child := launcherRuleFixture()
+	res := agentStatusReadResource(child)
+
+	_, ok := launcherCandidate(PrincipalContext{Kind: PrincipalKindAgent, ID: launcher.ID(), Identity: launcher},
+		res, ActionRead, permissionAgentRead)
+	require.True(t, ok, "principal ID matches the identity")
+
+	_, ok = launcherCandidate(PrincipalContext{Kind: PrincipalKindAgent, ID: tid("launcher-rule-other"), Identity: launcher},
+		res, ActionRead, permissionAgentRead)
+	assert.False(t, ok, "principal ID differs from the identity")
+}
+
+// TestLauncherRead_OtherRoutesUnchanged checks that, for the launcher,
+// the logs and message-logs routes and the agent list answer for an agent
+// it launched exactly as for an agent it did not launch.
+func TestLauncherRead_OtherRoutesUnchanged(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	bindFixtureOwner(t, f)
+	launched := launcherReadAgent(t, f, "launcher-routes-launched", f.proj.ID, []string{f.owner.ID, f.caller.ID})
+	unrelated := launcherReadAgent(t, f, "launcher-routes-unrelated", f.proj.ID, []string{f.owner.ID})
+
+	routes := map[string]func(id string) string{
+		"logs":                 func(id string) string { return "/api/v1/agents/" + id + "/logs" },
+		"message-logs":         func(id string) string { return "/api/v1/agents/" + id + "/message-logs" },
+		"project logs":         func(id string) string { return "/api/v1/projects/" + f.proj.ID + "/agents/" + id + "/logs" },
+		"project message-logs": func(id string) string { return "/api/v1/projects/" + f.proj.ID + "/agents/" + id + "/message-logs" },
+	}
+	for name, route := range routes {
+		t.Run(name, func(t *testing.T) {
+			want := f.asAgent(t, http.MethodGet, route(unrelated.ID), nil)
+			got := f.asAgent(t, http.MethodGet, route(launched.ID), nil)
+			assert.Equal(t, want.Code, got.Code, "unrelated %s, launched %s", want.Body.String(), got.Body.String())
+			assert.Equal(t, strings.ReplaceAll(want.Body.String(), unrelated.ID, "<id>"),
+				strings.ReplaceAll(got.Body.String(), launched.ID, "<id>"))
+		})
+	}
+
+	t.Run("list", func(t *testing.T) {
+		rec := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got ListAgentsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got), rec.Body.String())
+		listed := map[string]bool{}
+		for _, a := range got.Agents {
+			listed[a.ID] = true
+		}
+		assert.Equal(t, listed[unrelated.ID], listed[launched.ID], "launched and unrelated agents are listed alike")
+		assert.True(t, listed[unrelated.ID], "the project list shows the unrelated agent")
+	})
 }
