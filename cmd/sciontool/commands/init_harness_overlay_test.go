@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,17 +26,34 @@ import (
 // telemetry package's usage tests derive from.
 const claudeUsageFixture = "../../../pkg/sciontool/telemetry/testdata/usage/claude-2.1.280.pb.json"
 
-func freeLoopbackPort(t *testing.T) int {
+// clearLeakedTelemetryEnv blanks every telemetry config key so values the
+// container exports (SCION_OTEL_ENDPOINT, SCION_TELEMETRY_CLOUD_PROVIDER,
+// SCION_OTEL_GCP_CREDENTIALS, ...) cannot reach the pipeline under test.
+func clearLeakedTelemetryEnv(t *testing.T) {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	for _, key := range []string{
+		telemetry.EnvEnabled,
+		telemetry.EnvCloudEnabled,
+		telemetry.EnvEndpoint,
+		telemetry.EnvProtocol,
+		telemetry.EnvInsecure,
+		telemetry.EnvSkipTLSVerify,
+		telemetry.EnvCAFile,
+		telemetry.EnvGRPCPort,
+		telemetry.EnvHTTPPort,
+		telemetry.EnvFilterExclude,
+		telemetry.EnvFilterInclude,
+		telemetry.EnvProjectID,
+		telemetry.EnvRedactFields,
+		telemetry.EnvHashFields,
+		telemetry.EnvGCPCredentials,
+		telemetry.EnvCloudProvider,
+		telemetry.EnvMetricsDebug,
+		telemetry.EnvUsageSource,
+		telemetry.EnvHarness,
+	} {
+		t.Setenv(key, "")
 	}
-	port := lis.Addr().(*net.TCPAddr).Port
-	if err := lis.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return port
 }
 
 // postClaudeUsageFixture sends the native Claude usage events to the
@@ -72,13 +88,12 @@ func postClaudeUsageFixture(t *testing.T, httpPort int) {
 // harness env overlay. Loading the overlay must hand it to the running
 // pipeline so native usage is derived, without touching init's own env.
 func TestLoadHarnessEnvOverlayActivatesUsageDeriver(t *testing.T) {
-	httpPort := freeLoopbackPort(t)
+	clearLeakedTelemetryEnv(t)
 	t.Setenv(telemetry.EnvEnabled, "true")
 	t.Setenv(telemetry.EnvCloudEnabled, "false")
 	t.Setenv(telemetry.EnvGRPCPort, "0")
-	t.Setenv(telemetry.EnvHTTPPort, strconv.Itoa(httpPort))
+	t.Setenv(telemetry.EnvHTTPPort, "0")
 	t.Setenv(telemetry.EnvHarness, "claude")
-	t.Setenv(telemetry.EnvUsageSource, "")
 	t.Setenv(hooks.HarnessOutputsDirEnv, "")
 	t.Setenv(hooks.HarnessSecretsDirEnv, "")
 
@@ -94,6 +109,12 @@ func TestLoadHarnessEnvOverlayActivatesUsageDeriver(t *testing.T) {
 		defer cancel()
 		_ = pipeline.Stop(ctx)
 	})
+	// Port 0 lets the receiver pick a free port with no close-then-rebind
+	// race; Config reports the port it actually bound.
+	httpPort := pipeline.Config().HTTPPort
+	if httpPort == 0 {
+		t.Fatal("receiver did not report its bound HTTP port")
+	}
 
 	// Before the overlay is loaded the deriver only saw init's env.
 	postClaudeUsageFixture(t, httpPort)
