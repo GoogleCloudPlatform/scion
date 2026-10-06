@@ -40,12 +40,17 @@ import (
 //
 // Manual negative check (not shipped, because an unguarded race is
 // timing-dependent and would make a flaky test): change
-// migrateLockedForTest below to call cs.Migrate instead. The concurrent test
-// then fails on a fresh schema with SQLSTATE 23505 on
-// pg_type_typname_nsp_index (a Postgres catalog race between concurrent
-// CREATE TABLEs that the 42P07 skip hook does not cover), and the
-// externally-held-lock test fails deterministically because the migration
-// completes without ever waiting on the lock.
+// migrateLockedForTest below to call cs.Migrate instead.
+//   - The externally-held-lock test then fails deterministically: the
+//     migration completes without ever waiting on the lock (verified).
+//   - The concurrent test then crashes the test binary with "fatal error:
+//     concurrent map writes" in ent's Atlas setupTables, because concurrent
+//     AutoMigrate calls in ONE process share ent's global table
+//     definitions (verified). Separate replica processes do not share that
+//     state; across processes the unguarded failure is the Postgres catalog
+//     race (SQLSTATE 23505 on pg_type_typname_nsp_index) that the 42P07
+//     skip hook does not cover, as measured in ptone/scion#1078. Either
+//     way, the lock is what makes concurrent migration safe.
 
 // migrateLockedForTest is the single call site both tests use for the code
 // under test, so the manual negative check above is a one-line change.
