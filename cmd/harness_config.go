@@ -26,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/spf13/cobra"
 )
 
@@ -887,10 +886,8 @@ func pullHarnessConfigFromHub(hubCtx *HubContext, hc *hubclient.HarnessConfig, t
 	}
 	// Every entry must be a canonical relative path before anything is fetched
 	// or written.
-	for i, fileInfo := range downloadResp.Files {
-		if err := transfer.ValidateRelPath(fileInfo.Path); err != nil {
-			return fmt.Errorf("invalid path in download entry %d: %w", i, err)
-		}
+	if err := validateDownloadEntries(downloadResp.Files); err != nil {
+		return err
 	}
 	pending := make([]pendingFile, 0, len(downloadResp.Files))
 	for _, fileInfo := range downloadResp.Files {

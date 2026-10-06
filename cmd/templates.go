@@ -962,10 +962,8 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 	}
 
 	// Every entry must be a canonical relative path before anything is written.
-	for i, fileInfo := range downloadResp.Files {
-		if err := transfer.ValidateRelPath(fileInfo.Path); err != nil {
-			return fmt.Errorf("invalid path in download entry %d: %w", i, err)
-		}
+	if err := validateDownloadEntries(downloadResp.Files); err != nil {
+		return err
 	}
 
 	// Files are written through an os.Root so they stay inside destPath.
