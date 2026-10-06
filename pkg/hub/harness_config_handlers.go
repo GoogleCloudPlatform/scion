@@ -554,6 +554,12 @@ func extractHarnessConfigEntryFromStorage(ctx context.Context, stor storage.Stor
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
 	ctx := r.Context()
 
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -570,6 +576,17 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	hc.StoragePath = existing.StoragePath
 	hc.StorageURI = existing.StorageURI
 	hc.StorageBucket = existing.StorageBucket
+	// Content state is computed by the server during upload/finalize and
+	// is carried over from the existing record.
+	hc.ContentHash = existing.ContentHash
+	hc.Files = existing.Files
+	// Lifecycle and image-check state are managed by the server and are
+	// carried over from the existing record.
+	hc.Status = existing.Status
+	hc.ImageStatus = existing.ImageStatus
+	hc.ImageStatusCheckedAt = existing.ImageStatusCheckedAt
+	// The updater is the authenticated caller.
+	hc.UpdatedBy = identity.ID()
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
