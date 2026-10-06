@@ -7,6 +7,7 @@ require (
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/sync v0.22.0
 	google.golang.org/grpc v1.85.0-dev.0.20260825072537-93e31b48545e
 	modernc.org/sqlite v1.53.0
 )
@@ -161,7 +162,6 @@ require (
 	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
