@@ -719,3 +719,45 @@ func TestGetLegacyRuntimeBrokerByName_IgnoresFlatRowWithSameName(t *testing.T) {
 	_, err = fs.brokers.GetLegacyRuntimeBrokerByName(ctx, "nobody")
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
+
+// TestFindOrphanedAgents_ExcludesStalePinnedAgent: an agent an older binary
+// moved off its flat Runtime Broker (pinned, but runtime_broker_id now names
+// an offline legacy or a missing row) is still never an orphan candidate.
+func TestFindOrphanedAgents_ExcludesStalePinnedAgent(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	current := fs.createBroker(t, flatBroker("current", store.BrokerStatusOffline, nil))
+	flat := fs.createBroker(t, flatBroker("flat", store.BrokerStatusOnline, dockerTarget()))
+	offlineLegacy := fs.createBroker(t, flatBroker("offline-legacy", store.BrokerStatusOffline, nil))
+
+	staleOnLegacy := fs.createPinnedAgent(t, "stale-on-legacy", flat)
+	staleOnMissing := fs.createPinnedAgent(t, "stale-on-missing", flat)
+	for id, dest := range map[string]string{staleOnLegacy.ID: offlineLegacy.ID, staleOnMissing.ID: uuid.NewString()} {
+		uid, err := parseUUID(id)
+		require.NoError(t, err)
+		_, err = fs.client.Agent.UpdateOneID(uid).SetRuntimeBrokerID(dest).Save(ctx)
+		require.NoError(t, err)
+	}
+	legacy := fs.createAgentOn(t, "legacy", offlineLegacy.ID, "running")
+
+	got, err := fs.agents.FindOrphanedAgents(ctx, current.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{legacy.ID}, agentIDs(got), "stale-pinned agents must be excluded by the pin predicate")
+}
+
+func TestGetLegacyRuntimeBrokerByName_OldestByCreatedWins(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+	mk := func(name, slug string, at time.Time) uuid.UUID {
+		id := uuid.New()
+		_, err := fs.client.RuntimeBroker.Create().SetID(id).SetName(name).SetSlug(slug).SetCreated(at).Save(ctx)
+		require.NoError(t, err)
+		return id
+	}
+	// Insert the newer row first so insertion order cannot explain the result.
+	mk("DUP", "dup-2", time.Now())
+	older := mk("dup", "dup-1", time.Now().Add(-time.Hour))
+	got, err := fs.brokers.GetLegacyRuntimeBrokerByName(ctx, "dup")
+	require.NoError(t, err)
+	assert.Equal(t, older.String(), got.ID)
+}

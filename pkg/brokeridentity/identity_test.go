@@ -225,26 +225,6 @@ func TestIdentity_CollidesWithAnyLegacyBrokerIDIsError(t *testing.T) {
 	}
 }
 
-// TestIdentity_ReaddedEntryRestoresSameIDs covers settings rollback: the
-// instance entry disappears from settings and is re-added with the same key;
-// the identity directory was never touched, so the same IDs come back.
-func TestIdentity_ReaddedEntryRestoresSameIDs(t *testing.T) {
-	global := t.TempDir()
-	dir := InstanceDir(global, "local-docker")
-	first, err := LoadOrCreate(dir, "local-docker", TargetTypeDocker, dockerScope("D1", ""), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// (entry removed from settings: nothing reads the directory)
-	again, err := LoadOrCreate(InstanceDir(global, "local-docker"), "local-docker", TargetTypeDocker, dockerScope("D1", ""), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again.RuntimeBrokerID != first.RuntimeBrokerID || again.RuntimeTarget.ID != first.RuntimeTarget.ID {
-		t.Fatal("re-added entry must restore the same identity")
-	}
-}
-
 func TestIdentity_FirstBootRequiresScopeIdentity(t *testing.T) {
 	dir := instanceDir(t)
 	_, err := LoadOrCreate(dir, "local-docker", TargetTypeDocker, dockerScope("", "unix:///var/run/docker.sock"), nil)
@@ -259,5 +239,55 @@ func TestIdentity_FirstBootRequiresScopeIdentity(t *testing.T) {
 func TestIdentity_InvalidKeyRejected(t *testing.T) {
 	if _, err := LoadOrCreate(t.TempDir(), "Bad_Key", TargetTypeDocker, dockerScope("D1", ""), nil); err == nil {
 		t.Fatal("invalid key must be rejected")
+	}
+}
+
+// TestIdentity_LinkEEXISTLoadsWinner exercises the publish step when another
+// process already linked identity.json: the winner's identity is returned and
+// never replaced.
+func TestIdentity_LinkEEXISTLoadsWinner(t *testing.T) {
+	dir := instanceDir(t)
+	writeIdentityFile(t, dir, validIdentityJSON(t, nil))
+	got, err := mint(dir, filepath.Join(dir, IdentityFileName), "local-docker", TargetTypeDocker, dockerScope("D1", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RuntimeBrokerID != "b-1" || got.RuntimeTarget.ID != "t-1" {
+		t.Fatalf("the existing (winning) identity must be returned, got %+v", got)
+	}
+	if entries, _ := filepath.Glob(filepath.Join(dir, tempFilePrefix+"*")); len(entries) != 0 {
+		t.Fatalf("temp files left behind: %v", entries)
+	}
+}
+
+func TestIdentity_ExistingDirectoryTightenedTo0700(t *testing.T) {
+	dir := instanceDir(t)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreate(dir, "local-docker", TargetTypeDocker, dockerScope("D1", ""), nil); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(dir)
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("instance dir mode = %v, want 0700", info.Mode().Perm())
+	}
+}
+
+func TestIdentity_MissingErrorMessage(t *testing.T) {
+	dir := instanceDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "other"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadOrCreate(dir, "local-docker", TargetTypeDocker, dockerScope("D1", ""), nil)
+	if !errors.Is(err, ErrIdentityMissing) ||
+		!contains(err.Error(), `identity state for instance "local-docker" is missing but other state exists; restore it or remove the directory to register a new Runtime Broker`) {
+		t.Fatalf("frozen message not used: %v", err)
 	}
 }

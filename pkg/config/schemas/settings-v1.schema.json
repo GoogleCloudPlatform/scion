@@ -1350,7 +1350,7 @@
         },
         "cors": { "$ref": "#/$defs/corsConfig" },
         "instances": {
-          "type": "array",
+          "type": ["array", "null"],
           "maxItems": 1,
           "items": { "$ref": "#/$defs/runtimeBrokerInstance" },
           "description": "Flat (single-target) Runtime Broker instances hosted by this process. Empty or absent means legacy hosting. This release accepts one docker entry and requires the Hub in the same process. Read from the global settings file only."
@@ -1387,7 +1387,14 @@
             "namespace": { "type": "string", "description": "Kubernetes only (not implemented)." }
           },
           "if": { "properties": { "type": { "const": "docker" } } },
-          "then": { "not": { "anyOf": [ { "required": ["context"] }, { "required": ["namespace"] } ] } }
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["context"], "properties": { "context": { "minLength": 1 } } },
+                { "required": ["namespace"], "properties": { "namespace": { "minLength": 1 } } }
+              ]
+            }
+          }
         }
       }
     },

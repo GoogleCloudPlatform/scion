@@ -81,6 +81,10 @@ func newFlatInstanceTestServer(t *testing.T, opts flatInstanceOpts) *flatInstanc
 	srv := newTestServerWithManager(t, mgr)
 	srv.config.Host = "127.0.0.1"
 	srv.config.Port = 0
+	// No forced runtime: a legacy Runtime Broker would then resolve the
+	// settings active profile (a Kubernetes runtime) instead of using the
+	// single target, which keeps the positive tests discriminating.
+	srv.config.ForceRuntime = ""
 
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -104,6 +108,23 @@ func newFlatInstanceTestServer(t *testing.T, opts flatInstanceOpts) *flatInstanc
           type: docker
 `
 	writeFlatFixtureFile(t, filepath.Join(globalDir, "settings.yaml"), settings)
+	// Templates and harness-configs for the hub-managed project, which
+	// resolves them under the global dir (not the working directory's
+	// project .scion), so an accepted create can succeed.
+	for _, name := range []string{"default", "claude"} {
+		writeFlatFixtureFile(t, filepath.Join(globalDir, "templates", name, "scion-agent.yaml"), "harness_config: "+name+"\n")
+		writeFlatFixtureFile(t, filepath.Join(globalDir, "harness-configs", name, "config.yaml"), "harness: "+name+"\nimage: test-image:"+name+"\n")
+	}
+	if active != "" {
+		// The project settings written by setupTestScionEnv set their own
+		// active_profile, which wins over the global one; put the
+		// Kubernetes active profile there too so it takes effect.
+		projectDir, err := config.GetResolvedProjectDir("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFlatFixtureFile(t, filepath.Join(projectDir, "settings.yaml"), "schema_version: \"1\"\n"+active)
+	}
 	instances, err := config.LoadRuntimeBrokerInstances("")
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +148,11 @@ func newFlatInstanceTestServer(t *testing.T, opts flatInstanceOpts) *flatInstanc
 	}
 	_ = config.CheckRuntimeBrokerInstanceHosting(instances, opts.hubInProcess)
 
+	// P1.2 completes this helper: it constructs the flat instance from
+	// instances[0] and id, keeps ForceRuntime cleared, and, for a co-located
+	// instance (hubInProcess), installs the embedded registration's in-memory
+	// Hub credentials for id.RuntimeBrokerID (so a Hub connection exists),
+	// never the legacy multi-store or broker-credentials.json.
 	t.Fatalf("newFlatInstanceTestServer: P1.2 (ptone/scion#3268) wires the flat instance into the Runtime Broker server")
 	return &flatInstanceFixture{srv: srv, mgr: mgr, identity: id, instances: instances, globalDir: globalDir}
 }
@@ -150,6 +176,9 @@ func flatCreateBody(requestID, name string, extra map[string]interface{}) string
 		"slug":        name,
 		"projectId":   "flat-project-id",
 		"projectSlug": "flat-project",
+		// An unambiguous workspace for the hub-managed project, so an
+		// accepted create gets past buildStartContext.
+		"workspaceMode": "shared",
 	}
 	for k, v := range extra {
 		body[k] = v
@@ -215,11 +244,14 @@ func expectNoCreateSideEffects(t *testing.T, f *flatInstanceFixture, requestID s
 	if _, err := os.Stat(filepath.Join(f.globalDir, "projects", "flat-project")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("project directory created (stat err %v)", err)
 	}
+	if _, err := os.Stat(filepath.Join(f.globalDir, "projects", "flat-project", ".scion")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("project marker written (stat err %v)", err)
+	}
 	f.mgr.mu.Lock()
-	starts := f.mgr.startCalls
+	starts, preflights := f.mgr.startCalls, f.mgr.preflightCalls
 	f.mgr.mu.Unlock()
-	if starts != 0 || f.mgr.preflightCalls != 0 {
-		t.Errorf("runtime called: start=%d preflight=%d", starts, f.mgr.preflightCalls)
+	if starts != 0 || preflights != 0 {
+		t.Errorf("runtime called: start=%d preflight=%d", starts, preflights)
 	}
 }
 
@@ -326,8 +358,8 @@ func TestFlatInstanceStart_ExpectedTargetMismatchRejected(t *testing.T) {
 	if e.Details["actualRuntimeTargetId"] != f.identity.RuntimeTarget.ID {
 		t.Fatalf("details = %v", e.Details)
 	}
-	if f.mgr.startCalls != 0 {
-		t.Fatalf("runtime started on a mismatch: %d", f.mgr.startCalls)
+	if n := mgrStartCalls(f); n != 0 {
+		t.Fatalf("runtime started on a mismatch: %d", n)
 	}
 }
 
@@ -338,8 +370,8 @@ func TestFlatInstanceStart_UndecodableBodyRejected(t *testing.T) {
 		w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start", body)
 		expectFlatRefusal(t, w, http.StatusBadRequest, ErrCodeInvalidRequest)
 	}
-	if f.mgr.startCalls != 0 {
-		t.Fatalf("runtime started on an undecodable body: %d", f.mgr.startCalls)
+	if n := mgrStartCalls(f); n != 0 {
+		t.Fatalf("runtime started on an undecodable body: %d", n)
 	}
 	// Unknown keys stay ignored (start/restart version-skew contract).
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
@@ -351,7 +383,9 @@ func TestFlatInstanceStart_UndecodableBodyRejected(t *testing.T) {
 
 func TestFlatInstanceStart_WithoutExpectedTargetUsesOnlyTarget(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
-	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	// The settings active profile names a Kubernetes runtime; the start
+	// still runs on the single target's manager.
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true, activeProfile: "batch"})
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start", "")
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
@@ -390,7 +424,7 @@ func TestFlatInstanceStart_MismatchKeepsRunIDFencing(t *testing.T) {
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
 		`{"runId":"run-refused","expectedRuntimeTargetId":"another-target"}`)
 	expectFlatRefusal(t, w, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
-	if f.mgr.startCalls != 0 {
+	if mgrStartCalls(f) != 0 {
 		t.Fatal("a refused start must not reach the runtime")
 	}
 	// An accepted start still carries the hub-minted run ID unchanged.
@@ -443,7 +477,7 @@ func TestFlatInstanceServer_RemoteModeNeverActivates(t *testing.T) {
 	if conns != 0 {
 		t.Fatalf("no Hub connection may be opened, found %d", conns)
 	}
-	if f.mgr.startCalls != 0 {
+	if mgrStartCalls(f) != 0 {
 		t.Fatal("no dispatch may be accepted")
 	}
 }
@@ -454,15 +488,27 @@ func TestFlatInstanceServer_LoadsNoLegacyCredentials(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- f.srv.Start(ctx) }()
-	time.Sleep(500 * time.Millisecond)
+
+	// Readiness: wait until the instance's Hub connections are set up.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		f.srv.mu.Lock()
+		n := len(f.srv.hubConnections)
+		f.srv.mu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 
 	f.srv.mu.Lock()
+	if len(f.srv.hubConnections) == 0 {
+		t.Error("the co-located flat instance must hold a Hub connection for its own identity")
+	}
 	for name, conn := range f.srv.hubConnections {
-		if conn.BrokerID == legacyBrokerID {
-			t.Errorf("Hub connection %q uses the legacy identity %s", name, legacyBrokerID)
-		}
-		if conn.BrokerID != "" && conn.BrokerID != f.identity.RuntimeBrokerID {
-			t.Errorf("Hub connection %q uses a foreign identity %s", name, conn.BrokerID)
+		if conn.BrokerID != f.identity.RuntimeBrokerID {
+			t.Errorf("Hub connection %q uses identity %q, want only %s (legacy %s must never be loaded)",
+				name, conn.BrokerID, f.identity.RuntimeBrokerID, legacyBrokerID)
 		}
 	}
 	f.srv.mu.Unlock()
@@ -501,7 +547,17 @@ func TestLegacyInstanceCreate_NonEmptyExpectedTargetRejected(t *testing.T) {
 	if _, ok := srv.dispatchAttempts[reqID]; ok {
 		t.Error("refusal must precede the dispatch attempt")
 	}
-	if mgr.startCalls != 0 {
+	mgr.mu.Lock()
+	starts := mgr.startCalls
+	mgr.mu.Unlock()
+	if starts != 0 {
 		t.Error("runtime must not be called")
 	}
+}
+
+// mgrStartCalls reads the mock manager's start count under its lock.
+func mgrStartCalls(f *flatInstanceFixture) int {
+	f.mgr.mu.Lock()
+	defer f.mgr.mu.Unlock()
+	return f.mgr.startCalls
 }

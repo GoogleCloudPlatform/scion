@@ -71,7 +71,7 @@ func TestRuntimeTargetMismatch_MessageAndDetails(t *testing.T) {
 		t.Fatalf("details must have exactly the frozen keys, got %v", d)
 	}
 	legacy := &RuntimeTargetMismatch{RuntimeBrokerID: "b1", ExpectedRuntimeTargetID: "t2"}
-	if got, want := legacy.Message(), "Runtime Broker b1 serves runtime target no runtime target, but the request expected t2"; got != want {
+	if got, want := legacy.Message(), "Runtime Broker b1 serves no runtime target, but the request expected t2"; got != want {
 		t.Fatalf("legacy message: got %q, want %q", got, want)
 	}
 	b, _ := json.Marshal(legacy)

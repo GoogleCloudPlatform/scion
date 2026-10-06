@@ -67,12 +67,12 @@ type RuntimeTargetMismatch struct {
 
 // Message returns the frozen human-readable mismatch message.
 func (m *RuntimeTargetMismatch) Message() string {
-	actual := m.ActualRuntimeTargetID
-	if actual == "" {
-		actual = "no runtime target"
+	if m.ActualRuntimeTargetID == "" {
+		return fmt.Sprintf("Runtime Broker %s serves no runtime target, but the request expected %s",
+			m.RuntimeBrokerID, m.ExpectedRuntimeTargetID)
 	}
 	return fmt.Sprintf("Runtime Broker %s serves runtime target %s, but the request expected %s",
-		m.RuntimeBrokerID, actual, m.ExpectedRuntimeTargetID)
+		m.RuntimeBrokerID, m.ActualRuntimeTargetID, m.ExpectedRuntimeTargetID)
 }
 
 // Details returns the envelope details map for the mismatch.

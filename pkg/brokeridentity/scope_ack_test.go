@@ -146,6 +146,27 @@ func TestCheckActivationAck_MismatchedJoinAck(t *testing.T) {
 	if code != api.ErrCodeRuntimeTargetBindingConflict {
 		t.Fatalf("type mismatch: got %s", code)
 	}
+	code, _ = ackCode(t, CheckActivationAck(ackIdentity(), PhaseJoin, "other", &api.RuntimeTargetDescriptor{ID: "t-1", Type: TargetTypeDocker}))
+	if code != api.ErrCodeRuntimeTargetBindingConflict {
+		t.Fatalf("ID mismatch: got %s", code)
+	}
+}
+
+func TestAckError_Fields(t *testing.T) {
+	got := &api.RuntimeTargetDescriptor{ID: "t-9", Type: TargetTypeDocker}
+	var ae *AckError
+	if !errors.As(CheckActivationAck(ackIdentity(), PhaseActivate, "b-1", got), &ae) {
+		t.Fatal("want *AckError")
+	}
+	if ae.Code != api.ErrCodeRuntimeTargetBindingConflict || ae.Phase != PhaseActivate || ae.RuntimeBrokerID != "b-1" {
+		t.Fatalf("fields: %+v", ae)
+	}
+	if ae.Expected.RuntimeBrokerID != "b-1" || ae.Expected.RuntimeTarget == nil || ae.Expected.RuntimeTarget.ID != "t-1" {
+		t.Fatalf("expected binding: %+v", ae.Expected)
+	}
+	if ae.Got.RuntimeBrokerID != "b-1" || ae.Got.RuntimeTarget != got {
+		t.Fatalf("got binding: %+v", ae.Got)
+	}
 }
 
 func TestCheckActivationAck_DistinctCodes(t *testing.T) {
@@ -189,6 +210,13 @@ func TestCheckActivationAck_AllPhases(t *testing.T) {
 		code, _ = ackCode(t, CheckActivationAck(ackIdentity(), phase, "other", nil))
 		if code != api.ErrCodeRuntimeTargetBindingConflict {
 			t.Fatalf("phase %s: got %s", phase, code)
+		}
+		code, _ = ackCode(t, CheckActivationAck(ackIdentity(), phase, "b-1", &api.RuntimeTargetDescriptor{ID: "t-9", Type: TargetTypeDocker}))
+		if code != api.ErrCodeRuntimeTargetBindingConflict {
+			t.Fatalf("phase %s target mismatch: got %s", phase, code)
+		}
+		if err := CheckActivationAck(ackIdentity(), phase, "b-1", &api.RuntimeTargetDescriptor{ID: "t-1", Type: TargetTypeDocker}); err != nil {
+			t.Fatalf("phase %s bound: %v", phase, err)
 		}
 	}
 }

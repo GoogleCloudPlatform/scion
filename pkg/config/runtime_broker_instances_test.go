@@ -197,6 +197,19 @@ func TestRuntimeBrokerInstances_StrictLoaderFileResolution(t *testing.T) {
 		if len(got) != 1 || got[0].Key != "from-global" {
 			t.Fatalf("expected the global entry, got %+v", got)
 		}
+		// The lenient server loader silently falls back to the --config
+		// settings; the startup comparison must therefore detect a
+		// difference (the P1.2 refusal trigger).
+		gc, err := LoadGlobalConfig(cfgDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(gc.RuntimeBroker.Instances) != 1 || gc.RuntimeBroker.Instances[0].Key != "from-config" {
+			t.Fatalf("expected the lenient loader to fall back to --config, got %+v", gc.RuntimeBroker.Instances)
+		}
+		if reflect.DeepEqual(RuntimeBrokerInstancesToGlobal(got), gc.RuntimeBroker.Instances) {
+			t.Fatal("strict and lenient results must differ in the silent-fallback case")
+		}
 	})
 	t.Run("unparseable global settings is an error", func(t *testing.T) {
 		global := flatTestHome(t)
@@ -348,6 +361,11 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"unsupported type":  {instancesYAML("- {key: a, name: x, runtime_target: {type: podman}}"), false},
 		"docker with ns":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, namespace: n}}"), false},
 		"unknown entry key": {instancesYAML("- {key: a, name: x, profile: p, runtime_target: {type: docker}}"), false},
+		"instances null":    {"schema_version: \"1\"\nserver:\n  broker:\n    instances: null\n", true},
+		"docker empty ctx":  {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, context: \"\"}}"), true},
+		"numeric key":       {instancesYAML("- {key: 123, name: x, runtime_target: {type: docker}}"), false},
+		"numeric name":      {instancesYAML("- {key: a, name: 7, runtime_target: {type: docker}}"), false},
+		"broker not a map":  {"schema_version: \"1\"\nserver:\n  broker: 5\n", false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -421,8 +439,11 @@ func TestRuntimeBrokerInstanceHosting_RemoteRefused(t *testing.T) {
 	if !errors.As(err, &he) || he.Code() != api.ErrCodeFlatRuntimeBrokerRemoteUnsupported {
 		t.Fatalf("remote flat hosting must be refused with %s, got %v", api.ErrCodeFlatRuntimeBrokerRemoteUnsupported, err)
 	}
-	if !strings.Contains(err.Error(), "remote flat Runtime Broker hosting arrives in P2") || !strings.Contains(err.Error(), "local-docker") {
-		t.Fatalf("message must give guidance: %v", err)
+	if want := "server.broker.instances requires the Hub in the same process in this release; remote flat Runtime Broker hosting arrives in P2 (ptone/scion#3271). Remove server.broker.instances to run this host as a legacy Runtime Broker"; err.Error() != want {
+		t.Fatalf("frozen message: got %q", err.Error())
+	}
+	if he.InstanceKey != "local-docker" {
+		t.Fatalf("instance key = %q", he.InstanceKey)
 	}
 	// --simulate-remote-broker: the Hub runs in process but the embedded
 	// registration (colocatedBrokerRegisters) does not, so hubInProcess is false.
@@ -431,6 +452,9 @@ func TestRuntimeBrokerInstanceHosting_RemoteRefused(t *testing.T) {
 	}
 	if err := CheckRuntimeBrokerInstanceHosting(nil, false); err != nil {
 		t.Fatalf("legacy remote hosting must be unchanged: %v", err)
+	}
+	if err := CheckRuntimeBrokerInstanceHosting([]V1RuntimeBrokerInstanceConfig{}, false); err != nil {
+		t.Fatalf("an empty (non-nil) list is legacy hosting: %v", err)
 	}
 	if err := CheckRuntimeBrokerInstanceHosting(inst, true); err != nil {
 		t.Fatalf("co-located flat hosting must be allowed: %v", err)

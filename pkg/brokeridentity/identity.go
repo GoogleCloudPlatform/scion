@@ -135,6 +135,10 @@ func LoadOrCreate(dir, key, targetType string, observed ExecutionScope, legacyBr
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create instance directory: %w", err)
 	}
+	// MkdirAll leaves an existing directory's mode alone; tighten it.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("restrict instance directory: %w", err)
+	}
 	unlock, err := lockDir(dir)
 	if err != nil {
 		return nil, err
@@ -152,8 +156,8 @@ func LoadOrCreate(dir, key, targetType string, observed ExecutionScope, legacyBr
 			return nil, ferr
 		}
 		if !firstBoot {
-			return nil, fmt.Errorf("%w: instance %q (%s); restore %s or remove the directory to register a new Runtime Broker",
-				ErrIdentityMissing, key, dir, IdentityFileName)
+			return nil, fmt.Errorf("%w: identity state for instance %q is missing but other state exists; restore it or remove the directory to register a new Runtime Broker (%s)",
+				ErrIdentityMissing, key, dir)
 		}
 		id, err = mint(dir, path, key, targetType, observed)
 		if err != nil {

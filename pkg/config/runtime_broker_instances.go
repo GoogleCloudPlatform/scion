@@ -63,10 +63,9 @@ func (e *RuntimeBrokerHostingError) Code() string {
 }
 
 func (e *RuntimeBrokerHostingError) Error() string {
-	return fmt.Sprintf("%s: server.broker.instances requires the Hub in the same process in this release; "+
-		"remote flat Runtime Broker hosting arrives in P2 (ptone/scion#3271). "+
-		"Remove server.broker.instances to run this host as a legacy Runtime Broker (instance %q)",
-		api.ErrCodeFlatRuntimeBrokerRemoteUnsupported, e.InstanceKey)
+	return "server.broker.instances requires the Hub in the same process in this release; " +
+		"remote flat Runtime Broker hosting arrives in P2 (ptone/scion#3271). " +
+		"Remove server.broker.instances to run this host as a legacy Runtime Broker"
 }
 
 // ValidateRuntimeBrokerInstances checks server.broker.instances and returns
@@ -168,13 +167,20 @@ func LoadRuntimeBrokerInstances(configPath string) ([]V1RuntimeBrokerInstanceCon
 	if !found {
 		return nil, nil
 	}
-	brokerRaw, ok := raw["broker"].(map[string]interface{})
-	if !ok {
+	brokerVal, present := raw["broker"]
+	if !present || brokerVal == nil {
 		return nil, nil
+	}
+	brokerRaw, ok := brokerVal.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("server.broker must be a mapping")
 	}
 	instRaw, ok := brokerRaw["instances"]
 	if !ok || instRaw == nil {
 		return nil, nil
+	}
+	if err := checkInstanceScalarsAreStrings(instRaw); err != nil {
+		return nil, err
 	}
 	data, err := yamlv3.Marshal(instRaw)
 	if err != nil {
@@ -190,6 +196,46 @@ func LoadRuntimeBrokerInstances(configPath string) ([]V1RuntimeBrokerInstanceCon
 		return nil, joinValidationErrors(errs)
 	}
 	return instances, nil
+}
+
+// checkInstanceScalarsAreStrings rejects non-string scalars where the schema
+// requires strings (for example key: 123), which the YAML decoder would
+// otherwise coerce into strings.
+func checkInstanceScalarsAreStrings(instRaw interface{}) error {
+	list, ok := instRaw.([]interface{})
+	if !ok {
+		return fmt.Errorf("server.broker.instances must be a list")
+	}
+	checkStrings := func(path string, m map[string]interface{}, keys ...string) error {
+		for _, k := range keys {
+			if v, present := m[k]; present && v != nil {
+				if _, isString := v.(string); !isString {
+					return fmt.Errorf("%s.%s must be a string", path, k)
+				}
+			}
+		}
+		return nil
+	}
+	for i, e := range list {
+		p := fmt.Sprintf("server.broker.instances[%d]", i)
+		m, ok := e.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("%s must be a mapping", p)
+		}
+		if err := checkStrings(p, m, "key", "name"); err != nil {
+			return err
+		}
+		if t, present := m["runtime_target"]; present && t != nil {
+			tm, ok := t.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("%s.runtime_target must be a mapping", p)
+			}
+			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // readServerSectionStrict reads settings.yaml in dir. It reports found only
