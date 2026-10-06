@@ -120,6 +120,12 @@ type Resource struct {
 	// grant (skillProgenyAdapter, authz_skill_progeny.go) match the same
 	// column the skill list predicate filters on. Empty otherwise.
 	ScopeUserID string
+
+	// launchedTarget is the agent record the single-agent GET handlers
+	// read from the store, set only by agentStatusReadResource. The
+	// launcher status-read rule (authz_launcher_read.go) decides from it
+	// alone. It is unexported so no decoded request can carry it.
+	launchedTarget *store.Agent
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -573,6 +579,13 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 // authorization result.
 func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
 	bearer := request.bearerRun
+	// admissionMemo is the request-scoped project-admission memo shared by
+	// the bearer gate (step 1) and the relationship project-access stage
+	// (step 9), so a request reads project access from the store once.
+	admissionMemo := bearer.memoOrNil()
+	if admissionMemo == nil {
+		admissionMemo = &ProjectAdmissionCache{}
+	}
 	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
 	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
@@ -767,7 +780,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	if credential.Kind == CredentialKindUAT {
 		if in, ok := bearerGateInputsFor(principal, credential); ok {
 			in.ceiling = listRowReadCeiling(request, permissionID, &in.boundary, in.ceiling)
-			if denied := a.evaluateBearerGate(ctx, principal, in, request.Resource, request.TargetEvidence, request.Action, permissionID, bearer.memoOrNil(), bearer.traceOrNil()); denied != nil {
+			if denied := a.evaluateBearerGate(ctx, principal, in, request.Resource, request.TargetEvidence, request.Action, permissionID, admissionMemo, bearer.traceOrNil()); denied != nil {
 				return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
 			}
 		}
@@ -1034,9 +1047,9 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 9: Relationship candidates ───────────────────────────────
-	// On a kernel deny, named relationships (owner, ancestor, progeny,
-	// hub-member assign) are evaluated as typed candidates through the
-	// common stages in authz_relationship_rules.go:
+	// On a kernel deny, named relationships (owner, ancestor, launcher,
+	// progeny, hub-member assign) are evaluated as typed candidates
+	// through the common stages in authz_relationship_rules.go:
 	// relationship policy, hub-attested ancestry, relationship fact, source
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
@@ -1048,8 +1061,15 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// source agent's delegation chain), and those must always read the
 	// store, never the requester's memoized principals, constraints or
 	// edges. The restrictions passed in were already resolved above.
+	var relationshipFault bool
 	if !kernelAdmits || request.Explain {
-		rel := a.evaluateRelationshipCandidates(maskAllAuthzMemo(ctx), principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
+		rel := a.evaluateRelationshipCandidates(maskAllAuthzMemo(ctx), principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain,
+			&relationshipProjectAccess{memo: admissionMemo, requestCtx: ctx})
+		// A project-access lookup fault (stage 2c) that leaves the request
+		// denied is a resolution error, not a policy fact.
+		if !kernelAdmits && rel.accepted == nil && rel.projectAccessFault {
+			relationshipFault = true
+		}
 		if !kernelAdmits {
 			if rel.accepted != nil {
 				kernelProvenance := decision.Provenance
@@ -1076,7 +1096,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// relationship candidates), because the deny-all restriction from 7c
 	// applies to both. Step 10 below only overwrites DenyCause on decisions
 	// that were allowed at this point, so it cannot clobber this tag.
-	if !decision.Allowed && constraintLoadFailed {
+	if !decision.Allowed && (constraintLoadFailed || relationshipFault) {
 		decision.DenyCause = DenyCauseResolutionError
 	}
 
@@ -1718,6 +1738,11 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			if permissionID == permissions.PermissionGCPServiceAccountUse {
 				return agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource)
 			}
+			// agent.read has no agent scope. The launcher status read
+			// (authz_launcher_read.go) admits it for one stored target.
+			if permissionID == permissionAgentRead && launcherStatusReadHolds(agent, resource, ActionRead, permissionID) {
+				return true
+			}
 			_, ok := allowed[permissionID]
 			return ok
 		},
@@ -1926,7 +1951,12 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 	//   - decide's relationship candidates run under maskAllAuthzMemo, which
 	//     covers executionProjectAdmission -> ProjectAdmissionForClass ->
 	//     SystemAuthorityProof and relationshipSourceDelegationHolds -> the
-	//     delegation chain walk;
+	//     delegation chain walk. The one exception is the project-access
+	//     stage (relationshipProjectAccessStage, stage 2c): it evaluates the
+	//     requester's own project access, so decide passes it the request
+	//     context, and its ProjectTargetAdmission -> ProjectMembershipEvidence
+	//     and SystemAuthorityProof -> accessConstraintRestrictions read the
+	//     requester's memoized principals, bindings and constraint slot;
 	//   - the delegation ceiling call site and the chain walk itself run
 	//     under maskAuthzInputs, which covers getEffectivePermissions and
 	//     userRelationshipAuthority;

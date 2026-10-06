@@ -672,12 +672,19 @@ func TestListProjectAgentsSortedAgentJWT_CursorBindingPerField(t *testing.T) {
 // a missing full row is exercised on its own.
 type hideFromFullRowReadStore struct {
 	store.Store
+	fault   *storeFaultSwitch // nil: always active
 	agentID string
+}
+
+// newHideFromFullRowReadStore is the installStoreFault wrap func for
+// hideFromFullRowReadStore. Set agentID before arming.
+func newHideFromFullRowReadStore(inner store.Store, fault *storeFaultSwitch) *hideFromFullRowReadStore {
+	return &hideFromFullRowReadStore{Store: inner, fault: fault}
 }
 
 func (h *hideFromFullRowReadStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
 	res, err := h.Store.ListAgents(ctx, filter, opts)
-	if err != nil || len(filter.IDs) == 0 {
+	if err != nil || len(filter.IDs) == 0 || !h.fault.Active() {
 		return res, err
 	}
 	kept := res.Items[:0]
@@ -696,7 +703,7 @@ func (h *hideFromFullRowReadStore) ListAgents(ctx context.Context, filter store.
 // totalCount stays the member count (a short page is valid) and still
 // carries the cursor. The dropped row costs no decisions.
 func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(t *testing.T) {
-	f := sortedListSetup(t)
+	f, hiding, fault := sortedListSetupWithFault(t, newHideFromFullRowReadStore)
 	self := f.createAgent(t, "mf-self", string(state.PhaseRunning), nil)
 	sibs := make([]string, 3)
 	for i := range sibs {
@@ -711,7 +718,8 @@ func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(
 	}
 	tok := f.agentJWTFor(t, self.ID)
 	hidden := sibs[len(sibs)-1]
-	f.srv.store = &hideFromFullRowReadStore{Store: f.store, agentID: hidden}
+	hiding.agentID = hidden
+	fault.Arm()
 
 	t.Run("complete", func(t *testing.T) {
 		emitter := &recordingDecisionAuditEmitter{}
@@ -748,7 +756,6 @@ func TestListProjectAgentsSortedAgentJWT_RowMissingOnlyFromFullRowReadIsDropped(
 		assert.NotContains(t, agentIDs(next), sibs[1], "no row repeats after a short page")
 		assert.Equal(t, []string{sibs[0], self.ID}, agentIDs(next))
 	})
-	f.srv.store = f.store
 }
 
 func agentIDs(resp ListAgentsResponse) []string {

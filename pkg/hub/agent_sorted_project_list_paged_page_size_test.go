@@ -212,7 +212,7 @@ func TestListProjectAgentsSorted_PagedWalk_PageSizeBound_AllReadableReturnedOnce
 // PagedPageSize_BoundedByN_DesignSizes's doc comment for why a
 // self-referential expected value cannot catch an over-strict P_eff.
 func TestListProjectAgentsSorted_PagedRaced_PageSizeBound_StaysUnderRacedCeiling(t *testing.T) {
-	f := sortedListSetup(t)
+	f, _, fault := sortedListSetupWithFault(t, newRacingAllMembersStore)
 	const n = 501
 	const limit = 500
 	const wantPEff = 499 // floor((4000-501)/7) = floor(3499/7) = 499
@@ -222,8 +222,7 @@ func TestListProjectAgentsSorted_PagedRaced_PageSizeBound_StaysUnderRacedCeiling
 		"this test's hard-coded pEff must track effectivePagedPageSize's actual behavior")
 	require.Less(t, wantPEff, n, "a race on every page item is only interesting if the page doesn't already cover every candidate")
 
-	raced := &racingAllMembersStore{Store: f.store}
-	f.srv.store = raced
+	fault.Arm()
 
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
@@ -245,13 +244,20 @@ func TestListProjectAgentsSorted_PagedRaced_PageSizeBound_StaysUnderRacedCeiling
 // mutatingAfterMembersStore, which only races one row.
 type racingAllMembersStore struct {
 	store.Store
-	once sync.Once
+	fault *storeFaultSwitch // nil: always active
+	once  sync.Once
+}
+
+// newRacingAllMembersStore is the installStoreFault wrap func for
+// racingAllMembersStore.
+func newRacingAllMembersStore(inner store.Store, fault *storeFaultSwitch) *racingAllMembersStore {
+	return &racingAllMembersStore{Store: inner, fault: fault}
 }
 
 func (r *racingAllMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
 	members, err := r.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-	if err != nil {
-		return nil, err
+	if err != nil || !r.fault.Active() {
+		return members, err
 	}
 	r.once.Do(func() {
 		for _, m := range members {

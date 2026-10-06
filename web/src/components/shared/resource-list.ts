@@ -34,6 +34,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
+import { navigateTo } from '../../client/navigation.js';
 
 export type ResourceKind = 'template' | 'harness-config';
 
@@ -1026,12 +1027,7 @@ export class ScionResourceList extends LitElement {
       showToast(`${this.kind === 'template' ? 'Template' : 'Harness config'} created`, 'success');
       this.emitChanged('created', created.id);
       // Navigate to the new resource's detail page
-      window.history.pushState(
-        {},
-        '',
-        `${this.detailBasePath}/${this.detailSegment}/${created.id}`
-      );
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo(`${this.detailBasePath}/${this.detailSegment}/${created.id}`);
     } catch (err) {
       this.createError = err instanceof Error ? err.message : `Failed to create ${this.kindLabel}`;
     } finally {
