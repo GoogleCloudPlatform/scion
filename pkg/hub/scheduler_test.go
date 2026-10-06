@@ -1284,8 +1284,8 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.
@@ -1311,8 +1311,8 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.

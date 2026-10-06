@@ -171,6 +171,9 @@ type Agent struct {
 	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
 	RunIntent   RunIntent  `json:"-"`
 	RunIntentAt *time.Time `json:"-"`
+	// RunIntentMarkedAt equals RunIntentAt when the intent was last written
+	// by code that maintains start claims (see RunIntentWrittenWithClaims).
+	RunIntentMarkedAt *time.Time `json:"-"`
 
 	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
 	// held. Internal bookkeeping, untagged like the launch columns.
@@ -352,6 +355,10 @@ type AgentAppliedConfig struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket the hub uploaded
+	// WorkspaceStoragePath to. It is sent to the broker with the create so
+	// a broker without its own bucket setting can download the workspace.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// InlineConfig holds the full ScionConfig provided via the --config flag
 	// or Hub API config field. When set, the dispatcher threads it through to the
@@ -1014,6 +1021,25 @@ type BrokerProfile struct {
 	// pkg/runtime.HasAttachSupport uses), not false. A plain bool could not
 	// tell that "never reported" apart from an explicit false.
 	Attach *bool `json:"attach,omitempty"`
+	// ServiceAccountMappings lists the GCP service accounts this profile
+	// maps to a Kubernetes ServiceAccount (kubernetes_service_account_mappings
+	// in the broker's global settings, profile and runtime-entry level).
+	// Reported at broker join and refreshed by heartbeat (ProfileSAMappings),
+	// only for Kubernetes profiles; the Hub uses it only to warn about registered
+	// service accounts no profile maps (ptone/scion#3329 phase 2).
+	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
+	// MappingsReported is true when the broker reported
+	// ServiceAccountMappings for this profile, so an empty list means
+	// "nothing mapped" rather than "unknown" (an older broker, or a broker
+	// that could not read its settings).
+	MappingsReported bool `json:"mappingsReported,omitempty"`
+}
+
+// BrokerProfileSAMapping is one GCP service account a broker profile maps
+// to a Kubernetes ServiceAccount. A struct, not a bare string, so a later
+// phase can add per-entry details (such as the namespace) without a rename.
+type BrokerProfileSAMapping struct {
+	GSA string `json:"gsa"`
 }
 
 // ProjectProvider links a runtime broker to a project.

@@ -1559,14 +1559,26 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		return runHubProjectCreateHubManaged()
 	}
 
-	gitURL := args[0]
+	// Git remotes never need a query or fragment, and either can carry a
+	// token; drop them before the URL is used, sent or stored.
+	gitURL, ok := util.CutQueryAndFragment(args[0])
+	if !ok {
+		// A '?' or '#' inside the userinfo; do not echo the URL.
+		return newUsageError("invalid git URL: remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)")
+	}
 
-	// Validate URL format
+	// Validate URL format. The URL is not echoed: it may carry credentials.
 	if !util.IsGitURL(gitURL) {
-		return newUsageError("invalid git URL: %s\n\nAccepted formats:\n  https://github.com/org/repo.git\n  git@github.com:org/repo.git\n  ssh://git@github.com/org/repo", gitURL)
+		return newUsageError("invalid git URL\n\nAccepted formats:\n  https://github.com/org/repo.git\n  git@github.com:org/repo.git\n  ssh://git@github.com/org/repo")
 	}
 
 	normalized := util.NormalizeGitRemote(gitURL)
+	if strings.Contains(normalized, "@") {
+		// NormalizeGitRemote drops ordinary userinfo; an '@' left over means a
+		// password or an extra '@' in scp form. The hub refuses it too, so do
+		// not send it (and do not echo the URL).
+		return newUsageError("invalid git URL: remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)")
+	}
 
 	// Display name
 	org, repo := util.ExtractOrgRepo(gitURL)
@@ -1683,11 +1695,7 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		Slug:          slug,
 		GitRemote:     normalized,
 		WorkspaceMode: hubProjectCreateMode,
-		Labels: map[string]string{
-			store.LabelDefaultBranch: defaultBranch,
-			store.LabelCloneURL:      util.ToHTTPSCloneURL(gitURL),
-			store.LabelSourceURL:     gitURL,
-		},
+		Labels:        hubProjectGitSourceLabels(gitURL, defaultBranch),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create project: %w", err)
@@ -1798,11 +1806,33 @@ func runHubProjectCreateHubManaged() error {
 	return nil
 }
 
+// defaultBranchProbeTimeout bounds the default-branch probe so an
+// unreachable remote falls back to the default instead of hanging. It is a
+// variable only so tests can shorten it.
+var defaultBranchProbeTimeout = 10 * time.Second
+
+// defaultBranchProbeWaitDelay bounds how long the probe waits for its output
+// pipes to close after the context kills git. Without it, a stalled
+// git-remote-https child that inherited stderr keeps the pipe open and
+// Output() blocks until that child exits, defeating the timeout.
+const defaultBranchProbeWaitDelay = 1 * time.Second
+
+// defaultBranchProbeCmd builds the `git ls-remote --symref` command used by
+// detectDefaultBranch. GIT_TERMINAL_PROMPT=0 stops git from blocking on an
+// interactive credential prompt when no credential helper can answer.
+func defaultBranchProbeCmd(ctx context.Context, cloneURL string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--symref", cloneURL, "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.WaitDelay = defaultBranchProbeWaitDelay
+	return cmd
+}
+
 // detectDefaultBranch probes a git remote to detect its default branch.
 // Returns the branch name or empty string on failure.
 func detectDefaultBranch(cloneURL string) string {
-	cmd := exec.Command("git", "ls-remote", "--symref", cloneURL, "HEAD")
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultBranchProbeTimeout)
+	defer cancel()
+	output, err := defaultBranchProbeCmd(ctx, cloneURL).Output()
 	if err != nil {
 		return ""
 	}
@@ -2635,19 +2665,7 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 
 	if !util.IsTerminal() {
 		fmt.Printf("\nSkipping template sync (non-interactive mode).\n")
-		fmt.Println("Run 'scion templates sync --all' to upload project templates.")
-		return
-	}
-
-	// Show discovered templates
-	fmt.Printf("\nFound %d project template(s) not yet synced to Hub:\n", len(projectTemplates))
-	for _, t := range projectTemplates {
-		fmt.Printf("  - %s\n", t.Name)
-	}
-
-	if !hubsync.ConfirmAction("Sync these templates to the Hub?", true, autoConfirm) {
-		fmt.Println("Skipping template sync.")
-		fmt.Println("Run 'scion templates sync --all' to upload project templates later.")
+		fmt.Println("Run 'scion templates sync <name>' to upload project templates.")
 		return
 	}
 
@@ -2657,24 +2675,9 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 		return
 	}
 
-	fmt.Println("\nSyncing project templates to Hub...")
-	var synced int
-	for _, tpl := range projectTemplates {
-		harnessType, err := detectHarnessType(tpl)
-		if err != nil {
-			fmt.Printf("  %s: skipped (failed to detect harness: %v)\n", tpl.Name, err)
-			continue
-		}
-
-		// Use force=false — don't overwrite existing Hub templates
-		err = syncTemplateToHub(hubCtx, tpl.Name, tpl.Path, "project", harnessType)
-		if err != nil {
-			fmt.Printf("  %s: failed: %v\n", tpl.Name, err)
-			continue
-		}
-		synced++
-	}
-	fmt.Printf("%d template(s) synced to project scope.\n", synced)
+	syncNewTemplatesOnLink(hubCtx, projectTemplates, func(prompt string) bool {
+		return hubsync.ConfirmAction(prompt, true, autoConfirm)
+	})
 }
 
 // registerProjectOnHub registers a new project on the Hub.
@@ -2907,4 +2910,28 @@ func listBrokersForProject(ctx context.Context, client hubclient.Client, project
 		}
 		fmt.Printf("  - %s (%s)\n", b.Name, status)
 	}
+}
+
+// hubProjectGitSourceLabels returns the git source labels `hub project
+// create` sends for gitURL. The source-url keeps the URL as entered apart from
+// userinfo, query and fragment (util.SanitizeGitSourceURL). Either URL label
+// is omitted when the URL cannot be sanitized unambiguously.
+func hubProjectGitSourceLabels(gitURL, defaultBranch string) map[string]string {
+	labels := map[string]string{store.LabelDefaultBranch: defaultBranch}
+	if cloneURL := hubProjectCloneURLLabel(gitURL); cloneURL != "" {
+		labels[store.LabelCloneURL] = cloneURL
+	}
+	if src := util.SanitizeGitSourceURL(gitURL); src != "" {
+		labels[store.LabelSourceURL] = src
+	}
+	return labels
+}
+
+// hubProjectCloneURLLabel derives the clone-url label for `hub project create`
+// from the user's git URL via util.HTTPSCloneURL, which sanitizes it first
+// (userinfo, query and fragment dropped: the hub refuses a clone-url with any
+// of them) and maps scp and ssh:// remotes to HTTPS. It returns "" when the
+// URL cannot be sanitized unambiguously.
+func hubProjectCloneURLLabel(gitURL string) string {
+	return util.HTTPSCloneURL(gitURL)
 }

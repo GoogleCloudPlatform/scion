@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -236,8 +237,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
-			// Cross-broker agent move is not implemented by this broker.
-			AgentMove:      false,
+			// This broker honours localOnly deletes and confirms a moved
+			// agent's NFS workspace before provisioning it (agent move).
+			AgentMove:      true,
 			StartsInFlight: s.startsInFlight != nil,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
@@ -325,6 +327,45 @@ func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
 			continue
 		}
 		out = append(out, hubclient.ProfileAttachState{Name: p.Name, Attach: *p.Attach})
+	}
+	return out
+}
+
+// loadHeartbeatMappingSettings loads the broker's global settings plus the
+// DB-backed overlay, the source of kubernetes_service_account_mappings at
+// dispatch (resolveKubernetesAssignIdentity). A variable so tests can
+// substitute settings.
+var loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	return vs, err
+}
+
+// heartbeatProfileSAMappings returns, sorted by profile name, the GSA
+// mappings of each Kubernetes profile (by resolved runtime type) in the
+// broker's global settings, for the heartbeat's ProfileSAMappings field.
+// Nil when the settings cannot be read, so the hub keeps what it has; an
+// empty result when there are no Kubernetes profiles.
+func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState {
+	vs, err := loadHeartbeatMappingSettings()
+	if err != nil || vs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(vs.Profiles))
+	for name := range vs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := []hubclient.ProfileSAMappingsState{}
+	for _, name := range names {
+		gsas, isKubernetes, _ := vs.ProfileKubernetesSAMappings(name)
+		if !isKubernetes {
+			continue
+		}
+		state := hubclient.ProfileSAMappingsState{Name: name, ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}}
+		for _, gsa := range gsas {
+			state.ServiceAccountMappings = append(state.ServiceAccountMappings, hubclient.BrokerProfileSAMapping{GSA: gsa})
+		}
+		out = append(out, state)
 	}
 	return out
 }
@@ -1178,6 +1219,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				BadRequest(w, httpMessage)
 				return
 			}
+			if errors.Is(dlErr, errWorkspaceStorageUnconfigured) {
+				markAttemptFailed(http.StatusUnprocessableEntity, attemptMsg)
+				writeWorkspaceStorageUnconfigured(w)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
 			RuntimeError(w, httpMessage)
 			return
@@ -1230,6 +1276,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// config instead of reusing what's persisted — see Manager.Reprovision.
 		var cfg *api.ScionConfig
 		var err error
+		if req.ExpectExistingNFSWorkspace != "" {
+			checker, ok := sc.Manager.(nfsMoveWorkspaceChecker)
+			if !ok {
+				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
+				Conflict(w, "this broker cannot confirm a moved agent's NFS workspace")
+				return
+			}
+			if path, chkErr := checker.CheckNFSMoveWorkspace(opts.ProjectPath, req.ProjectID, opts.Name, req.ExpectExistingNFSWorkspace); chkErr != nil {
+				s.agentLifecycleLog.Warn("Agent move: the agent's workspace is not on this broker's NFS export; refusing to provision",
+					"agent_id", req.ID, "project_id", req.ProjectID, "path", path, "error", chkErr)
+				markAttemptFailed(http.StatusConflict, "moved agent workspace missing")
+				span.SetStatus(codes.Error, chkErr.Error())
+				Conflict(w, "Failed to provision moved agent: "+chkErr.Error())
+				return
+			}
+		}
 		if req.Reprovision {
 			cfg, err = sc.Manager.Reprovision(ctx, opts)
 		} else {
@@ -1424,20 +1486,55 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 // error (400) on the synchronous path rather than a runtime error.
 var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 
+// errWorkspaceStorageUnconfigured marks a downloadWorkspaceFromGCS error
+// caused by having no bucket to download the workspace upload from: the
+// request carries no WorkspaceStorageBucket (a hub that predates it) and the
+// broker has no StorageBucket setting. Answered with
+// writeWorkspaceStorageUnconfigured (422), not a runtime error
+// (ptone/scion#3422).
+var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
+
+// syncWorkspaceFromGCS downloads a workspace upload; a variable so tests
+// can substitute a fake for real GCS.
+var syncWorkspaceFromGCS = gcp.SyncFromGCS
+
+// workspaceStorageUnconfiguredMessage is the user-facing text for
+// errWorkspaceStorageUnconfigured.
+const workspaceStorageUnconfiguredMessage = "Cannot download the uploaded workspace: the create request names no storage bucket and this runtime broker has no storage bucket configured. " +
+	"Update the hub so it sends the workspace bucket, or configure the broker's storage bucket (storage.bucket or --storage-bucket)."
+
+// workspaceStorageBucket returns the bucket a create request's workspace
+// upload is downloaded from: the bucket the hub sent with the request, else
+// this broker's own StorageBucket setting, else "".
+func (s *Server) workspaceStorageBucket(req CreateAgentRequest) string {
+	if req.WorkspaceStorageBucket != "" {
+		return req.WorkspaceStorageBucket
+	}
+	return s.config.StorageBucket
+}
+
+// writeWorkspaceStorageUnconfigured answers a create that cannot download
+// its workspace upload because no bucket is known for it.
+func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeWorkspaceStorageUnconfigured, workspaceStorageUnconfiguredMessage, nil)
+}
+
 // downloadWorkspaceFromGCS performs the non-git GCS workspace bootstrap when
-// req.WorkspaceStoragePath is set. It is a pure extraction of createAgent's
-// original inline admission step (no behavior change), factored out so the
-// async-launch path (runLaunch) can perform exactly the same step in its
-// goroutine (design t1-async-create-v11.md §3.1: "Launch is the GCS
-// workspace download ... plus Manager.Start, in a goroutine").
+// req.WorkspaceStoragePath is set. It was factored out of createAgent's
+// inline admission step so the async-launch path (runLaunch) performs the
+// same step in its goroutine (design t1-async-create-v11.md §3.1: "Launch is
+// the GCS workspace download ... plus Manager.Start, in a goroutine"). It
+// downloads from the request's bucket, else this broker's StorageBucket
+// (workspaceStorageBucket), and refuses before creating the workspace
+// directory when neither is set.
 //
 // Returns opts unchanged when WorkspaceStoragePath is empty. On error it
 // returns: the short status string the synchronous caller records on the
-// dispatch attempt; httpMessage, the exact user-facing text the synchronous
-// path wrote with RuntimeError before this was extracted (byte-identical,
-// capitalized, no wrapped error — design's "byte-identical to today" for the
-// asyncLaunch-absent path); and err, a normal lowercase Go error for the
-// async path's failure report and logging.
+// dispatch attempt; httpMessage, the capitalized user-facing text the
+// synchronous path writes (no wrapped error); and err, a normal lowercase Go
+// error for the async path's failure report and logging. err is
+// errWorkspaceStorageUnconfigured when no bucket is known, which callers
+// answer with a 422 rather than a runtime error.
 func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (updated api.StartOptions, attemptMsg string, httpMessage string, err error) {
 	if req.WorkspaceStoragePath == "" {
 		return opts, "", "", nil
@@ -1450,15 +1547,18 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, attemptMsg, httpMessage, err
 	}
 
+	// Resolve the bucket before creating anything: a broker with no bucket
+	// for the upload refuses the create with errWorkspaceStorageUnconfigured
+	// (422) instead of leaving an empty workspace directory behind.
+	bucket := s.workspaceStorageBucket(req)
+	if bucket == "" {
+		return opts, "storage bucket not configured", workspaceStorageUnconfiguredMessage,
+			errWorkspaceStorageUnconfigured
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		return opts, "failed to create workspace directory", "Failed to create workspace directory: " + mkErr.Error(),
 			fmt.Errorf("failed to create workspace directory: %w", mkErr)
-	}
-
-	bucket := s.config.StorageBucket
-	if bucket == "" {
-		return opts, "storage bucket not configured", "Storage bucket not configured for workspace bootstrap",
-			errors.New("storage bucket not configured for workspace bootstrap")
 	}
 
 	if s.config.Debug {
@@ -1470,7 +1570,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		)
 	}
 
-	if syncErr := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
+	if syncErr := syncWorkspaceFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
 		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
 			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
 	}
@@ -1898,6 +1998,24 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	deleteFiles := query.Get("deleteFiles") == "true"
 	removeBranch := query.Get("removeBranch") == "true"
 	softDelete := query.Get("softDelete") == "true"
+	// localOnly removes only this broker's own state for the agent (its
+	// container, broker-local agent directory and home): never the agent's
+	// files on the shared NFS export and never its branch. The hub sends it
+	// to the source broker after moving the agent to another broker on the
+	// same export, where the workspace now lives on (design ptone/scion#2727
+	// §3.5). Only brokers advertising the AgentMove capability honour it.
+	//
+	// localOnly still runs the manager's normal file deletion below
+	// (DeleteTarget: the broker-local agent directory and home, and any
+	// worktree under the broker's project directory). That is safe only
+	// because a hub-native project's directory on the broker is
+	// broker-local (~/.scion/projects/<slug>), never on the export, and
+	// linked projects cannot move. Keep it so: localOnly must never reach a
+	// path under the NFS export (TestDeleteAgent_LocalOnlyNeverTouchesExport).
+	localOnly := query.Get("localOnly") == "true"
+	if localOnly {
+		removeBranch = false
+	}
 
 	// Resolve the exact entry to delete, scoped to the requested project,
 	// across the default and every auxiliary runtime (ptone/scion#1819).
@@ -2151,7 +2269,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// the delete; what failed is then left in place, and an agent created
 	// again with the same name reuses it. The agent's branch is always
 	// kept, whatever removeBranch says.
-	if filesToDelete && agentProjectID != "" {
+	if filesToDelete && !localOnly && agentProjectID != "" {
 		if remover, ok := target.mgr.(nfsAgentFilesRemover); ok {
 			if paths, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
@@ -5705,6 +5823,14 @@ type nfsAgentFilesRemover interface {
 
 var _ nfsAgentFilesRemover = (*agent.AgentManager)(nil)
 
+// nfsMoveWorkspaceChecker is implemented by managers that can confirm a
+// moved agent's workspace on the NFS export (agent.AgentManager).
+type nfsMoveWorkspaceChecker interface {
+	CheckNFSMoveWorkspace(projectPath, projectID, agentName, kind string) (string, error)
+}
+
+var _ nfsMoveWorkspaceChecker = (*agent.AgentManager)(nil)
+
 // errAgentIdentityUnknown means a runtime process restart dropped the
 // in-memory record a runtime needs to tell "not found" apart from "exists,
 // but this process can no longer identify which project it belongs to," for
@@ -6350,14 +6476,17 @@ func trustedEntryProjectPath(path, projectID string) bool {
 // function is ever reached.
 //
 // When projectID is set, only a project directory whose recorded project ID
-// (the project-id file) equals projectID is considered, so a same-named
-// agent in another project is never returned (ptone/scion#1819). When
-// projectID is empty, the name must be found in exactly one project; more
-// than one is reported as an ambiguity error rather than a guess.
+// (the project-id file, or the .scion marker file of a project without git)
+// equals projectID is considered, so a same-named agent in another project
+// is never returned (ptone/scion#1819). When projectID is empty, the name
+// must be found in exactly one project; more than one is reported as an
+// ambiguity error rather than a guess.
 //
 // Probes both the in-project location (worktree-mode agents) and the external
 // per-agent state dir under ~/.scion/project-configs/ (shared-workspace agents,
-// whose state lives external to the shared checkout).
+// whose state lives external to the shared checkout). For a project whose
+// .scion is a marker file, the returned dir is the external config dir the
+// marker resolves to, where its agents live.
 func findAgentInHubManagedProjects(agentName, projectID string) (string, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -6374,11 +6503,26 @@ func findAgentInHubManagedProjects(agentName, projectID string) (string, error) 
 				continue
 			}
 			scionDir := filepath.Join(baseDir, entry.Name(), ".scion")
-			if projectID != "" {
-				recorded, err := config.ReadProjectID(scionDir)
-				if err != nil || recorded != projectID {
+			// A hub-native project without git records its identity in a
+			// .scion marker FILE rather than a project-id file, and its
+			// agents live in the external config dir the marker points at
+			// (ptone/scion#2839), so both the identity and the agents dir
+			// are resolved marker-aware.
+			if projectID != "" && projectIDAtPath(scionDir) != projectID {
+				continue
+			}
+			if config.IsProjectMarkerFile(scionDir) {
+				resolved, err := config.GetResolvedProjectDir(scionDir)
+				if err != nil || resolved == "" || resolved == scionDir {
 					continue
 				}
+				scionDir = resolved
+			}
+			// Two marker files can resolve to the same external config
+			// dir (the same project under two entries): that is one
+			// project, not an ambiguity.
+			if slices.Contains(found, scionDir) {
+				continue
 			}
 			if hubManagedProjectHasAgent(scionDir, agentName) {
 				found = append(found, scionDir)

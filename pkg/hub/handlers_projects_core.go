@@ -315,7 +315,17 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateCloneURLLabelValue(req.Labels); msg != "" {
+		ValidationError(w, msg, cloneURLLabelErrorDetails())
+		return
+	}
+	sanitizeSourceURLLabel(req.Labels)
+
+	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
+	if msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// Workspace mode is create-only and server-owned: validate the requested
 	// mode against the project's git-ness and set the label only from the
@@ -368,6 +378,8 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		baseSlug = api.Slugify(req.Name)
 	} else if isReservedProjectSlug(baseSlug) {
 		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
+	} else if !requireProjectSlugFormat(w, baseSlug) {
 		return
 	}
 
@@ -1378,7 +1390,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	if msg := validateCloneURLLabelValue(req.Labels); msg != "" {
+		ValidationError(w, msg, cloneURLLabelErrorDetails())
+		return
+	}
+	sanitizeSourceURLLabel(req.Labels)
+
+	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
+	if msg != "" {
+		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 
 	// The workspace-mode label is server-owned (design #2703 §2.4): reject
 	// values register cannot honour before any lookup or mutation.
@@ -2564,9 +2586,11 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // (TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): agent.read
 // has no AgentScopes mapping, so the strict check would otherwise deny even
 // an agent reading its own record. getAgent applies the same exemption.
-// Reading a *different* agent in the caller's project still goes through
-// the same agent.read check as getAgent and is denied by it (CO1); an agent
-// in another project is answered 404 before that check.
+// Reading a *different* agent in the caller's project goes through the
+// same agent.read check as getAgent (authorizeSingleAgentRead), which
+// denies it unless the caller directly launched that agent
+// (authz_launcher_read.go). An agent caller that is denied, or that names
+// an agent in another project, gets the same 404 as for a missing agent.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
 		return
@@ -2582,13 +2606,13 @@ func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, project
 	isSelf := false
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		if agentIdent.ProjectID() != projectID {
-			NotFound(w, "Agent")
+			writeAgentNotFound(w)
 			return
 		}
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	if !isSelf {
-		if !s.authorize(w, r, agentResource(agent), ActionRead) {
+		if !s.authorizeSingleAgentRead(w, r, agent) {
 			return
 		}
 	}
@@ -2915,16 +2939,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		project.Name = updates.Name
 	}
 	if updates.Slug != "" {
-		newSlug := api.Slugify(updates.Slug)
-		if newSlug == "" {
-			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
-			return
-		}
-		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
-			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
-			return
-		}
+		newSlug := updates.Slug
 		if newSlug != oldSlug {
+			if isReservedProjectSlug(newSlug) {
+				ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+				return
+			}
+			if !requireProjectSlugFormat(w, newSlug) {
+				return
+			}
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
 				writeErrorFromErr(w, err, "")
@@ -2939,6 +2962,17 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	if updates.Labels != nil {
+		// Validate the clone-url only when this request adds or changes it:
+		// the full map is resent on every PATCH, and an unchanged legacy
+		// value must not block unrelated label edits (NormalizeCloneURL
+		// strips it on read).
+		if v, ok := updates.Labels[store.LabelCloneURL]; ok && v != project.Labels[store.LabelCloneURL] {
+			if msg := validateCloneURLLabelValue(updates.Labels); msg != "" {
+				ValidationError(w, msg, cloneURLLabelErrorDetails())
+				return
+			}
+		}
+		sanitizeSourceURLLabel(updates.Labels)
 		// PATCH replaces the labels map wholesale; keep the server-owned
 		// workspace-mode label and refuse attempts to change it (design
 		// #2703 §2.4 / D6).
@@ -3143,7 +3177,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	}
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {
-		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, nil)
+		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
 		return
 	}
 
@@ -3236,6 +3270,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
 		s.removeHubManagedProjectDir(projectID, project.Slug)
+		s.removeEmbeddedBrokerProjectDir(project.Slug, "")
 	}
 	s.webdavLocks.Delete(projectID)
 
@@ -3349,6 +3384,43 @@ func isDirectChildOfAny(target string, roots []string) bool {
 		}
 	}
 	return false
+}
+
+// removeEmbeddedBrokerProjectDir removes the co-located broker's local
+// project directory, ~/.scion/projects/<slug>, after a project is deleted.
+//
+// The embedded broker shares this process's filesystem and materializes
+// hub-native projects at that path whatever workspace storage backend the hub
+// uses, and the broker cleanup step leaves this directory to the hub. With the
+// default local backend the hub-managed path is that same directory, so it has
+// already been removed (removedPath) and nothing more is done. With a
+// configured backend the hub-managed path may be on the backend mount, and
+// this removes the local directory as well. Only a single direct child of the
+// projects root is removed. An absent directory is not an error.
+func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
+	if s.GetEmbeddedBrokerID() == "" {
+		return
+	}
+	if err := validateProjectSlug(slug); err != nil {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return
+	}
+	projectsRoot := filepath.Join(globalDir, "projects")
+	localPath := filepath.Join(projectsRoot, slug)
+	if filepath.Dir(localPath) != projectsRoot {
+		return
+	}
+	// An empty removedPath means no hub-managed path was removed, so the
+	// local directory is still to be removed.
+	if removedPath != "" && localPath == filepath.Clean(removedPath) {
+		return
+	}
+	if err := util.RemoveAllSafe(localPath); err != nil {
+		s.projectsLogger().Warn("embedded broker project directory removal did not complete")
+	}
 }
 
 // dispatchAgentDeletions dispatches agent deletion to runtime brokers

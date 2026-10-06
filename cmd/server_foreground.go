@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -554,6 +555,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		var webStore hub.WebChatStore
 		if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
 			if rawDB := dbProvider.DB(); rawDB != nil {
+				// Artifact store: creates the artifact_* tables (outside
+				// the Ent migration graph, design D3) on every start,
+				// whether or not the hub.artifacts experiment is on.
+				as := artifacts.NewStore(rawDB, cfg.Database.Driver)
+				if err := as.Init(ctx); err != nil {
+					log.Printf("Warning: failed to initialize artifact store: %v", err)
+				} else {
+					hubSrv.SetArtifactStore(as)
+					log.Printf("Artifact store initialized")
+				}
+
 				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
 				if err := ws.Init(); err != nil {
 					log.Printf("Warning: failed to initialize webchat store: %v", err)
@@ -1397,7 +1409,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
-	if err := migrateStore(ctx, cfg, s); err != nil {
+	if err := migrateStore(ctx, s); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
@@ -1413,42 +1425,13 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	return s, entClient, nil
 }
 
-func migrateStore(ctx context.Context, cfg *config.GlobalConfig, s *entadapter.CompositeStore) error {
-	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
-		return s.Migrate(ctx)
-	}
-
-	db := s.DB()
-	if db == nil {
-		return fmt.Errorf("postgres store does not expose a database connection")
-	}
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("acquiring migration lock connection: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", int64(store.LockSchemaMigration)); err != nil {
-		return fmt.Errorf("acquiring migration advisory lock: %w", err)
-	}
-	locked := true
-	defer func() {
-		if locked {
-			if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", int64(store.LockSchemaMigration)); err != nil {
-				slog.Error("Failed to release migration advisory lock", "error", err)
-			}
-		}
-	}()
-
-	if err := s.Migrate(ctx); err != nil {
-		return err
-	}
-
-	if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", int64(store.LockSchemaMigration)); err != nil {
-		return fmt.Errorf("releasing migration advisory lock: %w", err)
-	}
-	locked = false
-	return nil
+// migrateStore runs the schema migration and seed data. On Postgres it is
+// serialized across Hub replicas by the store.LockSchemaMigration advisory
+// lock; see CompositeStore.MigrateWithSchemaLock, which owns the locked path
+// so its Postgres integration test exercises the same code
+// (ptone/scion#1078).
+func migrateStore(ctx context.Context, s *entadapter.CompositeStore) error {
+	return s.MigrateWithSchemaLock(ctx)
 }
 
 // runWithAdvisoryLock runs fn under a TryAdvisoryLock if the store implements
@@ -3228,6 +3211,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		NFSConfig:                     brokerNFS,
+		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,
 		DefaultProfile:                brokerDefaultProfile,
 		Debug:                         enableDebug,

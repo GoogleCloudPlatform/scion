@@ -319,6 +319,34 @@ var identityOperations = []OperationSpec{
 	// Domain: credential — token and credential management
 	// =====================================================================
 	{
+		ID:          "credential.token.read",
+		Domain:      "credential",
+		Description: "List or read the caller's own user access tokens",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/tokens/{id}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		BasePermission:   "user.read",
+		Effects:          []SecurityEffect{EffectListScoped, EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Token reads are authenticated-only (user reads own tokens); no per-resource permission required beyond session validity",
+			Scope:  "self-token management only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonCredentialManagement),
+	},
+	{
 		ID:          "credential.token.create",
 		Domain:      "credential",
 		Description: "Create a user access token (UAT)",
@@ -719,5 +747,62 @@ var identityOperations = []OperationSpec{
 			Waives: []WaivedObligation{WaiveBasePermission, WaiveDenialCodes},
 		}},
 		Bearer: NonUser(),
+	},
+	{
+		ID:          "user.session.revoke",
+		Domain:      "user",
+		Description: "Revoke every cookie session of a user (platform admin only)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/revoke-sessions", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "user-from-url",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Only an unscoped local platform admin may revoke another user's sessions",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		DenialCodes:   []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionHubAdmin,
+			Reason: "Platform-admin role check (requireAdminFor); the session generation increment is logged, not audited",
+			Scope:  "user session revocation",
+			Waives: []WaivedObligation{WaiveBasePermission, WaiveAuditObligation},
+		}},
+		Bearer: SessionOnly(ReasonSessionRecovery),
+	},
+	{
+		ID:          "user.terminalworkspace",
+		Domain:      "user",
+		Description: "Read or replace the caller's own terminal workspace",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/terminal-workspace", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/terminal-workspace", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne, EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The path names no user; the subject is always the caller, so no resource permission applies",
+			Scope:  "caller's own terminal workspace",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 }

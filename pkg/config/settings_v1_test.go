@@ -288,15 +288,17 @@ func TestLoadVersionedSettings_HubEnvVars(t *testing.T) {
 func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// populate ProjectID and would make this test fail for a reason
+	// unrelated to the variable under test.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
@@ -314,9 +316,7 @@ func TestLoadVersionedSettings_LegacyHubEnvNeverAdopted(t *testing.T) {
 func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalHome := os.Getenv("HOME")
-	defer func() { _ = os.Setenv("HOME", originalHome) }()
-	_ = os.Setenv("HOME", tmpDir)
+	t.Setenv("HOME", tmpDir)
 
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
@@ -324,8 +324,12 @@ func TestLoadVersionedSettings_LegacyHubEnvDoesNotOverrideFile(t *testing.T) {
 	v1Settings := "schema_version: \"1\"\nhub:\n  grove_id: \"file-grove\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Settings), 0644))
 
-	_ = os.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
-	defer func() { _ = os.Unsetenv("SCION_HUB_GROVE_ID") }()
+	// Agent containers export the canonical project-ID env vars, which
+	// populate ProjectID and would make this test fail for a reason
+	// unrelated to the variable under test.
+	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+
+	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
 
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
