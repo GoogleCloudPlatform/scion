@@ -91,15 +91,17 @@ describe('navigation lint rule matching', () => {
     expect(await lint(code)).toEqual(['no-restricted-imports']);
   });
 
-  it.each(["void import('../../client/main.js');", "const main = await import('../client/main');"])(
-    'flags dynamic import of client/main: %s',
-    async (code) => {
-      expect(await lint(code)).toEqual(['no-restricted-syntax']);
-    }
-  );
+  it.each([
+    "void import('../../client/main.js');",
+    "const main = await import('../client/main');",
+    'void import(`../../client/main.js`);',
+  ])('flags dynamic import of client/main: %s', async (code) => {
+    expect(await lint(code)).toEqual(['no-restricted-syntax']);
+  });
 
   it('allows dynamic imports of other modules', async () => {
     expect(await lint("void import('../../client/navigation.js');")).toEqual([]);
+    expect(await lint('void import(`../../client/${name}.js`);')).toEqual([]);
   });
 
   it.each([

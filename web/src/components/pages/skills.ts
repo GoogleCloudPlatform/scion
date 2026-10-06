@@ -329,8 +329,10 @@ export class ScionPageSkills extends LitElement {
    * After a load that started with focus inside the page: if the re-render
    * removed the focused control (e.g. Retry, once the error or notice
    * clears) so that focus fell to the document body, move it to the search
-   * input, or else to whichever Retry is shown (ptone/scion#2948). Focus
-   * the user moved elsewhere during the load is left alone.
+   * input (ptone/scion#2948). Focus the user moved elsewhere during the
+   * load is left alone. The filter bar is always rendered after the first
+   * load, so the Retry selectors are only a defensive fallback in case
+   * that ever changes.
    */
   private async restoreFocus(): Promise<void> {
     await this.updateComplete;

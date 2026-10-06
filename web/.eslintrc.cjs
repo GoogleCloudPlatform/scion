@@ -143,7 +143,8 @@ module.exports = {
                             'Use navigateTo(), pushUrl() or replaceSearch() from client/navigation.js instead of raw history.pushState/replaceState.',
                     },
                     {
-                        selector: 'ImportExpression[source.value=/\\/client\\/main(\\.(js|ts))?$/]',
+                        selector:
+                            'ImportExpression[source.value=/\\/client\\/main(\\.(js|ts))?$/], ImportExpression[source.type="TemplateLiteral"][source.quasis.length=1][source.quasis.0.value.cooked=/\\/client\\/main(\\.(js|ts))?$/]',
                         message:
                             'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
                     },
