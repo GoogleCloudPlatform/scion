@@ -33,9 +33,8 @@ import (
 // hubProjectSlugPattern is the grammar api.Slugify produces: lowercase
 // letters, digits and inner dashes, at most api.MaxSlugLength characters.
 // Only a slug matching it is used as a path component. A project whose slug
-// is outside it (the hub accepts a client-supplied slug as is) is not
-// handled: its marker-project agents are not found and its shared-dir
-// storage is not removed.
+// is outside it is not handled: its marker-project agents are not found and
+// its shared-dir storage is not removed.
 var hubProjectSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // projectShortIDPattern is the grammar of config.ProjectMarker.ShortUUID for

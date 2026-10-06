@@ -299,7 +299,8 @@ func TestHubManagedProjectSharedDirsBase_RejectsSlugGrammar(t *testing.T) {
 }
 
 // A failure to remove the shared-dir storage answers 500 and keeps the
-// project's .scion entry, so a retried delete can still locate the storage.
+// project's .scion entry, so a delete re-run by an operator (the hub does
+// not retry it) can still locate the storage.
 func TestDeleteProject_SharedDirRemovalFailure_KeepsMarker(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission bits do not stop root")
@@ -403,7 +404,7 @@ func TestRemoveProjectConfigsSubtree(t *testing.T) {
 
 // When the shared-dir storage location cannot be read, the delete answers
 // 500 and keeps the project's .scion entry rather than leaving the storage
-// behind; a retry once it is readable removes both.
+// behind; a delete re-run by an operator once it is readable removes both.
 func TestDeleteProject_SharedDirStorageUnreadable_KeepsMarker(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permission bits do not stop root")
@@ -432,4 +433,77 @@ func TestDeleteProject_SharedDirStorageUnreadable_KeepsMarker(t *testing.T) {
 	}
 	assertGone(t, baseA)
 	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+}
+
+// A project-configs layout that is wrong rather than unreadable (a regular
+// file or a symlink loop in place of a directory) is not reported as
+// unreadable: the storage is left alone and the project directory is still
+// removed.
+func TestDeleteProject_SharedDirLayoutError_NotUnreadable(t *testing.T) {
+	cases := []struct {
+		name string
+		// break replaces path with a non-directory.
+		breakPath func(t *testing.T, path string)
+	}{
+		{"regular file (ENOTDIR)", func(t *testing.T, path string) { seedFile(t, path) }},
+		{"symlink loop (ELOOP)", func(t *testing.T, path string) { symlinkInto(t, filepath.Base(path), path) }},
+	}
+	for _, tc := range cases {
+		for _, level := range []string{"project-configs", "entry"} {
+			t.Run(tc.name+" at "+level, func(t *testing.T) {
+				mgr := &filteringMockManager{}
+				srv, home := newScopeTestServer(t, mgr)
+				writeHubMarker(t, home, "proj-a", config.ProjectMarker{ProjectID: scopeProjA, ProjectName: "proj-a", ProjectSlug: "proj-a"})
+				configs := filepath.Join(home, ".scion", config.ProjectConfigsDir)
+				path := configs
+				if level == "entry" {
+					path = filepath.Join(configs, "proj-a__"+shortA())
+					if err := os.MkdirAll(configs, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				tc.breakPath(t, path)
+				other := seedFile(t, filepath.Join(home, ".scion", "projects", "proj-b", "keep"))
+
+				rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+				if rec.Code != http.StatusNoContent {
+					t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+				}
+				assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+				if _, err := os.Lstat(path); err != nil {
+					t.Errorf("%s was removed: %v", path, err)
+				}
+				assertPresent(t, other)
+			})
+		}
+	}
+}
+
+// A symlinked project-configs entry is a layout error even when its target
+// cannot be read: it is classified before the readability probe, so the
+// delete succeeds and leaves the target alone instead of failing.
+func TestDeleteProject_SymlinkedEntryToUnreadable_LeftAlone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not stop root")
+	}
+	mgr := &filteringMockManager{}
+	srv, home := newScopeTestServer(t, mgr)
+	writeHubMarker(t, home, "proj-a", config.ProjectMarker{ProjectID: scopeProjA, ProjectName: "proj-a", ProjectSlug: "proj-a"})
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	keep := seedFile(t, filepath.Join(target, config.SharedDirsSubdir, "s", "file"))
+	if err := os.Chmod(target, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(target, 0o755) })
+	symlinkInto(t, target, filepath.Join(home, ".scion", config.ProjectConfigsDir, "proj-a__"+shortA()))
+
+	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	assertPresent(t, keep)
 }

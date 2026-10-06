@@ -5045,11 +5045,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	// the project directory (ptone/scion#2878). Its location is computed
 	// from the request's slug and project ID, but the project's .scion
 	// entry must still be present to corroborate it, so a failure here must
-	// leave that entry in place for a retry. A request without a project ID
-	// leaves the storage alone. When the entry disagrees with the request,
-	// the storage is left alone and the project directory is still removed;
-	// when the storage location cannot be read, the delete fails so it can
-	// be retried.
+	// leave that entry in place. The hub does not retry this cleanup
+	// automatically; keeping the entry lets an operator re-run the delete.
+	// A request without a project ID leaves the storage alone. When the
+	// entry disagrees with the request, the storage is left alone and the
+	// project directory is still removed; when the storage location cannot
+	// be read, the delete fails and both stay in place.
 	if requestedID := r.URL.Query().Get("project_id"); requestedID == "" {
 		s.agentLifecycleLog.Warn("project delete without project_id: shared-dir storage not removed", "slug", slug)
 	} else if sharedDirsBase, err := hubManagedProjectSharedDirsBase(globalDir, absProject, slug, requestedID); errors.Is(err, errSharedDirStorageUnreadable) {
@@ -5092,10 +5093,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 // storage location other than the computed one) or the computed directory
 // is not a real directory inside project-configs
 // (projectConfigPathContained); the caller then leaves the storage alone.
+// Other read errors on the .scion entry or during the containment check
+// (for example an unreadable marker) count as absence or disagreement, so
+// the storage is left in place in those cases too.
 // It returns an error wrapping errSharedDirStorageUnreadable when the
 // computed location cannot be read (for example a permission or I/O
-// error), so the caller can fail the delete and keep the .scion entry for a
-// retry instead of leaving the storage behind.
+// error), so the caller can fail the delete and keep the .scion entry,
+// letting an operator re-run the delete (the hub does not retry it
+// automatically), instead of leaving the storage behind.
 //
 // This assumes <slug>__<short ID> under project-configs belongs to the
 // project being deleted. A linked (non hub-managed) copy of the same
@@ -5147,6 +5152,14 @@ func hubManagedProjectSharedDirsBase(globalDir, projectPath, slug, requestedProj
 	}
 	if filepath.Clean(base) != want {
 		return "", fmt.Errorf("shared-dir storage location does not match the request")
+	}
+	// Classify layout errors before probing readability: a symlink or
+	// non-directory at the project's project-configs entry is left alone
+	// rather than reported as unreadable.
+	if info, err := os.Lstat(dir); os.IsNotExist(err) {
+		return "", nil
+	} else if err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
+		return "", fmt.Errorf("shared-dir storage is not a real directory inside project-configs")
 	}
 	if _, err := os.Lstat(want); os.IsNotExist(err) {
 		return "", nil
