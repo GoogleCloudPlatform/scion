@@ -699,6 +699,54 @@ describe('scion-schedule-list edit dialog while saving', () => {
     expect(editDialog(el)).toBeNull();
   });
 
+  it('does not close a replacement dialog when a late save succeeds', async () => {
+    const { el, calls } = await mountAndSave();
+    const i = el as unknown as ListInternals & { editLoading: boolean };
+    const other = schedule({ id: 's-2', name: 'two' });
+    i.editSchedule = other;
+    await settle(el);
+
+    calls.at(-1)!.resolve(jsonResponse(schedule({ id: 's-1', name: 'one' })));
+    await settle(el);
+    expect(i.editSchedule).toBe(other);
+    expect(i.editError).toBeNull();
+    // The reload starts only once the in-flight flag is clear.
+    expect(i.editLoading).toBe(false);
+    expect(calls.at(-1)?.method).toBe('GET');
+  });
+
+  it("keeps a second save's in-flight flag while the first save's reload finishes", async () => {
+    const { el, calls } = await mountAndSave();
+    const i = el as unknown as ListInternals & { editLoading: boolean };
+    calls.at(-1)!.resolve(jsonResponse(schedule({ id: 's-1', name: 'one' })));
+    await settle(el);
+    const reload = calls.at(-1)!;
+    expect(reload.method).toBe('GET'); // still pending
+
+    // Start a second save while that reload is in flight. The list shows
+    // its loading spinner meanwhile, so drive the dialog directly.
+    const d = el as unknown as {
+      openEditDialog(s: Record<string, unknown>): void;
+      editCron: string;
+      handleEdit(e: Event): Promise<void>;
+    };
+    d.openEditDialog(schedule({ id: 's-2', name: 'two' }));
+    d.editCron = '0 1 * * *';
+    void d.handleEdit(new Event('submit'));
+    await settle(el);
+    expect(calls.at(-1)?.method).toBe('PATCH');
+    expect(i.editLoading).toBe(true);
+
+    reload.resolve(
+      jsonResponse({
+        schedules: [schedule({ id: 's-1', name: 'one' }), schedule({ id: 's-2', name: 'two' })],
+      })
+    );
+    await settle(el);
+    expect(i.editLoading).toBe(true);
+    expect(editDialog(el)?.getAttribute('label')).toBe('Edit Schedule: two');
+  });
+
   it('drops a late result if the dialog was replaced anyway', async () => {
     const { el, calls } = await mountAndSave();
     // Force the replacement the UI guards against.
