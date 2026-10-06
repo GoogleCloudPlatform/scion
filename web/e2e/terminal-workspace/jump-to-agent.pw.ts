@@ -286,6 +286,29 @@ test('the agents-only palette lists its options across the full width of the res
   expect(ratio).toBeGreaterThan(0.9);
 });
 
+test('the agents-only palette keeps the single-group panel width', async ({ page }) => {
+  await setup(page, {
+    [agentA]: fixture(agentA, 'Alice-bot'),
+    [agentB]: fixture(agentB, 'Bob-bot'),
+  });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+  // Open from outside the pane, so the shortcut does not go to the PTY.
+  await page.locator('.terminal-layout-btn').first().focus();
+  await page.keyboard.press('Control+k');
+  await expect(paletteOption(page, 'Bob-bot')).toBeVisible();
+
+  // Read the settled panel, not a frame of the dialog's open animation.
+  const panelWidth = () =>
+    paletteDialog(page).evaluate((dialog) => {
+      const panel = dialog.shadowRoot!.querySelector('[part~="panel"]')!;
+      return panel.getAnimations().length === 0 ? panel.getBoundingClientRect().width : -1;
+    });
+  // The suite's 1100px viewport: min(560px, 92vw) resolves to 560px. Only
+  // a palette with more than one group uses the wider panel.
+  await expect.poll(panelWidth).toBeCloseTo(560, 0);
+});
+
 test('in a single-pane view, picks navigate to the agent URL for new and open agents', async ({
   page,
 }) => {
