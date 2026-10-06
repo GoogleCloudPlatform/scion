@@ -2143,6 +2143,7 @@ func (s *Server) createAgentInProject(
 						// Swap workspace to storage path for remote broker
 						agent.AppliedConfig.Workspace = ""
 						agent.AppliedConfig.WorkspaceStoragePath = storagePath
+						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
 						if err := s.store.UpdateAgent(ctx, agent); err != nil {
 							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
 						}
@@ -4389,6 +4390,12 @@ func isContainerNameConflict(err error) bool {
 // is duplicated because importing pkg/runtimebroker would invert layering.
 const skillResolutionErrorCode = "skill_resolution_failed"
 
+// workspaceStorageUnconfiguredErrorCode mirrors
+// runtimebroker.ErrCodeWorkspaceStorageUnconfigured (duplicated for the same
+// layering reason): the broker has no bucket to download the workspace
+// upload from.
+const workspaceStorageUnconfiguredErrorCode = "workspace_storage_unconfigured"
+
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
 //
@@ -4419,6 +4426,8 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 	case relaySkillResolutionError(w, err):
+		// Response already written.
+	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
@@ -4471,6 +4480,19 @@ func relaySkillResolutionError(w http.ResponseWriter, err error) bool {
 		w.Header().Set("Retry-After", se.RetryAfter)
 	}
 	writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), skillResolutionClientDetails(se.brokerErrorDetails()))
+	return true
+}
+
+// relayWorkspaceStorageUnconfigured writes the broker's refusal to create an
+// agent whose workspace upload it has no bucket for, keeping the broker's
+// status (422), code and message instead of the generic 502, and reports
+// whether it did (ptone/scion#3422).
+func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != workspaceStorageUnconfiguredErrorCode {
+		return false
+	}
+	writeError(w, se.StatusCode, workspaceStorageUnconfiguredErrorCode, "Failed to dispatch to runtime broker: "+se.brokerErrorMessage(), nil)
 	return true
 }
 

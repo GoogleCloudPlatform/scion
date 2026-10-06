@@ -1165,6 +1165,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				BadRequest(w, httpMessage)
 				return
 			}
+			if errors.Is(dlErr, errWorkspaceStorageUnconfigured) {
+				markAttemptFailed(http.StatusUnprocessableEntity, attemptMsg)
+				writeWorkspaceStorageUnconfigured(w)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
 			RuntimeError(w, httpMessage)
 			return
@@ -1410,6 +1415,39 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 // error (400) on the synchronous path rather than a runtime error.
 var errInvalidWorkspaceDir = errors.New("invalid workspace directory")
 
+// errWorkspaceStorageUnconfigured marks a downloadWorkspaceFromGCS error
+// caused by having no bucket to download the workspace upload from: the
+// request carries no WorkspaceStorageBucket (a hub that predates it) and the
+// broker has no StorageBucket setting. Answered with
+// writeWorkspaceStorageUnconfigured (422), not a runtime error
+// (ptone/scion#3422).
+var errWorkspaceStorageUnconfigured = errors.New("storage bucket not configured for workspace bootstrap")
+
+// syncWorkspaceFromGCS downloads a workspace upload; a variable so tests
+// can substitute a fake for real GCS.
+var syncWorkspaceFromGCS = gcp.SyncFromGCS
+
+// workspaceStorageUnconfiguredMessage is the user-facing text for
+// errWorkspaceStorageUnconfigured.
+const workspaceStorageUnconfiguredMessage = "Cannot download the uploaded workspace: the create request names no storage bucket and this runtime broker has no storage bucket configured. " +
+	"Update the hub so it sends the workspace bucket, or configure the broker's storage bucket (storage.bucket or --storage-bucket)."
+
+// workspaceStorageBucket returns the bucket a create request's workspace
+// upload is downloaded from: the bucket the hub sent with the request, else
+// this broker's own StorageBucket setting, else "".
+func (s *Server) workspaceStorageBucket(req CreateAgentRequest) string {
+	if req.WorkspaceStorageBucket != "" {
+		return req.WorkspaceStorageBucket
+	}
+	return s.config.StorageBucket
+}
+
+// writeWorkspaceStorageUnconfigured answers a create that cannot download
+// its workspace upload because no bucket is known for it.
+func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeWorkspaceStorageUnconfigured, workspaceStorageUnconfiguredMessage, nil)
+}
+
 // downloadWorkspaceFromGCS performs the non-git GCS workspace bootstrap when
 // req.WorkspaceStoragePath is set. It is a pure extraction of createAgent's
 // original inline admission step (no behavior change), factored out so the
@@ -1436,15 +1474,18 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, attemptMsg, httpMessage, err
 	}
 
+	// Resolve the bucket before creating anything: a broker with no bucket
+	// for the upload refuses the create with errWorkspaceStorageUnconfigured
+	// (422) instead of leaving an empty workspace directory behind.
+	bucket := s.workspaceStorageBucket(req)
+	if bucket == "" {
+		return opts, "storage bucket not configured", workspaceStorageUnconfiguredMessage,
+			errWorkspaceStorageUnconfigured
+	}
+
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
 		return opts, "failed to create workspace directory", "Failed to create workspace directory: " + mkErr.Error(),
 			fmt.Errorf("failed to create workspace directory: %w", mkErr)
-	}
-
-	bucket := s.config.StorageBucket
-	if bucket == "" {
-		return opts, "storage bucket not configured", "Storage bucket not configured for workspace bootstrap",
-			errors.New("storage bucket not configured for workspace bootstrap")
 	}
 
 	if s.config.Debug {
@@ -1456,7 +1497,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		)
 	}
 
-	if syncErr := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
+	if syncErr := syncWorkspaceFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
 		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
 			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
 	}

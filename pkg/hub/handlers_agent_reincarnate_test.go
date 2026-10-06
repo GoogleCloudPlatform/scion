@@ -5597,6 +5597,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			keptWorkspaceStoragePath := "gs://evolved-bucket/evolved-path"
 			keptAgentRoleGrandfathered := !want.AgentRoleGrandfathered
 			created.AppliedConfig.WorkspaceStoragePath = keptWorkspaceStoragePath
+			created.AppliedConfig.WorkspaceStorageBucket = "evolved-bucket"
 			created.AppliedConfig.AgentRoleGrandfathered = keptAgentRoleGrandfathered
 			require.NoError(t, s.UpdateAgent(ctx, created))
 
@@ -5619,6 +5620,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			assert.Equal(t, want.TemplateHash, fresh.TemplateHash, "TemplateHash must match what create produced")
 			assert.Equal(t, wantHubAccessScopes, fresh.HubAccessScopes, "HubAccessScopes must match what create produced")
 			assert.Equal(t, keptWorkspaceStoragePath, fresh.WorkspaceStoragePath, "WorkspaceStoragePath must be kept from the live row, not reset")
+			assert.Equal(t, "evolved-bucket", fresh.WorkspaceStorageBucket, "WorkspaceStorageBucket must be kept with WorkspaceStoragePath")
 			assert.Equal(t, keptAgentRoleGrandfathered, fresh.AgentRoleGrandfathered, "AgentRoleGrandfathered must be kept from the live row, not reset")
 			var freshSkills []api.SkillReference
 			if fresh.InlineConfig != nil {

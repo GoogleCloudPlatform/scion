@@ -61,6 +61,13 @@ const (
 	ErrCodeTemplateError      = "template_error"
 	ErrCodeSkillResolution    = "skill_resolution_failed"
 
+	// ErrCodeWorkspaceStorageUnconfigured marks a create whose workspace was
+	// uploaded to bucket storage (workspaceStoragePath set) when neither the
+	// request nor this broker names the bucket to download it from. It is
+	// answered with 422 before anything is provisioned, and the hub relays
+	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
+	ErrCodeWorkspaceStorageUnconfigured = "workspace_storage_unconfigured"
+
 	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
 	// verified as safe because a runtime process restart dropped the
 	// in-memory record needed to tell "not found" apart from "exists, but

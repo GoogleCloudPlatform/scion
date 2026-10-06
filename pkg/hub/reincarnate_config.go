@@ -103,10 +103,12 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		// Kept verbatim: identity-adjacent fields the pipeline never touches,
 		// and (for Phase 1, which accepts no --harness/--reset-overrides/etc.
 		// request overrides) never overridden by the request either.
-		// WorkspaceStoragePath and AgentRoleGrandfathered are kept too:
-		// without the storage path a remote broker gets the hub-local path
-		// populateAgentConfig stamps for an empty Workspace instead of the
-		// GCS path it actually needs, and grandfathered-role provenance is
+		// WorkspaceStoragePath (with its bucket) and AgentRoleGrandfathered
+		// are kept too: without the storage path a remote broker gets the
+		// hub-local path populateAgentConfig stamps for an empty Workspace
+		// instead of the GCS path it actually needs, without the bucket a
+		// broker with no bucket setting cannot download it
+		// (ptone/scion#3422), and grandfathered-role provenance is
 		// audit data, not something to re-derive.
 		Attach:                 old.Attach,
 		CreatorName:            old.CreatorName,
@@ -115,6 +117,7 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		GitClone:               old.GitClone,
 		Workspace:              old.Workspace,
 		WorkspaceStoragePath:   old.WorkspaceStoragePath,
+		WorkspaceStorageBucket: old.WorkspaceStorageBucket,
 		Branch:                 old.Branch,
 		GCPIdentity:            old.GCPIdentity,
 
