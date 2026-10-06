@@ -1413,7 +1413,11 @@ func resolveHubProjectSharedDirPath(project *store.Project, dirName string) (str
 		return "", err
 	}
 	scionPath := filepath.Join(workspacePath, config.DotScion)
-	if !workspaceRecordsProjectIdentity(scionPath) {
+	hasIdentity, err := workspaceRecordsProjectIdentity(scionPath)
+	if err != nil {
+		return "", errSharedDirProjectRecordMismatch
+	}
+	if !hasIdentity {
 		return expected, nil
 	}
 	projectDir, _, err := config.ResolveProjectPath(scionPath)
@@ -1429,13 +1433,24 @@ func resolveHubProjectSharedDirPath(project *store.Project, dirName string) (str
 
 // workspaceRecordsProjectIdentity reports whether the .scion entry at
 // scionPath records a project identity: either it is a marker file, or it is
-// a directory holding a non-empty project-id.
-func workspaceRecordsProjectIdentity(scionPath string) bool {
+// a directory holding a project-id. Only a project-id that does not exist
+// counts as no identity; an empty project-id or any other error reading it is
+// returned as an error.
+func workspaceRecordsProjectIdentity(scionPath string) (bool, error) {
 	if config.IsProjectMarkerFile(scionPath) {
-		return true
+		return true, nil
 	}
 	id, err := config.ReadProjectID(scionPath)
-	return err == nil && id != ""
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if id == "" {
+		return false, errors.New("empty project-id")
+	}
+	return true, nil
 }
 
 // validateWorkspaceFilePath validates that a file path is safe for workspace operations.

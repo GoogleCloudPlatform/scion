@@ -173,7 +173,9 @@ func TestSharedDirFiles_WorkspaceWithoutIdentityUsesProjectRecord(t *testing.T) 
 	project, workspacePath := createTestHubManagedProject(t, srv, "Record No Identity")
 	addSharedDirToProject(t, srv, project.ID, "data")
 
-	require.False(t, workspaceRecordsProjectIdentity(filepath.Join(workspacePath, config.DotScion)))
+	hasIdentity, err := workspaceRecordsProjectIdentity(filepath.Join(workspacePath, config.DotScion))
+	require.NoError(t, err)
+	require.False(t, hasIdentity)
 
 	rec := doRequest(t, srv, http.MethodPut,
 		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/data/files/note.txt", project.ID),
@@ -236,6 +238,107 @@ func TestSharedDirFiles_WorkspaceIdentityMatchingProjectRecord(t *testing.T) {
 			content, err := os.ReadFile(filepath.Join(sdPath, "new.txt"))
 			require.NoError(t, err)
 			assert.Equal(t, "new", string(content))
+		})
+	}
+}
+
+// TestProjectRecordSharedDirPath_RequiresValidRecord: the record-derived path
+// is produced only from a valid slug, project ID and shared dir name.
+func TestProjectRecordSharedDirPath_RequiresValidRecord(t *testing.T) {
+	const validID = "0b1c2d3e-4f50-4617-8293-a4b5c6d7e8f9"
+	cases := []struct {
+		name    string
+		project store.Project
+		dirName string
+	}{
+		{"empty slug", store.Project{ID: validID, Slug: ""}, "data"},
+		{"empty project ID", store.Project{ID: "", Slug: "proj"}, "data"},
+		{"project ID with parent segment", store.Project{ID: "../x", Slug: "proj"}, "data"},
+		{"project ID with separator", store.Project{ID: "a/b", Slug: "proj"}, "data"},
+		{"empty dir name", store.Project{ID: validID, Slug: "proj"}, ""},
+		{"dir name with parent segment", store.Project{ID: validID, Slug: "proj"}, "../x"},
+		{"dir name with separator", store.Project{ID: validID, Slug: "proj"}, "a/b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			project := tc.project
+			got, err := projectRecordSharedDirPath(&project, tc.dirName)
+			require.Error(t, err)
+			assert.Empty(t, got)
+		})
+	}
+
+	t.Run("valid record", func(t *testing.T) {
+		project := store.Project{ID: validID, Slug: "proj"}
+		got, err := projectRecordSharedDirPath(&project, "data")
+		require.NoError(t, err)
+		assert.Equal(t, resolveTestSharedDirPath(t, &project, "data"), got)
+	})
+}
+
+// TestSharedDirFiles_UnreadableWorkspaceIdentityFailsClosed: a workspace
+// project-id that exists but cannot be read as an identity fails closed with
+// the same pathless error, and nothing is created at the record path.
+func TestSharedDirFiles_UnreadableWorkspaceIdentityFailsClosed(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, scionPath string)
+	}{
+		{
+			name: "project-id is a directory",
+			setup: func(t *testing.T, scionPath string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(scionPath, "project-id"), 0o755))
+			},
+		},
+		{
+			name: "project-id is empty",
+			setup: func(t *testing.T, scionPath string) {
+				require.NoError(t, os.WriteFile(filepath.Join(scionPath, "project-id"), nil, 0o644))
+			},
+		},
+	}
+	if os.Geteuid() != 0 {
+		cases = append(cases, struct {
+			name  string
+			setup func(t *testing.T, scionPath string)
+		}{
+			name: "project-id is unreadable",
+			setup: func(t *testing.T, scionPath string) {
+				p := filepath.Join(scionPath, "project-id")
+				require.NoError(t, os.WriteFile(p, []byte("some-id\n"), 0o644))
+				require.NoError(t, os.Chmod(p, 0))
+				t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+			},
+		})
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := testServer(t)
+			project, workspacePath := createTestHubManagedProject(t, srv, "Record Unreadable")
+			addSharedDirToProject(t, srv, project.ID, "data")
+			scionPath := filepath.Join(workspacePath, config.DotScion)
+			require.NoError(t, os.MkdirAll(scionPath, 0o755))
+			tc.setup(t, scionPath)
+
+			_, identityErr := workspaceRecordsProjectIdentity(scionPath)
+			require.Error(t, identityErr)
+
+			_, resolveErr := resolveHubProjectSharedDirPath(project, "data")
+			require.Error(t, resolveErr)
+			assert.True(t, errors.Is(resolveErr, errSharedDirProjectRecordMismatch))
+			assert.False(t, strings.Contains(resolveErr.Error(), string(filepath.Separator)),
+				"error must not contain a path: %q", resolveErr.Error())
+
+			home, err := os.UserHomeDir()
+			require.NoError(t, err)
+			rec := doRequest(t, srv, http.MethodPut,
+				fmt.Sprintf("/api/v1/projects/%s/shared-dirs/data/files/note.txt", project.ID),
+				ProjectWorkspaceWriteRequest{Content: "hello"})
+			assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), home)
+			assert.Nil(t, dirEntryNames(t, resolveTestSharedDirPath(t, project, "data")),
+				"nothing is created at the record path")
 		})
 	}
 }
