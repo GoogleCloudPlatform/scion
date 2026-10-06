@@ -1591,6 +1591,10 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	// Detect default branch
 	defaultBranch := hubProjectCreateBranch
 	if defaultBranch == "" {
+		// Probe over HTTPS, the same URL the clone-url label records below:
+		// an HTTPS ls-remote cannot hit an SSH host-key or passphrase prompt
+		// (HTTPS credential prompts are still possible; ptone/scion#3411),
+		// and a failed probe only falls back to "main".
 		cloneURL := util.ToHTTPSCloneURL(gitURL)
 		defaultBranch = detectDefaultBranch(cloneURL)
 		if defaultBranch == "" {
@@ -1663,7 +1667,17 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create project on the hub (server assigns ID)
+	// Create project on the hub (server assigns ID).
+	//
+	// The clone-url label is always https, whatever scheme the remote uses
+	// (ptone/scion#2862). Agents and shared-workspace init clone from it
+	// with the hub/broker token, and token auth only works over HTTPS:
+	// util.authenticatedCloneURL injects the token only for https URLs, and
+	// the broker's git credential helper supplies GITHUB_TOKEN for HTTP(S)
+	// clones only (see hubCloneTransportNote). An ssh:// or git:// label
+	// would clone without credentials, or stall on an SSH host-key prompt.
+	// This matches the other writers of the label: the web create form and
+	// pkg/hub/project_clone.go.
 	project, err := client.Projects().Create(ctx, &hubclient.CreateProjectRequest{
 		Name:          displayName,
 		Slug:          slug,
