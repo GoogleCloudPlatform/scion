@@ -290,13 +290,11 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
-		// Artifact service — deferred, not stubbed: no handler behaviour yet
-		// (the routes answer 404); catalog operations land with the handlers.
-		"artifact.read":   "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.create": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.update": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.delete": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
-		"artifact.manage": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
+		// Artifact service: read and create are cataloged (P1); update,
+		// delete and manage have no handler behaviour yet.
+		"artifact.update": "Artifact service: new versions land with the two-step publish (ptone/scion#3215)",
+		"artifact.delete": "Artifact service: deletion lands with grants and retention (ptone/scion#3231)",
+		"artifact.manage": "Artifact service: grants and share links land in ptone/scion#3231",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
@@ -1251,6 +1249,7 @@ var domainResourceCompatibility = map[string][]string{
 	"schedule":           {"ResourceScheduledEvent"},
 	"chat":               {"ResourceProject"},
 	"env":                {"ResourceProject"},
+	"artifact":           {"ResourceArtifact"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

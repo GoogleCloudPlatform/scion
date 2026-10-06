@@ -24,6 +24,10 @@
 // protocol without changing this package.
 //
 // The hub mounts the service under /api/v1/artifacts. While the hub.artifacts
-// experiment is off, every route answers 404. Phase P0 adds the scaffolding
-// only, so every route also answers 404 while the experiment is on.
+// experiment is off, the hub answers 404 for every route before the service
+// sees the request.
+//
+// Persistence: Store owns the artifact_* tables (created by Init, outside
+// the hub's Ent schema). Bytes live in pkg/storage under
+// hubs/{hub-id}/artifacts/, content-addressed by SHA-256 (see BlobPath).
 package artifacts

@@ -1925,6 +1925,49 @@ var Catalog = []OperationSpec{
 	},
 
 	// =====================================================================
+	// Domain: artifact — artifact service (pkg/artifacts, hub.artifacts
+	// experiment). The service authorizes through the hub's artifacts.Host
+	// adapter (artifacts_host.go) against the artifact's home project, plus
+	// its own artifact_grant rows for reads.
+	// =====================================================================
+	{
+		ID:          "artifact.read",
+		Domain:      "artifact",
+		Description: "Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/files/{path}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestArtifactsTwoAgentsSameProject"}},
+	},
+	{
+		ID:          "artifact.create",
+		Domain:      "artifact",
+		Description: "Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-query",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestArtifactsTwoAgentsSameProject"}},
+	},
+
+	// =====================================================================
 	// Domain: skill — skill CRUD
 	// =====================================================================
 	{
@@ -2728,12 +2771,9 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/messages/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own message by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
-	// Artifact service (hub.artifacts experiment). Deferred, not stubbed:
-	// the routes have no handler behaviour yet and answer 404; catalog
-	// operations replace these exemptions when the handlers land
-	// (ptone/scion#3202).
-	{Pattern: "/api/v1/artifacts", Kind: ExemptionAuthenticationOnly, Reason: "Artifact collection, experiment-gated, answers 404 with no handler behaviour yet; replaced by catalog operations when handlers land (ptone/scion#3202)", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/artifacts/", Kind: ExemptionAuthenticationOnly, Reason: "Artifact by ID, experiment-gated, answers 404 with no handler behaviour yet; replaced by catalog operations when handlers land (ptone/scion#3202)", Owner: "route_metadata.go"},
+	// Artifact share links (hub.artifacts experiment): no handler behaviour
+	// yet, the route answers 404; a catalog operation replaces this
+	// exemption when share links land (ptone/scion#3202).
 	{Pattern: "/api/v1/artifacts/shared/", Kind: ExemptionPublicEndpoint, Reason: "Artifact share links (token-only by design; still behind the auth middleware until token access ships), experiment-gated, answers 404 with no handler behaviour yet; replaced by a catalog operation when the handler lands (ptone/scion#3202)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/message-channels", Kind: ExemptionAuthenticationOnly, Reason: "List own message channels, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service", Owner: "route_metadata.go"},
