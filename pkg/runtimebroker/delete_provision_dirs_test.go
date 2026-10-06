@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -126,12 +127,22 @@ func TestDeleteAgent_MarkerFileHubNativeProject_ProvisionedNeverStarted_RemovesD
 // and CWD isolated.
 func newProvisionDirsServer(t *testing.T, entries *[]api.AgentInfo, deleted *[]string) (*Server, string) {
 	t.Helper()
+	return newProvisionDirsServerOnList(t, entries, deleted, nil)
+}
+
+// newProvisionDirsServerOnList is newProvisionDirsServer with a hook run on
+// every runtime List (target resolution), or none when onList is nil.
+func newProvisionDirsServerOnList(t *testing.T, entries *[]api.AgentInfo, deleted *[]string, onList func()) (*Server, string) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(t.TempDir())
 	rt := &runtime.MockRuntime{
 		NameFunc: func() string { return "docker" },
 		ListFunc: func(_ context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+			if onList != nil {
+				onList()
+			}
 			var out []api.AgentInfo
 			for _, e := range *entries {
 				ok := true
@@ -229,5 +240,58 @@ func TestDeleteAgent_GlobalDirPathForProject_FilesUntouched(t *testing.T) {
 	}
 	if _, err := os.Stat(globalAgentDir); err != nil {
 		t.Fatalf("a non-global project's delete removed files in the global dir: %v", err)
+	}
+}
+
+// A fenced delete (notAfter, GoogleCloudPlatform/scion#2490) of a
+// provisioned-never-started agent in a marker-file hub-native project: a
+// stale dispatch, refused on arrival or once the deadline passes during
+// target resolution, leaves the provision dir in place; an accepted one
+// still removes it.
+func TestDeleteAgent_MarkerFileHubNativeProject_StaleDispatch_KeepsProvisionDir(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// notAfter is relative to fenceT0, the delete clock at arrival.
+		notAfter time.Duration
+		// passDuringResolution moves the clock past notAfter on the
+		// first runtime List, after the arrival check.
+		passDuringResolution bool
+		wantStatus           int
+	}{
+		{"passed on arrival", -deleteNotAfterSkew - time.Second, false, http.StatusConflict},
+		{"passes during resolution", 10 * time.Second, true, http.StatusConflict},
+		{"in time", 30 * time.Second, false, http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var entries []api.AgentInfo
+			var deleted []string
+			clock := &fakeDeleteClock{now: fenceT0}
+			notAfter := fenceT0.Add(tc.notAfter)
+			var onList func()
+			if tc.passDuringResolution {
+				onList = func() { clock.Set(notAfter.Add(deleteNotAfterSkew + time.Second)) }
+			}
+			srv, home := newProvisionDirsServerOnList(t, &entries, &deleted, onList)
+			srv.config.DeleteClock = clock.Now
+			_, agentDir := makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+
+			rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true&removeBranch=true"+notAfterParam(notAfter))
+			if tc.wantStatus == http.StatusConflict {
+				assertStaleDispatch(t, rec.Code, rec.Body.Bytes())
+				if _, err := os.Stat(agentDir); err != nil {
+					t.Fatalf("a stale delete removed the provision dir %s: %v", agentDir, err)
+				}
+			} else {
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+				}
+				if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+					t.Fatalf("the provision dir %s was left behind (stat err %v)", agentDir, err)
+				}
+			}
+			if len(deleted) != 0 {
+				t.Errorf("runtime deletes = %v, want none (no container)", deleted)
+			}
+		})
 	}
 }
