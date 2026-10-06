@@ -2202,6 +2202,11 @@ func (s *Server) createAgentInProject(
 	}
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
+	// From here the launch no longer follows the client (ptone/scion#1961):
+	// a client that gives up mid-dispatch must not cancel the broker launch,
+	// the post-dispatch phase writes, or a real failure's rollback. Each
+	// dispatch below is bounded by syncDispatch instead.
+	ctx = detachLaunchFromClient(ctx)
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
 		// A create is a start, unless it only provisions.
 		intent := store.RunIntentRunning
@@ -2219,7 +2224,11 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Debug("Hub: env-gather requested, using DispatchAgentCreateWithGather",
 					"agent_id", agent.ID,
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
-				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				var created *CreateDispatchResult
+				err := syncDispatch(ctx, func(dctx context.Context) (err error) {
+					created, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
+					return err
+				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
 					// A stop or delete reached the record before the launch
@@ -2269,7 +2278,11 @@ func (s *Server) createAgentInProject(
 					}
 				}
 			} else {
-				created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+				var created *CreateDispatchResult
+				err := syncDispatch(ctx, func(dctx context.Context) (err error) {
+					created, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
+					return err
+				})
 				envReqs := created.EnvRequirements()
 				if errors.Is(err, ErrLaunchInvalidPhase) {
 					// A stop or delete reached the record before the launch
@@ -2317,7 +2330,9 @@ func (s *Server) createAgentInProject(
 			}
 		} else {
 			// Provision-only: set up agent filesystem without starting
-			if err := dispatcher.DispatchAgentProvision(ctx, agent); err != nil {
+			if err := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentProvision(dctx, agent)
+			}); err != nil {
 				if isSkillResolutionDispatchError(err) {
 					// A required skill could not be resolved, so the agent
 					// can never start from this provision. Fail the create the
