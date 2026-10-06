@@ -15,6 +15,10 @@ import (
 func shParse(t *testing.T, input string) []string {
 	t.Helper()
 
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skipf("skipping: shell-parsing test requires a POSIX sh in PATH: %v", err)
+	}
+
 	script := "set -- " + input + "; for a in \"$@\"; do printf '%s\\000' \"$a\"; done"
 	cmd := exec.Command("sh", "-c", script)
 	var out bytes.Buffer
