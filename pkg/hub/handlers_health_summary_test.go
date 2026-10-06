@@ -361,3 +361,39 @@ func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
 	assert.Equal(t, "unhealthy", resp.Database.Status)
 	assert.Contains(t, resp.Hub.UnhealthyChecks, "database: unhealthy")
 }
+
+// Chat plugin broker records are always marked online; the connected broker
+// count in /healthz and the health summary must only count runtime brokers.
+func TestHealthStats_ConnectedBrokersExcludesPlugins(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:            tid("count-runtime-broker"),
+		Name:          "Runtime Broker",
+		Slug:          "runtime-broker",
+		Status:        store.BrokerStatusOnline,
+		LastHeartbeat: time.Now(),
+	}))
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:            tid("count-plugin-broker"),
+		Name:          "plugin-broker-telegram",
+		Slug:          "plugin-broker-telegram",
+		Status:        store.BrokerStatusOnline,
+		Labels:        map[string]string{"scion.io/plugin": "telegram"},
+		LastHeartbeat: time.Now(),
+	}))
+
+	rr := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var health HealthResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &health))
+	require.NotNil(t, health.Stats)
+	assert.Equal(t, 1, health.Stats.ConnectedBrokers, "/healthz stats")
+
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var summary HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &summary))
+	assert.Equal(t, 1, summary.Hub.ConnectedBrokers, "health summary")
+}

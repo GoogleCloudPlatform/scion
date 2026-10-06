@@ -166,8 +166,8 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	if projectResult, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1}); err == nil {
 		stats.Projects = projectResult.TotalCount
 	}
-	if brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}, store.ListOptions{Limit: 1}); err == nil {
-		stats.ConnectedBrokers = brokerResult.TotalCount
+	if count, err := s.countOnlineRuntimeBrokers(ctx); err == nil {
+		stats.ConnectedBrokers = count
 	}
 
 	return &HealthResponse{
@@ -179,6 +179,31 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
 		Checks:       checks,
 		Stats:        stats,
+	}
+}
+
+// countOnlineRuntimeBrokers counts online runtime brokers. Message broker
+// plugin records (Discord, Telegram, ...) carry the "scion.io/plugin" label
+// and are always marked online, so they are not counted.
+func (s *Server) countOnlineRuntimeBrokers(ctx context.Context) (int, error) {
+	const pageSize = 200
+	filter := store.RuntimeBrokerFilter{Status: store.BrokerStatusOnline}
+	opts := store.ListOptions{Limit: pageSize, SkipTotalCount: true}
+	count := 0
+	for {
+		result, err := s.store.ListRuntimeBrokers(ctx, filter, opts)
+		if err != nil {
+			return 0, err
+		}
+		for i := range result.Items {
+			if !isPluginBroker(&result.Items[i]) {
+				count++
+			}
+		}
+		if result.NextCursor == "" || result.NextCursor == opts.Cursor {
+			return count, nil
+		}
+		opts.Cursor = result.NextCursor
 	}
 }
 
