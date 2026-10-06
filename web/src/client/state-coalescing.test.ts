@@ -885,7 +885,12 @@ describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', (
       { agentId: 'a3' },
     ]);
 
-    // A delete after the restore in the same flush leaves nothing restored.
+    // The mark lasts one flush: a later plain `created` is not a restore.
+    emit(sm, 'agent.a2.created', { phase: 'running', name: 'A2' });
+    vi.advanceTimersByTime(100);
+    expect(created.slice(3)).toEqual([{ agentId: 'a2' }]);
+
+    // A delete after the restore in the same flush leaves no agent-created.
     emit(sm, 'agent.a4.created', {
       phase: 'stopped',
       name: 'A4',
@@ -894,7 +899,7 @@ describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', (
     emit(sm, 'agent.a4.deleted', {});
     emit(sm, 'agent.a5.created', { phase: 'running', name: 'A5' });
     vi.advanceTimersByTime(100);
-    expect(created.slice(3)).toEqual([{ agentId: 'a5' }]);
+    expect(created.slice(4)).toEqual([{ agentId: 'a5' }]);
   });
 
   it('a delete then a restore created in the same flush leaves the agent present (ptone/scion#2951)', () => {
