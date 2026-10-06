@@ -39,7 +39,7 @@ Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) a
 
 Values stored under a reserved name before this check existed are not deleted, but they are never used: the Hub drops them at dispatch and the Runtime Broker drops them again before injection. If a variable or secret collides with a value the runtime sets itself, the runtime's value wins.
 
-`SCION_METADATA_MODE` is always set by the Hub. It comes from the agent's GCP identity configuration and defaults to `block`. A Runtime Broker only accepts an elevated mode (anything other than `block`) when the Hub's dispatch includes its source marker. Otherwise the broker downgrades it, so a stored value or an older Hub cannot turn on metadata access.
+`SCION_METADATA_MODE` is always set by the Hub. It comes from the agent's GCP identity configuration and defaults to `block`. A Runtime Broker only accepts an elevated mode (anything other than `block`) when the Hub's dispatch includes its source marker. Otherwise the Runtime Broker downgrades it, so a stored value or an older Hub cannot turn on metadata access.
 
 ---
 ## Injection Modes

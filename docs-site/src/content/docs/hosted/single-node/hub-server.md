@@ -197,10 +197,7 @@ Administrators can trigger critical infrastructure operations directly from the 
 
 ### Migrations
 
-The panel also lists one-time data migrations. Timezone-related ones:
-
-- **UTC Timestamp Normalize (`utc-timestamp-normalize`)**: Rewrites stored timestamps to UTC so ordering and paging are exact. On SQLite it covers every time column and the times embedded in JSON fields; on Postgres, only the JSON-embedded times. On SQLite, a background check at Hub start logs an error naming `utc-timestamp-normalize` and the affected tables when the operation is needed. Tables that can't be read at all, because of rows written in a numeric-abbreviation zone such as `Asia/Kathmandu`, are repaired automatically at start, after a one-time snapshot next to the database file (`<db>.pre-utc-timestamp-normalize-<time>.bak`). That snapshot needs about the database's size in free disk space and contains secrets, so store it like the database and delete it once the repair is verified. Back up the database before running the operation. It is safe to re-run, and a dry run (`{"params":{"dryRun":true}}`) reports without writing.
-- **Applied Config TZ Cleanup (`applied-config-tz-cleanup`)**: Optional. Converts the `TZ` that older Hubs saved in each agent's applied config into an explicit timezone pin (source `legacy`) in one pass. The Hub already does this per agent the next time its timezone is read, so this only matters relative to `applied-config-env-cleanup`: run it first to keep every saved `TZ` as a pin. Safe to re-run.
+The panel also lists one-time data migrations, with **Run** for a pending migration and **Retry** for a failed one. The timezone-related ones, `utc-timestamp-normalize` and `applied-config-tz-cleanup`, are described in [Times and timezones: Operator steps](/scion/reference/times-and-timezones/#operator-steps). On SQLite, the automatic start-up repair of unreadable timestamp rows first writes a one-time snapshot next to the database file (`<db>.pre-utc-timestamp-normalize-<time>.bak`). It needs about the database's size in free disk space and contains secrets, so store it like the database and delete it once the repair is verified. A dry run of `utc-timestamp-normalize` (`{"params":{"dryRun":true}}`) reports without writing.
 
 ### Operation Execution & History
 
