@@ -97,11 +97,59 @@ export interface PaginateAllOptions<T> {
 const DEFAULT_MAX_PAGES = 500;
 const DEFAULT_PAGE_TIMEOUT_MS = 60_000;
 
+/** Extra context carried by a {@link PaginationError} raised for a non-2xx page response. */
+export interface PaginationErrorDetails {
+  /** HTTP status of the failed page response. */
+  status?: number;
+  /** The failed response's body: parsed JSON when it was JSON, else its text (absent if unreadable or empty). */
+  body?: unknown;
+  /** The hub's human-readable error message from that body, when it had one. */
+  hubMessage?: string;
+}
+
 /** Raised when a page request fails or times out, a response body is malformed, or pagination does not terminate within the safety bound. */
 export class PaginationError extends Error {
-  constructor(message: string) {
+  /** HTTP status, set when a page response was not ok. */
+  readonly status?: number;
+  /** The failed page response's body, set when a page response was not ok and its body was readable. */
+  readonly body?: unknown;
+  /** The hub's error message from the failed response body, when it had one. */
+  readonly hubMessage?: string;
+
+  constructor(message: string, details: PaginationErrorDetails = {}) {
     super(message);
     this.name = 'PaginationError';
+    if (details.status !== undefined) this.status = details.status;
+    if (details.body !== undefined) this.body = details.body;
+    if (details.hubMessage !== undefined) this.hubMessage = details.hubMessage;
+  }
+}
+
+/**
+ * The hub's error message from a failed response body, accepting the shapes
+ * the hub sends: `{error: {message}}`, `{message}` or `{error: "..."}`.
+ */
+function hubErrorMessage(body: unknown): string | undefined {
+  if (typeof body === 'string') return body.trim() || undefined;
+  if (body === null || typeof body !== 'object') return undefined;
+  const data = body as { error?: unknown; message?: unknown };
+  if (data.error && typeof data.error === 'object') {
+    const message = (data.error as { message?: unknown }).message;
+    if (typeof message === 'string' && message) return message;
+  }
+  if (typeof data.message === 'string' && data.message) return data.message;
+  if (typeof data.error === 'string' && data.error) return data.error;
+  return undefined;
+}
+
+/** Read a failed response's body for error reporting: parsed JSON if it is JSON, else its text. */
+async function readErrorBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
   }
 }
 
@@ -201,7 +249,20 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
         throw err;
       }
       if (!res.ok) {
-        throw new PaginationError(`${label} request failed: ${res.status}`);
+        // Keep the hub's explanation (e.g. why a 403 was refused) instead of
+        // reporting only the status. The body read is still bounded by this
+        // page's timeout; if it cannot be read, report the status alone.
+        let body: unknown;
+        try {
+          body = await readErrorBody(res);
+        } catch {
+          if (signal?.aborted) throw walkAbortedError();
+        }
+        const details: PaginationErrorDetails = { status: res.status };
+        if (body !== undefined) details.body = body;
+        const hubMessage = hubErrorMessage(body);
+        if (hubMessage !== undefined) details.hubMessage = hubMessage;
+        throw new PaginationError(`${label} request failed: ${res.status}`, details);
       }
       try {
         raw = await res.json();
