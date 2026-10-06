@@ -17,7 +17,9 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -895,6 +897,79 @@ SELECT id FROM ancestors`, p1)
 		}
 	}
 	return result, nil
+}
+
+// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+// given group as a direct child group, in one query on the child-group edge.
+// Unlike GetParentGroups it does not walk ancestors and does not exclude the
+// group itself, so a self-edge is reported.
+func (s *GroupStore) GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error) {
+	uid, err := parseUUID(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	ids, err := s.client.Group.Query().
+		Where(group.HasChildGroupsWith(group.IDEQ(uid))).
+		IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+// child group of parentGroupID. It shares only RemoveGroupMember's
+// project_agents guard. Unlike RemoveGroupMember's group branch, it deletes
+// the join-table row directly, returns store.ErrNotFound when no row was
+// deleted, and does not bump the parent group's updated timestamp. On
+// PostgreSQL a concurrent delete of the same row waits for the first
+// transaction and then deletes nothing, so exactly one caller sees success.
+func (s *GroupStore) RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error {
+	parentUID, err := parseUUID(parentGroupID)
+	if err != nil {
+		return err
+	}
+	childUID, err := parseUUID(childGroupID)
+	if err != nil {
+		return err
+	}
+
+	// Same guard as RemoveGroupMember.
+	g, err := s.client.Group.Get(ctx, parentUID)
+	if err != nil {
+		return mapError(err)
+	}
+	if g.GroupType == group.GroupTypeProjectAgents {
+		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
+	}
+
+	// In the child_groups join table, the first primary key column holds the
+	// parent group and the second the child group.
+	drv := s.client.Driver()
+	d := drv.Dialect()
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = %s AND %s = %s",
+		group.ChildGroupsTable,
+		group.ChildGroupsPrimaryKey[0], sqlUUIDPh(d, 1),
+		group.ChildGroupsPrimaryKey[1], sqlUUIDPh(d, 2))
+	var res sql.Result
+	if err := drv.Exec(ctx, query, []any{parentUID, childUID}, &res); err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // GetGroupByProjectID retrieves the project_agents group associated with a project.
