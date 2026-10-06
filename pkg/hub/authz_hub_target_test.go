@@ -383,14 +383,25 @@ func TestCheckAccessWithEvidence_EvidenceClassifiesWithoutWidening(t *testing.T)
 		assert.Equal(t, without.Allowed, withEvidence.Allowed)
 	})
 
+	owner := bearerUser(f.ownerA)
+	ownerToken := NewScopedUserIdentityWithBoundaryAndDecoration(owner, projectBoundary(f.projectA), []string{"agent:list"}, tid("evidcheck-owner-cred"), bearerCeiling(t, "agent:list"), nil)
+	agentsA := Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}
+	agentsB := Resource{Type: "agent", ParentType: "project", ParentID: f.projectB}
+
 	t.Run("evidence naming another project does not widen the boundary", func(t *testing.T) {
-		owner := bearerUser(f.ownerA)
-		token := NewScopedUserIdentityWithBoundaryAndDecoration(owner, projectBoundary(f.projectA), []string{"agent:list"}, tid("evidcheck-owner-cred"), bearerCeiling(t, "agent:list"), nil)
-		own := authz.CheckAccessWithEvidence(ctx, token, Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, ActionList, projectCollectionEvidence("agent.list", f.projectA))
+		own := authz.CheckAccessWithEvidence(ctx, ownerToken, agentsA, ActionList, projectCollectionEvidence("agent.list", f.projectA))
 		assert.True(t, own.Allowed, own.Reason)
-		other := authz.CheckAccessWithEvidence(ctx, token, Resource{Type: "agent", ParentType: "project", ParentID: f.projectB}, ActionList, projectCollectionEvidence("agent.list", f.projectB))
-		assert.False(t, other.Allowed)
-		assert.Equal(t, bearerReasonOutsideProject, other.Reason)
+		mismatch := projectCollectionEvidence("agent.list", f.projectA)
+		d := authz.CheckAccessWithEvidence(ctx, ownerToken, agentsB, ActionList, mismatch)
+		assert.False(t, d.Allowed)
+		eval := authz.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), projectBoundary(f.projectA), ownerToken.Ceiling(), "agent.list", agentsB, BearerOptions{Evidence: mismatch})
+		assert.Equal(t, BearerStageTargetUnknown, eval.Stage, eval.Decision.Reason)
+	})
+
+	t.Run("a target in another project is outside the boundary", func(t *testing.T) {
+		d := authz.CheckAccessWithEvidence(ctx, ownerToken, agentsB, ActionList, projectCollectionEvidence("agent.list", f.projectB))
+		assert.False(t, d.Allowed)
+		assert.Equal(t, bearerReasonOutsideProject, d.Reason)
 	})
 }
 

@@ -138,14 +138,10 @@ func uatpDeleteProjectBinding(t *testing.T, s store.Store, userID, projectID str
 	}
 }
 
-// uatpInsertLegacyToken inserts a project-scoped UAT row directly via the
-// store, instead of through CreateToken's mint-time eligibility/boundary
-// checks. Used to model a scope already present on a credential (a
-// legacy token minted before a rule existed, or a future relaxed rule)
-// when CanMintSelector would refuse to mint that same scope fresh -- this
-// lets a test prove separately that use-time evaluation never re-derives
-// or re-checks mint-time issuance rules (selector boundaries, eligibility)
-// against an already-stored scope; only current authority decides.
+// uatpInsertLegacyToken inserts a project-boundary token row with the given
+// scopes directly into the store, without minting, so a test can evaluate a
+// stored scope that mint would refuse. Use-time evaluation applies the
+// ceiling, boundary eligibility and current authority.
 func uatpInsertLegacyToken(t *testing.T, s store.Store, userID, projectID string, scopes []string) string {
 	t.Helper()
 	return uatpInsertStoredToken(t, s, userID, "", projectID, scopes)
