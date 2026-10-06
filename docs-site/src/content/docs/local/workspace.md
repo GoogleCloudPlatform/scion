@@ -224,7 +224,7 @@ Creating a shared directory and creating its backing directory on disk are separ
 
 Until then, listing the shared directory's files through the Hub returns an empty list, and reading a file returns not found. Listing or reading never creates the directory.
 
-A write through the Hub only creates the directory in storage the Hub itself can reach: the NFS export, a hub-managed project's directory on the Hub host, or the project's directory on a Runtime Broker running in the same server as the Hub. It never creates the directory on a remote broker; that copy appears only when an agent of the project starts on that broker. For a git project with no co-located broker and no NFS storage, a write through the Hub is rejected and creates nothing.
+A write through the Hub only creates the directory in storage the Hub itself can reach: the NFS export, a hub-managed project's storage on the Hub host, or the project's directory on a Runtime Broker running in the same server as the Hub. It never creates the directory on a remote broker; that copy appears only when an agent of the project starts on that broker. For a git project with no co-located broker and no NFS storage, a write through the Hub is rejected and creates nothing.
 
 ### Mounting Shared Directories
 
