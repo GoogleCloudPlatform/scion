@@ -51,6 +51,12 @@ func TestResolveDashboardTimeZone(t *testing.T) {
 		{"", "UTC"},
 		{"UTC", "UTC"},
 		{"Etc/UTC", "UTC"},
+		{"Etc/GMT", "UTC"},
+		{"GMT", "UTC"},
+		{"UCT", "UTC"},
+		{"Etc/UCT", "UTC"},
+		{"Etc/Greenwich", "UTC"},
+		{"Etc/GMT-0", "UTC"},
 		{"Local", "UTC"},
 		{"America/Chicago", "America/Chicago"},
 		{"Asia/Kathmandu", "Asia/Kathmandu"},
@@ -85,6 +91,15 @@ func TestResolveDashboardTimeZone(t *testing.T) {
 		})
 	}
 	assert.Same(t, time.UTC, resolveDashboardTimeZone("Local"), "Local must be UTC, never the hub process zone")
+	for alias := range utcZoneAliases {
+		assert.Same(t, time.UTC, resolveDashboardTimeZone(alias), "%s is exactly UTC and must share the UTC cache entries", alias)
+		loc, err := time.LoadLocation(alias)
+		require.NoError(t, err, "%s must be a real tzdata name", alias)
+		for _, probe := range []time.Time{time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)} {
+			_, offset := probe.In(loc).Zone()
+			assert.Zero(t, offset, "%s must have a zero offset", alias)
+		}
+	}
 }
 
 func TestMetricsQueryWindowStartsAtLocalMidnight(t *testing.T) {

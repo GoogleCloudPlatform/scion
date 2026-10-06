@@ -78,15 +78,29 @@ const (
 // also honours the ZONEINFO environment variable.
 var timeZoneParamShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z][A-Za-z0-9_+-]*){0,2}$`)
 
-// utcZoneAliases resolve to time.UTC, so they share the UTC cache entries
-// and the "(UTC)" labels. Some browsers report "Etc/UTC" for a UTC host.
+// utcZoneAliases are the tzdata names that are exactly UTC (offset zero, no
+// DST, ever). They resolve to time.UTC, so they share the UTC cache entries,
+// do not use a slot under maxCachedZones, and get the "(UTC)" labels. Some
+// browsers report "Etc/UTC" or "Etc/GMT" for a UTC host.
 var utcZoneAliases = map[string]bool{
 	"UTC":           true,
 	"Etc/UTC":       true,
-	"Etc/Universal": true,
+	"UCT":           true,
+	"Etc/UCT":       true,
 	"Universal":     true,
-	"Etc/Zulu":      true,
+	"Etc/Universal": true,
 	"Zulu":          true,
+	"Etc/Zulu":      true,
+	"GMT":           true,
+	"Etc/GMT":       true,
+	"GMT0":          true,
+	"Etc/GMT0":      true,
+	"GMT+0":         true,
+	"GMT-0":         true,
+	"Etc/GMT+0":     true,
+	"Etc/GMT-0":     true,
+	"Greenwich":     true,
+	"Etc/Greenwich": true,
 }
 
 // resolveDashboardTimeZone turns the dashboard's tz query parameter into the
@@ -95,6 +109,10 @@ var utcZoneAliases = map[string]bool{
 // resolves to UTC, so a bad tz degrades to the pre-existing UTC buckets
 // instead of failing the request. "Local" is rejected because it would be
 // the hub process's own zone, not the viewer's.
+//
+// The length, path and shape checks come first because the value is
+// untrusted request input; the portability rules are the package's shared
+// validateIANATimezone (timezone_validate.go).
 func resolveDashboardTimeZone(tz string) *time.Location {
 	if tz == "" || tz == "Local" || len(tz) > maxTimeZoneParamLen {
 		return time.UTC
@@ -108,7 +126,7 @@ func resolveDashboardTimeZone(tz string) *time.Location {
 	if utcZoneAliases[tz] {
 		return time.UTC
 	}
-	if nonPortableTimezoneNames[tz] || strings.HasPrefix(tz, "right/") || strings.HasPrefix(tz, "posix/") {
+	if validateIANATimezone(tz) != nil {
 		return time.UTC
 	}
 	loc, err := time.LoadLocation(tz)
