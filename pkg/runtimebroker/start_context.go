@@ -352,7 +352,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the broker's default: a broker can register more than one profile
 	// (e.g. both a "docker" and a "kubernetes" profile), and a dispatch's
 	// profile selects which one it runs on. mgr and dispatchRuntimeType are
-	// resolved exactly once here, via resolveManagerForOpts (handlers.go) —
+	// resolved exactly once here, via resolveManagerForOptsStrict (handlers.go) —
 	// the same function that ultimately selects the manager this function
 	// returns — and reused below instead of re-resolving, so within this one
 	// buildStartContext call the GCP check and the manager it returns cannot
@@ -378,14 +378,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.Config != nil {
 		gcpIdentityProfile = in.Config.Profile
 	}
+	savedProfile := false
 	if gcpIdentityProfile == "" && in.Operation != opCreate {
 		gcpIdentityProfile = agent.GetSavedProfile(in.Name, in.ProjectPath)
+		savedProfile = gcpIdentityProfile != ""
 	}
-	mgr, dispatchRuntimeType := s.resolveManagerForOpts(api.StartOptions{
+	// A saved profile that no longer resolves fails here, with the same
+	// 503 as start/restart's own later resolution, rather than classifying
+	// the dispatch against the default runtime first (ptone/scion#2709).
+	// Create and a start without a saved profile stay non-strict.
+	mgr, dispatchRuntimeType, err := s.resolveManagerForOptsStrict(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	})
+	}, savedProfile, slog.LevelWarn)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
 	// Default when no GCP identity config is provided at all: "block" on

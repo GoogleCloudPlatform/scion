@@ -218,7 +218,7 @@ By default this does not activate container-script provisioning. Use
 		activateScript, _ := cmd.Flags().GetBool("activate-script")
 		force, _ := cmd.Flags().GetBool("force")
 		if activateScript && len(args) == 0 {
-			return fmt.Errorf("--activate-script requires a harness-config name")
+			return newUsageError("--activate-script requires a harness-config name")
 		}
 
 		globalDir, err := config.GetGlobalDir()

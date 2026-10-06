@@ -113,7 +113,7 @@
         "autohelp": {
           "type": "boolean",
           "default": true,
-          "description": "Print usage help on errors.",
+          "description": "Print the usage block after an argument or flag error.",
           "x-env-var": "SCION_CLI_AUTOHELP",
           "x-since": "1"
         },

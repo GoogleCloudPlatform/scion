@@ -2444,6 +2444,15 @@ func GetSavedProfile(agentName string, projectPath string) string {
 	return ""
 }
 
+// GetSavedRuntime returns the runtime name agent-info.json records the
+// agent last ran on, or "" if none is recorded.
+func GetSavedRuntime(agentName string, projectPath string) string {
+	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
+		return info.Runtime
+	}
+	return ""
+}
+
 func GetSavedHarnessConfig(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
 		return info.HarnessConfig

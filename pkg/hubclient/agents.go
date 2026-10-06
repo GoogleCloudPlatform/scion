@@ -48,7 +48,8 @@ type AgentService interface {
 	// Delete removes an agent.
 	Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error
 
-	// Start starts a stopped agent.
+	// Start starts a stopped agent. It sends no request body, so it never
+	// asks for a force-resume; see agentService.Start.
 	Start(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Stop stops a running agent.
@@ -503,7 +504,17 @@ func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) stri
 	return path
 }
 
-// Start starts a stopped agent.
+// Start starts a stopped agent via the hub's /start lifecycle action. It
+// sends no request body.
+//
+// The hub's /start route also accepts an optional {"forceResume":true} body
+// (hub.AgentLifecycleStartRequest), which resumes the interrupted harness
+// session of an agent in phase=error. The client deliberately does not expose
+// it here: the scion CLI reaches force-resume through the create path
+// instead (`scion resume --force` sends CreateAgentRequest with Resume and
+// ForceResume set), which also covers an agent that is not yet provisioned
+// or no longer exists on the hub. No caller needs force-resume on Start
+// (ptone/scion#2864).
 func (s *agentService) Start(ctx context.Context, agentID string) (*LifecycleResponse, error) {
 	return s.lifecycle(ctx, agentID, "start")
 }
