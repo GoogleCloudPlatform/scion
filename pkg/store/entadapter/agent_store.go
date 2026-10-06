@@ -1410,8 +1410,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// this repeats it on the locked row. A start's own write (StartWrite)
 	// is held by the start-block rule instead, which also covers a
 	// finalizing row whose lease expired.
+	// DeletionHoldsRow is a superset of entAgentDeletionActive.
 	deleteHolds := entAgentDeletionActive(current, now)
-	if su.StartWrite && !deleteHolds {
+	if su.StartWrite {
 		deleteHolds = entAgentToStore(current).DeletionHoldsRow(now)
 	}
 	if current.DeletedAt != nil || deleteHolds {

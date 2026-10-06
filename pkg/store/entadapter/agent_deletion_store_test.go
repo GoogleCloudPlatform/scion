@@ -452,6 +452,20 @@ func TestAgentStore_UpdateAgentStatus_DeletionGuard(t *testing.T) {
 		}
 	})
 
+	// A deleting row whose lease expired does not hold the row
+	// (DeletionHoldsRow), so a start's own write applies. This separates
+	// the start-block rule from "a start is held by any in-progress delete".
+	t.Run("start write on a lease-expired deleting row applies", func(t *testing.T) {
+		a := makeAgent(projectID, "c-start-del-expired")
+		a.Phase = "stopped"
+		require.NoError(t, s.CreateAgent(ctx, a))
+		seedDeletion(t, s, a.ID, store.DeletionStateDeleting, time.Now().Add(-time.Minute), "")
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", ClearExit: true, ClearTerminalRemnants: true, StartWrite: true}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "running", got.Phase)
+	})
+
 	t.Run("start write on a live row applies", func(t *testing.T) {
 		a := makeAgent(projectID, "c-start-live")
 		a.Phase = "stopped"
