@@ -107,7 +107,7 @@ The error uses code `skill_resolution_failed`. Its message names the skill refer
 
 When a Hub dispatches `scion create` (which only provisions), a provisioning failure for any other reason is still reported as a warning on the created agent. Without a Hub, `scion create` fails with the error.
 
-On a Hub that runs several nodes, a start, restart or resume handed to another Hub node does not carry the broker's error back. It currently reports a generic error (502) instead of `skill_resolution_failed`.
+On a Hub that runs several nodes, a create, start, restart or resume handed to another Hub node returns the same error, status and `Retry-After` as on a single node. For a create, this covers a failure the broker reports when it answers the request. A failure the broker reports after it has accepted an asynchronous launch is reported through that launch, as on a single node.
 
 ## Skill reference URIs
 
@@ -283,6 +283,7 @@ Because the cache is content-addressed, identical content is stored once regardl
 scion skills list
 scion skills list --scope global --search deploy
 scion skills list --tags ci,production          # comma-separated, AND semantics
+scion skills list --tags ci --tags production   # repeatable; same filter
 
 # Show a skill's details and its versions
 scion skills show deploy-checklist

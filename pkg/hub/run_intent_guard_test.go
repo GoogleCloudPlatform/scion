@@ -65,13 +65,12 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.suspendAgent":                  {kind: intentRecorded},
 	"Server.handleStopAllAgents":           {kind: intentRecorded},
 	"Server.autoSuspendStalledAgents":      {kind: intentRecorded},
-	"Server.dispatchAgentEventHandler":     {kind: intentRecorded},
-	"Server.wakeAgentForDM":                {kind: intentRecorded},
+	"Server.dispatchAgentEventHandler":     {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
 	"Server.handleExistingAgent":           {kind: intentRecorded},
 	"Server.createAgentInProject":          {kind: intentRecorded},
 	"deletionEngine.dispatch":              {kind: intentRecorded},
 	"Server.dispatchAgentDeletions":        {kind: intentRecorded},
-	"Server.handleWorkspaceSyncToFinalize": {kind: intentRecorded},
+	"Server.handleWorkspaceSyncToFinalize": {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
 	"dispatchDeleteFailedCreate":           {kind: intentRecorded, recordedBy: "Server.cleanupFailedCreate"},
 
 	"Server.execDispatchStart":   {kind: intentExecutor},
@@ -82,6 +81,21 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// Reincarnation stops and restarts the container in place; the agent
 	// is meant to keep running throughout.
 	"Server.runReincarnationWorker": {kind: intentUnchanged},
+	// Starts run under a start claim, which records intent running
+	// (withStartClaim records it itself while start claims are off).
+	"Server.startAgentCore": {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
+	// A start that completed after a stop was accepted: intent is already
+	// stopped.
+	"Server.compensatingStop": {kind: intentUnchanged},
+	// The start-claim reaper stops a container an unconfirmed start left
+	// running past its hold; the agent's intent is left as it is.
+	"Server.stopUnconfirmedStart": {kind: intentUnchanged},
+	// The backstop stops an agent whose intent is already stopped.
+	"Server.stopForStoppedIntent": {kind: intentUnchanged},
+	// Removes a run that landed after its agent was deleted or a delete
+	// claimed it: the row is gone, or the delete engine records the stopped
+	// intent itself (ptone/scion#3055).
+	"HTTPAgentDispatcher.compensateLandedRun": {kind: intentUnchanged},
 }
 
 // funcDeclKey names a function declaration as Recv.Name, or Name for a

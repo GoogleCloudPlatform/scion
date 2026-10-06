@@ -74,6 +74,20 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **Claude Code version guard:** Claude Code versions older than 2.1.280 reject Opus 5.5 (`claude-opus-5-5*`, and the `opus` alias) with a `400 claude_code_version_too_old` error. If the container's `claude` binary is older than 2.1.280 and the resolved model is Opus 5.5, `provision.py` falls back to `claude-opus-4-8` and logs a warning. Rebuild the `scion-claude` image with Claude Code 2.1.280 or later to use Opus 5.5.
 - **Auto-updater disabled:** Scion sets `DISABLE_AUTOUPDATER=1` in the container, so Claude Code does not try to update itself in the background. To upgrade Claude Code, rebuild the harness image.
 
+### Effort (Thinking Level)
+When `SCION_THINKING_LEVEL` is set (0–100, from `--thinking-level` on `scion start` or Hub agent defaults), the provisioner sets `CLAUDE_CODE_EFFORT_LEVEL` in the environment of the `claude` process. The table comes from the `thinking:` block in the bundle's `config.yaml` (see [Thinking Level Map](/scion/reference/harness-settings/#thinking-level-map-thinking)):
+
+| Thinking Level | `CLAUDE_CODE_EFFORT_LEVEL` |
+| :--- | :--- |
+| 0–25 | `low` |
+| 26–50 | `medium` |
+| 51–75 | `high` |
+| 76–100 | `xhigh` |
+
+Values outside the 0–100 range are clamped. The top tier is `xhigh` rather than `max` to avoid `max`'s excessive-token runs; `max` is still reachable by setting `CLAUDE_CODE_EFFORT_LEVEL` directly or with a custom `thinking:` table. When a model does not support a level, Claude Code uses the highest level it supports below that one (for example, `xhigh` runs as `high` on Sonnet 4.6). See [Claude Code model configuration](https://code.claude.com/docs/en/model-config).
+
+When the level is unset or blank, the variable is not set, so Claude Code keeps its own per-model default effort. A value that is not an integer (`abc`, `1.5`) also sets nothing, and logs a warning. The variable outranks `--effort`, `/effort` and the `effortLevel` setting in `settings.json`. If `CLAUDE_CODE_EFFORT_LEVEL` is already set in a template or harness-config `env:` block (even to an empty value), the provisioner leaves it alone, and logs a warning if a thinking level was also requested.
+
 ### Known Limitations
 - Claude Code is a beta tool and its configuration format may change.
 
@@ -89,7 +103,9 @@ OpenCode supports two authentication methods (auto-detected in this order):
 - **Auth File** (`auth-file`): Uses `~/.local/share/opencode/auth.json` if available. Scion copies this file from your host when the agent is created.
 
 ### Configuration
-- **Config File**: `~/.config/opencode/opencode.json`.
+- **Config File**: `~/.config/opencode/opencode.json`, in the current opencode schema. The provisioner merges `model`, MCP servers (under `mcp`) and, for Vertex AI, `google-vertex/...` default models plus `disabled_providers: ["github-copilot"]` into this file. An explicit `SCION_MODEL` wins over the Vertex default, and the Vertex default never replaces a `model` already in the file. A file that is not plain JSON (for example one with comments) is left unchanged, with a warning.
+- **Size aliases**: the bundled `model_aliases` are not yet in opencode's `provider/model` form, so the provisioner skips them with a warning and leaves `model` unchanged (ptone/scion#3065).
+- **`opencode.jsonc`**: opencode loads `opencode.jsonc` after `opencode.json`, so its keys (including `model`) override the file the provisioner writes.
 - **Environment**: Respects standard OpenCode environment variables.
 - **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. The provisioning script resolves it with `scion_harness.resolve_model`, which maps a size alias through the harness-config's `model_aliases` to configure the underlying model.
 - **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.

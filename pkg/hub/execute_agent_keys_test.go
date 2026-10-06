@@ -559,6 +559,39 @@ func TestExecuteAgentKeys_RealHTTPDispatcherIntegration(t *testing.T) {
 	}
 }
 
+// TestExecuteAgentKeys_NeverDispatchedHTTPRouteIsUnavailable is the end-to-end
+// regression for ptone/scion#2628: a broker with no control-channel session
+// and no live affinity owner is routed over HTTP, and its endpoint never
+// accepts the connection. The dispatch fails only with a timeout error, before
+// any request byte was written, so the Hub must answer 503 keys_unavailable,
+// not 502 keys_outcome_unknown.
+func TestExecuteAgentKeys_NeverDispatchedHTTPRouteIsUnavailable(t *testing.T) {
+	for _, shape := range keysRouteShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			f := newAgentKeysRouteFixture(t)
+			storeSpy := &agentKeysWriteSpyStore{Store: f.store}
+			f.srv.store = storeSpy
+			events := &agentKeysEventSpy{}
+			f.srv.SetEventPublisher(events)
+
+			// The handler's own admission window is 30s; end the pending
+			// dial sooner through the keys client's timeout.
+			httpClient, dials := pendingDialKeysClient(t, 300*time.Millisecond)
+			hybrid := NewHybridBrokerClient(NewControlChannelManager(DefaultControlChannelConfig(), slog.Default()), httpClient, nil, false)
+			hybrid.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
+			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.store, hybrid, false, slog.Default()))
+			token := f.agentToken(t, tid("execkeys-2628-"+shape.name), f.projectA.ID, ScopeAgentLifecycle)
+
+			rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, shape.path(f.agentInA), validKeysBody, token)
+			assertKeysDenialOutcome(t, shape.name, rec, http.StatusServiceUnavailable, "keys_unavailable")
+			if dials.Load() == 0 {
+				t.Fatal("expected the HTTP route to start a dial")
+			}
+			assertNoKeysSideEffects(t, storeSpy, events)
+		})
+	}
+}
+
 // TestExecuteAgentKeys_RunningPhaseGate pins AK-26 on both route shapes,
 // over a table of non-running phases: a target that is not in the running
 // phase is refused before any dispatch is attempted -- no wake/start.

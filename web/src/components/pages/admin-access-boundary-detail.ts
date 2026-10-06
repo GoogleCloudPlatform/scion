@@ -33,7 +33,6 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo } from '../../client/main.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
 import type {
   AccessBoundaryDetail,
@@ -55,6 +54,7 @@ import type { AuditPageRequestDetail } from '../shared/access-boundary-audit-tim
 import type { PreviewCommitSuccessDetail } from '../shared/access-boundary-preview.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type PagePhase = 'loading' | 'ready' | 'error' | 'not_found' | 'deleting' | 'permission_denied';
 

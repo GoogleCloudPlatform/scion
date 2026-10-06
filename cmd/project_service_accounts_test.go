@@ -96,8 +96,8 @@ func TestSAAddCmd_OldProjectFlagHint(t *testing.T) {
 	err := saAddCmd.ParseFlags([]string{"--project", "my-gcp-project"})
 	require.NoError(t, err)
 
-	require.NotNil(t, saAddCmd.PreRunE, "add command must wire the hint check as PreRunE for it to actually run")
-	err = saAddCmd.PreRunE(saAddCmd, nil)
+	require.NotNil(t, saAddCmd.Args, "add command must wire the hint check into Args for it to run before the required-flag check")
+	err = saAddCmd.Args(saAddCmd, []string{"sa@example.iam.gserviceaccount.com"})
 	require.Error(t, err)
 	assert.Equal(t, gcpProjectFlagHint, err.Error())
 }
@@ -113,8 +113,8 @@ func TestSAAddCmd_NoHintWhenGCPProjectSet(t *testing.T) {
 	err := saAddCmd.ParseFlags([]string{"-g", "my-scion-project", "--gcp-project", "my-gcp-project"})
 	require.NoError(t, err)
 
-	require.NotNil(t, saAddCmd.PreRunE)
-	require.NoError(t, saAddCmd.PreRunE(saAddCmd, nil))
+	require.NotNil(t, saAddCmd.Args)
+	require.NoError(t, saAddCmd.Args(saAddCmd, []string{"sa@example.iam.gserviceaccount.com"}))
 }
 
 // TestSAAddCmd_NoHintWhenNoProjectFlags ensures a bare invocation, with
@@ -128,6 +128,6 @@ func TestSAAddCmd_NoHintWhenNoProjectFlags(t *testing.T) {
 	err := saAddCmd.ParseFlags([]string{})
 	require.NoError(t, err)
 
-	require.NotNil(t, saAddCmd.PreRunE)
-	require.NoError(t, saAddCmd.PreRunE(saAddCmd, nil))
+	require.NotNil(t, saAddCmd.Args)
+	require.NoError(t, saAddCmd.Args(saAddCmd, []string{"sa@example.iam.gserviceaccount.com"}))
 }

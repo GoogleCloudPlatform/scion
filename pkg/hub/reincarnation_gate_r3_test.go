@@ -51,11 +51,12 @@ import (
 // secondary loop is ever reached.
 type failCreateMessageForAgentStore struct {
 	store.Store
+	fault   *storeFaultSwitch // nil: always active
 	agentID string
 }
 
 func (s *failCreateMessageForAgentStore) CreateMessage(ctx context.Context, msg *store.Message) error {
-	if msg.AgentID == s.agentID {
+	if s.fault.Active() && msg.AgentID == s.agentID {
 		return errors.New("injected CreateMessage failure for target agent")
 	}
 	return s.Store.CreateMessage(ctx, msg)
@@ -70,7 +71,11 @@ func (s *failCreateMessageForAgentStore) CreateMessage(ctx context.Context, msg 
 // first, never reaching this branch — this test isolates the secondary's
 // persist failure instead.
 func TestSendAgentRouted_R1_MigratingSecondaryPersistFailureIsErrorNotDeferred(t *testing.T) {
-	srv, s := testServer(t)
+	// Installed before createProjectOwnerRoleBinding below, whose mutation
+	// audit goroutine reads srv.store (ptone/scion#3184).
+	srv, s, failing, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *failCreateMessageForAgentStore {
+		return &failCreateMessageForAgentStore{Store: inner, fault: f}
+	})
 	ctx := context.Background()
 	seedRoleDefinitions(ctx, s)
 	broker := &store.RuntimeBroker{ID: tid("r1-b"), Name: "b", Slug: "b", Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
@@ -95,14 +100,15 @@ func TestSendAgentRouted_R1_MigratingSecondaryPersistFailureIsErrorNotDeferred(t
 	// Fail CreateMessage only for the migrating secondary; the primary's
 	// own persist (checked first, per the review) must still succeed so
 	// execution actually reaches the secondary loop.
-	srv.store = &failCreateMessageForAgentStore{Store: s, agentID: second.ID}
+	failing.agentID = second.ID
+	fault.Arm()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/conversations/topic:"+project.ID+"/messages", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), owner))
 	rr := httptest.NewRecorder()
 	mentionResults := []messages.MentionResult{{Slug: "r1-second", Status: "delivered"}}
 	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello @r1-second", "Owner", []*store.Agent{primary, second}, []string{"r1-second"}, mentionResults, nil, time.Now(), "", nil, false)
+		"hello @r1-second", "Owner", []*store.Agent{primary, second}, []string{"r1-second"}, mentionResults, nil, time.Now(), "", nil, chatSendOptions{})
 
 	require.NotEmpty(t, msgID, "the primary's own message must still be persisted; response: %d %s", rr.Code, rr.Body.String())
 

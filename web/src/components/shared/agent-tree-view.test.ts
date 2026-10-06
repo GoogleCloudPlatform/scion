@@ -30,6 +30,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 import './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';
 import type { Agent } from '../../shared/types.js';
+import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
   layoutForest,
@@ -309,6 +310,17 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
 
     expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
     expect(statusLabel('k1')).toBe('stopped');
+  });
+
+  it('shows a provision-only agent as created (not started) with a start hint (ptone/scion#2929)', async () => {
+    el.agents = el.agents.map((a) =>
+      a.id === 'k1' ? { ...a, phase: 'created', provisionedOnly: true } : a
+    );
+    await el.updateComplete;
+
+    const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
+    expect(badge?.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
+    expect(badge?.getAttribute('title')).toContain('scion start kid');
   });
 
   /** Edges whose title indicates non-messageable ("mismatch") styling. */
@@ -1544,6 +1556,78 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
       rootRemove.mockRestore();
       docRemove.mockRestore();
     }
+  });
+
+  // ptone/scion#2941: only the primary button starts a pan.
+  it('does not start a pan on a right or middle button press', () => {
+    for (const button of [1, 2]) {
+      const ev = new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        pointerId: 1,
+        button,
+      });
+      canvas().dispatchEvent(ev);
+      expect(canvas().classList.contains('dragging')).toBe(false);
+      expect(ev.defaultPrevented).toBe(false);
+      expect(selectStartPrevented(document.body)).toBe(false);
+      pointer('pointerup');
+    }
+    // The primary button still pans, for a mouse, a touch contact and a pen.
+    for (const pointerType of ['mouse', 'touch', 'pen']) {
+      canvas().dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 0,
+          pointerType,
+        })
+      );
+      expect(canvas().classList.contains('dragging'), pointerType).toBe(true);
+      pointer('pointerup');
+      expect(canvas().classList.contains('dragging')).toBe(false);
+    }
+  });
+
+  // The Ctrl check applies to a mouse only: a touch or pen contact pans
+  // even with Ctrl held (e.g. a keyboard-attached tablet).
+  it('still pans on a touch or pen contact with Ctrl held', () => {
+    for (const pointerType of ['touch', 'pen']) {
+      canvas().dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 0,
+          pointerType,
+          ctrlKey: true,
+        })
+      );
+      expect(canvas().classList.contains('dragging'), pointerType).toBe(true);
+      pointer('pointerup');
+      expect(canvas().classList.contains('dragging')).toBe(false);
+    }
+  });
+
+  // macOS Ctrl+click is a context-menu click that reports button 0.
+  it('does not start a pan on a mouse Ctrl+click', () => {
+    const ev = new PointerEvent('pointerdown', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      pointerId: 1,
+      button: 0,
+      pointerType: 'mouse',
+      ctrlKey: true,
+    });
+    canvas().dispatchEvent(ev);
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(ev.defaultPrevented).toBe(false);
+    pointer('pointerup');
   });
 
   it('ends the pan and stops suppressing selection when pointer capture is lost', () => {

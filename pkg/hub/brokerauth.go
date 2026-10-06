@@ -218,6 +218,9 @@ type BrokerJoinRequest struct {
 	// WorkspaceStorage is the broker's workspace storage descriptor. An
 	// older broker omits it and the stored descriptor is left unchanged.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// DefaultProfile is the broker's default (active) profile name. An
+	// older broker omits it and the stored value is left unchanged.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
 }
 
 // BrokerJoinResponse is the response for POST /api/v1/brokers/join.
@@ -255,6 +258,10 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.EmptyPerAgentWorkspace = true
 		case "agentmove", "agent_move":
 			caps.AgentMove = true
+		case "reprovisionemptyperagent", "reprovision_empty_per_agent":
+			caps.ReprovisionEmptyPerAgent = true
+		case "startsinflight", "starts_in_flight":
+			caps.StartsInFlight = true
 		}
 	}
 	return caps
@@ -543,6 +550,9 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	// heartbeat handler for why a stale descriptor is safe).
 	if req.WorkspaceStorage != nil {
 		broker.WorkspaceStorage = req.WorkspaceStorage
+	}
+	if req.DefaultProfile != nil {
+		broker.DefaultProfile = *req.DefaultProfile
 	}
 
 	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {

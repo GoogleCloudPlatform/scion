@@ -98,12 +98,13 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 		return nil, ReasonCapabilityRequired, http.StatusForbidden
 	}
 
-	// Check 5: root human live authority. Admission is built-in project
-	// membership (CheckEffectiveMembership) OR target-applicable system
+	// Check 5: root human live authority. Admission is project membership
+	// (CheckEffectiveMembership: any active project-scoped binding, built-in
+	// or custom, direct or group-derived) OR target-applicable system
 	// authority for the exact secret.use permission (SystemAuthorityProof).
-	// An unrelated custom project binding satisfies neither leg. This
-	// composition is deliberately narrower than ProjectAdmissionForClass,
-	// which counts any active project-scoped binding (ptone/scion#2129).
+	// Membership is admission only: the check-7 project.secret_read
+	// permission still gates every read, so a custom-only member without
+	// that permission is refused there.
 	u, err := s.store.GetUser(ctx, root.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

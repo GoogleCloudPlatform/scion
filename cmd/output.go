@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -50,6 +51,33 @@ func outputJSON(v interface{}) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// jsonReportedError is returned by a command that has already written its
+// result, failures included, as JSON on stdout. The process still exits 1,
+// but Execute prints no "Error:" banner, so a JSON consumer reading stdout,
+// or stdout and stderr together, sees only the JSON document.
+type jsonReportedError struct{ msg string }
+
+func (e *jsonReportedError) Error() string { return e.msg }
+
+// isReportedInJSON reports whether err was already reported in JSON output.
+func isReportedInJSON(err error) bool {
+	var r *jsonReportedError
+	return errors.As(err, &r)
+}
+
+// outputJSONResult writes v as JSON on stdout. If failed is true it then
+// returns a jsonReportedError with msg, so the command exits non-zero, as
+// it does in text mode, without printing anything more.
+func outputJSONResult(v interface{}, failed bool, msg string) error {
+	if err := outputJSON(v); err != nil {
+		return err
+	}
+	if failed {
+		return &jsonReportedError{msg: msg}
+	}
+	return nil
 }
 
 // ActionResult is a standard JSON shape for action command results.
