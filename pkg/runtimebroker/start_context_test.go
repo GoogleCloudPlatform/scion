@@ -207,31 +207,21 @@ func writeSavedAgentProfile(t *testing.T, dotScionDir, agentName, profile string
 }
 
 // TestBuildStartContext_LaunchIDEnv pins SCION_LAUNCH_ID as broker-owned:
-// set from the create request's launch id, and never passed through from
-// the resolved or template env.
+// a resolved-env value and its classification are always dropped, because
+// Manager.Start sets the variable from the run ID it labels the container
+// with.
 func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
 	tests := []struct {
 		name        string
-		launchID    string
 		resolvedEnv map[string]string
 		envCls      map[string]api.EnvKind
-		want        string
-		wantSet     bool
 	}{
-		{name: "create with launch id", launchID: "launch-1", want: "launch-1", wantSet: true},
-		{name: "no launch id", wantSet: false},
+		{name: "absent"},
+		{name: "resolved env value dropped", resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"}},
 		{
-			name:        "resolved env value replaced",
-			launchID:    "launch-2",
-			resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"},
-			want:        "launch-2",
-			wantSet:     true,
-		},
-		{
-			name:        "resolved env value dropped without launch id",
+			name:        "resolved env value and classification dropped",
 			resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"},
 			envCls:      map[string]api.EnvKind{"SCION_LAUNCH_ID": api.EnvKindPlain},
-			wantSet:     false,
 		},
 	}
 	for _, tt := range tests {
@@ -243,7 +233,7 @@ func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
 			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 				Name:               "my-agent",
 				AgentID:            "uuid-1",
-				LaunchID:           tt.launchID,
+				RunID:              "run-1",
 				ProjectPath:        filepath.Join(t.TempDir(), "my-project"),
 				ResolvedEnv:        tt.resolvedEnv,
 				EnvClassifications: tt.envCls,
@@ -253,12 +243,14 @@ func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, ok := sc.Opts.Env["SCION_LAUNCH_ID"]
-			if ok != tt.wantSet || got != tt.want {
-				t.Errorf("SCION_LAUNCH_ID = %q (set %v), want %q (set %v)", got, ok, tt.want, tt.wantSet)
+			if got, ok := sc.Opts.Env["SCION_LAUNCH_ID"]; ok {
+				t.Errorf("SCION_LAUNCH_ID = %q, want it unset in the start options", got)
 			}
-			if _, ok := sc.EnvClassifications["SCION_LAUNCH_ID"]; ok && !tt.wantSet {
-				t.Errorf("SCION_LAUNCH_ID classification kept after the value was dropped")
+			if _, ok := sc.EnvClassifications["SCION_LAUNCH_ID"]; ok {
+				t.Errorf("SCION_LAUNCH_ID classification kept")
+			}
+			if sc.Opts.RunID != "run-1" {
+				t.Errorf("RunID = %q, want %q", sc.Opts.RunID, "run-1")
 			}
 		})
 	}

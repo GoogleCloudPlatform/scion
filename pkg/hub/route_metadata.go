@@ -401,6 +401,26 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
+	// Policy: Artifacts (pkg/artifacts, behind the hub.artifacts experiment).
+	// The service performs the fine-grained checks through artifacts.Host;
+	// the share-link route authenticates by link token only.
+	// -------------------------------------------------------------------------
+	"/api/v1/artifacts": {
+		Pattern: "/api/v1/artifacts", RouteID: "artifacts.list",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/": {
+		Pattern: "/api/v1/artifacts/", RouteID: "artifacts.byId",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/shared/": {
+		Pattern: "/api/v1/artifacts/shared/", RouteID: "artifacts.shared",
+		Classification: RoutePublic,
+	},
+
+	// -------------------------------------------------------------------------
 	// Policy: Skills
 	// -------------------------------------------------------------------------
 	"/api/v1/skills": {

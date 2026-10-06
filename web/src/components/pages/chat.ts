@@ -369,6 +369,11 @@ export class ScionPageChat extends LitElement {
   /** Width of the members panel in px. Persisted per browser. */
   @state() private membersWidth = MEMBERS_WIDTH_DEFAULT;
   @state() private v2SpaceRailLoaded = false;
+  /**
+   * Set when initV2's lazy imports fail (for example, a deploy removed the
+   * old chunks). The rail then asks for a reload instead of spinning.
+   */
+  @state() private v2SpaceRailLoadFailed = false;
   /** Human members for the members sidebar (from the members endpoint). */
   @state() private v2HumanMembers: import('../shared/chat/chat-members.js').ChatHumanMember[] = [];
   /** Agent members for the members sidebar. */
@@ -485,6 +490,15 @@ export class ScionPageChat extends LitElement {
    * just to re-merge it; the fallback poll resyncs it slowly instead.
    */
   private _hubPresenceGeneration: number | null = null;
+  /**
+   * Bumped by each `initV2` and by `disconnectedCallback`. An `initV2`
+   * resuming after its lazy imports goes on only if it is still the latest
+   * and the page is still connected. The disconnect bump and the
+   * `isConnected` check overlap on purpose: either alone stops a removed
+   * page, and the generation alone stops a superseded `initV2` after a
+   * reconnect.
+   */
+  private _initV2Generation = 0;
   /**
    * Bumped on `disconnectedCallback` (same pattern as `_unreadDMRequestId`
    * below) and whenever `v2Conversation` is assigned a truthy value (see
@@ -1495,6 +1509,7 @@ export class ScionPageChat extends LitElement {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
+    ++this._initV2Generation;
     ++this._hubMembersGeneration;
     this._projectMembersAbort?.abort();
     this._projectMembersAbort = null;
@@ -1686,8 +1701,24 @@ export class ScionPageChat extends LitElement {
   // =========================================================================
 
   private async initV2(): Promise<void> {
+    const generation = ++this._initV2Generation;
     // Lazy-load the space rail and members components
-    await Promise.all([loadSpaceRail(), loadChatMembers()]);
+    try {
+      await Promise.all([loadSpaceRail(), loadChatMembers()]);
+    } catch (err) {
+      // initV2 is not awaited, so a failure not caught here would surface
+      // as an unhandled rejection. Log it, and stop: without its
+      // components the page cannot run the rest of startup.
+      console.error('Chat page failed to load its components:', err);
+      if (this.isConnected && generation === this._initV2Generation) {
+        this.v2SpaceRailLoadFailed = true;
+      }
+      return;
+    }
+    // Removed (or removed and re-connected) while the imports were in
+    // flight; disconnectedCallback already cleaned up.
+    if (!this.isConnected || generation !== this._initV2Generation) return;
+    this.v2SpaceRailLoadFailed = false;
     this.v2SpaceRailLoaded = true;
 
     // Parse initial route
@@ -1832,11 +1863,14 @@ export class ScionPageChat extends LitElement {
       : null;
   }
 
-  /** Does the current URL still name this readable thread route? */
+  /** Does the current URL still name this readable thread route, on a mounted page? */
   private routeNamesThread(slug: string, threadId: string): boolean {
     const match = window.location.pathname.match(/\/chat\/([^/]+)\/([^/]+)$/);
     return (
-      !!match && decodeURIComponent(match[1]) === slug && decodeURIComponent(match[2]) === threadId
+      this.isConnected &&
+      !!match &&
+      decodeURIComponent(match[1]) === slug &&
+      decodeURIComponent(match[2]) === threadId
     );
   }
 
@@ -1846,10 +1880,10 @@ export class ScionPageChat extends LitElement {
     return this.isConnected && !!match && decodeURIComponent(match[1]) === slug;
   }
 
-  /** Does the current URL still name this peer-ID DM route? */
+  /** Does the current URL still name this peer-ID DM route, on a mounted page? */
   private routeNamesDMPeer(peerId: string): boolean {
     const match = window.location.pathname.match(/\/chat\/dm\/([^/]+)$/);
-    return !!match && decodeURIComponent(match[1]) === peerId;
+    return this.isConnected && !!match && decodeURIComponent(match[1]) === peerId;
   }
 
   private parseV2Route(): void {
@@ -5231,19 +5265,7 @@ export class ScionPageChat extends LitElement {
         @scroll=${this._handleV2PanelsScroll}
       >
         <div class="v2-rail" ?inert=${this.isMobileLayout && this.mobilePanel !== 'left'}>
-          ${this.v2SpaceRailLoaded
-            ? html`
-                <scion-chat-space-rail
-                  selectedKey=${this.v2Conversation?.conversationKey || ''}
-                  selectedProjectId=${this.v2Conversation && !this.v2Conversation.isDM
-                    ? this.v2Conversation.projectId
-                    : ''}
-                  currentUserId=${this.pageData?.user?.id || ''}
-                  @thread-select=${this.handleThreadSelect}
-                  @reset-view=${this.handleResetView}
-                ></scion-chat-space-rail>
-              `
-            : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
+          ${this.renderV2Rail()}
         </div>
 
         <div
@@ -5387,6 +5409,29 @@ export class ScionPageChat extends LitElement {
    * The conversation header steps back to the rail; the members header
    * steps back to the conversation.
    */
+  /** The left rail: the space rail once loaded, else a spinner or a load error. */
+  private renderV2Rail(): TemplateResult {
+    if (this.v2SpaceRailLoaded) {
+      return html`
+        <scion-chat-space-rail
+          selectedKey=${this.v2Conversation?.conversationKey || ''}
+          selectedProjectId=${this.v2Conversation && !this.v2Conversation.isDM
+            ? this.v2Conversation.projectId
+            : ''}
+          currentUserId=${this.pageData?.user?.id || ''}
+          @thread-select=${this.handleThreadSelect}
+          @reset-view=${this.handleResetView}
+        ></scion-chat-space-rail>
+      `;
+    }
+    if (this.v2SpaceRailLoadFailed) {
+      return html`<div class="loading-rail" role="alert">
+        Chat failed to load. Reload the page to try again.
+      </div>`;
+    }
+    return html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`;
+  }
+
   private renderMobileBackButton(target: 'left' | 'center' = 'left') {
     return html`
       <sl-icon-button

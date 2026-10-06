@@ -79,6 +79,11 @@ beforeEach(() => {
   chatSpacesLoad.invalidate();
 });
 
+/** Let pending promise callbacks (a few macrotask turns of awaits) run. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
 describe('chat mention roster stability', () => {
   it('reuses agent props until the member roster or project changes', () => {
     const page = createPage();
@@ -1190,11 +1195,6 @@ describe('chat page — promote DM dialog', () => {
 });
 
 describe('chat page — late route lookups', () => {
-  /** Let pending promise callbacks (the lookup's awaits) run. */
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
-
   /**
    * Hold the project-by-slug lookup until `release` is called; every other
    * request gets an empty object.
@@ -1216,9 +1216,24 @@ describe('chat page — late route lookups', () => {
     return release;
   }
 
+  /** A page that reports itself mounted, as one the router shows does. */
+  function mountedPage(): any {
+    const el = createPage();
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
+    return el;
+  }
+
+  /**
+   * A rail reload landing, as one does after each inbound message: the rail
+   * knows no slug for the route yet, so every re-parse starts its own lookup.
+   */
+  function railReloaded(el: any): void {
+    el.handleRailLoaded(new CustomEvent('rail-loaded', { detail: { spaceIds: [], spaces: [] } }));
+  }
+
   it('a late slug lookup leaves the panel alone once the rail has opened the thread', async () => {
     const release = holdSlugLookup();
-    const el = createPage();
+    const el = mountedPage();
     window.history.replaceState({}, '', '/chat/alpha/topic-1');
     el.parseV2Route();
     // The rail loads first and opens the thread through the known slug.
@@ -1237,7 +1252,7 @@ describe('chat page — late route lookups', () => {
 
   it('a late slug lookup does not pull the user back from a thread they opened since', async () => {
     const release = holdSlugLookup();
-    const el = createPage();
+    const el = mountedPage();
     window.history.replaceState({}, '', '/chat/alpha/topic-1');
     el.parseV2Route();
     el.navigateToThread({
@@ -1256,7 +1271,7 @@ describe('chat page — late route lookups', () => {
 
   it('a slug lookup still opens a cold-loaded thread', async () => {
     const release = holdSlugLookup();
-    const el = createPage();
+    const el = mountedPage();
     window.history.replaceState({}, '', '/chat/alpha/topic-1');
     el.parseV2Route();
 
@@ -1266,13 +1281,61 @@ describe('chat page — late route lookups', () => {
     expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectId: 'p1' });
     expect(el.mobilePanel).toBe('center');
   });
+
+  it('a burst of rail reloads does not pull the user back to the thread the URL named before', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    railReloaded(el);
+    railReloaded(el);
+    // The user opens another thread and starts typing in it.
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-2');
+  });
+
+  it('a burst of rail reloads still opens the thread the URL names', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    railReloaded(el);
+    railReloaded(el);
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'topic-1', projectSlug: 'alpha' });
+    expect(window.location.pathname).toBe('/chat/alpha/topic-1');
+  });
+
+  it('a late slug lookup on a page that is no longer mounted does nothing', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+    // The router replaced this page with a new one for the same URL.
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    release();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
+  });
 });
 
 describe('chat page — late space lookups', () => {
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
-
   /**
    * Hold the project-by-slug lookup and the space's thread list until their
    * releases are called; every other request gets an empty object.
@@ -1398,6 +1461,55 @@ describe('chat page — late space lookups', () => {
     expect(el.v2Conversation).toBeNull();
   });
 
+  /** A rail reload that knows the space, as after each inbound message. */
+  function railReloadedWithSpace(el: any): void {
+    el.handleRailLoaded(
+      new CustomEvent('rail-loaded', {
+        detail: {
+          spaceIds: [],
+          spaces: [{ projectId: 'p1', projectSlug: 'alpha', projectName: 'A' }],
+        },
+      })
+    );
+  }
+
+  it('on desktop, a burst of rail reloads does not move the user off a thread opened since', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(false);
+    window.history.replaceState({}, '', '/chat/alpha');
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    expect(el.rail.threadsFor).toHaveBeenCalledTimes(3);
+    openThreadFromRail(el);
+
+    releases.threads();
+    await flush();
+
+    expect(navigateTo).not.toHaveBeenCalled();
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    expect(window.location.pathname).toBe('/chat/alpha/topic-2');
+  });
+
+  it('on desktop, a burst of rail reloads on a space opens its #general once', async () => {
+    const releases = holdSpaceLookups();
+    const el = createSpacePage(false);
+    vi.mocked(navigateTo).mockImplementationOnce((path: string) => {
+      window.history.pushState({}, '', path);
+    });
+    window.history.replaceState({}, '', '/chat/alpha');
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+    railReloadedWithSpace(el);
+
+    releases.threads();
+    await flush();
+
+    expect(navigateTo).toHaveBeenCalledTimes(1);
+    expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/general-1');
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'general-1', projectSlug: 'alpha' });
+  });
+
   it('a slug lookup still opens a cold-loaded space', async () => {
     const releases = holdSpaceLookups();
     releases.threads();
@@ -1442,10 +1554,6 @@ describe('chat page — rail reload after a message', () => {
 });
 
 describe('chat page — late DM peer lookups', () => {
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
-
   /**
    * Hold each DM-list request until its own release is called, in order;
    * every other request gets an empty object.
@@ -1480,10 +1588,14 @@ describe('chat page — late DM peer lookups', () => {
     return releases;
   }
 
-  /** A page whose user ID is unknown, so a peer-ID DM route is resolved over the API. */
+  /**
+   * A mounted page whose user ID is unknown, so a peer-ID DM route is
+   * resolved over the API.
+   */
   function createPageWithoutUserId(): any {
     const el = createPage();
     el.pageData = {};
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
     return el;
   }
 
@@ -1713,6 +1825,21 @@ describe('chat page — late DM peer lookups', () => {
     expect(el.mobilePanel).toBe('center');
   });
 
+  it('a lookup on a page that is no longer mounted opens nothing', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+    // The router replaced this page with a new one for the same URL.
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
+  });
+
   it('a lookup overtaken during the user refresh builds no key and logs no error', async () => {
     // The DM list has no match, so the lookup falls back to fetching the
     // user, and that request is held until released.
@@ -1751,6 +1878,216 @@ describe('chat page — late DM peer lookups', () => {
     expect(errorSpy).not.toHaveBeenCalled();
     expect(el.v2Conversation.conversationKey).toBe('topic-2');
     errorSpy.mockRestore();
+  });
+});
+
+describe('chat page — startup after the page is removed', () => {
+  /**
+   * Load initV2's lazy modules up front. Its own imports then come from the
+   * module cache, but initV2 still resumes only after an await, so a page
+   * removed in the same task as it was connected is removed first.
+   */
+  async function loadLazyModules(): Promise<void> {
+    await Promise.all([
+      import('../shared/chat/chat-space-rail.js'),
+      import('../shared/chat/chat-members.js'),
+    ]);
+  }
+
+  /**
+   * A page that never renders: these tests are about initV2's side effects,
+   * and happy-dom mishandles the members element a disconnected page renders
+   * (it calls attribute callbacks on the never-upgraded instance).
+   */
+  function createUnrenderedPage(): any {
+    const el = createPage();
+    el.shouldUpdate = () => false;
+    return el;
+  }
+
+  function dmListLoads(): number {
+    return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
+  }
+
+  type IntervalHandle = ReturnType<typeof setInterval>;
+
+  /**
+   * Spy on setInterval and clearInterval, so a test can tell which intervals
+   * it started and whether each was cleared. Intervals are told apart by
+   * handle, not by delay: the presence heartbeat shares the poll's delay.
+   */
+  function trackIntervals(): { live: () => IntervalHandle[] } {
+    const setSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+    return {
+      live: () => {
+        const cleared = new Set(clearSpy.mock.calls.map(([h]) => h));
+        return setSpy.mock.results
+          .map((r) => r.value as IntervalHandle)
+          .filter((h) => !cleared.has(h));
+      },
+    };
+  }
+
+  it('a page removed before its lazy imports resolve loads nothing and starts no poll', async () => {
+    vi.mocked(apiFetch).mockClear();
+    const intervals = trackIntervals();
+    await loadLazyModules();
+    const el = createUnrenderedPage();
+    window.history.replaceState({}, '', '/chat');
+    document.body.appendChild(el);
+    // The router replaces the page before initV2's imports come back.
+    el.remove();
+
+    await flush();
+
+    expect(dmListLoads()).toBe(0);
+    expect(el._fallbackPollInterval).toBeNull();
+    expect(intervals.live()).toEqual([]);
+    expect(el.v2SpaceRailLoaded).toBe(false);
+  });
+
+  it('a page removed and connected again before its imports resolve initialises once', async () => {
+    vi.mocked(apiFetch).mockClear();
+    const intervals = trackIntervals();
+    await loadLazyModules();
+    const el = createUnrenderedPage();
+    window.history.replaceState({}, '', '/chat');
+    try {
+      document.body.appendChild(el);
+      el.remove();
+      document.body.appendChild(el);
+
+      await flush();
+
+      expect(el.v2SpaceRailLoaded).toBe(true);
+      expect(dmListLoads()).toBe(1);
+      // Exactly one live interval, and it is the connected page's poll: the
+      // first initV2 started nothing its disconnect could no longer clear.
+      expect(el._fallbackPollInterval).not.toBeNull();
+      expect(intervals.live()).toEqual([el._fallbackPollInterval]);
+
+      el.remove();
+      expect(intervals.live()).toEqual([]);
+    } finally {
+      el.remove();
+    }
+  });
+
+  describe('when a lazy import fails', () => {
+    const chunkError = new Error('Failed to fetch dynamically imported module');
+    let unhandled: unknown[];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+
+    beforeEach(async () => {
+      // Load the real modules first, so these tests time the same whether
+      // or not an earlier test already did: only the mocked import differs.
+      await loadLazyModules();
+      unhandled = [];
+      process.on('unhandledRejection', onUnhandled);
+      // A deploy purged the old chunk: the members import rejects.
+      vi.doMock('../shared/chat/chat-members.js', () => {
+        throw chunkError;
+      });
+    });
+
+    afterEach(() => {
+      vi.doUnmock('../shared/chat/chat-members.js');
+      process.off('unhandledRejection', onUnhandled);
+    });
+
+    it('logs the error, starts nothing, and flags the rail as failed', async () => {
+      vi.mocked(apiFetch).mockClear();
+      const intervals = trackIntervals();
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      try {
+        document.body.appendChild(el);
+
+        await flush();
+
+        expect(unhandled).toEqual([]);
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Chat page failed to load its components:',
+          expect.anything()
+        );
+        expect(el.v2SpaceRailLoaded).toBe(false);
+        expect(el.v2SpaceRailLoadFailed).toBe(true);
+        expect(dmListLoads()).toBe(0);
+        expect(el._fallbackPollInterval).toBeNull();
+        expect(intervals.live()).toEqual([]);
+      } finally {
+        el.remove();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('on a page removed meanwhile, logs the error and changes nothing', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      try {
+        document.body.appendChild(el);
+        el.remove();
+
+        await flush();
+
+        expect(unhandled).toEqual([]);
+        expect(errorSpy).toHaveBeenCalledWith(
+          'Chat page failed to load its components:',
+          expect.anything()
+        );
+        expect(el.v2SpaceRailLoadFailed).toBe(false);
+        expect(el.v2SpaceRailLoaded).toBe(false);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('a connected page renders a reload message in the rail', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // Renders the rail's template, not the whole page: happy-dom breaks
+      // on the members element once its module is defined (see above).
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      try {
+        document.body.appendChild(el);
+        await flush();
+
+        const rail = renderToFragment(el.renderV2Rail());
+        const alert = rail.querySelector('[role="alert"]');
+        expect(alert).not.toBeNull();
+        expect(alert?.textContent).toContain('Reload the page to try again.');
+        expect(rail.querySelector('sl-spinner')).toBeNull();
+      } finally {
+        el.remove();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('clears the failure once a later startup loads its imports', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const el = createUnrenderedPage();
+      window.history.replaceState({}, '', '/chat');
+      try {
+        document.body.appendChild(el);
+        await vi.waitFor(() => expect(el.v2SpaceRailLoadFailed).toBe(true));
+
+        // The page is removed and added again, and this time the chunk loads.
+        el.remove();
+        vi.doUnmock('../shared/chat/chat-members.js');
+        await loadLazyModules();
+        document.body.appendChild(el);
+        await vi.waitFor(() => expect(el.v2SpaceRailLoaded).toBe(true));
+
+        expect(unhandled).toEqual([]);
+        expect(el.v2SpaceRailLoadFailed).toBe(false);
+      } finally {
+        el.remove();
+        errorSpy.mockRestore();
+      }
+    });
   });
 });
 
@@ -1993,10 +2330,6 @@ describe('chat page — thread and scroll position across mode switches', () => 
 describe('chat page — late conversation switches while composing', () => {
   const DM_KEY = 'dm:agent:agent-1:user:user-me';
   const NEW_TOPIC = { id: 'topic-9', projectId: 'p1', name: 'promoted <b>name</b>' };
-
-  async function flush(): Promise<void> {
-    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
-  }
 
   /** A page showing the agent DM, whose thread reports `composing`. */
   function pageOnDM(composing: boolean): any {

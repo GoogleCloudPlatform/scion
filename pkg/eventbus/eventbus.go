@@ -44,6 +44,9 @@ type EventBus interface {
 	// Subscribe registers a handler for messages matching a topic pattern.
 	// Patterns use NATS-style wildcards: * matches a single token, > matches the remainder.
 	// Returns a Subscription that can be used to unsubscribe.
+	// Buses that invoke handlers locally reject a nil handler with
+	// ErrNilHandler; external spokes of a FanOutEventBus are subscribed with a
+	// nil handler (pattern-only, for remote filtering) and must accept it.
 	Subscribe(pattern string, handler EventHandler) (Subscription, error)
 
 	// Close shuts down the event bus and releases resources.

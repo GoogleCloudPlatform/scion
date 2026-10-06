@@ -436,9 +436,21 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// reincarnate-claim hooks and the audit record commit in one
 	// transaction (reincarnateClaimTx), so a failure at any step leaves the
 	// agent unclaimed with no record behind it.
+	// The claim also requires that no start claim is held, live or
+	// unconfirmed: a start whose outcome is unknown may still create a
+	// container this reincarnation would then compete with.
 	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, auditActorFromContext(ctx)); err != nil {
+		var held *store.ClaimHeldError
 		if errors.Is(err, store.ErrVersionConflict) {
 			Conflict(w, "agent was concurrently modified; retry")
+			return
+		}
+		if errors.As(err, &held) {
+			Conflict(w, "a start is in progress for this agent; retry once it completes")
+			return
+		}
+		if errors.Is(err, store.ErrClaimPredicate) {
+			Conflict(w, "a reincarnation is already pending for this agent")
 			return
 		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {
