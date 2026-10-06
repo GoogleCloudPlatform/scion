@@ -32,7 +32,7 @@ import (
 // memo, while making one audited attach decision per agent and loading the
 // caller's groups once for the whole attach phase instead of once per agent.
 func TestSpaceMembers_MemoizedAttachMatchesUnmemoized(t *testing.T) {
-	srv, s, owner, member, projectID := msgAuthzSetup(t)
+	srv, s, owner, member, projectID, wrapped, fault := msgAuthzSetupWithFault(t, newSpaceMembersStore)
 	ctx := context.Background()
 
 	ownerAgents := createSpaceMembersAgents(t, s, projectID, owner.ID, "memo-owner", 3)
@@ -67,16 +67,13 @@ func TestSpaceMembers_MemoizedAttachMatchesUnmemoized(t *testing.T) {
 	// Count group loads made after the agent walk, i.e. by the attach phase.
 	walkDone := false
 	attachGroupLoads := 0
-	wrapped := &spaceMembersStore{
-		Store:       s,
-		onAgentPage: func(_ int, last bool) { walkDone = walkDone || last },
-		onEffectiveGroups: func() {
-			if walkDone {
-				attachGroupLoads++
-			}
-		},
+	wrapped.onAgentPage = func(_ int, last bool) { walkDone = walkDone || last }
+	wrapped.onEffectiveGroups = func() {
+		if walkDone {
+			attachGroupLoads++
+		}
 	}
-	srv.store = wrapped
+	fault.Arm()
 	srv.authzService.store = wrapped
 	emitter := &parityRecordingAuditEmitter{}
 	srv.authzService.SetDecisionAuditEmitter(emitter)

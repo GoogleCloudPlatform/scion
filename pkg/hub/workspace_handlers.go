@@ -515,7 +515,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			writeLaunchInvalidPhase(w, err, agent.ID)
 			return
 		}
-		if s.writeStartClaimError(w, err, agent.ID) {
+		if s.writeStartClaimError(ctx, w, err, agent.ID) {
 			return
 		}
 		if err != nil {

@@ -1704,7 +1704,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 // that as_needed env vars (e.g. GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_REGION) are
 // resolved before auth provisioning runs on the broker.
 func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
-	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false)
+	return d.dispatchProvision(ctx, agent, "DispatchAgentProvision", false, "")
 }
 
 // DispatchAgentReprovision re-renders an EXISTING agent's on-disk config
@@ -1722,14 +1722,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 // does that separately via DispatchAgentStart. Precondition: the agent's
 // container is already stopped.
 func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent) error {
-	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true)
+	return d.dispatchProvision(ctx, agent, "DispatchAgentReprovision", true, "")
 }
 
 // dispatchProvision is the shared implementation behind DispatchAgentProvision
 // and DispatchAgentReprovision: build a provision-only create request, dispatch
 // it with the GatherEnv two-pass mechanism, and merge any resolved storage env
 // back into AppliedConfig.
-func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool) (err error) {
+func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace string) (err error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1755,6 +1755,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	}()
 	req.ProvisionOnly = true
 	req.Reprovision = reprovision
+	req.ExpectExistingNFSWorkspace = expectNFSWorkspace
 	req.GatherEnv = true
 
 	// Track which scope provided each key

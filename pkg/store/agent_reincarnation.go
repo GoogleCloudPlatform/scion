@@ -91,7 +91,21 @@ type AgentReincarnation struct {
 	// Handoff is the agent-authored handoff text delivered to the new
 	// generation's first task.
 	Handoff string `json:"handoff,omitempty"`
+
+	// SourceBrokerID and TargetBrokerID are set, at creation, for a
+	// cross-broker move: the broker the agent leaves and the one it moves
+	// to. Empty for a plain reincarnation.
+	SourceBrokerID string `json:"sourceBrokerId,omitempty"`
+	TargetBrokerID string `json:"targetBrokerId,omitempty"`
+	// SourceCleanup is the outcome of a completed move's best-effort
+	// localOnly delete on the source broker: SourceCleanupDone or
+	// "failed:<reason>"; "" until attempted. Written only by
+	// SetAgentReincarnationSourceCleanup.
+	SourceCleanup string `json:"sourceCleanup,omitempty"`
 }
+
+// SourceCleanupDone records a successful source-broker cleanup after a move.
+const SourceCleanupDone = "done"
 
 // AgentReincarnationStore defines agent-reincarnation persistence operations.
 type AgentReincarnationStore interface {
@@ -193,4 +207,9 @@ type AgentReincarnationStore interface {
 	// stored: a maintenance rewrite is not a lifecycle step. Returns
 	// (false, nil) if no row matched.
 	UpdateAgentReincarnationSnapshots(ctx context.Context, r *AgentReincarnation, expectState string) (bool, error)
+
+	// SetAgentReincarnationSourceCleanup records the outcome of a move's
+	// source-broker cleanup on the record with ID id (a narrow
+	// single-column write). Returns ErrNotFound if no row matched.
+	SetAgentReincarnationSourceCleanup(ctx context.Context, id, outcome string) error
 }

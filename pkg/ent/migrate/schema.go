@@ -394,6 +394,9 @@ var (
 		{Name: "previous_applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "new_applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "handoff", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "source_broker_id", Type: field.TypeString, Nullable: true},
+		{Name: "target_broker_id", Type: field.TypeString, Nullable: true},
+		{Name: "source_cleanup", Type: field.TypeString, Nullable: true},
 	}
 	// AgentReincarnationsTable holds the schema information for the "agent_reincarnations" table.
 	AgentReincarnationsTable = &schema.Table{

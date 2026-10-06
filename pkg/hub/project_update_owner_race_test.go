@@ -33,13 +33,14 @@ import (
 // lands exactly in the read-then-write window of a full-row update.
 type beforeProjectUpdateStore struct {
 	store.Store
+	fault     *storeFaultSwitch // nil: always active
 	projectID string
 	hook      func()
 	fired     bool
 }
 
 func (b *beforeProjectUpdateStore) UpdateProject(ctx context.Context, p *store.Project) error {
-	if !b.fired && p.ID == b.projectID {
+	if b.fault.Active() && !b.fired && p.ID == b.projectID {
 		b.fired = true
 		b.hook()
 	}
@@ -51,10 +52,12 @@ func (b *beforeProjectUpdateStore) UpdateProject(ctx context.Context, p *store.P
 // (ptone/scion#2597). Before the fix the full-row UpdateProject wrote the
 // stale OwnerID (alice) back over the transferred one (bob).
 func TestUpdateProject_ConcurrentTransferOwnershipSurvives(t *testing.T) {
-	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *beforeProjectUpdateStore {
+		return &beforeProjectUpdateStore{Store: inner, fault: f}
+	})
 	ctx := context.Background()
 
-	wrapped := &beforeProjectUpdateStore{Store: s, projectID: project.ID}
+	wrapped.projectID = project.ID
 	wrapped.hook = func() {
 		rec := doRequestAsUser(t, srv, alice, http.MethodPost,
 			"/api/v1/projects/"+project.ID+"/transfer-ownership",
@@ -64,7 +67,7 @@ func TestUpdateProject_ConcurrentTransferOwnershipSurvives(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, bob.ID, got.OwnerID, "precondition: transfer committed inside the PATCH window")
 	}
-	srv.store = wrapped
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodPatch, "/api/v1/projects/"+project.ID,
 		map[string]string{"name": "Renamed During Transfer"})
