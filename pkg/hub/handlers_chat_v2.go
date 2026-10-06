@@ -1263,7 +1263,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		}
 		if noted, token, ok := s.unmentionedHumanNote(ctx, members, projectID, key, creatorID, user.ID(), content); ok {
 			content = noted
-			mentionNames = append(append([]string(nil), mentionNames...), token)
+			mentionNames = append(slices.Clone(mentionNames), token)
 			noRecipient = false
 		}
 	}
