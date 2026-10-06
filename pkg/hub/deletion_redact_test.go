@@ -23,6 +23,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -347,6 +348,46 @@ func TestLifecycleStartRacedByDelete_DeletionAdminVsNonAdmin(t *testing.T) {
 	}
 	assert.JSONEq(t, string(views["admin"]["state"]), string(views["member"]["state"]))
 	for _, k := range []string{"startedAt", "leaseExpiresAt", "soft"} {
+		assert.Contains(t, views["member"], k)
+	}
+}
+
+// A stop whose run was replaced while it was in flight is not recorded and
+// answers from the current row (handleAgentLifecycle's stop branch when
+// recordStopStatus reports not recorded). The row carries a failed delete
+// with an error text, which only the admin may see.
+func TestLifecycleStopNotRecorded_DeletionAdminVsNonAdmin(t *testing.T) {
+	views := map[string]map[string]json.RawMessage{}
+	for _, c := range []struct {
+		name     string
+		identity Identity
+	}{
+		{"admin", NewAuthenticatedUser("u-admin", "admin@test.com", "Admin", "admin", "web")},
+		{"member", NewAuthenticatedUser("u-m", "m@test.com", "M", "member", "web")},
+	} {
+		srv, s := testServer(t)
+		_, _, agent := setupOnlineBrokerAgent(t, s, "redact-stop-notrec-"+c.name)
+		_, err := s.SetAgentRunID(context.Background(), agent.ID, "run-old")
+		require.NoError(t, err)
+		seedDeletionWithError(t, s, agent.ID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}, "broker said: stop detail")
+		client := &runSwapStopClient{s: s, agentID: agent.ID}
+		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+		views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, "stop")
+		require.Equal(t, "run-old", client.lastStopRunID, "%s: the stop went out for the old run", c.name)
+		require.Equal(t, "run-new", mustGetAgent(t, s, agent.ID).RunID, "%s: the row moved to the new run, so the stop was not recorded", c.name)
+	}
+	require.NotNil(t, views["admin"])
+	assert.JSONEq(t, `"failed"`, string(views["admin"]["state"]))
+	assert.JSONEq(t, `"runtime_error"`, string(views["admin"]["code"]))
+	assert.JSONEq(t, `"broker said: stop detail"`, string(views["admin"]["error"]))
+	assert.Contains(t, views["admin"], "claim")
+	// Separate servers, so the timestamps differ: compare the shape.
+	require.NotNil(t, views["member"])
+	for _, k := range deletionDetailKeys {
+		assert.NotContains(t, views["member"], k, "member sees %s", k)
+	}
+	assert.JSONEq(t, string(views["admin"]["state"]), string(views["member"]["state"]))
+	for _, k := range []string{"startedAt", "soft"} {
 		assert.Contains(t, views["member"], k)
 	}
 }
@@ -812,8 +853,9 @@ func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
 	}
 	sort.Strings(viewSites)
 	assert.Len(t, computeSites, 1, "only deletionViewForCaller computes the view: %v", computeSites)
-	// enrichAgents, enrichAgent, two lifecycle responses, the managed
-	// response, the 202 writer and the status event.
-	assert.Len(t, viewSites, 7, "deletion view call sites: %v", viewSites)
+	// enrichAgents, enrichAgent, three lifecycle responses (stop no-op,
+	// stop not recorded, final), the managed response, the 202 writer and
+	// the status event.
+	assert.Len(t, viewSites, 8, "deletion view call sites: %v", viewSites)
 	assert.Equal(t, 1, eventSites, "events.go builds the status event's deletion view once")
 }
