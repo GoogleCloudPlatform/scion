@@ -660,7 +660,7 @@ func writeMissingLocalFileError(w http.ResponseWriter, err error, op string) {
 	if errors.As(err, &pathErr) && pathErr.Path != "" {
 		details["file"] = filepath.Base(pathErr.Path)
 	}
-	msg := "Failed to " + op + ": a template or harness-config file is missing on this broker. " +
+	msg := failedOpText(op) + ": a template or harness-config file is missing on this broker. " +
 		"Re-sync the template or harness-config to the Hub; if the Hub uses local storage, " +
 		"make sure it serves those files over HTTP rather than as local file paths."
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeTemplateError, msg, details)
