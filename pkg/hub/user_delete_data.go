@@ -379,7 +379,8 @@ func (s *Server) startUserScopedDataSweep(parent context.Context) <-chan struct{
 
 // findOrphanedUserScopeIDs returns, sorted, the scope IDs of user-scope
 // secrets and env vars whose user no longer exists. A user lookup error
-// other than not-found leaves that ID out, so its values are kept.
+// other than not-found leaves that ID out, so its values are kept. If ctx
+// ends during the lookups, it returns ctx's error and no IDs.
 func (s *Server) findOrphanedUserScopeIDs(ctx context.Context) ([]string, error) {
 	scopeIDs := make(map[string]bool)
 	envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser})
@@ -399,6 +400,9 @@ func (s *Server) findOrphanedUserScopeIDs(ctx context.Context) ([]string, error)
 
 	ids := make([]string, 0, len(scopeIDs))
 	for id := range scopeIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("user lookup: %w", err)
+		}
 		if id == "" {
 			continue
 		}

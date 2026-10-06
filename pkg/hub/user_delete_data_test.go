@@ -26,7 +26,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -456,14 +455,18 @@ func TestNew_SchedulesUserScopedDataSweep(t *testing.T) {
 }
 
 // blockingUserScopeListStore blocks the sweep's unscoped list of user-scope
-// env vars until release is closed (or a fallback timeout passes, so a
-// synchronous lookup fails the test instead of hanging it).
+// env vars until release is closed or the caller's ctx ends.
 type blockingUserScopeListStore struct {
 	store.Store
 	entered     chan struct{}
 	enteredOnce sync.Once
 	release     chan struct{}
-	timedOut    atomic.Bool
+	releaseOnce sync.Once
+}
+
+// Release unblocks the list. It is safe to call more than once.
+func (s *blockingUserScopeListStore) Release() {
+	s.releaseOnce.Do(func() { close(s.release) })
 }
 
 // DB forwards to the wrapped store's raw *sql.DB so New()'s D4
@@ -480,8 +483,8 @@ func (s *blockingUserScopeListStore) ListEnvVars(ctx context.Context, filter sto
 		s.enteredOnce.Do(func() { close(s.entered) })
 		select {
 		case <-s.release:
-		case <-time.After(5 * time.Second):
-			s.timedOut.Store(true)
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
 	return s.Store.ListEnvVars(ctx, filter)
@@ -503,21 +506,69 @@ func TestNew_UserScopedDataSweepLookupRunsInBackground(t *testing.T) {
 	require.NoError(t, err)
 	bs := &blockingUserScopeListStore{Store: inner, entered: make(chan struct{}), release: make(chan struct{})}
 
-	srv, _ := testServerWithStore(t, bs)
+	// New() runs in a goroutine: a lookup inside New() would block it until
+	// release, so it would not return before the hang guard fires.
+	type newResult struct {
+		srv *Server
+		err error
+	}
+	built := make(chan newResult, 1)
+	go func() {
+		srv, err := New(testServerConfig(), bs)
+		built <- newResult{srv, err}
+	}()
+	var res newResult
+	select {
+	case res = <-built:
+	case <-time.After(30 * time.Second):
+		t.Cleanup(func() {
+			bs.Release()
+			if r := <-built; r.srv != nil {
+				select {
+				case <-r.srv.userScopedDataSweepDone:
+				case <-time.After(30 * time.Second):
+					t.Error("startup sweep did not end after release")
+				}
+				_ = r.srv.Shutdown(context.Background())
+			}
+			_ = inner.Close()
+		})
+		t.Fatal("New() must not wait for the sweep lookup")
+	}
+	if res.srv != nil {
+		t.Cleanup(func() {
+			_ = res.srv.Shutdown(context.Background())
+			_ = inner.Close()
+		})
+	} else {
+		t.Cleanup(func() { _ = inner.Close() })
+	}
+	require.NoError(t, res.err)
+	srv := res.srv
 	require.NotNil(t, srv.userScopedDataSweepDone)
+	// Registered after the Shutdown/Close cleanup, so it runs first: the
+	// sweep goroutine ends before the store closes, on every path.
+	t.Cleanup(func() {
+		bs.Release()
+		select {
+		case <-srv.userScopedDataSweepDone:
+		case <-time.After(30 * time.Second):
+			t.Error("startup sweep did not end after release")
+		}
+	})
+
 	select {
 	case <-bs.entered:
 	case <-time.After(30 * time.Second):
 		t.Fatal("startup sweep lookup did not start")
 	}
-	require.False(t, bs.timedOut.Load(), "New() must not wait for the sweep lookup")
 	select {
 	case <-srv.userScopedDataSweepDone:
 		t.Fatal("startup sweep finished while its lookup was blocked")
 	default:
 	}
 
-	close(bs.release)
+	bs.Release()
 	select {
 	case <-srv.userScopedDataSweepDone:
 	case <-time.After(30 * time.Second):
@@ -525,6 +576,43 @@ func TestNew_UserScopedDataSweepLookupRunsInBackground(t *testing.T) {
 	}
 	_, ev := userScopedCounts(t, inner, missing)
 	assert.Zero(t, ev, "the startup sweep must remove a missing user's env vars")
+}
+
+// ctxFreeUserScopeListStore runs the user-scope lists without the caller's
+// cancellation, so only the user lookups see an ended ctx.
+type ctxFreeUserScopeListStore struct {
+	store.Store
+}
+
+func (s *ctxFreeUserScopeListStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
+	return s.Store.ListEnvVars(context.WithoutCancel(ctx), filter)
+}
+
+func (s *ctxFreeUserScopeListStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
+	return s.Store.ListSecrets(context.WithoutCancel(ctx), filter)
+}
+
+// TestSweepOrphanedUserScopedData_ExpiredContextKeepsValues: when the sweep's
+// ctx has ended by the time of the user lookups, the sweep returns the ctx
+// error and removes nothing.
+func TestSweepOrphanedUserScopedData_ExpiredContextKeepsValues(t *testing.T) {
+	srv, s := testServer(t)
+	b := useLocalSecretBackend(t, srv, s)
+	missing := tid("user-gone")
+	seedUserScopedData(t, s, b, missing)
+	srv.store = &ctxFreeUserScopeListStore{Store: s}
+	t.Cleanup(func() { srv.store = s })
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	removed, kept, err := srv.sweepOrphanedUserScopedData(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "user lookup")
+	assert.Zero(t, removed)
+	assert.Zero(t, kept)
+	sec, ev := userScopedCounts(t, s, missing)
+	assert.Equal(t, 1, sec, "an expired sweep must keep the secrets")
+	assert.Equal(t, 1, ev, "an expired sweep must keep the env vars")
 }
 
 // softDeletedAgent creates a soft-deleted agent in the project.
