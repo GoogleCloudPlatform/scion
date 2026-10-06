@@ -317,6 +317,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 	}
 	var deleteFiles, removeBranch, softDelete bool
 	var deletedAt time.Time
+	var claim int64
 	if d.Args != "" {
 		args, err := UnmarshalDeleteArgs(d.Args)
 		if err != nil {
@@ -326,11 +327,40 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		removeBranch = args.RemoveBranch
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
+		claim = args.Claim
 		if len(args.PreviousRunIDs) > 0 {
 			agent.PreviousRunIDs = args.PreviousRunIDs
 		}
 	}
+	// A delete engine's intent applies only while the claim it was created
+	// under is still the row's current claim, live or failed in_doubt (see
+	// deferredDeleteDeadline): the engine may have died, its lease lapsed
+	// and the user started the agent again since (ptone/scion#2906). A
+	// stale intent is dropped without dispatching; failing it (rather than
+	// completing it) keeps a waiting engine from reading it as a teardown
+	// that ran. The deadline sent to the broker is computed now, not when
+	// the intent was written.
+	//
+	// An intent records no run ID of its own until ptone/scion#2550 P5; the
+	// broker gets the re-read row's run ID. The intent's previous runs
+	// (ptone/scion#3097) are deleted by the same DispatchAgentDelete call
+	// under this fence, so each previous-run delete carries the same
+	// notAfter and a stale intent deletes none of them.
+	if claim != 0 {
+		notAfter, ok := deferredDeleteDeadline(ctx, agent, claim, deleteClock())
+		if !ok {
+			s.agentLifecycleLog.Info("reconcile: deferred delete intent's claim is no longer current; dropped",
+				"id", d.ID, "agent_id", agent.ID, "intent_claim", claim, "row_claim", agent.DeletionClaim,
+				"deletion_state", agent.DeletionState, "deletion_code", agent.DeletionCode)
+			return "", fmt.Errorf("%w (intent claim %d, row claim %d)", errStaleDeleteDispatch, claim, agent.DeletionClaim)
+		}
+		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: claim, notAfter: notAfter})
+	}
 	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
+		if isStaleDeleteDispatch(err) && !errors.Is(err, errStaleDeleteDispatch) {
+			// Keep the marker in the row's error text for the originating node.
+			return "", fmt.Errorf("dispatch delete: %w: %w", errStaleDeleteDispatch, err)
+		}
 		return "", fmt.Errorf("dispatch delete: %w", err)
 	}
 	return "", nil

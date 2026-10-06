@@ -1079,13 +1079,53 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 }
 
 // handleExistingAgent encapsulates the full decision tree for an agent that
-// already exists when a create/start request arrives.
+// already exists (same slug, same project) when a create request arrives. It
+// either writes the HTTP response itself or tells the caller what to do.
 //
-// Phases:
-//  1. Stale cleanup (running/stopped/error + not provision-only): dispatch delete, remove from DB → deleted
-//  2. Env-gather re-provisioning (provisioning + GatherEnv): dispatch delete, remove from DB → deleted
-//  3. Restart (created/provisioning/pending + not provision-only): recover broker ID, update config, dispatch start → started
-//  4. Otherwise: none (caller decides what to do)
+// Gates, in order, before any branch acts:
+//   - Lifecycle authz: the caller must be allowed to manage this specific
+//     agent (the same check the /start route enforces). A denial returns
+//     existingAgentConflict, so the caller learns only that the name is taken.
+//   - Start gate: an agent whose create/start is already in flight is
+//     returned as it is (200, request not applied) → existingAgentStarted;
+//     any other start-gate refusal is written → existingAgentErrored.
+//
+// Branches (all but env-gather are skipped for req.ProvisionOnly):
+//  1. Suspended: restart in place, preserving harness state. Re-reserves
+//     quota, records run intent, dispatches start with the harness resume
+//     flag set, marks the agent running → existingAgentStarted.
+//  2. Running/stopped/error: resumeInPlaceDecision decides. A stopped agent
+//     with req.Resume restarts in place with a fresh harness session; an
+//     errored agent with req.Resume and req.ForceResume is force-resumed
+//     (crash recovery), continuing the interrupted session. Either path
+//     re-reserves quota and dispatches start → existingAgentStarted.
+//     Anything else, including every running agent, is a duplicate →
+//     existingAgentConflict. Existing agents are never deleted here.
+//  3. Env-gather re-provisioning (provisioning + req.GatherEnv): record run
+//     intent stopped, dispatch a broker delete when both a dispatcher and a
+//     runtime broker are set (skipped otherwise; a delete failure aborts
+//     unless cleanupMode=force), revoke the agent's credentials, hard-delete
+//     the row and release its quotas → existingAgentDeleted, and the caller
+//     creates a fresh agent.
+//  4. Restart (created/provisioning): recover the broker ID if unset, apply
+//     task/attach, record run intent and dispatch start without resume (the
+//     agent keeps the quota reservation taken at create) → existingAgentStarted.
+//  5. Otherwise (e.g. any provision-only request outside branch 3) →
+//     existingAgentConflict.
+//
+// Branches 1, 2 and 4 write an error response → existingAgentErrored when
+// they cannot dispatch (no dispatcher or runtime broker), have a GCP
+// identity the token-mint gate would refuse (gcpIdentityStartRefusal,
+// checked before quota and run intent), fail the start-dispatch setup
+// (beginStartDispatchHTTP, branches 1 and 2: the quota reservation, the
+// starting-phase write, or a delete claim taking the row) or run-intent
+// bookkeeping, or get a dispatch error. The one exception is a
+// dispatch-time start-guard refusal reporting a launch already in flight,
+// which is answered like the start gate above → existingAgentStarted.
+// Branch 3 writes an error → existingAgentErrored when recording run intent,
+// the broker delete (unless cleanupMode=force) or the row delete fails.
+// existingAgentNone is returned only when existingAgent is nil, and the
+// caller proceeds with a normal create.
 func (s *Server) handleExistingAgent(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -1144,7 +1184,7 @@ func (s *Server) handleExistingAgent(
 		cleanupMode = "strict"
 	}
 
-	// Suspended agents are restarted in-place (not deleted), preserving harness state.
+	// Branch 1: Suspended agents are restarted in-place (not deleted), preserving harness state.
 	if !req.ProvisionOnly && existingAgent.Phase == string(state.PhaseSuspended) {
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
@@ -1236,7 +1276,7 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	// Phase 1: Agent is running/stopped/error.
+	// Branch 2: Agent is running/stopped/error.
 	// Resume=true for stopped agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseRunning) ||
@@ -1345,7 +1385,7 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Phase 2: Env-gather re-provisioning — provisioning + GatherEnv requested.
+	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
 			writeErrorFromErr(w, err, "")
@@ -1394,7 +1434,7 @@ func (s *Server) handleExistingAgent(
 		return existingAgentDeleted
 	}
 
-	// Phase 3: Restart — agent was provisioned/created and needs to be started.
+	// Branch 4: Restart — agent was provisioned/created and needs to be started.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseCreated) ||
 			existingAgent.Phase == string(state.PhaseProvisioning)) {

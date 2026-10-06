@@ -51,7 +51,7 @@ Use --dry-run to preview cascade effects without applying.`,
 
 		// Client-side validation
 		if err := validateMessageMode(mode); err != nil {
-			return err
+			return asUsageError(err)
 		}
 
 		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, false)
