@@ -646,6 +646,31 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-primary-50, #eff6ff);
     }
 
+    /* In a narrow composer the chip keeps to one line: a long agent name is
+       cut with an ellipsis (the full name is in its title) rather than
+       wrapping the tab into a block over the messages. */
+    @media (max-width: 768px) {
+      :host > sl-dropdown {
+        max-width: 100%;
+      }
+
+      .destination-chip {
+        min-width: 0;
+        white-space: nowrap;
+      }
+
+      .destination-chip > * {
+        flex: none;
+      }
+
+      .destination-chip > .agent-name {
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    }
+
     /* W7: File upload styles */
     .attach-btn {
       flex-shrink: 0;
@@ -1243,7 +1268,7 @@ export class ScionChatComposer extends LitElement {
       return html`
         <div class="destination-chip dm">
           <span class="arrow">&rarr;</span>
-          <span class="agent-name">@${this.peerName}</span>
+          <span class="agent-name" title=${'@' + this.peerName}>@${this.peerName}</span>
         </div>
       `;
     }
@@ -1258,7 +1283,7 @@ export class ScionChatComposer extends LitElement {
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
             <span style="font-size: var(--chat-fs-base)">🤖</span>
-            <span class="agent-name">${this.defaultAgent}</span>
+            <span class="agent-name" title=${this.defaultAgent}>${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
               ? html`<sl-icon name="chevron-down" class="chip-chevron"></sl-icon>`
