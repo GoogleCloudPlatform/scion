@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -77,8 +78,9 @@ type Scheduler struct {
 	// Event type handlers for one-shot events
 	eventHandlers map[string]EventHandler
 
-	// Tick counter (monotonically increasing)
-	tickCount uint64
+	// Tick counter (monotonically increasing). Written by the ticker loop and
+	// read concurrently by handler goroutines and Status(), so it is atomic.
+	tickCount atomic.Uint64
 
 	// One-shot timers (in-memory)
 	mu     sync.Mutex
@@ -362,7 +364,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 			case <-s.stopCh:
 				return
 			case <-ticker.C:
-				s.tickCount++
+				s.tickCount.Add(1)
 				s.runRecurringHandlers(ctx)
 			}
 		}
@@ -422,10 +424,13 @@ const maxJitter = 30 * time.Second
 // across ALL ticks — slow handlers from tick N still hold slots when tick N+1
 // fires, preventing cross-tick concurrency blow-up.
 func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
+	// Snapshot the tick once so eligibility and logging agree on it.
+	tick := s.tickCount.Load()
+
 	// Collect eligible handlers for this tick.
 	var eligible []RecurringHandler
 	for _, h := range s.recurring {
-		if s.tickCount%uint64(h.Interval) == 0 {
+		if tick%uint64(h.Interval) == 0 {
 			eligible = append(eligible, h)
 		}
 	}
@@ -467,7 +472,7 @@ func (s *Scheduler) runRecurringHandlers(ctx context.Context) {
 			defer cancel()
 
 			start := time.Now()
-			s.log.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", s.tickCount)
+			s.log.Debug("Scheduler: running recurring handler", "name", handler.Name, "tick", tick)
 
 			func() {
 				defer func() {
@@ -700,7 +705,7 @@ func (s *Scheduler) Status() SchedulerStatus {
 	s.mu.Unlock()
 
 	return SchedulerStatus{
-		TickCount:      s.tickCount,
+		TickCount:      s.tickCount.Load(),
 		TickInterval:   s.tickInterval.String(),
 		MaxConcurrency: s.MaxConcurrency,
 		Recurring:      recurring,

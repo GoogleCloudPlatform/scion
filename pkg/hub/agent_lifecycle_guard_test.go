@@ -166,7 +166,9 @@ func (d *softDeletingDispatcher) DispatchAgentCreateWithGather(ctx context.Conte
 
 // A soft delete that finishes between the create dispatch and the
 // post-dispatch write keeps the row soft-deleted with its operation ID, and
-// a restore then reactivates the edge the soft delete deactivated.
+// a restore then reactivates the edge the soft delete deactivated. The
+// create itself answers 409 delete_in_progress with no agent body: the
+// agent was deleted while it was being created (ptone/scion#3099).
 func TestPostDispatchWriteKeepsSoftDeletedRow(t *testing.T) {
 	disp := &softDeletingDispatcher{createAgentDispatcher: &createAgentDispatcher{createPhase: string(state.PhaseRunning)}}
 	srv, s, project := setupCreateAgentServer(t, disp)
@@ -174,10 +176,10 @@ func TestPostDispatchWriteKeepsSoftDeletedRow(t *testing.T) {
 	srv.config.SoftDeleteRetention = time.Hour
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "soft-race", ProjectID: project.ID, Task: "t"})
-	require.Less(t, rec.Code, 300, rec.Body.String())
 	require.NoError(t, disp.err, "the soft delete during dispatch")
 	require.NotNil(t, disp.capturedAgent)
 	id := disp.capturedAgent.ID
+	requireDeletedDuringCreate(t, rec, id)
 
 	got := mustGetAgent(t, s, id)
 	assert.False(t, got.DeletedAt.IsZero(), "the row stays soft-deleted")

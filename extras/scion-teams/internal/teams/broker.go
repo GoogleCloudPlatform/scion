@@ -16,6 +16,8 @@ package teams
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 const (
@@ -85,6 +88,10 @@ type TeamsBroker struct {
 	phase      int  // 1 or 2
 
 	mu sync.Mutex
+
+	// lastAskCleanup is when expired ask-user requests were last deleted.
+	// Guarded by mu.
+	lastAskCleanup time.Time
 
 	// Subscription tracking.
 	subscriptions map[string]bool
@@ -342,6 +349,12 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		msg.Metadata["project_id"] = projectID
 	}
 
+	// Ask-user cards need a request ID so button clicks can be matched to
+	// the stored request.
+	if msg.Type == messages.TypeInputNeeded && msg.Metadata["request_id"] == "" {
+		msg.Metadata["request_id"] = newAskRequestID()
+	}
+
 	// Format the message into a Teams Activity.
 	activity, err := formatStructuredMessage(msg)
 	if err != nil {
@@ -456,6 +469,25 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		return nil
 	}
 
+	// Store ask-user requests before the card is sent so button clicks can
+	// be answered. Plain-text messages have no buttons and need no request.
+	// If the request cannot be stored, send the question without buttons and
+	// ask for a reply message instead.
+	if msg.Type == messages.TypeInputNeeded && len(activity.Attachments) > 0 {
+		var storeErr error
+		if store == nil {
+			storeErr = fmt.Errorf("store not initialized")
+		} else {
+			b.cleanupExpiredAskUsers(ctx, store)
+			storeErr = b.storePendingAskUser(ctx, store, msg, projectID, agentSlug, targets[0].conversationID)
+		}
+		if storeErr != nil {
+			b.log.Error("Failed to store pending ask-user request, sending question without buttons",
+				"request_id", msg.Metadata["request_id"], "error", storeErr)
+			activity = askUserWithoutButtons(msg, askAgentSlug(msg, agentSlug))
+		}
+	}
+
 	// TODO(Phase 3): Add dedup guard before sending. Discord has dedup
 	// protection via message nonces; Teams should get equivalent protection
 	// when the Store layer is integrated in Phase 3.
@@ -487,9 +519,107 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	return nil
 }
 
+// askUserTTL is how long an ask-user card can be answered.
+const askUserTTL = 24 * time.Hour
+
+// newAskRequestID returns a random ask-user request ID.
+func newAskRequestID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("ask-%d", time.Now().UnixNano())
+	}
+	return "ask-" + hex.EncodeToString(b)
+}
+
+// askUserCleanupInterval is the minimum time between deletions of expired
+// ask-user requests.
+const askUserCleanupInterval = time.Hour
+
+// cleanupExpiredAskUsers deletes expired ask-user requests, at most once per
+// askUserCleanupInterval.
+func (b *TeamsBroker) cleanupExpiredAskUsers(ctx context.Context, store Store) {
+	b.mu.Lock()
+	due := time.Since(b.lastAskCleanup) >= askUserCleanupInterval
+	if due {
+		b.lastAskCleanup = time.Now()
+	}
+	b.mu.Unlock()
+	if !due {
+		return
+	}
+	if n, err := store.DeleteExpiredAskUsers(ctx); err != nil {
+		b.log.Warn("Failed to delete expired ask-user requests", "error", err)
+	} else if n > 0 {
+		b.log.Debug("Deleted expired ask-user requests", "count", n)
+	}
+}
+
+// askAgentSlug returns the agent asking the question: the "agent:<slug>"
+// sender, or the agent from the topic.
+func askAgentSlug(msg *messages.StructuredMessage, topicAgentSlug string) string {
+	if strings.HasPrefix(msg.Sender, "agent:") {
+		return strings.TrimPrefix(msg.Sender, "agent:")
+	}
+	return topicAgentSlug
+}
+
+// askUserNoButtonsNote is appended when an ask-user question is sent
+// without buttons.
+func askUserNoButtonsNote(agentSlug string) string {
+	if agentSlug == "" {
+		return "_Buttons are unavailable for this question. To answer, reply in a linked channel._"
+	}
+	return fmt.Sprintf("_Buttons are unavailable for this question. To answer, @-mention %s in a linked channel._", agentSlug)
+}
+
+// askUserWithoutButtons returns a plain-text activity for an ask-user
+// question from agentSlug, listing the choices and how to answer.
+func askUserWithoutButtons(msg *messages.StructuredMessage, agentSlug string) *Activity {
+	var sb strings.Builder
+	if agentSlug != "" {
+		fmt.Fprintf(&sb, "[%s] ", agentSlug)
+	}
+	sb.WriteString(msg.Msg)
+	if choices := askUserMetadataChoices(msg); len(choices) > 0 {
+		fmt.Fprintf(&sb, "\n\nChoices: %s", strings.Join(choices, ", "))
+	}
+	sb.WriteString("\n\n" + askUserNoButtonsNote(agentSlug))
+	return &Activity{Type: "message", Text: sb.String()}
+}
+
+// storePendingAskUser records an ask-user request posted to conversationID.
+// An existing request with the same ID is left unchanged. It returns an
+// error when the project or agent is unknown, because the answer could not
+// be delivered.
+func (b *TeamsBroker) storePendingAskUser(ctx context.Context, store Store, msg *messages.StructuredMessage, projectID, topicAgentSlug, conversationID string) error {
+	agentSlug := askAgentSlug(msg, topicAgentSlug)
+	if projectID == "" {
+		projectID = msg.Metadata["project_id"]
+	}
+	pending := &PendingAskUser{
+		RequestID:      msg.Metadata["request_id"],
+		ConversationID: stripThreadSuffix(conversationID),
+		AgentSlug:      agentSlug,
+		ProjectID:      projectID,
+		Choices:        askUserChoices(msg),
+		ExpiresAt:      time.Now().Add(askUserTTL),
+	}
+	if pending.ProjectID == "" || pending.AgentSlug == "" {
+		return fmt.Errorf("ask-user message without project (%q) or agent (%q)", pending.ProjectID, pending.AgentSlug)
+	}
+	return store.CreatePendingAskUser(ctx, pending)
+}
+
 // parsePublishTopic extracts projectID and agentSlug from a topic string.
-// Topics follow the pattern "project.agent.event" or similar dot-delimited formats.
+// Canonical topics (scion.project.<id>.agent.<slug>.messages) are parsed
+// with projectkeys; other topics use the "project.agent.event" form.
 func parsePublishTopic(topic string) (projectID, agentSlug string) {
+	if parsed, err := projectkeys.ParseTopic(topic); err == nil {
+		if parsed.Kind == projectkeys.TopicKindAgent {
+			agentSlug = parsed.Actor
+		}
+		return parsed.ProjectID, agentSlug
+	}
 	parts := strings.SplitN(topic, ".", 3)
 	if len(parts) >= 1 {
 		projectID = parts[0]
@@ -791,6 +921,18 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		msg.Recipient = "agent:" + agentSlug
 	}
 
+	// Deliver as the sender's linked Scion account. Unlinked senders get a
+	// register hint instead of a silent drop.
+	mapping, err := linkedUserByTeamsID(ctx, store, msg.SenderID)
+	if problem := linkProblem(mapping, err, unlinkedInboundHint); problem != "" {
+		if err != nil {
+			b.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", msg.SenderID)
+		}
+		b.replyText(ctx, activity, problem)
+		return nil
+	}
+	msg.Sender = onBehalfOfUser(mapping)
+
 	// Update conversation context for routing replies back.
 	// Placed here (after link resolution) so link.ProjectID is available.
 	if msg.SenderID != "" {
@@ -816,12 +958,15 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		msg.ThreadID = convID
 	}
 
-	topic := fmt.Sprintf("scion.project.%s.agent.%s.messages", link.ProjectID, agentSlug)
+	topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 	if err := b.hubClient.DeliverInbound(ctx, topic, msg); err != nil {
 		b.log.Error("Failed to deliver message to hub",
 			"error", err,
 			"conversation_id", activity.Conversation.ID,
 		)
+		// The webhook has already acknowledged this activity, so report the
+		// failure in the conversation.
+		b.replyText(ctx, activity, inboundFailureText(err, mapping, link.ProjectSlug, agentSlug))
 		return fmt.Errorf("deliver to hub: %w", err)
 	}
 
@@ -830,6 +975,61 @@ func (b *TeamsBroker) handleMessage(ctx context.Context, activity *Activity) err
 		"sender", msg.Sender,
 	)
 	return nil
+}
+
+// unlinkedInboundHint is sent when an unlinked user messages an agent.
+const unlinkedInboundHint = "Your message was not delivered. Link your Teams account to Scion first with the `register` command."
+
+// inboundDeliveryFailureText is sent when the hub rejects an inbound message.
+func inboundDeliveryFailureText(agentSlug string) string {
+	return fmt.Sprintf("Your message to **%s** could not be delivered. Please try again.", agentSlug)
+}
+
+// linkCheckFailedText is shown when the sender's account link cannot be read.
+const linkCheckFailedText = "Couldn't check your account link. Please try again."
+
+// linkedUserByTeamsID returns the Scion account linked to teamsUserID. It
+// returns (nil, nil) when there is no link and an error when the link could
+// not be read. Use linkProblem to check that the mapping is usable.
+func linkedUserByTeamsID(ctx context.Context, store Store, teamsUserID string) (*TeamsUserMapping, error) {
+	if store == nil {
+		return nil, fmt.Errorf("store not initialized")
+	}
+	if teamsUserID == "" {
+		return nil, nil
+	}
+	mapping, err := store.GetUserMapping(ctx, teamsUserID)
+	if err != nil {
+		return nil, err
+	}
+	return mapping, nil
+}
+
+// linkProblem returns the reply for a sender whose account link cannot be
+// used, or "" when mapping is usable. unlinkedText is used when the sender
+// has no link.
+func linkProblem(mapping *TeamsUserMapping, err error, unlinkedText string) string {
+	switch {
+	case err != nil:
+		return linkCheckFailedText
+	case mapping == nil:
+		return unlinkedText
+	case mapping.ScionEmail == "":
+		return staleLinkText
+	}
+	return ""
+}
+
+// replyText sends a plain-text message to the activity's conversation.
+func (b *TeamsBroker) replyText(ctx context.Context, activity *Activity, text string) {
+	if b.sender == nil {
+		b.log.Warn("Sender not initialized, cannot send reply")
+		return
+	}
+	reply := &Activity{Type: "message", Text: text}
+	if _, err := b.sender.sendActivity(ctx, activity.ServiceURL, activity.Conversation.ID, reply); err != nil {
+		b.log.Error("Failed to send reply", "error", err, "conversation_id", activity.Conversation.ID)
+	}
 }
 
 // stripThreadSuffix removes the ";messageid=..." suffix that Teams appends to
