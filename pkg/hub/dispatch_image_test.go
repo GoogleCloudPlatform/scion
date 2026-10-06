@@ -127,7 +127,7 @@ func TestDispatch_TemplateImageNotSentAsTopTier(t *testing.T) {
 
 	// Template image only.
 	derived := newAgent("img-derived", nil)
-	srv.populateAgentConfig(ctx, derived, project, template)
+	require.NoError(t, srv.populateAgentConfig(ctx, derived, project, template))
 	require.Equal(t, "template-image:v1", derived.AppliedConfig.Image,
 		"AppliedConfig.Image still records the template image for display")
 	req, err := d.buildCreateRequest(ctx, derived, "test")
@@ -138,7 +138,7 @@ func TestDispatch_TemplateImageNotSentAsTopTier(t *testing.T) {
 
 	// User-specified image beats the template and is sent as the top tier.
 	explicit := newAgent("img-explicit", &api.ScionConfig{Image: "user-image:v2"})
-	srv.populateAgentConfig(ctx, explicit, project, template)
+	require.NoError(t, srv.populateAgentConfig(ctx, explicit, project, template))
 	require.Equal(t, "user-image:v2", explicit.AppliedConfig.Image)
 	req, err = d.buildCreateRequest(ctx, explicit, "test")
 	require.NoError(t, err)
