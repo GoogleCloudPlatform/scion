@@ -15,21 +15,16 @@
 package cmd
 
 import (
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // ptone/scion#3430: a create the Hub rejects (non-2xx, no agent record) must
-// end `scion start` at once with a non-zero exit and the Hub's message. It
-// must not enter the launch wait or poll the agent afterwards.
+// end `scion start` at once with exit code 1 and the Hub's message. It must
+// not enter the launch wait or send any request after the create.
 func TestStartAgentViaHub_RejectedCreateExitsImmediately(t *testing.T) {
 	const projectID, agentName = "proj-rejected", "rejected-agent"
 	for _, tc := range []struct {
@@ -51,72 +46,23 @@ func TestStartAgentViaHub_RejectedCreateExitsImmediately(t *testing.T) {
 			})
 			serviceAccountFlag, startNoWait, startWaitTimeout = "sa-unavailable", false, 0
 
-			var (
-				mu            sync.Mutex
-				createCalls   int
-				afterCreate   []string // requests seen after the rejected create
-				createBodyGCP interface{}
-			)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				defer mu.Unlock()
-				w.Header().Set("Content-Type", "application/json")
-				if createCalls > 0 {
-					afterCreate = append(afterCreate, r.Method+" "+r.URL.Path)
-				}
-				switch {
-				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
-					createCalls++
-					var body map[string]interface{}
-					_ = json.NewDecoder(r.Body).Decode(&body)
-					createBodyGCP = body["gcp_identity"]
-					w.WriteHeader(tc.status)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
-						"error": map[string]interface{}{"code": tc.code, "message": tc.message},
-					})
-				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "p"})
-				default:
-					// Existing-agent check (before create) and any poll (after):
-					// the agent does not exist.
-					w.WriteHeader(http.StatusNotFound)
-					_ = json.NewEncoder(w).Encode(map[string]interface{}{
-						"error": map[string]interface{}{"code": "not_found", "message": "agent not found"},
-					})
-				}
-			}))
-			t.Cleanup(srv.Close)
-			client, err := hubclient.New(srv.URL)
-			require.NoError(t, err)
-			hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: projectID}
+			stub := newHubStartStub(t, projectID, agentName, "")
+			stub.createStatus, stub.createErrCode, stub.createErrMsg = tc.status, tc.code, tc.message
 
-			// Guard against a hang: a wait loop would block here until its
-			// budget (minutes) runs out.
-			done := make(chan struct{})
-			var stdout, stderr string
 			var startErr error
-			go func() {
-				defer close(done)
-				stdout, stderr = captureStdIO(t, func() {
-					startErr = startAgentViaHub(nil, hubCtx, agentName, "do it", false, nil)
-				})
-			}()
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				t.Fatal("startAgentViaHub did not return after the Hub rejected the create")
-			}
+			stdout, stderr := captureStdIO(t, func() {
+				startErr = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "do it", false, nil)
+			})
 
 			require.Error(t, startErr)
 			assert.Contains(t, startErr.Error(), tc.message, "the Hub's error message must be surfaced")
-			assert.NotZero(t, exitCodeFor(startErr), "a rejected create must exit non-zero")
+			assert.Equal(t, 1, exitCodeFor(startErr), "a rejected create is a plain Hub failure: exit 1")
 			assert.True(t, isHubFailure(startErr), "a rejected create is a Hub failure, not a usage error")
 
-			mu.Lock()
-			defer mu.Unlock()
-			assert.Equal(t, 1, createCalls, "the create must be sent exactly once")
-			assert.Equal(t, map[string]interface{}{"metadata_mode": "assign", "service_account_id": "sa-unavailable"}, createBodyGCP)
-			assert.Empty(t, afterCreate, "no request (wait/poll) may follow a rejected create")
+			assert.Equal(t, 1, stub.createCalls, "the create must be sent exactly once")
+			assert.Equal(t, map[string]interface{}{"metadata_mode": "assign", "service_account_id": "sa-unavailable"},
+				stub.createBody["gcp_identity"], "the reporter's --service-account must reach the create")
+			assert.Empty(t, stub.afterCreate, "no request (wait/poll) may follow a rejected create")
 			assert.NotContains(t, stdout+stderr, "Waiting for agent", "a rejected create must not enter the launch wait")
 		})
 	}

@@ -31,14 +31,18 @@ import (
 
 // hubStartStub is an httptest hub that answers the calls startAgentViaHub
 // makes on the non-attach path: project GET, existing-agent GET, and the
-// agent create POST (whose raw JSON body it captures).
+// agent create POST (whose raw JSON body it captures, even when the create
+// fails).
 type hubStartStub struct {
 	server        *httptest.Server
 	createBody    map[string]interface{}
 	createCalls   int
 	existingPhase string // "" → existing-agent GET returns 404
 	project       map[string]interface{}
-	createStatus  int // non-zero → the create POST fails with this status
+	createStatus  int      // non-zero → the create POST fails with this status
+	createErrCode string   // error code for a failed create ("" → "conflict")
+	createErrMsg  string   // error message for a failed create ("" → "refused by hub")
+	afterCreate   []string // "METHOD path" of every request after the first create
 }
 
 func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *hubStartStub {
@@ -46,6 +50,9 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 	stub := &hubStartStub{existingPhase: existingPhase}
 	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if stub.createCalls > 0 {
+			stub.afterCreate = append(stub.afterCreate, r.Method+" "+r.URL.Path)
+		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
 			if stub.project != nil {
@@ -67,16 +74,23 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			stub.createCalls++
-			if stub.createStatus != 0 {
-				w.WriteHeader(stub.createStatus)
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error": map[string]interface{}{"code": "conflict", "message": "refused by hub"},
-				})
-				return
-			}
 			raw, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
 			require.NoError(t, json.Unmarshal(raw, &stub.createBody))
+			if stub.createStatus != 0 {
+				code, msg := stub.createErrCode, stub.createErrMsg
+				if code == "" {
+					code = "conflict"
+				}
+				if msg == "" {
+					msg = "refused by hub"
+				}
+				w.WriteHeader(stub.createStatus)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": code, "message": msg},
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(&hubclient.CreateAgentResponse{
 				Agent: &hubclient.Agent{
 					ID: "agent-id", Slug: agentName, Name: agentName,
