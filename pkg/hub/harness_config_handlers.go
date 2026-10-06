@@ -657,7 +657,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, existing.StoragePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
 		}
 	}
 
@@ -1151,7 +1151,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			srcPath := source.StoragePath + "/" + file.Path
 			dstPath := storagePath + "/" + file.Path
 			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 				RuntimeError(w, "Failed to copy files: "+err.Error())
 				return
 			}
@@ -1163,7 +1163,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 
 	if err := s.store.CreateHarnessConfig(ctx, clone); err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storagePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)

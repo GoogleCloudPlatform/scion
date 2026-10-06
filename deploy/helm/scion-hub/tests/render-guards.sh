@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=152   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes).
+EXPECTED_TOTAL=187   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -29,7 +29,7 @@ HELM="${HELM:-helm}"
 # BASE render would return an error string instead of manifests and every check below would
 # accuse the chart of a fault it does not have. The chart will not default it - a generated
 # secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
-BASE=(--set image.repository=r --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+BASE=(--set image.repository=r --set agents.imageRegistry=example.invalid/agents --set hub.hubId=ci-minimal --set hub.baseUrl=https://ci-minimal.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
 
 # A COMPLETE WEB CLIENT CREDENTIAL, for the rows that need auth.mode=oauth to
 # render at all. Not folded into BASE, because several rows below exist
@@ -856,7 +856,7 @@ accept "credentials supplied through config.extra in snake_case" --set auth.mode
 # there is nothing to inspect and nothing to refuse. Asserting this keeps the
 # guard from growing into a claim about a file the chart cannot see.
 accept "oauth with no credentials but an external settings Secret" \
-  --set auth.mode=oauth --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned
+  --set auth.mode=oauth --set auth.proxy.iap.audience= --set agents.imageRegistry= --set config.existingSecret=operator-owned
 
 # THE POSITIVE TWIN OF THE SPELLING GUARD: the chart's own render must land on
 # the side of the guard it enforces. A chart that refused camelCase from
@@ -881,6 +881,194 @@ else
   failed=$((failed + 1))
 fi
 unset _oa
+
+echo "== agents.imageRegistry is required for the in-process broker =="
+# The chart always renders --enable-runtime-broker, and the hub then refuses to
+# start without a registry (requireImageRegistryForBroker,
+# cmd/server_foreground.go). The hub's sources, each accepted here: the
+# SCION_IMAGE_REGISTRY and SCION_MAINTENANCE_IMAGE_REGISTRY environment
+# variables, and image_registry resolved for the active profile (profile level,
+# else top level). Not checked under config.existingSecret. BASE carries a
+# registry, so each row clears it first.
+reject "no registry anywhere" "agents.imageRegistry is required" --set agents.imageRegistry=
+reject "registry only on a profile that is not active" "agents.imageRegistry is required" \
+  --set agents.imageRegistry= --set config.extra.profiles.other.image_registry=example.invalid/agents
+reject "SCION_IMAGE_REGISTRY with an empty value" "to an empty value" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+accept "agents.imageRegistry set"
+accept "top-level image_registry through config.extra" \
+  --set agents.imageRegistry= --set config.extra.image_registry=example.invalid/agents
+accept "active-profile image_registry through config.extra" \
+  --set agents.imageRegistry= --set config.extra.profiles.default.image_registry=example.invalid/agents
+accept "SCION_IMAGE_REGISTRY through hub.extraEnv" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/agents'
+accept "SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv valueFrom" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
+accept "no registry under config.existingSecret" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned
+
+echo "== hub.extraEnv entries the koanf env layer applies over settings.yaml =="
+# LoadVersionedSettings loads SCION_* variables over settings.yaml, so two
+# extraEnv shapes change what the registry check above read from the file. The
+# chart refuses them rather than modelling env precedence (assertExtraEnv).
+#
+# An empty SCION_IMAGE_REGISTRY erases the rendered image_registry: this first
+# row rendered before the refusal and the hub then refused to start.
+reject "empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+reject "empty SCION_MAINTENANCE_IMAGE_REGISTRY" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+reject "SCION_IMAGE_REGISTRY with neither value nor valueFrom" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY'
+reject "empty SCION_IMAGE_REGISTRY under config.existingSecret" "to an empty value" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+accept "non-empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/other'
+accept "non-empty literal SCION_MAINTENANCE_IMAGE_REGISTRY as the only source" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].value=example.invalid/agents'
+accept "SCION_IMAGE_REGISTRY valueFrom alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
+# SCION_ACTIVE_PROFILE overrides active_profile. The first row was a false
+# refusal (the hub would resolve profiles.other), the second a false accept
+# (the hub would resolve no registry); both are now one refusal.
+reject "SCION_ACTIVE_PROFILE naming a profile that has a registry" "may not set SCION_ACTIVE_PROFILE" \
+  --set agents.imageRegistry= --set config.extra.profiles.other.image_registry=example.invalid/agents \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' --set 'hub.extraEnv[0].value=other'
+reject "SCION_ACTIVE_PROFILE moving off the profile that has a registry" "may not set SCION_ACTIVE_PROFILE" \
+  --set agents.imageRegistry= --set config.extra.profiles.default.image_registry=example.invalid/agents \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' --set 'hub.extraEnv[0].value=other'
+reject "SCION_ACTIVE_PROFILE through valueFrom" "active_profile through config.extra" \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=profile' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=name'
+accept "a name that only begins with SCION_ACTIVE_PROFILE" \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE_NOTE' --set 'hub.extraEnv[0].value=x'
+
+echo "== SCION_SERVER_SECRETS_* through hub.extraEnv =="
+# SCION_SERVER_SECRETS_BACKEND binds after settings.yaml and can select gcpsm
+# with no project, which the hub only logs; secrets.backend refuses that shape.
+reject "SCION_SERVER_SECRETS_BACKEND" "SCION_SERVER_SECRETS_* are refused" \
+  --set 'hub.extraEnv[0].name=SCION_SERVER_SECRETS_BACKEND' --set 'hub.extraEnv[0].value=gcpsm'
+
+echo "== hub.adminEmails =="
+# One address per entry. The hub comma-splits a one-element list only, so a
+# comma would mean two admins or one invalid address depending on the list.
+reject "adminEmails entry with a comma, schema layer" "hub.adminEmails.0" \
+  --set 'hub.adminEmails[0]=a@example.invalid\,b@example.invalid'
+reject "adminEmails with config.existingSecret" "inline settings values (hub.adminEmails)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned \
+  --set 'hub.adminEmails[0]=a@example.invalid'
+executed=$((executed + 1))
+_ae="$(render --set 'hub.adminEmails={a@example.invalid,b@example.invalid}' --show-only templates/secret-settings.yaml)"
+_ad="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_ae" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_ad" | grep -q '^kind: Secret$'; then
+  echo "FAIL  server.hub.admin_emails shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_ae" | grep -A2 -E '^ +admin_emails:$' | grep -qE '^ +- a@example.invalid$' \
+  && printf '%s\n' "$_ae" | grep -A2 -E '^ +admin_emails:$' | grep -qE '^ +- b@example.invalid$' \
+  && ! printf '%s\n' "$_ad" | grep -q 'admin_emails'; then
+  echo "ok    hub.adminEmails renders server.hub.admin_emails as a list; empty renders no admin_emails"
+else
+  echo "FAIL  server.hub.admin_emails shape: the list did not render, or an empty list rendered the key"
+  failed=$((failed + 1))
+fi
+unset _ae _ad
+
+echo "== secrets.backend =="
+# local renders nothing; gcpsm renders server.secrets and needs a project. The
+# hub only WARNS when gcpsm has no project (NewGCPBackend's error is logged by
+# cmd/server_foreground.go and the hub runs with no secret backend), so the
+# chart refuses it. gcpsm values under local reach nothing and are refused too.
+reject "gcpsm with no projectId" "requires secrets.gcpsm.projectId" --set secrets.backend=gcpsm
+reject "projectId under backend local" "set while secrets.backend is local" \
+  --set secrets.gcpsm.projectId=rg-project
+reject "replicationLocations under backend local" "set while secrets.backend is local" \
+  --set 'secrets.gcpsm.replicationLocations={us-central1}'
+reject "unknown backend, schema layer" "secrets.backend" --set secrets.backend=vault
+reject "gcpsm alongside config.existingSecret" "secrets.backend" \
+  --set config.existingSecret=rg-settings --set auth.proxy.iap.audience= \
+  --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project
+accept "gcpsm with projectId" --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project
+# The rendered shape: snake_case keys V1SecretsConfig binds, under server.secrets,
+# and absent entirely under the default backend.
+executed=$((executed + 1))
+_sb="$(render --set secrets.backend=gcpsm --set secrets.gcpsm.projectId=rg-project \
+  --set 'secrets.gcpsm.replicationLocations={us-central1,us-east1}' --show-only templates/secret-settings.yaml)"
+_sd="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_sb" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_sd" | grep -q '^kind: Secret$'; then
+  echo "FAIL  server.secrets shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_sb" | grep -qE '^      secrets:$' \
+  && printf '%s\n' "$_sb" | grep -qE '^        backend: gcpsm$' \
+  && printf '%s\n' "$_sb" | grep -qE '^        gcp_project_id: rg-project$' \
+  && printf '%s\n' "$_sb" | grep -A2 -E '^        gcp_replication_locations:$' | grep -qE '^        - us-east1$' \
+  && ! printf '%s\n' "$_sd" | grep -qE '^      secrets:$'; then
+  echo "ok    gcpsm renders server.secrets.{backend,gcp_project_id,gcp_replication_locations}; local renders no server.secrets"
+else
+  echo "FAIL  server.secrets shape: gcpsm did not render the snake_case keys, or local rendered a secrets block"
+  failed=$((failed + 1))
+fi
+unset _sb _sd
+
+echo "== Deployment selector labels are a contract =="
+# CONTRACT, NOT STYLE. A Terraform-owned NEG Service selects the hub's pods by
+# exactly these two labels, app.kubernetes.io/name and app.kubernetes.io/instance,
+# with values derived from the chart name (or nameOverride) and the release
+# name. Change the set or the derivation and that Service selects nothing:
+# the load balancer's backends drain, nothing in this chart goes red, and
+# Kubernetes reports the Deployment healthy. spec.selector is also immutable on
+# an existing Deployment, so a change here cannot be rolled out in place.
+# If you must change these labels, change the Terraform selector in the same
+# release and plan for a Deployment replacement.
+#
+# Each row pins spec.selector.matchLabels to EXACTLY the two keys (no more, no
+# fewer) and checks the pod template carries both with the same values.
+# _matchlabels <release> <helm args...> prints "key=value" lines from the
+# Deployment's spec.selector.matchLabels, sorted.
+_matchlabels() {
+  local rel="$1"; shift
+  "$HELM" template "$rel" "$CHART" "${BASE[@]}" "$@" --show-only templates/deployment.yaml 2>&1 \
+    | awk '/^  selector:$/ {s=1; next}
+           s==1 && /^    matchLabels:$/ {s=2; next}
+           s==2 && /^      [^ ]/ {sub(/^      /, ""); sub(/: /, "="); gsub(/"/, ""); print; next}
+           s==2 {exit}' | sort
+}
+_podlabels() {
+  local rel="$1"; shift
+  "$HELM" template "$rel" "$CHART" "${BASE[@]}" "$@" --show-only templates/deployment.yaml 2>&1 \
+    | awk '/^  template:$/ {s=1; next}
+           s==1 && /^      labels:$/ {s=2; next}
+           s==2 && /^        [^ ]/ {sub(/^        /, ""); sub(/: /, "="); gsub(/"/, ""); print; next}
+           s==2 {exit}' | sort
+}
+_selector_row() { # _selector_row <label> <release> <expected name> <helm args...>
+  local label="$1" rel="$2" name="$3"; shift 3
+  executed=$((executed + 1))
+  local want got pod
+  want="$(printf 'app.kubernetes.io/instance=%s\napp.kubernetes.io/name=%s\n' "$rel" "$name")"
+  got="$(_matchlabels "$rel" "$@")"
+  pod="$(_podlabels "$rel" "$@")"
+  if [ "$got" != "$want" ]; then
+    echo "FAIL  selector contract, ${label}: matchLabels is not exactly name=${name}, instance=${rel}"
+    echo "        got: $(printf '%s' "$got" | tr '\n' ' ')"
+    failed=$((failed + 1))
+  elif ! printf '%s\n' "$pod" | grep -qxF "app.kubernetes.io/name=${name}" \
+    || ! printf '%s\n' "$pod" | grep -qxF "app.kubernetes.io/instance=${rel}"; then
+    echo "FAIL  selector contract, ${label}: the pod template does not carry the selector labels"
+    echo "        got: $(printf '%s' "$pod" | tr '\n' ' ')"
+    failed=$((failed + 1))
+  else
+    echo "ok    selector contract, ${label}: matchLabels is exactly name=${name}, instance=${rel}"
+  fi
+}
+_selector_row "chart name, release t" t scion-hub
+_selector_row "chart name, another release" scion-prod scion-hub
+_selector_row "nameOverride" scion-prod hub-override --set nameOverride=hub-override
+_selector_row "fullnameOverride does not reach the selector" t scion-hub --set fullnameOverride=something-else
+unset -f _matchlabels _podlabels _selector_row
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm
