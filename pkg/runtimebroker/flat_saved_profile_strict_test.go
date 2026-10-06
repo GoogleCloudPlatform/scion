@@ -78,11 +78,13 @@ func TestFlatInstance_UnresolvableSavedProfileNeverReturns503(t *testing.T) {
 		})
 	}
 
-	// A refused start returns before the run is recorded on the tracked
-	// start (the refusal precedes setRunID) and never reaches the runtime.
+	// A refused start never reaches the runtime and leaves no tracked run
+	// after the request returns. That the refusal precedes setRunID is
+	// guaranteed by the handler's code order; the tracked entry closes when
+	// the handler returns, so this check cannot observe the order itself.
 	t.Run("flat refused start is not started", func(t *testing.T) {
 		f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
-		w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start",
+		w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start?runId=run-refused",
 			`{"runId":"run-refused","expectedRuntimeTargetId":"another-target"}`)
 		expectFlatRefusal(t, w, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
 		if mgrStartCalls(f) != 0 {
