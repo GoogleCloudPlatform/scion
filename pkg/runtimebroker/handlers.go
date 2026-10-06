@@ -37,7 +37,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -1462,7 +1461,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		)
 	}
 
-	if syncErr := gcp.SyncFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
+	if syncErr := s.workspaceDownloader()(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
 		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
 			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
 	}

@@ -21,7 +21,6 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
@@ -53,7 +52,9 @@ const (
 // brokerCopyOfHubWorkspace reports whether projectPath is a hub-managed
 // workspace that this broker populated from a hub workspace upload for
 // projectID, and that no hub keeps as its own on this host:
-//   - projectPath, with symlinks resolved, is <globalDir>/projects/<slug>;
+//   - projectPath, with symlinks resolved, is <globalDir>/projects/<slug>
+//     with only <globalDir> resolved, and that entry is a directory, not a
+//     symlink;
 //   - no hub workspace record <globalDir>/hub-workspaces/<slug> exists;
 //   - the broker workspace record <globalDir>/broker-workspaces/<slug>
 //     holds exactly projectID.
@@ -67,12 +68,16 @@ func brokerCopyOfHubWorkspace(projectPath, slug, projectID string) bool {
 	if err != nil {
 		return false
 	}
-	got, err := filepath.EvalSymlinks(projectPath)
+	resolvedGlobal, err := filepath.EvalSymlinks(globalDir)
 	if err != nil {
 		return false
 	}
-	want, err := filepath.EvalSymlinks(filepath.Join(globalDir, "projects", slug))
-	if err != nil || filepath.Clean(got) != filepath.Clean(want) {
+	want := filepath.Join(resolvedGlobal, "projects", slug)
+	if info, err := os.Lstat(want); err != nil || !info.IsDir() {
+		return false
+	}
+	got, err := filepath.EvalSymlinks(projectPath)
+	if err != nil || filepath.Clean(got) != want {
 		return false
 	}
 
@@ -90,40 +95,6 @@ func brokerCopyOfHubWorkspace(projectPath, slug, projectID string) bool {
 	}
 	recorded, err := config.ReadWorkspaceRecord(brokerRecord)
 	return err == nil && recorded == projectID
-}
-
-// hubWorkspaceIdentity is a workspace .scion identity in either form.
-type hubWorkspaceIdentity struct {
-	scionPath string
-	marker    *config.ProjectMarker
-	id, slug  string
-}
-
-func readHubWorkspaceIdentity(projectPath string) (*hubWorkspaceIdentity, error) {
-	scionPath := filepath.Join(projectPath, config.DotScion)
-	info, err := os.Lstat(scionPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	switch {
-	case info.Mode().IsRegular():
-		marker, err := config.ReadProjectMarker(scionPath)
-		if err != nil {
-			return nil, err
-		}
-		return &hubWorkspaceIdentity{scionPath: scionPath, marker: marker, id: marker.ProjectID, slug: marker.ProjectSlug}, nil
-	case info.IsDir():
-		id, err := config.ReadProjectID(scionPath)
-		if err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-		return &hubWorkspaceIdentity{scionPath: scionPath, id: id, slug: api.Slugify(config.GetProjectName(scionPath))}, nil
-	default:
-		return nil, nil
-	}
 }
 
 // configRootHoldsFiles reports whether root exists and contains any
@@ -160,14 +131,14 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 	if !brokerCopyOfHubWorkspace(projectPath, slug, projectID) {
 		return hubIdentityNotBrokerCopy, nil
 	}
-	current, err := readHubWorkspaceIdentity(projectPath)
+	current, err := config.ReadWorkspaceIdentity(projectPath)
 	if err != nil {
 		return "", err
 	}
 	if current == nil {
 		return hubIdentityNoEntry, nil
 	}
-	if current.id == projectID && (current.marker == nil || current.slug == slug) {
+	if current.Matches(slug, projectID) {
 		return hubIdentityMatching, nil
 	}
 
@@ -178,11 +149,11 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 	if !ok {
 		return hubIdentityUnexpectedForm, nil
 	}
-	if current.id != "" {
-		if !shareddirs.ValidProjectID(current.id) {
+	if current.ID != "" {
+		if !shareddirs.ValidProjectID(current.ID) {
 			return hubIdentityUnexpectedForm, nil
 		}
-		previous, ok := config.ConfinedProjectConfigRoot(current.slug, current.id)
+		previous, ok := config.ConfinedProjectConfigRoot(current.Slug, current.ID)
 		if !ok {
 			return hubIdentityUnexpectedForm, nil
 		}
@@ -198,14 +169,7 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 		return hubIdentityInUse, nil
 	}
 
-	if current.marker == nil {
-		if err := config.WriteProjectID(current.scionPath, projectID); err != nil {
-			return "", err
-		}
-		return hubIdentityRecorded, nil
-	}
-	updated := &config.ProjectMarker{ProjectID: projectID, ProjectName: slug, ProjectSlug: slug, Type: current.marker.Type}
-	if err := config.WriteProjectMarker(current.scionPath, updated); err != nil {
+	if err := current.Write(slug, projectID); err != nil {
 		return "", err
 	}
 	return hubIdentityRecorded, nil

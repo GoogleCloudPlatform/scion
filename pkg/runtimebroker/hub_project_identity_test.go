@@ -16,9 +16,13 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -299,3 +303,104 @@ func TestAlignHubManagedProjectIdentity_StartPathUsesHubIDDir(t *testing.T) {
 }
 
 func ptr(s string) *string { return &s }
+
+// createWithWorkspaceDownload sends a create request for brokerTestSlug with
+// a GCS workspace upload to srv, with the download replaced by download.
+func createWithWorkspaceDownload(t *testing.T, srv *Server, download func(context.Context, string, string, string) error) *httptest.ResponseRecorder {
+	t.Helper()
+	srv.config.StorageBucket = "test-bucket"
+	srv.SetWorkspaceDownloader(download)
+	body, err := json.Marshal(CreateAgentRequest{
+		ID:                   "agent-ws-1",
+		Name:                 "agent-ws",
+		ProjectID:            brokerTestHubID,
+		ProjectSlug:          brokerTestSlug,
+		WorkspaceStoragePath: "workspaces/" + brokerTestHubID + "/files",
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+func downloadOK(_ context.Context, _, _, localPath string) error {
+	return os.WriteFile(filepath.Join(localPath, "downloaded.txt"), []byte("downloaded"), 0644)
+}
+
+func brokerRecordPath(t *testing.T) string {
+	t.Helper()
+	path, err := config.BrokerWorkspaceRecordPath(brokerTestSlug)
+	require.NoError(t, err)
+	return path
+}
+
+func TestCreateAgent_BrokerRecordAfterDownloadIntoNewWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := newTestServer(t)
+
+	w := createWithWorkspaceDownload(t, srv, downloadOK)
+	require.Less(t, w.Code, 300, w.Body.String())
+
+	got, err := config.ReadWorkspaceRecord(brokerRecordPath(t))
+	require.NoError(t, err)
+	assert.Equal(t, brokerTestHubID, got)
+}
+
+func TestCreateAgent_NoBrokerRecordForWorkspacePresentAtRequest(t *testing.T) {
+	srv := newTestServer(t)
+	_, _ = seedBrokerWorkspace(t, brokerTestLocalID, false)
+
+	w := createWithWorkspaceDownload(t, srv, downloadOK)
+	require.Less(t, w.Code, 300, w.Body.String())
+
+	assert.NoFileExists(t, brokerRecordPath(t))
+}
+
+func TestCreateAgent_NoBrokerRecordWhenDownloadFails(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := newTestServer(t)
+
+	w := createWithWorkspaceDownload(t, srv, func(context.Context, string, string, string) error {
+		return errors.New("download failed")
+	})
+	assert.GreaterOrEqual(t, w.Code, 400)
+
+	assert.NoFileExists(t, brokerRecordPath(t))
+}
+
+func TestCreateAgent_HubWorkspaceKeepsIdentityAndGetsNoBrokerRecord(t *testing.T) {
+	srv := newTestServer(t)
+	workspace, previous := seedBrokerWorkspace(t, brokerTestLocalID, true)
+	writeHubRecord(t, brokerTestHubID)
+	scionPath := filepath.Join(workspace, config.DotScion)
+	before, err := os.ReadFile(scionPath)
+	require.NoError(t, err)
+
+	w := createWithWorkspaceDownload(t, srv, downloadOK)
+	require.Less(t, w.Code, 300, w.Body.String())
+
+	after, err := os.ReadFile(scionPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "the hub workspace marker is not rewritten")
+	assert.Equal(t, previous, brokerConfigRoot(t, workspace))
+	assert.NoFileExists(t, brokerRecordPath(t))
+}
+
+func TestRecordHubProjectIdentity_SymlinkedProjectDirSkips(t *testing.T) {
+	workspace, _ := seedBrokerWorkspace(t, brokerTestLocalID, false)
+	writeBrokerRecord(t, brokerTestHubID)
+
+	// projects/<slug> becomes a symlink to the real workspace directory.
+	real := filepath.Join(t.TempDir(), "real")
+	require.NoError(t, os.Rename(workspace, real))
+	require.NoError(t, os.Symlink(real, workspace))
+
+	outcome, err := recordHubProjectIdentity(workspace, brokerTestSlug, brokerTestHubID, notBusy)
+	require.NoError(t, err)
+	assert.Equal(t, hubIdentityNotBrokerCopy, outcome)
+	id, err := config.ReadProjectID(filepath.Join(real, config.DotScion))
+	require.NoError(t, err)
+	assert.Equal(t, brokerTestLocalID, id)
+}
