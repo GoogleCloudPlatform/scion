@@ -17,7 +17,9 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -855,15 +857,11 @@ SELECT id FROM effective`, p1)
 	return result, nil
 }
 
-// maxParentGroupDepth caps the recursion depth of the ancestor CTE.
-// This is a safety limit to bound query cost in pathological hierarchies;
-// in practice group nesting should be shallow.
-const maxParentGroupDepth = 32
-
 // GetParentGroups returns all ancestor groups of the given group — groups that
 // transitively contain this group as a child — via a recursive CTE that walks
 // the parent_groups edge upward. The group itself is NOT included in the
-// result. Recursion depth is capped at maxParentGroupDepth levels.
+// result. The walk has no depth limit: it resolves the same closure that
+// GetEffectiveGroups resolves for a member, and UNION ends it on a cycle.
 func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
 	uid, err := parseUUID(groupID)
 	if err != nil {
@@ -873,14 +871,13 @@ func (s *GroupStore) GetParentGroups(ctx context.Context, groupID string) ([]str
 	drv := s.client.Driver()
 	p1 := sqlUUIDPh(drv.Dialect(), 1)
 
-	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id, depth) AS (
-    SELECT group_id, 1 FROM group_child_groups WHERE parent_group_id = %s
-    UNION ALL
-    SELECT gc.group_id, a.depth + 1 FROM group_child_groups gc
+	query := fmt.Sprintf(`WITH RECURSIVE ancestors(id) AS (
+    SELECT group_id FROM group_child_groups WHERE parent_group_id = %s
+    UNION
+    SELECT gc.group_id FROM group_child_groups gc
     JOIN ancestors a ON gc.parent_group_id = a.id
-    WHERE a.depth < %d
 )
-SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
+SELECT id FROM ancestors`, p1)
 
 	rows := &entsql.Rows{}
 	if err := drv.Query(ctx, query, []any{uid}, rows); err != nil {
@@ -900,6 +897,79 @@ SELECT DISTINCT id FROM ancestors`, p1, maxParentGroupDepth)
 		}
 	}
 	return result, nil
+}
+
+// GetDirectParentGroupIDs returns the IDs of the groups that contain the
+// given group as a direct child group, in one query on the child-group edge.
+// Unlike GetParentGroups it does not walk ancestors and does not exclude the
+// group itself, so a self-edge is reported.
+func (s *GroupStore) GetDirectParentGroupIDs(ctx context.Context, groupID string) ([]string, error) {
+	uid, err := parseUUID(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	ids, err := s.client.Group.Query().
+		Where(group.HasChildGroupsWith(group.IDEQ(uid))).
+		IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	result := make([]string, len(ids))
+	for i, id := range ids {
+		result[i] = id.String()
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+// RemoveChildGroupEdge removes the edge that makes childGroupID a direct
+// child group of parentGroupID. It shares only RemoveGroupMember's
+// project_agents guard. Unlike RemoveGroupMember's group branch, it deletes
+// the join-table row directly, returns store.ErrNotFound when no row was
+// deleted, and does not bump the parent group's updated timestamp. On
+// PostgreSQL a concurrent delete of the same row waits for the first
+// transaction and then deletes nothing, so exactly one caller sees success.
+func (s *GroupStore) RemoveChildGroupEdge(ctx context.Context, parentGroupID, childGroupID string) error {
+	parentUID, err := parseUUID(parentGroupID)
+	if err != nil {
+		return err
+	}
+	childUID, err := parseUUID(childGroupID)
+	if err != nil {
+		return err
+	}
+
+	// Same guard as RemoveGroupMember.
+	g, err := s.client.Group.Get(ctx, parentUID)
+	if err != nil {
+		return mapError(err)
+	}
+	if g.GroupType == group.GroupTypeProjectAgents {
+		return fmt.Errorf("%w: cannot manually modify members of project_agents groups", store.ErrInvalidInput)
+	}
+
+	// In the child_groups join table, the first primary key column holds the
+	// parent group and the second the child group.
+	drv := s.client.Driver()
+	d := drv.Dialect()
+	query := fmt.Sprintf("DELETE FROM %s WHERE %s = %s AND %s = %s",
+		group.ChildGroupsTable,
+		group.ChildGroupsPrimaryKey[0], sqlUUIDPh(d, 1),
+		group.ChildGroupsPrimaryKey[1], sqlUUIDPh(d, 2))
+	var res sql.Result
+	if err := drv.Exec(ctx, query, []any{parentUID, childUID}, &res); err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // GetGroupByProjectID retrieves the project_agents group associated with a project.

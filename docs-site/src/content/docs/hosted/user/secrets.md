@@ -33,6 +33,14 @@ runtime_broker  <  hub  <  project  <  user
 ```
 Therefore, user-scoped settings have the highest priority and will override project, hub, and broker-scoped variables or secrets of the same name. Template `env` blocks and CLI `--env` flags are layered on top of resolved secrets.
 
+### Reserved Names
+
+Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) are reserved for Scion's own control-plane variables. The Hub rejects with a validation error any environment variable, or `environment`-type secret, whose key or target uses one of these prefixes. `file` and `variable` secrets are not affected.
+
+Values stored under a reserved name before this check existed are not deleted, but they are never used: the Hub drops them at dispatch and the Runtime Broker drops them again before injection. If a variable or secret collides with a value the runtime sets itself, the runtime's value wins.
+
+`SCION_METADATA_MODE` is always set by the Hub. It comes from the agent's GCP identity configuration and defaults to `block`. A Runtime Broker only accepts an elevated mode (anything other than `block`) when the Hub's dispatch includes its source marker. Otherwise the Runtime Broker downgrades it, so a stored value or an older Hub cannot turn on metadata access.
+
 ---
 ## Injection Modes
 
