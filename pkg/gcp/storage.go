@@ -77,8 +77,12 @@ var syncStatsSeq atomic.Uint64
 // the process shares one global error count that is never reset. Once any
 // sync had failed, every later sync then refused to delete extraneous
 // files ("not deleting files as there were IO errors") until the process
-// restarted. rclone discards the oldest groups once it holds
-// max_stats_groups of them, so the groups do not accumulate.
+// restarted. The groups are bounded: rclone keeps at most
+// max_stats_groups of them (default 1000) and discards the oldest when a
+// new one is added. This assumes a group outlives its sync. If 1000 or
+// more syncs started while one was still running, that sync's group could
+// be discarded; rclone would then recreate it with a zero error count, and
+// a sync that had hit IO errors could still delete files.
 func withSyncStatsGroup(ctx context.Context) context.Context {
 	return accounting.WithStatsGroup(ctx, fmt.Sprintf("scion-workspace-sync-%d", syncStatsSeq.Add(1)))
 }

@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -357,9 +358,10 @@ func TestWorkspaceSyncGuard_NoUnfilteredRcloneTransfers(t *testing.T) {
 // storageSyncViolations parses src (the contents of storage.go) and
 // returns every way it departs from the filtered-sync rules:
 //   - an rclone transfer package is imported, under its own name or an
-//     alias, and a call through it other than the single sync.Sync in
-//     syncFiltered appears; a dot import is rejected outright, since its
-//     calls cannot be attributed;
+//     alias, and any reference through it other than the single sync.Sync
+//     call in syncFiltered appears, including a function value held in a
+//     local or package-level variable; a dot import is rejected outright,
+//     since its references cannot be attributed;
 //   - syncFiltered does not build its context with identityFilteredContext;
 //   - the helpers do not route through syncFiltered;
 //   - anything mentions symlink handling options (copy_links, links,
@@ -395,40 +397,73 @@ func storageSyncViolations(src string) ([]string, error) {
 		transferPkgs[local] = base
 	}
 
+	// Every reference to a transfer package counts, not just calls: a
+	// function value such as "do := sync.Sync" or a package-level
+	// "var doSync = sync.Sync" would otherwise reach rclone unfiltered.
+	// The whole file is walked, so declarations outside functions are
+	// covered too. The only allowed reference is the callee of the single
+	// sync.Sync call in syncFiltered.
+	callees := map[*ast.SelectorExpr]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				callees[sel] = true
+			}
+		}
+		return true
+	})
 	callsIn := map[string]map[string]int{}
 	total := 0
 	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
+		fnName := ""
+		var body ast.Node = decl
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			fnName = fn.Name.Name
+			if fn.Body == nil {
+				continue
+			}
+			body = fn.Body
 		}
 		calls := map[string]int{}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			switch fun := call.Fun.(type) {
+		ast.Inspect(body, func(n ast.Node) bool {
+			switch v := n.(type) {
 			case *ast.SelectorExpr:
-				if x, ok := fun.X.(*ast.Ident); ok {
-					if base, ok := transferPkgs[x.Name]; ok {
-						total++
-						callee := base + "." + fun.Sel.Name
-						if fn.Name.Name != "syncFiltered" || callee != "sync.Sync" || x.Name != "sync" {
-							problems = append(problems, fn.Name.Name+" calls "+x.Name+"."+fun.Sel.Name+"; only syncFiltered may call sync.Sync")
-						}
-					}
-					calls[x.Name+"."+fun.Sel.Name]++
+				x, ok := v.X.(*ast.Ident)
+				if !ok {
+					return true
 				}
-			case *ast.Ident:
-				calls[fun.Name]++
+				base, ok := transferPkgs[x.Name]
+				if !ok {
+					return true
+				}
+				total++
+				ref := x.Name + "." + v.Sel.Name
+				switch {
+				case fnName == "":
+					problems = append(problems, "a package-level declaration references "+ref+"; only syncFiltered may call sync.Sync")
+				case !callees[v]:
+					problems = append(problems, fnName+" references "+ref+" as a value; only syncFiltered may call sync.Sync")
+				case fnName != "syncFiltered" || base+"."+v.Sel.Name != "sync.Sync" || x.Name != "sync":
+					problems = append(problems, fnName+" calls "+ref+"; only syncFiltered may call sync.Sync")
+				}
+			case *ast.CallExpr:
+				switch fun := v.Fun.(type) {
+				case *ast.SelectorExpr:
+					if x, ok := fun.X.(*ast.Ident); ok {
+						calls[x.Name+"."+fun.Sel.Name]++
+					}
+				case *ast.Ident:
+					calls[fun.Name]++
+				}
 			}
 			return true
 		})
-		callsIn[fn.Name.Name] = calls
+		if fnName != "" {
+			callsIn[fnName] = calls
+		}
 	}
 	if total != 1 {
-		problems = append(problems, "found "+strconv.Itoa(total)+" rclone transfer calls, want exactly 1 (sync.Sync in syncFiltered)")
+		problems = append(problems, "found "+strconv.Itoa(total)+" rclone transfer references, want exactly 1 (the sync.Sync call in syncFiltered)")
 	}
 	if callsIn["syncFiltered"]["identityFilteredContext"] != 1 {
 		problems = append(problems, "syncFiltered must build its context with identityFilteredContext")
@@ -505,37 +540,83 @@ func TestWorkspaceSyncGuard_StorageGuardCatchesBypasses(t *testing.T) {
 	extraCall := func(t *testing.T, s, pkg string) string {
 		return edit(t, s, helperBody, "src, _ := fs.NewFs(ctx, localPath)\n\tdst, _ := fs.NewFs(ctx, gcsRemote(bucketName, prefix))\n\t_ = "+pkg+".Sync(ctx, dst, src, false)\n\t"+helperBody)
 	}
-	cases := map[string]func(t *testing.T) string{
-		"extra plain call": func(t *testing.T) string {
-			return extraCall(t, orig, "sync")
+	// The download helper's tail, where a function-value bypass is added.
+	const downloadTail = "fmt.Printf(\"Syncing %s to %s via rclone\\n\", remote, localPath)\n\n\treturn syncFiltered(ctx, dstFs, srcFs)"
+	// Each case lists the problems its bypass must produce, so an
+	// unrelated violation cannot make a case pass on its own.
+	cases := map[string]struct {
+		mutate func(t *testing.T) string
+		want   []string
+	}{
+		"extra plain call": {
+			mutate: func(t *testing.T) string {
+				return extraCall(t, orig, "sync")
+			},
+			want: []string{"SyncToGCS calls sync.Sync; only syncFiltered may call sync.Sync"},
 		},
-		"aliased import": func(t *testing.T) string {
-			s := edit(t, orig, syncImport, syncImport+"\n\trsync "+syncImport)
-			return extraCall(t, s, "rsync")
+		"aliased import": {
+			mutate: func(t *testing.T) string {
+				s := edit(t, orig, syncImport, syncImport+"\n\trsync "+syncImport)
+				return extraCall(t, s, "rsync")
+			},
+			want: []string{"SyncToGCS calls rsync.Sync; only syncFiltered may call sync.Sync"},
 		},
-		"aliased operations import": func(t *testing.T) string {
-			s := edit(t, orig, syncImport, syncImport+"\n\tops \"github.com/rclone/rclone/fs/operations\"")
-			return edit(t, s, helperBody, "_ = ops.CopyFile\n\tops.Purge(ctx, nil, \"\")\n\t"+helperBody)
+		"aliased operations import": {
+			mutate: func(t *testing.T) string {
+				s := edit(t, orig, syncImport, syncImport+"\n\tops \"github.com/rclone/rclone/fs/operations\"")
+				return edit(t, s, helperBody, "_ = ops.CopyFile\n\tops.Purge(ctx, nil, \"\")\n\t"+helperBody)
+			},
+			want: []string{
+				"SyncToGCS references ops.CopyFile as a value; only syncFiltered may call sync.Sync",
+				"SyncToGCS calls ops.Purge; only syncFiltered may call sync.Sync",
+			},
 		},
-		"dot import": func(t *testing.T) string {
-			return edit(t, orig, syncImport, ". \"github.com/rclone/rclone/fs/operations\"\n\t"+syncImport)
+		"dot import": {
+			mutate: func(t *testing.T) string {
+				return edit(t, orig, syncImport, ". \"github.com/rclone/rclone/fs/operations\"\n\t"+syncImport)
+			},
+			want: []string{"dot import of github.com/rclone/rclone/fs/operations is not allowed"},
 		},
-		"helper skips syncFiltered": func(t *testing.T) string {
-			return edit(t, orig, "fmt.Printf(\"Syncing %s to %s via rclone\\n\", localPath, remote)\n\n\treturn syncFiltered(ctx, dstFs, srcFs)",
-				"fmt.Printf(\"Syncing %s to %s via rclone\\n\", localPath, remote)\n\n\treturn sync.Sync(ctx, dstFs, srcFs, false)")
+		"helper skips syncFiltered": {
+			mutate: func(t *testing.T) string {
+				return edit(t, orig, "fmt.Printf(\"Syncing %s to %s via rclone\\n\", localPath, remote)\n\n\treturn syncFiltered(ctx, dstFs, srcFs)",
+					"fmt.Printf(\"Syncing %s to %s via rclone\\n\", localPath, remote)\n\n\treturn sync.Sync(ctx, dstFs, srcFs, false)")
+			},
+			want: []string{
+				"syncLocalToRemote calls sync.Sync; only syncFiltered may call sync.Sync",
+				"syncLocalToRemote must call syncFiltered",
+			},
 		},
-		"copy_links on the local remote": func(t *testing.T) string {
-			return edit(t, orig, "srcFs, err := fs.NewFs(ctx, localPath)", "srcFs, err := fs.NewFs(ctx, \":local,copy_links=true:\"+localPath)")
+		"local function value": {
+			mutate: func(t *testing.T) string {
+				return edit(t, orig, downloadTail, "do := sync.Sync\n\t_ = do(ctx, dstFs, srcFs, false)\n\t"+downloadTail)
+			},
+			want: []string{"syncRemoteToLocal references sync.Sync as a value; only syncFiltered may call sync.Sync"},
+		},
+		"package-level function value": {
+			mutate: func(t *testing.T) string {
+				s := edit(t, orig, "// syncStatsSeq numbers", "var doSync = sync.Sync\n\n// syncStatsSeq numbers")
+				return edit(t, s, downloadTail, "_ = doSync(ctx, dstFs, srcFs, false)\n\t"+downloadTail)
+			},
+			want: []string{"a package-level declaration references sync.Sync; only syncFiltered may call sync.Sync"},
+		},
+		"copy_links on the local remote": {
+			mutate: func(t *testing.T) string {
+				return edit(t, orig, "srcFs, err := fs.NewFs(ctx, localPath)", "srcFs, err := fs.NewFs(ctx, \":local,copy_links=true:\"+localPath)")
+			},
+			want: []string{"storage.go mentions \":local,copy_links=true:\"; symlinks must not be followed or translated"},
 		},
 	}
-	for name, mutate := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			problems, err := storageSyncViolations(mutate(t))
+			problems, err := storageSyncViolations(tc.mutate(t))
 			if err != nil {
 				t.Fatalf("mutated storage.go does not parse: %v", err)
 			}
-			if len(problems) == 0 {
-				t.Error("guard reported nothing for a bypass")
+			for _, want := range tc.want {
+				if !slices.Contains(problems, want) {
+					t.Errorf("guard did not report %q; got %q", want, problems)
+				}
 			}
 		})
 	}
