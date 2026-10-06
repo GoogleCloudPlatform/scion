@@ -683,10 +683,10 @@ func TestAsyncCreate_AbortRecordedBeforeClaimSucceeds_NoStart(t *testing.T) {
 //
 // workspaceStoragePath is set (with a fake, failing download) so that if
 // this check is missing, the launch falls through into the GCS download
-// step, which records the call and fails fast -- observable independently of the IsAborted check after the
-// download (that one would never even be reached, since a download error
-// fails the launch directly), so this test cannot be satisfied by that
-// later check doing the work instead.
+// step, which records the call and fails fast -- observable independently
+// of the IsAborted check after the download (that one would never even be
+// reached, since a download error fails the launch directly), so this test
+// cannot be satisfied by that later check doing the work instead.
 func TestAsyncCreate_AbortRecordedDuringWaitSuperseded_NoMarkerNoStart(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, rtb := newAsyncTestServer(t, mgr)
@@ -1350,16 +1350,17 @@ func TestCreateAgent_SyncGCSDownload_UsesRequestBucket(t *testing.T) {
 	}
 }
 
-// TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText covers the
-// synchronous path's GCS-download failure body staying byte-identical to
-// what it was before downloadWorkspaceFromGCS existed as a separate
-// function: capitalized, with no wrapped-error prefix.
+// TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText pins the
+// synchronous path's GCS-download failure body (capitalized, with no
+// wrapped-error prefix) through a failing fake download. The request names
+// no bucket, so it also checks the download falls back to the broker's
+// StorageBucket setting.
 func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) {
 	mgr := newAsyncManager()
 	srv, _ := newAsyncTestServer(t, mgr)
 	srv.config.WorktreeBase = t.TempDir()
 	srv.config.StorageBucket = "broker-bucket"
-	installFakeWorkspaceSync(t, errors.New("fake sync failure"))
+	fake := installFakeWorkspaceSync(t, errors.New("fake sync failure"))
 
 	w := postCreate(t, srv, map[string]any{
 		"name": "agent-sync-gcs-fail", "workspaceStoragePath": "some/path",
@@ -1373,7 +1374,11 @@ func TestCreateAgent_SyncGCSDownloadFailure_PinsOriginalErrorText(t *testing.T) 
 		t.Fatalf("decode error response: %v", err)
 	}
 	if errResp.Error.Message != "Failed to download workspace from GCS: fake sync failure" {
-		t.Fatalf("message = %q, want the byte-identical capitalized GCS error text", errResp.Error.Message)
+		t.Fatalf("message = %q, want the capitalized GCS error text", errResp.Error.Message)
+	}
+	calls := fake.Calls()
+	if len(calls) != 1 || calls[0].bucket != "broker-bucket" {
+		t.Fatalf("downloads = %+v, want one from the broker setting bucket broker-bucket", calls)
 	}
 }
 
@@ -1819,10 +1824,10 @@ func TestAsyncCreate_HubManagedGCSBootstrap_NotAmbiguous(t *testing.T) {
 	}
 
 	w := postCreate(t, srv, map[string]any{
-		"workspaceStorageBucket": "hub-bucket",
-		"name":                   "agent-hub-gcs-async", "id": "agent-hub-gcs-async-id", "projectId": "proj-1",
+		"name": "agent-hub-gcs-async", "id": "agent-hub-gcs-async-id", "projectId": "proj-1",
 		"projectSlug": "notes", "workspaceStoragePath": "workspaces/proj-1/agent-hub-gcs-async-id",
-		"asyncLaunch": true, "launchId": "L-hub-gcs", "launchTimeoutSeconds": 300,
+		"workspaceStorageBucket": "hub-bucket", "asyncLaunch": true,
+		"launchId": "L-hub-gcs", "launchTimeoutSeconds": 300,
 		"config": map[string]any{"template": "claude"},
 	})
 	if w.Code != http.StatusCreated {

@@ -1449,19 +1449,21 @@ func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
 }
 
 // downloadWorkspaceFromGCS performs the non-git GCS workspace bootstrap when
-// req.WorkspaceStoragePath is set. It is a pure extraction of createAgent's
-// original inline admission step (no behavior change), factored out so the
-// async-launch path (runLaunch) can perform exactly the same step in its
-// goroutine (design t1-async-create-v11.md §3.1: "Launch is the GCS
-// workspace download ... plus Manager.Start, in a goroutine").
+// req.WorkspaceStoragePath is set. It was factored out of createAgent's
+// inline admission step so the async-launch path (runLaunch) performs the
+// same step in its goroutine (design t1-async-create-v11.md §3.1: "Launch is
+// the GCS workspace download ... plus Manager.Start, in a goroutine"). It
+// downloads from the request's bucket, else this broker's StorageBucket
+// (workspaceStorageBucket), and refuses before creating the workspace
+// directory when neither is set.
 //
 // Returns opts unchanged when WorkspaceStoragePath is empty. On error it
 // returns: the short status string the synchronous caller records on the
-// dispatch attempt; httpMessage, the exact user-facing text the synchronous
-// path wrote with RuntimeError before this was extracted (byte-identical,
-// capitalized, no wrapped error — design's "byte-identical to today" for the
-// asyncLaunch-absent path); and err, a normal lowercase Go error for the
-// async path's failure report and logging.
+// dispatch attempt; httpMessage, the capitalized user-facing text the
+// synchronous path writes (no wrapped error); and err, a normal lowercase Go
+// error for the async path's failure report and logging. err is
+// errWorkspaceStorageUnconfigured when no bucket is known, which callers
+// answer with a 422 rather than a runtime error.
 func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRequest, opts api.StartOptions) (updated api.StartOptions, attemptMsg string, httpMessage string, err error) {
 	if req.WorkspaceStoragePath == "" {
 		return opts, "", "", nil

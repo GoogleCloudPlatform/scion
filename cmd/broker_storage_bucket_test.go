@@ -29,6 +29,7 @@ func TestBrokerStorageBucket(t *testing.T) {
 		{"gcs bucket", config.StorageConfig{Provider: "gcs", Bucket: "ws-bucket"}, "ws-bucket"},
 		{"provider unset", config.StorageConfig{Bucket: "ws-bucket"}, "ws-bucket"},
 		{"local provider ignores bucket", config.StorageConfig{Provider: "local", Bucket: "ws-bucket"}, ""},
+		{"local provider is case-insensitive", config.StorageConfig{Provider: "Local", Bucket: "ws-bucket"}, ""},
 		{"no bucket", config.StorageConfig{Provider: "gcs"}, ""},
 	}
 	for _, tc := range cases {

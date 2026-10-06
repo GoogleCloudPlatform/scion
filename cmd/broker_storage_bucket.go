@@ -14,7 +14,11 @@
 
 package cmd
 
-import "github.com/GoogleCloudPlatform/scion/pkg/config"
+import (
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+)
 
 // brokerStorageBucket returns the GCS bucket the runtime broker falls back
 // to when a workspace transfer request names none: the server's
@@ -23,7 +27,7 @@ import "github.com/GoogleCloudPlatform/scion/pkg/config"
 // each create that carries a workspace upload, so this only matters for
 // requests from hubs that predate that (ptone/scion#3422).
 func brokerStorageBucket(storage config.StorageConfig) string {
-	if storage.Provider == "local" {
+	if strings.EqualFold(storage.Provider, "local") {
 		return ""
 	}
 	return storage.Bucket
