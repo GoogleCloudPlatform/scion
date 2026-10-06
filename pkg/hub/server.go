@@ -1754,6 +1754,9 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
+	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
