@@ -311,15 +311,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, workspaceModeErr, nil)
 		return
 	}
-	// miller79/scion#167: in-place reuse is safe only where the private
-	// workspace is a directory on the broker's own disk. Checked, like the
-	// capability below, before anything is planned or stopped, so a dry
-	// run reports the same verdict.
-	if sameBrokerEmptyPerAgent && !localDiskRuntime(agent.Runtime) {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			"empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)", nil)
-		return
-	}
 
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -346,6 +337,17 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		// plan is computed or anything is persisted).
 		writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
 			"runtime broker does not support agent reincarnation; upgrade the broker", nil)
+		return
+	}
+	// miller79/scion#167: in-place reuse is safe only where the private
+	// workspace is a directory on the broker's own disk. Checked, like the
+	// capability below, before anything is planned or stopped, so a dry
+	// run reports the same verdict. An unrecorded runtime falls back to
+	// resolveAgentRuntime (the value enrichAgents displays), which returns
+	// "" when the broker's profiles are ambiguous: still refused.
+	if sameBrokerEmptyPerAgent && !localDiskRuntime(effectiveAgentRuntime(agent, broker)) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"empty-per-agent reincarnation is supported only on local-disk runtimes (docker, podman, container)", nil)
 		return
 	}
 	if sameBrokerEmptyPerAgent && !broker.Capabilities.ReprovisionEmptyPerAgent {
@@ -718,6 +720,16 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 	}
 
 	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// effectiveAgentRuntime is the agent's recorded runtime, or, when none is
+// recorded yet, the one resolveAgentRuntime derives from the broker's
+// profiles ("" when ambiguous).
+func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) string {
+	if agent.Runtime != "" {
+		return agent.Runtime
+	}
+	return resolveAgentRuntime(agent, broker)
 }
 
 // localDiskRuntime reports whether an agent's recorded runtime
