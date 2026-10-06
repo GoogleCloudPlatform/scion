@@ -27,7 +27,8 @@ import (
 // a cross-node deferred wait); the bound covers them all together.
 //
 // It equals the hub-to-broker request limit: the control channel's
-// RequestTimeout (server.go:1849, default in controlchannel.go:59) and the
+// RequestTimeout (set in New, server.go:2007; default in
+// DefaultControlChannelConfig, controlchannel.go:59) and the
 // broker HTTP transport's client timeout (broker_http_transport.go). When it
 // fires, the dispatch ctx is done, and what the broker sees depends on the
 // transport: on the control channel, BrokerConnection.TunnelRequest sends a
