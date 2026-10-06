@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/membershiplosscheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -146,6 +148,72 @@ func TestAgentHold_ClearReasonIsCapped(t *testing.T) {
 	assert.LessOrEqual(t, len(h.ClearReason), 2000)
 	assert.True(t, strings.HasPrefix(reason, h.ClearReason))
 	assert.Equal(t, actor.String(), h.ClearedByID)
+}
+
+// TestAgentHold_CreateIsAtomic: when a later batch of a call fails at insert,
+// the rows of its earlier batches are not kept, and the call returns 0.
+func TestAgentHold_CreateIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+	// One hold per batch, so the call below runs two batches.
+	cs.insertBatch = 1
+
+	projectID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projectID, Name: "hold", Slug: "hold-" + projectID[:8]}))
+	a := makeAgent(projectID, "hold-a")
+	require.NoError(t, cs.CreateAgent(ctx, a))
+	b := makeAgent(projectID, "hold-b")
+	require.NoError(t, cs.CreateAgent(ctx, b))
+
+	// The insert of b's hold fails; a's hold is in the batch before it.
+	failAgent := uuid.MustParse(b.ID)
+	client.AgentHold.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if hm, ok := m.(*ent.AgentHoldMutation); ok {
+				if id, ok := hm.AgentID(); ok && id == failAgent {
+					return nil, errors.New("insert refused by test")
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	hold := func(agentID string) *store.AgentHold {
+		return &store.AgentHold{
+			AgentID:           agentID,
+			ProjectID:         projectID,
+			Cause:             store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser,
+			RootPrincipalID:   uuid.NewString(),
+			Trigger:           store.MembershipLossTriggerMemberRemove,
+		}
+	}
+
+	n, err := cs.CreateAgentHolds(ctx, []*store.AgentHold{hold(a.ID), hold(b.ID)})
+	require.Error(t, err)
+	assert.Equal(t, 0, n)
+	count, err := client.AgentHold.Query().Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "no row of the first batch is kept")
+
+	// Inside WithTx the call runs in the ambient transaction and also
+	// returns 0.
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		n, err := tx.CreateAgentHolds(ctx, []*store.AgentHold{hold(a.ID), hold(b.ID)})
+		assert.Equal(t, 0, n)
+		return err
+	})
+	require.Error(t, err)
+	count, err = client.AgentHold.Query().Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+
+	// Without the failing hold the same call inserts.
+	n, err = cs.CreateAgentHolds(ctx, []*store.AgentHold{hold(a.ID)})
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
 }
 
 // lockTestBackendPID returns the PostgreSQL backend PID of txStore's

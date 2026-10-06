@@ -612,6 +612,7 @@ func (s *DelegationEdgeStore) heldForRoot(ctx context.Context, rootID string, ca
 				agenthold.RootPrincipalIDEQ(rootID),
 				agenthold.ClearedAtIsNil(),
 			).
+			Select(agenthold.FieldAgentID).
 			All(ctx)
 		if err != nil {
 			return nil, mapError(err)

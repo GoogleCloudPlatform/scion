@@ -145,17 +145,27 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 			assert.Equal(t, 0, n)
 			assert.NotEqual(t, first, holds[0].ID, "every call assigns a fresh ID")
 
+			// Keep the clear more than a second after the first call, so
+			// the first call's creation time is before the clear at any
+			// stored timestamp precision.
+			time.Sleep(1100 * time.Millisecond)
 			_, err = s.ClearAgentHolds(ctx, a, store.ClearActor{Kind: store.ClearActorUser, ID: uuid.NewString()}, "resumed")
 			require.NoError(t, err)
+			// The cleared row's ClearedAt is not after this time.
+			afterClear := time.Now()
 
-			// After the clear, the same slice inserts a new active hold.
+			// After the clear, the same slice inserts a new active hold
+			// whose creation time is this call's, not the first call's.
 			n, err = s.CreateAgentHolds(ctx, holds)
 			require.NoError(t, err)
 			assert.Equal(t, 1, n)
+			assert.False(t, holds[0].CreatedAt.Before(afterClear), "every call sets its own creation time")
 			active, err := s.ListActiveAgentHolds(ctx, a)
 			require.NoError(t, err)
 			require.Len(t, active, 1)
 			assert.Equal(t, holds[0].ID, active[0].ID)
+			assert.False(t, active[0].CreatedAt.Before(afterClear.Add(-time.Second)),
+				"the active hold was created after the previous hold was cleared")
 		})
 
 		t.Run("a hold outside its agent's project is refused", func(t *testing.T) {
@@ -174,6 +184,10 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 				n, err := s.CreateAgentHolds(ctx, holds)
 				assert.ErrorIs(t, err, store.ErrInvalidInput, name)
 				assert.Equal(t, 0, n, name)
+				for _, h := range holds {
+					assert.Empty(t, h.ID, name)
+					assert.True(t, h.CreatedAt.IsZero(), "a refused call leaves its holds unchanged: %s", name)
+				}
 			}
 			for _, a := range []string{f.agents[0], other.agents[0]} {
 				held, err := s.HasActiveAgentHold(ctx, a)

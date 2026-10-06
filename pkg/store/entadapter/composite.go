@@ -187,6 +187,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.AgentStore.inTx = true
 	txStore.AccessConstraintStore.inTx = true
 	txStore.MembershipLossCheckStore.inTx = true
+	txStore.AgentHoldStore.inTx = true
 	return txStore
 }
 
