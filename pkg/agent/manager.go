@@ -325,7 +325,10 @@ func agentMatchesName(a api.AgentInfo, agentID string) bool {
 // container) down to one entry per container identity, keyed by
 // ContainerID when present, falling back to a composite of name/project
 // fields for an entry with no container (e.g. a "created" but not yet
-// started agent). Exported so callers outside this package (e.g. CLI
+// started agent). A Kubernetes entry's key is its operation ID
+// (runtime.AgentOperationID, namespace/pod), so same-named pods in two
+// namespaces are two containers, not one; for other runtimes that is the
+// container ID. Exported so callers outside this package (e.g. CLI
 // target-resolution code) that need the exact same de-duplication rule
 // selectAgentTarget and resolveKeysTarget already apply internally do not
 // need to keep a second copy of it.
@@ -336,7 +339,7 @@ func DedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
 	seen := make(map[string]bool, len(agents))
 	out := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		key := a.ContainerID
+		key := runtime.AgentOperationID(a)
 		if key == "" {
 			key = "name:" + a.Name + "|" + a.ProjectID + "|" + a.Project
 		}

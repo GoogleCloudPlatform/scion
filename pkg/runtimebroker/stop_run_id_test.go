@@ -170,8 +170,11 @@ func TestStopAgent_RunIDWithLegacyUnlabelledContainer_Stops(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if f.stopCalls() != 1 || f.mgr.lastStopAgentID != "cid-new" {
-		t.Errorf("stop calls = %d, last = %q; want one stop of cid-new", f.stopCalls(), f.mgr.lastStopAgentID)
+	// The requested run goes to the runtime (as deleteRunRef does), so a
+	// run-checking runtime still refuses a pod another run recreated.
+	if f.stopCalls() != 1 || f.mgr.lastStopAgentID != "cid-new" || f.mgr.lastStopRunID != "run-old" {
+		t.Errorf("stop calls = %d, last = %q run %q; want one stop of cid-new with run-old",
+			f.stopCalls(), f.mgr.lastStopAgentID, f.mgr.lastStopRunID)
 	}
 }
 
@@ -506,47 +509,116 @@ func TestRestartAgent_StopLegCarriesEntryRun(t *testing.T) {
 	}
 }
 
-// resolvedStopRef: the matched entry's container is
-// addressed by its operation ID, qualified with a Kubernetes entry's
-// namespace, and carries the entry's run; any other target is passed bare
-// with no run, so another entry's namespace or run is never applied.
+// resolvedStopRef: the matched entry's container is addressed by its
+// operation ID, qualified with a Kubernetes entry's namespace, and carries
+// the entry's run, or the requested run for a legacy entry with no run
+// label (as deleteRunRef does); any other target is passed bare with no
+// run, so another entry's namespace or run is never applied.
 func TestResolvedStopRef(t *testing.T) {
 	k8sEntry := func(id, ns, run string) api.AgentInfo {
 		return api.AgentInfo{ContainerID: id, RunID: run, Runtime: "kubernetes",
 			Kubernetes: &api.AgentK8sMetadata{Namespace: ns, PodName: id}}
 	}
 	cases := []struct {
-		name   string
-		target string
-		match  agentMatch
-		want   scionrt.RunRef
+		name    string
+		target  string
+		match   agentMatch
+		request string
+		want    scionrt.RunRef
 	}{
 		{"kubernetes entry in ns-a is namespace-qualified with its run", "dev",
-			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", "run-1"), matched: true},
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", "run-1"), matched: true}, "",
 			scionrt.RunRef{ID: "ns-a/dev", RunID: "run-1"}},
-		{"legacy kubernetes entry with no run is qualified, no run", "dev",
-			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", ""), matched: true},
+		{"labelled entry keeps its own run over the requested one", "dev",
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", "run-1"), matched: true}, "run-req",
+			scionrt.RunRef{ID: "ns-a/dev", RunID: "run-1"}},
+		{"legacy entry, legacy stop: qualified, no run", "dev",
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", ""), matched: true}, "",
 			scionrt.RunRef{ID: "ns-a/dev"}},
+		{"legacy entry, run-scoped stop: qualified, requested run", "dev",
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", ""), matched: true}, "run-req",
+			scionrt.RunRef{ID: "ns-a/dev", RunID: "run-req"}},
 		{"kubernetes entry with no namespace stays bare", "dev",
-			agentMatch{containerID: "dev", entry: k8sEntry("dev", "", "run-1"), matched: true},
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "", "run-1"), matched: true}, "",
 			scionrt.RunRef{ID: "dev", RunID: "run-1"}},
 		{"docker entry ID is unchanged, with its run", "3f2a9c1d0b7e",
-			agentMatch{containerID: "3f2a9c1d0b7e", entry: api.AgentInfo{ContainerID: "3f2a9c1d0b7e", RunID: "run-1", Runtime: "docker"}, matched: true},
+			agentMatch{containerID: "3f2a9c1d0b7e", entry: api.AgentInfo{ContainerID: "3f2a9c1d0b7e", RunID: "run-1", Runtime: "docker"}, matched: true}, "",
 			scionrt.RunRef{ID: "3f2a9c1d0b7e", RunID: "run-1"}},
 		{"label-overridden container ID is qualified as the target", "dev",
-			agentMatch{containerID: "dev", entry: k8sEntry("pod-xyz", "ns-a", "run-1"), matched: true},
+			agentMatch{containerID: "dev", entry: k8sEntry("pod-xyz", "ns-a", "run-1"), matched: true}, "",
 			scionrt.RunRef{ID: "ns-a/dev", RunID: "run-1"}},
 		{"target other than the matched container is bare, no run", "dev",
-			agentMatch{containerID: "other", entry: k8sEntry("other", "ns-a", "run-1"), matched: true},
+			agentMatch{containerID: "other", entry: k8sEntry("other", "ns-a", "run-1"), matched: true}, "run-req",
 			scionrt.RunRef{ID: "dev"}},
 		{"no match: bare target (legacy pass-through)", "dev",
-			agentMatch{},
+			agentMatch{}, "",
 			scionrt.RunRef{ID: "dev"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolvedStopRef(tc.target, tc.match); got != tc.want {
-				t.Errorf("resolvedStopRef(%q) = %+v, want %+v", tc.target, got, tc.want)
+			if got := resolvedStopRef(tc.target, tc.match, tc.request); got != tc.want {
+				t.Errorf("resolvedStopRef(%q, request %q) = %+v, want %+v", tc.target, tc.request, got, tc.want)
+			}
+		})
+	}
+}
+
+// dedupeAgentEntries keys on the operation ID: same-named pods in two
+// namespaces stay distinct; the same pod, or the same Docker/Podman/Apple
+// container ID (no Kubernetes metadata: keyed on the container ID as
+// before), listed twice collapses to one.
+func TestDedupeAgentEntries_OperationID(t *testing.T) {
+	pod := func(ns string) api.AgentInfo {
+		return api.AgentInfo{Name: "dev", ContainerID: "dev", Kubernetes: &api.AgentK8sMetadata{Namespace: ns, PodName: "dev"}}
+	}
+	docker := func(id string) api.AgentInfo { return api.AgentInfo{Name: "dev", ContainerID: id, Runtime: "docker"} }
+	cases := []struct {
+		name string
+		in   []api.AgentInfo
+		want int
+	}{
+		{"pods in two namespaces stay distinct", []api.AgentInfo{pod("ns-a"), pod("ns-b")}, 2},
+		{"the same pod listed twice collapses", []api.AgentInfo{pod("ns-a"), pod("ns-a")}, 1},
+		{"the same docker container listed twice collapses", []api.AgentInfo{docker("3f2a"), docker("3f2a")}, 1},
+		{"two docker containers stay distinct", []api.AgentInfo{docker("3f2a"), docker("9b1c")}, 2},
+		{"entries with only an ID collapse by ID", []api.AgentInfo{{ID: "x"}, {ID: "x"}}, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := len(dedupeAgentEntries(tc.in)); got != tc.want {
+				t.Errorf("len(dedupeAgentEntries) = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// preferRunEntries: the requested run's entries win, then unlabelled legacy
+// entries; with neither, every entry is kept so another run holding the
+// name is still seen. No run keeps the list unchanged.
+func TestPreferRunEntries(t *testing.T) {
+	e := func(id, run string) api.AgentInfo { return api.AgentInfo{ContainerID: id, RunID: run} }
+	all := []api.AgentInfo{e("a", "run-1"), e("b", "run-2"), e("c", "")}
+	ids := func(in []api.AgentInfo) string {
+		var out []string
+		for _, a := range in {
+			out = append(out, a.ContainerID)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, tc := range []struct {
+		name string
+		in   []api.AgentInfo
+		run  string
+		want string
+	}{
+		{"exact run wins", all, "run-2", "b"},
+		{"legacy entry when no exact", all, "run-3", "c"},
+		{"other runs only: all kept", all[:2], "run-3", "a,b"},
+		{"no run: unchanged", all, "", "a,b,c"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ids(preferRunEntries(tc.in, tc.run)); got != tc.want {
+				t.Errorf("preferRunEntries(%q) = %s, want %s", tc.run, got, tc.want)
 			}
 		})
 	}

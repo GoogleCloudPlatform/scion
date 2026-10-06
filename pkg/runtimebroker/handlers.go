@@ -2747,7 +2747,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// longer holds the name returns 404 before any side effect: no
 		// launch cancel, and no cancel of, or wait on, a start of another
 		// run.
-		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
+		match, lookupErr = s.lookupAgentMatchForRun(ctx, id, projectID, runID)
 		if s.refuseStopRunMismatch(w, span, key, id, runID, match, lookupErr, stopCheckWithInFlight) {
 			return
 		}
@@ -2763,7 +2763,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		if wokeLaunch {
 			cancelledOwn++
 		}
-		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
+		match, lookupErr = s.lookupAgentMatchForRun(ctx, id, projectID, runID)
 		// Whatever the cancel did, a runtime entry of another run is never
 		// stopped. In-flight starts of other runs no longer count here: this
 		// run's own starts are already cancelled, so refusing for another
@@ -2865,7 +2865,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 	// Stop exactly the resolved entry: StopTarget does not re-resolve by
 	// name, so the run checked above is the run stopped.
-	stopRef := resolvedStopRef(target, match)
+	stopRef := resolvedStopRef(target, match, runID)
 	if err := mgr.StopTarget(ctx, stopRef); err != nil {
 		if errors.Is(err, scionrt.ErrRunMismatch) {
 			// The runtime enforces stopRef.RunID (Kubernetes Stop is a
@@ -3031,7 +3031,16 @@ func (s *Server) trackedStartRunID(id, projectID, queryRunID, bodyRunID string) 
 // another entry's namespace or run is never applied. Both callers,
 // stopAgent and restartAgent's stop leg, pass it to Manager.StopTarget, so
 // the resolved entry is stopped without re-resolving by name.
-func resolvedStopRef(target string, m agentMatch) scionrt.RunRef {
+//
+// A legacy entry with no run label carries requestRunID instead (empty for
+// a legacy stop and for restart's stop leg), as deleteRunRef does for a
+// run-scoped delete. A run-scoped stop therefore acts on an unlabelled pod
+// exactly as a run-scoped delete does: the pod matches by name (a legacy
+// pod predates run IDs), and the runtime's run-checked path still applies,
+// so a pod recreated by another run between the lookup and the stop (now
+// labelled with that run, or under a new UID) is left alone with
+// ErrRunMismatch rather than stopped by name.
+func resolvedStopRef(target string, m agentMatch, requestRunID string) scionrt.RunRef {
 	ref := scionrt.RunRef{ID: target}
 	if m.containerID == target {
 		// The target as an operation ID (namespace-qualified with the
@@ -3041,6 +3050,9 @@ func resolvedStopRef(target string, m agentMatch) scionrt.RunRef {
 		e.ContainerID = target
 		ref.ID = scionrt.AgentOperationID(e)
 		ref.RunID = m.entry.RunID
+		if ref.RunID == "" {
+			ref.RunID = requestRunID
+		}
 	}
 	return ref
 }
@@ -3247,7 +3259,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// the start below create it.
 	if stopTarget == "" {
 		s.agentLifecycleLog.Warn("Restart: agent not found in project, proceeding with start", "agent_id", id)
-	} else if err := stopMgr.StopTarget(ctx, resolvedStopRef(stopTarget, match)); err != nil {
+	} else if err := stopMgr.StopTarget(ctx, resolvedStopRef(stopTarget, match, "")); err != nil {
 		if isContainerStopTolerable(err) {
 			s.agentLifecycleLog.Warn("Restart: stop target not found or already stopped, proceeding with start", "agent_id", id, "error", err)
 		} else {

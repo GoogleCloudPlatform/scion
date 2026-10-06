@@ -1598,6 +1598,16 @@ type agentMatch struct {
 // path reads them from the same entry it acts on. Resolution order and
 // errors are exactly lookupAgentTarget's.
 func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
+	return s.lookupAgentMatchForRun(ctx, slug, projectID, "")
+}
+
+// lookupAgentMatchForRun is lookupAgentMatch for a run-scoped operation:
+// among the entries the runtime lists for slug, those of run runID are
+// preferred (see preferRunEntries) before the match must be unique, so a
+// pod of the requested run is found even when a same-named pod of another
+// run is listed beside it (for example in another namespace). With an
+// empty runID it is exactly lookupAgentMatch.
+func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, runID string) (agentMatch, error) {
 	if s.manager == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
@@ -1613,7 +1623,7 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		if err != nil {
 			return agentMatch{}, err
 		}
-		return agentMatchFrom(slug, agents, own.mgr, own.rt)
+		return agentMatchFrom(slug, preferRunEntries(agents, runID), own.mgr, own.rt)
 	}
 
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
@@ -1668,7 +1678,36 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		}
 	}
 
-	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+	return agentMatchFrom(slug, preferRunEntries(agents, runID), matchManager, matchRuntime)
+}
+
+// preferRunEntries narrows the entries listed for a run-scoped lookup with
+// the rule a run-scoped delete applies (filterDeleteCandidatesByRun):
+// entries labelled runID win; without one, legacy entries carrying no run
+// label match by name. When neither exists, every entry is kept, so the
+// caller still sees another run holding the name (and refuses with the
+// run-mismatch 404, or fails closed when that is ambiguous). An empty runID
+// keeps agents unchanged.
+func preferRunEntries(agents []api.AgentInfo, runID string) []api.AgentInfo {
+	if runID == "" || len(agents) < 2 {
+		return agents
+	}
+	var exact, legacy []api.AgentInfo
+	for _, a := range agents {
+		switch a.RunID {
+		case runID:
+			exact = append(exact, a)
+		case "":
+			legacy = append(legacy, a)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	if len(legacy) > 0 {
+		return legacy
+	}
+	return agents
 }
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
@@ -2019,7 +2058,11 @@ func uniqueAgentEntry(slug string, agents []api.AgentInfo) (api.AgentInfo, error
 
 // dedupeAgentEntries collapses entries that refer to the same backing
 // container (the same container can be reported more than once, e.g. by a
-// runtime that is registered both as default and auxiliary).
+// runtime that is registered both as default and auxiliary). Entries are
+// keyed by operation ID (scionrt.AgentOperationID), so same-named
+// Kubernetes pods in two namespaces stay distinct (and a lookup matching
+// both is ambiguous) rather than collapsing to whichever was listed first;
+// for other runtimes that is the container ID.
 func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	if len(agents) < 2 {
 		return agents
@@ -2027,7 +2070,7 @@ func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	seen := make(map[string]bool, len(agents))
 	out := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		key := a.ContainerID
+		key := scionrt.AgentOperationID(a)
 		if key == "" {
 			key = a.ID
 		}
