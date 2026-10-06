@@ -2232,6 +2232,7 @@ func (s *Server) createAgentInProject(
 					// 500 with its correlation ID instead (writeCreateFailure).
 					s.agentLifecycleLog.Warn("Workspace storage did not respond; failing agent create",
 						"agent_id", agent.ID, "project_id", project.ID, "error", workspaceErr)
+					ucancel()
 					corrID := cleanup(createRollback{Stage: createStageWorkspaceStorage, Cause: workspaceErr})
 					writeCreateFailure(w, corrID, func() { writeWorkspaceStorageUnavailable(w, workspaceErr) })
 					return
@@ -2259,6 +2260,10 @@ func (s *Server) createAgentInProject(
 						// Swap workspace to storage path for remote broker
 						agent.AppliedConfig.Workspace = ""
 						agent.AppliedConfig.WorkspaceStoragePath = storagePath
+						// The upload above is always GCS (gcp.SyncToGCS), so
+						// stor.Bucket() names the GCS bucket whatever stor's
+						// provider; no workspaceDownloadBucket check is needed.
+						agent.AppliedConfig.WorkspaceStorageBucket = stor.Bucket()
 						if err := s.store.UpdateAgent(detachLaunchFromClient(ctx), agent); err != nil {
 							s.agentLifecycleLog.Warn("Failed to update agent with workspace storage path", "agent_id", agent.ID, "error", err)
 						}
@@ -2978,6 +2983,11 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		}
 		if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
 			ref.write(w)
+			return
+		}
+		// finalize-env creates the agent on the broker, so it can meet the
+		// same workspace-bucket refusal as create (ptone/scion#3422).
+		if relayWorkspaceStorageUnconfigured(w, err) {
 			return
 		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
@@ -4362,6 +4372,14 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		if isBrokerAgentNotFound(err) {
+			// The broker answered that the agent has no running container
+			// (e.g. its pod is gone): a state conflict, not a broker
+			// failure (ptone/scion#3443).
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				"Agent has no running container on its runtime broker; start or restart the agent and retry", nil)
+			return
+		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
@@ -4634,9 +4652,13 @@ func isContainerNameConflict(err error) bool {
 		strings.Contains(msg, "is already in use by container")
 }
 
-// skillResolutionErrorCode mirrors runtimebroker.ErrCodeSkillResolution; it
-// is duplicated because importing pkg/runtimebroker would invert layering.
-const skillResolutionErrorCode = "skill_resolution_failed"
+// skillResolutionErrorCode is the broker's code for a required-skill
+// resolution failure.
+const skillResolutionErrorCode = api.BrokerErrCodeSkillResolution
+
+// workspaceStorageUnconfiguredErrorCode is the broker's code for a create
+// with no bucket to download the workspace upload from.
+const workspaceStorageUnconfiguredErrorCode = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
@@ -4668,6 +4690,8 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 	case relaySkillResolutionError(w, err):
+		// Response already written.
+	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
@@ -4720,6 +4744,19 @@ func relaySkillResolutionError(w http.ResponseWriter, err error) bool {
 		w.Header().Set("Retry-After", se.RetryAfter)
 	}
 	writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), skillResolutionClientDetails(se.brokerErrorDetails()))
+	return true
+}
+
+// relayWorkspaceStorageUnconfigured writes the broker's refusal to create an
+// agent whose workspace upload it has no bucket for, keeping the broker's
+// status (422), code and message instead of the generic 502, and reports
+// whether it did (ptone/scion#3422).
+func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != workspaceStorageUnconfiguredErrorCode {
+		return false
+	}
+	writeError(w, se.StatusCode, workspaceStorageUnconfiguredErrorCode, "Failed to dispatch to runtime broker: "+se.brokerErrorMessage(), nil)
 	return true
 }
 

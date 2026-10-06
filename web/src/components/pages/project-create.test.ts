@@ -254,6 +254,14 @@ const EMPTY_PER_AGENT_TEMPLATE = {
   labels: { 'scion.io/template': 'true', 'scion.dev/workspace-mode': 'per-agent' },
 };
 
+/** The hub's 400 for a slug outside the slug format. */
+const SLUG_FORMAT_ERROR = {
+  code: 'validation_error',
+  message:
+    'slug must be in slug format: lowercase letters a-z, digits 0-9 and single hyphens, not starting or ending with a hyphen, at most 63 characters',
+  details: { field: 'slug' },
+};
+
 interface FormOpts {
   templates?: unknown[];
   systemStatus?: Record<string, unknown>;
@@ -265,6 +273,8 @@ interface FormOpts {
   templatePage?: (page: number) => { status?: number; body: unknown };
   /** Status for POST /api/v1/projects (201 created, 200 already exists). */
   createStatus?: number;
+  /** Body for POST /api/v1/projects (defaults to a created project). */
+  createBody?: unknown;
   validatePath?: Record<string, unknown>;
   providersStatus?: number;
 }
@@ -316,7 +326,7 @@ async function createForm(opts: FormOpts = {}): Promise<{
     }
     if (method === 'POST' && path.endsWith('/api/v1/projects')) {
       return Promise.resolve(
-        jsonResponse({ project: { id: 'new-blank' } }, opts.createStatus ?? 201)
+        jsonResponse(opts.createBody ?? { project: { id: 'new-blank' } }, opts.createStatus ?? 201)
       );
     }
     return Promise.resolve(jsonResponse({}));
@@ -489,6 +499,22 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
 
     expect(posts(requests)).toEqual([
       { path: '/api/v1/projects', method: 'POST', body: { name: 'My Notes', slug: 'my-notes' } },
+    ]);
+  });
+
+  it('Blank derives a slug in the hub slug format from the name', async () => {
+    const { el, requests } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    const longName = `Café ${'x'.repeat(57)} notes`;
+    await setValue(el, '#name', longName, 'sl-input');
+    await submit(el);
+
+    // The 63-character cut lands on a hyphen, which is trimmed.
+    const expected = `cafe-${'x'.repeat(57)}`;
+    expect(expected).toHaveLength(62);
+    expect(posts(requests)).toEqual([
+      { path: '/api/v1/projects', method: 'POST', body: { name: longName, slug: expected } },
     ]);
   });
 
@@ -849,6 +875,58 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     await submit(el);
 
     expect(posts(requests).map((r) => r.body)).toEqual([{ name: 'notes' }]);
+  });
+
+  it('shows a create 400 about the slug inline on Slug without navigating', async () => {
+    const { el, requests } = await createForm({
+      createStatus: 400,
+      createBody: { error: SLUG_FORMAT_ERROR },
+    });
+    element = el;
+
+    await setValue(el, '#name', 'Notes', 'sl-input');
+    await setValue(el, '#slug', 'My_Notes', 'sl-input');
+    await submit(el);
+
+    expect(text(q(el, '.slug-error'))).toBe(SLUG_FORMAT_ERROR.message);
+    expect(text(q(el, '.slug-error'))).not.toContain('My_Notes');
+    expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('true');
+    expect(q(el, '.error-banner')).toBeNull();
+    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(posts(requests).map((r) => r.path)).toEqual(['/api/v1/projects']);
+  });
+
+  it('keeps a create 400 about another field in the banner', async () => {
+    const { el } = await createForm({
+      createStatus: 400,
+      createBody: { error: { code: 'validation_error', message: 'name is required' } },
+    });
+    element = el;
+
+    await setValue(el, '#name', 'Notes', 'sl-input');
+    await submit(el);
+
+    expect(text(q(el, '.error-banner'))).toContain('name is required');
+    expect(q(el, '.slug-error')).toBeNull();
+  });
+
+  it('shows a clone 400 about the slug inline on Slug without navigating', async () => {
+    const { el } = await createForm({
+      templates: [SHARED_TEMPLATE],
+      cloneStatus: 400,
+      cloneBody: { error: SLUG_FORMAT_ERROR },
+    });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-shared', 'sl-change');
+    await setValue(el, '#name', 'Notes', 'sl-input');
+    await setValue(el, '#slug', 'My_Notes', 'sl-input');
+    await submit(el);
+
+    expect(text(q(el, '.slug-error'))).toBe(SLUG_FORMAT_ERROR.message);
+    expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('true');
+    expect(q(el, '.error-banner')).toBeNull();
+    expect(window.history.pushState).not.toHaveBeenCalled();
   });
 
   it('shows a clone 409 inline on Slug without navigating', async () => {

@@ -363,6 +363,10 @@ type AgentAppliedConfig struct {
 	// WorkspaceStoragePath is the GCS storage path for bootstrapped workspaces.
 	// Set during workspace bootstrap for non-git projects.
 	WorkspaceStoragePath string `json:"workspaceStoragePath,omitempty"`
+	// WorkspaceStorageBucket is the GCS bucket the hub uploaded
+	// WorkspaceStoragePath to. It is sent to the broker with the create so
+	// a broker without its own bucket setting can download the workspace.
+	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
 
 	// InlineConfig holds the full ScionConfig provided via the --config flag
 	// or Hub API config field. When set, the dispatcher threads it through to the
