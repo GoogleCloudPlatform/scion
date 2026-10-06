@@ -323,6 +323,23 @@ export function defaultBuiltInForAdd(
   return NO_PROJECT_ROLE;
 }
 
+/**
+ * Whether the "None" built-in radio is offered. None means "custom roles
+ * only", so it is shown only when it can be meaningful: the catalog has
+ * custom roles, or (Edit mode) the principal holds no built-in role now or
+ * holds custom roles.
+ */
+export function showNoProjectRoleOption(opts: {
+  mode: MemberDialogMode;
+  assignable: readonly AssignableProjectRole[];
+  currentBuiltInId: string;
+  heldCustomCount: number;
+}): boolean {
+  if (customCatalog(opts.assignable).length > 0) return true;
+  if (opts.mode !== 'edit') return false;
+  return opts.currentBuiltInId === NO_PROJECT_ROLE || opts.heldCustomCount > 0;
+}
+
 /** Whether any binding in the view comes from somewhere other than a direct
  *  grant. The Source column is shown only then; while every binding is
  *  direct it would read "Direct" on every row. */
@@ -537,6 +554,9 @@ export class ScionProjectMembersEditor extends LitElement {
   @state() private dlgDisplayName = '';
   @state() private dlgBuiltIn = NO_PROJECT_ROLE;
   @state() private dlgCurrentBuiltIn = NO_PROJECT_ROLE;
+  /** Set once the user picks a built-in radio; until then Add mode keeps
+   *  re-computing its default as the catalog and capabilities arrive. */
+  private dlgBuiltInTouched = false;
   /** Role name of dlgCurrentBuiltIn, so it can be shown without a catalog. */
   @state() private dlgCurrentBuiltInName = '';
   @state() private dlgCustomIds: string[] = [];
@@ -950,6 +970,10 @@ export class ScionProjectMembersEditor extends LitElement {
     }
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    this.syncAddDefault(changed);
+  }
+
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('projectId') && this.projectId) {
       // Skip if connectedCallback already triggered the initial load.
@@ -1100,6 +1124,35 @@ export class ScionProjectMembersEditor extends LitElement {
     };
   }
 
+  private get noProjectRoleShown(): boolean {
+    return showNoProjectRoleOption({
+      mode: this.dialogMode,
+      assignable: this.assignableRoles,
+      currentBuiltInId: this.dlgCurrentBuiltIn,
+      heldCustomCount: this.dlgHeldCustom.length,
+    });
+  }
+
+  /**
+   * Add mode can open before the role catalog has loaded (the Add button
+   * appears as soon as the capabilities arrive), when the only possible
+   * default is None. While the user has not picked a radio, the default is
+   * re-computed whenever the catalog or capabilities change; a hidden None
+   * is never left selected.
+   */
+  private syncAddDefault(changed: Map<string, unknown>): void {
+    if (!this.dialogOpen || this.dialogMode !== 'add' || this.dlgLockedReason) return;
+    const inputsChanged = changed.has('assignableRoles') || changed.has('capabilities');
+    const hiddenNone = this.dlgBuiltIn === NO_PROJECT_ROLE && !this.noProjectRoleShown;
+    if ((inputsChanged && !this.dlgBuiltInTouched) || hiddenNone) {
+      this.dlgBuiltIn = defaultBuiltInForAdd(
+        this.capabilities,
+        this.dlgPrincipalType,
+        this.assignableRoles
+      );
+    }
+  }
+
   private roleIdKind(id: string): 'builtin' | 'custom' | 'unknown' {
     const role = this.assignableRoles.find((r) => r.id === id);
     if (!role) return 'unknown';
@@ -1125,6 +1178,7 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgCurrentBuiltIn = NO_PROJECT_ROLE;
     this.dlgCurrentBuiltInName = '';
     this.dlgBuiltIn = defaultBuiltInForAdd(this.capabilities, 'user', this.assignableRoles);
+    this.dlgBuiltInTouched = false;
     this.dlgCustomIds = [];
     this.dlgHeldCustom = [];
     this.dlgExpectedIds = [];
@@ -1239,6 +1293,7 @@ export class ScionProjectMembersEditor extends LitElement {
     this.dlgPrincipalId = '';
     this.dlgDisplayName = '';
     this.dlgBuiltIn = defaultBuiltInForAdd(this.capabilities, type, this.assignableRoles);
+    this.dlgBuiltInTouched = false;
     this.dlgCustomIds = [];
     this.resetDialogMessages();
   }
@@ -1878,17 +1933,20 @@ export class ScionProjectMembersEditor extends LitElement {
           .value=${this.dlgBuiltIn}
           @sl-change=${(e: Event) => {
             this.dlgBuiltIn = (e.target as HTMLInputElement).value;
+            this.dlgBuiltInTouched = true;
           }}
         >
           ${builtIns.map((role) =>
             option(role.id, labels[getRoleTier(role.name)], optionState(role), role.description)
           )}
-          ${option(
-            NO_PROJECT_ROLE,
-            'None',
-            optionState(null),
-            'No built-in role; custom roles only'
-          )}
+          ${this.noProjectRoleShown
+            ? option(
+                NO_PROJECT_ROLE,
+                'None',
+                optionState(null),
+                'No built-in role; custom roles only'
+              )
+            : nothing}
         </sl-radio-group>
       </div>
     `;

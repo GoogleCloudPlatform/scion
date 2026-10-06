@@ -67,6 +67,7 @@ import {
   isLastOwnerByTier,
   roleIdsUnclassifiable,
   selectionToRoleIds,
+  showNoProjectRoleOption,
   tierFromRoleIds,
   type MemberDialogMode,
 } from './project-members-editor.js';
@@ -587,6 +588,134 @@ describe('dialog defaults and validation', () => {
     await el.handleRemoveFromDialog();
     expect(apiFetch).not.toHaveBeenCalled();
     expect(el.dialogOpen).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The None radio and the Add default
+// ---------------------------------------------------------------------------
+
+/** A catalog with the built-in roles only (no custom roles on the hub). */
+const BUILTIN_ONLY_CATALOG = [R_OWNER, R_ADMIN, R_MEMBER];
+
+describe('None radio visibility', () => {
+  const show = (
+    mode: MemberDialogMode,
+    assignable: AssignableProjectRole[],
+    currentBuiltInId = NO_PROJECT_ROLE,
+    heldCustomCount = 0
+  ) => showNoProjectRoleOption({ mode, assignable, currentBuiltInId, heldCustomCount });
+
+  it('is hidden in Add mode when there are no custom roles', () => {
+    expect(show('add', BUILTIN_ONLY_CATALOG)).toBe(false);
+    expect(show('add', [])).toBe(false);
+  });
+
+  it('is shown whenever the catalog has custom roles', () => {
+    expect(show('add', OWNER_CATALOG)).toBe(true);
+    expect(show('edit', OWNER_CATALOG, 'r-member')).toBe(true);
+  });
+
+  it('is shown in Edit mode for a principal with no built-in role or with custom roles', () => {
+    expect(show('edit', BUILTIN_ONLY_CATALOG, NO_PROJECT_ROLE, 0)).toBe(true);
+    expect(show('edit', BUILTIN_ONLY_CATALOG, 'r-member', 1)).toBe(true);
+    expect(show('edit', BUILTIN_ONLY_CATALOG, 'r-member', 0)).toBe(false);
+  });
+
+  it('Add dialog renders no None radio without custom roles', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS, BUILTIN_ONLY_CATALOG);
+    el.openAddDialog();
+    await el.updateComplete;
+    const values = qa(el, 'sl-radio-group sl-radio').map((r) => r.getAttribute('value'));
+    expect(values).toEqual(['r-owner', 'r-admin', 'r-member']);
+    expect(el.dlgBuiltIn).toBe('r-admin');
+    expect(q(el, '.validation-warning')).toBeNull();
+  });
+
+  it('Add dialog renders the None radio with custom roles', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    el.openAddDialog();
+    await el.updateComplete;
+    expect(q(el, `sl-radio[value="${NO_PROJECT_ROLE}"]`)).not.toBeNull();
+  });
+
+  it('Edit dialog renders the None radio for a principal with no built-in role', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS, BUILTIN_ONLY_CATALOG);
+    el.openEditDialog(CAROL);
+    await el.updateComplete;
+    expect(q(el, `sl-radio[value="${NO_PROJECT_ROLE}"]`)).not.toBeNull();
+  });
+
+  it('Edit dialog hides the None radio for a built-in-only principal without custom roles', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS, BUILTIN_ONLY_CATALOG);
+    el.openEditDialog(DAVE);
+    await el.updateComplete;
+    expect(q(el, `sl-radio[value="${NO_PROJECT_ROLE}"]`)).toBeNull();
+    expect(el.dlgBuiltIn).toBe('r-member');
+  });
+});
+
+describe('Add default after a late catalog load', () => {
+  /** Mounts with the assignable-roles response held until release(). */
+  async function mountWithHeldCatalog(catalog: AssignableProjectRole[]) {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const list = listRoute(ALL_GROUPS, OWNER_CAPS);
+    vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+      const res = list(url, init);
+      if (res) return res;
+      if (url.endsWith('/members/assignable-roles')) {
+        await held;
+        return jsonResponse(200, { items: catalog });
+      }
+      throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);
+    });
+    const el = new ScionProjectMembersEditor();
+    el.projectId = 'p-1';
+    document.body.appendChild(el);
+    mounted.push(el);
+    const i = el as unknown as EditorInternals;
+    // The Add button is available once the capabilities are in.
+    await vi.waitFor(() => expect(i.capabilities).not.toBeNull());
+    expect(i.assignableRoles).toEqual([]);
+    return { el: i, release };
+  }
+
+  it('re-defaults to Admin when the catalog arrives after the dialog opened', async () => {
+    const { el, release } = await mountWithHeldCatalog(BUILTIN_ONLY_CATALOG);
+    el.openAddDialog();
+    expect(el.dlgBuiltIn).toBe(NO_PROJECT_ROLE);
+    release();
+    await vi.waitFor(() => expect(el.loading).toBe(false));
+    await el.updateComplete;
+    expect(el.dlgBuiltIn).toBe('r-admin');
+    expect(q<HTMLInputElement>(el, 'sl-radio-group')?.value).toBe('r-admin');
+    el.dlgPrincipalId = 'u-new';
+    await el.updateComplete;
+    expect(q(el, '.validation-warning')).toBeNull();
+  });
+
+  it('re-defaults to Member for an agent principal', async () => {
+    const { el, release } = await mountWithHeldCatalog(OWNER_CATALOG);
+    el.openAddDialog();
+    el.onPrincipalTypeChange('agent');
+    release();
+    await vi.waitFor(() => expect(el.loading).toBe(false));
+    await el.updateComplete;
+    expect(el.dlgBuiltIn).toBe('r-member');
+  });
+
+  it('keeps a radio the user picked when the catalog reloads', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    el.openAddDialog();
+    await el.updateComplete;
+    const groupEl = q<HTMLInputElement>(el, 'sl-radio-group')!;
+    groupEl.value = NO_PROJECT_ROLE;
+    groupEl.dispatchEvent(new Event('sl-change'));
+    expect(el.dlgBuiltIn).toBe(NO_PROJECT_ROLE);
+    el.assignableRoles = [...OWNER_CATALOG];
+    await el.updateComplete;
+    expect(el.dlgBuiltIn).toBe(NO_PROJECT_ROLE);
   });
 });
 
