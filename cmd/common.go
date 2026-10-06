@@ -79,7 +79,7 @@ var (
 	inlineConfigPath      string
 	labelFlags            []string
 	modelFlag             string
-	thinkingLevelFlag     int = -1
+	thinkingLevelFlag     string
 	agentRoleFlag         string
 	messageModeFlag       string
 	serviceAccountFlag    string
@@ -118,14 +118,6 @@ func validateHarnessAuthFlag(v string) error {
 	default:
 		return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", v)
 	}
-}
-
-// validateThinkingLevelFlag checks a --thinking-level value; -1 means unset.
-func validateThinkingLevelFlag(v int) error {
-	if v != -1 && (v < 0 || v > 100) {
-		return fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100", v)
-	}
-	return nil
 }
 
 func parseLabels(raw []string) (map[string]string, error) {
@@ -699,14 +691,16 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 		inlineCfg.Model = normalizedModel
 	}
-	if thinkingLevelFlag != -1 {
-		if err := validateThinkingLevelFlag(thinkingLevelFlag); err != nil {
-			return asUsageError(err)
+	// An explicitly set --thinking-level is always parsed, so an empty
+	// value fails instead of being treated as unset.
+	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
+		val, err := parseThinkingLevel(thinkingLevelFlag)
+		if err != nil {
+			return err
 		}
 		if inlineCfg == nil {
 			inlineCfg = &api.ScionConfig{}
 		}
-		val := thinkingLevelFlag
 		inlineCfg.ThinkingLevel = &val
 	}
 

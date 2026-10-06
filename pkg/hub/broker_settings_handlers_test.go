@@ -272,12 +272,13 @@ func TestBrokerSettings_Put_ExpectedRevisionMismatchIsConflictNotBypass(t *testi
 // store's own CAS.
 type racingBrokerSettingsPutStore struct {
 	store.Store
+	fault *storeFaultSwitch // nil: always active
 	racer func()
 	fired bool
 }
 
 func (r *racingBrokerSettingsPutStore) PutBrokerSettings(ctx context.Context, brokerID string, settings store.BrokerSettings, expectedRevision int64, updatedBy string) (*store.BrokerSettingsRecord, error) {
-	if !r.fired {
+	if r.fault.Active() && !r.fired {
 		r.fired = true
 		r.racer()
 	}
@@ -295,7 +296,11 @@ func (r *racingBrokerSettingsPutStore) PutBrokerSettings(ctx context.Context, br
 // CAS must fail with a plain 409 — never silently overwrite the concurrent
 // write.
 func TestBrokerSettings_Put_ConcurrentWriteBetweenReadAndCASIsConflictNotBypass(t *testing.T) {
-	srv, s := testServer(t)
+	// Installed before the first PUT, whose mutation audit goroutine reads
+	// srv.store (ptone/scion#3184); armed for the second PUT.
+	srv, s, racing, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *racingBrokerSettingsPutStore {
+		return &racingBrokerSettingsPutStore{Store: inner, fault: f}
+	})
 	broker := newBrokerSettingsTestBroker(t, s, "race", "")
 
 	adminRec := doRequest(t, srv, http.MethodPut, settingsPath(broker.ID), map[string]interface{}{
@@ -304,14 +309,12 @@ func TestBrokerSettings_Put_ConcurrentWriteBetweenReadAndCASIsConflictNotBypass(
 	})
 	require.Equal(t, http.StatusOK, adminRec.Code, adminRec.Body.String())
 
-	srv.store = &racingBrokerSettingsPutStore{
-		Store: s,
-		racer: func() {
-			_, err := s.PutBrokerSettings(context.Background(), broker.ID,
-				store.BrokerSettings{MaxAgents: int64ptrForTest(5)}, 1, "admin-concurrent")
-			require.NoError(t, err)
-		},
+	racing.racer = func() {
+		_, err := s.PutBrokerSettings(context.Background(), broker.ID,
+			store.BrokerSettings{MaxAgents: int64ptrForTest(5)}, 1, "admin-concurrent")
+		require.NoError(t, err)
 	}
+	fault.Arm()
 
 	// This request is itself authorized (dev/admin token) and really does
 	// change the value (1 -> 10), so it reaches the actual PutBrokerSettings

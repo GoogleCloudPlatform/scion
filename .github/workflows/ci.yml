@@ -550,7 +550,7 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16
@@ -579,11 +579,10 @@ jobs:
 
       # design t1-async-create-v11.md §6, "Postgres in CI": runs
       # pkg/store/integrationtest (the existing Postgres-only harness) plus
-      # the entadapter tests selected by test-launch-store-postgres's -run
-      # regex (see that Makefile target's comment for the current list, the
-      # source of truth), which run unchanged against SQLite (the default
-      # `go test` build) and Postgres (here, via -tags integration) to prove
-      # dialect parity. This job owns every Postgres-specific assertion in
+      # the full pkg/store/entadapter suite (ptone/scion#2207; see that
+      # Makefile target's comment), which runs unchanged against SQLite (the
+      # default `go test` build) and Postgres (here, via -tags integration)
+      # to prove dialect parity. This job owns every Postgres-specific assertion in
       # P1a: the transaction-scoped advisory lock, SKIP LOCKED,
       # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
       # savepoints. The job also runs the timestamp contract test (last step).

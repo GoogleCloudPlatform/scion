@@ -283,6 +283,11 @@ type ServerConfig struct {
 	// Used by the metrics dashboard to query Cloud Monitoring.
 	// Falls back to GCPProjectID if empty.
 	TelemetryProjectID string
+	// DisableCloudLogQuery skips building the Cloud Logging query service
+	// even when a GCP project ID is found in the environment
+	// (logging.ResolveProjectID). Tests set it so that constructing a server
+	// never creates real Cloud Logging clients from ambient env.
+	DisableCloudLogQuery bool
 	// GCPMintCapPerProject is the maximum number of minted service accounts allowed per project.
 	// Zero means unlimited (default).
 	GCPMintCapPerProject int
@@ -767,6 +772,10 @@ type DeleteAgentOptions struct {
 	DeletedAt    time.Time
 	RunID        string
 	NotAfter     time.Time
+	// LocalOnly removes only the broker's own state for the agent, never
+	// its files on the NFS export or its branch (runtimebroker deleteAgent,
+	// ?localOnly). Send it only to a broker advertising AgentMove.
+	LocalOnly bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -786,6 +795,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.SoftDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(opts.DeletedAt.UTC().Format(time.RFC3339)))
+	}
+	if opts.LocalOnly {
+		query += "&localOnly=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -986,6 +998,11 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// ExpectExistingNFSWorkspace mirrors
+	// runtimebroker.CreateAgentRequest.ExpectExistingNFSWorkspace: on a
+	// ProvisionOnly request for an agent moved from another broker, the
+	// broker confirms the workspace on its mount of the export first.
+	ExpectExistingNFSWorkspace string `json:"expectExistingNfsWorkspace,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
 	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
 	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
@@ -1528,6 +1545,9 @@ type Server struct {
 	// intentStops records when the hub last stopped an agent that ran with
 	// run intent stopped (agent ID -> time.Time), to rate-limit it.
 	intentStops sync.Map
+	// httpDrains marks brokers with a heartbeat-triggered drain of queued
+	// stops running on this node (http_broker_drain.go).
+	httpDrains sync.Map
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -1683,6 +1703,17 @@ func newInstanceID() string {
 
 // InstanceID returns the per-process unique identifier for this hub instance.
 func (s *Server) InstanceID() string { return s.instanceID }
+
+// cloudLogQueryProjectID returns the GCP project New() builds the Cloud
+// Logging query service for, or "" when that service must not be built:
+// cfg.DisableCloudLogQuery is set, or no project ID is found in the
+// environment (logging.ResolveProjectID).
+func cloudLogQueryProjectID(cfg ServerConfig) string {
+	if cfg.DisableCloudLogQuery {
+		return ""
+	}
+	return logging.ResolveProjectID()
+}
 
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
@@ -2285,8 +2316,9 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 		srv.authConfig.ProxyUserProvisioner = MakeProxyUserProvisioner(srv)
 	}
 
-	// Initialize Cloud Logging query service (optional, gated on GCP project ID)
-	if projectID := logging.ResolveProjectID(); projectID != "" {
+	// Initialize Cloud Logging query service (optional, gated on GCP project
+	// ID and on cfg.DisableCloudLogQuery)
+	if projectID := cloudLogQueryProjectID(cfg); projectID != "" {
 		logQuerySvc, err := NewLogQueryService(ctx, projectID)
 		if err != nil {
 			slog.Warn("Failed to initialize Cloud Logging query service", "error", err)
@@ -4108,6 +4140,11 @@ type MessageEventPayload struct {
 	Plain     bool   `json:"plain,omitempty"`
 }
 
+// errScheduledMessageRefused is the one public refusal a scheduled message
+// records when its target cannot be resolved or fire-time authorization
+// refuses it. The specific cause is logged, never stored on the event.
+var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
+
 // messageEventHandler returns an EventHandler that dispatches scheduled messages
 // to agents via the AgentDispatcher.
 //
@@ -4154,20 +4191,26 @@ func (s *Server) messageEventHandler() EventHandler {
 			return fmt.Errorf("message payload must include agentId or agentName")
 		}
 		if err != nil {
+			// The returned error is persisted as ScheduledEvent.Error, which
+			// project readers can see. A missing target, a lookup failure
+			// and an authorization refusal below all return the same
+			// constant (errScheduledMessageRefused); the specific cause is
+			// logged here.
 			if errors.Is(err, store.ErrNotFound) {
 				slog.Warn("Scheduler: target agent no longer exists",
 					"eventID", evt.ID,
 					"agentName", payload.AgentName,
 					"agent_id", payload.AgentID,
 					"projectID", evt.ProjectID,
-					"message", payload.Message)
-				// Return the error — the enclosing scheduler wrapper
-				// (fireEvent / executeSchedule) owns status recording and
-				// will persist the error message on the event.
-				return fmt.Errorf("target agent deleted: agent %q not found in project %q",
-					targetName, evt.ProjectID)
+					"cause", "target agent deleted")
+			} else {
+				slog.Warn("Scheduler: target agent lookup failed",
+					"eventID", evt.ID,
+					"agentName", targetName,
+					"projectID", evt.ProjectID,
+					"error", err)
 			}
-			return fmt.Errorf("failed to resolve agent %q: %w", targetName, err)
+			return errScheduledMessageRefused
 		}
 
 		// ---- C1 containment: fire-time authorization ----
@@ -4177,7 +4220,13 @@ func (s *Server) messageEventHandler() EventHandler {
 		// status recording. No external effect occurs on denial.
 		_, authErr := s.authorizeScheduledMessageFire(ctx, evt, agent)
 		if authErr != nil {
-			return authErr
+			slog.Warn("Scheduler: scheduled message refused at fire time",
+				"eventID", evt.ID,
+				"agent_id", agent.ID,
+				"projectID", evt.ProjectID,
+				"creator", evt.CreatedBy,
+				"error", authErr)
+			return errScheduledMessageRefused
 		}
 
 		// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).

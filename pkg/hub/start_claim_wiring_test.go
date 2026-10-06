@@ -937,3 +937,38 @@ func TestStartClaimWiring_StopReleasesTheClaimAfterItsStatusAndQuota(t *testing.
 	}
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the superseded claim is released after the stop")
 }
+
+// A start whose agent is hard-deleted while it dispatches loses its claim at
+// the next renewal; the client gets delete_in_progress, as for a delete that
+// won, not "start abandoned".
+func TestStartClaimWiring_StartLostToADeleteAnswersDeleteInProgress(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	var run *startClaimRun
+	f.srv.startClaimTestHook = func(r *startClaimRun) { run = r }
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		require.NoError(t, f.s.DeleteAgent(context.Background(), a.ID))
+		run.markLost("the row was deleted")
+		return nil
+	}
+	code, body := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusConflict, code, body)
+	errCode, _ := errorDetails(body)
+	assert.Equal(t, ErrCodeDeleteInProgress, errCode)
+}
+
+// A start whose claim is lost while its agent still exists is answered as
+// an abandoned start.
+func TestStartClaimWiring_StartLostWithoutADeleteIsAbandoned(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	var run *startClaimRun
+	f.srv.startClaimTestHook = func(r *startClaimRun) { run = r }
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		run.markLost("superseded")
+		return nil
+	}
+	code, body := lifecycle(t, f, a.ID, "start")
+	require.Equal(t, http.StatusConflict, code, body)
+	errCode, _ := errorDetails(body)
+	assert.Equal(t, ErrCodeConflict, errCode)
+	assert.Contains(t, fmt.Sprint(body), "abandoned")
+}

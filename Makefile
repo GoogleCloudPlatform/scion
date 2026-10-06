@@ -169,7 +169,7 @@ test-fixture-coverage:
 # (TestProjectDeletionService_LockOrderNoDeadlock: ProjectDeletionService
 # locks the project's agents before its project-group cascade deletes agent
 # memberships), selected by name so only that test runs here. In the second
-# run (the entadapter allow-list), the TestDeleteGroupMembershipsForUser_
+# run (the full entadapter suite), the TestDeleteGroupMembershipsForUser_
 # prefix also selects
 # TestDeleteGroupMembershipsForUser_LockOrderVsProjectGroupCascade (a user
 # delete locks the groups it owns before its memberships, so it cannot
@@ -177,6 +177,11 @@ test-fixture-coverage:
 # TestDeleteGroupMembershipsForUser_OwnedGroupLockAllowsMemberInsert (that
 # lock is FOR NO KEY UPDATE, so it does not block the FK check of a
 # membership inserted into an owned group, which would deadlock).
+#
+# Since ptone/scion#2207 the job runs the FULL pkg/store/entadapter suite on
+# Postgres (no -run filter); the lists above document why particular groups
+# matter here, not what is selected. Every entadapter test now has to pass on
+# both backends.
 #
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
@@ -193,6 +198,12 @@ test-fixture-coverage:
 # SCION_TEST_WORKER_DSN set (see multiprocess_test.go's package comment),
 # not Postgres-availability skips. They are excluded by name so a genuine
 # new skip in that package still fails the target.
+#
+# In the entadapter run, a test that is SQLite-only by design skips through
+# enttest.SkipOnPostgres, whose skip message is
+# "enttest-sqlite-only: <test name> <reason>". A skipped test is allowed only
+# if its own skip message carries that marker, so there is no name list here
+# and any other skip still fails the target.
 test-launch-store-postgres:
 	@echo "Running launch store tests against Postgres..."
 	@if [ -z "$$SCION_TEST_POSTGRES_URL" ]; then \
@@ -209,14 +220,19 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only integration tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
-	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestCountGroupMembersByRole_IgnoresDeletedOwner|TestGetGroupMembers_SkipsOrphanedRows|TestCompositeDeleteAgent_|TestCompositeDeleteProject_|TestFinalizeAgentDeletionHard_|TestPurgeDeletedAgents_|TestCompositeStore_PurgeDeletedAgents_|TestDeleteGroupMembershipsForUser_|TestPreviousRunIDs_|TestSeedMaintenanceOperations)' \
+	@go test -tags integration -count=1 -timeout 40m -v \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
-	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log; then \
-		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
+	sed -nE 's/^[[:space:]]*--- SKIP: ([^ ]+).*/\1/p' /tmp/test-launch-store-postgres.log | sort -u \
+		> /tmp/test-launch-store-postgres.skipped; \
+	grep -oE 'enttest-sqlite-only: [^ ]+' /tmp/test-launch-store-postgres.log | awk '{print $$2}' | sort -u \
+		> /tmp/test-launch-store-postgres.sqlite-only; \
+	unexpected=$$(grep -vxF -f /tmp/test-launch-store-postgres.sqlite-only /tmp/test-launch-store-postgres.skipped); \
+	if [ -n "$$unexpected" ]; then \
+		echo "ERROR: these entadapter tests were skipped on Postgres without enttest.SkipOnPostgres:" >&2; \
+		echo "$$unexpected" >&2; \
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \

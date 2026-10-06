@@ -48,6 +48,7 @@ The **Runtime** is the infrastructure layer responsible for executing the agent 
 - **Podman**: A daemonless, rootless alternative to Docker for Linux and macOS.
 - **Apple Container**: Uses the native Virtualization Framework on macOS for improved performance.
 - **Kubernetes**: Allows running agents as Pods in a Kubernetes cluster, enabling remote execution and scaling at production scale.
+- **Substrate**: Runs each agent as an [Agent Substrate](https://github.com/agent-substrate/substrate) actor on GKE, driven through the Substrate `ateapi` control plane and `atenet` router by an in-cluster Runtime Broker. Selected explicitly with a `type: substrate` runtime entry; see [`deploy/substrate/`](https://github.com/GoogleCloudPlatform/scion/tree/main/deploy/substrate) for cluster and Runtime Broker manifests and operations docs.
 
 ### Runtime Broker
 A **Runtime Broker** is a *service* that manages the lifecycle of containerized agents on behalf of the **Hub** — it is not itself a compute node. It provisions workspaces, hydrates templates, streams logs, and delegates container operations to a pluggable **Runtime**.

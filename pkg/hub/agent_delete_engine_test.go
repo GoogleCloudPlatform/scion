@@ -237,6 +237,9 @@ func ownerDeleteRequest(t *testing.T, s store.Store, ctx context.Context, agentI
 	a.OwnerID = userID
 	a.CreatedBy = userID
 	require.NoError(t, s.UpdateAgent(context.Background(), a))
+	// The owner relationship requires active project access
+	// (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, userID, a.ProjectID)
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/agents/"+agentID, nil)
 	return req.WithContext(contextWithIdentity(ctx, NewAuthenticatedUser(userID, userID+"@test.com", "Owner", "member", "cli")))
 }
