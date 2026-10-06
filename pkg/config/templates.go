@@ -313,16 +313,19 @@ func templateNameFromDir(dir string) string {
 	return base
 }
 
-// bareContentHashPattern matches a content hash without the "sha256:"
-// prefix (transfer.IsContentHash requires the prefix).
-var bareContentHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+// templateHashPattern matches a content hash in any letter case, with or
+// without the "sha256:" prefix. transfer.IsContentHash only accepts the
+// lowercase, prefixed form the cache writes today; this broader match is
+// local to display-name derivation so an unprefixed or uppercase digest (a
+// legacy or externally produced hash) is never shown as a template name
+// either (ptone/scion#3113).
+var templateHashPattern = regexp.MustCompile(`(?i)^(sha256:)?[0-9a-f]{64}$`)
 
 // isTemplateHashName reports whether s is a content hash rather than a
-// template name: the prefixed form cache directories use today, or a bare
-// 64-hex digest (a legacy or unprefixed hash), which must not be shown as a
-// template name either (ptone/scion#3113).
+// template name: the prefixed form cache directories use today, or any
+// other letter case or the bare 64-hex digest (templateHashPattern).
 func isTemplateHashName(s string) bool {
-	return transfer.IsContentHash(s) || bareContentHashPattern.MatchString(s)
+	return transfer.IsContentHash(s) || templateHashPattern.MatchString(s)
 }
 
 // FriendlyTemplateName converts a raw template reference (cache path, URI, or

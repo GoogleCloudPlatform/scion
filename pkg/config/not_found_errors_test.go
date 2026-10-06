@@ -120,6 +120,8 @@ func TestHarnessConfigNotFoundError_FromLookup(t *testing.T) {
 // query string or userinfo (ptone/scion#3113 review N1/N2).
 func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
 	hex := strings.Repeat("ab", 32)
+	upperHex := strings.ToUpper(hex)
+	mixedHex := strings.Repeat("aB", 32)
 	cases := []struct {
 		ref  string
 		want string
@@ -127,6 +129,14 @@ func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
 		{hex, ""},
 		{"/var/cache/scion/templates/" + hex, ""},
 		{"/var/cache/scion/templates/sha256:" + hex, ""},
+		// Any letter case, bare or prefixed (upstream review).
+		{upperHex, ""},
+		{"sha256:" + upperHex, ""},
+		{"SHA256:" + mixedHex, ""},
+		{mixedHex, ""},
+		{"/var/cache/scion/templates/" + upperHex, ""},
+		{"/var/cache/scion/templates/sha256:" + upperHex, ""},
+		{"/var/cache/scion/templates/sha256:" + mixedHex, ""},
 		{"https://host.example/a/b.tgz?token=s3cr3t", "b"},
 		{"https://host.example/a/b?sig=x", "b"},
 		{"https://user:pw@host.example", "host.example"},
@@ -153,7 +163,7 @@ func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
 		if strings.ContainsAny(got, "\n\r ") {
 			t.Errorf("FriendlyTemplateName(%q) = %q contains a decoded space or line break", c.ref, got)
 		}
-		for _, secret := range []string{"s3cr3t", "sig", "token", "user", "pw@", hex} {
+		for _, secret := range []string{"s3cr3t", "sig", "token", "user", "pw@", hex, upperHex, mixedHex} {
 			if strings.Contains(got, secret) {
 				t.Errorf("FriendlyTemplateName(%q) = %q leaks %q", c.ref, got, secret)
 			}
@@ -161,7 +171,9 @@ func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
 	}
 
 	// Through the typed error, as the broker sees it.
-	if n := NewTemplateNotFoundError("/var/cache/scion/templates/"+hex, "x").Name; n != "" {
-		t.Errorf("TemplateNotFoundError.Name for a bare-hex cache dir = %q, want empty", n)
+	for _, dir := range []string{hex, upperHex, "sha256:" + upperHex, "SHA256:" + mixedHex} {
+		if n := NewTemplateNotFoundError("/var/cache/scion/templates/"+dir, "x").Name; n != "" {
+			t.Errorf("TemplateNotFoundError.Name for cache dir %q = %q, want empty", dir, n)
+		}
 	}
 }
