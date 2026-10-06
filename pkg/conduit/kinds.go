@@ -17,6 +17,7 @@ package conduit
 import (
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -56,13 +57,14 @@ func PrincipalKindFromProto(p conduitv1.PrincipalKind) (PrincipalKind, error) {
 // StreamKind is the canonical stream kind string (contracts §2).
 type StreamKind string
 
-// Stream kinds.
+// Stream kinds. The strings come from the grant package, so frames,
+// sessions and grants share one list (pinned by TestStreamKindsMatchGrant).
 const (
-	StreamTCP    StreamKind = "tcp"
-	StreamPTY    StreamKind = "pty"
-	StreamSSH    StreamKind = "ssh"
-	StreamLogs   StreamKind = "logs"
-	StreamEvents StreamKind = "events"
+	StreamTCP    StreamKind = grant.StreamKindTCP
+	StreamPTY    StreamKind = grant.StreamKindPTY
+	StreamSSH    StreamKind = grant.StreamKindSSH
+	StreamLogs   StreamKind = grant.StreamKindLogs
+	StreamEvents StreamKind = grant.StreamKindEvents
 )
 
 var streamToProto = map[StreamKind]conduitv1.StreamKind{
