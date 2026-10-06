@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -176,7 +177,7 @@ func brokerStateFixture(t *testing.T) (home string, paths []string) {
 func TestCleanupAfterDeregister_PurgeLocal(t *testing.T) {
 	home, paths := brokerStateFixture(t)
 	var out bytes.Buffer
-	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 0, nil, false, true, paths))
+	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, false, true, paths))
 
 	for _, gone := range []string{"hub-credentials", "broker.log", "runtime-broker-state/b-1", "cache/templates"} {
 		assert.NoFileExists(t, filepath.Join(home, gone))
@@ -192,7 +193,7 @@ func TestCleanupAfterDeregister_PurgeLocal(t *testing.T) {
 func TestCleanupAfterDeregister_NoPurgeListsResidue(t *testing.T) {
 	home, paths := brokerStateFixture(t)
 	var out bytes.Buffer
-	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 0, nil, false, false, paths))
+	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, false, false, paths))
 	assert.NoDirExists(t, filepath.Join(home, "hub-credentials"), "the empty credentials dir is always removed")
 	assert.FileExists(t, filepath.Join(home, "broker.log"))
 	assert.Contains(t, out.String(), "Local broker state left in place")
@@ -204,12 +205,13 @@ func TestCleanupAfterDeregister_NoPurgeListsResidue(t *testing.T) {
 func TestCleanupAfterDeregister_PurgeSkipped(t *testing.T) {
 	tests := []struct {
 		name      string
-		remaining int
+		remaining []brokercredentials.BrokerCredentials
 		listErr   error
 		running   bool
 		wantErr   string
 	}{
-		{name: "other connections remain", remaining: 1, wantErr: "1 hub connection(s) remain"},
+		{name: "other connections remain", remaining: []brokercredentials.BrokerCredentials{{Name: "other", BrokerID: "b-2"}}, wantErr: "deregister them first with 'scion runtime-broker deregister --name <name>' (other)"},
+		{name: "connection without broker ID remains", remaining: []brokercredentials.BrokerCredentials{{Name: "other"}}, wantErr: "remove them by hand"},
 		{name: "connections cannot be listed", listErr: errors.New("boom"), wantErr: "could not list hub connections"},
 		{name: "broker running", running: true, wantErr: "the broker is running"},
 	}
@@ -222,6 +224,8 @@ func TestCleanupAfterDeregister_PurgeSkipped(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "--purge-local skipped")
 			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Contains(t, out.String(), "Local broker state left in place", "a refused purge lists what is left")
+			assert.Contains(t, out.String(), filepath.Join(home, "broker.log"))
 			assert.FileExists(t, filepath.Join(home, "hub-credentials", "other.json"))
 			assert.FileExists(t, filepath.Join(home, "broker.log"))
 			assert.DirExists(t, filepath.Join(home, "runtime-broker-state", "b-1"))
@@ -258,9 +262,10 @@ func TestPurgeLocalBrokerStateOnly_RefusesWhileConnectionsRemain(t *testing.T) {
 	cmd.Flags().Int("port", 0, "")
 	require.NoError(t, cmd.Flags().Set("port", strconv.Itoa(freeTCPPort(t))))
 
-	err := purgeLocalBrokerStateOnly(cmd)
+	err := purgeLocalBrokerStateOnly(cmd, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "2 hub connection(s) remain")
+	assert.Contains(t, err.Error(), filepath.Join(credsDir, "no-id.json"), "a connection without broker ID is named by file")
 	assert.FileExists(t, filepath.Join(scionHome, "broker.log"))
 	assert.DirExists(t, filepath.Join(scionHome, "cache", "templates"))
 	assert.FileExists(t, filepath.Join(credsDir, "other.json"))
@@ -278,7 +283,7 @@ func TestPurgeLocalBrokerStateOnly_PurgesWithNoConnections(t *testing.T) {
 	cmd.Flags().Int("port", 0, "")
 	require.NoError(t, cmd.Flags().Set("port", strconv.Itoa(freeTCPPort(t))))
 
-	require.NoError(t, purgeLocalBrokerStateOnly(cmd))
+	require.NoError(t, purgeLocalBrokerStateOnly(cmd, ""))
 	assert.NoFileExists(t, filepath.Join(scionHome, "broker.log"))
 	assert.NoDirExists(t, filepath.Join(scionHome, "hub-credentials"))
 	assert.FileExists(t, filepath.Join(scionHome, "settings.yaml"))
@@ -316,4 +321,60 @@ func TestConfirmProvide(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// purgeOnlyFixture sets up a scion home whose credentials store holds the
+// given files, with broker-local state, and returns the scion home and a
+// command whose --port points at nothing.
+func purgeOnlyFixture(t *testing.T, creds map[string]string) (string, *cobra.Command) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	scionHome := filepath.Join(home, ".scion")
+	credsDir := filepath.Join(scionHome, "hub-credentials")
+	require.NoError(t, os.MkdirAll(credsDir, 0o700))
+	for name, body := range creds {
+		require.NoError(t, os.WriteFile(filepath.Join(credsDir, name+".json"), []byte(body), 0o600))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(scionHome, "broker.log"), []byte("x"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(scionHome, "cache", "templates"), 0o755))
+	cmd := &cobra.Command{}
+	cmd.Flags().Int("port", 0, "")
+	require.NoError(t, cmd.Flags().Set("port", strconv.Itoa(freeTCPPort(t))))
+	return scionHome, cmd
+}
+
+// TestPurgeLocalBrokerStateOnly_SelectedNoIDConnectionDoesNotBlock: when
+// the only connection left is the selected one and it has no broker ID,
+// the purge runs (that connection is the one being deregistered), and its
+// credentials file is left in place and named.
+func TestPurgeLocalBrokerStateOnly_SelectedNoIDConnectionDoesNotBlock(t *testing.T) {
+	scionHome, cmd := purgeOnlyFixture(t, map[string]string{"no-id": `{"name":"no-id","hubEndpoint":"https://a"}`})
+	var err error
+	out := captureStdout(t, func() { err = purgeLocalBrokerStateOnly(cmd, "no-id") })
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(scionHome, "broker.log"))
+	assert.NoDirExists(t, filepath.Join(scionHome, "cache", "templates"))
+	noID := filepath.Join(scionHome, "hub-credentials", "no-id.json")
+	assert.FileExists(t, noID)
+	assert.Contains(t, out, noID)
+}
+
+// TestPurgeLocalBrokerStateOnly_OtherNoIDConnectionNamed: another
+// connection without a broker ID still blocks the purge, and the error
+// names its file for removal by hand.
+func TestPurgeLocalBrokerStateOnly_OtherNoIDConnectionNamed(t *testing.T) {
+	scionHome, cmd := purgeOnlyFixture(t, map[string]string{
+		"no-id":   `{"name":"no-id","hubEndpoint":"https://a"}`,
+		"stale-b": `{"name":"stale-b","hubEndpoint":"https://b"}`,
+	})
+	var err error
+	out := captureStdout(t, func() { err = purgeLocalBrokerStateOnly(cmd, "no-id") })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 hub connection(s) remain")
+	assert.Contains(t, err.Error(), filepath.Join(scionHome, "hub-credentials", "stale-b.json"))
+	assert.Contains(t, err.Error(), "remove them by hand")
+	assert.NotContains(t, err.Error(), "no-id.json", "the selected connection is not counted")
+	assert.FileExists(t, filepath.Join(scionHome, "broker.log"))
+	assert.Contains(t, out, "Local broker state left in place")
 }

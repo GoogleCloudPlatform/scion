@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -243,4 +244,18 @@ func TestLoginEndpointTargetGlobal(t *testing.T) {
 	assert.True(t, loginEndpointTargetGlobal(plain, false, false), "default: global")
 	assert.False(t, loginEndpointTargetGlobal(plain, false, true), "explicit --global=false: project")
 	assert.True(t, loginEndpointTargetGlobal(plain, true, true), "global context is always global")
+}
+
+func TestExplicitNotGlobalFlag(t *testing.T) {
+	newFlags := func(args ...string) *pflag.FlagSet {
+		fs := pflag.NewFlagSet("t", pflag.ContinueOnError)
+		fs.Bool("global", false, "")
+		require.NoError(t, fs.Parse(args))
+		return fs
+	}
+	assert.False(t, explicitNotGlobalFlag(newFlags()), "not given")
+	assert.True(t, explicitNotGlobalFlag(newFlags("--global=false")), "explicit false")
+	assert.False(t, explicitNotGlobalFlag(newFlags("--global")), "true")
+	assert.False(t, explicitNotGlobalFlag(newFlags("--global=true")), "explicit true")
+	assert.False(t, explicitNotGlobalFlag(pflag.NewFlagSet("none", pflag.ContinueOnError)), "no such flag")
 }

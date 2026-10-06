@@ -18,12 +18,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // hubAuthURLPrecedence documents the hub URL order 'scion hub auth login'
@@ -191,10 +193,7 @@ func persistLoginEndpointForInvocation(cmd *cobra.Command, hubURL string) {
 		fmt.Printf("Warning: could not resolve settings scope to save the hub endpoint: %v\n", err)
 		return
 	}
-	explicitNotGlobal := false
-	if f := cmd.Flags().Lookup("global"); f != nil && f.Changed && !globalMode {
-		explicitNotGlobal = true
-	}
+	explicitNotGlobal := explicitNotGlobalFlag(cmd.Flags())
 	err = persistLoginEndpoint(os.Stdout, loginEndpointOptions{
 		HubURL:       hubURL,
 		ProjectPath:  resolvedPath,
@@ -208,4 +207,16 @@ func persistLoginEndpointForInvocation(cmd *cobra.Command, hubURL string) {
 	if err != nil {
 		fmt.Printf("Warning: %v\n", err)
 	}
+}
+
+// explicitNotGlobalFlag reports whether the --global flag in fs was given
+// explicitly as false (--global=false), which asks hub auth login to save
+// the endpoint to the project's settings.
+func explicitNotGlobalFlag(fs *pflag.FlagSet) bool {
+	f := fs.Lookup("global")
+	if f == nil || !f.Changed {
+		return false
+	}
+	v, err := strconv.ParseBool(f.Value.String())
+	return err == nil && !v
 }

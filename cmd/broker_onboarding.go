@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 )
 
@@ -48,6 +49,10 @@ const (
 	// still settling: only then does status wait for its hub connections.
 	brokerRecentStartWindow = 30 * time.Second
 )
+
+// errBrokerNotProbed stands for a health check the status wait budget left
+// no time for.
+var errBrokerNotProbed = errors.New("broker server not probed: status wait budget exhausted")
 
 // brokerStatusSleep is time.Sleep; tests replace it.
 var brokerStatusSleep = time.Sleep
@@ -215,16 +220,18 @@ func purgeBrokerLocalState(paths []string, out io.Writer) error {
 }
 
 // cleanupAfterDeregister handles local broker state after deregister.
-// remaining is the number of hub connections left in the credentials store
-// and listErr the error listing them, if any. It removes the credentials
-// directory when it is known to be left empty. With purge it also removes
-// statePaths (brokerLocalStatePaths), but only when the store was listed,
-// no hub connection remains (the state is shared by all of them) and no
-// broker is running (it is in use). A purge that cannot run returns an
-// error, so a script sees a non-zero exit. Without purge it lists what is
-// left behind.
-func cleanupAfterDeregister(out io.Writer, credsDir string, remaining int, listErr error, brokerRunning, purge bool, statePaths []string) error {
-	if listErr == nil && remaining == 0 && credsDir != "" {
+// remaining lists the hub connections left in the credentials store (in
+// credsDir) and listErr is the error listing them, if any. It removes the
+// credentials directory when it is known to be left empty. With purge it
+// also removes statePaths (brokerLocalStatePaths), but only when the store
+// was listed, no hub connection remains (the state is shared by all of
+// them) and no broker is running (it is in use). A purge that cannot run
+// prints the paths left in place and returns an error, so a script sees a
+// non-zero exit; connections without a broker ID (which deregister cannot
+// remove) are named by file, to be removed by hand. Without purge it lists
+// what is left behind.
+func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercredentials.BrokerCredentials, listErr error, brokerRunning, purge bool, statePaths []string) error {
+	if listErr == nil && len(remaining) == 0 && credsDir != "" {
 		if removed, err := removeDirIfEmpty(credsDir); err != nil {
 			_, _ = fmt.Fprintf(out, "Warning: failed to remove empty %s: %v\n", credsDir, err)
 		} else if removed {
@@ -233,31 +240,76 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining int, listE
 	}
 	left := existingPaths(statePaths)
 	if purge {
+		var refusal error
 		switch {
 		case listErr != nil:
-			return fmt.Errorf("--purge-local skipped: could not list hub connections (%v); local broker state was left in place", listErr)
-		case remaining > 0:
-			return fmt.Errorf("--purge-local skipped: %d hub connection(s) remain and share the local broker state; deregister them first (see 'scion runtime-broker hubs')", remaining)
+			refusal = fmt.Errorf("--purge-local skipped: could not list hub connections (%v)", listErr)
+		case len(remaining) > 0:
+			refusal = remainingConnectionsError(credsDir, remaining)
 		case brokerRunning:
-			return errors.New("--purge-local skipped: the broker is running; stop it with 'scion runtime-broker stop', then run 'scion runtime-broker deregister --purge-local'")
+			refusal = errors.New("--purge-local skipped: the broker is running; stop it with 'scion runtime-broker stop', then run 'scion runtime-broker deregister --purge-local'")
 		case len(left) == 0:
 			_, _ = fmt.Fprintln(out, "No local broker state to remove.")
 			return nil
 		default:
 			return purgeBrokerLocalState(left, out)
 		}
+		printLeftInPlace(out, left)
+		return refusal
 	}
+	printLeftInPlace(out, left)
+	if len(left) > 0 && listErr == nil && len(remaining) == 0 {
+		_, _ = fmt.Fprintln(out, "Remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.")
+	}
+	return nil
+}
+
+// printLeftInPlace lists the broker-local state paths that were not removed.
+func printLeftInPlace(out io.Writer, left []string) {
 	if len(left) == 0 {
-		return nil
+		return
 	}
 	_, _ = fmt.Fprintln(out, "Local broker state left in place:")
 	for _, p := range left {
 		_, _ = fmt.Fprintf(out, "  %s\n", p)
 	}
-	if listErr == nil && remaining == 0 {
-		_, _ = fmt.Fprintln(out, "Remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.")
+}
+
+// remainingConnectionsError explains why --purge-local refused because hub
+// connections remain. Connections with a broker ID can be deregistered with
+// --name; credentials files without one cannot, so their files are named
+// for removal by hand.
+func remainingConnectionsError(credsDir string, remaining []brokercredentials.BrokerCredentials) error {
+	var withID, noIDFiles []string
+	for _, c := range remaining {
+		if c.BrokerID == "" {
+			noIDFiles = append(noIDFiles, filepath.Join(credsDir, c.Name+".json"))
+		} else {
+			withID = append(withID, c.Name)
+		}
 	}
-	return nil
+	msg := fmt.Sprintf("--purge-local skipped: %d hub connection(s) remain and share the local broker state", len(remaining))
+	if len(withID) > 0 {
+		msg += fmt.Sprintf("; deregister them first with 'scion runtime-broker deregister --name <name>' (%s)", strings.Join(withID, ", "))
+	}
+	if len(noIDFiles) > 0 {
+		msg += fmt.Sprintf("; these credentials files have no broker ID and cannot be deregistered, remove them by hand if they are no longer needed: %s", strings.Join(noIDFiles, ", "))
+	}
+	return errors.New(msg)
+}
+
+// excludeConnection returns conns without the connection named name.
+func excludeConnection(conns []brokercredentials.BrokerCredentials, name string) []brokercredentials.BrokerCredentials {
+	if name == "" {
+		return conns
+	}
+	out := make([]brokercredentials.BrokerCredentials, 0, len(conns))
+	for _, c := range conns {
+		if c.Name != name {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // errProvideNeedsConfirmation is returned when runtime-broker provide cannot
