@@ -1759,3 +1759,11 @@ func TestStateChangeUsesStatusField(t *testing.T) {
 		})
 	}
 }
+
+// TestStateChangeActivityNilMessage guards stateChangeActivity against a nil
+// message.
+func TestStateChangeActivityNilMessage(t *testing.T) {
+	if got := stateChangeActivity(nil); got != "" {
+		t.Errorf("stateChangeActivity(nil) = %q, want empty", got)
+	}
+}

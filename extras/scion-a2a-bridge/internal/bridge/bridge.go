@@ -1346,6 +1346,9 @@ func (b *Bridge) processAndAppendEvent(ctx context.Context, taskID, agentSlug st
 // human-readable sentence in Msg ("x has reached a state of COMPLETED: ..."),
 // so Status is authoritative; Msg is used only when Status is empty.
 func stateChangeActivity(msg *messages.StructuredMessage) string {
+	if msg == nil {
+		return ""
+	}
 	if msg.Status != "" {
 		return msg.Status
 	}
