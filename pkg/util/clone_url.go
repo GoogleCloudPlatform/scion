@@ -23,13 +23,19 @@ import (
 
 // NormalizeCloneURL normalizes a project clone URL (a clone-url label or a git
 // remote) to the form the Hub clones from. Surrounding whitespace is trimmed
-// and local paths are returned unchanged. Every other value is first passed
-// through SanitizeGitSourceURL, so the result never carries userinfo (an ssh
-// or scp-style login is kept), a query string or a fragment; a value that
-// cannot be sanitized unambiguously normalizes to "" (ResolveCloneURL then
-// falls back to the git remote). Explicit http(s)://, ssh://, git:// and git@
-// URLs are then kept as they are; other remotes (e.g. "github.com/org/repo")
-// are converted to an HTTPS clone URL via ToHTTPSCloneURL.
+// and local paths are returned unchanged. A git+ssh:// or ssh+git:// URL is
+// first rewritten to ssh://. Every other value is then passed through
+// SanitizeGitSourceURL, so the result never carries userinfo (an ssh or
+// scp-style login is kept), a query string or a fragment; a value that cannot
+// be sanitized unambiguously normalizes to "" (ResolveCloneURL then falls
+// back to the git remote). After that:
+//   - URLs with an explicit scheme (http(s)://, ssh://, git://, file://, ...)
+//     are kept as they are;
+//   - scp-style "git@host:org/repo" is kept as it is (ssh transport);
+//   - scp-style remotes with another login ("deploy@host:org/repo") become
+//     the HTTPS clone URL of host/org/repo;
+//   - other remotes (e.g. "github.com/org/repo") are converted to an HTTPS
+//     clone URL via ToHTTPSCloneURL.
 //
 // This is the single source of truth shared by the Hub (which clones from the
 // result) and the CLI (which reports it), so the two cannot drift.
@@ -39,18 +45,21 @@ func NormalizeCloneURL(cloneURL string) string {
 		return cloneURL
 	}
 
+	if scheme, rest, ok := splitScheme(cloneURL); ok && (scheme == "git+ssh" || scheme == "ssh+git") {
+		cloneURL = "ssh://" + rest
+	}
 	cloneURL = SanitizeGitSourceURL(cloneURL)
 	if cloneURL == "" {
 		return ""
 	}
-	lower := strings.ToLower(cloneURL)
-	for _, prefix := range []string{"http://", "https://", "ssh://", "git://"} {
-		if strings.HasPrefix(lower, prefix) {
+	if _, _, ok := splitScheme(cloneURL); ok {
+		return cloneURL
+	}
+	if login, host, path, ok := splitSCP(cloneURL); ok {
+		if login == "git" {
 			return cloneURL
 		}
-	}
-	if strings.HasPrefix(cloneURL, "git@") {
-		return cloneURL
+		return ToHTTPSCloneURL(host + "/" + path)
 	}
 
 	return ToHTTPSCloneURL(cloneURL)
@@ -94,8 +103,13 @@ func trimSpaceEdges(s string) string {
 }
 
 // isLocalPath reports whether s is a local filesystem path (absolute, or
-// relative with an explicit ./ or ../ prefix) rather than a remote URL.
+// relative with an explicit ./ or ../ prefix) rather than a remote URL. A
+// leading "//" is an RFC 3986 network-path reference (//user:pass@host/repo),
+// not a local path.
 func isLocalPath(s string) bool {
+	if strings.HasPrefix(s, "//") {
+		return false
+	}
 	return filepath.IsAbs(s) || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../")
 }
 
@@ -125,24 +139,24 @@ var scpLogin = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // splitSCP splits an scp-style remote "login@host:path" (no scheme) at its
 // first '@' and the first ':' after it. ok is false unless the login matches
-// scpLogin and the host is non-empty with no '/'. The path is returned as
-// is and may itself contain '@'.
+// scpLogin and the host is non-empty with no '/' or '@'. The path is returned
+// as is and may itself contain '@'; callers treat that as ambiguous.
 //
 // Note: the login is not a secret in this form, so a value such as
 // "TOKEN@github.com:org/repo" is indistinguishable from an ordinary login and
 // is accepted. That ambiguity is inherent to scp syntax; credentials belong
 // in project secrets or the GitHub App, not in the remote.
 //
-// It is intentional that ValidateCloneURLLabel refuses "git@host:repo@v1"
-// while SanitizeGitSourceURL keeps it for the source-url label: the login is
-// transport, and the '@' in the path is ref-like and carries no secret.
+// An '@' in the scp path ("git@host:repo@v1", "git@user:PW@host:org/repo") is
+// ambiguous: ValidateCloneURLLabel refuses it and SanitizeGitSourceURL drops
+// the value.
 func splitSCP(value string) (login, host, path string, ok bool) {
 	login, rest, found := strings.Cut(value, "@")
 	if !found || !scpLogin.MatchString(login) {
 		return "", "", "", false
 	}
 	host, path, found = strings.Cut(rest, ":")
-	if !found || host == "" || strings.Contains(host, "/") {
+	if !found || host == "" || strings.ContainsAny(host, "/@") {
 		return "", "", "", false
 	}
 	return login, host, path, true
@@ -205,9 +219,10 @@ func ValidateCloneURLLabel(value string) error {
 // An ssh:// or scp-style login (git@host:org/repo) is kept; http(s), git and
 // other schemes lose all userinfo, including a bare token. When a credential
 // cannot be removed unambiguously — the value contains other whitespace or
-// control characters, or an '@' remains outside a transport login (for
-// example a password that looks like a port, https://user:8443/x@host/repo)
-// — the result is "" so that nothing which might be a secret is kept.
+// control characters, or an '@' remains outside a single transport login (for
+// example a password that looks like a port, https://user:8443/x@host/repo,
+// or any '@' in an scp path) — the result is "" so that nothing which might
+// be a secret is kept.
 func SanitizeGitSourceURL(value string) string {
 	value = trimSpaceEdges(value)
 	if value == "" || isLocalPath(value) {
@@ -234,7 +249,10 @@ func SanitizeGitSourceURL(value string) string {
 		}
 		return prefix + rest
 	}
-	if _, _, _, ok := splitSCP(value); ok {
+	if _, _, path, ok := splitSCP(value); ok {
+		if strings.Contains(path, "@") {
+			return ""
+		}
 		return value
 	}
 	// Schemeless host/path with userinfo before the first '/'
@@ -244,7 +262,10 @@ func SanitizeGitSourceURL(value string) string {
 	if at := strings.LastIndex(authority, "@"); at >= 0 {
 		authority = authority[at+1:]
 	}
-	if authority == "" || strings.Contains(path, "@") {
+	// A ':' left in the authority must be a port; anything else
+	// (git@PW@host:org/repo) is an scp form with extra '@' and is ambiguous.
+	if authority == "" || strings.Contains(path, "@") ||
+		(strings.Contains(authority, ":") && !isHostAndPort(authority)) {
 		return ""
 	}
 	if hasPath {

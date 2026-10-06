@@ -157,7 +157,10 @@ export function cloneUrlCredentialHint(remote: string): string | null {
   if (!/^[\x21-\x7e]*$/.test(url)) {
     return 'The repository URL must not include spaces, control or non-ASCII characters.';
   }
-  if (url.startsWith('/') || url.startsWith('./') || url.startsWith('../')) return null;
+  // A leading '//' is a network-path reference (//user:pass@host/repo), not a local path.
+  const isLocalPath =
+    (url.startsWith('/') && !url.startsWith('//')) || url.startsWith('./') || url.startsWith('../');
+  if (isLocalPath) return null;
   if (/[?#]/.test(url)) {
     return 'The repository URL must not include a query string or fragment.' + advice;
   }
@@ -176,7 +179,7 @@ export function cloneUrlCredentialHint(remote: string): string | null {
       at > 0 &&
       scpLogin.test(authority.slice(0, at));
   } else {
-    const scp = /^([A-Za-z0-9._-]+)@([^:/]+):(.*)$/.exec(url);
+    const scp = /^([A-Za-z0-9._-]+)@([^:/@]+):(.*)$/.exec(url);
     loginOnly = scp !== null && !scp[3].includes('@');
   }
   return loginOnly
@@ -195,6 +198,10 @@ export function cloneUrlCredentialHint(remote: string): string | null {
  */
 export function deriveCloneUrl(remote: string): string {
   let cloneUrl = displayGitRemote(remote);
+  // An ssh:// port is the ssh daemon's, not the https server's.
+  if (/^ssh:\/\//i.test(trimRemote(remote))) {
+    cloneUrl = cloneUrl.replace(/^([^/]+):\d+(?=\/|$)/, '$1');
+  }
   const lowerUrl = cloneUrl.toLowerCase();
   const isADO =
     lowerUrl.startsWith('dev.azure.com/') ||

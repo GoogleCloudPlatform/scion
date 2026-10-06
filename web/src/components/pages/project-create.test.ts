@@ -1099,6 +1099,10 @@ describe('cloneUrlCredentialHint', () => {
     'user:PW@host/org/repo://',
     'https:/user:PW@host/r',
     'git@host:repo@v1',
+    'git@PW@host:org/repo',
+    'git@a@b@host:x',
+    'git@user:PW@host:org/repo',
+    '//user:PW@host/repo',
   ])('flags userinfo in %s', (url) => {
     expect(hint(url)).toMatch(/username, password or token/);
   });
@@ -1142,6 +1146,9 @@ describe('deriveCloneUrl', () => {
     ['https://user:pass@github.com/org/repo', 'https://github.com/org/repo.git'],
     ['https://github.com/org/repo?ref=main#x', 'https://github.com/org/repo.git'],
     ['https://dev.azure.com/org/proj/_git/repo.git', 'https://dev.azure.com/org/proj/_git/repo'],
+    ['ssh://git@host:22/org/repo', 'https://host/org/repo.git'],
+    ['SSH://git@host:2222/org/repo.git', 'https://host/org/repo.git'],
+    ['https://host:8443/org/repo', 'https://host:8443/org/repo.git'],
   ])('derives %s', (input, want) => {
     const got = derive(input);
     expect(got).toBe(want);
