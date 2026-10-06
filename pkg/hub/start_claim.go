@@ -431,7 +431,7 @@ type startedState struct {
 func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts StartOpts) error {
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
-		opts.Dispatch.rollback(ctx)
+		opts.Dispatch.rollback(ctx) // nil-safe: a no-op without a caller's hold
 		return errors.New("no dispatcher")
 	}
 	provisioned := agent.Phase == string(state.PhaseCreated) || agent.Phase == string(state.PhaseProvisioning)
@@ -473,7 +473,8 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	if err != nil && !errors.Is(err, errStartedStatusWrite) {
 		// A start refused before its dispatch ran (a held or lost claim, a
 		// refused intent) leaves a caller's hold to undo; a no-op once the
-		// hold was settled or rolled back.
+		// hold was settled or rolled back, and when there is no hold (sd is
+		// nil: rollback is nil-safe).
 		sd.rollback(ctx)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {

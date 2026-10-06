@@ -51,14 +51,14 @@ func (s *Server) stopAgentsRunningWithIntentStopped(ctx context.Context, brokerI
 	}
 	var pending map[string]bool
 	for i := range agents {
-		a := agents[i]
+		a := &agents[i]
 		seen, ok := report.observed[a.ID]
 		if !ok || seen.state != store.ObservedPresentRunning {
 			continue
 		}
 		if a.RunIntent != store.RunIntentStopped || a.RunIntentAt == nil || a.StartClaimID != "" ||
 			!a.DeletedAt.IsZero() || a.DeletionActive(time.Now()) ||
-			reincarnationInFlight(&a) || s.lifecycleOps.active(a.ID) {
+			reincarnationInFlight(a) || s.lifecycleOps.active(a.ID) {
 			continue
 		}
 		if pending == nil {
@@ -73,7 +73,7 @@ func (s *Server) stopAgentsRunningWithIntentStopped(ctx context.Context, brokerI
 			continue
 		}
 		s.intentStops.Store(a.ID, time.Now())
-		if a.RunIntent == store.RunIntentStopped && a.RunIntentAt != nil && !a.RunIntentWrittenWithClaims() {
+		if !a.RunIntentWrittenWithClaims() {
 			// Intent last written by earlier code (or the boot backfill),
 			// which could leave intent stopped on an agent meant to run
 			// (a reincarnated stopped agent, a rolled-back delete, a
@@ -81,7 +81,7 @@ func (s *Server) stopAgentsRunningWithIntentStopped(ctx context.Context, brokerI
 			s.agentLifecycleLog.Info("Agent runs with a stopped run intent from earlier code; not stopped", "agent_id", a.ID)
 			continue
 		}
-		go s.stopForStoppedIntent(context.WithoutCancel(ctx), a)
+		go s.stopForStoppedIntent(context.WithoutCancel(ctx), *a)
 	}
 }
 
