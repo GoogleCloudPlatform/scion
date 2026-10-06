@@ -457,7 +457,7 @@ Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedR
 `api.CheckExpectedRuntimeTarget(runtimeBrokerID, actual, expected string) *api.RuntimeTargetMismatch` lives in `pkg/api/runtime_target.go`.
 - It returns nil when `expected == ""` or `expected == actual`.
 - Otherwise it returns the details for the envelope.
-- `api.RuntimeTargetMismatch.Message()` produces the frozen message: "Runtime Broker <runtimeBrokerId> serves runtime target <actual>, but the request expected <expected>". When `actual` is empty, the target text reads "no runtime target".
+- `api.RuntimeTargetMismatch.Message()` produces the frozen message: "Runtime Broker <runtimeBrokerId> serves runtime target <actual>, but the request expected <expected>". When `actual` is empty, the message reads "Runtime Broker <runtimeBrokerId> serves no runtime target, but the request expected <expected>".
 - The Hub and the Runtime Broker both build their envelopes from it.
 
 ### Error codes (all new; constants added in **P1.1** in the packages listed, used by P1.2)
@@ -470,7 +470,7 @@ Store model: `Agent.PinnedRuntimeBrokerID`, `PinnedRuntimeTargetID` and `PinnedR
 | `runtime_target_changed` | 409 | `ErrCodeRuntimeTargetChanged` | hub | `runtimeBrokerId`, `storedRuntimeTargetId`, `reportedRuntimeTargetId` | Registration R3/R4 |
 | `runtime_broker_not_flat` | 409 | `ErrCodeRuntimeBrokerNotFlat` | hub | `runtimeBrokerId` | Flat registration against a legacy row (R3) |
 | `runtime_broker_name_conflict` | 409 | `ErrCodeRuntimeBrokerNameConflict` | hub | `name`, `slug`, `existingRuntimeBrokerId` | R2 (flat creation), R4 (legacy creation colliding with a flat row), admin PATCH rename |
-| `runtime_target_move_unsupported` | 409 | `ErrCodeRuntimeTargetMoveUnsupported` | hub | `agentId`, `runtimeBrokerId` | Move eligibility: a dry-run move refused through `writeMoveRefusal` (verdict check `runtime_target`) in P1 (non-dry-run moves stay 501), and the same refusal once moves exist (section 7) |
+| `runtime_target_move_unsupported` | 409 | `ErrCodeRuntimeTargetMoveUnsupported` | hub | none: written by `writeMoveRefusal` with only its existing `verdict` detail (no new wire details) | Move eligibility: a dry-run move refused through `writeMoveRefusal` (verdict check `runtime_target`) in P1 (non-dry-run moves stay 501), and the same refusal once moves exist (section 7) |
 | `runtime_target_pin_stale` | 409 | `ErrCodeRuntimeTargetPinStale` | hub | `agentId`, `pinnedRuntimeBrokerId`, `runtimeBrokerId` | Stale pin (section 7) |
 | `runtime_target_ack_missing` | — (instance-side, not HTTP) | `ErrCodeRuntimeTargetAckMissing` | api | `runtimeBrokerId`, `phase` | The registration or join response (R9), the embedded bound result, or the P2.1 activation binding (R10) lacks `runtimeTarget`. Startup error; instance not activated |
 | `runtime_target_binding_conflict` | — (instance-side, not HTTP) | `ErrCodeRuntimeTargetBindingConflict` | api | `runtimeBrokerId`, `phase`, `expected`, `got` | The registration or join response (R9), the embedded bound result, or the P2.1 activation binding (R10) carries a different Runtime Broker ID or target. Startup error; instance not activated |
@@ -499,7 +499,7 @@ Notes on the codes:
 
   **Frozen order:**
   1. **Resolve** the Runtime Broker. **A flat row is never linked here.** An unlinked flat row can be reached only through an **explicit** `runtimeBrokerId`: the project default and Hub-default cases select only from the project's linked, online providers, so they keep today's fall-through. For an explicit flat row that is not linked to the project, the resolver evaluates **`canDispatchToBroker` on that row first**. A denial returns today's authorization response (authorization wins). Otherwise it answers 422 `runtime_broker_not_linked` ("Runtime Broker <id> is not linked to project <p>; link it explicitly (scion runtime-broker provide, or POST /api/v1/projects/{id}/providers) before creating agents on it") and writes nothing.
-     **Legacy rows keep today's order unchanged**: the in-resolver project-update `CheckAccess`, the offline 503, and then today's create-time link inside the resolver, before step 2 (which, for agent callers, depends on that link through `brokerServesProject`). A client-supplied `expectedRuntimeTargetId` toward a legacy row is **not** checked here: it stays in step 4's new-create branch, in the step-5 precedence, after dispatch authorization. So for an explicit unlinked legacy row, today's create-time link (step 1) may persist when a later check refuses, exactly as it does today for a step-2 403.
+     **Legacy rows keep today's order unchanged**: the in-resolver project-update `CheckAccess`, the offline 503, and then today's create-time link inside the resolver, before step 2. An agent caller creating on an explicit, unlinked legacy row is denied by that project-update `CheckAccess` today: it gets 403 and no link is written. That is unchanged. A client-supplied `expectedRuntimeTargetId` toward a legacy row is **not** checked here: it stays in step 4's new-create branch, in the step-5 precedence, after dispatch authorization. So for an explicit unlinked legacy row, today's create-time link (step 1) may persist when a later check refuses, exactly as it does today for a step-2 403.
   2. **Access (the single authorization rule, section 17):** `checkBrokerDispatchAccess`, unchanged. The existing pure checks that follow it today stay here, unchanged and in their current order: `requireEmptyPerAgentBrokerCapability` (412), GCP passthrough authorization, and service-account assignment validation.
   3. **Read the existing agent** (`GetAgentBySlug`, a pure read moved up from its current position) and decide which `handleExistingAgent` branch applies, without executing it.
   4. **Branch:**
@@ -638,7 +638,7 @@ GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 are in flight 
 Stage B commits these names. Groups A–E (including the new pure mismatch tests) run for real in P1.1.
 
 Group F tests are the dispatch half:
-- They compile against real types and helpers in P1.1, with no build tags.
+- They compile against real types and helpers in P1.1, in the default build. (The pkg/hub and cmd files carry the usual `//go:build !no_sqlite` tag, like the other SQLite-backed test files there.)
 - Each calls `t.Skip(pendingFlatDispatch)`, where `const pendingFlatDispatch = "pending ptone/scion#3268: flat dispatch not wired yet"` is defined once per package, so deleting the constant forces every skip to be removed.
 - **Compilation rule:** a group F body may reference only (1) symbols that exist at 28eb4f0, (2) symbols P1.1 adds, (3) raw JSON or string literals, or (4) the named F‑arrange helpers. P1.1 therefore adds, without callers: the type `*hub.RuntimeTargetRefusal{Code, Status, Message, Details}` with `Error()` in `pkg/hub/errors.go`; `store.PinnedPlacement`; and the store methods. Behaviour such as `isConfirmedStartNotActedOnError` recognizing the type is P1.2. The skipped assertions state it now, and P1.2 must make them pass. The Stage B review checks that group F compiles.
 - **Bodies in P1.1 are complete arrange/act/assert.** They use:
@@ -647,6 +647,10 @@ Group F tests are the dispatch half:
   - existing test harnesses (Hub test server, store fixtures, Runtime Broker test server);
   - raw-JSON request bodies for fields that are not added in P1.1 (the Hub public `CreateAgentRequest` in `handlers_agents_core.go`, `RemoteCreateAgentRequest`, Runtime Broker `CreateAgentRequest`, `StartExtras`).
 - Where the thing under test has no P1.1 API (constructing a flat Runtime Broker instance, `RegisterEmbeddedFlatRuntimeBroker`, `StartExtras.ExpectedRuntimeTargetID`), the arrange step goes through a helper in the same test file: `newFlatInstanceTestServer` in pkg/runtimebroker, `registerEmbeddedFlatForTest` in pkg/hub. Its P1.1 body builds as much as the current code allows. Such tests are marked **F‑arrange** below.
+- **Frozen test internals (accepted constraints for P1.2):**
+  - The Runtime Broker group F tests reach into `*runtimebroker.Server` internals (`Handler`, `Start`, `hubConnections`, `dispatchAttempts`, `launchRegistry`).
+  - The fixture types (`flatInstanceFixture`, `flatInstanceOpts`, `flatHubFixture` and their helper methods) are effectively frozen with the bodies; only the named F‑arrange helpers change.
+  - The P1 remote-mode gate (`flat_runtime_broker_remote_unsupported`) is enforced in **both** `cmd` `startRuntimeBroker` and `runtimebroker.Server.Start`.
 - **P1.2 removes the constant and may change only the bodies of those named arrange helpers.** Assertions and the act steps must pass unchanged, or come with a reviewed amendment to this appendix. The P1.2 review checks both.
 
 **A. Settings (`pkg/config`)**
@@ -774,7 +778,7 @@ Hub (`pkg/hub/flat_runtime_broker_contract_test.go`, plus one new file in `cmd/`
 - `TestRegisterProjectBrokerID_FlatRowRefused`: 409 `runtime_broker_link_path_unsupported` before any project mutation; a legacy row is linked as today.
 - `TestFlatCreate_UnlinkedFlatRowAuthorizationWins`: a caller denied by `canDispatchToBroker` on an explicit unlinked flat row gets today's authorization response, not 422.
 - `TestFlatCreate_UnlinkedFlatRowNotReachedThroughDefaults`: an unlinked flat row is never selected as the project default or Hub default (fall-through unchanged).
-- `TestLegacyCreate_AgentCallerCreateTimeLinkUnchanged`: an agent caller creating on an explicit, unlinked legacy row still gets the in-resolver link and then passes `checkBrokerDispatchAccess`, as today. A caller denied by `canDispatchToBroker` who sends an `expectedRuntimeTargetId` toward an unlinked legacy row gets today's 403, not 409 or 412.
+- `TestLegacyCreate_AgentCallerCreateTimeLinkUnchanged`: an agent caller creating on an explicit, unlinked legacy row gets 403 and no provider link is written, as today (the resolver's project-update `CheckAccess` denies it). A caller denied by `canDispatchToBroker` who sends an `expectedRuntimeTargetId` toward an unlinked legacy row gets today's 403, not 409 or 412.
 - `TestFlatCreate_UnlinkedFlatBrokerNotAutoLinked`: create with `runtimeBrokerId` of an unlinked flat row gives 422 `runtime_broker_not_linked`; no provider row and no project default are written.
 - `TestFlatCreate_ExplicitLinkThenCreateWithBrokerIDOnly`: the P1 slice path. Link the flat row with `POST /api/v1/projects/{id}/providers`, then create with only `runtimeBrokerId`; the agent is pinned.
 - `TestFlatCreate_AuthorizationBeforeFlatChecks` (fixture: a **linked** flat row): a caller denied by `canDispatchToBroker` gets the existing authorization error, even when a flat check would also fail. No flat code is returned and nothing is written.
@@ -897,7 +901,7 @@ This section states which layer decides what, so a flat dispatch has **exactly o
 | Flat correctness | Right identity and target | This appendix (P1) | `runtime_target_*`, `runtime_broker_not_flat`, `runtime_broker_name_conflict`, `runtime_profile_unsupported`, `experiment_disabled`, the instance-side codes |
 
 **Order and precedence** (all before any write. The only exception is a **legacy** row's create-time link in step 1, which is unchanged from today and may persist when a later step refuses, as it does today. No flat-contract check runs before step 2, and no link is ever written for a flat row):
-1. resolve (never links a flat row; for an explicit unlinked flat row, `canDispatchToBroker` first, then 422 `runtime_broker_not_linked`; legacy rows keep today's in-resolver link);
+1. resolve (never links a flat row; for an explicit unlinked flat row, `canDispatchToBroker` first, then 422 `runtime_broker_not_linked`; legacy rows keep today's in-resolver link, behind its project-update `CheckAccess`; an agent caller on an unlinked legacy row gets today's 403 and no link);
 2. dispatch authorization (`canDispatchToBroker` via `checkBrokerDispatchAccess`);
 3. the existing step-2 checks (section 9);
 4. the existing-agent read and branch;
@@ -912,6 +916,7 @@ If dispatch authorization fails, its error is returned and no flat check is eval
 
 ## Change log
 
+- **Stage B review appendix changes A1–A5 (approved by the delivery lead):** the agent-caller legacy create is 403 with no link, as today (§9 step 1, §15, §17); `runtime_target_move_unsupported` is verdict-only through `writeMoveRefusal`; the empty-actual mismatch message reads "serves no runtime target"; group F's frozen internals and the two-place remote gate are documented; "no build tags" is replaced by "compiles in the default build".
 - **r8 narrow fixes:** the legacy expected-target check stays in step 4 after authorization (step-1 placement removed); the legacy-link exception is scoped in the side-effects list and the §17 order heading; the `RegisterProject` `brokerId` refusal is placed as a read-only pre-mutation lookup; `runtime_broker_link_path_unsupported` is added to the §17 link-creation row.
 - **r7 review-round-7 fixes (N1–N6, T1–T6):** `RegisterProject` with `brokerId` refuses flat rows (409 `runtime_broker_link_path_unsupported`), so the providers endpoint is the one explicit link path. For an explicit unlinked flat row, `canDispatchToBroker` runs before `runtime_broker_not_linked`, so authorization wins. Ack phases include embedded and activate. Legacy rows keep today's in-resolver link order (agent callers unchanged). `hubInProcess` is `colocatedBrokerRegisters`. Forward rule: #3340's co-located auto-link never applies to flat rows. Status line, change log, scope of the §17 headline, defaults-only fall-through, refusal list, `autoProvide` wording and a doc reference fixed.
 - **r7 addendum (convergence with ptone/scion#3340, as corrected):** new section 17. Dispatch is authorized only by `canDispatchToBroker`; link creation only by the explicit providers endpoint; flat checks are correctness only; order and precedence frozen; forward seam. Flat rows never receive an automatic link, the P1 co-located instance included: R7 creates no link or default; R8 project-creation auto-provide skips flat rows; the resolver answers 422 `runtime_broker_not_linked` instead of linking. The P1 slice links explicitly. Cross-references in sections 6, 9 and 10. Tests added.
