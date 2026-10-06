@@ -477,6 +477,10 @@ func TestPreviousRunDelete_MidLoopDeferral_HandsOffRemainingRuns(t *testing.T) {
 	args, err := UnmarshalDeleteArgs(intents[0].Args)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"run-1", "run-2"}, args.PreviousRunIDs, "the runs not yet deleted, oldest first")
+	// The hand-off keeps the engine's fence: the intent records its claim,
+	// so the owning node re-fences the remaining deletes (ptone/scion#2906).
+	assert.NotZero(t, args.Claim, "the mid-loop intent carries no claim")
+	assert.Equal(t, mustGetAgent(t, df.store, df.agent.ID).DeletionClaim, args.Claim)
 }
 
 // Review N2: a compensating delete names only the run that landed, even

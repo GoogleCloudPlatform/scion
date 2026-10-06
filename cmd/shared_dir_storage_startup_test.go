@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -224,6 +225,36 @@ func TestLogSharedDirStorageOverridesStartup_InvalidOverrideWarns(t *testing.T) 
 		assert.Contains(t, lines[0], "runtimes.k8s.shared_dir_storage_backend")
 		assert.Contains(t, lines[1], "profile gke: backend=nfs (from runtimes.k8s.shared_dir_storage_backend)")
 	}
+}
+
+// TestLogSharedDirStorageOverridesStartup_PerDirEntries: a line per profile
+// and shared dir whose backend comes from a per-dir entry; a runtime entry
+// that the profile's single value overrides is not listed.
+func TestLogSharedDirStorageOverridesStartup_PerDirEntries(t *testing.T) {
+	gs := &config.VersionedSettings{
+		Server: &config.V1ServerConfig{SharedDirStorage: &config.V1SharedDirStorageConfig{
+			Backend: "local",
+			NFS:     &config.V1NFSConfig{MountRoot: "/mnt/nfs", Shares: []config.V1NFSShare{{ID: "share-1", PVName: "pv-1"}}},
+		}},
+		Runtimes: map[string]config.V1RuntimeConfig{
+			"k8s":    {Type: "kubernetes", SharedDirStorageBackends: map[string]string{"gocache": "local"}},
+			"docker": {Type: "docker"},
+		},
+		Profiles: map[string]config.V1ProfileConfig{
+			"gke":   {Runtime: "k8s", SharedDirStorageBackends: map[string]string{"notes": "nfs"}},
+			"fast":  {Runtime: "k8s", SharedDirStorageBackend: "nfs"},
+			"local": {Runtime: "docker"},
+		},
+	}
+	var lines []string
+	logSharedDirStorageOverridesStartup(gs, func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "shared_dir_storage for profile gke, shared dir gocache: backend=local (from runtimes.k8s.shared_dir_storage_backends.gocache)")
+	assert.Contains(t, joined, "shared_dir_storage for profile gke, shared dir notes: backend=nfs (from profiles.gke.shared_dir_storage_backends.notes)")
+	assert.NotContains(t, joined, "profile fast, shared dir", "the profile single value wins over the runtime per-dir entry")
+	assert.NotContains(t, joined, "Warning")
 }
 
 func TestLogHomeStorageStartup(t *testing.T) {
