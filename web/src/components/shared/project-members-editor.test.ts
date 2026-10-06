@@ -70,6 +70,7 @@ import {
   showNoProjectRoleOption,
   tierFromRoleIds,
   type MemberDialogMode,
+  type MemberPrincipalType,
 } from './project-members-editor.js';
 
 vi.mock('../../client/api.js', async (orig) => ({
@@ -604,7 +605,7 @@ describe('None radio visibility', () => {
     assignable: AssignableProjectRole[],
     currentBuiltInId = NO_PROJECT_ROLE,
     heldCustomCount = 0,
-    principalType = 'user'
+    principalType: MemberPrincipalType = 'user'
   ) =>
     showNoProjectRoleOption({
       mode,
@@ -747,6 +748,37 @@ describe('Add default after a late catalog load', () => {
     el.assignableRoles = [...OWNER_CATALOG];
     await el.updateComplete;
     expect(el.dlgBuiltIn).toBe(NO_PROJECT_ROLE);
+  });
+
+  it('replaces a picked None once the catalog reloads without custom roles', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    el.openAddDialog();
+    await el.updateComplete;
+    const groupEl = q<HTMLInputElement>(el, 'sl-radio-group')!;
+    groupEl.value = NO_PROJECT_ROLE;
+    groupEl.dispatchEvent(new Event('sl-change'));
+    expect(el.dlgBuiltIn).toBe(NO_PROJECT_ROLE);
+    el.assignableRoles = [...BUILTIN_ONLY_CATALOG];
+    await el.updateComplete;
+    expect(el.dlgBuiltIn).toBe('r-admin');
+    expect(q(el, `sl-radio[value="${NO_PROJECT_ROLE}"]`)).toBeNull();
+    el.dlgPrincipalId = 'u-new';
+    await el.updateComplete;
+    expect(q(el, '.validation-warning')).toBeNull();
+  });
+
+  it('keeps a built-in the user picked when the capabilities change', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    el.openAddDialog();
+    await el.updateComplete;
+    expect(el.dlgBuiltIn).toBe('r-admin');
+    const groupEl = q<HTMLInputElement>(el, 'sl-radio-group')!;
+    groupEl.value = 'r-member';
+    groupEl.dispatchEvent(new Event('sl-change'));
+    expect(el.dlgBuiltIn).toBe('r-member');
+    el.capabilities = { ...OWNER_CAPS };
+    await el.updateComplete;
+    expect(el.dlgBuiltIn).toBe('r-member');
   });
 });
 

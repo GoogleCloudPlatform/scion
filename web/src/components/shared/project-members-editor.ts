@@ -332,7 +332,7 @@ export function defaultBuiltInForAdd(
  */
 export function showNoProjectRoleOption(opts: {
   mode: MemberDialogMode;
-  principalType: string;
+  principalType: MemberPrincipalType;
   assignable: readonly AssignableProjectRole[];
   currentBuiltInId: string;
   heldCustomCount: number;
@@ -1144,6 +1144,7 @@ export class ScionProjectMembersEditor extends LitElement {
    * is never left selected.
    */
   private syncAddDefault(changed: Map<string, unknown>): void {
+    // The lock check is defensive: Add mode is never locked today.
     if (!this.dialogOpen || this.dialogMode !== 'add' || this.dlgLockedReason) return;
     const inputsChanged = changed.has('assignableRoles') || changed.has('capabilities');
     const hiddenNone = this.dlgBuiltIn === NO_PROJECT_ROLE && !this.noProjectRoleShown;
