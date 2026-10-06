@@ -15,10 +15,10 @@
  */
 
 /**
- * The hub buckets dashboard series by UTC calendar day, so the day-bucket
- * labels must say "(UTC)" (tz-refactor task 7, ptone/scion#2500). These
- * tests pin the chart x-axis title and the per-day chart headings on every
- * day-bucketed tab (sessions, model-calls, tokens).
+ * The hub buckets dashboard series by calendar day in the zone the page asks
+ * for (UTC by default) and echoes that zone, and the day-bucket labels must
+ * name it. These tests pin the chart x-axis title and the per-day chart
+ * headings on every day-bucketed tab (sessions, model-calls, tokens).
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -109,13 +109,24 @@ async function settle(el: MetricsPage): Promise<void> {
   await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
 }
 
-async function mountOnTab(tab: string): Promise<MetricsPage> {
+function requestParams(url: string | URL | Request): URLSearchParams {
+  const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+  return new URL(path, 'http://localhost').searchParams;
+}
+
+/** Response body for a view, echoing the bucketing zone like the hub does. */
+function viewBody(params: URLSearchParams, acceptedZone?: string): unknown {
+  const view = params.get('view') ?? '';
+  const body = VIEW_BODIES[view];
+  if (!body) return SUMMARY;
+  return { ...body, zone: acceptedZone ?? params.get('tz') ?? 'UTC' };
+}
+
+async function mountOnTab(tab: string, acceptedZone?: string): Promise<MetricsPage> {
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string | URL | Request) => {
-      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
-      const view = new URL(path, 'http://localhost').searchParams.get('view') ?? '';
-      const body = VIEW_BODIES[view] ?? SUMMARY;
+      const body = viewBody(requestParams(url), acceptedZone);
       return Promise.resolve(
         new Response(JSON.stringify(body), {
           status: 200,
@@ -133,7 +144,7 @@ async function mountOnTab(tab: string): Promise<MetricsPage> {
   return el;
 }
 
-describe('scion-page-metrics — UTC day-bucket labels', () => {
+describe('scion-page-metrics — default (UTC) day-bucket labels', () => {
   beforeEach(() => pinBrowserTimeZone('UTC'));
 
   let element: MetricsPage | null = null;
@@ -279,6 +290,75 @@ describe('scion-page-metrics — viewer time zone', () => {
       .find((u) => u.includes('view=sessions'));
     expect(sessionsUrl).toBeDefined();
     expect(new URL(sessionsUrl!, 'http://localhost').searchParams.get('tz')).toBe('Asia/Tokyo');
+    element.remove();
+  });
+
+  it('labels days UTC when the hub fell back to UTC for the requested zone', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    const element = await mountOnTab('sessions', 'UTC');
+
+    const rendered = [...(element.shadowRoot?.querySelectorAll('.chart-section-title') ?? [])].map(
+      (h) => h.textContent?.trim()
+    );
+    expect(rendered).toEqual(['Daily Sessions (UTC)', 'Active Agents per Day (UTC)']);
+    for (const config of chartConfigs.slice(-2)) {
+      expect(config.options.scales.x.title).toMatchObject({ text: 'Day (UTC)' });
+    }
+    element.remove();
+  });
+
+  it('ignores a stale response that lands after a Display timezone change', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    // Hold each sessions response until the test releases it.
+    const pending: { tz: string | null; release: () => void }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request) => {
+        const params = requestParams(url);
+        const respond = () =>
+          new Response(JSON.stringify(viewBody(params)), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        if (params.get('view') !== 'sessions') return Promise.resolve(respond());
+        return new Promise<Response>((resolve) => {
+          pending.push({ tz: params.get('tz'), release: () => resolve(respond()) });
+        });
+      })
+    );
+    const element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+    element.activeTab = 'sessions';
+    const tokyoLoad = element.loadView('sessions');
+    await settle(element);
+
+    // The zone changes while the Tokyo request is in flight.
+    setPreferredTimeZone('Europe/London');
+    await settle(element);
+    expect(pending.map((p) => p.tz)).toEqual(['Asia/Tokyo', 'Europe/London']);
+
+    // The London response lands first, then the stale Tokyo one.
+    pending[1].release();
+    await settle(element);
+    pending[0].release();
+    await tokyoLoad;
+    await settle(element);
+
+    const rendered = [...(element.shadowRoot?.querySelectorAll('.chart-section-title') ?? [])].map(
+      (h) => h.textContent?.trim()
+    );
+    expect(rendered).toEqual([
+      'Daily Sessions (Europe/London)',
+      'Active Agents per Day (Europe/London)',
+    ]);
+    expect(chartConfigs.at(-1)?.options.scales.x.title).toMatchObject({
+      text: 'Day (Europe/London)',
+    });
+    // The applied data is the London response, not the stale Tokyo one.
+    expect((element as unknown as { sessions: { zone?: string } }).sessions.zone).toBe(
+      'Europe/London'
+    );
     element.remove();
   });
 

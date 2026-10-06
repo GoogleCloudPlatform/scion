@@ -42,20 +42,27 @@ interface SummaryData {
   uniqueAgents: number;
 }
 
+/**
+ * `zone` is the IANA zone the hub actually bucketed the days in: the `tz` the
+ * page sent, or "UTC" when the hub rejected it (or predates the field).
+ */
 interface SessionsData {
   periodDays: number;
+  zone?: string;
   dailyCounts: TimeSeriesPoint[];
   activeAgents: TimeSeriesPoint[];
 }
 
 interface ModelCallsData {
   periodDays: number;
+  zone?: string;
   byModel: LabeledTimeSeries[];
   byHarness: LabeledTimeSeries[];
 }
 
 interface TokensData {
   periodDays: number;
+  zone?: string;
   input: LabeledTimeSeries[];
   output: LabeledTimeSeries[];
 }
@@ -77,9 +84,11 @@ const CHART_COLORS = [
  * The page asks the hub to bucket daily series in the viewer's Display
  * timezone (the `tz` parameter), i.e. `effectiveTimeZone()`: the user's
  * Display timezone preference, or the browser's zone when the preference is
- * Auto (unset). The axis title and the chart headings name that zone, so a
- * reader always knows which calendar the dates use. Without a zone the hub
- * buckets by UTC day.
+ * Auto (unset). The hub echoes the zone it actually bucketed in (`zone`),
+ * and the axis title and chart headings name that zone rather than the
+ * current preference, so the labels always match the data even if the hub
+ * fell back to UTC or the preference changed while a request was in flight.
+ * Without a zone the hub buckets by UTC day.
  */
 
 /** The viewer's effective Display timezone (IANA name), if one resolves. */
@@ -119,9 +128,24 @@ export class ScionPageMetrics extends LitElement {
 
   private charts: Map<string, Chart> = new Map();
 
-  /** The zone the day buckets are in, for chart headings. */
+  /**
+   * Incremented on every loadView; a response is applied only if no newer
+   * load started meanwhile, so a slow response for an old zone, tab or
+   * period never overwrites newer data.
+   */
+  private loadSeq = 0;
+
+  /** The zone the active tab's day buckets are in, as reported by the hub. */
   private get dayZone(): string {
-    return dayZoneLabel(displayTimeZone());
+    const data =
+      this.activeTab === 'sessions'
+        ? this.sessions
+        : this.activeTab === 'model-calls'
+          ? this.modelCalls
+          : this.activeTab === 'tokens'
+            ? this.tokens
+            : null;
+    return dayZoneLabel(data?.zone);
   }
 
   static override styles = css`
@@ -305,6 +329,7 @@ export class ScionPageMetrics extends LitElement {
   }
 
   private async loadView(view: string): Promise<void> {
+    const seq = ++this.loadSeq;
     this.loading = true;
     this.error = null;
 
@@ -326,10 +351,14 @@ export class ScionPageMetrics extends LitElement {
       });
 
       if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+        const message = await extractApiError(response, `HTTP ${response.status}`);
+        if (seq !== this.loadSeq) return;
+        throw new Error(message);
       }
 
       const data = await response.json();
+      // A newer load (zone, tab or period change) superseded this one.
+      if (seq !== this.loadSeq) return;
 
       switch (view) {
         case 'summary':
@@ -346,9 +375,10 @@ export class ScionPageMetrics extends LitElement {
           break;
       }
     } catch (err) {
+      if (seq !== this.loadSeq) return;
       this.error = err instanceof Error ? err.message : String(err);
     } finally {
-      this.loading = false;
+      if (seq === this.loadSeq) this.loading = false;
     }
   }
 
@@ -534,7 +564,7 @@ export class ScionPageMetrics extends LitElement {
             x: {
               grid: { display: false },
               ticks: { font: { size: 11 } },
-              title: { display: true, text: dayAxisTitle(displayTimeZone()), font: { size: 11 } },
+              title: { display: true, text: dayAxisTitle(this.dayZone), font: { size: 11 } },
             },
             y: {
               beginAtZero: true,
