@@ -2368,7 +2368,7 @@ func (s *Server) createAgentInProject(
 					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
 					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
 					return
-				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(w, err, agent.ID) {
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held, or
 					// not eligible), or the claim was lost while the create
 					// ran: a stop superseded it, and whatever was
@@ -2452,7 +2452,7 @@ func (s *Server) createAgentInProject(
 					corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
 					writeCreateFailure(w, corrID, func() { writeRunIntentError(w, err, agent.ID) })
 					return
-				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(w, err, agent.ID) {
+				} else if !errors.Is(err, store.ErrDeleteInProgress) && s.writeStartClaimError(ctx, w, err, agent.ID) {
 					// Refused by the start claim before dispatch (held, or
 					// not eligible), or the claim was lost while the create
 					// ran: a stop superseded it, and whatever was
@@ -2966,7 +2966,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		writeLaunchInvalidPhase(w, err, agent.ID)
 		return
 	}
-	if s.writeStartClaimError(w, err, agent.ID) {
+	if s.writeStartClaimError(ctx, w, err, agent.ID) {
 		return
 	}
 	if err != nil {

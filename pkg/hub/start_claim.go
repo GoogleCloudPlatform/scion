@@ -764,9 +764,10 @@ func (s *Server) writeStartInProgress(w http.ResponseWriter, err error) bool {
 // for a refused running intent), the starting write's error (409 when the
 // stored phase moved on), 409 start_in_progress for a held claim, 409
 // conflict when the agent is not eligible (being deleted, or a reincarnation
-// in flight), 409 conflict when the claim was lost to a stop. It reports
-// whether it wrote.
-func (s *Server) writeStartClaimError(w http.ResponseWriter, err error, agentID string) bool {
+// in flight), 409 conflict when the claim was lost to a stop (or
+// delete_in_progress when a delete won meanwhile). It reports whether it
+// wrote.
+func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter, err error, agentID string) bool {
 	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
 		ref.write(w)
 		return true
@@ -783,6 +784,13 @@ func (s *Server) writeStartClaimError(w http.ResponseWriter, err error, agentID 
 		Conflict(w, "the agent cannot be started now: it is being deleted or reincarnated")
 		return true
 	case errors.Is(err, errStartClaimLost):
+		// A delete that won while the start was dispatching (a hard delete
+		// also loses the claim at the next renewal) answers as a delete
+		// does, not as an abandoned start.
+		if s.deleteWonAfterLanding(ctx, agentID) {
+			writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
+			return true
+		}
 		Conflict(w, "the start was abandoned: a stop or another start superseded it")
 		return true
 	}
