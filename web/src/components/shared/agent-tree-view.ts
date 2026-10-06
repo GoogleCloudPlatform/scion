@@ -117,6 +117,12 @@ const MAX_SCALE = 2.5;
 const HIGHLIGHT_MS = 2000;
 /** Rendered size, in CSS px, a jump to an agent zooms the agent's name to. */
 const JUMP_NAME_PX = 16;
+/**
+ * How long {@link ScionAgentTreeView.revealAgent} waits for the canvas to
+ * have a size before it gives up, so a much later render cannot move the
+ * viewport.
+ */
+const PENDING_REVEAL_MS = 1000;
 
 /**
  * The zoom at which a name label whose font size is `fontSize` (a computed
@@ -129,12 +135,6 @@ export function jumpScale(fontSize: string, fallback: number): number {
   if (!Number.isFinite(px) || px <= 0) return fallback;
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, JUMP_NAME_PX / px));
 }
-/**
- * How long {@link ScionAgentTreeView.revealAgent} waits for the canvas to
- * have a size before it gives up, so a much later render cannot move the
- * viewport.
- */
-const PENDING_REVEAL_MS = 1000;
 
 /**
  * Whether `sel` holds a non-empty range selection. Uses `type`, not
@@ -752,10 +752,9 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   /**
-   * Brings one agent into view: expands any collapsed ancestors so its node
-   * is laid out, centers the viewport on it at the zoom that renders its
-   * name at about 16px (see {@link jumpScale}) and highlights it briefly. Keyboard focus is left alone (see
-   * {@link focusAgentNode}).
+   * Brings one agent into view: expands any collapsed ancestors so its node is laid out, centers
+   * the viewport on it at the zoom that renders its name at about 16px (see {@link jumpScale}) and
+   * highlights it briefly. Keyboard focus is left alone (see {@link focusAgentNode}).
    *
    * The centering waits for the canvas to have a size, for a short while
    * only, and the highlight starts once the node is centered.
