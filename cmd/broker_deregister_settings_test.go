@@ -286,3 +286,32 @@ func TestRemoveHubConnectionSetting_NoFile(t *testing.T) {
 	_, err := os.Stat(filepath.Join(dir, "settings.yaml"))
 	assert.True(t, os.IsNotExist(err), "no settings file should be created")
 }
+
+// TestRemoveHubConnectionSetting_ReadsUnderLock: the settings file is read
+// under the settings lock, so the entry check and the last-entry decision
+// see a change another writer made before the lock was released. Reading
+// before the lock would see one entry, delete the whole hub_connections map
+// and drop the entry added meanwhile.
+func TestRemoveHubConnectionSetting_ReadsUnderLock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nhub_connections:\n  myhub:\n    endpoint: https://a.example.com\n"), 0644))
+
+	unlock := config.LockSettingsFile()
+	done := make(chan error, 1)
+	go func() { done <- removeHubConnectionSetting(dir, "myhub") }()
+	// Give a pre-lock read time to happen before the file changes.
+	time.Sleep(100 * time.Millisecond)
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nhub_connections:\n  myhub:\n    endpoint: https://a.example.com\n  other:\n    endpoint: https://b.example.com\n"), 0644))
+	unlock()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("removeHubConnectionSetting did not finish")
+	}
+	after := readFlatYAML(t, path)
+	assert.Equal(t, "https://b.example.com", after["hub_connections.other.endpoint"], "the entry added before the lock was released must survive")
+	assert.NotContains(t, after, "hub_connections.myhub.endpoint")
+}

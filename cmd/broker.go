@@ -2413,6 +2413,12 @@ func resolveBrokerRestartOptions(cmd *cobra.Command, saved []string) (port int, 
 //     config.DeleteHubConnection would rewrite it through the legacy struct
 //     and drop every v1 key, and the in-place editor does not handle JSON.
 func removeHubConnectionSetting(dir, name string) error {
+	// Held from the read to the write, so the entry check and the
+	// last-entry decision below use the file as it is written back.
+	// (config.LockSettingsFile serialises writers in this process only.)
+	unlock := config.LockSettingsFile()
+	defer unlock()
+
 	path := config.GetSettingsPath(dir)
 	if path == "" {
 		return nil
@@ -2461,8 +2467,6 @@ func removeHubConnectionSetting(dir, name string) error {
 		edit.Path = []string{"hub_connections"}
 	}
 	edits := []config.SettingsPathEdit{edit}
-	unlock := config.LockSettingsFile()
-	defer unlock()
 	staged, err := config.PrepareSettingsPathEdits(dir, edits)
 	if err != nil {
 		return fmt.Errorf("%w; remove hub_connections.%s from %s by hand", err, name, path)
