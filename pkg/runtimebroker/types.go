@@ -252,6 +252,10 @@ type CreateAgentRequest struct {
 	CreatorName string `json:"creatorName,omitempty"`
 	// NoAuth indicates the agent should start without any injected credentials.
 	NoAuth bool `json:"noAuth,omitempty"`
+	// AllowGitCredentials is the hub-resolved template property that lets
+	// the agent's container receive GitHub credential env keys. Absent or
+	// false means those keys are removed from the container env.
+	AllowGitCredentials bool `json:"allowGitCredentials,omitempty"`
 	// Attach indicates the agent should start in interactive attach mode (not detached).
 	Attach bool `json:"attach,omitempty"`
 	// ProvisionOnly indicates the agent should be provisioned (dirs, worktree, templates)

@@ -1132,10 +1132,16 @@ type StartOptions struct {
 	Detached           *bool
 	Resume             bool
 	NoAuth             bool
-	Branch             string
-	Workspace          string
-	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
-	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// AllowGitCredentials is the hub's answer, carried in the dispatch
+	// request, to whether this agent's container may receive GitHub
+	// credential env keys (see agent.IsGitCredentialEnvKey). It is read only
+	// in BrokerMode, where false (including absent from the request) means
+	// those keys are removed. Never set from broker-local config.
+	AllowGitCredentials bool
+	Branch              string
+	Workspace           string
+	GitClone            *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
+	SharedWorkspace     bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
 	// SharedWorkspaceClone holds the clone settings of a shared-plain git
 	// project's workspace. Set only with SharedWorkspace and without
 	// GitClone. It does not change how the workspace is mounted or created:

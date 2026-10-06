@@ -118,7 +118,10 @@ type startContextInputs struct {
 
 	// Behavior
 	NoAuth bool
-	Attach bool
+	// AllowGitCredentials comes from the dispatch request only (see
+	// api.StartOptions.AllowGitCredentials).
+	AllowGitCredentials bool
+	Attach              bool
 
 	// WorkspaceMode is the resolved workspace sharing mode for the project
 	// (e.g. "worktree-per-agent"). Threaded from CreateAgentRequest so the
@@ -737,11 +740,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// --- Build StartOptions ---
 	opts := api.StartOptions{
-		Name:               in.Name,
-		BrokerMode:         true,
-		ProjectPath:        in.ProjectPath,
-		NoAuth:             in.NoAuth,
-		TrustedHubEndpoint: trustedHubEndpoint,
+		Name:                in.Name,
+		BrokerMode:          true,
+		ProjectPath:         in.ProjectPath,
+		NoAuth:              in.NoAuth,
+		AllowGitCredentials: in.AllowGitCredentials,
+		TrustedHubEndpoint:  trustedHubEndpoint,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).

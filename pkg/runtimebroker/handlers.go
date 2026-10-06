@@ -1062,28 +1062,29 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(createStart).String())
 	buildCtxStart := time.Now()
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               req.Name,
-		AgentID:            req.ID,
-		Slug:               req.Slug,
-		ProjectPath:        req.ProjectPath,
-		ProjectSlug:        req.ProjectSlug,
-		ProjectID:          req.ProjectID,
-		HubGlobalProject:   hubGlobalProject,
-		Config:             req.Config,
-		InlineConfig:       req.InlineConfig,
-		SharedDirs:         req.SharedDirs,
-		HubEndpoint:        req.HubEndpoint,
-		AgentToken:         req.AgentToken,
-		CreatorName:        req.CreatorName,
-		ResolvedEnv:        req.ResolvedEnv,
-		EnvClassifications: req.EnvClassifications,
-		ResolvedSecrets:    req.ResolvedSecrets,
-		NoAuth:             req.NoAuth,
-		Attach:             req.Attach,
-		WorkspaceMode:      req.WorkspaceMode,
-		RunID:              req.RunID,
-		HTTPRequest:        r,
-		Operation:          opCreate,
+		Name:                req.Name,
+		AgentID:             req.ID,
+		Slug:                req.Slug,
+		ProjectPath:         req.ProjectPath,
+		ProjectSlug:         req.ProjectSlug,
+		ProjectID:           req.ProjectID,
+		HubGlobalProject:    hubGlobalProject,
+		Config:              req.Config,
+		InlineConfig:        req.InlineConfig,
+		SharedDirs:          req.SharedDirs,
+		HubEndpoint:         req.HubEndpoint,
+		AgentToken:          req.AgentToken,
+		CreatorName:         req.CreatorName,
+		ResolvedEnv:         req.ResolvedEnv,
+		EnvClassifications:  req.EnvClassifications,
+		ResolvedSecrets:     req.ResolvedSecrets,
+		NoAuth:              req.NoAuth,
+		AllowGitCredentials: req.AllowGitCredentials,
+		Attach:              req.Attach,
+		WorkspaceMode:       req.WorkspaceMode,
+		RunID:               req.RunID,
+		HTTPRequest:         r,
+		Operation:           opCreate,
 		// Threaded only for the workspace-source checks; the download
 		// itself runs after buildStartContext (below, or in runLaunch).
 		WorkspaceStoragePath: req.WorkspaceStoragePath,
@@ -2218,8 +2219,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		//
 		// RunID is the hub-minted identity of the run this start begins
 		// (ptone/scion#2550); see CreateAgentRequest.RunID.
-		RunID                string                           `json:"runId,omitempty"`
-		TemplateName         string                           `json:"templateName,omitempty"` // naming only; never loaded
+		RunID        string `json:"runId,omitempty"`
+		TemplateName string `json:"templateName,omitempty"` // naming only; never loaded
+		// AllowGitCredentials: see CreateAgentRequest.AllowGitCredentials.
+		AllowGitCredentials  bool                             `json:"allowGitCredentials,omitempty"`
 		HubEndpoint          string                           `json:"hubEndpoint,omitempty"`
 		UserID               string                           `json:"userId,omitempty"`
 		ProvisionCredentials map[string]string                `json:"provisionCredentials,omitempty"`
@@ -2351,6 +2354,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
+		AllowGitCredentials:      startReq.AllowGitCredentials,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -2860,6 +2864,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID string `json:"runId,omitempty"`
 		// TemplateName mirrors the same field on the start path.
 		TemplateName string `json:"templateName,omitempty"`
+		// AllowGitCredentials mirrors the same field on the start path.
+		AllowGitCredentials bool `json:"allowGitCredentials,omitempty"`
 		// HubAgentDefaults mirrors the same field on the start path.
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 	}
@@ -2946,6 +2952,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		EnvClassifications:       restartReq.EnvClassifications,
 		RunID:                    restartReq.RunID,
 		TemplateName:             restartReq.TemplateName,
+		AllowGitCredentials:      restartReq.AllowGitCredentials,
 		HTTPRequest:              r,
 		Operation:                opHTTPRestart,
 	})

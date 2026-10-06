@@ -720,8 +720,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	var auth api.AuthConfig
 	var resolvedAuth *api.ResolvedAuth
+	stripGitCredentials := gitCredentialsStripped(opts)
+	if stripGitCredentials {
+		removeStagedGitCredentialFiles(agentHome)
+	}
 	if !opts.NoAuth {
 		auth = harness.GatherAuthWithEnv(authEnvOverlay, !opts.BrokerMode, authMeta)
+		if stripGitCredentials {
+			stripGitCredentialAuthEnv(&auth)
+		}
 		if opts.BrokerMode {
 			harness.OverlayFileSecrets(&auth, opts.ResolvedSecrets, authMeta)
 		}
@@ -1170,7 +1177,7 @@ authDone:
 		}
 	}
 
-	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnvWithPolicy(finalScionCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode, stripGitCredentials)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -1894,6 +1901,12 @@ authDone:
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
 	}
+	if stripGitCredentials {
+		if removed := stripGitCredentialRunConfig(&runCfg); len(removed) > 0 {
+			slog.Info("agent start: removed GitHub credential env keys not allowed for this agent",
+				"agent", opts.Name, "keys", removed)
+		}
+	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
 	id, err := m.Runtime.Run(ctx, runCfg)
@@ -2307,13 +2320,27 @@ func containerName(projectName, agentName string) string {
 // when the key is absent from the merged env or has an empty value, i.e. when
 // no layer would otherwise put it in the container.
 func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
+	return buildAgentEnvWithPolicy(scionCfg, extraEnv, defaultEnv, brokerMode, false)
+}
+
+// buildAgentEnvWithPolicy is buildAgentEnv with one more rule: when
+// stripGitCredentials is set, the config layer never reads a GitHub
+// credential name (IsGitCredentialEnvKey) from the host env, neither through
+// the empty-value passthrough nor through a ${VAR} reference, and an empty
+// matching key is not reported as missing. Matching keys that carry a value
+// are left in the result for stripGitCredentialRunConfig to remove.
+func buildAgentEnvWithPolicy(scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool, stripGitCredentials bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
 	combined := make(map[string]string)
+	expand := util.ExpandEnv
+	if stripGitCredentials {
+		expand = expandEnvWithoutGitCredentials
+	}
 
 	if scionCfg != nil && scionCfg.Env != nil {
 		for k, v := range scionCfg.Env {
 			// Support variable substitution in keys and values
-			expandedKey, _ := util.ExpandEnv(k)
-			expandedValue, warned := util.ExpandEnv(v)
+			expandedKey, _ := expand(k)
+			expandedValue, warned := expand(v)
 
 			if expandedKey == "" {
 				continue
@@ -2332,7 +2359,10 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 			// If the value is empty (no variable reference was used),
 			// treat the key as an implicit host env passthrough: look up
 			// the environment variable of the same name on the host.
-			if expandedValue == "" {
+			// The empty-value passthrough never reads a GitHub credential
+			// name from the host when the policy applies; the key itself is
+			// removed later, in stripGitCredentialRunConfig.
+			if expandedValue == "" && (!stripGitCredentials || !IsGitCredentialEnvKey(expandedKey)) {
 				if hostVal, ok := os.LookupEnv(expandedKey); ok && hostVal != "" {
 					expandedValue = hostVal
 				}
@@ -2353,6 +2383,10 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 
 	agentEnv := []string{}
 	for k, v := range combined {
+		if v == "" && stripGitCredentials && IsGitCredentialEnvKey(k) {
+			// Removed anyway; not a missing required key.
+			continue
+		}
 		if v == "" && skipBrokerLocalEnvKey(brokerMode, k) {
 			continue
 		}
