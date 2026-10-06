@@ -462,7 +462,7 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 	}
 
 	if wantJSON(envOutputJSON) {
-		return outputJSON(newEnvListOutput(scope, resp.EnvVars))
+		return outputJSON(newEnvListOutput(scope, resp.ScopeID, resp.EnvVars))
 	}
 
 	if len(resp.EnvVars) == 0 {
@@ -484,9 +484,10 @@ func runEnvList(cmd *cobra.Command, _ []string) error {
 
 // envVarOutput is the JSON shape of one env var in "scion hub env get"
 // and "scion hub env list". It keeps the field names of the Hub record
-// so existing readers keep working. Value is always present for a
-// non-sensitive variable, even when empty, and left out for a sensitive
-// one, as in the text output.
+// and their omitempty rules so existing readers keep working. The one
+// change is Value: it is always present for a non-sensitive variable,
+// even when empty, and left out for a sensitive one, as in the text
+// output.
 type envVarOutput struct {
 	ID            string    `json:"id"`
 	Key           string    `json:"key"`
@@ -494,18 +495,20 @@ type envVarOutput struct {
 	Scope         string    `json:"scope"`
 	ScopeID       string    `json:"scopeId"`
 	Description   string    `json:"description,omitempty"`
-	Sensitive     bool      `json:"sensitive"`
+	Sensitive     bool      `json:"sensitive,omitempty"`
 	InjectionMode string    `json:"injectionMode,omitempty"`
-	Secret        bool      `json:"secret"`
+	Secret        bool      `json:"secret,omitempty"`
 	Created       time.Time `json:"created"`
 	Updated       time.Time `json:"updated"`
 	CreatedBy     string    `json:"createdBy,omitempty"`
 }
 
-// envListOutput is the JSON shape of "scion hub env list".
+// envListOutput is the JSON shape of "scion hub env list". It keeps the
+// top-level fields of the Hub list response.
 type envListOutput struct {
-	Scope   string         `json:"scope"`
 	EnvVars []envVarOutput `json:"envVars"`
+	Scope   string         `json:"scope"`
+	ScopeID string         `json:"scopeId"`
 }
 
 func newEnvVarOutput(v *hubclient.EnvVar) envVarOutput {
@@ -529,8 +532,12 @@ func newEnvVarOutput(v *hubclient.EnvVar) envVarOutput {
 	return out
 }
 
-func newEnvListOutput(scope string, vars []hubclient.EnvVar) envListOutput {
-	out := envListOutput{Scope: scope, EnvVars: make([]envVarOutput, 0, len(vars))}
+func newEnvListOutput(scope, scopeID string, vars []hubclient.EnvVar) envListOutput {
+	out := envListOutput{
+		EnvVars: make([]envVarOutput, 0, len(vars)),
+		Scope:   scope,
+		ScopeID: scopeID,
+	}
 	for i := range vars {
 		out.EnvVars = append(out.EnvVars, newEnvVarOutput(&vars[i]))
 	}

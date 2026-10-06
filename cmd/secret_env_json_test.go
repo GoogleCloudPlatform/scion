@@ -197,10 +197,9 @@ func TestRunEnvGet_JSON(t *testing.T) {
 			got := decodeJSONObject(t, out)
 			assert.Equal(t, map[string]interface{}{
 				"id": "e1", "key": "LOG_LEVEL", "value": "debug", "scope": "user",
-				"scopeId": "u1", "description": "log verbosity", "sensitive": false,
-				"injectionMode": "as_needed", "secret": false,
+				"scopeId": "u1", "description": "log verbosity",
+				"injectionMode": "as_needed", "createdBy": "user-1",
 				"created": "2026-01-01T00:00:00Z", "updated": "2026-01-02T00:00:00Z",
-				"createdBy": "user-1",
 			}, got)
 
 			out = captureStdout(t, func() {
@@ -219,7 +218,7 @@ func TestRunEnvList_JSONModes(t *testing.T) {
 	for _, mode := range jsonModes {
 		t.Run(mode.name, func(t *testing.T) {
 			setupJSONCmdTest(t, map[string]interface{}{
-				"/api/v1/env": map[string]interface{}{"envVars": envJSONFixture(), "scope": "user"},
+				"/api/v1/env": map[string]interface{}{"envVars": envJSONFixture(), "scope": "user", "scopeId": "u1"},
 			})
 			outputFormat = mode.format
 			envOutputJSON = mode.jsonFlag
@@ -231,19 +230,22 @@ func TestRunEnvList_JSONModes(t *testing.T) {
 			assert.NotContains(t, out, "hidden-value")
 
 			got := decodeJSONObject(t, out)
+			assert.ElementsMatch(t, []string{"envVars", "scope", "scopeId"}, mapKeys(got))
 			assert.Equal(t, "user", got["scope"])
+			assert.Equal(t, "u1", got["scopeId"])
 			items, ok := got["envVars"].([]interface{})
 			require.True(t, ok, "envVars must be an array")
 			require.Len(t, items, 2)
 			first := items[0].(map[string]interface{})
 			assert.ElementsMatch(t, []string{
-				"id", "key", "value", "scope", "scopeId", "description", "sensitive",
-				"injectionMode", "secret", "created", "updated", "createdBy",
-			}, mapKeys(first))
+				"id", "key", "value", "scope", "scopeId", "description",
+				"injectionMode", "created", "updated", "createdBy",
+			}, mapKeys(first), "false flags are left out, as in the Hub record")
 			assert.Equal(t, "debug", first["value"])
 			second := items[1].(map[string]interface{})
 			assert.NotContains(t, second, "value")
 			assert.Equal(t, true, second["sensitive"])
+			assert.Equal(t, true, second["secret"])
 			assert.Equal(t, "e2", second["id"])
 		})
 	}
@@ -263,6 +265,8 @@ func TestRunEnvList_JSONModesEmpty(t *testing.T) {
 			})
 			got := decodeJSONObject(t, out)
 			assert.Equal(t, "user", got["scope"])
+			require.Contains(t, got, "scopeId", "scopeId is kept even when empty, as in the Hub response")
+			assert.Equal(t, "", got["scopeId"])
 			assert.Equal(t, []interface{}{}, got["envVars"], "empty list must encode as []")
 		})
 	}
