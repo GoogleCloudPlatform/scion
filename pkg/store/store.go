@@ -750,6 +750,14 @@ type AgentFilter struct {
 	// chain contains the given principal ID (transitive access via creation lineage).
 	AncestorID string
 
+	// CreatedBy, when non-empty, restricts results to agents whose
+	// created_by equals this value exactly. It is always ANDed with every
+	// other filter. The user delete guard uses it to find agents a user's
+	// schedules started, which record the user only as created_by
+	// (ptone/scion#2769). omitempty keeps list cursor bindings unchanged
+	// when it is unset.
+	CreatedBy string `json:",omitempty"`
+
 	// Labels, when non-empty, restricts results to agents whose labels
 	// contain all specified key-value pairs (AND semantics).
 	Labels map[string]string
@@ -1391,9 +1399,11 @@ type UserStore interface {
 
 	// LockUserRow locks the user row until the surrounding transaction ends
 	// (ptone/scion#2769). On PostgreSQL exclusive=true runs
-	// SELECT ... FOR UPDATE and exclusive=false runs SELECT ... FOR SHARE, so
-	// a user delete (exclusive) and an agent create or restore for that user
-	// (shared) serialize under READ COMMITTED. On SQLite this is a plain read
+	// SELECT ... FOR UPDATE and exclusive=false runs SELECT ... FOR KEY SHARE,
+	// so a user delete (exclusive) and an agent create or restore for that
+	// user (shared) serialize under READ COMMITTED. FOR KEY SHARE conflicts
+	// only with FOR UPDATE (and DELETE), so ordinary updates of the user row
+	// (last seen, profile edits) do not wait on a create or restore. On SQLite this is a plain read
 	// (SQLite already serializes writes at the database level).
 	//
 	// Must be called inside a transaction (WithTx). Returns ErrNotFound if

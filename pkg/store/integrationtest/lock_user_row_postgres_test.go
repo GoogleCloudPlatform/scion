@@ -32,8 +32,9 @@ import (
 const lockWaitProbe = 300 * time.Millisecond
 
 // TestLockUserRow_DeleteFirstFailsCreate_Postgres: the user delete holds the
-// user row FOR UPDATE; an agent create for that user takes FOR SHARE, waits
-// for the delete to commit, then finds the user gone (ptone/scion#2769).
+// user row FOR UPDATE; an agent create for that user takes FOR KEY SHARE,
+// waits for the delete to commit, then finds the user gone
+// (ptone/scion#2769).
 func TestLockUserRow_DeleteFirstFailsCreate_Postgres(t *testing.T) {
 	cs := newStore(t)
 	ctx := context.Background()
@@ -64,7 +65,7 @@ func TestLockUserRow_DeleteFirstFailsCreate_Postgres(t *testing.T) {
 
 	select {
 	case err := <-createDone:
-		t.Fatalf("FOR SHARE must wait for the FOR UPDATE holder, returned early: %v", err)
+		t.Fatalf("FOR KEY SHARE must wait for the FOR UPDATE holder, returned early: %v", err)
 	case <-time.After(lockWaitProbe):
 	}
 	close(release)
@@ -74,9 +75,9 @@ func TestLockUserRow_DeleteFirstFailsCreate_Postgres(t *testing.T) {
 }
 
 // TestLockUserRow_CreateFirstIsSeenByDelete_Postgres: an agent create holds
-// the owner's row FOR SHARE and inserts the agent; the user delete's FOR
-// UPDATE waits for it to commit, and its owned-agents read then sees the new
-// agent (ptone/scion#2769).
+// the owner's row FOR KEY SHARE and inserts the agent; the user delete's
+// FOR UPDATE waits for it to commit, and its owned-agents read then sees the
+// new agent (ptone/scion#2769).
 func TestLockUserRow_CreateFirstIsSeenByDelete_Postgres(t *testing.T) {
 	cs := newStore(t)
 	ctx := context.Background()
@@ -128,7 +129,7 @@ func TestLockUserRow_CreateFirstIsSeenByDelete_Postgres(t *testing.T) {
 
 	select {
 	case r := <-deleteDone:
-		t.Fatalf("FOR UPDATE must wait for the FOR SHARE holder, returned early: %+v", r)
+		t.Fatalf("FOR UPDATE must wait for the FOR KEY SHARE holder, returned early: %+v", r)
 	case <-time.After(lockWaitProbe):
 	}
 	close(release)
@@ -136,4 +137,45 @@ func TestLockUserRow_CreateFirstIsSeenByDelete_Postgres(t *testing.T) {
 	r := <-deleteDone
 	require.NoError(t, r.err)
 	assert.Equal(t, 1, r.owned, "the delete's owned-agents read must see the agent committed first")
+}
+
+// TestLockUserRow_SharedDoesNotBlockUserUpdate_Postgres: the shared lock is
+// FOR KEY SHARE, not FOR SHARE, so a plain UPDATE of the user row (which
+// takes FOR NO KEY UPDATE), such as the last-seen write, does not wait for
+// an open agent create or restore transaction (ptone/scion#2769).
+func TestLockUserRow_SharedDoesNotBlockUserUpdate_Postgres(t *testing.T) {
+	cs := newStore(t)
+	ctx := context.Background()
+	u := makeUser("lock-upd-" + shortID() + "@example.com")
+	require.NoError(t, cs.CreateUser(ctx, u))
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- cs.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.LockUserRow(ctx, u.ID, false); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	defer func() {
+		close(release)
+		require.NoError(t, <-holderDone)
+	}()
+
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- cs.UpdateUserLastSeen(ctx, u.ID, time.Now())
+	}()
+	select {
+	case err := <-updateDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a plain user-row UPDATE must not wait for the shared (FOR KEY SHARE) lock holder")
+	}
 }

@@ -565,6 +565,81 @@ func TestDeleteUser_DescendantAgentDenied(t *testing.T) {
 	require.NoError(t, err, "denied delete must keep the user")
 }
 
+// scheduledAgent returns an agent shaped like the scheduler's dispatch
+// (dispatchAgentEventHandler): no owner, no ancestry, and the schedule's
+// creator recorded only as CreatedBy.
+func scheduledAgent(slug, projectID, createdBy, phase string) *store.Agent {
+	return &store.Agent{ID: tid("agent-" + slug), Slug: slug, Name: slug, ProjectID: projectID,
+		Phase: phase, Detached: true, CreatedBy: createdBy}
+}
+
+// TestDeleteUser_ScheduledAgentDenied: an agent the scheduler dispatched for
+// the user's schedule (OwnerID empty, CreatedBy the user) blocks the delete
+// on both delete paths, stopped or not; a soft-deleted one does not, and
+// neither does an agent with another owner that names the user as creator.
+func TestDeleteUser_ScheduledAgentDenied(t *testing.T) {
+	t.Run("users delete", func(t *testing.T) {
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		ctx := context.Background()
+		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+		running := scheduledAgent("dave-sched-running", project.ID, dave.ID, "running")
+		require.NoError(t, s.CreateAgent(ctx, running))
+		stopped := scheduledAgent("dave-sched-stopped", project.ID, dave.ID, "stopped")
+		require.NoError(t, s.CreateAgent(ctx, stopped))
+		gone := scheduledAgent("dave-sched-gone", project.ID, dave.ID, "stopped")
+		gone.DeletedAt = time.Now().Add(-time.Hour)
+		require.NoError(t, s.CreateAgent(ctx, gone))
+		erin := newActiveMember(t, s, "user-erin", "erin@test.com")
+		erins := scheduledAgent("erin-owned", project.ID, dave.ID, "running")
+		erins.OwnerID = erin.ID
+		require.NoError(t, s.CreateAgent(ctx, erins))
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+		requireOwnsAgentsDenial(t, rec, running, stopped)
+		_, err := s.GetUser(ctx, dave.ID)
+		require.NoError(t, err, "denied delete must keep the user")
+
+		require.NoError(t, s.DeleteAgent(ctx, running.ID))
+		require.NoError(t, s.DeleteAgent(ctx, stopped.ID))
+		rec = doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	})
+	t.Run("allow-list delete", func(t *testing.T) {
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		ctx := context.Background()
+		carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
+		a := scheduledAgent("carol-sched", project.ID, carol.ID, "running")
+		require.NoError(t, s.CreateAgent(ctx, a))
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/allow-list/"+carol.Email, nil)
+		requireOwnsAgentsDenial(t, rec, a)
+		_, err := s.GetUser(ctx, carol.ID)
+		require.NoError(t, err, "denied delete must keep the invited user")
+	})
+}
+
+// TestScheduledCreate_CreatorUserMissing: a scheduler-shaped create whose
+// creator is neither a user nor an agent fails closed and writes nothing; one
+// whose creator is an existing agent (an agent's schedule) succeeds.
+func TestScheduledCreate_CreatorUserMissing(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	r := newUserLockRecordingStore(s)
+	srv.store = r
+
+	a := scheduledAgent("gone-sched", project.ID, tid("user-gone"), "created")
+	err := srv.createAgentWithIdentityKey(ctx, a, a.Slug)
+	require.ErrorIs(t, err, errAgentOwnerUserMissing)
+	_, err = s.GetAgent(ctx, a.ID)
+	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
+
+	creator := &store.Agent{ID: tid("agent-sched-creator"), Slug: "sched-creator", Name: "sched-creator",
+		ProjectID: project.ID, Phase: "running"}
+	require.NoError(t, s.CreateAgent(ctx, creator))
+	b := scheduledAgent("agent-sched", project.ID, creator.ID, "created")
+	require.NoError(t, srv.createAgentWithIdentityKey(ctx, b, b.Slug))
+}
+
 // userLockRecordingStore records, in order, the user-row locks, agent
 // lists and agent writes made through it, including inside WithTx.
 // LockUserRow fails with lockErr when it is set.
@@ -625,6 +700,8 @@ func (r *userLockRecordingStore) ListAgents(ctx context.Context, f store.AgentFi
 		r.record("list:owner:" + f.OwnerID)
 	case f.AncestorID != "":
 		r.record("list:ancestor:" + f.AncestorID)
+	case f.CreatedBy != "":
+		r.record("list:createdby:" + f.CreatedBy)
 	}
 	return r.Store.ListAgents(ctx, f, opts)
 }
@@ -664,6 +741,7 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 		requireBefore(t, r, "lock:"+dave.ID+":true", "list:owner:"+dave.ID)
 		requireBefore(t, r, "lock:"+dave.ID+":true", "list:ancestor:"+dave.ID)
+		requireBefore(t, r, "lock:"+dave.ID+":true", "list:createdby:"+dave.ID)
 	})
 	t.Run("allow-list delete", func(t *testing.T) {
 		srv, s, _, _, _ := setupDemoPolicyTest(t)
@@ -674,6 +752,7 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		requireBefore(t, r, "lock:"+carol.ID+":true", "list:owner:"+carol.ID)
 		requireBefore(t, r, "lock:"+carol.ID+":true", "list:ancestor:"+carol.ID)
+		requireBefore(t, r, "lock:"+carol.ID+":true", "list:createdby:"+carol.ID)
 	})
 	t.Run("create", func(t *testing.T) {
 		f := newUATCreateFixture(t, "lock-create")
@@ -683,6 +762,42 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 		require.Less(t, rec.Code, 300, rec.Body.String())
 		requireBefore(t, r, "lock:"+f.creator.ID+":false", "create:lock-create")
 		assert.Equal(t, -1, r.index("lock:"+f.creator.ID+":true"), "create must not lock exclusively")
+	})
+	t.Run("descendant create", func(t *testing.T) {
+		// An agent started by one of the user's agents: its owner is the
+		// parent agent, so the lock goes to the ancestry root, the user.
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		ctx := context.Background()
+		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+		parent := createOwnedAgent(t, s, "dave-parent", project.ID, dave.ID)
+		r := newUserLockRecordingStore(s)
+		srv.store = r
+		child := &store.Agent{ID: tid("agent-dave-child"), Slug: "dave-child", Name: "dave-child",
+			ProjectID: project.ID, Phase: "created", OwnerID: parent.ID, CreatedBy: parent.ID,
+			Ancestry: []string{dave.ID, parent.ID}}
+		require.NoError(t, srv.commitAgentCreate(ctx, agentCreateWrite{
+			Provenance: store.AuthorityProvenance{ProvenanceVersion: 1},
+			Agent:      child,
+			Slug:       child.Slug,
+			Edge: &store.DelegationEdge{DelegatorType: store.DelegationPrincipalAgent, DelegatorID: parent.ID,
+				DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
+				ScopeID: project.ID, Role: string(AgentRoleNone), Active: true},
+			Audit: &store.MutationAuditRecord{MutationType: mutationTypeAgentDelegation},
+		}))
+		requireBefore(t, r, "lock:"+dave.ID+":false", "create:dave-child")
+		assert.Equal(t, -1, r.index("lock:"+dave.ID+":true"), "create must not lock exclusively")
+	})
+	t.Run("scheduled create", func(t *testing.T) {
+		// The scheduler's agent has no owner or ancestry and records the
+		// schedule's creator only as CreatedBy; the lock goes to that user.
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+		r := newUserLockRecordingStore(s)
+		srv.store = r
+		a := scheduledAgent("dave-sched", project.ID, dave.ID, "created")
+		require.NoError(t, srv.createAgentWithIdentityKey(context.Background(), a, a.Slug))
+		requireBefore(t, r, "lock:"+dave.ID+":false", "create:dave-sched")
+		assert.Equal(t, -1, r.index("lock:"+dave.ID+":true"), "create must not lock exclusively")
 	})
 	t.Run("restore", func(t *testing.T) {
 		srv, s, _, _, project := setupDemoPolicyTest(t)

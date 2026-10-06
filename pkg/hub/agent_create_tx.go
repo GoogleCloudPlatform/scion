@@ -70,12 +70,12 @@ type agentCreateWrite struct {
 // errInvalidDisplayName before any write. An incomplete write (nil agent,
 // edge or audit, or a zero provenance) returns errAgentCreateWriteInvalid.
 //
-// When a user delegates to the agent and owns it (Edge.DelegatorType is
-// user and Edge.DelegatorID is Agent.OwnerID), the transaction first takes a
-// shared lock on that user's row and re-checks that the user exists
-// (lockAgentOwnerUserTx, ptone/scion#2769). A create racing the user's
-// delete then either commits first, so the delete sees the agent and is
-// refused, or fails with errAgentOwnerUserMissing and writes nothing.
+// The transaction first takes a shared lock on the row of the user the
+// user delete guard would count for the agent (its owner when that is a
+// user, else its ancestry root when that is a user) and re-checks that the
+// user exists (lockAgentGuardUserTx, ptone/scion#2769). A create racing that
+// user's delete then either commits first, so the delete sees the agent and
+// is refused, or fails with errAgentOwnerUserMissing and writes nothing.
 func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) error {
 	switch {
 	case w.Agent == nil:
@@ -99,13 +99,8 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 	w.Edge.EffectCeiling = w.Ceiling
 	w.Edge.AuthorityProvenance = w.Provenance
 
-	ownerUserID := ""
-	if w.Edge.DelegatorType == store.DelegationPrincipalUser && w.Edge.DelegatorID == w.Agent.OwnerID {
-		ownerUserID = w.Agent.OwnerID
-	}
-
 	return s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := lockAgentOwnerUserTx(ctx, tx, ownerUserID); err != nil {
+		if err := lockAgentGuardUserTx(ctx, tx, w.Agent); err != nil {
 			return err
 		}
 		agent := w.Agent

@@ -305,9 +305,10 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 		// restored (ptone/scion#2769): the user delete refuses while the
 		// user has agents, but soft-deleted agents do not count. The check
 		// takes a shared lock on the owner user's row first, so it
-		// serializes with a concurrent user delete on PostgreSQL (user row
-		// before agent rows, the delete's order). Agents owned by an
-		// existing agent are not refused.
+		// serializes with a concurrent user delete on PostgreSQL. User row
+		// first: no path locks an agent, project or group row and then a
+		// user row, so this cannot deadlock with the delete. Agents owned by
+		// an existing agent are not refused.
 		if err := checkRestoreOwnerTx(ctx, tx, agentOwnerUserID(&row)); err != nil {
 			return err
 		}

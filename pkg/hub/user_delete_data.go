@@ -34,11 +34,11 @@ import (
 // (DELETE /api/v1/users/{id} and the deprecated allow-list delete) refuse
 // with 409 conflict and list the agents in details.agents. On PostgreSQL the
 // delete locks the user row (FOR UPDATE) before the check, and agent create
-// and restore lock it shared (FOR SHARE) and re-check that the owner exists,
-// so a create racing a delete either commits first (and the delete sees the
-// agent) or fails. After a delete commits, the user's user-scope secrets and
-// env vars are removed as a best effort, and a startup sweep removes any left
-// behind for users that no longer exist.
+// and restore lock it shared (FOR KEY SHARE) and re-check that the user
+// exists, so a create racing a delete either commits first (and the delete
+// sees the agent) or fails. After a delete commits, the user's user-scope
+// secrets and env vars are removed as a best effort, and a startup sweep
+// removes any left behind for users that no longer exist.
 
 // ownedAgentRef identifies an agent that blocks the deletion of its owner.
 type ownedAgentRef struct {
@@ -72,17 +72,18 @@ func writeUserOwnsAgentsDeleteError(w http.ResponseWriter, e *userOwnsAgentsDele
 var ownedAgentsPageSize = 100
 
 // checkUserOwnsNoAgentsTx refuses the deletion of userID while the user's
-// agents exist: agents with OwnerID == userID, and agents started by those
-// agents (the user is the root of their ancestry). It runs inside the delete
-// transaction.
+// agents exist: agents with OwnerID == userID, agents started by those
+// agents (the user is the root of their ancestry), and agents the scheduler
+// dispatched for the user's schedules (OwnerID empty, CreatedBy == userID).
+// It runs inside the delete transaction.
 //
 // It first locks the user row exclusively (SELECT ... FOR UPDATE on
-// PostgreSQL; see store.UserStore.LockUserRow). Agent create and restore
-// take a shared lock on the owner's row in their own transactions and
-// re-check that the user exists (lockAgentOwnerUserTx), so an agent created
-// for the user either commits before this check runs (and is listed) or
-// waits for the delete and then fails. It returns store.ErrNotFound if the
-// user no longer exists.
+// PostgreSQL; see store.UserStore.LockUserRow). Agent create (including the
+// scheduler's) and restore take a shared lock on that user's row in their
+// own transactions and re-check that the user exists (lockAgentGuardUserTx,
+// checkRestoreOwnerTx), so an agent this check would count either commits
+// before it runs (and is listed) or waits for the delete and then fails. It
+// returns store.ErrNotFound if the user no longer exists.
 //
 // Soft-deleted agents do not count: the agent list hides them by default
 // (AgentFilter.IncludeDeleted is false), and they are purged later; restore
@@ -105,8 +106,12 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 	// descendants; a user ID only appears as the ancestry root). Agents the
 	// user created also record [userID] as their ancestry, so the two
 	// queries overlap; seen drops the duplicates. The OwnerID query still
-	// covers legacy agents with an empty ancestry.
-	for _, filter := range []store.AgentFilter{{OwnerID: userID}, {AncestorID: userID}} {
+	// covers legacy agents with an empty ancestry. The CreatedBy query finds
+	// agents the scheduler dispatched for the user's schedules: they have no
+	// owner or ancestry and record the user only as created_by, so only
+	// those with an empty OwnerID count from it (an agent with an owner is
+	// counted, or not, by the other two queries).
+	for _, filter := range []store.AgentFilter{{OwnerID: userID}, {AncestorID: userID}, {CreatedBy: userID}} {
 		opts := store.ListOptions{Limit: ownedAgentsPageSize, SkipTotalCount: true}
 		for {
 			page, err := tx.ListAgents(ctx, filter, opts)
@@ -114,7 +119,7 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 				return fmt.Errorf("list agents owned by user: %w", err)
 			}
 			for _, a := range page.Items {
-				if seen[a.ID] {
+				if seen[a.ID] || (filter.CreatedBy != "" && a.OwnerID != "") {
 					continue
 				}
 				seen[a.ID] = true
@@ -133,30 +138,74 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 	return &userOwnsAgentsDeleteError{agents: owned}
 }
 
-// errAgentOwnerUserMissing is returned by lockAgentOwnerUserTx when the user
-// who owns (or is about to own) an agent no longer exists.
+// errAgentOwnerUserMissing is returned when the user who owns (or is about
+// to own) an agent no longer exists (see lockUserPrincipalTx).
 var errAgentOwnerUserMissing = errors.New("the agent's owner no longer exists")
 
-// lockAgentOwnerUserTx takes a shared lock on the row of ownerUserID, the
-// user who owns an agent being created or restored, and re-checks that the
-// user exists (ptone/scion#2769). It runs inside the create or restore
-// transaction, before the agent row is written. Paired with the exclusive
-// lock checkUserOwnsNoAgentsTx takes in the user delete transaction, it
-// serializes the two on PostgreSQL. It returns errAgentOwnerUserMissing when
-// the user does not exist. An empty or non-UUID ID is not a user that can own
-// an agent and is skipped.
-func lockAgentOwnerUserTx(ctx context.Context, tx store.Store, ownerUserID string) error {
-	if ownerUserID == "" {
-		return nil
+// lockUserPrincipalTx takes a shared lock on the row of principalID when it
+// names a user, and reports whether it did (ptone/scion#2769). It runs
+// inside an agent create or restore transaction, before the agent row is
+// written. Paired with the exclusive lock checkUserOwnsNoAgentsTx takes in
+// the user delete transaction, it serializes the two on PostgreSQL.
+//
+// principalID is a polymorphic principal reference (a user or an agent). It
+// returns false and no error when the ID is empty or not a UUID (not a user
+// that can own an agent), or names an existing agent. It returns
+// errAgentOwnerUserMissing when the ID is neither a user nor an agent (both
+// lookups return not found), the existence rule relationshipSourceActive
+// uses: the principal was a user that has been deleted.
+func lockUserPrincipalTx(ctx context.Context, tx store.Store, principalID string) (bool, error) {
+	if principalID == "" {
+		return false, nil
 	}
-	if _, err := uuid.Parse(ownerUserID); err != nil {
-		return nil
+	if _, err := uuid.Parse(principalID); err != nil {
+		return false, nil
 	}
-	if err := tx.LockUserRow(ctx, ownerUserID, false); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return errAgentOwnerUserMissing
+	err := tx.LockUserRow(ctx, principalID, false)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	if _, err := tx.GetAgent(ctx, principalID); err == nil {
+		return false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	return false, errAgentOwnerUserMissing
+}
+
+// lockAgentGuardUserTx takes a shared lock on the row of the user that
+// checkUserOwnsNoAgentsTx would count for the new agent a, and re-checks
+// that the user exists (ptone/scion#2769). That user is the first of these
+// that is a user:
+//
+//   - a.OwnerID (an agent a user created directly);
+//   - a.Ancestry[0], the ancestry root (an agent started by one of the
+//     user's agents; a user ID only appears as the root);
+//   - a.CreatedBy when a.OwnerID is empty (an agent the scheduler
+//     dispatched for a user's schedule, which records the user only there).
+//
+// It runs in the create transaction before the agent row is written, so a
+// create racing that user's delete either commits first (and the delete
+// sees the agent and is refused) or waits for the delete and then fails with
+// errAgentOwnerUserMissing. A candidate that names an existing agent is
+// skipped; one that is neither a user nor an agent fails the create closed
+// with errAgentOwnerUserMissing (lockUserPrincipalTx).
+func lockAgentGuardUserTx(ctx context.Context, tx store.Store, a *store.Agent) error {
+	candidates := []string{a.OwnerID}
+	if len(a.Ancestry) > 0 && a.Ancestry[0] != a.OwnerID {
+		candidates = append(candidates, a.Ancestry[0])
+	}
+	if a.OwnerID == "" {
+		candidates = append(candidates, a.CreatedBy)
+	}
+	for _, id := range candidates {
+		locked, err := lockUserPrincipalTx(ctx, tx, id)
+		if err != nil || locked {
+			return err
 		}
-		return err
 	}
 	return nil
 }

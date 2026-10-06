@@ -1274,6 +1274,13 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.AncestorID != "" {
 		preds = append(preds, ancestryContains(filter.AncestorID))
 	}
+	if filter.CreatedBy != "" {
+		createdByUID, err := parseUUID(filter.CreatedBy)
+		if err != nil {
+			return nil, err
+		}
+		preds = append(preds, agent.CreatedByEQ(createdByUID))
+	}
 	for k, v := range filter.Labels {
 		preds = append(preds, labelContains(k, v))
 	}
