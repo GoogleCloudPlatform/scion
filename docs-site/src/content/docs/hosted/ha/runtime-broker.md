@@ -109,6 +109,12 @@ For containerized brokers, set `SCION_TRANSPORT_MODE` and `SCION_TRANSPORT_AUDIE
 
 See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full deployment guide, including Workload Identity setup and the registration Job manifest.
 
+## In-Cluster Runtime Broker for the Substrate Runtime
+
+The `substrate` runtime runs each agent as an [Agent Substrate](https://github.com/agent-substrate/substrate) actor on GKE. Because Substrate's control API (`ateapi`) and inbound router (`atenet-router`) have no authorization of their own, the Runtime Broker for this runtime must run **inside** the GKE cluster rather than reaching in over a LoadBalancer or Ingress. Inside each actor, `sciontool substrate-serve` runs as PID 1 and serves the Runtime Broker's bootstrap, exec and health requests with the enforced privilege drop in place. Agent egress is limited to the Hub, git, model and telemetry hosts plus any public hostnames the operator lists in the runtime's `egress_allow`. The agent image must be pinned by digest.
+
+Configure it with a runtime entry of `type: substrate` and a `substrate:` block (`api_endpoint`, `router_endpoint`, `sandbox_class`, `worker_selector`, `snapshot_storage`, `egress_allow`, …). The cluster prerequisites, Runtime Broker manifest, example settings and day-2 operations live in [`deploy/substrate/`](https://github.com/GoogleCloudPlatform/scion/tree/main/deploy/substrate).
+
 ## Security & Isolation
 
 When you register your machine as a broker:
@@ -119,7 +125,7 @@ When you register your machine as a broker:
 
 ## Broker Registration Permission
 
-Registering a broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded-broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register brokers. Users with the **viewer** hub role cannot.
+Registering a Runtime Broker, or re-minting its join token, requires the `broker.create` permission. This covers `POST /api/v1/brokers` and the embedded Runtime Broker path of `POST /api/v1/projects/register`. `broker.create` is granted through the built-in `hub-member` role, so users with the **member** or **admin** [hub role](/scion/hosted/ha/permissions/#hub-roles) can register Runtime Brokers. Users with the **viewer** hub role cannot. Runtime Broker creation requires a signed-in session: a request authenticated with a [user access token](/scion/hosted/user/personal-access-tokens/) is denied with `403`, whatever the token's boundary or scopes.
 
 :::caution[Breaking change]
 Viewer-role users could previously register brokers; they now receive a 403. The `hub-member` role is reconciled to revision 3 on Hub start to add `broker.create`, so no manual migration is needed for members.

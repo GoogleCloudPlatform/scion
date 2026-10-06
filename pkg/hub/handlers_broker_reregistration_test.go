@@ -41,7 +41,7 @@ import (
 // brand-new registration as well as a match — additionally requires the
 // broker.create permission (authorizeBrokerCreate, handlers_brokers.go); a
 // match on top of that also requires broker ownership, checked by
-// authorizedForBrokerOwnerAction: the caller must be a system-scoped
+// authorizedForBrokerRotate: the caller must be a system-scoped
 // super-admin, be the broker itself (HMAC), or be the user recorded as the
 // broker's creator. Holding the broker.read catalog permission alone does
 // not satisfy either check.
@@ -574,7 +574,7 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// Empty caller ID (G1) — authorizedForBrokerOwnerAction is the single shared
+// Empty caller ID (G1) — authorizedForBrokerRotate is the single shared
 // predicate behind re-registration, secret rotation, and the embedded
 // register path (see handlers_project_register_broker_test.go), so a direct
 // call here covers all three. An identity whose ID() is "" must never match
@@ -582,7 +582,7 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 // "" == "" is true.
 // ----------------------------------------------------------------------------
 
-func TestAuthorizedForBrokerOwnerAction_EmptyCallerIDNeverMatchesOwnerlessBroker(t *testing.T) {
+func TestAuthorizedForBrokerRotate_EmptyCallerIDNeverMatchesOwnerlessBroker(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	broker := &store.RuntimeBroker{ID: tid("empty-id-broker"), Name: "Empty ID Broker", Slug: "empty-id-broker", CreatedBy: ""}
@@ -590,7 +590,7 @@ func TestAuthorizedForBrokerOwnerAction_EmptyCallerIDNeverMatchesOwnerlessBroker
 
 	emptyIDUser := NewAuthenticatedUser("", "empty-id@test.com", "Empty ID", store.UserRoleMember, "api")
 
-	allowed, err := srv.authorizedForBrokerOwnerAction(ctx, emptyIDUser, nil, broker.ID,
+	allowed, err := srv.authorizedForBrokerRotate(ctx, emptyIDUser, nil, broker.ID,
 		func() (*store.RuntimeBroker, error) { return broker, nil })
 
 	require.NoError(t, err)
