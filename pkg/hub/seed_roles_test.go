@@ -963,6 +963,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-owner",
 			perms: projectOwnerPermissionIDs(),
 			want: []string{
+				"artifact.create", "artifact.read",
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
@@ -983,6 +984,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-admin",
 			perms: projectAdminPermissionIDs(),
 			want: []string{
+				"artifact.create", "artifact.read",
 				"agent.create", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.stop_all", "agent.update",
@@ -1003,6 +1005,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-member",
 			perms: projectMemberCuratedPermissionIDs(),
 			want: []string{
+				"artifact.create", "artifact.read",
 				"agent.create", "agent.list", "agent.read",
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.list", "harness_config.read",
@@ -1024,9 +1027,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:  5,
-		store.ProjectRoleAdmin:  5,
-		store.ProjectRoleMember: 4,
+		store.ProjectRoleOwner:  6,
+		store.ProjectRoleAdmin:  6,
+		store.ProjectRoleMember: 5,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
@@ -1049,9 +1052,9 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 5, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 5, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 4, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 6, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 6, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
 	}
 
 	for _, pr := range projectRoles {
@@ -1587,7 +1590,9 @@ func TestR5_ReconciliationGrantsPortAccessToExistingOwnersAndAdmins(t *testing.T
 		require.NoError(t, err)
 		assert.Contains(t, rd.Permissions, "agent.port_access", "%s should carry agent.port_access after reconciliation", name)
 		assert.NotContains(t, rd.Permissions, "agent.attach", "%s must still lack agent.attach", name)
-		assert.Equal(t, 5, getAppliedBuiltInRoleMarker(ctx, s, name).Revision, "%s marker should advance to revision 5", name)
+		// R5 granted agent.port_access; the marker advances to the current
+		// revision (R6 added the artifact permissions).
+		assert.Equal(t, 6, getAppliedBuiltInRoleMarker(ctx, s, name).Revision, "%s marker should advance to the current revision", name)
 
 		d := authz.CheckAccess(ctx, caller, memberAgent, ActionPortAccess)
 		assert.True(t, d.Allowed, "%s should open a member's ports after reconciliation: %s", name, d.Reason)

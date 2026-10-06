@@ -37,6 +37,12 @@ type sseAgentStore struct {
 	authzErr  error
 }
 
+// GetUser returns an active user for any ID, for the live project-access
+// check on relationship grants.
+func (s *sseAgentStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	return &store.User{ID: id, Email: id + "@test.com", Role: "member", Status: store.UserStatusActive}, nil
+}
+
 func (s *sseAgentStore) GetAgent(_ context.Context, id string) (*store.Agent, error) {
 	if s.lookupErr != nil {
 		return nil, s.lookupErr
@@ -103,6 +109,17 @@ func sseAgentReadBinding(userID, scopeType, scopeID string) *mockAuthzStore {
 	}
 }
 
+// sseAgentProjectAccess is a project binding to a role with no permissions:
+// project access without any permission granted through the role.
+func sseAgentProjectAccess(userID, projectID string) *mockAuthzStore {
+	return &mockAuthzStore{
+		roleDefinitions: map[string]*store.RoleDefinition{"access-role": {
+			ID: "access-role", Name: "sse-agent-project-access", ScopeType: store.RoleScopeProject, Permissions: []string{},
+		}},
+		roleBindings: []*store.RoleBinding{{ID: "access-binding", RoleDefinitionID: "access-role", PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID, ScopeType: store.RoleScopeProject, ScopeID: projectID}},
+	}
+}
+
 func TestAuthorizeSSESubjects_AgentPolicy(t *testing.T) {
 	id, projectID := tid("sse-policy-agent"), tid("sse-policy-project")
 	for _, tc := range []struct {
@@ -114,8 +131,12 @@ func TestAuthorizeSSESubjects_AgentPolicy(t *testing.T) {
 		want     bool
 	}{
 		{name: "unrelated user", bindings: &mockAuthzStore{}},
-		{name: "resource owner", owner: "user-1", bindings: &mockAuthzStore{}, want: true},
-		{name: "ancestor", ancestry: []string{"user-1"}, bindings: &mockAuthzStore{}, want: true},
+		// Owner and ancestor relationships on a project agent require active
+		// project access (ptone/scion#2141).
+		{name: "resource owner", owner: "user-1", bindings: sseAgentProjectAccess("user-1", projectID), want: true},
+		{name: "ancestor", ancestry: []string{"user-1"}, bindings: sseAgentProjectAccess("user-1", projectID), want: true},
+		{name: "resource owner without project access", owner: "user-1", bindings: &mockAuthzStore{}},
+		{name: "ancestor without project access", ancestry: []string{"user-1"}, bindings: &mockAuthzStore{}},
 		{name: "project inherited read", bindings: sseAgentReadBinding("user-1", store.RoleScopeProject, projectID), want: true},
 		{name: "cross project", bindings: sseAgentReadBinding("user-1", store.RoleScopeProject, tid("other-project"))},
 		{name: "hub read grant", bindings: sseAgentReadBinding("user-1", store.RoleScopeSystem, ""), want: true},
@@ -182,8 +203,11 @@ func TestSSEHandler_AgentMixedBatch(t *testing.T) {
 	allowedID, deniedID := tid("sse-allowed-agent"), tid("sse-denied-agent")
 	for _, deny := range []bool{false, true} {
 		t.Run(map[bool]string{false: "authorized batch", true: "mixed batch"}[deny], func(t *testing.T) {
-			s := &sseAgentStore{mockAuthzStore: &mockAuthzStore{}, agents: map[string]*store.Agent{
-				allowedID: {ID: allowedID, OwnerID: "user-1"}, deniedID: {ID: deniedID, OwnerID: "other-user"},
+			// Agents always belong to a project, and the owner relationship
+			// requires active access to it (ptone/scion#2141).
+			projectID := tid("sse-batch-project")
+			s := &sseAgentStore{mockAuthzStore: sseAgentProjectAccess("user-1", projectID), agents: map[string]*store.Agent{
+				allowedID: {ID: allowedID, ProjectID: projectID, OwnerID: "user-1"}, deniedID: {ID: deniedID, ProjectID: projectID, OwnerID: "other-user"},
 			}}
 			pub := &sseCountingPublisher{ChannelEventPublisher: NewChannelEventPublisher()}
 			defer pub.Close()

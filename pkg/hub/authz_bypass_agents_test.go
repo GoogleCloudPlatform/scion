@@ -157,6 +157,10 @@ func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 		OwnerID: f.owner.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, f.other))
+	// The owner relationship on a project agent requires active project
+	// access (ptone/scion#2141); the binding grants no permissions itself.
+	grantProjectAccessOnly(t, s, f.owner.ID, f.proj.ID)
+	grantProjectAccessOnly(t, s, f.owner.ID, f.other.ID)
 
 	// An auto-provide broker, so that agent creation can resolve a broker and
 	// the create tests exercise the authorization gate rather than dying at
@@ -578,6 +582,9 @@ func TestBypassAgents_UpdateAgentServiceAccountChecks(t *testing.T) {
 			Created:     time.Now(),
 		}
 		require.NoError(t, f.store.CreateUser(context.Background(), updater))
+		// Active project access for the owner relationship (ptone/scion#2141);
+		// the binding grants no permission, including no service account read.
+		grantProjectAccessOnly(t, f.store, updater.ID, f.proj.ID)
 
 		owned := &store.Agent{
 			ID:        uuid.New().String(),

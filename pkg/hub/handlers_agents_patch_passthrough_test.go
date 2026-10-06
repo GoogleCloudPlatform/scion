@@ -448,4 +448,9 @@ func addProjectMember(t *testing.T, srv *Server, s store.Store, project *store.P
 		// Ignore if already a member
 		t.Logf("AddGroupMember: %v (may already be a member)", err)
 	}
+	// Project access is a project role binding; the members-group row alone
+	// is not one. The access-only binding grants no permission itself and
+	// satisfies the active project access that owner and ancestor
+	// relationships require (ptone/scion#2141).
+	grantProjectAccessOnly(t, s, user.ID, project.ID)
 }

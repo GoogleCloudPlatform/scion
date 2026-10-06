@@ -47,7 +47,7 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 		inLinkedProject bool
 		project, broker string
 		noLocalBroker   bool // no broker credentials on this host
-		explicitPath    bool // pass --path <linked project>
+		explicitPath    bool // pass --path <linked project root>; only used with a remote broker
 		wantLinkedPath  bool
 	}{
 		{"--project from HOME", false, target, "", false, false, false},
@@ -161,6 +161,15 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 			if !tc.wantLinkedPath {
 				if *gotPath != "" {
 					t.Errorf("registered path %q, want none (the broker resolves the project by slug)", *gotPath)
+				}
+				return
+			}
+			if tc.explicitPath {
+				// An explicit --path for a remote broker is the project root
+				// on that host and is sent as given (ptone/scion#3157), so it
+				// is not resolved to this host's .scion directory.
+				if want := filepath.Dir(linked); *gotPath != want {
+					t.Errorf("registered path %q, want --path as given %q", *gotPath, want)
 				}
 				return
 			}

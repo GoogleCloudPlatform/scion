@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	slashpath "path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -135,7 +136,8 @@ Prerequisites:
   broker.create, which hub members do.
 
 The broker is owned by the signed-in user, or by the token's user.
-Re-registering an existing broker requires its owner or a super-admin.
+Re-registering an existing broker requires its owner, or a super-admin
+with a sign-in (a token re-registers only a broker its user created).
 Registration never associates the broker with a project: the owner runs
 'scion runtime-broker provide' for each project the broker should serve.
 
@@ -416,7 +418,7 @@ func init() {
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
-	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Local project path to register for this broker (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory)")
+	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Project path to register for this broker, resolved on this host (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory). With --broker naming another host's broker, give the absolute path to the project root (the directory containing .scion) on that host; it is sent as given")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
 
@@ -1250,7 +1252,8 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	// and no --path, no path is sent: the current directory need not belong
 	// to the named project.
 	if brokerProvidePath != "" {
-		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug)
+		remote := isRemoteBroker && brokerID != getLocalBrokerID()
+		explicitPath, err := resolveProvidePath(brokerProvidePath, projectName, projectSlug, remote)
 		if err != nil {
 			return err
 		}
@@ -1271,7 +1274,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Printf("Broker '%s' added as provider for project '%s'\n", brokerName, project.Name)
 	if localProjectPath != "" {
-		fmt.Printf("Local project path: %s\n", localProjectPath)
+		fmt.Println(providePathSummary(localProjectPath, brokerName, isRemoteBroker && brokerID != getLocalBrokerID()))
 	} else {
 		fmt.Println("No local path sent; an existing provider path for this broker is kept (a stored global-directory path is cleared), otherwise the broker uses its hub-managed project directory.")
 	}
@@ -1341,7 +1344,27 @@ func provideBrokerToProject(ctx context.Context, client hubclient.Client, projec
 // the target project is the global project (hub slug "global"): registering
 // that directory for any other project makes the broker treat its global
 // directory as that project.
-func resolveProvidePath(path, projectName, projectSlug string) (string, error) {
+//
+// For a remote broker (one that is not this host's broker) the path is the
+// absolute project root (the directory containing .scion) on the broker's
+// host, so it is not resolved or checked against this host's filesystem: it
+// is sent as given, cleaned with slash-only path rules (separators are not
+// translated). A path naming the .scion directory itself is
+// refused with a hint to pass its parent (ptone/scion#3157).
+func resolveProvidePath(path, projectName, projectSlug string, remote bool) (string, error) {
+	if remote {
+		// The path is in the remote broker's form, so it is checked and
+		// cleaned with the slash-only path package, never this host's
+		// filepath rules, and its separators are not translated.
+		if !slashpath.IsAbs(path) {
+			return "", fmt.Errorf("--path %q must be an absolute path on the broker's host when --broker names a remote broker", path)
+		}
+		cleaned := slashpath.Clean(path)
+		if slashpath.Base(cleaned) == config.DotScion {
+			return "", fmt.Errorf("--path %q names a .scion directory; for a remote broker pass the project root that contains it: %s", path, slashpath.Dir(cleaned))
+		}
+		return cleaned, nil
+	}
 	resolved, isGlobal, err := config.ResolveProjectPath(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve --path %q: %w", path, err)
@@ -2088,8 +2111,10 @@ func getLocalBrokerID() string {
 // runtime that actually opts out reports it once the broker itself runs
 // and registers/heartbeats with a live instance in hand (see
 // buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
+// "agentMove" is a property of this broker binary (localOnly delete and the
+// moved-workspace check), like "reprovision".
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}
+	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace", "agentMove"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
@@ -2099,6 +2124,15 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 		return nil
 	}
 
+	// GSA-to-KSA mappings are read from the broker's global settings only,
+	// the same source the broker resolves them from at dispatch
+	// (resolveKubernetesAssignIdentity). If they cannot be read, profiles
+	// are reported without them (MappingsReported=false: unknown).
+	mappingVS, mappingErr := loadBrokerMappingSettings()
+	if mappingErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not read global settings for kubernetes_service_account_mappings; the Hub will treat this broker's mappings as unknown: %v\n", mappingErr)
+	}
+
 	var profiles []hubclient.BrokerProfile
 	for name, profileCfg := range settings.Profiles {
 		// Determine runtime type from the profile's runtime reference
@@ -2106,6 +2140,7 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 		if runtimeType == "" {
 			runtimeType = "docker" // default
 		}
+		mappings, reported := brokerProfileSAMappings(mappingVS, mappingErr, name)
 
 		// Look up runtime config to get additional info (context, namespace for K8s)
 		var context, namespace string
@@ -2117,15 +2152,47 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 		}
 
 		profiles = append(profiles, hubclient.BrokerProfile{
-			Name:      name,
-			Type:      runtimeType,
-			Available: true,
-			Context:   context,
-			Namespace: namespace,
+			Name:                   name,
+			Type:                   runtimeType,
+			Available:              true,
+			Context:                context,
+			Namespace:              namespace,
+			ServiceAccountMappings: mappings,
+			MappingsReported:       reported,
 		})
 	}
 
 	return profiles
+}
+
+// loadBrokerMappingSettings loads the broker's global settings (plus the
+// DB-backed overlay, when one is installed) for reporting
+// kubernetes_service_account_mappings at join. A variable so tests can
+// substitute settings.
+var loadBrokerMappingSettings = func() (*config.VersionedSettings, error) {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	return vs, err
+}
+
+// brokerProfileSAMappings returns the GSAs profileName maps to a KSA (its
+// own mapping plus its runtime entry's) and whether they are reported. Only
+// Kubernetes profiles report (by resolved runtime type, so a custom entry
+// key with type kubernetes counts). Not reported when the settings could not
+// be loaded or do not have the profile: the Hub then treats the profile's
+// mappings as unknown instead of empty.
+func brokerProfileSAMappings(vs *config.VersionedSettings, loadErr error, profileName string) ([]hubclient.BrokerProfileSAMapping, bool) {
+	if loadErr != nil {
+		return nil, false
+	}
+	gsas, isKubernetes, known := vs.ProfileKubernetesSAMappings(profileName)
+	if !known || !isKubernetes {
+		return nil, false
+	}
+	var out []hubclient.BrokerProfileSAMapping
+	for _, gsa := range gsas {
+		out = append(out, hubclient.BrokerProfileSAMapping{GSA: gsa})
+	}
+	return out, true
 }
 
 // brokerRegistrationDefaultProfile returns the broker's default (active)

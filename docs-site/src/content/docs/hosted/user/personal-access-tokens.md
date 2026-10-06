@@ -95,6 +95,16 @@ built-in `project-owner` and `project-admin` roles do. Losing project access (fo
 being removed from the project) makes every request against that project fail immediately, even
 though the token itself is still otherwise valid.
 
+Concretely, every request made with a token passes all of these checks, in order, and any error
+along the way denies the request:
+
+1. The token's boundary is valid.
+2. The request's target resolves to a scope (a project or the hub) that the boundary allows.
+3. The requested permission is inside the token's stored permission ceiling.
+4. For a project target, you still have active access to that project.
+5. Your live authority on the target (role bindings, groups, relationship grants, and access
+   boundaries) allows the action.
+
 ### Checking what you can select
 
 Before minting a token, you can ask which scopes you are currently eligible to select for a given
@@ -159,7 +169,21 @@ before retrying.
 A token can instead carry a **hub boundary**, which lets one token work across every project you
 can reach. The CLI always mints project tokens; mint a hub token through the API by sending
 `"boundary": {"kind": "hub"}` instead of `projectId` to `POST /api/v1/auth/tokens`. A missing
-boundary never means hub, and a hub boundary that also names a project is rejected with `400`.
+boundary never means hub: a request that names neither `projectId` nor `boundary` is rejected
+with `400` (`details.reason` `boundary_required`). A hub boundary that also names a project, or a
+`boundary` that disagrees with `projectId`, is rejected with `400` (`boundary_invalid`). Token
+management requires a signed-in session credential; a UAT cannot mint another token:
+
+```bash
+curl -X POST -H "Authorization: Bearer $SESSION_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"name":"hub-automation","boundary":{"kind":"hub"},"scopes":["template:manage"]}' \
+     https://scion.example.com/api/v1/auth/tokens
+```
+
+Token responses include a `boundary` object (`{"kind":"project","projectId":"…"}` or
+`{"kind":"hub"}`); `projectId` is omitted for hub tokens, so read `boundary.kind` to tell them
+apart.
 
 The same per-request checks apply, with these limits:
 
@@ -173,6 +197,8 @@ The same per-request checks apply, with these limits:
 - **Messages.** A message sent to an agent with a token passes the same boundary, ceiling, and
   live project-access checks before any other rule can allow it.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
+  A project token cannot create or re-register a Runtime Broker (see
+  [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).
 
 ## Using a token
 
@@ -194,9 +220,15 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
 - **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
   scheduled `dispatch_agent` events or schedules. See
   [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
+- **Runtime Broker registration**: creating a Runtime Broker (`POST /api/v1/brokers` and the
+  embedded Runtime Broker path of project registration) admits a UAT only when it is a
+  hub-boundary token carrying `broker:create` and your user holds `broker.create`; any other UAT
+  is denied with `403`. Re-registering an existing Runtime Broker (issuing a new join token) with
+  such a token works only for a Runtime Broker your user created: a UAT does not satisfy the
+  super-admin shortcut. See
+  [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
 - **Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
-  secret or carry the broker owner's consent to associate a broker with a project. A
-  hub-boundary token with `broker:create` can register a broker. See
+  secret or carry the broker owner's consent to associate a broker with a project. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
 
 ## Trust level separation

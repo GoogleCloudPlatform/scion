@@ -237,8 +237,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
-			// Cross-broker agent move is not implemented by this broker.
-			AgentMove:      false,
+			// This broker honours localOnly deletes and confirms a moved
+			// agent's NFS workspace before provisioning it (agent move).
+			AgentMove:      true,
 			StartsInFlight: s.startsInFlight != nil,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
@@ -326,6 +327,45 @@ func (s *Server) heartbeatProfileAttach() []hubclient.ProfileAttachState {
 			continue
 		}
 		out = append(out, hubclient.ProfileAttachState{Name: p.Name, Attach: *p.Attach})
+	}
+	return out
+}
+
+// loadHeartbeatMappingSettings loads the broker's global settings plus the
+// DB-backed overlay, the source of kubernetes_service_account_mappings at
+// dispatch (resolveKubernetesAssignIdentity). A variable so tests can
+// substitute settings.
+var loadHeartbeatMappingSettings = func() (*config.VersionedSettings, error) {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	return vs, err
+}
+
+// heartbeatProfileSAMappings returns, sorted by profile name, the GSA
+// mappings of each Kubernetes profile (by resolved runtime type) in the
+// broker's global settings, for the heartbeat's ProfileSAMappings field.
+// Nil when the settings cannot be read, so the hub keeps what it has; an
+// empty result when there are no Kubernetes profiles.
+func (s *Server) heartbeatProfileSAMappings() []hubclient.ProfileSAMappingsState {
+	vs, err := loadHeartbeatMappingSettings()
+	if err != nil || vs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(vs.Profiles))
+	for name := range vs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := []hubclient.ProfileSAMappingsState{}
+	for _, name := range names {
+		gsas, isKubernetes, _ := vs.ProfileKubernetesSAMappings(name)
+		if !isKubernetes {
+			continue
+		}
+		state := hubclient.ProfileSAMappingsState{Name: name, ServiceAccountMappings: []hubclient.BrokerProfileSAMapping{}}
+		for _, gsa := range gsas {
+			state.ServiceAccountMappings = append(state.ServiceAccountMappings, hubclient.BrokerProfileSAMapping{GSA: gsa})
+		}
+		out = append(out, state)
 	}
 	return out
 }
@@ -1231,6 +1271,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// config instead of reusing what's persisted — see Manager.Reprovision.
 		var cfg *api.ScionConfig
 		var err error
+		if req.ExpectExistingNFSWorkspace != "" {
+			checker, ok := sc.Manager.(nfsMoveWorkspaceChecker)
+			if !ok {
+				markAttemptFailed(http.StatusConflict, "moved agent workspace not confirmed")
+				Conflict(w, "this broker cannot confirm a moved agent's NFS workspace")
+				return
+			}
+			if path, chkErr := checker.CheckNFSMoveWorkspace(opts.ProjectPath, req.ProjectID, opts.Name, req.ExpectExistingNFSWorkspace); chkErr != nil {
+				s.agentLifecycleLog.Warn("Agent move: the agent's workspace is not on this broker's NFS export; refusing to provision",
+					"agent_id", req.ID, "project_id", req.ProjectID, "path", path, "error", chkErr)
+				markAttemptFailed(http.StatusConflict, "moved agent workspace missing")
+				span.SetStatus(codes.Error, chkErr.Error())
+				Conflict(w, "Failed to provision moved agent: "+chkErr.Error())
+				return
+			}
+		}
 		if req.Reprovision {
 			cfg, err = sc.Manager.Reprovision(ctx, opts)
 		} else {
@@ -1899,6 +1955,24 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	deleteFiles := query.Get("deleteFiles") == "true"
 	removeBranch := query.Get("removeBranch") == "true"
 	softDelete := query.Get("softDelete") == "true"
+	// localOnly removes only this broker's own state for the agent (its
+	// container, broker-local agent directory and home): never the agent's
+	// files on the shared NFS export and never its branch. The hub sends it
+	// to the source broker after moving the agent to another broker on the
+	// same export, where the workspace now lives on (design ptone/scion#2727
+	// §3.5). Only brokers advertising the AgentMove capability honour it.
+	//
+	// localOnly still runs the manager's normal file deletion below
+	// (DeleteTarget: the broker-local agent directory and home, and any
+	// worktree under the broker's project directory). That is safe only
+	// because a hub-native project's directory on the broker is
+	// broker-local (~/.scion/projects/<slug>), never on the export, and
+	// linked projects cannot move. Keep it so: localOnly must never reach a
+	// path under the NFS export (TestDeleteAgent_LocalOnlyNeverTouchesExport).
+	localOnly := query.Get("localOnly") == "true"
+	if localOnly {
+		removeBranch = false
+	}
 
 	// Resolve the exact entry to delete, scoped to the requested project,
 	// across the default and every auxiliary runtime (ptone/scion#1819).
@@ -2152,7 +2226,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// the delete; what failed is then left in place, and an agent created
 	// again with the same name reuses it. The agent's branch is always
 	// kept, whatever removeBranch says.
-	if filesToDelete && agentProjectID != "" {
+	if filesToDelete && !localOnly && agentProjectID != "" {
 		if remover, ok := target.mgr.(nfsAgentFilesRemover); ok {
 			if paths, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
@@ -5705,6 +5779,14 @@ type nfsAgentFilesRemover interface {
 }
 
 var _ nfsAgentFilesRemover = (*agent.AgentManager)(nil)
+
+// nfsMoveWorkspaceChecker is implemented by managers that can confirm a
+// moved agent's workspace on the NFS export (agent.AgentManager).
+type nfsMoveWorkspaceChecker interface {
+	CheckNFSMoveWorkspace(projectPath, projectID, agentName, kind string) (string, error)
+}
+
+var _ nfsMoveWorkspaceChecker = (*agent.AgentManager)(nil)
 
 // errAgentIdentityUnknown means a runtime process restart dropped the
 // in-memory record a runtime needs to tell "not found" apart from "exists,
