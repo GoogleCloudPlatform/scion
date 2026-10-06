@@ -255,7 +255,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): the agent's own conduit session; agent:port:forward; 404 when the experiment is off
 
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
-	"/api/v1/artifacts":         "authenticated", // Artifact collection; service checks artifact.* through artifacts.Host; 404 when the experiment is off
+	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/":        "authenticated", // Artifact by ID; service checks artifact.* through artifacts.Host; 404 when the experiment is off
 	"/api/v1/artifacts/shared/": "authenticated", // Share links (RoutePublic in route metadata); still behind UnifiedAuthMiddleware until token-only access ships; 404 when the experiment is off
 
