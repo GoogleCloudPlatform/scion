@@ -54,6 +54,7 @@ import { chatUnread } from '../../client/chat-unread.js';
 import { CHAT_STARTUP_REUSE_MS, chatDMsLoad, chatLoadClock } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
+import { isMacPlatform } from '../../utils/platform.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { blurElement, focusElement } from '../shared/focus-moved.js';
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../client/chat-palette-types.js';
@@ -342,6 +343,17 @@ interface SpaceMember {
   kind: 'user' | 'agent';
 }
 
+/** Input types that take typed text, where a line-editing key has a native meaning. */
+const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
+  'text',
+  'search',
+  'email',
+  'url',
+  'tel',
+  'password',
+  'number',
+]);
+
 @customElement('scion-page-chat')
 export class ScionPageChat extends LitElement {
   @property({ type: Object })
@@ -369,6 +381,11 @@ export class ScionPageChat extends LitElement {
   /** Width of the members panel in px. Persisted per browser. */
   @state() private membersWidth = MEMBERS_WIDTH_DEFAULT;
   @state() private v2SpaceRailLoaded = false;
+  /**
+   * Set when initV2's lazy imports fail (for example, a deploy removed the
+   * old chunks). The rail then asks for a reload instead of spinning.
+   */
+  @state() private v2SpaceRailLoadFailed = false;
   /** Human members for the members sidebar (from the members endpoint). */
   @state() private v2HumanMembers: import('../shared/chat/chat-members.js').ChatHumanMember[] = [];
   /** Agent members for the members sidebar. */
@@ -485,6 +502,15 @@ export class ScionPageChat extends LitElement {
    * just to re-merge it; the fallback poll resyncs it slowly instead.
    */
   private _hubPresenceGeneration: number | null = null;
+  /**
+   * Bumped by each `initV2` and by `disconnectedCallback`. An `initV2`
+   * resuming after its lazy imports goes on only if it is still the latest
+   * and the page is still connected. The disconnect bump and the
+   * `isConnected` check overlap on purpose: either alone stops a removed
+   * page, and the generation alone stops a superseded `initV2` after a
+   * reconnect.
+   */
+  private _initV2Generation = 0;
   /**
    * Bumped on `disconnectedCallback` (same pattern as `_unreadDMRequestId`
    * below) and whenever `v2Conversation` is assigned a truthy value (see
@@ -1495,6 +1521,7 @@ export class ScionPageChat extends LitElement {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
+    ++this._initV2Generation;
     ++this._hubMembersGeneration;
     this._projectMembersAbort?.abort();
     this._projectMembersAbort = null;
@@ -1686,8 +1713,24 @@ export class ScionPageChat extends LitElement {
   // =========================================================================
 
   private async initV2(): Promise<void> {
+    const generation = ++this._initV2Generation;
     // Lazy-load the space rail and members components
-    await Promise.all([loadSpaceRail(), loadChatMembers()]);
+    try {
+      await Promise.all([loadSpaceRail(), loadChatMembers()]);
+    } catch (err) {
+      // initV2 is not awaited, so a failure not caught here would surface
+      // as an unhandled rejection. Log it, and stop: without its
+      // components the page cannot run the rest of startup.
+      console.error('Chat page failed to load its components:', err);
+      if (this.isConnected && generation === this._initV2Generation) {
+        this.v2SpaceRailLoadFailed = true;
+      }
+      return;
+    }
+    // Removed (or removed and re-connected) while the imports were in
+    // flight; disconnectedCallback already cleaned up.
+    if (!this.isConnected || generation !== this._initV2Generation) return;
+    this.v2SpaceRailLoadFailed = false;
     this.v2SpaceRailLoaded = true;
 
     // Parse initial route
@@ -3942,6 +3985,9 @@ export class ScionPageChat extends LitElement {
     // hidden behind the terminal workspace must perform zero palette state
     // changes or fetches even though it stays mounted.
     if (this._eventFromTerminalSurface(e)) return;
+    // On macOS, Ctrl+K in a text field deletes to the end of the line; the
+    // palette's shortcut there is Cmd+K.
+    if (e.ctrlKey && isMacPlatform() && this._eventFromTextField(e)) return;
     if (!this._paletteOpenGuardsHold()) return;
 
     e.preventDefault();
@@ -3984,6 +4030,21 @@ export class ScionPageChat extends LitElement {
       if (node.tagName === 'SCION-TERMINAL-PANE') return true;
       return node.classList?.contains('xterm') ?? false;
     });
+  }
+
+  /**
+   * True when the event originated in an editable text field: a text-taking
+   * input, a textarea, or contenteditable content. Read-only and disabled
+   * fields are not editable. Reads `composedPath()[0]`, since a document
+   * listener sees the composer's native textarea retargeted to its shadow host.
+   */
+  private _eventFromTextField(e: KeyboardEvent): boolean {
+    const origin = e.composedPath()[0];
+    if (origin instanceof HTMLInputElement) {
+      return TEXT_INPUT_TYPES.has(origin.type) && !origin.readOnly && !origin.disabled;
+    }
+    if (origin instanceof HTMLTextAreaElement) return !origin.readOnly && !origin.disabled;
+    return origin instanceof HTMLElement && origin.isContentEditable;
   }
 
   /** Is the current URL (relative to BASE_URL) `/chat` or a route below it? */
@@ -5234,19 +5295,7 @@ export class ScionPageChat extends LitElement {
         @scroll=${this._handleV2PanelsScroll}
       >
         <div class="v2-rail" ?inert=${this.isMobileLayout && this.mobilePanel !== 'left'}>
-          ${this.v2SpaceRailLoaded
-            ? html`
-                <scion-chat-space-rail
-                  selectedKey=${this.v2Conversation?.conversationKey || ''}
-                  selectedProjectId=${this.v2Conversation && !this.v2Conversation.isDM
-                    ? this.v2Conversation.projectId
-                    : ''}
-                  currentUserId=${this.pageData?.user?.id || ''}
-                  @thread-select=${this.handleThreadSelect}
-                  @reset-view=${this.handleResetView}
-                ></scion-chat-space-rail>
-              `
-            : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
+          ${this.renderV2Rail()}
         </div>
 
         <div
@@ -5390,6 +5439,29 @@ export class ScionPageChat extends LitElement {
    * The conversation header steps back to the rail; the members header
    * steps back to the conversation.
    */
+  /** The left rail: the space rail once loaded, else a spinner or a load error. */
+  private renderV2Rail(): TemplateResult {
+    if (this.v2SpaceRailLoaded) {
+      return html`
+        <scion-chat-space-rail
+          selectedKey=${this.v2Conversation?.conversationKey || ''}
+          selectedProjectId=${this.v2Conversation && !this.v2Conversation.isDM
+            ? this.v2Conversation.projectId
+            : ''}
+          currentUserId=${this.pageData?.user?.id || ''}
+          @thread-select=${this.handleThreadSelect}
+          @reset-view=${this.handleResetView}
+        ></scion-chat-space-rail>
+      `;
+    }
+    if (this.v2SpaceRailLoadFailed) {
+      return html`<div class="loading-rail" role="alert">
+        Chat failed to load. Reload the page to try again.
+      </div>`;
+    }
+    return html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`;
+  }
+
   private renderMobileBackButton(target: 'left' | 'center' = 'left') {
     return html`
       <sl-icon-button
