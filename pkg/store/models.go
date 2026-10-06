@@ -1480,6 +1480,11 @@ const (
 	// (dispatch was attempted and rejected) and "pending" (dispatch is
 	// still outstanding) — deferred means dispatch was never attempted.
 	MessageDispatchDeferred = "deferred"
+	// MessageDispatchNoRecipient marks a group-thread message that resolved
+	// no agent recipient (no default agent, no reply-to agent, no agent
+	// @mention). It is saved to the thread but no agent was given it, so it
+	// must not read as "dispatched". Terminal: nothing retries it.
+	MessageDispatchNoRecipient = "no_recipient"
 )
 
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
