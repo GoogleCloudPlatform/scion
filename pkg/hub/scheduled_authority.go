@@ -41,7 +41,9 @@ const (
 
 // revisionAuthorityCeiling returns the frozen effect ceiling to record on a
 // schedule revision of eventType authored by the request's identity: the
-// ceiling sourceEffectCeiling computes for that credential. On an error it
+// ceiling sourceEffectCeiling computes for that credential. action is the
+// authoring action (create, or update for an edit or resume), recorded on a
+// denial. On an error it
 // writes the response and returns ok=false, before anything is written:
 //   - a lookup fault → 500;
 //   - a credential that cannot be recorded as an authority source → 403 with
@@ -51,7 +53,7 @@ const (
 // source records the unrecorded ceiling instead: scheduled-message authority
 // is decided by the scheduled-message rule, which does not read this
 // ceiling, and an unrecorded ceiling never reads as principal.
-func (s *Server) revisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID, eventType string) (store.EffectCeiling, bool) {
+func (s *Server) revisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID, eventType string, action Action) (store.EffectCeiling, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if s.authzService == nil {
@@ -72,7 +74,7 @@ func (s *Server) revisionAuthorityCeiling(w http.ResponseWriter, r *http.Request
 		if eventType == "message" {
 			return store.EffectCeiling{}, true
 		}
-		logAuthzDenial(r, identity, Resource{Type: "schedule", ParentType: "project", ParentID: projectID}, ActionUpdate,
+		logAuthzDenial(r, identity, Resource{Type: "schedule", ParentType: "project", ParentID: projectID}, action,
 			"effect ceiling denied: "+string(cause)+": "+err.Error())
 		writeForbiddenDenial(w, scheduleCeilingDenialMessage(cause), DeniedByDelegationCeiling)
 		return store.EffectCeiling{}, false

@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -205,7 +207,7 @@ func fireRevisionCeiling(srv *Server, identity Identity, projectID, eventType st
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", nil)
 	req = req.WithContext(contextWithIdentity(req.Context(), identity))
 	rec := httptest.NewRecorder()
-	c, ok := srv.revisionAuthorityCeiling(rec, req, projectID, eventType)
+	c, ok := srv.revisionAuthorityCeiling(rec, req, projectID, eventType, ActionCreate)
 	return c, ok, rec
 }
 
@@ -269,6 +271,32 @@ func TestSchedCreateCeilingErrorDeniesWrite(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, c)
 	})
+}
+
+// A ceiling denial is logged with the authoring action: create on the
+// create paths, update on an edit or resume.
+func TestSchedCeilingDenialLogsAuthoringAction(t *testing.T) {
+	srv, _, projectID := setupScheduleTest(t)
+	capture := &capturingHandler{}
+	restoreLog := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(restoreLog) })
+
+	fed := &federatedTestIdentity{id: tid("sched-ceil-log-fed"), email: "fed@example.com", role: "member"}
+	for _, action := range []Action{ActionCreate, ActionUpdate} {
+		capture.mu.Lock()
+		capture.records = nil
+		capture.mu.Unlock()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), fed))
+		rec := httptest.NewRecorder()
+		_, ok := srv.revisionAuthorityCeiling(rec, req, projectID, "dispatch_agent", action)
+		require.False(t, ok)
+		require.Equal(t, http.StatusForbidden, rec.Code)
+		logRec, found := findRecord(capture.all(), "authorization denied")
+		require.True(t, found, "expected a denial log line")
+		assert.Equal(t, string(action), fmt.Sprint(recordAttrs(logRec)["action"]))
+	}
 }
 
 // A federated user's message schedule and one-shot message event store the
