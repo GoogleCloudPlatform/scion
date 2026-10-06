@@ -37,6 +37,10 @@ All four findings were fixed; none declined.
 
 - **R2-1 (Low, test gap):** fixed in 1d7865e. Held-request web tests now pin the loading guard and the stale-error guard (only the newest request clears the spinner; an older error for the same view is dropped), plus a control test. Forcing either guard to `true` fails its test. No product change was needed.
 
+## Review round 3 and upstream merge
+
+- Round 3 was clean. Upstream main (a4bf5eb) was merged in with a merge commit (2a93fce), not a rebase: \`git show --remerge-diff\` is empty, and the diff against upstream lists only this task's files. On the merged tree, \`go build\`, the time-literals gate, the targeted pkg/hub tests (UTC, Tokyo, Kathmandu), web typecheck and the three web test files (Tokyo, Kathmandu) all pass.
+
 ## Follow-ups noticed (not done)
 
 - `QueryProjectSummary` ("Last 24 hours") stays a rolling 24h window with no buckets, so the zone does not affect it.
