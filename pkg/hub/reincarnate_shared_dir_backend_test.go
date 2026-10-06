@@ -209,7 +209,8 @@ func TestHTTPAgentDispatcher_ProvisionOmitsSharedDirBackendChange(t *testing.T) 
 }
 
 // A shared dir backend change cannot be combined with a move to another
-// broker; a dry run is refused with 400 and nothing is written.
+// broker: a dry run or a real move is refused with 400, nothing is written
+// and nothing is dispatched to either broker.
 func TestReincarnateAgent_SharedDirBackends_WithMoveRefused(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	count := f.agentCount(t)
@@ -217,6 +218,8 @@ func TestReincarnateAgent_SharedDirBackends_WithMoveRefused(t *testing.T) {
 	for name, body := range map[string]ReincarnateAgentRequest{
 		"change":      {DryRun: true, TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}},
 		"allow empty": {DryRun: true, TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}, AllowEmptySharedDir: true},
+		// A real move would otherwise run and drop the change.
+		"real move": {Handoff: "h", TargetBroker: f.dst.ID, SharedDirBackends: map[string]string{"notes": "nfs"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()

@@ -535,7 +535,7 @@ dry run. A target you cannot see is reported as not found. If the CLI says the H
 `--broker`, upgrade the Hub.
 
 :::note[Phase 1]
-This release supports only `--handoff-file`, `--handoff-template`, `--dry-run`, `--broker` together with `--dry-run`, and the shared directory backend flags. Overrides such as a different image,
+This release supports only `--handoff-file`, `--handoff-template`, `--dry-run`, and `--broker` together with `--dry-run`. Overrides such as a different image,
 model, or harness config are not yet available.
 :::
 

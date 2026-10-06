@@ -234,3 +234,78 @@ func TestReincarnateAgentViaHub_SharedDirRealRequestNotEchoed(t *testing.T) {
 	assert.Contains(t, err.Error(), "started without the shared dir backend change")
 	assert.Len(t, *bodies, 2)
 }
+
+// fullResponseHub is a fake hub whose whole reincarnate response comes
+// from respond; it records request bodies.
+func fullResponseHub(t *testing.T, respond func(body map[string]interface{}) string) (*HubContext, *[]map[string]interface{}) {
+	t.Helper()
+	var bodies []map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/reincarnate") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		data, _ := io.ReadAll(r.Body)
+		var body map[string]interface{}
+		_ = json.Unmarshal(data, &body)
+		bodies = append(bodies, body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(respond(body)))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	return &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}, &bodies
+}
+
+// With a patch flag, --shared-dir-backend and --broker together, the
+// dry-run probe carries all three and its checks run in order: patch, then
+// the shared dir echo, then the move handshake. Each case fails exactly
+// the first check its response does not satisfy.
+func TestReincarnateAgentViaHub_ProbeChecksPatchSharedDirsAndMoveInOrder(t *testing.T) {
+	const (
+		patched   = `"patched":["image"]`
+		sharedDir = `"sharedDirBackends":{"notes":"nfs"}`
+		move      = `"sourceBrokerId":"b1","targetBrokerId":"b2","moveVerdict":{}`
+	)
+	resp := func(plan string, top string) string {
+		out := `{"agentId":"agent-1","generation":2,"state":"planned","plan":{` + plan + `}`
+		if top != "" {
+			out += "," + top
+		}
+		return out + "}"
+	}
+	for _, tc := range []struct {
+		name     string
+		response string
+		wantErr  string
+		requests int
+	}{
+		{"nothing applied", resp("", ""), "does not support reincarnate patch flags", 1},
+		{"patch only", resp(patched, ""), "does not support --shared-dir-backend", 1},
+		{"patch and shared dir, no move", resp(patched+","+sharedDir, ""), "does not support --broker", 1},
+		{"all applied", resp(patched+","+sharedDir, move), "", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hubCtx, bodies := fullResponseHub(t, func(map[string]interface{}) string { return tc.response })
+			setSharedDirFlags(t, []string{"notes=nfs"}, false, false)
+			prevImage := reincarnateImage
+			t.Cleanup(func() { reincarnateImage = prevImage })
+			reincarnateImage, reincarnateBroker = "img:v2", "b2"
+
+			err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Len(t, *bodies, tc.requests)
+			probe := (*bodies)[0]
+			assert.Equal(t, true, probe["dryRun"])
+			assert.Equal(t, "b2", probe["targetBroker"])
+			assert.Equal(t, "img:v2", probe["image"])
+			assert.Equal(t, map[string]interface{}{"notes": "nfs"}, probe["sharedDirBackends"])
+		})
+	}
+}
