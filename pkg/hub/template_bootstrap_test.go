@@ -1454,6 +1454,15 @@ func TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins(t *testin
 	if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
 		t.Fatal(err)
 	}
+	// An existing user template, imported in the first pass and edited
+	// before the second, proves existing rows are still synced.
+	existingTmpl := filepath.Join(templatesDir, "existing-template")
+	if err := os.MkdirAll(existingTmpl, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existingTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
 		t.Fatal(err)
 	}
@@ -1464,9 +1473,20 @@ func TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins(t *testin
 	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
 		t.Fatal(err)
 	}
+	existingBefore, err := s.GetTemplateBySlug(ctx, "existing-template", scope, "")
+	if err != nil {
+		t.Fatalf("existing user template not imported: %v", err)
+	}
 
 	if _, err := s.UpsertHubSetting(ctx, builtinSeedLedgerSection, json.RawMessage(`"not-a-ledger"`),
 		"test", -1, "seeded"); err != nil {
+		t.Fatal(err)
+	}
+	corrupt, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existingTmpl, "scion-agent.yaml"), []byte("harness: claude\n# edited\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	userTmpl := filepath.Join(templatesDir, "my-template")
@@ -1488,5 +1508,69 @@ func TestBootstrapTemplatesFromDir_CorruptLedgerFailsClosedForBuiltins(t *testin
 	}
 	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("deleted default template re-created with a corrupt ledger (err=%v)", err)
+	}
+	existingAfter, err := s.GetTemplateBySlug(ctx, "existing-template", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if existingAfter.ContentHash == existingBefore.ContentHash {
+		t.Error("existing template was not synced with a corrupt ledger (content hash unchanged)")
+	}
+	after, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != corrupt.Revision || string(after.Value) != string(corrupt.Value) {
+		t.Errorf("corrupt ledger row was overwritten: rev %d -> %d, value %s", corrupt.Revision, after.Revision, after.Value)
+	}
+}
+
+// TestBootstrapTemplatesFromDir_MarksExistingBuiltinWhenSyncFails verifies
+// that an existing built-in row counts as seeded even if its content sync
+// fails (mark before sync, same rule as the hosted path): after a failed
+// sync the name is in the ledger, so deleting the row sticks.
+func TestBootstrapTemplatesFromDir_MarksExistingBuiltinWhenSyncFails(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	scope := string(store.TemplateScopeGlobal)
+
+	dir := makeTemplateDir(t, "default", map[string]string{
+		"scion-agent.yaml": "harness: claude\n",
+	})
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a hub that predates the ledger.
+	if err := s.DeleteHubSetting(ctx, builtinSeedLedgerSection); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change the content so the sync must upload, and make uploads fail.
+	if err := os.WriteFile(filepath.Join(dir, "default", "scion-agent.yaml"), []byte("harness: claude\n# v2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetStorage(&failingUploadStorage{mockStorage: stor})
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap with failing sync: %v", err)
+	}
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.Templates, []string{"default"}) {
+		t.Fatalf("ledger after failed sync = %+v, want templates [default]", doc)
+	}
+
+	// Delete the row, then bootstrap with a working sync: it stays deleted.
+	srv.SetStorage(stor)
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapTemplatesFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted default template re-created (err=%v)", err)
 	}
 }

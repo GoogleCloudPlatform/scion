@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/resources"
 )
@@ -849,10 +851,31 @@ func TestBootstrapHarnessConfigsFromDir_CorruptLedgerFailsClosedForBuiltins(t *t
 	if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: true}); err != nil {
 		t.Fatal(err)
 	}
+	// Edit an existing built-in on disk: it must still be synced.
+	const synced = "codex"
+	syncedBefore, err := s.GetHarnessConfigBySlug(ctx, synced, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(hcDir, synced, "config.yaml"), os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n# edited locally\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
 
 	err = srv.BootstrapHarnessConfigsFromDir(ctx, hcDir)
 	if err == nil {
 		t.Fatal("expected an error for an unreadable ledger")
+	}
+	syncedAfter, err := s.GetHarnessConfigBySlug(ctx, synced, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if syncedAfter.ContentHash == syncedBefore.ContentHash {
+		t.Errorf("existing built-in %q was not synced with a corrupt ledger (content hash unchanged)", synced)
 	}
 	if _, err := s.GetHarnessConfigBySlug(ctx, userName, store.HarnessConfigScopeGlobal, ""); err != nil {
 		t.Errorf("user dir not imported with a corrupt ledger: %v", err)
@@ -863,5 +886,66 @@ func TestBootstrapHarnessConfigsFromDir_CorruptLedgerFailsClosedForBuiltins(t *t
 	after, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
 	if after.Revision != corrupt.Revision || string(after.Value) != string(corrupt.Value) {
 		t.Errorf("corrupt ledger row was overwritten: rev %d -> %d, value %s", corrupt.Revision, after.Revision, after.Value)
+	}
+}
+
+// failingUploadStorage wraps mockStorage and fails every upload, to force a
+// content sync of an existing row to fail.
+type failingUploadStorage struct {
+	*mockStorage
+}
+
+func (f *failingUploadStorage) Upload(context.Context, string, io.Reader, storage.UploadOptions) (*storage.Object, error) {
+	return nil, errors.New("upload failed (test)")
+}
+
+// TestBootstrapHarnessConfigsFromDir_MarksExistingBuiltinWhenSyncFails
+// verifies that an existing built-in row counts as seeded even if its content
+// sync fails (mark before sync, same rule as the hosted path): after a failed
+// sync the name is in the ledger, so deleting the row sticks.
+func TestBootstrapHarnessConfigsFromDir_MarksExistingBuiltinWhenSyncFails(t *testing.T) {
+	srv, s, stor := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	const name = "claude"
+
+	dir := makeHarnessConfigDir(t, name, map[string]string{
+		"config.yaml": "harness: claude\nimage: scion-claude:latest\nuser: scion\n",
+	})
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a hub that predates the ledger.
+	if err := s.DeleteHubSetting(ctx, builtinSeedLedgerSection); err != nil {
+		t.Fatal(err)
+	}
+
+	// Change the content so the sync must upload, and make uploads fail.
+	if err := os.WriteFile(filepath.Join(dir, name, "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:v2\nuser: scion\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetStorage(&failingUploadStorage{mockStorage: stor})
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatalf("bootstrap with failing sync: %v", err)
+	}
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.HarnessConfigs, []string{name}) {
+		t.Fatalf("ledger after failed sync = %+v, want harness_configs [%s]", doc, name)
+	}
+
+	// Delete the row, then bootstrap with a working sync: it stays deleted.
+	srv.SetStorage(stor)
+	hc, err := s.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteHarnessConfig(ctx, hc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.BootstrapHarnessConfigsFromDir(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetHarnessConfigBySlug(ctx, name, store.HarnessConfigScopeGlobal, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("deleted built-in %q re-created (err=%v)", name, err)
 	}
 }

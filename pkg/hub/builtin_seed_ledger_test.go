@@ -309,11 +309,17 @@ func TestBuiltinSeedLedger_FailClosed(t *testing.T) {
 		t.Error("fail-closed ledger must report every name as seen")
 	}
 	l.Mark(storage.ResourceKindHarnessConfig, "claude")
-	before, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	before, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatalf("GetHubSetting before save: %v", err)
+	}
 	if err := srv.saveBuiltinSeedLedger(ctx, l); err != nil {
 		t.Fatal(err)
 	}
-	after, _ := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	after, err := s.GetHubSetting(ctx, builtinSeedLedgerSection)
+	if err != nil {
+		t.Fatalf("GetHubSetting after save: %v", err)
+	}
 	if after.Revision != before.Revision {
 		t.Error("fail-closed ledger save must not write")
 	}
