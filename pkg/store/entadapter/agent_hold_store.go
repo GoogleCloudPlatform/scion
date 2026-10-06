@@ -15,8 +15,10 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -156,9 +158,10 @@ func agentHoldCreate(c *ent.Client, h *store.AgentHold, now time.Time) (agentHol
 // one inserted concurrently by another hub instance. Every hold gets a fresh
 // ID and the call's creation time on every call, and the rows this call
 // inserted are counted by those IDs. Before any insert, each hold's agent row
-// must exist with project_id equal to the hold's ProjectID. The call runs in
-// one transaction (the ambient one when called inside WithTx), so it inserts
-// all of its rows or none.
+// must exist with project_id equal to the hold's ProjectID. Inserts run in
+// ascending agent ID order. The call runs in one transaction (the ambient one
+// when called inside WithTx), and ID and CreatedAt are written to the holds
+// only when it returns without error.
 func (s *AgentHoldStore) CreateAgentHolds(ctx context.Context, holds []*store.AgentHold) (int, error) {
 	if s.inTx {
 		return s.createAgentHolds(ctx, s.client, holds)
@@ -194,14 +197,25 @@ func (s *AgentHoldStore) createAgentHolds(ctx context.Context, c *ent.Client, ho
 		}
 		rows = append(rows, r)
 	}
+	// Work on a copy ordered by agent ID in byte order, the order
+	// LockAgentRows takes agent rows in, so the agent row locks the inserts
+	// take follow the same order. pos maps each sorted row back to its hold.
+	pos := make([]int, len(rows))
+	for i := range pos {
+		pos[i] = i
+	}
+	sort.SliceStable(pos, func(i, j int) bool {
+		return bytes.Compare(rows[pos[i]].agentID[:], rows[pos[j]].agentID[:]) < 0
+	})
+	sorted := make([]agentHoldRow, len(rows))
+	for i, p := range pos {
+		sorted[i] = rows[p]
+	}
+	rows = sorted
 	for start := 0; start < len(rows); start += batchSize {
 		if err := checkAgentHoldProjects(ctx, c, rows[start:min(start+batchSize, len(rows))]); err != nil {
 			return 0, err
 		}
-	}
-	for i, h := range holds {
-		h.ID = rows[i].id.String()
-		h.CreatedAt = now
 	}
 	inserted := 0
 	for start := 0; start < len(rows); start += batchSize {
@@ -231,6 +245,10 @@ func (s *AgentHoldStore) createAgentHolds(ctx context.Context, c *ent.Client, ho
 			return 0, mapError(err)
 		}
 		inserted += n
+	}
+	for i, r := range rows {
+		holds[pos[i]].ID = r.id.String()
+		holds[pos[i]].CreatedAt = now
 	}
 	return inserted, nil
 }

@@ -2924,15 +2924,18 @@ type AgentHoldStore interface {
 	// ID and CreatedAt are set by the store on every call: every hold it
 	// is given gets a fresh ID and the call's creation time, replacing any
 	// value already set, so the same holds can be passed again. Both are
-	// written to the holds only after every hold passes validation and the
-	// project check; a refused call leaves its holds unchanged. That ID
-	// only names a stored row for holds this call inserted: holds skipped
-	// as already active, and holds of a call that returned an error, have
-	// no row with that ID.
+	// written to the holds only when the call returns without error, so a
+	// call that returns an error leaves its holds unchanged. A written ID
+	// names a stored row only for holds this call inserted; holds skipped
+	// as already active have no row with that ID.
 	//
-	// The call is atomic: it inserts all of its rows or none. Outside a
-	// transaction it runs in its own; inside WithTx it runs in the ambient
-	// one. On any error it returns 0.
+	// Holds are inserted in ascending agent ID order (byte order of the
+	// UUID), the order LockAgentRows locks agent rows in.
+	//
+	// Outside a transaction the call runs in its own and inserts all of its
+	// rows or none. Inside WithTx it runs in the ambient transaction; the
+	// caller must return the error (rolling the transaction back) for the
+	// call to leave no rows. On any error it returns 0.
 	CreateAgentHolds(ctx context.Context, holds []*AgentHold) (inserted int, err error)
 
 	// HasActiveAgentHold reports whether the agent has at least one active

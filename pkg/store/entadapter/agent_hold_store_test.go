@@ -21,6 +21,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -151,13 +153,14 @@ func TestAgentHold_ClearReasonIsCapped(t *testing.T) {
 }
 
 // TestAgentHold_CreateIsAtomic: when a later batch of a call fails at insert,
-// the rows of its earlier batches are not kept, and the call returns 0.
+// the rows of its earlier batches are not kept, the call returns 0, and the
+// holds it was given are left unchanged.
 func TestAgentHold_CreateIsAtomic(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)
 	t.Cleanup(func() { _ = cs.Close() })
-	// One hold per batch, so the call below runs two batches.
+	// One hold per batch, so the calls below run two batches.
 	cs.insertBatch = 1
 
 	projectID := uuid.NewString()
@@ -167,8 +170,13 @@ func TestAgentHold_CreateIsAtomic(t *testing.T) {
 	b := makeAgent(projectID, "hold-b")
 	require.NoError(t, cs.CreateAgent(ctx, b))
 
-	// The insert of b's hold fails; a's hold is in the batch before it.
-	failAgent := uuid.MustParse(b.ID)
+	// Holds are inserted in ascending agent ID order, so the agent with
+	// the higher ID is in the second batch. Its insert fails.
+	first, second := a, b
+	if aID, bID := uuid.MustParse(a.ID), uuid.MustParse(b.ID); bytes.Compare(aID[:], bID[:]) > 0 {
+		first, second = b, a
+	}
+	failAgent := uuid.MustParse(second.ID)
 	client.AgentHold.Use(func(next ent.Mutator) ent.Mutator {
 		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
 			if hm, ok := m.(*ent.AgentHoldMutation); ok {
@@ -190,30 +198,107 @@ func TestAgentHold_CreateIsAtomic(t *testing.T) {
 			Trigger:           store.MembershipLossTriggerMemberRemove,
 		}
 	}
+	assertUnchanged := func(holds []*store.AgentHold) {
+		t.Helper()
+		for _, h := range holds {
+			assert.Empty(t, h.ID, "a call that returns an error leaves its holds unchanged")
+			assert.True(t, h.CreatedAt.IsZero(), "a call that returns an error leaves its holds unchanged")
+		}
+	}
 
-	n, err := cs.CreateAgentHolds(ctx, []*store.AgentHold{hold(a.ID), hold(b.ID)})
+	holds := []*store.AgentHold{hold(second.ID), hold(first.ID)}
+	n, err := cs.CreateAgentHolds(ctx, holds)
 	require.Error(t, err)
 	assert.Equal(t, 0, n)
+	assertUnchanged(holds)
 	count, err := client.AgentHold.Query().Count(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0, count, "no row of the first batch is kept")
 
-	// Inside WithTx the call runs in the ambient transaction and also
-	// returns 0.
+	// Inside WithTx the call runs in the ambient transaction: its first
+	// batch is inserted there, and rolling the transaction back removes it.
+	holds = []*store.AgentHold{hold(second.ID), hold(first.ID)}
 	err = cs.WithTx(ctx, func(tx store.Store) error {
-		n, err := tx.CreateAgentHolds(ctx, []*store.AgentHold{hold(a.ID), hold(b.ID)})
+		txStore := tx.(*CompositeStore)
+		txStore.insertBatch = 1
+		n, err := tx.CreateAgentHolds(ctx, holds)
 		assert.Equal(t, 0, n)
+		inTx, cerr := txStore.client.AgentHold.Query().Count(ctx)
+		require.NoError(t, cerr)
+		assert.Equal(t, 1, inTx, "the first batch is inserted in the ambient transaction")
 		return err
 	})
 	require.Error(t, err)
+	assertUnchanged(holds)
 	count, err = client.AgentHold.Query().Count(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, 0, count)
+	assert.Equal(t, 0, count, "the rollback leaves no rows")
 
 	// Without the failing hold the same call inserts.
-	n, err = cs.CreateAgentHolds(ctx, []*store.AgentHold{hold(a.ID)})
+	n, err = cs.CreateAgentHolds(ctx, []*store.AgentHold{hold(first.ID)})
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+}
+
+// TestAgentHold_CreateInsertsInAgentIDOrder: holds passed in descending agent
+// ID order are inserted in ascending agent ID order, all of them are
+// inserted, and each hold gets the ID of its own row.
+func TestAgentHold_CreateInsertsInAgentIDOrder(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+	cs.insertBatch = 2
+
+	projectID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projectID, Name: "hold", Slug: "hold-" + projectID[:8]}))
+	var agentIDs []uuid.UUID
+	for i := 0; i < 5; i++ {
+		a := makeAgent(projectID, fmt.Sprintf("hold-%d", i))
+		require.NoError(t, cs.CreateAgent(ctx, a))
+		agentIDs = append(agentIDs, uuid.MustParse(a.ID))
+	}
+	sort.Slice(agentIDs, func(i, j int) bool { return bytes.Compare(agentIDs[i][:], agentIDs[j][:]) > 0 })
+
+	var order []uuid.UUID
+	client.AgentHold.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if hm, ok := m.(*ent.AgentHoldMutation); ok && hm.Op().Is(ent.OpCreate) {
+				if id, ok := hm.AgentID(); ok {
+					order = append(order, id)
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	holds := make([]*store.AgentHold, len(agentIDs))
+	for i, id := range agentIDs {
+		holds[i] = &store.AgentHold{
+			AgentID:           id.String(),
+			ProjectID:         projectID,
+			Cause:             store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser,
+			RootPrincipalID:   uuid.NewString(),
+			Trigger:           store.MembershipLossTriggerMemberRemove,
+		}
+	}
+	n, err := cs.CreateAgentHolds(ctx, holds)
+	require.NoError(t, err)
+	assert.Equal(t, len(holds), n)
+
+	require.Len(t, order, len(agentIDs))
+	assert.True(t, sort.SliceIsSorted(order, func(i, j int) bool { return bytes.Compare(order[i][:], order[j][:]) < 0 }),
+		"holds are inserted in ascending agent ID order")
+
+	for i, h := range holds {
+		assert.Equal(t, agentIDs[i].String(), h.AgentID, "the input order is kept")
+		require.NotEmpty(t, h.ID)
+		row, err := client.AgentHold.Get(ctx, uuid.MustParse(h.ID))
+		require.NoError(t, err)
+		assert.Equal(t, agentIDs[i], row.AgentID, "each hold gets the ID of its own row")
+		assert.Equal(t, h.RootPrincipalID, row.RootPrincipalID)
+	}
 }
 
 // lockTestBackendPID returns the PostgreSQL backend PID of txStore's
