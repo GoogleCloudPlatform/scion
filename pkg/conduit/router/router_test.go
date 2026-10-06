@@ -298,6 +298,9 @@ func newFront(t *testing.T, target string) *front {
 		switch f.mode.Load() {
 		case frontBare503:
 			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+		case frontOtherReason503:
+			w.Header().Set(relay.HeaderRefusalReason, "upstream_unreachable")
+			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
 		case frontLoseResponse:
 			f.forwarded.Add(1)
 			rp.ServeHTTP(httptest.NewRecorder(), r)
@@ -315,7 +318,8 @@ func newFront(t *testing.T, target string) *front {
 }
 
 // TestRouterExcludesUnreachableOwner (design §3.5): a failed dial to an
-// owner excludes that relay and re-resolves within the bound.
+// owner, or the owner's own pre-admission refusal with a reason, excludes
+// that relay and re-resolves within the bound.
 // With no alternative the original error is returned. A bare 503, a
 // status produced by the target, a lost response and a failure after
 // admission are not re-resolved.
@@ -326,6 +330,7 @@ func TestRouterExcludesUnreachableOwner(t *testing.T) {
 		nodes  map[string]*relaytest.Node
 	}
 	dialFail := func(e env, id string) { e.fronts[id].srv.Close() }
+	refuse := func(e env, id string) { e.nodes[id].Relay.Kill() }
 	frontMode := func(m int32) func(env, string) {
 		return func(e env, id string) { e.fronts[id].mode.Store(m) }
 	}
@@ -373,15 +378,23 @@ func TestRouterExcludesUnreachableOwner(t *testing.T) {
 			want: []string{"relay-a", live}, status: 200},
 		{name: "dial failure re-resolves (stream)", stream: true, failing: []string{"relay-a"}, live: true, breakFn: dialFail,
 			want: []string{"relay-a", live}},
+		{name: "refusal not_serving re-resolves (rpc)", failing: []string{"relay-a"}, live: true, breakFn: refuse,
+			want: []string{"relay-a", live}, status: 200},
+		{name: "refusal not_serving re-resolves (stream)", stream: true, failing: []string{"relay-a"}, live: true, breakFn: refuse,
+			want: []string{"relay-a", live}},
 		{name: "excluded relays are not chosen again", failing: []string{"relay-a", "relay-b"}, live: true, breakFn: dialFail,
 			want: []string{"relay-b", "relay-a", live}, status: 200},
 		{name: "bound reached returns the owner error", failing: []string{"relay-a", "relay-b", "relay-c"}, live: true, breakFn: dialFail,
 			want: []string{"relay-c", "relay-b", "relay-a"}, check: isOwnerUnreachable},
 		{name: "no alternative after a dial failure", failing: []string{"relay-a"}, breakFn: dialFail,
 			want: []string{"relay-a"}, check: isOwnerUnreachable},
+		{name: "no alternative after a refusal (stream)", stream: true, failing: []string{"relay-a"}, breakFn: refuse,
+			want: []string{"relay-a"}, check: isOwnerUnreachable},
 		{name: "bare 503 is not re-resolved (rpc)", failing: []string{"relay-a"}, live: true, breakFn: frontMode(frontBare503),
 			want: []string{"relay-a"}, check: notRetriable},
 		{name: "bare 503 is not re-resolved (stream)", stream: true, failing: []string{"relay-a"}, live: true, breakFn: frontMode(frontBare503),
+			want: []string{"relay-a"}, check: notRetriable},
+		{name: "503 with another reason is not re-resolved", failing: []string{"relay-a"}, live: true, breakFn: frontMode(frontOtherReason503),
 			want: []string{"relay-a"}, check: notRetriable},
 		{name: "target 503 in the RpcResponse is not re-resolved", failing: []string{"relay-a"}, live: true, target: target503,
 			want: []string{"relay-a"}, status: http.StatusServiceUnavailable},

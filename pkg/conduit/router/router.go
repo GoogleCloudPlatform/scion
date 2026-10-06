@@ -247,7 +247,8 @@ func (r *Router) ownerEndpoint(ctx context.Context, rec registry.SessionRecord) 
 //   - relay.ErrStaleRoute (the owner no longer holds the session or it is
 //     no longer admissible): that session is excluded. When the bound is
 //     reached the result is ErrNoSession.
-//   - relay.ErrOwnerUnreachable (the internal dial failed): that relay
+//   - relay.ErrOwnerUnreachable (the internal dial failed, or the owner
+//     refused before admission with an explicit reason): that relay
 //     instance, and so every session it holds, is excluded for the rest
 //     of the resolution. When the bound is reached, or no other session
 //     is eligible, fn's error is returned unchanged.
