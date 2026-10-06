@@ -351,7 +351,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			}
 			return
 		}
-		code, message := classifyStartError(ctx, sr.err)
+		code, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName)
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
 		s.agentLifecycleLog.Error("runLaunch: agent start failed",
@@ -520,7 +520,7 @@ func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
 // already expired (DeadlineExceeded) takes precedence: that is ctx', so it
 // means the launch ran out of its budget, which is launch_timeout regardless
 // of the error Start happened to return when it unwound.
-func classifyStartError(ctx context.Context, err error) (code, message string) {
+func classifyStartError(ctx context.Context, err error, templateSlug string) (code, message string) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "launch_timeout", "launch timed out before the agent started"
 	}
@@ -541,19 +541,13 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 		// synchronous create or start returns, with the error naming the
 		// skill and its cause.
 		return ErrCodeSkillResolution, err.Error()
-	case errors.Is(err, config.ErrTemplateNotFound):
-		// Normalised (ptone/scion#3113): the wrapped text is built for the
-		// broker's own diagnostics, not for the client. It names broker
-		// filesystem paths (an absolute template path, the project's
-		// templates directory) or a content-addressed cache hash
-		// (pkg/config/templates.go, pkg/agent/provision.go). The caller
-		// knows which template it asked for, so the sentinel's own text is
-		// enough to act on. The full error is logged by runLaunch.
-		return "template_not_found", templateNotFoundMessage(config.ErrTemplateNotFound)
-	case errors.Is(err, config.ErrHarnessConfigNotFound):
-		// Normalised for the same reason: the wrapped text lists every
-		// broker directory searched (pkg/config/harness_config.go).
-		return "template_not_found", templateNotFoundMessage(config.ErrHarnessConfigNotFound)
+	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
+		// The same text the synchronous create gives: it names the
+		// template or harness-config (the ptone/scion#1316 404 contract)
+		// but not err's own text, which can name broker filesystem paths
+		// or a content hash (ptone/scion#3113; see notFoundResourceText).
+		// The full error is logged by runLaunch.
+		return "template_not_found", runtimeOpError(opCreateAgent, err).Error() + ": " + notFoundResourceText(err, templateSlug)
 	default:
 		// The same fixed text the synchronous create returns for a
 		// Manager.Start failure (runtimeOpError): the raw error routinely
@@ -561,12 +555,4 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 		// file path. The full error is logged by runLaunch.
 		return "runtime_error", runtimeOpError(opCreateAgent, err).Error()
 	}
-}
-
-// templateNotFoundMessage is the fixed text of an async template_not_found
-// failure: the synchronous create's "Failed to create agent: " prefix plus
-// the sentinel's own text ("template not found" or "harness-config not
-// found"), never the wrapped error's.
-func templateNotFoundMessage(sentinel error) string {
-	return runtimeOpError(opCreateAgent, sentinel).Error() + ": " + sentinel.Error()
 }

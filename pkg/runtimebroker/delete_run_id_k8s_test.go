@@ -282,7 +282,7 @@ func TestCreateAgent_RunConflictIs409(t *testing.T) {
 }
 
 func TestClassifyStartError_RunConflict(t *testing.T) {
-	code, msg := classifyStartError(context.Background(), errIdentityRunConflict)
+	code, msg := classifyStartError(context.Background(), errIdentityRunConflict, "")
 	if code != "name_in_use" {
 		t.Fatalf("code = %q, want name_in_use", code)
 	}

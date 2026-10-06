@@ -39,6 +39,28 @@ import (
 // folding it into a generic 5xx (ptone/scion#1316 fault 3).
 var ErrTemplateNotFound = errors.New("template not found")
 
+// TemplateNotFoundError is the typed form of ErrTemplateNotFound
+// (errors.Is(err, ErrTemplateNotFound) still matches). Error() keeps the
+// full diagnostic text, which can name broker filesystem paths; Name is the
+// display-safe template name for client-facing messages (ptone/scion#3113).
+type TemplateNotFoundError struct {
+	// Name is FriendlyTemplateName of the reference that did not resolve:
+	// a plain name, an absolute path's base name, or "" when the only
+	// identifier is a content hash.
+	Name string
+	msg  string
+}
+
+// NewTemplateNotFoundError returns a TemplateNotFoundError for ref whose
+// Error() is msg (the caller's full diagnostic text, without the
+// sentinel's own text, which Error() appends).
+func NewTemplateNotFoundError(ref, msg string) *TemplateNotFoundError {
+	return &TemplateNotFoundError{Name: FriendlyTemplateName(ref), msg: msg}
+}
+
+func (e *TemplateNotFoundError) Error() string { return e.msg + ": " + ErrTemplateNotFound.Error() }
+func (e *TemplateNotFoundError) Unwrap() error { return ErrTemplateNotFound }
+
 type Template struct {
 	Name  string
 	Path  string
@@ -395,7 +417,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
 			return &Template{Name: templateNameFromDir(name), Path: name}, nil
 		}
-		return nil, fmt.Errorf("template path %s not found or not a directory: %w", name, ErrTemplateNotFound)
+		return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template path %s not found or not a directory", name))
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
@@ -414,7 +436,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("template %s not found: %w", name, ErrTemplateNotFound)
+	return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template %s not found", name))
 }
 
 // findOrHydrateDefaultTemplate resolves the default template, seeding it from the

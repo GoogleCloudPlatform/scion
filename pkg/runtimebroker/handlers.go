@@ -1250,7 +1250,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			span.SetStatus(codes.Error, err.Error())
 			if errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
-				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
+				// Names the resource without err's own text, which can carry
+				// broker paths (ptone/scion#3113); the full error is logged.
+				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found",
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+notFoundResourceText(err, opts.TemplateName), nil)
 				return
 			}
 			// A required skill reference that could not be resolved is mapped
@@ -1382,7 +1386,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// runtimeOpError). The full error is logged above.
 			Conflict(w, scionrt.ErrRunConflict.Error())
 		case notFoundErr:
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+			// Names the resource without err's own text, which can carry
+			// broker paths (ptone/scion#3113). The full error is logged above.
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+notFoundResourceText(err, opts.TemplateName), nil)
 		case isSkillErr:
 			SkillResolutionFailed(w, skillErr)
 		default:

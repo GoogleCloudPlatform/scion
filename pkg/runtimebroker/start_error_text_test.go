@@ -36,6 +36,10 @@ import (
 )
 
 const (
+	testContentHash    = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	brokerTemplatePath = "/srv/broker-7/templates/secret"
+	hydratedCachePath  = "/var/cache/scion/templates/sha256:" + testContentHash
+
 	startErrTextProjectID = "proj-3113"
 	startErrTextRunID     = "run-3113"
 )
@@ -136,6 +140,7 @@ func TestAsyncStartError_NormalisedText(t *testing.T) {
 		err       error
 		detail    string
 		wantCode  string
+		forbid    []string
 		wantMsg   string
 		checkSync bool
 	}{
@@ -156,18 +161,36 @@ func TestAsyncStartError_NormalisedText(t *testing.T) {
 			checkSync: true,
 		},
 		{
-			name:     "template_not_found",
-			err:      fmt.Errorf("template path /srv/broker-7/templates/secret not found or not a directory: %w", config.ErrTemplateNotFound),
-			detail:   "/srv/broker-7/templates/secret",
-			wantCode: "template_not_found",
-			wantMsg:  "Failed to create agent: template not found",
+			// An absolute template path names the template by its base
+			// name, never the broker directory.
+			name:      "template_not_found",
+			err:       fmt.Errorf("provision: %w", config.NewTemplateNotFoundError(brokerTemplatePath, "template path "+brokerTemplatePath+" not found or not a directory")),
+			detail:    brokerTemplatePath,
+			forbid:    []string{"/srv/broker-7"},
+			wantCode:  "template_not_found",
+			wantMsg:   `Failed to create agent: template "secret" not found`,
+			checkSync: true,
 		},
 		{
-			name:     "harness_config_not_found",
-			err:      fmt.Errorf("harness-config %q not found (searched: /srv/broker-7/harness-configs/x): %w", "x", config.ErrHarnessConfigNotFound),
-			detail:   "/srv/broker-7/harness-configs/x",
-			wantCode: "template_not_found",
-			wantMsg:  "Failed to create agent: harness-config not found",
+			// A hydrated cache directory is named by its content hash: the
+			// message names the template slug the caller sent instead
+			// (the request's config.template, "claude").
+			name:      "template_not_found_hydrated_cache",
+			err:       config.NewTemplateNotFoundError(hydratedCachePath, "template path "+hydratedCachePath+" not found or not a directory"),
+			detail:    hydratedCachePath,
+			forbid:    []string{"/var/cache/scion", testContentHash, "sha256:"},
+			wantCode:  "template_not_found",
+			wantMsg:   `Failed to create agent: template "claude" not found`,
+			checkSync: true,
+		},
+		{
+			name:      "harness_config_not_found",
+			err:       fmt.Errorf("provision: %w", &config.HarnessConfigNotFoundError{Name: "x", Searched: []string{"/srv/broker-7/harness-configs/x"}}),
+			detail:    "/srv/broker-7/harness-configs/x",
+			forbid:    []string{"/srv/broker-7", "searched"},
+			wantCode:  "template_not_found",
+			wantMsg:   `Failed to create agent: harness-config "x" not found`,
+			checkSync: true,
 		},
 	}
 	for _, c := range cases {
@@ -181,6 +204,11 @@ func TestAsyncStartError_NormalisedText(t *testing.T) {
 				t.Errorf("async message = %q, want %q", report.Message, c.wantMsg)
 			}
 			assertDetailOnlyInLog(t, report.Message, logs, "runLaunch: agent start failed", name, c.detail)
+			for _, f := range c.forbid {
+				if strings.Contains(report.Message, f) {
+					t.Errorf("async message leaked %q: %q", f, report.Message)
+				}
+			}
 
 			if !c.checkSync {
 				return
@@ -202,11 +230,12 @@ func TestClassifyStartError_FixedText(t *testing.T) {
 	}{
 		{errors.New(identityLeakingRuntimeError), "Failed to create agent"},
 		{fmt.Errorf("wrapped scion-ctr-9e1d: %w", agent.ErrContainerNameInUse), agent.ErrContainerNameInUse.Error()},
-		{fmt.Errorf("template /srv/x not found: %w", config.ErrTemplateNotFound), "Failed to create agent: template not found"},
-		{fmt.Errorf("harness-config /srv/y: %w", config.ErrHarnessConfigNotFound), "Failed to create agent: harness-config not found"},
+		{config.NewTemplateNotFoundError(brokerTemplatePath, "template path "+brokerTemplatePath), `Failed to create agent: template "secret" not found`},
+		{config.NewTemplateNotFoundError(hydratedCachePath, "cache"), `Failed to create agent: template "claude" not found`},
+		{&config.HarnessConfigNotFoundError{Name: "x", Searched: []string{"/srv/y"}}, `Failed to create agent: harness-config "x" not found`},
 	}
 	for _, c := range cases {
-		_, got := classifyStartError(t.Context(), c.err)
+		_, got := classifyStartError(t.Context(), c.err, "claude")
 		if got != c.want {
 			t.Errorf("classifyStartError(%q) message = %q, want %q", c.err, got, c.want)
 		}
@@ -329,4 +358,92 @@ func TestRunLaunch_LaunchMarkerWriteFailure_FixedText(t *testing.T) {
 	}
 	assertDetailOnlyInLog(t, failed.Message, logs.String(),
 		"runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files", name, markersDir)
+}
+
+// TestNotFoundResourceText covers every naming rule: the typed error's
+// name, the slug fallback for a content-hash reference, the resolved
+// default template's name when the caller named none, and the fixed
+// sentinel text only when nothing names the resource.
+func TestNotFoundResourceText(t *testing.T) {
+	// The caller named no template, so resolution looked up "default";
+	// that is the name the real lookup records on its error.
+	_, defaultErr := config.FindTemplateInProjectPath("default", t.TempDir())
+	if !errors.Is(defaultErr, config.ErrTemplateNotFound) {
+		t.Fatalf("FindTemplateInProjectPath(default) error = %v, want ErrTemplateNotFound", defaultErr)
+	}
+	cases := []struct {
+		name string
+		err  error
+		slug string
+		want string
+	}{
+		{"typed template name", config.NewTemplateNotFoundError("claude", "template claude not found"), "", `template "claude" not found`},
+		{"absolute path uses its base name", config.NewTemplateNotFoundError(brokerTemplatePath, "x"), "", `template "secret" not found`},
+		{"content hash falls back to the slug", config.NewTemplateNotFoundError(hydratedCachePath, "x"), "claude", `template "claude" not found`},
+		{"slug that is a path is shortened", config.NewTemplateNotFoundError(hydratedCachePath, "x"), brokerTemplatePath, `template "secret" not found`},
+		{"resolved default template", defaultErr, "", `template "default" not found`},
+		{"bare sentinel uses the slug", config.ErrTemplateNotFound, "claude", `template "claude" not found`},
+		{"nothing names the template", config.NewTemplateNotFoundError(hydratedCachePath, "x"), "", "template not found"},
+		{"typed harness-config", &config.HarnessConfigNotFoundError{Name: "x", Searched: []string{"/srv/y"}}, "claude", `harness-config "x" not found`},
+		{"bare harness-config sentinel", config.ErrHarnessConfigNotFound, "claude", "harness-config not found"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := notFoundResourceText(c.err, c.slug); got != c.want {
+				t.Errorf("notFoundResourceText = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestSyncNotFound_NamesResourceWithoutPaths covers the synchronous
+// provision-only create and the async admission's Preflight: the 404
+// names the template, never the broker path (ptone/scion#3113).
+func TestSyncNotFound_NamesResourceWithoutPaths(t *testing.T) {
+	tplErr := fmt.Errorf("provision: %w", config.NewTemplateNotFoundError(brokerTemplatePath, "template path "+brokerTemplatePath+" not found or not a directory"))
+	check := func(t *testing.T, w *httptest.ResponseRecorder, logs, logMsg, name, wantMsg string) {
+		t.Helper()
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404: %s", w.Code, w.Body.String())
+		}
+		var resp ErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode error body: %v (%s)", err, w.Body.String())
+		}
+		if resp.Error.Code != ErrCodeNotFound || resp.Error.Message != wantMsg {
+			t.Errorf("error = %+v, want code %q message %q", resp.Error, ErrCodeNotFound, wantMsg)
+		}
+		assertDetailOnlyInLog(t, resp.Error.Message, logs, logMsg, name, brokerTemplatePath)
+	}
+
+	t.Run("provision only", func(t *testing.T) {
+		const name = "agent-provision-not-found"
+		srv := newTestServer(t)
+		srv.manager.(*mockManager).provisionErr = tplErr
+		logs := &syncBuffer{}
+		srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+		w := postCreate(t, srv, map[string]any{
+			"id": name, "name": name, "provisionOnly": true,
+			"projectId": startErrTextProjectID, "runId": startErrTextRunID,
+			"config": map[string]any{"template": "claude"},
+		})
+		check(t, w, logs.String(), "Agent provision failed: template or harness-config not found", name,
+			`Failed to provision agent: template "secret" not found`)
+	})
+
+	t.Run("async preflight", func(t *testing.T) {
+		const name = "agent-preflight-not-found"
+		mgr := newAsyncManager()
+		mgr.setPreflightErr(tplErr)
+		srv, _ := newAsyncTestServer(t, mgr)
+		logs := &syncBuffer{}
+		srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+		w := postCreate(t, srv, map[string]any{
+			"id": name, "name": name, "asyncLaunch": true, "launchId": "L-" + name,
+			"projectId": startErrTextProjectID, "runId": startErrTextRunID,
+			"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+		})
+		check(t, w, logs.String(), "Agent create failed: preflight: template or harness-config not found", name,
+			`Failed to create agent: template "secret" not found`)
+	})
 }

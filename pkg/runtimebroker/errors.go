@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -336,6 +337,43 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // log on every path, just not through this one function.
 func runtimeOpError(op string, err error) *OpaqueError {
 	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
+}
+
+// notFoundResourceText is the client text for a template or harness-config
+// that did not resolve (config.ErrTemplateNotFound /
+// config.ErrHarnessConfigNotFound). It names the resource, as the 404
+// contract from ptone/scion#1316 requires, but never repeats err's own
+// text, which can name broker filesystem paths (the directories searched,
+// an absolute template path) or a content hash (ptone/scion#3113).
+//
+//   - harness-config: the typed error's Name, the name that was requested.
+//   - template: the typed error's Name (config.FriendlyTemplateName of the
+//     reference). When that is empty — the reference was a hydrated cache
+//     directory named by its content hash — templateSlug, the template name
+//     the caller sent (api.StartOptions.TemplateName), passed through
+//     config.FriendlyTemplateName too.
+//   - no name either way (the caller named no template): the sentinel's
+//     own fixed text.
+func notFoundResourceText(err error, templateSlug string) string {
+	if errors.Is(err, config.ErrTemplateNotFound) {
+		name := ""
+		var tplErr *config.TemplateNotFoundError
+		if errors.As(err, &tplErr) {
+			name = tplErr.Name
+		}
+		if name == "" {
+			name = config.FriendlyTemplateName(templateSlug)
+		}
+		if name == "" {
+			return config.ErrTemplateNotFound.Error()
+		}
+		return fmt.Sprintf("template %q not found", name)
+	}
+	var hcErr *config.HarnessConfigNotFoundError
+	if errors.As(err, &hcErr) && hcErr.Name != "" {
+		return fmt.Sprintf("harness-config %q not found", hcErr.Name)
+	}
+	return config.ErrHarnessConfigNotFound.Error()
 }
 
 // opCreateAgent is the runtimeOpError op for a create's Manager.Start
