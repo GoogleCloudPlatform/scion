@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -303,4 +304,44 @@ func TestDeleteAgent_MarkerFileHubNativeProject_StaleDispatch_KeepsProvisionDir(
 			}
 		})
 	}
+}
+
+// Two hub-native project entries whose marker files resolve to the SAME
+// external config dir are one project: the agent resolves to that dir, with
+// no ambiguity error. Agents in two genuinely different dirs are still
+// reported as ambiguous.
+func TestFindAgentInHubManagedProjects_MarkerFileDedupe(t *testing.T) {
+	t.Run("two markers, same dir", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		extDir, _ := makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+		// A second entry carrying the same marker resolves to extDir.
+		alias := filepath.Join(home, ".scion", "projects", "proj-b-alias")
+		if err := os.MkdirAll(alias, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		marker := &config.ProjectMarker{ProjectID: scopeProjB, ProjectName: "proj-b", ProjectSlug: "proj-b"}
+		if err := config.WriteProjectMarker(filepath.Join(alias, config.DotScion), marker); err != nil {
+			t.Fatal(err)
+		}
+		for _, projectID := range []string{scopeProjB, ""} {
+			got, err := findAgentInHubManagedProjects("dev", projectID)
+			if err != nil {
+				t.Fatalf("projectID %q: unexpected error: %v", projectID, err)
+			}
+			if got != extDir {
+				t.Errorf("projectID %q: got %q, want %q", projectID, got, extDir)
+			}
+		}
+	})
+	t.Run("two different dirs", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		makeHubNativeMarkerProject(t, home, "proj-b", scopeProjB, "dev")
+		makeHubNativeMarkerProject(t, home, "proj-a", scopeProjA, "dev")
+		got, err := findAgentInHubManagedProjects("dev", "")
+		if err == nil || !strings.Contains(err.Error(), "found in 2 hub-managed projects") {
+			t.Fatalf("got (%q, %v), want the ambiguity error", got, err)
+		}
+	})
 }

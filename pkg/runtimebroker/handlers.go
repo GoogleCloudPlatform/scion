@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -6391,6 +6392,12 @@ func findAgentInHubManagedProjects(agentName, projectID string) (string, error) 
 					continue
 				}
 				scionDir = resolved
+			}
+			// Two marker files can resolve to the same external config
+			// dir (the same project under two entries): that is one
+			// project, not an ambiguity.
+			if slices.Contains(found, scionDir) {
+				continue
 			}
 			if hubManagedProjectHasAgent(scionDir, agentName) {
 				found = append(found, scionDir)
