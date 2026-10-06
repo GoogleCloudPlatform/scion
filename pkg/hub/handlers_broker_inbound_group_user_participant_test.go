@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -139,6 +140,50 @@ func TestBrokerInboundRouted_GroupParticipantFailure_StillDelivers(t *testing.T)
 	require.True(t, resp.Delivered)
 	require.Len(t, resp.Results, 1)
 	require.Equal(t, "delivered", resp.Results[0].Status)
+}
+
+// createMessageFailCaptureStore fails every CreateMessage call and records
+// the conversation ID of the last message it was asked to store, so a test
+// can find the conversation even though no message row exists.
+type createMessageFailCaptureStore struct {
+	store.Store
+	conversationID string
+}
+
+func (s *createMessageFailCaptureStore) CreateMessage(_ context.Context, msg *store.Message) error {
+	s.conversationID = msg.ConversationID
+	return errors.New("injected CreateMessage failure")
+}
+
+func TestBrokerInboundRouted_GroupPostNotStored_DoesNotListUser(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+	failing := &createMessageFailCaptureStore{Store: env.store}
+	env.srv.store = failing
+
+	rec := env.doRoutedRequest(t, routedThreadPost(env, "group-user-thread-4", "hello"))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var resp routedInboundResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Len(t, resp.Results, 1)
+	require.Equal(t, "delivered", resp.Results[0].Status)
+	require.NotEmpty(t, resp.Results[0].PersistenceWarning,
+		"the response must report that the message was not stored")
+
+	convID := failing.conversationID
+	require.NotEmpty(t, convID, "the message must be attributed to a conversation")
+	conv, err := env.store.GetConversation(context.Background(), convID)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	parts, err := env.store.ListParticipants(context.Background(), convID)
+	require.NoError(t, err)
+	for _, p := range parts {
+		require.NotEqual(t, "user", p.PrincipalKind,
+			"the posting user is listed only once their message is stored")
+	}
+	require.Equal(t, 1, countParticipants(t, env.store, convID, "agent", env.agent1.ID),
+		"sanity: the group listing step still ran for the dispatched agent")
 }
 
 func TestBrokerInboundRouted_DirectConversation_ParticipantsUnchanged(t *testing.T) {
