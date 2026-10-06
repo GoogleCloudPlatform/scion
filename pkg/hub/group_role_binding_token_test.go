@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -274,4 +275,42 @@ func TestGroupChange_TokenRefusedAtAnyAncestorDepth(t *testing.T) {
 	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "innermost group add member")
 	_, err = f.s.GetGroupMembership(context.Background(), inner.ID, store.GroupMemberTypeUser, added)
 	assert.ErrorIs(t, err, store.ErrNotFound, "a refused add adds no member")
+}
+
+// TestGroupCreate_ChildOfRoleBoundParentRefusesToken pins that creating a
+// group under a parent applies the group rule to the parent. Group create
+// refuses a user access token at its own authorization check, so the rule
+// is pinned at authorizeChildGroupGrant, the parent check createGroup runs,
+// called with a real minted token authenticated as the middleware does.
+func TestGroupCreate_ChildOfRoleBoundParentRefusesToken(t *testing.T) {
+	f := newGroupRuleFixture(t, "gchild")
+	bound := f.group(t, "gchild-bound", "")
+	f.bind(t, bound)
+	plain := f.group(t, "gchild-plain", "")
+
+	ctx := realTokenContext(t, f.srv, f.key)
+	rec := httptest.NewRecorder()
+	_, _, ok := f.srv.authorizeChildGroupGrant(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/groups", nil), bound)
+	assert.False(t, ok)
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "child of a role-bound parent")
+
+	rec = httptest.NewRecorder()
+	_, _, ok = f.srv.authorizeChildGroupGrant(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/groups", nil), plain)
+	assert.True(t, ok, "a parent with no role binding in its closure admits the token: %d %s", rec.Code, rec.Body.String())
+}
+
+// TestGroupDelete_SystemManagedRefusalPrecedesGroupRule pins that deleting
+// a project_agents group answers every credential with the system-managed
+// 400, including a user access token on a group that carries a role
+// binding.
+func TestGroupDelete_SystemManagedRefusalPrecedesGroupRule(t *testing.T) {
+	f := newGroupRuleFixture(t, "gpa")
+	g := f.group(t, "gpa-agents", store.GroupTypeProjectAgents)
+	f.bind(t, g)
+
+	rec := doRequestWithUAT(t, f.srv, f.key, http.MethodDelete, "/api/v1/groups/"+g.ID, nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "system-managed")
+	_, err := f.s.GetGroup(context.Background(), g.ID)
+	assert.NoError(t, err, "the group stays in place")
 }

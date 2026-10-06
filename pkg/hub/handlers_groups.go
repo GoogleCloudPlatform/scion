@@ -285,7 +285,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var ok bool
-		canDelegateResult, canDelegateReason, ok = s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember)
+		canDelegateResult, canDelegateReason, ok = s.authorizeChildGroupGrant(w, r, parent)
 		if !ok {
 			return
 		}
@@ -557,9 +557,6 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 	if !s.authorize(w, r, groupResource(group), ActionDelete) {
 		return
 	}
-	if !s.requireSessionForRoleBoundGroup(w, r, group) {
-		return
-	}
 
 	// Constraint-coverage gate (R5): if this group participates in any
 	// AccessConstraint, deleting it silently removes the constraint's subject.
@@ -570,6 +567,9 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 
 	if group.GroupType == store.GroupTypeProjectAgents {
 		BadRequest(w, "project_agents groups are system-managed and cannot be deleted via API")
+		return
+	}
+	if !s.requireSessionForRoleBoundGroup(w, r, group) {
 		return
 	}
 
@@ -990,6 +990,22 @@ func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Reques
 	return canDelegateResult, canDelegateReason, true
 }
 
+// authorizeChildGroupGrant runs the authorization for creating a group under
+// parent. The new group becomes a member of parent, so the caller needs the
+// authority authorizeGroupMemberGrant requires for a plain member, and the
+// group rule of requireSessionForRoleBoundGroup applies to parent. It writes
+// the refusal response and returns ok=false when the caller may not.
+func (s *Server) authorizeChildGroupGrant(w http.ResponseWriter, r *http.Request, parent *store.Group) (canDelegateResult, canDelegateReason string, ok bool) {
+	canDelegateResult, canDelegateReason, ok = s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember)
+	if !ok {
+		return "", "", false
+	}
+	if !s.requireSessionForRoleBoundGroup(w, r, parent) {
+		return "", "", false
+	}
+	return canDelegateResult, canDelegateReason, true
+}
+
 // handleGroupMemberByID handles DELETE on /api/v1/groups/{groupId}/members/{type}/{id}
 func (s *Server) handleGroupMemberByID(w http.ResponseWriter, r *http.Request, groupID, memberPath string) {
 	ctx := r.Context()
@@ -1127,11 +1143,12 @@ func (s *Server) groupClosureHasRoleBinding(ctx context.Context, groupID string)
 
 // requireSessionForRoleBoundGroup refuses a user access token on a change
 // to a group whose closure carries a role binding: updating or deleting the
-// group, or adding or removing a member. Such a change moves role-binding
-// authority, so it is session-only with the GOV_PENDING reason
-// (session_only_gate.go). A group with no role binding in its closure, and
-// every other credential, proceed. It runs after the group authorization
-// check. Returns false when the response has been written.
+// group, adding or removing a member, or creating a child group under it.
+// Such a change moves role-binding authority, so it is session-only with the
+// GOV_PENDING reason (session_only_gate.go). A group with no role binding in
+// its closure, and every other credential, proceed. It runs after the group
+// authorization check, and in deleteGroup after the system-managed and
+// constraint checks. Returns false when the response has been written.
 func (s *Server) requireSessionForRoleBoundGroup(w http.ResponseWriter, r *http.Request, group *store.Group) bool {
 	if !IsScopedUserIdentity(GetIdentityFromContext(r.Context())) {
 		return true
