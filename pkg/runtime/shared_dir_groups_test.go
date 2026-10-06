@@ -17,6 +17,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Tests for ptone/scion#3155: nfs shared-dir leaf groups as pod
@@ -104,17 +106,90 @@ func TestSharedDirSupplementalGroups(t *testing.T) {
 	assert.Nil(t, sharedDirSupplementalGroups(cfg, 1000))
 }
 
-// The broker never adds the sciontool env var to the pod env. It would have
-// no effect there anyway: pods run non-root, so sciontool does no privilege
-// drop and the process keeps the pod's supplementalGroups.
-func TestBuildPod_SharedDirLeafGroups_NoSupplementalGIDsEnv(t *testing.T) {
-	pod, err := newNFSTestK8sRuntime().buildPod("default", sharedDirGroupsRunConfig(4242))
-	require.NoError(t, err)
-	for _, c := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+// podEnvValues returns every value of name in the pod's containers' env.
+func podEnvValues(_ any, containers []corev1.Container, name string) []string {
+	var vals []string
+	for _, c := range containers {
 		for _, e := range c.Env {
-			assert.NotEqual(t, SupplementalGIDsEnvVar, e.Name, "container %s", c.Name)
+			if e.Name == name {
+				vals = append(vals, e.Value)
+			}
 		}
 	}
+	return vals
+}
+
+// The broker owns SCION_SUPPLEMENTAL_GIDS in the pod env too: exactly the
+// pod's supplementalGroups when there are any, so sciontool applies umask
+// 002; pods start as the agent user, so it drives nothing else
+// (ptone/scion#3155).
+func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
+	rt := newNFSTestK8sRuntime()
+	fsGroup := int64(os.Getgid())
+
+	t.Run("groups present sets the leaf gids the pod holds", func(t *testing.T) {
+		pod, err := rt.buildPod("default", sharedDirGroupsRunConfig(4242, fsGroup, 4343))
+		require.NoError(t, err)
+		assert.Equal(t, []int64{4242, 4343}, pod.Spec.SecurityContext.SupplementalGroups)
+		assert.Equal(t, []string{fmt.Sprintf("4242,%d,4343", fsGroup)}, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+		assert.Empty(t, podEnvValues(pod, pod.Spec.InitContainers, SupplementalGIDsEnvVar), "init containers unchanged")
+	})
+	// The leaf gid equals fsGroup: no supplementalGroups entry, but the pod
+	// holds it through fsGroup, so it still gets umask 002.
+	t.Run("leaf gid equal to fsGroup still sets it", func(t *testing.T) {
+		pod, err := rt.buildPod("default", sharedDirGroupsRunConfig(fsGroup))
+		require.NoError(t, err)
+		assert.Nil(t, pod.Spec.SecurityContext.SupplementalGroups)
+		assert.Equal(t, []string{fmt.Sprintf("%d", fsGroup)}, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+	})
+	t.Run("no groups leaves it unset", func(t *testing.T) {
+		cfg := sharedDirGroupsRunConfig()
+		pod, err := rt.buildPod("default", cfg)
+		require.NoError(t, err)
+		assert.Empty(t, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+	})
+	t.Run("template value is dropped without groups", func(t *testing.T) {
+		cfg := sharedDirGroupsRunConfig()
+		cfg.SharedDirStorage = nil
+		cfg.Env = []string{SupplementalGIDsEnvVar + "=27"}
+		pod, err := rt.buildPod("default", cfg)
+		require.NoError(t, err)
+		assert.Empty(t, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+	})
+	t.Run("secret targeting it is dropped", func(t *testing.T) {
+		for _, groups := range [][]int64{nil, {4242}} {
+			cfg := sharedDirGroupsRunConfig(groups...)
+			cfg.ResolvedSecrets = []api.ResolvedSecret{{Name: "s", Type: "environment", Target: SupplementalGIDsEnvVar, Value: "0,27"}}
+			pod, err := rt.buildPod("default", cfg)
+			require.NoError(t, err)
+			var want []string
+			if len(groups) > 0 {
+				want = []string{"4242"}
+			}
+			for _, c := range pod.Spec.Containers {
+				for _, e := range c.Env {
+					if e.Name == SupplementalGIDsEnvVar {
+						assert.Nil(t, e.ValueFrom, "no secret reference may set it")
+					}
+				}
+			}
+			assert.Equal(t, want, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+		}
+	})
+	t.Run("template value is replaced with groups", func(t *testing.T) {
+		cfg := sharedDirGroupsRunConfig(4242)
+		cfg.Env = []string{SupplementalGIDsEnvVar + "=0,27"}
+		pod, err := rt.buildPod("default", cfg)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"4242"}, podEnvValues(pod, pod.Spec.Containers, SupplementalGIDsEnvVar))
+	})
+}
+
+func TestWithSupplementalGIDsEnv(t *testing.T) {
+	in := []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: SupplementalGIDsEnvVar, Value: "27"}, {Name: SupplementalGIDsEnvVar, ValueFrom: &corev1.EnvVarSource{}}}
+	assert.Equal(t, []corev1.EnvVar{{Name: "A", Value: "1"}}, withSupplementalGIDsEnv(in, nil))
+	assert.Equal(t, []corev1.EnvVar{{Name: "A", Value: "1"}, {Name: SupplementalGIDsEnvVar, Value: "5,6"}}, withSupplementalGIDsEnv(in, []int64{5, 6}))
+	assert.Equal(t, "27", in[1].Value, "input slice not modified")
 }
 
 func writeEchoCommand(t *testing.T) string {

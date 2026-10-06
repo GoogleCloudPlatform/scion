@@ -1238,12 +1238,15 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 	return code, true
 }
 
-// SupplementalGIDsEnvVar tells sciontool init which supplementary groups to
-// keep when it drops from root to the agent user (Go's privilege drop
-// otherwise clears them). sciontool keeps only ids that are also in its own
-// supplementary groups, i.e. ids the runtime actually granted with
-// --group-add. The broker owns it: buildCommonRunArgs drops any value from
-// template or user env, and appendSharedDirGroupArgs sets it. Mirrored in
+// SupplementalGIDsEnvVar lists the nfs shared-dir groups the runtime
+// granted. sciontool keeps only ids that are also in its own supplementary
+// groups (what the runtime actually granted), keeps them when it drops from
+// root to the agent user (Go's privilege drop otherwise clears them), and
+// applies umask 002 when any remain. Both runtimes set it and own it:
+// Docker/Podman via appendSharedDirGroupArgs (buildCommonRunArgs drops
+// template or user values), Kubernetes via withSupplementalGIDsEnv with
+// the leaf gids the pod holds (supplementalGroups plus one equal to
+// fsGroup). Mirrored in
 // pkg/sciontool/suppgroups (EnvVar) (ptone/scion#3155).
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
 
