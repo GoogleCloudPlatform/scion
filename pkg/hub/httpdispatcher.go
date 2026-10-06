@@ -214,13 +214,9 @@ type HTTPAgentDispatcher struct {
 	// provider = no default sent.
 	autoExposePortsDefaultProvider func() *bool
 
-	// conduitCapability reports whether this hub serves conduit sessions
-	// (SCION_HUB_CONDUIT). Nil means never.
-	conduitCapability func() bool
-
 	// dispatchExperimentsProvider returns the enabled hub experiments that
-	// change broker behaviour, read on every create, start and restart
-	// dispatch. Nil provider = none sent.
+	// change broker or agent behaviour, read once on every create, start
+	// and restart dispatch. Nil provider = none sent.
 	dispatchExperimentsProvider func() []string
 }
 
@@ -312,26 +308,35 @@ func (d *HTTPAgentDispatcher) SetHubName(name string) {
 }
 
 // SetSecretBackend sets the secret backend for resolving secrets.
-// SetConduitCapability sets the check behind SCION_HUB_CONDUIT: agents
-// dispatched while it reports true get SCION_HUB_CONDUIT=true and dial the
-// conduit endpoint; otherwise the variable is removed and sciontool keeps
-// the legacy port-forward tunnel.
-func (d *HTTPAgentDispatcher) SetConduitCapability(fn func() bool) {
-	d.conduitCapability = fn
-}
+// envHubExperiments lists, comma-separated, the dispatch experiments the
+// agent itself acts on (agentExperimentNames). sciontool reads it; its
+// absence (an older hub, or none on) keeps every such feature off.
+const envHubExperiments = "SCION_HUB_EXPERIMENTS"
 
-// applyConduitCapability sets or removes SCION_HUB_CONDUIT. The hub owns
-// the variable: a value from config or storage env is replaced or dropped.
-func (d *HTTPAgentDispatcher) applyConduitCapability(env map[string]string, cls *map[string]api.EnvKind) {
-	if d.conduitCapability != nil && d.conduitCapability() {
-		env[envHubConduit] = "true"
-		classifyEnv(cls, envHubConduit, api.EnvKindPlain)
+// agentExperimentNames is the allow-list of dispatch experiments sent to
+// the agent in envHubExperiments. Any other entry of the dispatch set stays
+// between hub and broker.
+var agentExperimentNames = []string{conduitExperiment}
+
+// applyAgentExperiments sets envHubExperiments to the allow-listed entries
+// of dispatched, or removes it when there are none. The hub owns the
+// variable: a value from config or storage env is replaced or dropped.
+func applyAgentExperiments(env map[string]string, cls *map[string]api.EnvKind, dispatched []string) {
+	var names []string
+	for _, name := range dispatched {
+		if slices.Contains(agentExperimentNames, name) && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		delete(env, envHubExperiments)
+		if *cls != nil {
+			delete(*cls, envHubExperiments)
+		}
 		return
 	}
-	delete(env, envHubConduit)
-	if *cls != nil {
-		delete(*cls, envHubConduit)
-	}
+	env[envHubExperiments] = strings.Join(names, ",")
+	classifyEnv(cls, envHubExperiments, api.EnvKindPlain)
 }
 
 func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
@@ -403,8 +408,10 @@ func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool)
 }
 
 // SetDispatchExperimentsProvider registers the accessor for the enabled
-// hub experiments sent to brokers with each create, start and restart
-// dispatch, so an admin toggle applies at the agent's next dispatch.
+// hub experiments sent with each create, start and restart dispatch, so an
+// admin toggle applies at the agent's next dispatch. Brokers receive the
+// whole set; the agent gets only its allow-listed entries
+// (applyAgentExperiments).
 func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string) {
 	d.dispatchExperimentsProvider = fn
 }
@@ -739,6 +746,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// its env records; adopt it as a pin before the env is copied below.
 	adoptLegacyTZ(agent.AppliedConfig)
 
+	// Read once, so the broker and the agent see the same set.
+	experiments := d.dispatchExperiments()
+
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
 		// effectiveDispatchWorkspace applies the "a linked local provider
@@ -802,7 +812,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		if d.hubAgentDefaultsProvider != nil {
 			hubDefaults = d.hubAgentDefaultsProvider()
 		}
-		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault(), d.dispatchExperiments())
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault(), experiments)
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -1158,7 +1168,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	if req.ResolvedEnv == nil {
 		req.ResolvedEnv = make(map[string]string)
 	}
-	d.applyConduitCapability(req.ResolvedEnv, &req.EnvClassifications)
+	applyAgentExperiments(req.ResolvedEnv, &req.EnvClassifications, experiments)
 
 	resolvedSkillsCount := 0
 	if req.PreResolvedSkills != nil {
@@ -2870,6 +2880,9 @@ type startEnvResult struct {
 	// instead. DispatchAgentStart's revoke-on-failure defer must only arm
 	// when this call issued a credential to revoke.
 	tokenIssued bool
+	// experiments is the dispatch experiment set read for this start; the
+	// caller sends it to the broker so both see the same set.
+	experiments []string
 }
 
 // buildStartEnv assembles the full resolved environment used to start or
@@ -3139,7 +3152,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	}
 
 	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
-	d.applyConduitCapability(resolvedEnv, &envClassifications)
+	// Read once: DispatchAgentStart/Restart send the same set to the broker.
+	experiments := d.dispatchExperiments()
+	applyAgentExperiments(resolvedEnv, &envClassifications, experiments)
 
 	return startEnvResult{
 		env:             resolvedEnv,
@@ -3149,6 +3164,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		projectInfo:     projectInfo,
 		workspace:       wsSpec,
 		tokenIssued:     tokenIssued,
+		experiments:     experiments,
 	}, nil
 }
 
@@ -3313,7 +3329,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), startEnv.experiments),
 		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {
@@ -3454,7 +3470,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), startEnv.experiments),
 		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {

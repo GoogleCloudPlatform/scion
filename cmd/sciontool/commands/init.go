@@ -127,8 +127,9 @@ type InitRunOptions struct {
 	DisablePortForwarding bool
 
 	// DisableConduit keeps the legacy port-forward tunnel even when the hub
-	// advertises conduit (SCION_HUB_CONDUIT=true). The zero value dials the
-	// conduit endpoint when, and only when, the hub advertises it.
+	// advertises conduit (hub.conduit in SCION_HUB_EXPERIMENTS). The zero
+	// value dials the conduit endpoint when, and only when, the hub
+	// advertises it.
 	DisableConduit bool
 
 	// DisableReExec skips RunInit's environ-purge re-exec (see

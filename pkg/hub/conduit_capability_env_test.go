@@ -22,45 +22,54 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
 )
 
-// TestDispatchConduitCapabilityEnv: SCION_HUB_CONDUIT=true reaches the
-// agent on create, start and restart only while the capability check
-// reports true; otherwise it is absent, so sciontool never calls
-// /api/v1/conduit.
+// TestDispatchConduitCapabilityEnv: SCION_HUB_EXPERIMENTS reaches the
+// agent on create, start and restart with only the allow-listed entries of
+// the dispatch set; it is absent when none is on, so sciontool never calls
+// /api/v1/conduit. The broker still receives the whole set.
 func TestDispatchConduitCapabilityEnv(t *testing.T) {
 	paths := []struct {
 		name     string
 		dispatch func(context.Context, *HTTPAgentDispatcher, *store.Agent) error
 		env      func(*mockRuntimeBrokerClient) map[string]string
+		broker   func(*mockRuntimeBrokerClient) *RemoteHubAgentDefaults
 	}{
 		{"create", func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 			_, err := d.DispatchAgentCreate(ctx, a)
 			return err
-		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastCreateReq.ResolvedEnv }},
+		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastCreateReq.ResolvedEnv },
+			func(m *mockRuntimeBrokerClient) *RemoteHubAgentDefaults { return m.lastCreateReq.Config.HubAgentDefaults }},
 		{"start", func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 			return d.DispatchAgentStart(ctx, a, "", false)
-		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastResolvedEnv }},
+		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastResolvedEnv },
+			func(m *mockRuntimeBrokerClient) *RemoteHubAgentDefaults { return m.lastStartExtras.HubAgentDefaults }},
 		{"restart", func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 			return d.DispatchAgentRestart(ctx, a)
-		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastRestartResolvedEnv }},
+		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastRestartResolvedEnv },
+			func(m *mockRuntimeBrokerClient) *RemoteHubAgentDefaults { return m.lastRestartExtras.HubAgentDefaults }},
 	}
-	caps := []struct {
-		name string
-		fn   func() bool
-		want bool
+	sets := []struct {
+		name    string
+		set     []string
+		noProv  bool
+		wantEnv string // "" = absent
 	}{
-		{"unset", nil, false},
-		{"off", func() bool { return false }, false},
-		{"on", func() bool { return true }, true},
+		{name: "no provider", noProv: true},
+		{name: "none on"},
+		{name: "only a broker experiment", set: []string{experiments.K8sNFSHome}},
+		{name: "conduit", set: []string{conduitExperiment}, wantEnv: conduitExperiment},
+		{name: "conduit and a broker experiment", set: []string{experiments.K8sNFSHome, conduitExperiment}, wantEnv: conduitExperiment},
 	}
 	for _, p := range paths {
-		for _, c := range caps {
+		for _, c := range sets {
 			t.Run(p.name+"/"+c.name, func(t *testing.T) {
 				ctx := context.Background()
 				memStore := createTestStore(t)
-				id := "conduit-env-" + p.name + "-" + c.name
+				id := "conduit-env-" + p.name
 				if err := memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
 					ID: tid("broker-" + id), Name: "b", Slug: "b",
 					Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
@@ -69,8 +78,8 @@ func TestDispatchConduitCapabilityEnv(t *testing.T) {
 				}
 				mock := &mockRuntimeBrokerClient{}
 				d := NewHTTPAgentDispatcherWithClient(memStore, mock, false, slog.Default())
-				if c.fn != nil {
-					d.SetConduitCapability(c.fn)
+				if !c.noProv {
+					d.SetDispatchExperimentsProvider(func() []string { return c.set })
 				}
 				agent := &store.Agent{
 					ID: tid("agent-" + id), Name: id, Slug: id,
@@ -81,42 +90,54 @@ func TestDispatchConduitCapabilityEnv(t *testing.T) {
 				if err := p.dispatch(ctx, d, agent); err != nil {
 					t.Fatalf("dispatch: %v", err)
 				}
-				got, ok := p.env(mock)[envHubConduit]
-				if c.want && got != "true" {
-					t.Fatalf("%s = %q, want true", envHubConduit, got)
+				got, ok := p.env(mock)[envHubExperiments]
+				if c.wantEnv == "" {
+					assert.False(t, ok, "%s = %q, want absent", envHubExperiments, got)
+				} else {
+					assert.Equal(t, c.wantEnv, got, envHubExperiments)
 				}
-				if !c.want && ok {
-					t.Fatalf("%s = %q, want absent", envHubConduit, got)
+				var brokerSet []string
+				if hd := p.broker(mock); hd != nil {
+					brokerSet = hd.Experiments
 				}
+				assert.Equal(t, c.set, brokerSet, "broker experiments")
 			})
 		}
 	}
 }
 
-// TestApplyConduitCapabilityOwnsTheVariable: a value from config or
-// storage env never survives; the hub sets or removes the variable.
-func TestApplyConduitCapabilityOwnsTheVariable(t *testing.T) {
+// TestApplyAgentExperimentsOwnsTheVariable: a value from config or storage
+// env never survives; the hub sets the variable to the allow-listed
+// entries or removes it.
+func TestApplyAgentExperimentsOwnsTheVariable(t *testing.T) {
 	for _, tt := range []struct {
-		name string
-		on   bool
-		in   string
+		name       string
+		in         string
+		dispatched []string
+		want       string // "" = removed
 	}{
-		{"forged true removed", false, "true"},
-		{"forged value replaced", true, "false"},
+		{name: "forged value removed", in: conduitExperiment},
+		{name: "forged value replaced", in: "x.y", dispatched: []string{conduitExperiment}, want: conduitExperiment},
+		{name: "broker experiment not sent", in: conduitExperiment, dispatched: []string{experiments.K8sNFSHome}},
+		{name: "unknown name not sent", dispatched: []string{"hub.other", conduitExperiment}, want: conduitExperiment},
+		{name: "duplicate sent once", dispatched: []string{conduitExperiment, conduitExperiment}, want: conduitExperiment},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d := &HTTPAgentDispatcher{conduitCapability: func() bool { return tt.on }}
-			env := map[string]string{envHubConduit: tt.in}
-			cls := map[string]api.EnvKind{envHubConduit: api.EnvKindPlain}
-			d.applyConduitCapability(env, &cls)
-			got, ok := env[envHubConduit]
-			_, classified := cls[envHubConduit]
-			switch {
-			case tt.on && (got != "true" || !classified):
-				t.Fatalf("env %q classified %v, want true and classified", got, classified)
-			case !tt.on && (ok || classified):
-				t.Fatalf("env %q (present %v) classified %v, want removed", got, ok, classified)
+			env := map[string]string{}
+			cls := map[string]api.EnvKind{}
+			if tt.in != "" {
+				env[envHubExperiments] = tt.in
+				cls[envHubExperiments] = api.EnvKindPlain
 			}
+			applyAgentExperiments(env, &cls, tt.dispatched)
+			got, ok := env[envHubExperiments]
+			_, classified := cls[envHubExperiments]
+			if tt.want == "" {
+				assert.False(t, ok || classified, "env %q (present %v) classified %v, want removed", got, ok, classified)
+				return
+			}
+			assert.Equal(t, tt.want, got)
+			assert.True(t, classified, "classified")
 		})
 	}
 }

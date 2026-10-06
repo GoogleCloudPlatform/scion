@@ -3760,8 +3760,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 		dispatcher.SetHubName(s.config.HubName)
 	}
 
-	dispatcher.SetConduitCapability(s.conduitServing)
-
 	// Pass hub ID and secret backend to dispatcher if configured
 	dispatcher.SetHubID(s.hubID)
 	if s.secretBackend != nil {
