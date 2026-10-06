@@ -885,3 +885,29 @@ func TestProvisionedProfile_AgentStateDirErrorHasNoHostPath(t *testing.T) {
 		t.Errorf("expected an unavailable agent state dir, got %v", err)
 	}
 }
+
+// TestProvisionedProfile_AgentStateDirErrorHasNoHostPath_InvalidProjectID:
+// a project-id marker with an invalid ID fails the root lookup with an error
+// that names the marker's host path but is not an *fs.PathError; the
+// resulting AgentStateDirError's message must not carry that path either.
+func TestProvisionedProfile_AgentStateDirErrorHasNoHostPath_InvalidProjectID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "project-id"), []byte("not a valid id\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := ProvisionedProfile(projectDir, "some-agent", true, "", false)
+	var de *AgentStateDirError
+	if !errors.As(err, &de) {
+		t.Fatalf("expected an *AgentStateDirError, got %v", err)
+	}
+	if strings.Contains(err.Error(), projectDir) {
+		t.Errorf("message must not contain the host path: %v", err)
+	}
+	if !errors.Is(err, config.ErrAgentStateDirUnavailable) || !config.IsAgentStateConflict(err) {
+		t.Errorf("expected an unavailable agent state dir, got %v", err)
+	}
+}

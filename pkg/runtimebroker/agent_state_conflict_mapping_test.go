@@ -65,10 +65,10 @@ func TestAgentStateConflictMapsTo409(t *testing.T) {
 // an unavailable state directory from an unusable state record.
 func TestClassifyStartError_AgentState(t *testing.T) {
 	ctx := context.Background()
-	if code, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateDirUnavailable)); code != LaunchErrCodeAgentStateUnavailable {
+	if code, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateDirUnavailable), ""); code != LaunchErrCodeAgentStateUnavailable {
 		t.Errorf("unavailable dir: code %q", code)
 	}
-	if code, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateConflict)); code != LaunchErrCodeAgentStateConflict {
+	if code, _ := classifyStartError(ctx, fmt.Errorf("%w: x", config.ErrAgentStateConflict), ""); code != LaunchErrCodeAgentStateConflict {
 		t.Errorf("unusable record: code %q", code)
 	}
 }

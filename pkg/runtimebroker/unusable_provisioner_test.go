@@ -125,7 +125,7 @@ func TestUnusableProvisioner_DispatchPathsAnswer422(t *testing.T) {
 // message.
 func TestClassifyStartError_UnusableProvisioner(t *testing.T) {
 	dir, err := unusableResolveErr(t)
-	code, msg := classifyStartError(context.Background(), err)
+	code, msg := classifyStartError(context.Background(), err, "")
 	if code != ErrCodeHarnessConfigUnusable {
 		t.Errorf("code = %q, want %q", code, ErrCodeHarnessConfigUnusable)
 	}

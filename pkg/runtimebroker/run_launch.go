@@ -244,9 +244,13 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// launch (cleanupAbortedLaunch's marker check can never match),
 			// so fail the launch here rather than starting the runtime with
 			// no way to clean up its files on abort.
+			//
+			// The report carries fixed text (ptone/scion#3113): the os error
+			// names broker filesystem paths. The full error is logged here.
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
-				"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", "failed to write launch marker: "+err.Error())
+				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
+				"launch_id", rec.ID, "error", err)
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", runtimeOpError("write launch marker", err).Error())
 			return
 		}
 	}
@@ -347,7 +351,12 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			}
 			return
 		}
-		code, message := classifyStartError(ctx, sr.err)
+		code, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName)
+		// message is fixed text for the client (ptone/scion#3113); the
+		// full error reaches only the broker's own log.
+		s.agentLifecycleLog.Error("runLaunch: agent start failed",
+			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
+			"launch_id", rec.ID, "error_code", code, "error", sr.err)
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
@@ -506,11 +515,6 @@ func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), ttl)
 }
 
-// classifyStartError maps a Manager.Start failure to a launch error code
-// (design §3.9; full progress/error-code detail is P3 scope). ctx having
-// already expired (DeadlineExceeded) takes precedence: that is ctx', so it
-// means the launch ran out of its budget, which is launch_timeout regardless
-// of the error Start happened to return when it unwound.
 // Async launch failure codes reported to the hub (alongside
 // ErrCodeHarnessConfigUnusable and ErrCodeSkillResolution).
 const (
@@ -526,7 +530,12 @@ const (
 	LaunchErrCodeAgentStateConflict = "agent_state_conflict"
 )
 
-func classifyStartError(ctx context.Context, err error) (code, message string) {
+// classifyStartError maps a Manager.Start failure to a launch error code
+// (design §3.9; full progress/error-code detail is P3 scope). ctx having
+// already expired (DeadlineExceeded) takes precedence: that is ctx', so it
+// means the launch ran out of its budget, which is launch_timeout regardless
+// of the error Start happened to return when it unwound.
+func classifyStartError(ctx context.Context, err error, templateSlug string) (code, message string) {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "launch_timeout", "launch timed out before the agent started"
 	}
@@ -539,7 +548,10 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	var skillErr *agent.SkillResolutionError
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):
-		return "name_in_use", err.Error()
+		// Fixed text, as on the synchronous create, start and restart
+		// paths: a wrapped error can carry runtime detail (container name,
+		// backend message) the client has no entitlement to see.
+		return "name_in_use", agent.ErrContainerNameInUse.Error()
 	case errors.Is(err, scionrt.ErrRunConflict):
 		// Another live run holds the agent name, and the runtime deleted
 		// nothing of it (ptone/scion#2550). Fixed text: the wrapped error
@@ -551,12 +563,21 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 		// skill and its cause.
 		return ErrCodeSkillResolution, err.Error()
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
-		return "template_not_found", err.Error()
+		// The same text the synchronous create gives: it names the
+		// template or harness-config (the ptone/scion#1316 404 contract)
+		// but not err's own text, which can name broker filesystem paths
+		// or a content hash (ptone/scion#3113; see notFoundResourceText).
+		// The full error is logged by runLaunch.
+		return "template_not_found", notFoundMessage(opCreateAgent, err, templateSlug)
 	case errors.Is(err, config.ErrAgentStateDirUnavailable):
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
 	case errors.Is(err, config.ErrAgentStateConflict):
 		return LaunchErrCodeAgentStateConflict, err.Error()
 	default:
-		return "runtime_error", err.Error()
+		// The same fixed text the synchronous create returns for a
+		// Manager.Start failure (runtimeOpError): the raw error routinely
+		// embeds a container ID, pod name, namespace, image reference or
+		// file path. The full error is logged by runLaunch.
+		return "runtime_error", runtimeOpError(opCreateAgent, err).Error()
 	}
 }

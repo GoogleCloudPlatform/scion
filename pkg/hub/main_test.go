@@ -19,6 +19,8 @@ package hub
 import (
 	"os"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 )
 
 // TestMain isolates $HOME for the whole (non-integration) pkg/hub test
@@ -34,7 +36,7 @@ import (
 // builds real Cloud Logging clients from it (ptone/scion#3188).
 func TestMain(m *testing.M) {
 	stopMemGuard := startMemGuard()
-	teardown := isolateTestHome()
+	teardown := testutil.IsolateHome("scion-hub-test-home-*")
 	clearAmbientGCPProjectEnv()
 	code := m.Run()
 	teardown()

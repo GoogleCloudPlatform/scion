@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -692,4 +694,74 @@ func TestStartNFSWorkspace_PermissionDeniedLeavesDirectoryToNode(t *testing.T) {
 	require.Equal(t, 1, ranCount, "the pod must still be created")
 	assert.False(t, existedAtRun)
 	assert.False(t, cfg.NFSWorkspacePreCreated)
+}
+
+// Start checks the configured workspace_storage.nfs uid/gid before the
+// runtime gets them: a broker only warns about invalid settings at
+// startup, so an out-of-range id must stop the start here with the full
+// key named, before any leaf directory is created on the export, and the
+// pod is never created. Valid values, including the default, still start.
+func TestStartNFSWorkspace_OwnerIDRange(t *testing.T) {
+	tests := []struct {
+		name      string
+		ownerYAML string
+		wantField string
+		// wantUID/wantGID are the ids the runtime must get; 0 means
+		// unset, which the runtime reads as the default 1000.
+		wantUID, wantGID int64
+		// wide marks ids above math.MaxInt32, which a 32-bit int
+		// cannot hold.
+		wide bool
+	}{
+		{name: "unset uses default", ownerYAML: ""},
+		{name: "explicit", ownerYAML: "      uid: 2000\n      gid: 3000\n", wantUID: 2000, wantGID: 3000},
+		{name: "maximum", ownerYAML: "      uid: 4294967294\n      gid: 4294967294\n", wantUID: 4294967294, wantGID: 4294967294, wide: true},
+		{name: "negative one uid", ownerYAML: "      uid: -1\n", wantField: "server.workspace_storage.nfs.uid"},
+		{name: "negative gid", ownerYAML: "      gid: -5\n", wantField: "server.workspace_storage.nfs.gid"},
+		{name: "unsigned sentinel uid", ownerYAML: "      uid: 4294967295\n", wantField: "server.workspace_storage.nfs.uid", wide: true},
+		{name: "unsigned sentinel gid", ownerYAML: "      gid: 4294967295\n", wantField: "server.workspace_storage.nfs.gid", wide: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wide && strconv.IntSize < 64 {
+				t.Skipf("ids in this case do not fit in a %d-bit int", strconv.IntSize)
+			}
+			mountRoot := filepath.Join(t.TempDir(), "nfs")
+			require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+			projectsDir := filepath.Join(mountRoot, "share-1", "projects")
+			f := newSharedDirStorageRunFixture(t)
+			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot+"\n"+strings.TrimSuffix(tt.ownerYAML, "\n")))
+			ran := false
+			var got runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				NameFunc: func() string { return "kubernetes" },
+				RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+					ran = true
+					got = rc
+					return "mock-id", nil
+				},
+			}
+			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+				Name:        "test-agent",
+				ProjectPath: f.projectScionDir,
+				NoAuth:      true,
+				Env:         map[string]string{"SCION_PROJECT_ID": testNFSWorkspaceProjectID},
+				GitClone:    &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+			})
+			if tt.wantField != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantField)
+				assert.False(t, ran, "the pod must not be created")
+				_, statErr := os.Stat(projectsDir)
+				assert.True(t, os.IsNotExist(statErr),
+					"no leaf directory may be created on the export for an invalid id (stat err: %v)", statErr)
+				return
+			}
+			require.NoError(t, err)
+			require.True(t, ran)
+			assert.DirExists(t, filepath.Join(projectsDir, testNFSWorkspaceProjectID, "workspace"))
+			assert.Equal(t, tt.wantUID, int64(got.NFSUID))
+			assert.Equal(t, tt.wantGID, int64(got.NFSGID))
+		})
+	}
 }

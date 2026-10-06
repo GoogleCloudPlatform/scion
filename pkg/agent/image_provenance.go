@@ -211,7 +211,7 @@ func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool, hub
 	agentDir, shared, err := AgentStateDir(projectDir, agentName, sharedWorkspace, hubProjectID, true)
 	if err != nil {
 		if shared {
-			return "", false, &AgentStateDirError{Err: withoutHostPath(err)}
+			return "", false, agentStateDirUnavailable(agentName, err)
 		}
 		return "", false, nil
 	}
@@ -228,6 +228,21 @@ func ProvisionedProfile(projectPath, agentName string, sharedWorkspace bool, hub
 		return "", false, nil
 	}
 	return p.Profile, true, nil
+}
+
+// agentStateDirUnavailable wraps a failed external agents root lookup as an
+// *AgentStateDirError whose message carries no host path. The sentinel
+// (config.ErrAgentStateDirUnavailable) and an *fs.PathError keep their cause
+// text, with the path removed; any other error (e.g. a project-id marker
+// with an invalid ID, whose message names the marker's path) is logged in
+// full and replaced by fixed text.
+func agentStateDirUnavailable(agentName string, err error) *AgentStateDirError {
+	var pe *fs.PathError
+	if errors.Is(err, config.ErrAgentStateDirUnavailable) || errors.As(err, &pe) {
+		return &AgentStateDirError{Err: withoutHostPath(err)}
+	}
+	slog.Error("agent state directory unavailable", "agent", agentName, "error", err)
+	return &AgentStateDirError{Err: errors.New("the external agents root could not be determined")}
 }
 
 // logImageProvenanceError logs an *ImageProvenanceError with its host path,
