@@ -392,7 +392,10 @@ func (s *Server) scheduledEffectCeiling(ctx context.Context, auth ScheduledAutho
 			}
 			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("scheduled authority: agent ceiling: %w", err)
 		}
-		ceiling = intersectEffectCeilings(ceiling, row)
+		ceiling, err = intersectEffectCeilings(ceiling, row)
+		if err != nil {
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, fmt.Errorf("%w: %v", errScheduledAuthorityDenied, err)
+		}
 	}
 	return ceiling, store.AuthorityProvenance{
 		ProvenanceVersion:           store.ProvenanceVersionV1,
@@ -412,20 +415,26 @@ func (s *Server) scheduledEffectCeiling(ctx context.Context, auth ScheduledAutho
 // intersectEffectCeilings returns the ceiling that allows exactly what both
 // a and b allow. Principal is the identity element. Two bounded ceilings
 // intersect over the registry (each under its own version) into bounded V1,
-// keeping b's boundary. Callers pass recorded ceilings only.
-func intersectEffectCeilings(a, b store.EffectCeiling) store.EffectCeiling {
+// keeping b's boundary. Any other kind (unrecorded or unknown) is an error,
+// so the intersection never widens past a ceiling it cannot read.
+func intersectEffectCeilings(a, b store.EffectCeiling) (store.EffectCeiling, error) {
+	for _, c := range []store.EffectCeiling{a, b} {
+		if c.Kind != store.EffectCeilingPrincipal && c.Kind != store.EffectCeilingBounded {
+			return store.EffectCeiling{}, fmt.Errorf("cannot intersect a %q ceiling", c.Kind)
+		}
+	}
 	if a.Kind == store.EffectCeilingPrincipal {
-		return b
+		return b, nil
 	}
 	if b.Kind == store.EffectCeilingPrincipal {
-		return a
+		return a, nil
 	}
-	fa, _ := a.Frozen()
+	fa, _ := a.Frozen() // both bounded: Frozen is ok
 	fb, _ := b.Frozen()
 	out := foldCeilings([]permissions.FrozenPermissionCeiling{fa, fb}, 0)
 	out.BoundaryKind = b.BoundaryKind
 	out.BoundaryProjectID = b.BoundaryProjectID
-	return out
+	return out, nil
 }
 
 // errScheduledChildDeletedDuringCreate fails a fire whose scheduled child was
