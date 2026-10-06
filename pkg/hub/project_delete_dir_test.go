@@ -318,3 +318,38 @@ func TestRemoveProjectDirUnderProjectsRoot_EmptyNFSMountRootRemovesNothing(t *te
 	_, err := os.Stat(kept)
 	assert.NoError(t, err, "a relative directory is never removed")
 }
+
+// TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty checks the value
+// the hub-managed removal returns: the resolved path when one was resolved,
+// whether or not it was removed, and "" when the slug fails the slug rule.
+func TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	srv, _ := testServer(t)
+
+	own := filepath.Join(tmpHome, ".scion", "projects", "own-project")
+	writeProjectDirFile(t, own)
+	assert.Equal(t, own, srv.removeHubManagedProjectDir("p", "own-project"), "a removed directory's path is returned")
+	_, err := os.Stat(own)
+	assert.True(t, os.IsNotExist(err))
+
+	assert.Equal(t, "", srv.removeHubManagedProjectDir("p", "."), "a slug failing the slug rule returns no path")
+	assert.Equal(t, "", srv.removeHubManagedProjectDir("p", ""), "an empty slug returns no path")
+
+	// A configuration whose resolved path is not under any projects root:
+	// the removal is refused and the resolved path is still returned.
+	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: "",
+			Shares:    []config.V1NFSShare{{ID: "", Server: "10.0.0.2", Export: "/scion"}},
+		},
+	}
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	kept := writeProjectDirFile(t, filepath.Join(workDir, "hub-projects", "own-project"))
+	assert.Equal(t, filepath.Join("hub-projects", "own-project"), srv.removeHubManagedProjectDir("p", "own-project"),
+		"a refused removal still returns the resolved path")
+	_, err = os.Stat(kept)
+	assert.NoError(t, err, "the refused directory remains")
+}

@@ -3269,8 +3269,8 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 5: Filesystem cleanup (hub-managed projects).
 	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		s.removeHubManagedProjectDir(projectID, project.Slug)
-		s.removeEmbeddedBrokerProjectDir(project.Slug, "")
+		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
+		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
 	}
 	s.webdavLocks.Delete(projectID)
 
@@ -3300,19 +3300,23 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 // deleted project, subject to removeProjectDirUnderProjectsRoot. When the slug
 // does not name a direct child of a projects root, or the directory cannot be
 // resolved, nothing is removed and a warning is logged.
-func (s *Server) removeHubManagedProjectDir(projectID, slug string) {
+//
+// It returns the resolved hub-managed path, or "" when the slug fails the slug
+// rule or the path cannot be resolved.
+func (s *Server) removeHubManagedProjectDir(projectID, slug string) string {
 	if err := validateProjectSlug(slug); err != nil {
 		s.projectsLogger().Warn("hub-managed project directory not removed: it is not a direct child of a projects root",
 			"project_id", projectID, "error", err)
-		return
+		return ""
 	}
 	projectPath, err := s.hubManagedProjectPath(slug)
 	if err != nil {
 		s.projectsLogger().Warn("could not resolve hub-managed project directory; skipping removal, the directory may be left behind",
 			"project_id", projectID)
-		return
+		return ""
 	}
 	s.removeProjectDirUnderProjectsRoot(projectID, projectPath)
+	return projectPath
 }
 
 // removeProjectDirUnderProjectsRoot removes projectPath only when it is a
