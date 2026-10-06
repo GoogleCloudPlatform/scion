@@ -97,7 +97,7 @@ func TestProjectSAMappingWarnings_Matrix(t *testing.T) {
 		{
 			name:     "docker-only broker",
 			email:    unmappedGSA,
-			profiles: [][]store.BrokerProfile{{{Name: "local", Type: "docker", MappingsReported: true}}},
+			profiles: [][]store.BrokerProfile{{{Name: "local", Type: "docker"}}},
 		},
 		{
 			name:     "broker with no profiles (flat row)",
@@ -456,7 +456,7 @@ func TestCreateGCPServiceAccount_WarnsWhenUnmapped(t *testing.T) {
 
 func TestCreateGCPServiceAccount_NoWarningWithoutKubernetesProviders(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	addProviderBroker(t, s, projectID, "b", store.BrokerProfile{Name: "local", Type: "docker", MappingsReported: true})
+	addProviderBroker(t, s, projectID, "b", store.BrokerProfile{Name: "local", Type: "docker"})
 
 	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID),
 		map[string]string{"email": unmappedGSA})
