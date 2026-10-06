@@ -450,14 +450,40 @@ func isProjectAccessLookupFault(err error) bool {
 
 // ErrUnsupportedPrincipalKind is returned by ProjectMembershipEvidence,
 // SystemAuthorityProof, and ProjectTargetAdmission for any PrincipalKind
-// other than PrincipalKindUser or PrincipalKindDev (local users, including
-// the dev/local-user adapter). This is an ALLOWLIST check — an empty or
-// unrecognized Kind value also fails closed into this error, not just the
-// enumerated agent/federated/broker kinds. No CredentialKind branching
-// anywhere in these functions, so a future agent-delegation extension (G)
-// can reuse them with an issuer.
-var ErrUnsupportedPrincipalKind = errors.New("project access evidence supports local user principals only")
+// other than PrincipalKindUser, PrincipalKindDev (local users, including
+// the dev/local-user adapter) or PrincipalKindFederatedUser. The mint-time
+// facades (MintTimeSystemGrant, CanMintSelector) accept local users only
+// and return it for a federated user too. This is an ALLOWLIST check — an
+// empty or unrecognized Kind value also fails closed into this error, not
+// just the enumerated agent/federated agent/federated service/broker kinds.
+// No CredentialKind branching anywhere in these functions, so a future
+// agent-delegation extension (G) can reuse them with an issuer.
+var ErrUnsupportedPrincipalKind = errors.New("project access evidence supports user principals only")
 
+// requireProjectAccessPrincipal admits the principal kinds whose current
+// project access is evaluated from hub-recorded role bindings: local users
+// (PrincipalKindUser, PrincipalKindDev) and federated users
+// (PrincipalKindFederatedUser, ptone/scion#3427). A federated user's
+// bindings are keyed to user:<issuer>:<sub> (NormalizePrincipalType maps the
+// kind to the store principal type "user"), so admission reads exactly the
+// edges the kernel grants from for that principal. Token claims, the
+// issuer's configured role and scopes, ancestry and ownership are never
+// read here.
+func requireProjectAccessPrincipal(principal PrincipalContext) error {
+	switch principal.Kind {
+	case PrincipalKindUser, PrincipalKindDev, PrincipalKindFederatedUser:
+		if principal.ID == "" {
+			return fmt.Errorf("%w: empty principal ID", ErrProjectAccessDenied)
+		}
+		return nil
+	default:
+		return ErrUnsupportedPrincipalKind
+	}
+}
+
+// requireLocalUserPrincipal admits local user principals only. It guards
+// the mint-time facades (MintTimeSystemGrant, CanMintSelector): a federated
+// user's project access does not make it mint-eligible.
 func requireLocalUserPrincipal(principal PrincipalContext) error {
 	switch principal.Kind {
 	case PrincipalKindUser, PrincipalKindDev:
@@ -671,13 +697,13 @@ func applyRestrictions(permIDs []string, restrictions []Restriction) []string {
 // group-expanded ACTIVE project-scoped role binding for projectID,
 // permission-agnostic — membership is access, independent of which specific
 // permissions the bound role carries. Fails closed on an empty projectID, a
-// non-Active user status, or any store error. Local user principals only
-// (see ErrUnsupportedPrincipalKind).
+// non-Active user status, or any store error. Local and federated user
+// principals only (see ErrUnsupportedPrincipalKind and requireActiveUser).
 //
 // Deliberately not built from isProjectOwnerOrAdmin (its direct-membership
 // branch has no activation-window check).
 func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal PrincipalContext, projectID string) (bool, ProjectAccessSource, error) {
-	if err := requireLocalUserPrincipal(principal); err != nil {
+	if err := requireProjectAccessPrincipal(principal); err != nil {
 		return false, "", err
 	}
 	if projectID == "" {
@@ -765,6 +791,23 @@ func closureKeys(refs []store.PrincipalRef) (directKey string, groupKeys map[str
 	return directKey, groupKeys
 }
 
+// requireActiveUser is the account-status gate for project access. It only
+// ever denies; it never admits, and access still requires a qualifying
+// binding afterwards.
+//
+// Local users (PrincipalKindUser, PrincipalKindDev) need an existing users
+// row with active status: a missing row denies.
+//
+// Federated users (PrincipalKindFederatedUser, ptone/scion#3427) are keyed
+// by <issuer>:<sub>, and no code path creates a users row for them today:
+//   - a missing row passes through to the binding check (it is not a grant);
+//   - an existing row that is not active denies, even with an active
+//     binding;
+//   - any other lookup error is a lookup fault and denies.
+//
+// Tracked assumption: "missing row passes" holds only while no path creates
+// users rows for federated principals. Once one does, revisit this arm and
+// require an active row, as for local users.
 func (a *AuthzService) requireActiveUser(ctx context.Context, principal PrincipalContext) error {
 	normalizedType := NormalizePrincipalType(string(principal.Kind))
 	if normalizedType != store.RoleBindingPrincipalUser {
@@ -774,10 +817,49 @@ func (a *AuthzService) requireActiveUser(ctx context.Context, principal Principa
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %v", ErrProjectAccessDenied, err))
 	}
+	if principal.Kind == PrincipalKindFederatedUser {
+		if err != nil {
+			// store.ErrNotFound: no account record; the binding check
+			// decides.
+			return nil
+		}
+		if user == nil || user.Status != store.UserStatusActive {
+			return fmt.Errorf("%w: user is not active", ErrProjectAccessDenied)
+		}
+		return nil
+	}
 	// A missing user record is a policy fact (the holder no longer exists),
 	// not a store fault: deny the same way as an inactive user, untagged.
 	if err != nil || user == nil || user.Status != store.UserStatusActive {
 		return fmt.Errorf("%w: user is not active", ErrProjectAccessDenied)
+	}
+	return nil
+}
+
+// requireReadableProjectConstraints is the strict access-constraint check
+// SystemAuthorityProof applies for a federated user: every active access
+// constraint whose scope covers projectID must have a recognized, valid
+// subject and scope. A constraint that fails validation (Degraded) cannot
+// be matched reliably against the principal closure, so it denies rather
+// than being skipped. A load failure is a lookup fault. The ordinary
+// reduction (accessConstraintRestrictions) still runs afterwards.
+func (a *AuthzService) requireReadableProjectConstraints(ctx context.Context, projectID string) error {
+	constraints, err := a.loadAllAccessConstraints(ctx)
+	if err != nil {
+		return projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
+	}
+	now := time.Now()
+	for _, sc := range constraints {
+		hc := storeToHubAccessConstraint(sc)
+		if hc == nil || !hc.IsActive(now) {
+			continue
+		}
+		if !constraintScopeApplies(hc, ScopeTypeProject, projectID) {
+			continue
+		}
+		if hc.Degraded {
+			return projectAccessLookupFault(fmt.Errorf("%w: access constraint %q is not readable", ErrProjectAccessDenied, hc.ID))
+		}
 	}
 	return nil
 }
@@ -1066,9 +1148,11 @@ func candidateSetHasPermission(candidates []CandidateBinding, roleDefs map[strin
 // project-agnostic check; use MintTimeSystemGrant for that. Requires
 // permissions.AppliesToExistingProjectTarget(permissionID) to be reviewed
 // true; an unreviewed or hub-only ID denies (ok=false, err=nil). Never
-// recurses into Decide. Local user principals only.
+// recurses into Decide. Local and federated user principals only; for a
+// federated user the constraint check is strict (see
+// requireReadableProjectConstraints).
 func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal PrincipalContext, projectID, permissionID string, class ProjectTargetClass) (bool, error) {
-	if err := requireLocalUserPrincipal(principal); err != nil {
+	if err := requireProjectAccessPrincipal(principal); err != nil {
 		return false, err
 	}
 	if projectID == "" {
@@ -1102,6 +1186,11 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 	closure := make(map[string]struct{}, len(refs))
 	for _, p := range refs {
 		closure[p.Type+":"+p.ID] = struct{}{}
+	}
+	if principal.Kind == PrincipalKindFederatedUser {
+		if err := a.requireReadableProjectConstraints(ctx, projectID); err != nil {
+			return false, err
+		}
 	}
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
 	if err != nil {
@@ -1290,6 +1379,11 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 	// just above: a transient constraint-table load failure must surface as
 	// an error here too, not as an indistinguishable "constraint stripped
 	// it" denial.
+	if principal.Kind == PrincipalKindFederatedUser {
+		if err := a.requireReadableProjectConstraints(ctx, projectID); err != nil {
+			return false, err
+		}
+	}
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
 	if err != nil {
 		return false, projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
@@ -1408,7 +1502,8 @@ var ErrProjectMismatch = errors.New("target project does not match requested pro
 // ScopeKind) for projectID/permissionID/target. Returns ErrProjectMismatch
 // if target's resolved project (via ResolveTargetScope with zero evidence,
 // since a real instance never needs collection-level evidence) does not
-// equal projectID. Any error denies. Local user principals only.
+// equal projectID. Any error denies. Local and federated user principals
+// only.
 func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal PrincipalContext, projectID, permissionID string, target Resource, memo *ProjectAdmissionCache) (ProjectAdmissionResult, error) {
 	targetScope := ResolveTargetScope(target, TargetScopeEvidence{})
 	if targetScope.Kind != TargetScopeProject || targetScope.ProjectID != projectID {
@@ -1444,7 +1539,7 @@ func (a *AuthzService) ProjectTargetAdmission(ctx context.Context, principal Pri
 // resource type (skillResource, templateResource, harnessConfigResource)
 // instead of assembling ProjectTargetClass directly.
 func (a *AuthzService) ProjectAdmissionForClass(ctx context.Context, principal PrincipalContext, projectID, permissionID string, class ProjectTargetClass, memo *ProjectAdmissionCache) (ProjectAdmissionResult, error) {
-	if err := requireLocalUserPrincipal(principal); err != nil {
+	if err := requireProjectAccessPrincipal(principal); err != nil {
 		return ProjectAdmissionResult{}, err
 	}
 	if projectID == "" {
