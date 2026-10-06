@@ -35,7 +35,7 @@ func ValidAgentRole(r AgentRole) bool {
 }
 
 // ScopesForRole returns the JWT scopes granted by a named agent role.
-// Scopes in ceilingOptionalRoleScopes (project:artifact:read) are part of the
+// Scopes in ceilingOptionalRoleScopes (project:artifact:read, project:artifact:write) are part of the
 // bundle but never decide whether a role fits a ceiling or may be delegated;
 // a mint drops them when the source ceiling lacks their permission.
 // Returns nil for AgentRoleNone (caller should set NoAuth=true instead).
@@ -55,6 +55,10 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentNotify,
 			ScopeAgentPortForward,
 			ScopeProjectArtifactRead,
+			// Publishing artifacts is how an agent hands a document to
+			// readers on other brokers or in the web UI; it only writes
+			// artifacts homed in the agent's own project.
+			ScopeProjectArtifactWrite,
 		}
 	case AgentRoleFull:
 		return []AgentTokenScope{
@@ -70,6 +74,7 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeProjectTemplateWrite,
 			ScopeAgentSetMessageMode,
 			ScopeProjectArtifactRead,
+			ScopeProjectArtifactWrite,
 		}
 	case "":
 		return ScopesForRole(AgentRoleNone)

@@ -627,7 +627,9 @@ func TestStopAllAgents_CustomProjectRoleOnly_Forbidden(t *testing.T) {
 }
 
 func TestStopAllAgents_MembershipStoreError_InternalError(t *testing.T) {
-	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	srv, s, alice, bob, project, _, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *errorInjectingStore {
+		return &errorInjectingStore{Store: inner, fault: f, getEffectiveGroupsErr: errors.New("injected store fault")}
+	})
 
 	addProjectMemberViaAPI(t, srv, s, alice, project.ID, store.RoleBindingPrincipalUser, bob.ID, store.ProjectRoleMember)
 	seedStopAllAgents(t, s, project.ID, bob)
@@ -635,7 +637,7 @@ func TestStopAllAgents_MembershipStoreError_InternalError(t *testing.T) {
 	// Fail the membership lookup's group read. The authz service keeps its
 	// own store reference, so only the handler's membership resolution sees
 	// the fault.
-	srv.store = &errorInjectingStore{Store: s, getEffectiveGroupsErr: errors.New("injected store fault")}
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost,
 		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)

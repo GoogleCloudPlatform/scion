@@ -15,6 +15,7 @@
 package config
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -196,4 +197,145 @@ func TestRuntimeDefaultsRoundTrip(t *testing.T) {
 	if strings.Contains(string(empty), "runtime:") {
 		t.Errorf("empty settings emitted a runtime block:\n%s", empty)
 	}
+}
+
+func TestApplyBuiltinDefaultResources(t *testing.T) {
+	tests := []struct {
+		name          string
+		res           *api.ResourceSpec
+		k8s           *api.K8sResources
+		wantLimitCPU  string
+		wantReqCPU    string
+		wantK8sLimits map[string]string // nil: k8s returned unchanged
+	}{
+		{name: "nil spec", wantLimitCPU: "2"},
+		{name: "empty spec", res: &api.ResourceSpec{}, wantLimitCPU: "2"},
+		{name: "request below builtin", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "1"}}, wantLimitCPU: "2", wantReqCPU: "1"},
+		{name: "request equal to builtin", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2"}}, wantLimitCPU: "2", wantReqCPU: "2"},
+		{name: "request equal to builtin in millicores", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2000m"}}, wantLimitCPU: "2", wantReqCPU: "2000m"},
+		{name: "request above builtin raises limit", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "4"}}, wantLimitCPU: "4", wantReqCPU: "4"},
+		{name: "two-digit request above builtin", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "10"}}, wantLimitCPU: "10", wantReqCPU: "10"},
+		{name: "millicore request above builtin copied verbatim", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "3500m"}}, wantLimitCPU: "3500m", wantReqCPU: "3500m"},
+		{name: "fractional request just above builtin", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2.5"}}, wantLimitCPU: "2.5", wantReqCPU: "2.5"},
+		{name: "explicit limit never changed", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "4"}, Limits: api.ResourceList{CPU: "1"}}, wantLimitCPU: "1", wantReqCPU: "4"},
+		{name: "unparseable request gives no raise", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "lots"}}, wantLimitCPU: "2", wantReqCPU: "lots"},
+		{
+			name:          "k8s request above builtin sets k8s limit only",
+			k8s:           &api.K8sResources{Requests: map[string]string{"cpu": "4"}},
+			wantLimitCPU:  "2",
+			wantK8sLimits: map[string]string{"cpu": "4"},
+		},
+		{
+			name:          "k8s request in millicores equal to builtin gives no raise",
+			k8s:           &api.K8sResources{Requests: map[string]string{"cpu": "2000m"}},
+			wantLimitCPU:  "2",
+			wantK8sLimits: nil,
+		},
+		{
+			name:          "k8s request keeps other k8s limits",
+			k8s:           &api.K8sResources{Requests: map[string]string{"cpu": "6"}, Limits: map[string]string{"nvidia.com/gpu": "1"}},
+			wantLimitCPU:  "2",
+			wantK8sLimits: map[string]string{"cpu": "6", "nvidia.com/gpu": "1"},
+		},
+		{
+			name:          "both requests each raise their own limit",
+			res:           &api.ResourceSpec{Requests: api.ResourceList{CPU: "3"}},
+			k8s:           &api.K8sResources{Requests: map[string]string{"cpu": "5"}},
+			wantLimitCPU:  "3",
+			wantReqCPU:    "3",
+			wantK8sLimits: map[string]string{"cpu": "5"},
+		},
+		{
+			name:         "k8s request not above raised generic limit",
+			res:          &api.ResourceSpec{Requests: api.ResourceList{CPU: "4"}},
+			k8s:          &api.K8sResources{Requests: map[string]string{"cpu": "3"}},
+			wantLimitCPU: "4",
+			wantReqCPU:   "4",
+		},
+		{
+			name:         "explicit k8s limit never changed",
+			k8s:          &api.K8sResources{Requests: map[string]string{"cpu": "4"}, Limits: map[string]string{"cpu": "3"}},
+			wantLimitCPU: "2",
+		},
+		{
+			name:         "explicit generic limit skips k8s raise too",
+			res:          &api.ResourceSpec{Limits: api.ResourceList{CPU: "1"}},
+			k8s:          &api.K8sResources{Requests: map[string]string{"cpu": "4"}},
+			wantLimitCPU: "1",
+		},
+		{
+			name:         "unparseable k8s request gives no raise",
+			k8s:          &api.K8sResources{Requests: map[string]string{"cpu": "many"}},
+			wantLimitCPU: "2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resBefore api.ResourceSpec
+			if tt.res != nil {
+				resBefore = *tt.res
+			}
+			k8sBefore := cloneK8s(tt.k8s)
+
+			gotRes, gotK8s := ApplyBuiltinDefaultResources(tt.res, tt.k8s)
+
+			if gotRes == nil {
+				t.Fatal("returned nil resources")
+			}
+			if gotRes.Limits.CPU != tt.wantLimitCPU {
+				t.Errorf("limits.cpu = %q, want %q", gotRes.Limits.CPU, tt.wantLimitCPU)
+			}
+			if gotRes.Requests.CPU != tt.wantReqCPU {
+				t.Errorf("requests.cpu = %q, want %q", gotRes.Requests.CPU, tt.wantReqCPU)
+			}
+			if tt.wantK8sLimits == nil {
+				if gotK8s != tt.k8s {
+					t.Errorf("k8s resources replaced, want unchanged input; got %+v", gotK8s)
+				}
+			} else {
+				if gotK8s == tt.k8s {
+					t.Fatal("k8s resources returned as the input pointer, want a raised copy")
+				}
+				if !maps.Equal(gotK8s.Limits, tt.wantK8sLimits) {
+					t.Errorf("k8s limits = %v, want %v", gotK8s.Limits, tt.wantK8sLimits)
+				}
+				if !maps.Equal(gotK8s.Requests, tt.k8s.Requests) {
+					t.Errorf("k8s requests = %v, want %v", gotK8s.Requests, tt.k8s.Requests)
+				}
+			}
+
+			// Inputs must never be mutated.
+			if tt.res != nil && *tt.res != resBefore {
+				t.Errorf("input spec mutated: got %+v, want %+v", *tt.res, resBefore)
+			}
+			if !equalK8s(tt.k8s, k8sBefore) {
+				t.Errorf("input k8s resources mutated: got %+v, want %+v", tt.k8s, k8sBefore)
+			}
+		})
+	}
+}
+
+// With limits.cpu already set, the inputs come back as the same pointers.
+func TestApplyBuiltinDefaultResources_ExplicitLimitReturnsInputs(t *testing.T) {
+	res := &api.ResourceSpec{Limits: api.ResourceList{CPU: "8"}}
+	k8s := &api.K8sResources{Requests: map[string]string{"cpu": "16"}}
+	gotRes, gotK8s := ApplyBuiltinDefaultResources(res, k8s)
+	if gotRes != res || gotK8s != k8s {
+		t.Errorf("want inputs returned unchanged, got %+v / %+v", gotRes, gotK8s)
+	}
+}
+
+func cloneK8s(k *api.K8sResources) *api.K8sResources {
+	if k == nil {
+		return nil
+	}
+	return &api.K8sResources{Requests: maps.Clone(k.Requests), Limits: maps.Clone(k.Limits)}
+}
+
+func equalK8s(a, b *api.K8sResources) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return maps.Equal(a.Requests, b.Requests) && maps.Equal(a.Limits, b.Limits)
 }

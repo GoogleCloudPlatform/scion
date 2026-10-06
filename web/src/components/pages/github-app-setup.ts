@@ -35,6 +35,7 @@ import type {
   Capabilities,
 } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
+import { navigateTo } from '../../client/navigation.js';
 
 type GitHubProject = Project;
 
@@ -168,11 +169,6 @@ export class ScionPageGitHubAppSetup extends LitElement {
   private async checkAllProjects(): Promise<void> {
     const projectsWithInstallation = this.projects.filter((p) => p.githubInstallationId);
     await Promise.allSettled(projectsWithInstallation.map((p) => this.checkProjectStatus(p)));
-  }
-
-  private navigateTo(path: string): void {
-    window.history.pushState({}, '', path);
-    window.dispatchEvent(new PopStateEvent('popstate'));
   }
 
   private renderStatusBadge(project: GitHubProject) {
@@ -454,7 +450,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
             <div class="actions-card">
               <h2>Get Started</h2>
               <p>Create a new project linked to a GitHub repository to start running agents.</p>
-              <sl-button variant="primary" @click=${() => this.navigateTo('/projects/new')}>
+              <sl-button variant="primary" @click=${() => navigateTo('/projects/new')}>
                 <sl-icon slot="prefix" name="folder-plus"></sl-icon>
                 Create New Project
               </sl-button>
@@ -533,7 +529,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
           <sl-button
             size="small"
             variant="default"
-            @click=${() => this.navigateTo(`/projects/${project.id}/settings`)}
+            @click=${() => navigateTo(`/projects/${project.id}/settings`)}
           >
             <sl-icon slot="prefix" name="gear"></sl-icon>
             Settings
