@@ -543,3 +543,67 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 		s.events.PublishAgentStatus(ctx, updated)
 	}
 }
+
+// execMissingAgentMessage is the status message recorded on an agent marked
+// missing because its broker answered an exec with agent_not_found.
+const execMissingAgentMessage = "The runtime broker reported no container for this agent when a command was run in it; it was removed outside of Scion (for example by a node drain or eviction)."
+
+// execReconcileTimeout bounds the reconcile write after an exec, which runs
+// even if the exec caller has gone away.
+const execReconcileTimeout = 10 * time.Second
+
+// reconcileExecAgentNotFound records a broker's agent_not_found answer to an
+// exec on the agent (ptone/scion#3470): an agent that was running when it
+// was read before the dispatch (observed) is moved to the phase and exit
+// reason the missing-container reconcile uses (phase error, exit reason
+// container_missing; a preempted or evicted reason is kept).
+//
+// The write is a compare-and-set against the observed row
+// (MarkAgentContainerMissingIfUnchanged): it changes nothing if the agent
+// has left phase running, moved to another broker, been written with a new
+// state_version or run ID (a start or restart dispatched since the read),
+// holds a start claim (a start, restart or stop in progress), is being
+// deleted, or was seen (last_seen) at or after dispatchedAt. As in the
+// heartbeat reconcile, an agent with a lifecycle dispatch in flight on this
+// Hub or queued for its broker is skipped. Errors are logged, never returned:
+// the caller's answer does not depend on this write.
+func (s *Server) reconcileExecAgentNotFound(ctx context.Context, observed *store.Agent, dispatchedAt time.Time) {
+	if observed == nil || observed.Phase != string(state.PhaseRunning) || observed.RuntimeBrokerID == "" {
+		return
+	}
+	if reincarnationInFlight(observed) || s.lifecycleOps.active(observed.ID) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), execReconcileTimeout)
+	defer cancel()
+
+	log := s.agentLifecycleLog.With("broker_id", observed.RuntimeBrokerID, "agent_id", observed.ID,
+		"agent", observed.Slug, "project_id", observed.ProjectID)
+	pending, err := s.pendingLifecycleAgents(ctx, observed.RuntimeBrokerID)
+	if err != nil {
+		log.Warn("exec reconcile: failed to list pending dispatches", "error", err)
+		return
+	}
+	if pending[observed.ID] {
+		return
+	}
+	updated, err := s.store.MarkAgentContainerMissingIfUnchanged(ctx, observed.ID, observed.RuntimeBrokerID, dispatchedAt,
+		store.ContainerMissingPrecondition{StateVersion: observed.StateVersion, RunID: observed.RunID},
+		execMissingAgentMessage)
+	if err != nil {
+		log.Warn("exec reconcile: failed to mark agent container missing", "error", err)
+		return
+	}
+	if updated == nil {
+		// The row changed since it was read (start, restart, stop, delete,
+		// heartbeat): leave it to that writer.
+		log.Debug("exec reconcile: agent changed since exec dispatch, not marked")
+		return
+	}
+	s.missingAgents.forget(observed.RuntimeBrokerID, observed.ID)
+	log.Warn("exec reconcile: broker reported no container for running agent, marked error",
+		"previous_activity", observed.Activity, "last_seen", observed.LastSeen,
+		"exit_reason", updated.ExitReason)
+	s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, string(state.PhaseRunning), updated.Phase)
+	s.events.PublishAgentStatus(ctx, updated)
+}

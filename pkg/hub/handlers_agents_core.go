@@ -4370,12 +4370,17 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	// Read before the dispatch: the reconcile below only counts the agent
+	// as unseen if nothing reported it from here on.
+	dispatchedAt := time.Now()
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
 		if isBrokerAgentNotFound(err) {
 			// The broker answered that the agent has no running container
 			// (e.g. its pod is gone): a state conflict, not a broker
-			// failure (ptone/scion#3443).
+			// failure (ptone/scion#3443). Record it on the agent too
+			// (ptone/scion#3470).
+			s.reconcileExecAgentNotFound(ctx, agent, dispatchedAt)
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 				"Agent has no running container on its runtime broker; start or restart the agent and retry", nil)
 			return

@@ -4890,6 +4890,10 @@ func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
 		wantStatus int
 		wantCode   string
 		wantMsg    string
+		// wantPhase/wantExitReason: the agent row after the call
+		// (ptone/scion#3470).
+		wantPhase      string
+		wantExitReason string
 	}{
 		{
 			name:       "agent_not_found",
@@ -4898,6 +4902,9 @@ func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
 			wantStatus: http.StatusConflict,
 			wantCode:   ErrCodeAgentNotRunning,
 			wantMsg:    "Agent has no running container on its runtime broker",
+
+			wantPhase:      string(state.PhaseError),
+			wantExitReason: string(state.ExitReasonContainerMissing),
 		},
 		{
 			name:       "other 404 code",
@@ -4906,6 +4913,8 @@ func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
 			wantStatus: http.StatusBadGateway,
 			wantCode:   ErrCodeRuntimeError,
 			wantMsg:    "Failed to execute command on runtime broker",
+
+			wantPhase: string(state.PhaseRunning),
 		},
 		{
 			name:       "broker internal error",
@@ -4914,6 +4923,8 @@ func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
 			wantStatus: http.StatusBadGateway,
 			wantCode:   ErrCodeRuntimeError,
 			wantMsg:    "Failed to execute command on runtime broker",
+
+			wantPhase: string(state.PhaseRunning),
 		},
 	}
 	for _, tc := range cases {
@@ -4959,6 +4970,105 @@ func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
 			assert.Equal(t, tc.wantCode, errResp.Error.Code)
 			assert.Contains(t, errResp.Error.Message, tc.wantMsg)
 			assert.Positive(t, execHits.Load(), "exec request never reached the fake broker")
+
+			got, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, got.Phase)
+			assert.Equal(t, tc.wantExitReason, got.ExitReason)
+		})
+	}
+}
+
+// TestHandleAgentExec_BrokerAgentNotFound_ConcurrentChange pins the race
+// guard of ptone/scion#3470: when the agent row changes while the exec is
+// with the broker (a start or restart claim, a new run, a versioned write, or
+// a status report), the broker's agent_not_found answer does not overwrite
+// it. The caller still gets the 409.
+func TestHandleAgentExec_BrokerAgentNotFound_ConcurrentChange(t *testing.T) {
+	cases := []struct {
+		name string
+		// change runs inside the fake broker, before it answers.
+		change func(t *testing.T, s store.Store, agentID string)
+	}{
+		{
+			name: "restart claim taken",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				_, err := s.ClaimAgentStart(context.Background(), agentID, "other-hub", store.StartClaimRestart, "", time.Minute)
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "new run dispatched",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				_, err := s.SetAgentRunID(context.Background(), agentID, "run-2")
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "versioned write",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				a, err := s.GetAgent(context.Background(), agentID)
+				require.NoError(t, err)
+				a.Message = "touched"
+				require.NoError(t, s.UpdateAgent(context.Background(), a))
+			},
+		},
+		{
+			name: "status report",
+			change: func(t *testing.T, s store.Store, agentID string) {
+				require.NoError(t, s.UpdateAgentStatus(context.Background(), agentID, store.AgentStatusUpdate{Activity: "thinking"}))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			agentID := tid("agent-exec-race")
+			var execHits atomic.Int32
+			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/exec") {
+					execHits.Add(1)
+					tc.change(t, s, agentID)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"agent_not_found","message":"agent not found"}}`))
+			}))
+			t.Cleanup(fakeBroker.Close)
+
+			project := &store.Project{ID: tid("project-exec-race"), Name: "Exec Race", Slug: "exec-race"}
+			require.NoError(t, s.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{
+				ID: tid("broker-exec-race"), Name: "Exec Race Broker", Slug: "exec-race-broker",
+				Endpoint: fakeBroker.URL, Status: store.BrokerStatusOnline,
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+			agent := &store.Agent{
+				ID: agentID, Slug: agentID, Name: "Exec Race Agent",
+				ProjectID: project.ID, RuntimeBrokerID: broker.ID, Phase: string(state.PhaseRunning),
+				LastSeen: time.Now().Add(-time.Hour),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+			_, err := s.SetAgentRunID(ctx, agentID, "run-1")
+			require.NoError(t, err)
+
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/exec", map[string]interface{}{
+				"command": []string{"tmux", "capture-pane", "-p"},
+			})
+			require.Equal(t, http.StatusConflict, rec.Code, "response body: %s", rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, ErrCodeAgentNotRunning, errResp.Error.Code)
+			require.Positive(t, execHits.Load(), "exec request never reached the fake broker")
+
+			got, err := s.GetAgent(ctx, agentID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase, "a concurrent change must not be overwritten")
+			assert.Empty(t, got.ExitReason)
 		})
 	}
 }

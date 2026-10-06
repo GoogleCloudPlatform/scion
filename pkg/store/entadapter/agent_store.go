@@ -1693,6 +1693,28 @@ var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
 // first changed nothing, matches every other row and records
 // container_missing.
 func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message)
+}
+
+// MarkAgentContainerMissingIfUnchanged implements store.AgentStore: it is
+// MarkAgentContainerMissing with the state_version, run_id and start claim
+// checks added to the same conditional UPDATEs.
+func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre store.ContainerMissingPrecondition, message string) (*store.Agent, error) {
+	runID := agent.RunIDEQ(pre.RunID)
+	if pre.RunID == "" {
+		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
+	}
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+		agent.StateVersionEQ(pre.StateVersion),
+		runID,
+		agent.StartClaimIDIsNil(),
+	)
+}
+
+// markAgentContainerMissing is the shared body of MarkAgentContainerMissing
+// and MarkAgentContainerMissingIfUnchanged; extra predicates are added to
+// both conditional UPDATEs.
+func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string, extra ...predicate.Agent) (*store.Agent, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
@@ -1726,6 +1748,7 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 				),
 				reason,
 			).
+			Where(extra...).
 			SetPhase("error").
 			SetActivity("").
 			SetStalledFromActivity("").

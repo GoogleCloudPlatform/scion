@@ -464,6 +464,16 @@ type AgentStore interface {
 	// updated record for event publishing.
 	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*Agent, error)
 
+	// MarkAgentContainerMissingIfUnchanged is MarkAgentContainerMissing for a
+	// caller that read the agent before a broker call and learned from that
+	// call that the container is gone (ptone/scion#3470). On top of every
+	// MarkAgentContainerMissing guard, the conditional UPDATE also requires
+	// that the row's state_version and run_id still equal pre's (so a start,
+	// restart or other versioned write since the read wins) and that no
+	// start claim of any kind (start, restart, stop) is held. Returns
+	// (nil, nil) when any check fails.
+	MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre ContainerMissingPrecondition, message string) (*Agent, error)
+
 	// ClearAgentRuntimeTarget removes the runtime target and any runtime
 	// target candidate recorded in an agent's applied config
 	// (AgentAppliedConfig.RuntimeTarget, RuntimeTargetCandidate) and changes
@@ -928,6 +938,16 @@ type AgentHealthAggregate struct {
 type AgentBrokerCounts struct {
 	Count   int
 	Healthy int
+}
+
+// ContainerMissingPrecondition is the agent state a caller observed before
+// the broker call that reported the container gone; see
+// MarkAgentContainerMissingIfUnchanged.
+type ContainerMissingPrecondition struct {
+	// StateVersion is the observed Agent.StateVersion.
+	StateVersion int64
+	// RunID is the observed Agent.RunID ("" matches a row with no run ID).
+	RunID string
 }
 
 // AgentStatusUpdate contains fields for status-only updates.
