@@ -76,13 +76,19 @@ func (f *mentionDotFixture) topic(name string) string {
 // topic watermark, and records it as mentioning each of mentioned.
 func (f *mentionDotFixture) message(topicID, name string, mentioned ...string) string {
 	f.t.Helper()
-	ctx := context.Background()
 	f.at = f.at.Add(time.Second)
-	msg := &store.Message{ID: tid("md-msg-" + name), ProjectID: f.proj.ID, Sender: "user:other@test.com",
+	return f.messageAt(topicID, tid("md-msg-"+name), f.at, mentioned...)
+}
+
+// messageAt is message with an explicit ID and creation time.
+func (f *mentionDotFixture) messageAt(topicID, id string, at time.Time, mentioned ...string) string {
+	f.t.Helper()
+	ctx := context.Background()
+	msg := &store.Message{ID: id, ProjectID: f.proj.ID, Sender: "user:other@test.com",
 		SenderID: tid("md-other-user"), Recipient: "thread:" + topicID, RecipientID: topicID,
-		Msg: name, Type: messages.TypeChat, Channel: "web", ThreadID: topicID, CreatedAt: f.at}
+		Msg: id, Type: messages.TypeChat, Channel: "web", ThreadID: topicID, CreatedAt: at}
 	if err := f.s.CreateMessage(ctx, msg); err != nil {
-		f.t.Fatalf("CreateMessage %s: %v", name, err)
+		f.t.Fatalf("CreateMessage %s: %v", id, err)
 	}
 	if err := f.wcs.TouchTopicActivity(ctx, topicID, msg.ID); err != nil {
 		f.t.Fatalf("TouchTopicActivity: %v", err)
@@ -164,6 +170,20 @@ func TestListThreads_HasUnreadMention(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// mark-unread on a single-message thread leaves an empty watermark.
+	emptyWatermark := f.topic("empty-watermark")
+	f.message(emptyWatermark, "ew-1", DevUserID)
+	if err := wcs.SetReadState(ctx, DevUserID, emptyWatermark, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// A watermark naming no stored message counts as no watermark.
+	lostWatermark := f.topic("lost-watermark")
+	f.message(lostWatermark, "lw-1", DevUserID)
+	if err := wcs.SetReadState(ctx, DevUserID, lostWatermark, tid("md-no-such-message")); err != nil {
+		t.Fatal(err)
+	}
+
 	deleted := f.topic("deleted")
 	f.message(deleted, "deleted-1", DevUserID)
 	if err := wcs.DeleteTopic(ctx, deleted); err != nil {
@@ -180,6 +200,9 @@ func TestListThreads_HasUnreadMention(t *testing.T) {
 		plain:       {true, false},
 		muted:       {true, true}, // the rail hides it; the data is unchanged
 		msgDeleted:  {true, false},
+
+		emptyWatermark: {true, true},
+		lostWatermark:  {true, true},
 	}
 	for id, w := range want {
 		e, ok := got[id]
@@ -340,5 +363,163 @@ func TestMentionedHumanIDs(t *testing.T) {
 	got := mentionedHumanIDs(members, []string{"Alice-Smith", "robert", "alice", "ghost", "bob"}, "u2")
 	if len(got) != 1 || got[0] != "u1" {
 		t.Fatalf("mentionedHumanIDs = %v; want [u1]", got)
+	}
+}
+
+// Messages with the same created time are ordered by ID, matching the
+// read watermark's monotonic guard and ListMessages.
+func TestUnreadMentionKeys_SameCreatedAtTieBreaksByID(t *testing.T) {
+	srv, s, wcs, proj, _ := setupMentionDotTest(t)
+	ctx := context.Background()
+	f := &mentionDotFixture{t: t, s: s, wcs: wcs, proj: proj, at: time.Now().UTC().Add(-time.Hour)}
+	lo, hi := tid("md-tie-a"), tid("md-tie-b")
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+
+	// Read up to lo; the mention on hi (same instant) is after it.
+	after := f.topic("tie-after")
+	f.messageAt(after, lo, at)
+	f.messageAt(after, hi, at, DevUserID)
+	if err := wcs.SetReadState(ctx, DevUserID, after, lo); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read up to hi; the mention on lo (same instant) is before it, and a
+	// later plain message keeps the thread unread.
+	before := f.topic("tie-before")
+	lo2, hi2 := tid("md-tie2-a"), tid("md-tie2-b")
+	if lo2 > hi2 {
+		lo2, hi2 = hi2, lo2
+	}
+	f.messageAt(before, lo2, at, DevUserID)
+	f.messageAt(before, hi2, at)
+	f.messageAt(before, tid("md-tie2-later"), at.Add(time.Second))
+	if err := wcs.SetReadState(ctx, DevUserID, before, hi2); err != nil {
+		t.Fatal(err)
+	}
+
+	keys, err := wcs.UnreadMentionKeys(ctx, DevUserID, []string{after, before})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keys[after] || keys[before] {
+		t.Fatalf("UnreadMentionKeys = %v; want only %s", keys, after)
+	}
+	got := listThreadsByID(t, srv, proj.ID)
+	if e := got[after]; !e.HasUnread || !e.HasUnreadMention {
+		t.Errorf("tie-after: %+v; want unread mention", e)
+	}
+	if e := got[before]; !e.HasUnread || e.HasUnreadMention {
+		t.Errorf("tie-before: %+v; want unread without mention", e)
+	}
+}
+
+// A human thread message routed to the topic's default agent still
+// records the human @mentions in it: "@agent do X, cc @alice" gives Alice
+// the mention dot.
+func TestSendAgentRouted_RecordsHumanMentions(t *testing.T) {
+	srv, s, wcs, proj, db := setupMentionDotTest(t)
+	d := &brokerMockDispatcher{}
+	srv.SetDispatcher(d)
+	ctx := context.Background()
+	alice := addHumanMember(t, s, proj.ID, "alice.smith@test.com", "Alice Smith")
+	a := &store.Agent{ID: tid("md-default-agent"), ProjectID: proj.ID, Name: "Builder", Slug: "md-builder",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	if err := s.CreateAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	topicID := tid("md-routed")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "routed",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: a.Slug}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": "@md-builder do X, cc @alice-smith"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(d.getMessages()) == 0 {
+		t.Fatal("expected the message to be routed to the default agent")
+	}
+
+	rec = doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/threads", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice list: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp chatTopicListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range resp.Threads {
+		if e.ID == topicID {
+			found = true
+			if !e.HasUnread || !e.HasUnreadMention {
+				t.Errorf("alice thread = %+v; want unread mention", e)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("thread %s not listed for alice: %+v", topicID, resp.Threads)
+	}
+	if keys, err := wcs.UnreadMentionKeys(ctx, DevUserID, []string{topicID}); err != nil || keys[topicID] {
+		t.Errorf("sender recorded as mentioned: %v %v", keys, err)
+	}
+}
+
+// An agent's thread message on the direct delivery path records the human
+// @mentions in it before it is published.
+func TestAgentThreadMessage_DirectPathRecordsHumanMentions(t *testing.T) {
+	srv, s, wcs, proj, db := setupMentionDotTest(t)
+	ctx := context.Background()
+	alice := addHumanMember(t, s, proj.ID, "alice.smith@test.com", "Alice Smith")
+	a := &store.Agent{ID: tid("md-poster-agent"), ProjectID: proj.ID, Name: "Poster", Slug: "md-poster",
+		Phase: "running"}
+	if err := s.CreateAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	topicID := tid("md-agent-thread")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "agent-thread",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	convID := def162GroupConv(t, s, proj.ID, topicID)
+
+	rr := postOutboundConvRef(t, srv, proj.ID, a.ID, "done, @alice-smith and @ghost", "conv:"+convID)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("outbound: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT user_id, conversation_key FROM webchat_mention WHERE user_id = ?`, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var u, k string
+		if err := rows.Scan(&u, &k); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, k)
+	}
+	if len(got) != 1 || got[0] != topicID {
+		t.Fatalf("alice mention rows = %v; want [%s]", got, topicID)
+	}
+	var total int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM webchat_mention`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("mention rows = %d; want 1 (no row for @ghost)", total)
+	}
+	keys, err := wcs.UnreadMentionKeys(ctx, alice.ID, []string{topicID})
+	if err != nil || !keys[topicID] {
+		t.Errorf("alice unread mention = %v %v; want true", keys, err)
 	}
 }

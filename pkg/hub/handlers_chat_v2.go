@@ -452,8 +452,10 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 
 	// One batched query over the same listed topic keys: which of them hold
 	// a mention of the caller after the caller's own read watermark. Only
-	// the caller's own mention and read-state rows are read. A failure
-	// degrades to plain unread dots.
+	// the caller's own mention and read-state rows are read. A watermark
+	// that resolves to no stored message counts all recorded mentions as
+	// unread; the HasUnread gate below bounds that. A failure degrades to
+	// plain unread dots.
 	mentionKeys, err := wcs.UnreadMentionKeys(r.Context(), user.ID(), convKeys)
 	if err != nil {
 		slog.Warn("chat threads: unread mention lookup failed",
@@ -1883,6 +1885,15 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		s.ensureDMRegistered(ctx, key, user.ID())
 	}
 
+	// Resolve human @mentions (names that are not agents may be people)
+	// and record them before publish, as sendHumanToHuman does: clients
+	// refetch the thread list and its mention dots on this event.
+	var mentionedHumans []string
+	if len(mentionNames) > 0 && projectID != "" {
+		mentionedHumans = mentionedHumanIDs(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, user.ID())
+		s.recordHumanMentions(ctx, key, storeMsg.ID, mentionedHumans)
+	}
+
 	// Both watermarks must be current before publish: clients refetch unread
 	// state on this event.
 	s.touchConversationActivity(ctx, key, storeMsg.ID)
@@ -2168,10 +2179,10 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	}
 
 	// --- W6: Human mention notifications ---
-	// Resolve @mentions that didn't match agents — they may be human members.
-	// Fire in a goroutine to avoid blocking the response.
-	if cn := s.getChatNotifier(); cn != nil && len(mentionNames) > 0 && projectID != "" {
-		go s.fireHumanMentionNotifications(context.Background(), mentionNames, projectID, key, user.ID(), senderLabel, content)
+	// Notify the human members resolved before publish. Fired in a
+	// goroutine to avoid blocking the response.
+	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
+		go s.notifyHumanMentions(context.Background(), mentionedHumans, projectID, key, user.ID(), senderLabel, content)
 	}
 
 	resp := chatMessageResponse{
