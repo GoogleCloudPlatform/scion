@@ -84,9 +84,8 @@ func externalEnvValues(cfg RunConfig, env map[string]string) map[string]string {
 	// Collect every external value per key rather than letting one source
 	// overwrite another. Which source wins in env depends on precedence
 	// (cfg.Env, harness, resolved auth, resolved secrets folded into
-	// cfg.Env); keeping
-	// all candidates means the value that reached argv is in the set
-	// whatever that precedence is.
+	// cfg.Env); keeping all candidates means the value that reached argv is
+	// in the set whatever that precedence is.
 	external := make(map[string][]string)
 
 	for _, e := range cfg.Env {
