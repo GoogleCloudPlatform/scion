@@ -50,16 +50,27 @@ var (
 	// launchWaitFallback is the default wait when the Hub does not advertise
 	// a launch budget (older Hub, async launch disabled, no active launch).
 	launchWaitFallback = 5 * time.Minute
-	// launchUnreadableGrace bounds how long an accepted launch whose status
+	// launchUnreadableGrace is how long an accepted launch whose status
 	// read is refused or answered not-found, before any read has succeeded,
-	// is retried before the wait reports the status as not readable. Right
-	// after the accept the read can fail briefly; a few seconds covers that
+	// is retried before the wait reports the status as not readable. It is
+	// the whole retry window, measured from the first failed read: the last
+	// delay is cut short so the final retry falls at its end. Right after
+	// the accept the read can fail briefly; a few seconds covers that
 	// without holding a launcher that can never read the status for long.
 	launchUnreadableGrace = 5 * time.Second
 	// launchUnreadableBackoff is the first retry delay within
 	// launchUnreadableGrace; it doubles up to launchUnreadableBackoffMax.
+	// With the defaults the retries come after 250ms, 500ms, 1s, 2s and
+	// the remaining 1.25s.
 	launchUnreadableBackoff    = 250 * time.Millisecond
 	launchUnreadableBackoffMax = 2 * time.Second
+)
+
+// launchNow and launchAfter are the clock used by the unreadable-status
+// retry; tests replace them.
+var (
+	launchNow   = time.Now
+	launchAfter = time.After
 )
 
 const (
@@ -126,11 +137,15 @@ type launchWaitOptions struct {
 	// BudgetFrom is the agent from the create response, used to derive the
 	// default wait. It may be nil; the first fetched agent is then used.
 	BudgetFrom *hubclient.Agent
-	// LaunchID is the launch ID from the Hub's accept response, when the
-	// client holds one. With it, a status read that is refused or answered
-	// not-found before any read has succeeded is retried briefly and then
-	// reported as not readable (*launchStatusUnreadableError) rather than
-	// as a deletion.
+	// Accepted reports that the Hub accepted the start being waited for:
+	// the create answer shows an active launch, or a workspace finalize
+	// dispatched the start. Then a status read that is refused or answered
+	// not-found before any read has succeeded is retried briefly and, for
+	// an agent caller, reported as not readable
+	// (*launchStatusUnreadableError) rather than as a deletion.
+	Accepted bool
+	// LaunchID is the accepted launch's ID, when the client holds one; it
+	// only names the launch in the not-readable message.
 	LaunchID string
 	// Get fetches the agent.
 	Get func(ctx context.Context) (*hubclient.Agent, error)
@@ -149,7 +164,7 @@ type launchWaitOptions struct {
 // Transient fetch errors (network, 5xx, 408, 429) are retried; other 4xx
 // answers end the wait with the Hub's error. The agent is reported deleted
 // only on a not-found after it has been read in this wait, or, for a user
-// caller, on a not-found that outlasts launchUnreadableGrace; see LaunchID
+// caller, on a not-found that outlasts launchUnreadableGrace; see Accepted
 // for an accepted launch whose status is not readable. It never changes
 // the agent.
 func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Agent, error) {
@@ -168,7 +183,7 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		getCtx, getCancel := context.WithTimeout(fetchCtx, launchFetchTimeout)
 		a, err := o.Get(getCtx)
 		getCancel()
-		if err != nil && last == nil && o.LaunchID != "" && isUnreadableStatusError(err) {
+		if err != nil && last == nil && o.Accepted && isUnreadableStatusError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
 			if err != nil && isUnreadableStatusError(err) {
 				if fetchCtx.Err() != nil {
@@ -178,7 +193,9 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 				// read as for a missing one, so neither answer means the
 				// agent is gone. A user caller is refused with 403, so a
 				// user's 404 is a definite not-found and a user's 403 keeps
-				// the login hint below.
+				// the login hint below. This follows the Hub's read check:
+				// authorizeSingleAgentRead and writeAgentNotFound in
+				// pkg/hub/handlers_agents_core.go.
 				if config.IsHubManagedAgent() {
 					return true, &launchStatusUnreadableError{Agent: o.AgentName, LaunchID: o.LaunchID, Err: err}
 				}
@@ -370,19 +387,22 @@ func isUnreadableStatusError(err error) bool {
 }
 
 // retryUnreadableStatus retries a status fetch that failed with an
-// unreadable-status error, with backoff, for at most launchUnreadableGrace.
-// It returns the first success, the first other error, or the last
-// unreadable-status error when the grace runs out or ctx ends.
+// unreadable-status error, with backoff, for launchUnreadableGrace; the last
+// delay is shortened to end at the grace. It returns the first success, the
+// first other error, or the last unreadable-status error when the grace
+// runs out or ctx ends.
 func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubclient.Agent, error), err error) (*hubclient.Agent, error) {
-	deadline := time.Now().Add(launchUnreadableGrace)
+	deadline := launchNow().Add(launchUnreadableGrace)
 	delay := launchUnreadableBackoff
-	for time.Until(deadline) >= delay {
-		timer := time.NewTimer(delay)
+	for {
+		remaining := deadline.Sub(launchNow())
+		if remaining <= 0 {
+			return nil, err
+		}
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return nil, err
-		case <-timer.C:
+		case <-launchAfter(min(delay, remaining)):
 		}
 		getCtx, getCancel := context.WithTimeout(ctx, launchFetchTimeout)
 		a, getErr := get(getCtx)
@@ -391,12 +411,8 @@ func retryUnreadableStatus(ctx context.Context, get func(context.Context) (*hubc
 			return a, getErr
 		}
 		err = getErr
-		delay *= 2
-		if delay > launchUnreadableBackoffMax {
-			delay = launchUnreadableBackoffMax
-		}
+		delay = min(delay*2, launchUnreadableBackoffMax)
 	}
-	return nil, err
 }
 
 // launchStatusUnreadableError is returned when the Hub accepted the launch
@@ -411,8 +427,12 @@ type launchStatusUnreadableError struct {
 }
 
 func (e *launchStatusUnreadableError) Error() string {
-	return fmt.Sprintf("agent '%s': launch accepted; status not readable with this credential's scope (launch %s); the launch continues on the Hub",
-		e.Agent, e.LaunchID)
+	launch := ""
+	if e.LaunchID != "" {
+		launch = fmt.Sprintf(" (launch %s)", e.LaunchID)
+	}
+	return fmt.Sprintf("agent '%s': launch accepted; status not readable with this credential's scope%s; the launch continues on the Hub",
+		e.Agent, launch)
 }
 
 func (e *launchStatusUnreadableError) Unwrap() error { return e.Err }

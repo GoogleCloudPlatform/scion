@@ -118,7 +118,13 @@ the wait stops: the launch continues on the Hub, and re-running
 SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
 Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
 example 401 or 403) stops the wait at once with the Hub's error, and the launch
-continues on the Hub. If the agent's create did not
+continues on the Hub. One exception: until the agent's status has been read
+once, a 403 or 404 for a launch the Hub accepted is retried for up to 5
+seconds. If an agent launcher still cannot read the new agent's status after
+that, the wait reports that the launch was accepted and its status is not
+readable with this credential's scope, and exits 1; the launch continues on the
+Hub. The agent is reported as deleted only on a 404 after its status was read,
+or, for a user's login, on a 404 that lasts past those 5 seconds. If the agent's create did not
 complete (for example the image could not be pulled), the error shows the
 stored template and task. Delete the agent and create it again
 (`scion delete <agent-name>`, then `scion start` with the same template and
