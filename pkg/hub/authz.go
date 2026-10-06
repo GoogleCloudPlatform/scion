@@ -1017,7 +1017,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	var relationshipFault bool
 	if !kernelAdmits || request.Explain {
 		rel := a.evaluateRelationshipCandidates(maskAllAuthzMemo(ctx), principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain,
-			&relationshipProjectAccess{memo: admissionMemo})
+			&relationshipProjectAccess{memo: admissionMemo, requestCtx: ctx})
 		// A project-access lookup fault (stage 2c) that leaves the request
 		// denied is a resolution error, not a policy fact.
 		if !kernelAdmits && rel.accepted == nil && rel.projectAccessFault {

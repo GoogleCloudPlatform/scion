@@ -160,6 +160,13 @@ type relationshipOutcome struct {
 // stage disabled; that path is not covered by this decision.
 type relationshipProjectAccess struct {
 	memo *ProjectAdmissionCache
+	// requestCtx, when set, is the request's own context, used for the
+	// stage's admission lookup instead of the memo-masked context the
+	// other stages run on. The stage evaluates the requester's own project
+	// access, so it may read the requester's memoized principals and
+	// bindings; every other stage reads on behalf of another principal and
+	// must not.
+	requestCtx context.Context
 }
 
 // isHubScopedServiceAccount reports whether the resource is a hub-scoped
@@ -398,7 +405,11 @@ func (a *AuthzService) runRelationshipStages(
 	// relationshipProjectAccessStage for the covered principals, rules and
 	// targets.
 	if projectAccess != nil {
-		if kind, detail := a.relationshipProjectAccessStage(ctx, principal, resource, permissionID, c.rule, projectAccess.memo); kind != "" {
+		stageCtx := ctx
+		if projectAccess.requestCtx != nil {
+			stageCtx = projectAccess.requestCtx
+		}
+		if kind, detail := a.relationshipProjectAccessStage(stageCtx, principal, resource, permissionID, c.rule, projectAccess.memo); kind != "" {
 			reject(kind, detail)
 			return nil, false
 		}
@@ -461,7 +472,8 @@ func projectAccessRelationshipRule(rule RelationshipRuleID) bool {
 //
 // Covered targets: any target whose structural project scope is set
 // (resourceProjectScope: a project-parented resource, or the project
-// itself; a project-parented target with no project ID is rejected), for every permission the owner and ancestor policies list on
+// itself; a project-parented target with no project ID is rejected),
+// for every permission the owner and ancestor policies list on
 // that resource type — agent create, read, list, update, delete,
 // lifecycle, attach, message, port access and the remaining agent
 // permissions; project-scoped template, harness config, skill and GCP

@@ -876,8 +876,16 @@ func TestParity_StoreCallCounts_ComputeCapabilitiesBatch(t *testing.T) {
 			plainAuthz.ComputeCapabilitiesBatch(maskAllAuthzMemo(ctx), f.user, resources, "agent")
 			k := len(ResourceActions["agent"])
 			require.Equal(t, 8, k, "test assumes 8 agent resource actions; ResourceActions[\"agent\"] changed")
-			assert.Equal(t, k*n, plainStore.countOf("GetEffectiveGroups"), "GetEffectiveGroups without the memo")
-			assert.Equal(t, k*n, plainStore.countOf("ListRoleBindingsForPrincipals"), "ListRoleBindingsForPrincipals without the memo")
+			// Without the memo, each action the kernel denies also reaches the
+			// owner/ancestor candidates, whose project-access check
+			// (ptone/scion#2141) loads the closure and bindings once more per
+			// decision. The project-member role grants one of the eight agent
+			// actions, so seven decisions per agent make that check. Under
+			// the memo (asserted above) the check reads the memo and adds
+			// nothing.
+			const relationshipChecks = 7
+			assert.Equal(t, (k+relationshipChecks)*n, plainStore.countOf("GetEffectiveGroups"), "GetEffectiveGroups without the memo")
+			assert.Equal(t, (k+relationshipChecks)*n, plainStore.countOf("ListRoleBindingsForPrincipals"), "ListRoleBindingsForPrincipals without the memo")
 			assert.Equal(t, k*n, plainStore.countOf("GetRoleDefinitionsByIDs"), "GetRoleDefinitionsByIDs without the memo")
 			assert.Equal(t, k*n*pages, plainStore.countOf("ListAccessConstraints"), "ListAccessConstraints without the memo")
 		})
@@ -2784,6 +2792,10 @@ func TestParity_R1_OwnerOnlyNoBinding(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "r1-proj", Name: "r1"}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: ownerID, Email: "r1@test.com", DisplayName: "r1", Role: "member", Status: "active"}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "r1-agent", Name: "r1-agent", ProjectID: projectID, Phase: "running", OwnerID: ownerID}))
+	// No permission-granting binding: an access-only project binding gives
+	// the owner relationship the active project access it requires
+	// (ptone/scion#2141) without granting any permission itself.
+	grantProjectAccessOnly(t, s, ownerID, projectID)
 	owner := NewAuthenticatedUser(ownerID, "r1@test.com", "r1", "member", "api")
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, OwnerID: ownerID}
 
@@ -3899,6 +3911,9 @@ func TestParity_R2_AncestorOnly(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Slug: "r2-proj", Name: "r2"}))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "r2-agent", Name: "r2-agent", ProjectID: projectID, Phase: "running", Ancestry: []string{ancestorID}}))
 	res := Resource{Type: "agent", ID: agentID, ParentType: "project", ParentID: projectID, Ancestry: []string{ancestorID}}
+	// Access-only project binding: the ancestor relationship requires active
+	// project access (ptone/scion#2141); the binding grants no permission.
+	grantProjectAccessOnly(t, s, ancestorID, projectID)
 
 	ancestor := NewAuthenticatedUser(ancestorID, "r2-ancestor@test.com", "r2a", "member", "api")
 	refDecisions, _, _, _ := runParity(t, s, ancestor, agentResourceTuples(res))
