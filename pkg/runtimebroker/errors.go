@@ -19,8 +19,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -521,6 +523,11 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // written as the retryable 503 from writeSavedProfileUnresolved; its text is
 // client-safe by construction.
 //
+// A *startContextError whose OriginalErr is a missing local file
+// (fs.ErrNotExist) is written as a 422 template_error by
+// writeMissingLocalFileError, ahead of the Hub-connectivity check, unless
+// it already carries an explicit 4xx Status.
+//
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
 // means as a client error, so collapsing just one 4xx (400) into the generic
@@ -552,6 +559,16 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		RuntimeError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
+	// A missing local file is checked ahead of the Hub-connectivity
+	// classification: *fs.PathError satisfies net.Error (it has Timeout and
+	// Temporary methods), so IsHubConnectivityError would otherwise report a
+	// file the broker could not find as a 503 hub_unreachable, even though
+	// the Hub answered (ptone/scion#3531). An explicit 4xx Status still wins.
+	if !(sce.Status >= 400 && sce.Status < 500) && errors.Is(sce.OriginalErr, fs.ErrNotExist) {
+		s.agentLifecycleLog.Warn("buildStartContext failed: local file missing", "op", op, "error", startContextDiagnostic(sce))
+		writeMissingLocalFileError(w, sce.OriginalErr, op)
+		return http.StatusUnprocessableEntity
+	}
 	if sce.IsHubError {
 		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
 			HubUnreachableError(w, sce.OriginalErr.Error())
@@ -568,6 +585,24 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 	s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
 	RuntimeError(w, runtimeOpError(op, err).Error())
 	return http.StatusInternalServerError
+}
+
+// writeMissingLocalFileError writes the 422 template_error for a file the
+// broker could not find while preparing an agent's start context (a
+// template or harness-config file, typically). The response names only the
+// missing file's base name, never its full path, since the path can be a
+// Hub-host or broker-internal location the caller has no entitlement to see.
+// The full error is logged server-side by the caller.
+func writeMissingLocalFileError(w http.ResponseWriter, err error, op string) {
+	details := map[string]interface{}{"cause": "file_not_found"}
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) && pathErr.Path != "" {
+		details["file"] = filepath.Base(pathErr.Path)
+	}
+	msg := "Failed to " + op + ": a template or harness-config file is missing on this broker. " +
+		"Re-sync the template or harness-config to the Hub; if the Hub uses local storage, " +
+		"make sure it serves those files over HTTP rather than as local file paths."
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeTemplateError, msg, details)
 }
 
 // startContextDiagnostic returns the real, underlying error a

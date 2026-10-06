@@ -18,13 +18,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
 // TestAgentLookupUnavailable_MessageText pins the exact response produced by
@@ -364,4 +368,110 @@ func TestMethodNotAllowed_AllowHeaderPerRoute(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWriteStartContextError_MissingLocalFileIsNotHubUnreachable is the
+// regression test for ptone/scion#3531. A file the broker cannot find while
+// hydrating a template or harness-config (for example, a Hub that stores
+// resources locally handing a remote broker file:// URLs for paths that only
+// exist on the Hub host) used to be reported as a 503 hub_unreachable:
+// *fs.PathError satisfies net.Error, so IsHubConnectivityError classified it
+// as a connectivity failure. It must be a 422 template_error that names the
+// missing file's base name without leaking its full path.
+func TestWriteStartContextError_MissingLocalFileIsNotHubUnreachable(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "hub-host-only", "storage", "harness-configs", "claude", "settings.json")
+	_, readErr := os.ReadFile(missing)
+	if !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("expected a not-exist error reading %s, got %v", missing, readErr)
+	}
+	// Pin the precondition that made this a bug: without the dedicated
+	// check, the raw file error reads as a Hub-connectivity error.
+	if !templatecache.IsHubConnectivityError(readErr) {
+		t.Fatalf("precondition changed: IsHubConnectivityError(%v) = false; the regression this test guards may no longer be reachable", readErr)
+	}
+
+	// Shaped as hydrateHarnessConfig/hydrateTemplate failures arrive: the
+	// resolver wraps the transfer client's read error, and buildStartContext
+	// marks it IsHubError.
+	wrapped := fmt.Errorf("failed to download file settings.json: %w", readErr)
+
+	tests := []struct {
+		name string
+		sce  *startContextError
+	}{
+		{
+			name: "harness-config hydration",
+			sce: &startContextError{
+				Status:      http.StatusInternalServerError,
+				Message:     "Failed to hydrate harness-config: " + wrapped.Error(),
+				IsHubError:  true,
+				OriginalErr: wrapped,
+			},
+		},
+		{
+			name: "template hydration, unwrapped path error",
+			sce: &startContextError{
+				Status:      http.StatusInternalServerError,
+				Message:     "Failed to hydrate template: " + readErr.Error(),
+				IsHubError:  true,
+				OriginalErr: readErr,
+			},
+		},
+		{
+			name: "non-hub start-context step",
+			sce: &startContextError{
+				Status:      http.StatusInternalServerError,
+				Message:     "prepare failed",
+				OriginalErr: wrapped,
+			},
+		},
+	}
+
+	srv := newTestServer(t)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			w := httptest.NewRecorder()
+			gotStatus := srv.writeStartContextError(w, tt.sce, "create agent")
+
+			if gotStatus != http.StatusUnprocessableEntity || w.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d (returned %d), want 422; body: %s", w.Code, gotStatus, w.Body.String())
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if resp.Error.Code != ErrCodeTemplateError {
+				t.Errorf("error code = %q, want %q", resp.Error.Code, ErrCodeTemplateError)
+			}
+			if strings.Contains(strings.ToLower(resp.Error.Message), "unreachable") {
+				t.Errorf("message must not blame Hub connectivity: %q", resp.Error.Message)
+			}
+			if !strings.HasPrefix(resp.Error.Message, "Failed to create agent: ") {
+				t.Errorf("message should be op-labeled, got %q", resp.Error.Message)
+			}
+			if got := resp.Error.Details["file"]; got != "settings.json" {
+				t.Errorf("details.file = %v, want settings.json", got)
+			}
+			if got := resp.Error.Details["cause"]; got != "file_not_found" {
+				t.Errorf("details.cause = %v, want file_not_found", got)
+			}
+			if strings.Contains(w.Body.String(), "hub-host-only") {
+				t.Errorf("response must not leak the full missing path: %s", w.Body.String())
+			}
+			if !strings.Contains(logBuf.String(), "hub-host-only") {
+				t.Errorf("server log should record the full path, got: %s", logBuf.String())
+			}
+		})
+	}
+
+	t.Run("explicit 4xx status still wins", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		sce := &startContextError{Status: http.StatusBadRequest, Message: "curated", OriginalErr: wrapped}
+		if got := srv.writeStartContextError(w, sce, "create agent"); got != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body: %s", got, w.Body.String())
+		}
+	})
 }
