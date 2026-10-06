@@ -521,8 +521,8 @@ func TestSchedLegacyUnknownDevRowDenied(t *testing.T) {
 	require.ErrorIs(t, f.fire(t, evt), errScheduledAuthorityUnrecorded)
 	f.assertNoChild(t, "sched-dev-legacy-c")
 
-	evt.InitiatorAttribution.AttributionVersion = 0
-	evt.InitiatorAttribution.InitiatorCredentialKind = store.InitiatorCredentialKindDevLocal
+	evt.AttributionVersion = 0
+	evt.InitiatorCredentialKind = store.InitiatorCredentialKindDevLocal
 	require.ErrorIs(t, f.fire(t, evt), errScheduledAuthorityUnrecorded)
 	f.assertNoChild(t, "sched-dev-legacy-c")
 }

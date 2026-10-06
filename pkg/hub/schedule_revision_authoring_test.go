@@ -428,7 +428,7 @@ func (c *concurrentReattributeStore) UpdateSchedule(ctx context.Context, sc *sto
 	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution) error {
 	if !c.fired {
 		c.fired = true
-		competing, err := c.Store.GetSchedule(ctx, sc.ID)
+		competing, err := c.GetSchedule(ctx, sc.ID)
 		if err != nil {
 			return err
 		}
