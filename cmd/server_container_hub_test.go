@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -82,6 +84,18 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 				in.PublicHubEndpoint = testIAPCloudRunURL
 				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
 				in.HubListenPort = 0
+			}),
+			want: containerHubEndpointResult{
+				Endpoint:                   "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+			},
+		},
+		{
+			name: "IAP-derived public URL without host-gateway support rewrites to the bridge host",
+			in: with(func(in *containerHubEndpointInputs) {
+				in.PublicHubEndpoint = testIAPCloudRunURL
+				in.PublicHubEndpointSource = hubEndpointSourceIAPAudience
+				in.HostGatewaySupported = func() bool { return false }
 			}),
 			want: containerHubEndpointResult{
 				Endpoint:                   "http://host.docker.internal:8080",
@@ -169,6 +183,9 @@ func TestComputeContainerHubEndpoint(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// The listen port always passes through to the result;
+			// TestBrokerContainerHubConfig checks it end to end.
+			tt.want.HubListenPort = tt.in.HubListenPort
 			got := computeContainerHubEndpoint(tt.in, nil)
 			assert.Equal(t, tt.want, got)
 		})
@@ -265,4 +282,120 @@ func TestResolveHubEndpointWithSource(t *testing.T) {
 			assert.Equal(t, tt.wantURL, resolveHubEndpoint(tt.cfg, settings))
 		})
 	}
+}
+
+func TestBrokerContainerHubConfig(t *testing.T) {
+	origEnableHub, origEnableWeb, origWebPort := enableHub, enableWeb, webPort
+	defer func() { enableHub, enableWeb, webPort = origEnableHub, origEnableWeb, origWebPort }()
+	enableHub, enableWeb, webPort = true, true, 8080
+
+	const brokerHub = "http://localhost:8080"
+	tests := []struct {
+		name        string
+		cfg         *config.GlobalConfig
+		runtimeName string
+		hubEndpoint string
+		src         hubEndpointSource
+		forceHost   bool
+		probe       bool // host-gateway support reported by the probe
+		wantProbed  bool
+		want        containerHubEndpointResult
+	}{
+		{
+			name:        "IAP source on docker returns the alias and the rewrite target",
+			cfg:         &config.GlobalConfig{},
+			runtimeName: "docker",
+			hubEndpoint: testIAPCloudRunURL,
+			src:         hubEndpointSourceIAPAudience,
+			probe:       true,
+			wantProbed:  true,
+			want: containerHubEndpointResult{
+				Endpoint:                   "http://scion-hub.internal:8080",
+				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              8080,
+			},
+		},
+		{
+			name:        "IAP source on docker without host-gateway uses the bridge host",
+			cfg:         &config.GlobalConfig{},
+			runtimeName: "docker",
+			hubEndpoint: testIAPCloudRunURL,
+			src:         hubEndpointSourceIAPAudience,
+			probe:       false,
+			wantProbed:  true,
+			want: containerHubEndpointResult{
+				Endpoint:                   "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              8080,
+			},
+		},
+		{
+			name:        "forced host networking skips the probe",
+			cfg:         &config.GlobalConfig{},
+			runtimeName: "docker",
+			hubEndpoint: testIAPCloudRunURL,
+			src:         hubEndpointSourceIAPAudience,
+			forceHost:   true,
+			want: containerHubEndpointResult{
+				Endpoint:                   "http://host.docker.internal:8080",
+				ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+				HubListenPort:              8080,
+			},
+		},
+		{
+			name:        "configured container endpoint skips the probe",
+			cfg:         &config.GlobalConfig{RuntimeBroker: config.RuntimeBrokerConfig{ContainerHubEndpoint: "http://custom:1234"}},
+			runtimeName: "docker",
+			hubEndpoint: testIAPCloudRunURL,
+			src:         hubEndpointSourceIAPAudience,
+			want:        containerHubEndpointResult{Endpoint: "http://custom:1234", HubListenPort: 8080},
+		},
+		{
+			name:        "kubernetes default runtime skips the probe and keeps the IAP URL",
+			cfg:         &config.GlobalConfig{},
+			runtimeName: "kubernetes",
+			hubEndpoint: testIAPCloudRunURL,
+			src:         hubEndpointSourceIAPAudience,
+			want:        containerHubEndpointResult{HubListenPort: 8080},
+		},
+		{
+			name:        "explicit base URL on docker routes at the public domain",
+			cfg:         &config.GlobalConfig{},
+			runtimeName: "docker",
+			hubEndpoint: "https://hub.example.com",
+			src:         hubEndpointSourceBaseURLEnv,
+			probe:       true,
+			wantProbed:  true,
+			want:        containerHubEndpointResult{Endpoint: "https://hub.example.com", HubListenPort: 8080},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.forceHost {
+				t.Setenv(runtime.ForceHostNetworkEnvVar, "1")
+			} else {
+				t.Setenv(runtime.ForceHostNetworkEnvVar, "")
+			}
+			probed := false
+			probe := func() bool { probed = true; return tt.probe }
+
+			got := brokerContainerHubConfig(tt.cfg, tt.runtimeName, brokerHub, tt.hubEndpoint, tt.src, probe, nil)
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantProbed, probed, "host-gateway probe called")
+		})
+	}
+}
+
+func TestContainerHubEndpointResultApplyTo(t *testing.T) {
+	cfg := runtimebroker.ServerConfig{BrokerID: "keep"}
+	containerHubEndpointResult{
+		Endpoint:                   "http://scion-hub.internal:8080",
+		ColocatedPublicHubEndpoint: testIAPCloudRunURL,
+		HubListenPort:              8080,
+	}.applyTo(&cfg)
+	assert.Equal(t, "http://scion-hub.internal:8080", cfg.ContainerHubEndpoint)
+	assert.Equal(t, testIAPCloudRunURL, cfg.ColocatedPublicHubEndpoint)
+	assert.Equal(t, 8080, cfg.HubListenPort)
+	assert.Equal(t, "keep", cfg.BrokerID)
 }

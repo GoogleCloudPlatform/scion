@@ -3164,25 +3164,12 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// We fall back to the legacy host.docker.internal (host networking) path
 	// when the escape hatch SCION_FORCE_HOST_NETWORK is set or the Docker
 	// daemon lacks host-gateway support.
-	chIn := containerHubEndpointInputs{
-		Configured:              cfg.RuntimeBroker.ContainerHubEndpoint,
-		HubEnabled:              enableHub,
-		BrokerHubEndpoint:       hubEndpointForRH,
-		PublicHubEndpoint:       hubEndpoint,
-		PublicHubEndpointSource: hubEndpointSrc,
-		HubListenPort:           resolveHubListenPort(cfg),
-	}
+	rtName := ""
 	if rt != nil {
-		chIn.RuntimeName = rt.Name()
+		rtName = rt.Name()
 	}
-	if chIn.Configured == "" && enableHub && hubEndpointForRH != "" && rt != nil {
-		chIn.ForceHostNetwork = os.Getenv(runtime.ForceHostNetworkEnvVar) != ""
-		if chIn.RuntimeName == "docker" && !chIn.ForceHostNetwork && !runtime.DockerSupportsHostGateway(ctx, "") {
-			log.Printf("WARNING: Docker daemon lacks host-gateway support; colocated agents will use host networking (re-introduces metadata-server port contention for concurrent agents). Upgrade Docker Engine to >= 20.10 to enable per-agent bridge networking.")
-			chIn.ForceHostNetwork = true
-		}
-	}
-	chRes := computeContainerHubEndpoint(chIn, log.Printf)
+	chRes := brokerContainerHubConfig(cfg, rtName, hubEndpointForRH, hubEndpoint, hubEndpointSrc,
+		func() bool { return runtime.DockerSupportsHostGateway(ctx, "") }, log.Printf)
 	containerHubEndpoint := chRes.Endpoint
 
 	if rt != nil && rt.Name() == "container" && containerHubEndpoint != "" {
@@ -3227,9 +3214,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		ReadTimeout:                   cfg.RuntimeBroker.ReadTimeout,
 		WriteTimeout:                  cfg.RuntimeBroker.WriteTimeout,
 		HubEndpoint:                   hubEndpointForRH,
-		ContainerHubEndpoint:          containerHubEndpoint,
-		ColocatedPublicHubEndpoint:    chRes.ColocatedPublicHubEndpoint,
-		HubListenPort:                 resolveHubListenPort(cfg),
 		BrokerID:                      brokerID,
 		BrokerName:                    brokerName,
 		CORSEnabled:                   cfg.RuntimeBroker.CORSEnabled,
@@ -3257,6 +3241,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		BrokerAuthEnabled:    true,
 		BrokerAuthStrictMode: true,
 	}
+	chRes.applyTo(&rhCfg)
 
 	// In co-located mode, hand the broker the Hub's storage backend so that a
 	// local filesystem backend is read directly (zero-copy) instead of being

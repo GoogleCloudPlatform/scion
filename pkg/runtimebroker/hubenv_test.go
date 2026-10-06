@@ -322,6 +322,30 @@ func TestApplyContainerBridgeOverride(t *testing.T) {
 			want:                 "http://host.docker.internal:8080",
 		},
 		{
+			name:                 "colocated public endpoint is rewritten for podman",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "podman",
+			want:                 "http://scion-hub.internal:8080",
+		},
+		{
+			name:                 "colocated public endpoint kept for cloudrun",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "cloudrun",
+			want:                 iapURL,
+		},
+		{
+			name:                 "colocated public endpoint kept for Apple container",
+			endpoint:             iapURL,
+			containerHubEndpoint: "http://scion-hub.internal:8080",
+			colocatedPublic:      iapURL,
+			runtimeName:          "container",
+			want:                 iapURL,
+		},
+		{
 			name:                 "other remote endpoint unchanged when colocated public is set",
 			endpoint:             "https://other.example.com",
 			containerHubEndpoint: "http://scion-hub.internal:8080",
@@ -700,6 +724,14 @@ func TestResolveEffectiveHubEndpoint_AnchorRows(t *testing.T) {
 				ContainerHubEndpoint: "http://scion-hub.internal:8080", ColocatedPublicHubEndpoint: iapPublic, RuntimeName: "docker",
 			},
 			want: "http://scion-hub.internal:8080",
+		},
+		{
+			name: "create on cloudrun: a colocated IAP public endpoint is kept",
+			in: hubEndpointInputs{
+				Op: opCreate, ReqHubEndpoint: iapPublic,
+				ContainerHubEndpoint: "http://scion-hub.internal:8080", ColocatedPublicHubEndpoint: iapPublic, RuntimeName: "cloudrun",
+			},
+			want: iapPublic,
 		},
 		{
 			name: "create on kubernetes: a colocated IAP public endpoint is kept",

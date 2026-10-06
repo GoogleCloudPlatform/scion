@@ -253,14 +253,17 @@ var bridgeHostnames = map[string]struct{}{
 
 // applyContainerBridgeOverride replaces endpoint with the container-reachable
 // containerHubEndpoint when a non-Kubernetes container cannot reach endpoint
-// itself: when endpoint is a loopback URL, or when it equals
-// colocatedPublicHubEndpoint, the colocated hub's public URL that this host
-// does not serve (e.g. an IAP-fronted Cloud Run URL).
+// itself: when endpoint is a loopback URL, or, on the docker and podman
+// runtimes only, when it equals colocatedPublicHubEndpoint, the colocated
+// hub's public URL that this host does not serve (e.g. an IAP-fronted Cloud
+// Run URL). Other runtimes (cloudrun, Apple container) keep the public URL:
+// they do not run on this host's Docker bridge.
 func applyContainerBridgeOverride(endpoint, containerHubEndpoint, colocatedPublicHubEndpoint, runtimeName string) string {
 	if containerHubEndpoint == "" || isKubernetesRuntimeName(runtimeName) {
 		return endpoint
 	}
-	if !isLocalhostEndpoint(endpoint) && !sameEndpoint(endpoint, colocatedPublicHubEndpoint) {
+	rewritePublic := isBridgeContainerRuntimeName(runtimeName) && sameEndpoint(endpoint, colocatedPublicHubEndpoint)
+	if !isLocalhostEndpoint(endpoint) && !rewritePublic {
 		return endpoint
 	}
 	bridgeURL, err := url.Parse(containerHubEndpoint)
@@ -292,6 +295,13 @@ func applyContainerBridgeOverride(endpoint, containerHubEndpoint, colocatedPubli
 	}
 	bridgeURL.Host = net.JoinHostPort(bridgeURL.Hostname(), port)
 	return bridgeURL.String()
+}
+
+// isBridgeContainerRuntimeName reports whether runtimeName runs agents as
+// local containers on this host's Docker-style bridge network, where a
+// host-gateway alias reaches the colocated hub.
+func isBridgeContainerRuntimeName(runtimeName string) bool {
+	return runtimeName == "docker" || runtimeName == "podman"
 }
 
 // sameEndpoint reports whether a and b name the same URL, ignoring a

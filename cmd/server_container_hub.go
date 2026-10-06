@@ -16,7 +16,12 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
 
 // colocatedHubHostAlias is the hostname colocated Docker agents use to reach
@@ -28,8 +33,8 @@ import (
 const colocatedHubHostAlias = "scion-hub.internal"
 
 // containerHubEndpointInputs are the facts computeContainerHubEndpoint
-// decides from. Side-effecting probes (env lookups, the Docker host-gateway
-// check) are done by the caller.
+// decides from. The Docker host-gateway check is injected as a probe and
+// only called when its answer matters.
 type containerHubEndpointInputs struct {
 	// Configured is runtime_broker.container_hub_endpoint; when set it wins.
 	Configured string
@@ -45,9 +50,12 @@ type containerHubEndpointInputs struct {
 	PublicHubEndpointSource hubEndpointSource
 	// HubListenPort is resolveHubListenPort.
 	HubListenPort int
-	// ForceHostNetwork is true when SCION_FORCE_HOST_NETWORK is set or the
-	// Docker daemon lacks host-gateway support.
+	// ForceHostNetwork is true when SCION_FORCE_HOST_NETWORK is set.
 	ForceHostNetwork bool
+	// HostGatewaySupported reports whether the Docker daemon supports
+	// host-gateway. It is called at most once, only for a Docker runtime
+	// that is not already forced onto host networking. Nil means supported.
+	HostGatewaySupported func() bool
 }
 
 // containerHubEndpointResult is what the runtime broker is configured with.
@@ -58,6 +66,37 @@ type containerHubEndpointResult struct {
 	// runtimebroker.ServerConfig.ColocatedPublicHubEndpoint: the public URL
 	// the broker rewrites to Endpoint for non-Kubernetes agents.
 	ColocatedPublicHubEndpoint string
+	// HubListenPort becomes runtimebroker.ServerConfig.HubListenPort.
+	HubListenPort int
+}
+
+// applyTo sets the runtime broker's container hub settings from r, so
+// startRuntimeBroker cannot forward one field and drop another.
+func (r containerHubEndpointResult) applyTo(cfg *runtimebroker.ServerConfig) {
+	cfg.ContainerHubEndpoint = r.Endpoint
+	cfg.ColocatedPublicHubEndpoint = r.ColocatedPublicHubEndpoint
+	cfg.HubListenPort = r.HubListenPort
+}
+
+// brokerContainerHubConfig builds the inputs computeContainerHubEndpoint
+// needs from the server configuration and returns the container hub
+// settings startRuntimeBroker hands to the runtime broker. runtimeName is
+// the broker's default runtime ("" when there is none); hubEndpoint and src
+// come from resolveHubEndpointWithSource. hostGatewayProbe checks the Docker
+// daemon for host-gateway support and is only called when needed.
+func brokerContainerHubConfig(cfg *config.GlobalConfig, runtimeName, hubEndpointForRH, hubEndpoint string, src hubEndpointSource, hostGatewayProbe func() bool, logf func(format string, args ...any)) containerHubEndpointResult {
+	in := containerHubEndpointInputs{
+		Configured:              cfg.RuntimeBroker.ContainerHubEndpoint,
+		HubEnabled:              enableHub,
+		BrokerHubEndpoint:       hubEndpointForRH,
+		RuntimeName:             runtimeName,
+		PublicHubEndpoint:       hubEndpoint,
+		PublicHubEndpointSource: src,
+		HubListenPort:           resolveHubListenPort(cfg),
+		ForceHostNetwork:        os.Getenv(runtime.ForceHostNetworkEnvVar) != "",
+		HostGatewaySupported:    hostGatewayProbe,
+	}
+	return computeContainerHubEndpoint(in, logf)
 }
 
 // computeContainerHubEndpoint decides the hub URL colocated agents are
@@ -87,17 +126,21 @@ func computeContainerHubEndpoint(in containerHubEndpointInputs, logf func(format
 		logf = func(string, ...any) {}
 	}
 	if in.Configured != "" || !in.HubEnabled || in.BrokerHubEndpoint == "" || in.RuntimeName == "" {
-		return containerHubEndpointResult{Endpoint: in.Configured}
+		return containerHubEndpointResult{Endpoint: in.Configured, HubListenPort: in.HubListenPort}
 	}
 
 	isDocker := in.RuntimeName == "docker"
+	if isDocker && !in.ForceHostNetwork && in.HostGatewaySupported != nil && !in.HostGatewaySupported() {
+		logf("WARNING: Docker daemon lacks host-gateway support; colocated agents will use host networking (re-introduces metadata-server port contention for concurrent agents). Upgrade Docker Engine to >= 20.10 to enable per-agent bridge networking.")
+		in.ForceHostNetwork = true
+	}
 	publicDomain := ""
 	if in.PublicHubEndpoint != "" && !isLocalhostURL(in.PublicHubEndpoint) {
 		publicDomain = strings.TrimRight(in.PublicHubEndpoint, "/")
 	}
 	iapDerived := publicDomain != "" && in.PublicHubEndpointSource == hubEndpointSourceIAPAudience
 
-	var res containerHubEndpointResult
+	res := containerHubEndpointResult{HubListenPort: in.HubListenPort}
 	switch {
 	case isDocker && !in.ForceHostNetwork && iapDerived && in.HubListenPort > 0:
 		res.Endpoint = fmt.Sprintf("http://%s:%d", colocatedHubHostAlias, in.HubListenPort)
