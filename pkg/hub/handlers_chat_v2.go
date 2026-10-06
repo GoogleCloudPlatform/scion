@@ -1523,9 +1523,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Translate human @firstname-lastname mentions to @email for agents.
 	// The original content is preserved for storage and human-facing display;
 	// agentContent is what the dispatched agent sees.
+	// The member list is also reused below to record human @mentions.
 	agentContent := content
+	var humanMembers []chatMemberEntry
 	if projectID != "" {
-		if humanMembers := s.resolveProjectHumanMembers(ctx, projectID); len(humanMembers) > 0 {
+		humanMembers = s.resolveProjectHumanMembers(ctx, projectID)
+		if len(humanMembers) > 0 {
 			agentContent = translateMentionsOutbound(content, humanMembers)
 		}
 	}
@@ -1888,9 +1891,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Resolve human @mentions (names that are not agents may be people)
 	// and record them before publish, as sendHumanToHuman does: clients
 	// refetch the thread list and its mention dots on this event.
+	// Matched against the member list already resolved above for mention
+	// translation, so this adds no lookup. Only names that matched no agent
+	// are candidates (agent slugs take precedence).
 	var mentionedHumans []string
-	if len(mentionNames) > 0 && projectID != "" {
-		mentionedHumans = mentionedHumanIDs(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, user.ID())
+	if humanNames := unresolvedMentionNames(mentionResults); len(humanNames) > 0 {
+		mentionedHumans = mentionedHumanIDs(humanMembers, humanNames, user.ID())
 		s.recordHumanMentions(ctx, key, storeMsg.ID, mentionedHumans)
 	}
 
@@ -5058,6 +5064,20 @@ func mentionedHumanIDs(humanMembers []chatMemberEntry, mentionNames []string, se
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// unresolvedMentionNames returns the mention names the routing plan found
+// no agent for (status "not_found"): the only names that can address a
+// human. Names resolved to agents, including over the recipient cap, are
+// excluded.
+func unresolvedMentionNames(results []messages.MentionResult) []string {
+	var names []string
+	for _, mr := range results {
+		if mr.Status == "not_found" {
+			names = append(names, mr.Slug)
+		}
+	}
+	return names
 }
 
 // notifyHumanMentions fires a mention notification to each user in userIDs.

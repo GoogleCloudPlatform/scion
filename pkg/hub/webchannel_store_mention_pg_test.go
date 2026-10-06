@@ -28,7 +28,7 @@ import (
 // TestUnreadMentionKeys_Postgres covers the Postgres-only parts of the
 // unread-mention query: the text-to-uuid cast of message_id, and the
 // UUID-shape guard that turns an empty or malformed watermark into "no
-// watermark" instead of a cast error.
+// watermark" instead of a cast error. It also covers the orphan sweep.
 //
 // It runs in a throwaway schema with a minimal messages table, so it never
 // touches an existing messages table in the target database.
@@ -99,4 +99,13 @@ func TestUnreadMentionKeys_Postgres(t *testing.T) {
 	other, err := wcs.UnreadMentionKeys(ctx, api.NewUUID(), keys)
 	require.NoError(t, err)
 	require.Empty(t, other)
+
+	// The orphan sweep drops a row whose message is gone and keeps the rest.
+	require.NoError(t, wcs.RecordMentions(ctx, "orphan", api.NewUUID(), []string{user}))
+	n, err := wcs.PurgeOrphanMentions(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	var left int
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT COUNT(*) FROM webchat_mention`).Scan(&left))
+	require.Equal(t, len(cases), left)
 }

@@ -258,6 +258,7 @@ func (s *rsWebChatStore) RecordMentions(context.Context, string, string, []strin
 func (s *rsWebChatStore) UnreadMentionKeys(context.Context, string, []string) (map[string]bool, error) {
 	return nil, nil
 }
+func (s *rsWebChatStore) PurgeOrphanMentions(context.Context) (int, error) { return 0, nil }
 
 // ==========================================================================
 // S1 — handleConversationHistory

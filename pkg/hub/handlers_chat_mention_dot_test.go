@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -521,5 +522,143 @@ func TestAgentThreadMessage_DirectPathRecordsHumanMentions(t *testing.T) {
 	keys, err := wcs.UnreadMentionKeys(ctx, alice.ID, []string{topicID})
 	if err != nil || !keys[topicID] {
 		t.Errorf("alice unread mention = %v %v; want true", keys, err)
+	}
+}
+
+// memberListCountingStore counts ListProjectMembers calls.
+type memberListCountingStore struct {
+	store.Store
+	calls atomic.Int32
+}
+
+func (c *memberListCountingStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
+	c.calls.Add(1)
+	return c.Store.ListProjectMembers(ctx, projectID)
+}
+
+// Recording human @mentions on a routed send reuses the member list the
+// send already resolves for mention translation: neither an @agent-only
+// send nor one that also cc's a person adds a member lookup. Only names
+// that matched no agent are recorded.
+func TestSendAgentRouted_MentionRecordingAddsNoMemberLookup(t *testing.T) {
+	srv, s, wcs, proj, db := setupMentionDotTest(t)
+	srv.SetDispatcher(&brokerMockDispatcher{})
+	ctx := context.Background()
+	alice := addHumanMember(t, s, proj.ID, "alice.smith@test.com", "Alice Smith")
+	for _, slug := range []string{"md-first", "md-second"} {
+		if err := s.CreateAgent(ctx, &store.Agent{ID: tid("md-agent-" + slug), ProjectID: proj.ID,
+			Name: slug, Slug: slug, Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	topicID := tid("md-agent-only")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "agent-only",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+	counting := &memberListCountingStore{Store: s}
+	srv.store = counting
+
+	send := func(content string) {
+		t.Helper()
+		counting.calls.Store(0)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+			map[string]string{"content": content})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("send: %d %s", rec.Code, rec.Body.String())
+		}
+		// The one pre-existing lookup for mention translation.
+		if n := counting.calls.Load(); n != 1 {
+			t.Errorf("%q: ListProjectMembers called %d times; want 1", content, n)
+		}
+	}
+	mentionRows := func() []string {
+		t.Helper()
+		rows, err := db.QueryContext(ctx, `SELECT user_id FROM webchat_mention`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = rows.Close() }()
+		var out []string
+		for rows.Next() {
+			var u string
+			if err := rows.Scan(&u); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, u)
+		}
+		return out
+	}
+
+	send("@md-first please ask @md-second")
+	if got := mentionRows(); len(got) != 0 {
+		t.Errorf("agent-only send recorded %v; want none", got)
+	}
+
+	send("@md-first please ask @md-second, cc @alice-smith")
+	if got := mentionRows(); len(got) != 1 || got[0] != alice.ID {
+		t.Errorf("mention rows = %v; want [%s]", got, alice.ID)
+	}
+}
+
+func TestUnresolvedMentionNames(t *testing.T) {
+	got := unresolvedMentionNames([]messages.MentionResult{
+		{Slug: "agent-a", Status: "delivered"},
+		{Slug: "alice", Status: "not_found"},
+		{Slug: "agent-capped", Status: "error"},
+		{Slug: "bob", Status: "not_found"},
+	})
+	if len(got) != 2 || got[0] != "alice" || got[1] != "bob" {
+		t.Fatalf("unresolvedMentionNames = %v; want [alice bob]", got)
+	}
+}
+
+// The failed-message retention job hard-deletes messages; it also drops
+// the mention rows of messages that no longer exist.
+func TestFailedMessageRetention_PurgesOrphanMentions(t *testing.T) {
+	srv, s, wcs, proj, db := setupMentionDotTest(t)
+	srv.config.FailedMessageRetentionDays = 1
+	ctx := context.Background()
+	topicID := tid("md-retention")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "retention",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	newMsg := func(name string, at time.Time) string {
+		m := &store.Message{ID: tid("md-ret-" + name), ProjectID: proj.ID, Sender: "user:dev@localhost",
+			SenderID: DevUserID, Recipient: "agent:a", Msg: name, Type: messages.TypeChat, Channel: "web",
+			ThreadID: topicID, DispatchState: store.MessageDispatchFailed, CreatedAt: at}
+		if err := s.CreateMessage(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+		if err := wcs.RecordMentions(ctx, topicID, m.ID, []string{tid("md-ret-user")}); err != nil {
+			t.Fatal(err)
+		}
+		return m.ID
+	}
+	old := newMsg("old", time.Now().Add(-48*time.Hour))
+	kept := newMsg("kept", time.Now())
+
+	srv.failedMessageRetentionHandler()(ctx)
+
+	if _, err := s.GetMessage(ctx, old); err == nil {
+		t.Fatal("old failed message was not purged")
+	}
+	var got []string
+	rows, err := db.QueryContext(ctx, `SELECT message_id FROM webchat_mention`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, id)
+	}
+	if len(got) != 1 || got[0] != kept {
+		t.Fatalf("mention rows = %v; want only %s", got, kept)
 	}
 }
