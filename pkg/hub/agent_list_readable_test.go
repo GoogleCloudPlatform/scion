@@ -510,43 +510,74 @@ func TestAgentListReadRule_ScopedTokenRacedRowStaysListed(t *testing.T) {
 // TestAgentListReadRule_ListRowReadReasonMarked pins the audit Reason of
 // an agent-list row read: a read allowed only through the list-row rule
 // carries listRowReadReasonMarker, and a read allowed by the ceiling
-// itself does not.
+// itself does not. It also pins the denied read records: a denied read is
+// never marked, and the plain read decision for a listed row the caller
+// owns is still recorded, and denied, when the ceiling lacks agent.read.
 func TestAgentListReadRule_ListRowReadReasonMarked(t *testing.T) {
 	f := readRuleSetup(t, 4, func(i int) bool { return i%2 == 0 })
 
-	readReasons := func(key string) (marked, unmarked int) {
+	type readCounts struct {
+		marked, unmarked int
+		deniedMarked     int
+		deniedByID       map[string]int
+	}
+	readReasons := func(key, query string) readCounts {
 		t.Helper()
 		emitter := &recordingDecisionAuditEmitter{}
 		f.srv.authzService.SetDecisionAuditEmitter(emitter)
-		rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath("limit=500"), nil)
+		rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath(query), nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		c := readCounts{deniedByID: map[string]int{}}
 		for _, r := range emitter.records {
-			if r.ResourceType != "agent" || r.Result != "allow" || r.Permission != string(ActionRead) {
+			if r.ResourceType != "agent" || r.Permission != string(ActionRead) {
 				continue
 			}
-			if strings.Contains(r.Reason, listRowReadReasonMarker) {
-				marked++
-			} else {
-				unmarked++
+			isMarked := strings.Contains(r.Reason, listRowReadReasonMarker)
+			switch {
+			case r.Result != "allow":
+				c.deniedByID[r.ResourceID]++
+				if isMarked {
+					c.deniedMarked++
+				}
+			case isMarked:
+				c.marked++
+			default:
+				c.unmarked++
 			}
 		}
-		return marked, unmarked
+		return c
 	}
 
 	listKey := mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list"})
-	marked, unmarked := readReasons(listKey)
+	c := readReasons(listKey, "limit=500")
 	// The legacy list decides each row twice: once in the count pass and
 	// once in the fill pass.
-	assert.Equal(t, 2*len(f.readable), marked, "each listed row's read is marked")
-	assert.Zero(t, unmarked)
+	assert.Equal(t, 2*len(f.readable), c.marked, "each listed row's read is marked")
+	assert.Zero(t, c.unmarked)
+	assert.Zero(t, c.deniedMarked, "a denied read is never marked")
+	for _, id := range f.readable {
+		assert.GreaterOrEqual(t, c.deniedByID[id], 1, "%s: the listed row's plain read is recorded as denied", id)
+	}
+
+	// The sorted list decides one list read per candidate, then one plain
+	// read per page row: each listed row has exactly one denied read
+	// record (its plain read), and each row that is not listed has
+	// exactly one (its list read).
+	c = readReasons(listKey, "sort=updated&limit=500")
+	assert.Equal(t, len(f.readable), c.marked, "each listed row's list read is marked")
+	assert.Zero(t, c.unmarked)
+	assert.Zero(t, c.deniedMarked, "a denied read is never marked")
+	for _, id := range f.all {
+		assert.Equal(t, 1, c.deniedByID[id], "%s: one denied read record", id)
+	}
 
 	// The member can read every agent in the project; its token holds
 	// agent:read, so the row reads (and the row capability reads) are
 	// allowed without widening.
 	readKey := mintScopedUAT(t, f.srv, f.member.ID, f.project.ID, []string{"agent:list", "agent:read"})
-	marked, unmarked = readReasons(readKey)
-	assert.Zero(t, marked, "a ceiling holding agent.read is not widened")
-	assert.GreaterOrEqual(t, unmarked, len(f.all))
+	c = readReasons(readKey, "limit=500")
+	assert.Zero(t, c.marked, "a ceiling holding agent.read is not widened")
+	assert.GreaterOrEqual(t, c.unmarked, len(f.all))
 }
 
 // TestGlobalAgentStatsCapCoversCandidateBound pins the assumption

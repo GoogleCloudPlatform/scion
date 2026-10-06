@@ -47,9 +47,12 @@ const sortedProjectDecisionCeiling = 4005
 // within 4,005 unraced for every n up to the 2,000 candidate ceiling,
 // where n is the member-read count (len(members), already capped at
 // authorizedListMaxCandidates by the time this is called), not the
-// ceiling pre-check COUNT. A raced row costs 8 at perRow=7 and up to 10
-// at perRow=8 (its plain read, the 8-action re-decision and one list
-// read), so a raced request stays within the race allowance (4,505). At
+// ceiling pre-check COUNT. A raced row costs one decision more than its
+// perRow: 8 at perRow=7 (the 8-action re-decision) and 9 at perRow=8 (its
+// plain read, the 7 remaining actions and one list read; read is not
+// re-decided, because a caller at that cost is always denied it). A page
+// or complete response holds at most 500 rows (the largest limit and fit),
+// so a raced request stays within the race allowance (4,505). At
 // perRow=7, P_eff==limit for n<=500 and P_eff<=285 at n=2,000; at
 // perRow=8, P_eff<=250 at n=2,000.
 // P_eff is NOT part of the cursor binding, so a later page computing a
@@ -365,8 +368,8 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		scopedToken = !scoped.Ceiling().Allows("agent.read")
 	}
 	// Fit requests whose complete branch would exceed the decision budget
-	// are served through the paged branch. Which rows are listed does not
-	// change.
+	// are served through the paged branch. Which agents are readable does
+	// not change; the response is an ordinary paged one.
 	perRow := pageRowDecisions
 	if scopedToken {
 		perRow = scopedPageRowDecisions
@@ -413,10 +416,9 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		// pre-check COUNT, which can be lower if the pool grew in between)
 		// and by the per-row cost, not just the request's limit, so the
 		// per-request decision cost 5+n+perRow*pageSize never exceeds the
-		// decision ceiling. pEff deliberately does
-		// not enter the cursor binding (binding, above, is built before
-		// pEff exists): n can differ from one page to the next without
-		// invalidating a cursor.
+		// decision ceiling. pEff deliberately does not enter the cursor
+		// binding (binding, above, is built before pEff exists): n can
+		// differ from one page to the next without invalidating a cursor.
 		pEff := effectivePagedPageSize(p.limit, n, perRow)
 		end := start + pEff
 		if end > len(r) {
@@ -501,20 +503,27 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 
 		var finalCap *Capabilities
 		if !resourceEqual(fullRes, memberRes) {
-			// Race: authorization inputs changed. Re-run the read decision
-			// and the remaining actions on the full row's Resource,
-			// fail-closed.
-			redecided := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, allAgentActions)[0]
-			if !capabilityAllows(redecided, ActionRead) {
-				if !scopedToken {
-					continue // no longer readable
-				}
+			// Race: authorization inputs changed. Re-run the decisions on
+			// the full row's Resource, fail-closed.
+			if scopedToken {
+				// At the higher per-row cost the plain read decision is
+				// always denied (the token ceiling lacks agent.read and
+				// every grant path applies it), so read is not re-decided:
+				// only the remaining actions are, plus the list read that
+				// keeps the row. A raced row costs 1+7+1 = 9 decisions.
+				restCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, remainingActions)[0]
 				relisted, err := s.authzService.AuthorizeListReadBatch(ctx, identity, []Resource{fullRes})
 				if err != nil || !relisted[0] {
 					continue // no longer listed
 				}
+				finalCap = mergeCapabilities(allAgentActions, &Capabilities{Actions: []string{}}, restCaps)
+			} else {
+				redecided := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, allAgentActions)[0]
+				if !capabilityAllows(redecided, ActionRead) {
+					continue // no longer readable
+				}
+				finalCap = redecided
 			}
-			finalCap = redecided
 		} else {
 			restCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, remainingActions)[0]
 			finalCap = mergeCapabilities(allAgentActions, pageReadCaps[i], restCaps)

@@ -174,3 +174,117 @@ func TestListProjectAgentsSorted_CompleteBudget_NormalAt500_Unchanged(t *testing
 	assert.Len(t, emitter.records, want)
 	assert.LessOrEqual(t, len(emitter.records), sortedProjectDecisionCeiling)
 }
+
+// TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_FallbackAppliesPhase
+// checks that a fit request served through the paged branch because of
+// the complete-branch budget applies the request's phase filter, as any
+// paged response does: only the matching agents are returned, totalCount
+// is the matching count, and the decision cost covers only those rows.
+func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_FallbackAppliesPhase(t *testing.T) {
+	n := completeBranchMaxCandidates(scopedPageRowDecisions) + 1
+	const running = 10
+
+	f := sortedListSetup(t)
+	f.createAgentsBulk(t, running, "cbphase-run", string(state.PhaseRunning), nil)
+	f.createAgentsBulk(t, n-running, "cbphase-stop", string(state.PhaseStopped), nil)
+	key := mintScopedUAT(t, f.srv, f.owner.ID, f.project.ID, []string{"agent:list"})
+
+	emitter := &recordingDecisionAuditEmitter{}
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath("sort=updated&fit=500&limit=500&phase=running"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := mustDecodeListAgentsResponse(t, rec.Body)
+
+	require.NotNil(t, resp.Complete)
+	assert.False(t, *resp.Complete, "past the boundary the paged branch is used")
+	assert.Len(t, resp.Agents, running)
+	for _, a := range resp.Agents {
+		assert.Equal(t, string(state.PhaseRunning), a.Phase, "%s: the phase filter applies to the paged response", a.ID)
+	}
+	assert.Equal(t, running, resp.TotalCount, "totalCount is the phase-filtered count")
+	assert.Empty(t, resp.NextCursor)
+
+	want := 5 + n + 8*running
+	assert.Len(t, emitter.records, want)
+	assert.LessOrEqual(t, len(emitter.records), sortedProjectDecisionCeiling)
+}
+
+// TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_RacedWorstCase_WithinRaceAllowance
+// checks, at the higher per-row cost, that a request whose every row
+// changes between the member read and the full-row read stays within the
+// race allowance (the decision ceiling plus one decision per row, for at
+// most maxSortedLimit rows) at the worst case of each branch. A raced row
+// costs its plain read, the 7 remaining actions and one list read, which is
+// 1+perRow decisions; read is not re-decided.
+//
+// Complete branch: the cost with every row raced is 5 + n*(2+perRow), which
+// grows with n, so the worst case is the largest n the complete branch
+// admits, completeBranchMaxCandidates(perRow).
+//
+// Paged branch: past that n, the cost with every row raced is
+// 5 + n + (1+perRow)*pEff(n), with pEff(n) = floor((ceiling-5-n)/perRow).
+// Each step up in n adds 1, and pEff drops by one every perRow steps,
+// removing 1+perRow, so the cost rises while pEff holds and falls when it
+// drops. The worst case is therefore the largest n that keeps pEff at its
+// value for the first paged n: n = ceiling-5 - perRow*pEff(first paged n).
+// The test also checks that choice against every n up to the candidate
+// ceiling.
+func TestListProjectAgentsSorted_CompleteBudget_HigherRowCost_RacedWorstCase_WithinRaceAllowance(t *testing.T) {
+	perRow := scopedPageRowDecisions
+	raceAllowance := sortedProjectDecisionCeiling + maxSortedLimit
+	completeMax := completeBranchMaxCandidates(perRow)
+
+	pagedCost := func(n int) int {
+		rows := effectivePagedPageSize(maxSortedLimit, n, perRow)
+		if rows > n {
+			rows = n
+		}
+		return 5 + n + (1+perRow)*rows
+	}
+	firstPagedRows := effectivePagedPageSize(maxSortedLimit, completeMax+1, perRow)
+	pagedWorst := sortedProjectDecisionCeiling - 5 - perRow*firstPagedRows
+	require.Greater(t, pagedWorst, completeMax)
+	for n := completeMax + 1; n <= authorizedListMaxCandidates; n++ {
+		require.LessOrEqual(t, pagedCost(n), pagedCost(pagedWorst), "n=%d: the paged worst case is the largest raced cost", n)
+	}
+
+	cases := []struct {
+		name     string
+		n        int
+		complete bool
+		rows     int
+	}{
+		{"complete branch", completeMax, true, completeMax},
+		{"paged branch", pagedWorst, false, firstPagedRows},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := sortedListSetup(t)
+			f.createAgentsBulk(t, tc.n, "cbraced", string(state.PhaseStopped), nil)
+			key := mintScopedUAT(t, f.srv, f.owner.ID, f.project.ID, []string{"agent:list"})
+			f.srv.store = &racingAllMembersStore{Store: f.store}
+
+			emitter := &recordingDecisionAuditEmitter{}
+			f.srv.authzService.SetDecisionAuditEmitter(emitter)
+
+			rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath("sort=updated&fit=500&limit=500"), nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			resp := mustDecodeListAgentsResponse(t, rec.Body)
+
+			require.NotNil(t, resp.Complete)
+			assert.Equal(t, tc.complete, *resp.Complete)
+			require.Len(t, resp.Agents, tc.rows, "every raced row stays listed")
+			for _, a := range resp.Agents {
+				assert.Equal(t, "true", a.Labels["raced"], "%s: the row changed after the member read", a.ID)
+				require.NotNil(t, a.Cap)
+				assert.NotContains(t, a.Cap.Actions, string(ActionRead), "%s: no read capability at the higher per-row cost", a.ID)
+			}
+
+			want := 5 + tc.n + (1+perRow)*tc.rows
+			t.Logf("n=%d rows=%d decisions=%d race allowance=%d", tc.n, tc.rows, len(emitter.records), raceAllowance)
+			assert.Len(t, emitter.records, want, "a raced row costs 1+perRow decisions")
+			assert.LessOrEqual(t, len(emitter.records), raceAllowance, "the raced request stays within the race allowance")
+		})
+	}
+}

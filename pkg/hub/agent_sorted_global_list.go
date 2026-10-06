@@ -170,7 +170,7 @@ const globalAgentStatsCap = 2000
 // agent-list rule as the items. The candidates are read as narrow members,
 // bounded by authorizedListMaxCandidates; past that bound the counts are a
 // lower bound and the [id,phase] list is omitted. Otherwise at most
-// authorizedListMaxCandidates (== globalAgentStatsCap) agents are
+// authorizedListMaxCandidates (<= globalAgentStatsCap) agents are
 // readable, so the list is always sent.
 func (s *Server) buildGlobalAgentStats(ctx context.Context, identity Identity, statsFilter store.AgentFilter, p agentListParams) (*ListAgentsStats, error) {
 	if !agentListAppliesReadRule(ctx) {
