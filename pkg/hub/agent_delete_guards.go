@@ -46,6 +46,20 @@ func deleteStopNoop(a *store.Agent) bool {
 	return deletionActive(a) || a.DeletionState == store.DeletionStateFinalizing
 }
 
+// deletedOrDeleteHeld reports whether an agent row that still exists is
+// soft-deleted or held by a delete (deleteStopNoop). With a row that is
+// gone, it is the "the agent is not live" rule shared by the created
+// publish (publishAgentCreatedIfLive), the message-broker subscription on
+// created (createdAgentLive) and the compensating delete of a landed run
+// (compensateLandedRun). A failed delete, or a deleting row whose lease
+// expired, does not count: that delete gave up.
+func deletedOrDeleteHeld(a *store.Agent) bool {
+	if a == nil {
+		return false
+	}
+	return !a.DeletedAt.IsZero() || deleteStopNoop(a)
+}
+
 // deleteBlocksStart is the start-block predicate (design §2.1):
 //
 //	deletionActive(a)
@@ -350,6 +364,7 @@ func (s *Server) reloadGuardedColumns(ctx context.Context, a *store.Agent) error
 	a.Message = fresh.Message
 	a.StateVersion = fresh.StateVersion
 	a.DeletedAt = fresh.DeletedAt
+	a.SoftDeleteOpID = fresh.SoftDeleteOpID
 	a.DeletionState = fresh.DeletionState
 	a.DeletionClaim = fresh.DeletionClaim
 	a.DeletionLeaseAt = fresh.DeletionLeaseAt

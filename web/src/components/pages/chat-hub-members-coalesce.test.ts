@@ -42,6 +42,10 @@ import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.j
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
   stateManager: Object.assign(new EventTarget(), { seedAgents: vi.fn(), setScope: vi.fn() }),
 }));
 

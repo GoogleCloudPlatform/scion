@@ -43,6 +43,9 @@
  *   focus handling: after a pick, `onSelect` has run but
  *   `onSelectionSettled` does not, since focus belongs to the reopened
  *   palette. A pick made in the closing dialog is ignored.
+ * - Keys typed from the open until the query input has focus become the
+ *   query (see {@link PaletteTypeahead}), however long the module takes
+ *   to load, rather than reaching the element focused before the open.
  * - An open is pending until its palette shows: while the element mounts
  *   (on a first open, while the module loads) or while a reopen waits out
  *   the close animation. Escape meanwhile closes it, as it would the shown
@@ -63,6 +66,7 @@ import type {
 import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
 import { deepActiveElement } from '../deep-active-element.js';
+import { PaletteTypeahead } from './palette-typeahead.js';
 
 /** What {@link QuickPaletteHostOptions.load} receives for one load. */
 export interface QuickPaletteLoadContext {
@@ -150,6 +154,8 @@ export class QuickPaletteHost {
   private pendingMount: Promise<ScionQuickPalette> | null = null;
   /** Whether {@link handlePendingEscape} is listening, while an open is pending. */
   private listeningForEscape = false;
+  /** Captures keys typed from {@link open} until the palette's input has focus. */
+  private readonly typeahead = new PaletteTypeahead();
 
   constructor(options: QuickPaletteHostOptions) {
     this.options = options;
@@ -187,6 +193,7 @@ export class QuickPaletteHost {
     }
     this.closedBySelection = false;
     this.paletteOpen = true;
+    this.typeahead.start();
     void this.load();
     if (hiding) {
       // The closing dialog no longer handles Escape, so listen for it here
@@ -225,6 +232,7 @@ export class QuickPaletteHost {
   close(): void {
     this.listenForEscape(false);
     this.paletteOpen = false;
+    this.typeahead.stop();
     if (this.palette) this.palette.open = false;
     this.abort?.abort();
   }
@@ -281,6 +289,7 @@ export class QuickPaletteHost {
         palette.label = this.options.label;
         palette.placeholder = this.options.placeholder;
         palette.groups = this.groups;
+        palette.typeahead = this.typeahead;
         palette.addEventListener('palette-select', (e) =>
           this.handleSelect(e as CustomEvent<{ target: PaletteTarget }>)
         );
@@ -351,6 +360,7 @@ export class QuickPaletteHost {
    */
   private cancelPendingOpen(): void {
     this.paletteOpen = false;
+    this.typeahead.stop();
     this.abort?.abort();
     this.invoker = null;
   }
