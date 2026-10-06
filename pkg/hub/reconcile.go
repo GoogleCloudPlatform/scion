@@ -199,12 +199,14 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		return "", err
 	}
 	var intentAt *time.Time
+	var supersedes string
 	if d.Args != "" {
 		args, err := UnmarshalStopArgs(d.Args)
 		if err != nil {
 			return "", fmt.Errorf("unmarshal stop args: %w", err)
 		}
 		intentAt = args.IntentAt
+		supersedes = args.SupersedesClaim
 		if args.RunID != "" {
 			// Stop the run the intent was queued for, not whatever run the
 			// row names now (ptone/scion#2550). agent is this call's own
@@ -259,6 +261,11 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 			// release loses its reservation until the backfill restores it.
 			s.releaseBrokerQuota(ctx, agent)
 		}
+		// The start claim held when the stop was recorded is superseded
+		// (compare-and-set on the stop's intent time, whatever the run). It
+		// is released last: released before the status write and the quota
+		// release, a new start could take it and then lose both to them.
+		s.releaseSupersededClaim(ctx, agent.ID, supersedes, *intentAt)
 	}
 	return "", nil
 }

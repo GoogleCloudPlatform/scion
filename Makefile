@@ -152,6 +152,31 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# It also includes the orphaned group-membership tests and the composite
+# purge tests (ptone/scion#2769): PurgeDeletedAgents re-reads its batch with
+# FOR UPDATE on Postgres only, and the restore-during-purge cases exercise
+# that path. A third run covers the storetest group/MembershipCleanup
+# conformance (pkg/store/storetest), selected by name so only that subtest
+# of the CRUD-parity suite runs here. The TestCompositeDeleteAgent_ and
+# TestCompositeDeleteProject_ prefixes also select the PostgreSQL-only
+# *_LockOrderNoDeadlock tests, which check that both deletes lock agent rows
+# before deleting their memberships (the purge/finalize order).
+# TestCompositeDeleteProject_LocksAgentsInIDOrder pins the ascending order of
+# that lock, and the TestPurgeDeletedAgents_ prefix selects
+# TestPurgeDeletedAgents_CrossBatchLockOrderNoDeadlock (purge batches in ID
+# order). A fourth run covers the production project-delete path in pkg/hub
+# (TestProjectDeletionService_LockOrderNoDeadlock: ProjectDeletionService
+# locks the project's agents before its project-group cascade deletes agent
+# memberships), selected by name so only that test runs here. In the second
+# run (the full entadapter suite), the TestDeleteGroupMembershipsForUser_
+# prefix also selects
+# TestDeleteGroupMembershipsForUser_LockOrderVsProjectGroupCascade (a user
+# delete locks the groups it owns before its memberships, so it cannot
+# deadlock against a project delete's group cascade) and
+# TestDeleteGroupMembershipsForUser_OwnedGroupLockAllowsMemberInsert (that
+# lock is FOR NO KEY UPDATE, so it does not block the FK check of a
+# membership inserted into an owned group, which would deadlock).
+#
 # Since ptone/scion#2207 the job runs the FULL pkg/store/entadapter suite on
 # Postgres (no -run filter); the lists above document why particular groups
 # matter here, not what is selected. Every entadapter test now has to pass on
@@ -207,6 +232,30 @@ test-launch-store-postgres:
 	if [ -n "$$unexpected" ]; then \
 		echo "ERROR: these entadapter tests were skipped on Postgres without enttest.SkipOnPostgres:" >&2; \
 		echo "$$unexpected" >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
+		./pkg/store/storetest/... > /tmp/test-launch-store-postgres-storetest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-storetest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestCompositeStore_CRUDParity/group/MembershipCleanup' /tmp/test-launch-store-postgres-storetest.log; then \
+		echo "ERROR: the storetest group/MembershipCleanup conformance did not run." >&2; \
+		exit 1; \
+	fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
+		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 20m -v \
+		-run '^TestProjectDeletionService_LockOrderNoDeadlock$$' \
+		./pkg/hub/ > /tmp/test-launch-store-postgres-hub.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-hub.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestProjectDeletionService_LockOrderNoDeadlock' /tmp/test-launch-store-postgres-hub.log; then \
+		echo "ERROR: the pkg/hub project-delete lock-order test did not run." >&2; \
 		exit 1; \
 	fi
 

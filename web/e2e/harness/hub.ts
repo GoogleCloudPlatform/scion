@@ -99,11 +99,16 @@ async function waitForHealth(
   const healthURL = `${baseURL}/healthz`;
   console.log(`[hub] Waiting for health at ${healthURL}...`);
 
+  // Last body seen, so a hub that answers but never goes healthy (e.g.
+  // degraded because its co-located broker failed to register) times out
+  // with the failing checks visible instead of no explanation.
+  let lastBody = '';
   while (Date.now() - start < timeoutMs) {
     try {
       const res = await fetch(healthURL, { signal: AbortSignal.timeout(2000) });
       if (res.ok) {
-        const body = await res.json();
+        lastBody = await res.text();
+        const body = JSON.parse(lastBody);
         if (body.status === 'healthy') {
           console.log('[hub] Hub is healthy.');
           return;
@@ -114,7 +119,10 @@ async function waitForHealth(
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error(`Hub did not become healthy within ${timeoutMs}ms`);
+  throw new Error(
+    `Hub did not become healthy within ${timeoutMs}ms` +
+      (lastBody ? `; last /healthz response: ${lastBody}` : ' (no response)'),
+  );
 }
 
 /**
