@@ -17,7 +17,10 @@ package teams
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -591,8 +594,30 @@ func TestConversationContext(t *testing.T) {
 
 // --- ProjectAgents ---
 
+// readCachedProjectAgents reads the cached agent list of projectID straight
+// from the sqlite table, or nil when there is none.
+func readCachedProjectAgents(t *testing.T, store Store, projectID string) (*ProjectAgents, error) {
+	t.Helper()
+	s, ok := store.(*sqliteStore)
+	require.True(t, ok, "unsupported store %T", store)
+	row := s.db.QueryRow(`SELECT project_id, agent_slugs, refreshed_at FROM project_agents WHERE project_id = ?`, projectID)
+	var pa ProjectAgents
+	var slugsJSON, refreshedAt string
+	err := row.Scan(&pa.ProjectID, &slugsJSON, &refreshedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	require.NoError(t, json.Unmarshal([]byte(slugsJSON), &pa.AgentSlugs))
+	pa.RefreshedAt, err = time.Parse(time.RFC3339, refreshedAt)
+	require.NoError(t, err)
+	return &pa, nil
+}
+
 func TestProjectAgents(t *testing.T) {
-	t.Run("SetAndGet", func(t *testing.T) {
+	t.Run("Set", func(t *testing.T) {
 		store := newTestStore(t)
 		ctx := context.Background()
 
@@ -603,7 +628,7 @@ func TestProjectAgents(t *testing.T) {
 		}
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "proj-1", got.ProjectID)
@@ -611,11 +636,10 @@ func TestProjectAgents(t *testing.T) {
 		assert.Equal(t, 2026, got.RefreshedAt.Year())
 	})
 
-	t.Run("GetNotFound", func(t *testing.T) {
+	t.Run("NotCached", func(t *testing.T) {
 		store := newTestStore(t)
-		ctx := context.Background()
 
-		got, err := store.GetProjectAgents(ctx, "nonexistent")
+		got, err := readCachedProjectAgents(t, store, "nonexistent")
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
@@ -635,7 +659,7 @@ func TestProjectAgents(t *testing.T) {
 		pa.RefreshedAt = time.Now().UTC().Add(time.Hour)
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, []string{"coder", "reviewer"}, got.AgentSlugs)
@@ -652,7 +676,7 @@ func TestProjectAgents(t *testing.T) {
 		}
 		require.NoError(t, store.SetProjectAgents(ctx, pa))
 
-		got, err := store.GetProjectAgents(ctx, "proj-1")
+		got, err := readCachedProjectAgents(t, store, "proj-1")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, []string{}, got.AgentSlugs)
@@ -710,12 +734,80 @@ func TestPendingAskUser(t *testing.T) {
 			ExpiresAt:      time.Now().Add(time.Hour).UTC(),
 		}))
 
-		require.NoError(t, store.MarkAskUserResponded(ctx, "req-123"))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.True(t, claimed)
 
 		got, err := store.GetPendingAskUser(ctx, "req-123")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.True(t, got.Responded)
+
+		// A second mark does not claim the request again.
+		claimed, err = store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.False(t, claimed)
+
+		// Unknown requests are not claimed.
+		claimed, err = store.MarkAskUserResponded(ctx, "missing")
+		require.NoError(t, err)
+		assert.False(t, claimed)
+	})
+
+	t.Run("ResetResponded", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID: "req-123",
+			ExpiresAt: time.Now().Add(time.Hour).UTC(),
+		}))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		require.True(t, claimed)
+
+		require.NoError(t, store.ResetAskUserResponded(ctx, "req-123"))
+		got, err := store.GetPendingAskUser(ctx, "req-123")
+		require.NoError(t, err)
+		assert.False(t, got.Responded)
+
+		claimed, err = store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		assert.True(t, claimed)
+	})
+
+	t.Run("CreateKeepsExisting", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+		expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID:      "req-123",
+			ConversationID: "conv-1",
+			AgentSlug:      "dev-1",
+			Choices:        []string{"yes"},
+			ExpiresAt:      expires,
+		}))
+		claimed, err := store.MarkAskUserResponded(ctx, "req-123")
+		require.NoError(t, err)
+		require.True(t, claimed)
+
+		require.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID:      "req-123",
+			ConversationID: "conv-2",
+			AgentSlug:      "dev-2",
+			Choices:        []string{"no"},
+			ExpiresAt:      expires.Add(24 * time.Hour),
+		}))
+
+		got, err := store.GetPendingAskUser(ctx, "req-123")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.True(t, got.Responded)
+		assert.Equal(t, "conv-1", got.ConversationID)
+		assert.Equal(t, "dev-1", got.AgentSlug)
+		assert.Equal(t, []string{"yes"}, got.Choices)
+		assert.True(t, expires.Equal(got.ExpiresAt))
 	})
 
 	t.Run("DeleteExpired", func(t *testing.T) {
@@ -922,4 +1014,25 @@ VALUES ('old-conv', 'proj-old', '2026-01-01T00:00:00Z', 0);`)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.True(t, got.ChatOnly)
+}
+
+func TestNewSQLiteStore_InMemorySharedAcrossGoroutines(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("req-%d", i)
+			assert.NoError(t, store.CreatePendingAskUser(ctx, &PendingAskUser{RequestID: id, ExpiresAt: time.Now().Add(time.Hour)}))
+			got, err := store.GetPendingAskUser(ctx, id)
+			assert.NoError(t, err)
+			assert.NotNil(t, got, "every goroutine sees the same in-memory database")
+		}(i)
+	}
+	wg.Wait()
 }

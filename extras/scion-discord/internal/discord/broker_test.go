@@ -450,7 +450,7 @@ func TestHubError_UserFacingMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := tt.err.userFacingMessage()
+			msg := tt.err.userFacingMessage("", "")
 			assert.Contains(t, msg, tt.contains)
 		})
 	}
@@ -1950,6 +1950,7 @@ func TestConfigure_SessionReplacement_ClearsSubs(t *testing.T) {
 		"db_path":   filepath.Join(t.TempDir(), "discord.db"),
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
 
 	// After Phase 1 reconfigure:
 	// - Old subs should be cleared (so Subscribe("*") would trigger startGateway)
@@ -2008,4 +2009,24 @@ func TestParseTopicComponents(t *testing.T) {
 			assert.Equal(t, tt.agentSlug, slug)
 		})
 	}
+}
+
+func TestGetProjectAgents_RefreshCarriesLinkedUser(t *testing.T) {
+	rec := &headerRecorder{}
+	hub := httptest.NewServer(rec)
+	defer hub.Close()
+
+	b := testBroker(nil)
+	b.store = newTestStore(t)
+	b.hubClient = NewHTTPHubClient(hub.URL, "", "", nil)
+	b.agentCacheTTL = 0
+
+	slugs, err := b.getProjectAgents(context.Background(), "p1", "user:alice@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"worker"}, slugs)
+
+	calls := rec.snapshot()
+	require.Len(t, calls, 1)
+	assert.Equal(t, "/api/v1/projects/p1/agents", calls[0].Path)
+	assert.Equal(t, "user:alice@example.com", calls[0].OnBehalfOf)
 }

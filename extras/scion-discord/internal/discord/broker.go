@@ -101,19 +101,35 @@ type hubError struct {
 	StatusCode int
 	Code       string `json:"code"`
 	Message    string `json:"message"`
+	// DeniedAction and ResourceType come from the error details of a
+	// denial, when present.
+	DeniedAction string `json:"-"`
+	ResourceType string `json:"-"`
 }
 
 func (e *hubError) Error() string {
 	return fmt.Sprintf("hub error %d (%s): %s", e.StatusCode, e.Code, e.Message)
 }
 
-// userFacingMessage returns a short message suitable for displaying to chat users.
-func (e *hubError) userFacingMessage() string {
+// userFacingMessage returns the text shown for a failed message delivery.
+// email is the sender's linked Scion account email and project the project
+// slug; either is "" when unknown.
+func (e *hubError) userFacingMessage(email, project string) string {
 	switch e.Code {
 	case "agent_not_found":
 		return "Target agent not found. Use `/scion agents` to see available agents."
 	case "forbidden":
-		return "You don't have permission to message this agent."
+		// The hub sends no distinct code when the linked user is unknown or
+		// inactive, so this matches on the message text.
+		if strings.HasPrefix(e.Message, "on-behalf-of principal") || strings.HasPrefix(e.Message, "sender identity") {
+			return staleLinkText
+		}
+		if action := actionPhrase(e.DeniedAction, e.ResourceType); action != "" {
+			return permissionDeniedText(email, action, project)
+		}
+		return permissionDeniedText(email, "message agents", project)
+	case "message_denied":
+		return permissionDeniedText(email, "message agents", project)
 	case "agent_not_running":
 		return "Agent is not running. It may be stopped, suspended, or in error state."
 	case "broker_auth_failed", "unauthorized":
@@ -140,6 +156,10 @@ func parseHubError(resp *http.Response) *hubError {
 		Error struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Details struct {
+				DeniedAction string `json:"denied_action"`
+				ResourceType string `json:"resource_type"`
+			} `json:"details"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Error.Code == "" {
@@ -149,6 +169,8 @@ func parseHubError(resp *http.Response) *hubError {
 	}
 	he.Code = envelope.Error.Code
 	he.Message = envelope.Error.Message
+	he.DeniedAction = envelope.Error.Details.DeniedAction
+	he.ResourceType = envelope.Error.Details.ResourceType
 	return he
 }
 
@@ -188,6 +210,11 @@ type DiscordBroker struct {
 	bootstrapDone    bool // set true after first successful bootstrap subscription
 
 	threadParents map[string]string // channelID -> parentID (cached thread lookups)
+
+	// replyCooldown holds when a throttled reply was last sent, keyed by
+	// channel, sender and reply kind.
+	replyCooldown   map[string]time.Time
+	replyCooldownMu sync.Mutex
 
 	agentCacheTTL  time.Duration
 	projectSlugMap map[string]string // injected by hub: projectID -> slug
@@ -372,6 +399,16 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 			d, err := time.ParseDuration(v)
 			if err != nil {
 				return fmt.Errorf("invalid agent_cache_ttl: %w", err)
+			}
+			if d < 0 {
+				b.log.Warn("agent_cache_ttl is negative; using the default",
+					"agent_cache_ttl", d, "default", defaultAgentCacheTTL)
+				d = defaultAgentCacheTTL
+			}
+			if d > maxAgentCacheTTL {
+				b.log.Warn("agent_cache_ttl is longer than the agent-cache retention allows; clamping",
+					"agent_cache_ttl", d, "max", maxAgentCacheTTL)
+				d = maxAgentCacheTTL
 			}
 			b.agentCacheTTL = d
 		}
@@ -1298,6 +1335,17 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		}
 	}
 
+	// Resolve the sender's link before any agent-cache access or routing:
+	// a sender the plugin cannot act as is never routed nor served cached
+	// data.
+	senderMapping, lookupErr := getUserMapping(ctx, store, b.log, m.Author.ID)
+	if lookupErr != nil || principalForMapping(senderMapping) == "" {
+		b.log.Debug("Message from unresolved sender not routed", "channel_id", channelID, "sender_id", m.Author.ID)
+		routed := config != nil && config.RoutedInboundEnabled
+		b.replyUnresolvedSender(s, m, channelID, botUserID, effectiveDefault, routed, senderMapping, lookupErr)
+		return
+	}
+
 	// Determine if routed inbound is enabled.
 	routedEnabled := config != nil && config.RoutedInboundEnabled
 
@@ -1311,14 +1359,31 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		// regardless of the agent list — pure text detection.
 		_, hasAll := extractAgentMentions(m.Content, nil)
 		if !hasAll {
-			b.handleRoutedInbound(ctx, s, m, store, link, channelID, botUserID, effectiveDefault)
+			b.handleRoutedInbound(ctx, s, m, store, link, senderMapping, channelID, botUserID, effectiveDefault)
 			return
 		}
 		// @all broadcast: fall through to legacy path below.
 	}
 
-	// Get project agents (with cache refresh) — only needed for legacy path.
-	agents := b.getProjectAgents(ctx, link.ProjectID)
+	// Get project agents (cached per user, refreshed as the sender) — only
+	// needed for the legacy path.
+	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, principalForMapping(senderMapping))
+	// agentListErrText tells the sender why their message could not be
+	// routed when no agent list is available, instead of reporting an
+	// addressed agent as unknown.
+	agentListErrText := func() string {
+		return hubErrorText(agentsErr, senderMapping.ScionEmail, link.ProjectSlug, agentListUnavailableText)
+	}
+	// replyAgentListErr tells the sender why their message was not routed.
+	// A message addressed to the bot is always answered; otherwise the
+	// reply is sent at most once per cooldown per sender and kind.
+	replyAgentListErr := func() {
+		addressed := isBotMentioned(m, botUserID) || b.isReplyToBot(m, botUserID)
+		if !addressed && b.shouldSuppressReply(channelID, m.Author.ID, "agent_list:"+agentListErrorKind(agentsErr)) {
+			return
+		}
+		s.ChannelMessageSend(channelID, agentListErrText())
+	}
 
 	// Three-tier @-mention routing (additive model: effectiveDefault is
 	// included as implicit primary when explicit agent mentions are present).
@@ -1345,6 +1410,10 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	if len(targets) == 0 {
 		// If bot was mentioned but no agent resolved, send error feedback.
 		if isBotMentioned(m, botUserID) {
+			if agentsErr != nil {
+				replyAgentListErr()
+				return
+			}
 			unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
 			if len(unresolved) > 0 {
 				errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.", strings.Join(unresolved, ", "))
@@ -1354,18 +1423,16 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		return
 	}
 
-	// Determine sender identity.
-	sender := "discord:" + m.Author.Username
-	senderID := m.Author.ID
-
-	mapping, err := store.GetUserMapping(ctx, senderID)
-	if err == nil && mapping != nil && mapping.ScionEmail != "" {
-		sender = "user:" + mapping.ScionEmail
-	} else if mapping == nil {
-		b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
-		s.ChannelMessageSend(channelID, "Please use `/scion register` first to interact with agents.")
+	// A sender the hub denies (including a link it no longer accepts) is
+	// never routed; they are told why instead.
+	if isForbiddenHubError(agentsErr) {
+		replyAgentListErr()
 		return
 	}
+
+	// Sender identity.
+	sender := principalForMapping(senderMapping)
+	senderID := m.Author.ID
 
 	// Classify mentions by position before stripping.
 	var classified ClassifiedMentions
@@ -1383,6 +1450,11 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 				hasUnknownStartMention = true
 				break
 			}
+		}
+		if hasUnknownStartMention && countAgentStartMentions(classified) == 0 && agentsErr != nil {
+			// Without an agent list the mention cannot be checked.
+			replyAgentListErr()
+			return
 		}
 		if hasUnknownStartMention && countAgentStartMentions(classified) == 0 {
 			var unresolved []string
@@ -1621,7 +1693,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 			"type", msg.Type)
 
 		if he := b.deliverInbound(topic, msg); he != nil {
-			s.ChannelMessageSend(channelID, he.userFacingMessage())
+			s.ChannelMessageSend(channelID, he.userFacingMessage(senderMapping.ScionEmail, link.ProjectSlug))
 		}
 	}
 
@@ -1662,7 +1734,7 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 
 			if he := b.deliverInbound(mentionTopic, mentionMsg); he != nil {
 				b.log.Warn("Failed to deliver mention notification",
-					"agent", bm.Name, "error", he.userFacingMessage())
+					"agent", bm.Name, "error", he.Error())
 			}
 		}
 	}
@@ -1680,33 +1752,13 @@ func (b *DiscordBroker) handleRoutedInbound(
 	m *discordgo.MessageCreate,
 	store Store,
 	link *ChannelLink,
+	mapping *DiscordUserMapping,
 	channelID, botUserID, effectiveDefault string,
 ) {
 	senderID := m.Author.ID
-
-	// Determine sender identity.
-	mapping, err := store.GetUserMapping(ctx, senderID)
-	if err != nil {
-		b.log.Error("Failed to get user mapping", "sender_id", senderID, "error", err)
-		return
-	}
-	if mapping == nil {
-		b.log.Debug("Unregistered user tried to send message (routed)", "sender_id", senderID)
-		s.ChannelMessageSend(channelID, "Please use `/scion register` first to interact with agents.")
-		return
-	}
-
-	// The routed endpoint requires "user:<email>" sender format. If the user
-	// mapping has no email, block early rather than sending to the hub which
-	// would reject with 400.
-	if mapping.ScionEmail == "" {
-		b.log.Warn("Routed inbound blocked: user has no email mapping",
-			"discord_user_id", senderID, "discord_username", mapping.DiscordUsername)
-		s.ChannelMessageSend(channelID,
-			"Your registration is incomplete — please use `/scion register` with your email to send messages.")
-		return
-	}
-	sender := "user:" + mapping.ScionEmail
+	// mapping is the sender's resolved link; the routed endpoint requires
+	// the "user:<email>" sender format.
+	sender := principalForMapping(mapping)
 
 	// Skip messages directed only at non-bot humans — these should not be
 	// routed to the hub. If no default agent is configured and no bot mention
@@ -1778,7 +1830,7 @@ func (b *DiscordBroker) handleRoutedInbound(
 
 	result, he := b.deliverRoutedInbound(link.ProjectID, effectiveDefault, msg)
 	if he != nil {
-		s.ChannelMessageSend(channelID, he.userFacingMessage())
+		s.ChannelMessageSend(channelID, he.userFacingMessage(mapping.ScionEmail, link.ProjectSlug))
 		return
 	}
 
@@ -1982,8 +2034,14 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 
 // --- Agent cache ---
 
-// getProjectAgents returns the cached agent slugs for a project, refreshing
-// from the Hub API if the cache is stale.
+// getProjectAgents returns the agent slugs of a project for routing a
+// message from the linked user onBehalfOf.
+//
+// The cache is kept per user and project: the user is only served a list
+// fetched as themselves. When their entry is stale the list is refreshed
+// from the hub as that user; a stale entry also covers a failed refresh,
+// except when the hub denies the user. A non-nil error means no list is
+// available: errNoLinkedUser without a user, otherwise the hub error.
 //
 // Known limitation: the cache has a 30s TTL (defaultAgentCacheTTL). If an agent
 // is created or renamed after the last refresh, it won't appear in the slug list
@@ -1992,52 +2050,195 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 // instead of being delivered to the mentioned agent. This is a known transient
 // gap, not addressed here — the centralized mention-routing design (Phase 4)
 // will replace this Discord-side resolution entirely.
-func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID string) []string {
+func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehalfOf string) ([]string, error) {
 	b.mu.RLock()
 	store := b.store
 	hubClient := b.hubClient
 	ttl := b.agentCacheTTL
 	b.mu.RUnlock()
 
-	if store == nil {
-		return nil
+	if onBehalfOf == "" {
+		return nil, errNoLinkedUser
 	}
+	return cachedAgentSlugs(ctx, store, hubClient, b.log, ttl, projectID, onBehalfOf)
+}
 
-	cached, err := store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
-	}
-	if cached != nil && time.Since(cached.RefreshedAt) < ttl {
-		return cached.AgentSlugs
+// cachedAgentSlugs returns the agent slugs of a project as seen by the
+// linked user onBehalfOf (non-empty), from that user's cache entry while it
+// is younger than ttl, otherwise from the hub. A stale entry of the same
+// user covers a failed refresh, except when the hub denies the request.
+func cachedAgentSlugs(ctx context.Context, store Store, hubClient HubClient, log *slog.Logger, ttl time.Duration, projectID, onBehalfOf string) ([]string, error) {
+	var cached *ProjectAgents
+	if store != nil {
+		var err error
+		cached, err = store.GetProjectAgents(ctx, onBehalfOf, projectID)
+		if err != nil {
+			log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
+		}
+		if cached != nil && time.Since(cached.RefreshedAt) < ttl {
+			return cached.AgentSlugs, nil
+		}
 	}
 
 	if hubClient == nil {
 		if cached != nil {
-			return cached.AgentSlugs
+			return cached.AgentSlugs, nil
 		}
-		return nil
+		return nil, errors.New("hub client not configured")
 	}
 
-	agents, err := hubClient.ListAgents(ctx, projectID)
+	agents, err := hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
-		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
-		if cached != nil {
-			return cached.AgentSlugs
+		log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
+		// A stale entry covers an unavailable hub, not a denial: when the
+		// user is denied (or their link is no longer accepted) the error is
+		// returned so they are told why.
+		if cached != nil && !isForbiddenHubError(err) {
+			return cached.AgentSlugs, nil
 		}
-		return nil
+		return nil, err
 	}
 
 	slugs := agentSlugs(agents)
-	saveErr := store.SetProjectAgents(ctx, &ProjectAgents{
-		ProjectID:   projectID,
-		AgentSlugs:  slugs,
-		RefreshedAt: time.Now(),
-	})
-	if saveErr != nil {
-		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
+	if store != nil {
+		saveErr := store.SetProjectAgents(ctx, &ProjectAgents{
+			User:        onBehalfOf,
+			ProjectID:   projectID,
+			AgentSlugs:  slugs,
+			RefreshedAt: time.Now(),
+		})
+		if saveErr != nil {
+			log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
+		}
 	}
+	return slugs, nil
+}
 
-	return slugs
+// msgRegisterToInteract is the reply to an unlinked sender who addresses
+// the bot.
+const msgRegisterToInteract = "Please use `/scion register` first to interact with agents."
+
+// msgSomethingWentWrong is the reply when the sender's link could not be
+// read.
+const msgSomethingWentWrong = "Something went wrong. Please try again."
+
+// replyUnresolvedSender answers a channel message whose sender cannot be
+// acted as (not linked, link without email, or lookup failure). Nothing
+// derived from the agent cache is used. A sender who addresses the bot is
+// told what to do. A sender with a link that needs re-registering, or whose
+// link could not be read, is also told when the message would go to the
+// default agent. Other messages are ignored.
+func (b *DiscordBroker) replyUnresolvedSender(s *discordgo.Session, m *discordgo.MessageCreate, channelID, botUserID, effectiveDefault string, routed bool, mapping *DiscordUserMapping, lookupErr error) {
+	addressed := isBotMentioned(m, botUserID) || b.isReplyToBot(m, botUserID)
+	text, kind := msgRegisterToInteract, ""
+	switch {
+	case lookupErr != nil:
+		text, kind = msgSomethingWentWrong, "lookup_failed"
+	case mapping != nil:
+		text, kind = staleLinkText, "stale_link"
+	}
+	if !addressed {
+		// A message that would go to the default agent is answered for a
+		// link that needs attention, at most once per cooldown per sender.
+		if kind == "" || !defaultAgentApplies(m, botUserID, effectiveDefault, routed) {
+			return
+		}
+		if b.shouldSuppressReply(channelID, m.Author.ID, "unresolved_sender:"+kind) {
+			return
+		}
+	}
+	s.ChannelMessageSend(channelID, text)
+}
+
+// replyCooldownDuration is how long a throttled reply is not repeated to
+// the same sender in the same channel.
+const replyCooldownDuration = 5 * time.Minute
+
+// shouldSuppressReply reports whether a reply of kind to senderID in
+// channelID was already sent within replyCooldownDuration; otherwise it
+// records this one and returns false.
+func (b *DiscordBroker) shouldSuppressReply(channelID, senderID, kind string) bool {
+	key := channelID + ":" + senderID + ":" + kind
+	now := time.Now()
+
+	b.replyCooldownMu.Lock()
+	defer b.replyCooldownMu.Unlock()
+	if b.replyCooldown == nil {
+		b.replyCooldown = make(map[string]time.Time)
+	}
+	if len(b.replyCooldown) > 1000 {
+		for k, t := range b.replyCooldown {
+			if now.Sub(t) >= replyCooldownDuration {
+				delete(b.replyCooldown, k)
+			}
+		}
+	}
+	if last, ok := b.replyCooldown[key]; ok && now.Sub(last) < replyCooldownDuration {
+		return true
+	}
+	b.replyCooldown[key] = now
+	return false
+}
+
+// agentListErrorKind names the kind of agent-list failure, for keying
+// throttled replies.
+func agentListErrorKind(err error) string {
+	switch {
+	case isStaleLinkError(err):
+		return "stale_link"
+	case isForbiddenHubError(err):
+		return "forbidden"
+	default:
+		return "unavailable"
+	}
+}
+
+// isReplyToBot reports whether the message replies to a message from the
+// bot, or from an agent through a webhook this plugin owns.
+func (b *DiscordBroker) isReplyToBot(m *discordgo.MessageCreate, botUserID string) bool {
+	ref := m.ReferencedMessage
+	if ref == nil {
+		return false
+	}
+	if ref.Author != nil && botUserID != "" && ref.Author.ID == botUserID && ref.WebhookID == "" {
+		return true
+	}
+	if ref.WebhookID == "" {
+		return false
+	}
+	b.mu.RLock()
+	webhooks := b.webhooks
+	b.mu.RUnlock()
+	if webhooks == nil {
+		return false
+	}
+	// Threads use their parent channel's webhook.
+	channelID := m.ChannelID
+	if parentID, isThread := b.resolveThreadParent(m.ChannelID); isThread {
+		channelID = parentID
+	}
+	return webhooks.owns(channelID, ref.WebhookID)
+}
+
+// defaultAgentApplies reports whether an unaddressed message would go to
+// the channel's default agent. It does not use the agent list. On the
+// routed path any text that is not a command, or an attachment, counts
+// when a default is set: the hub decides the routing. On the legacy path
+// the message needs text that is not a command and must not mention
+// another Discord user; a leading @name counts because the default agent
+// receives it either as the implicit primary or as the fallback.
+func defaultAgentApplies(m *discordgo.MessageCreate, botUserID, effectiveDefault string, routed bool) bool {
+	if effectiveDefault == "" {
+		return false
+	}
+	text := strings.TrimSpace(m.Content)
+	if strings.HasPrefix(text, "/") {
+		return false
+	}
+	if routed {
+		return text != "" || len(m.Attachments) > 0
+	}
+	return text != "" && !hasNonBotMentions(m.Message, botUserID)
 }
 
 // --- Routing helpers ---

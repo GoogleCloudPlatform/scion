@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -74,11 +75,20 @@ CREATE TABLE IF NOT EXISTS discord_conversation_context (
 	PRIMARY KEY (discord_user_id, project_id, agent_slug)
 );
 
-CREATE TABLE IF NOT EXISTS discord_project_agents (
-	project_id TEXT PRIMARY KEY,
+-- The agent-list cache was keyed by project only; it is now keyed by user
+-- and project. The old table only held a cache, so it is dropped.
+-- TODO: remove this DROP one release after the per-user cache ships.
+DROP TABLE IF EXISTS discord_project_agents;
+
+CREATE TABLE IF NOT EXISTS discord_user_project_agents (
+	user_principal TEXT NOT NULL,
+	project_id TEXT NOT NULL,
 	agent_slugs TEXT NOT NULL DEFAULT '[]',
-	refreshed_at TIMESTAMPTZ NOT NULL
+	refreshed_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (user_principal, project_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_discord_user_project_agents_refreshed ON discord_user_project_agents(refreshed_at);
 
 CREATE TABLE IF NOT EXISTS discord_pending_ask_users (
 	request_id TEXT PRIMARY KEY,
@@ -345,26 +355,39 @@ ORDER BY last_message_at DESC LIMIT 1`
 // --- ProjectAgents ---
 
 func (s *postgresStore) SetProjectAgents(ctx context.Context, pa *ProjectAgents) error {
+	if pa.User == "" {
+		return errors.New("save agent cache: user is required")
+	}
 	slugsJSON, err := json.Marshal(pa.AgentSlugs)
 	if err != nil {
 		return fmt.Errorf("marshal agent_slugs: %w", err)
 	}
 	const q = `
-INSERT INTO discord_project_agents (project_id, agent_slugs, refreshed_at)
-VALUES ($1, $2, $3)
-ON CONFLICT(project_id) DO UPDATE SET
+INSERT INTO discord_user_project_agents (user_principal, project_id, agent_slugs, refreshed_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT(user_principal, project_id) DO UPDATE SET
 	agent_slugs=EXCLUDED.agent_slugs, refreshed_at=EXCLUDED.refreshed_at`
-	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC())
-	return err
+	if _, err := s.db.ExecContext(ctx, q, pa.User, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC()); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM discord_user_project_agents WHERE refreshed_at < $1`, time.Now().Add(-agentCacheRetention).UTC()); err != nil {
+		// The list is saved; old rows are retried on the next save and are
+		// never served meanwhile.
+		slog.Warn("Failed to evict expired agent-cache entries", "error", err)
+	}
+	return nil
 }
 
-func (s *postgresStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM discord_project_agents WHERE project_id = $1`
-	row := s.db.QueryRowContext(ctx, q, projectID)
+func (s *postgresStore) GetProjectAgents(ctx context.Context, user, projectID string) (*ProjectAgents, error) {
+	if user == "" {
+		return nil, nil
+	}
+	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM discord_user_project_agents WHERE user_principal = $1 AND project_id = $2 AND refreshed_at >= $3`
+	row := s.db.QueryRowContext(ctx, q, user, projectID, time.Now().Add(-agentCacheRetention).UTC())
 
 	var pa ProjectAgents
 	var slugsJSON string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &pa.RefreshedAt)
+	err := row.Scan(&pa.User, &pa.ProjectID, &slugsJSON, &pa.RefreshedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

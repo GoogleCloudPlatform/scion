@@ -94,24 +94,36 @@ func (h *CallbackHandler) handleSetupProject(s *discordgo.Session, i *discordgo.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Fetch agents for the selected project.
-	agents, err := h.hubClient.ListAgents(ctx, projectID)
-	if err != nil {
-		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
-		h.respondUpdate(s, i, "Failed to fetch agents. Please try `/scion setup` again.", nil)
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		h.respondUpdate(s, i, msg, nil)
+	})
+	if !ok {
 		return
 	}
 
-	// Resolve project slug.
-	projectSlug := projectID
-	projects, projErr := h.hubClient.ListProjectsFresh(ctx)
-	if projErr == nil {
-		for _, p := range projects {
-			if p.ID == projectID {
-				projectSlug = p.DisplayName()
-				break
-			}
+	// Resolve the project slug from the user's own projects. It is "" when
+	// unknown; the link then falls back to the project ID.
+	projectSlug := ""
+	projects, projErr := h.hubClient.ListProjectsForUser(ctx, onBehalfOf)
+	if projErr != nil {
+		h.log.Warn("Failed to list user projects for slug", "project_id", projectID, "error", projErr)
+	}
+	for _, p := range projects {
+		if p.ID == projectID {
+			projectSlug = p.DisplayName()
+			break
 		}
+	}
+
+	// Fetch agents for the selected project as the invoking user.
+	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
+	if err != nil {
+		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
+		h.respondUpdate(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), projectSlug, "Failed to fetch agents. Please try `/scion setup` again."), nil)
+		return
+	}
+	if projectSlug == "" {
+		projectSlug = projectID
 	}
 
 	// Save the link immediately with no default agent.
@@ -153,6 +165,12 @@ func (h *CallbackHandler) handleSetupProject(s *discordgo.Session, i *discordgo.
 func (h *CallbackHandler) handleSetupDefaultAgent(s *discordgo.Session, i *discordgo.InteractionCreate, agentSlug string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		h.respondUpdate(s, i, msg, nil)
+	}); !ok {
+		return
+	}
 
 	link, _ := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if link == nil {
@@ -326,7 +344,7 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 
 	// Deliver the response to the hub.
 	if he := h.deliverAskUserResponse(ctx, i, pending, choice); he != nil {
-		h.respondUpdate(s, i, he.userFacingMessage(), nil)
+		h.respondUpdate(s, i, deliveryErrorText(ctx, s, h.store, h.log, he, interactionUserID(i), pending.ChannelID, pending.ProjectID), nil)
 		return
 	}
 
@@ -433,8 +451,10 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 	// Resolve the sender identity from Discord user → Scion identity.
 	discordUserID := interactionUserID(i)
 	sender := "discord:" + discordUserID
-	if mapping, err := h.store.GetUserMapping(ctx, discordUserID); err == nil && mapping != nil && mapping.ScionEmail != "" {
-		sender = "user:" + mapping.ScionEmail
+	if mapping, err := h.store.GetUserMapping(ctx, discordUserID); err == nil {
+		if principal := principalForMapping(mapping); principal != "" {
+			sender = principal
+		}
 	}
 
 	topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
@@ -467,10 +487,18 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 
 // --- Settings callback handlers ---
 
-// handleSettingsCallback toggles channel settings.
+// msgSettingsOtherChannel is the reply when a settings button is pressed in a
+// channel other than the one its panel was built for.
+const msgSettingsOtherChannel = "These settings buttons belong to another channel. Use `/scion settings` in this channel."
+
+// handleSettingsCallback toggles channel settings for the channel the button
+// was pressed in. Only linked users can toggle settings.
 // custom_id formats:
 //   - settings:observe:<channelID>      — toggle observe mode
 //   - settings:statechange:<channelID>  — toggle state change notifications
+//
+// <channelID> is the linked channel the panel was built for; a press is
+// refused when it does not match the link of the channel it was pressed in.
 func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discordgo.InteractionCreate, customID string) {
 	parts := strings.SplitN(customID, ":", 3)
 	if len(parts) < 3 {
@@ -478,16 +506,29 @@ func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discor
 		return
 	}
 	action := parts[1]
-	channelID := parts[2]
+	panelChannelID := parts[2]
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	link, err := h.store.GetChannelLink(ctx, channelID)
+	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		h.respondUpdate(s, i, msg, nil)
+	}); !ok {
+		return
+	}
+
+	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if err != nil || link == nil {
 		h.respondUpdate(s, i, "This channel is no longer linked to a project.", nil)
 		return
 	}
+	if link.ChannelID != panelChannelID {
+		h.log.Warn("Settings button pressed outside its channel",
+			"channel_id", i.ChannelID, "panel_channel_id", panelChannelID)
+		h.respondUpdate(s, i, msgSettingsOtherChannel, nil)
+		return
+	}
+	channelID := link.ChannelID
 
 	switch action {
 	case "observe":
@@ -533,6 +574,13 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// Every arm below writes a channel or thread default.
+	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		h.respondUpdate(s, i, msg, nil)
+	}); !ok {
+		return
+	}
 
 	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if err != nil || link == nil {
@@ -625,7 +673,8 @@ func (h *CallbackHandler) handleSendCallback(s *discordgo.Session, i *discordgo.
 
 // --- Notification callback handlers ---
 
-// handleNotifCallback toggles notification preferences.
+// handleNotifCallback toggles notification preferences for the project of the
+// channel the button was pressed in. Only linked users can toggle them.
 // custom_id formats:
 //   - notif:on:<agentSlug>   — enable notifications for agent
 //   - notif:off:<agentSlug>  — disable notifications for agent
@@ -644,6 +693,12 @@ func (h *CallbackHandler) handleNotifCallback(s *discordgo.Session, i *discordgo
 	defer cancel()
 
 	discordUserID := interactionUserID(i)
+
+	if _, ok := requirePrincipal(ctx, h.store, h.log, discordUserID, func(msg string) {
+		h.respondUpdate(s, i, msg, nil)
+	}); !ok {
+		return
+	}
 
 	// Look up the channel link to determine the project.
 	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
