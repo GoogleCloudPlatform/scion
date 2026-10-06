@@ -18,6 +18,8 @@ During the week of September 28 ([release notes](/scion/release-notes/2026-09-28
 
 A deleted built-in harness config (for example `claude`) or the built-in `default` template no longer comes back when the Hub restarts or is upgraded ([ptone/scion#3544](https://github.com/ptone/scion/issues/3544)). This also applies to harness configs left unselected in the setup wizard. The Hub records each built-in it has seeded in the `builtin_resources_seeded` Hub setting, and startup only creates built-ins that are not in that record. Built-ins that are new in a release are still added, and built-ins you keep still receive content updates.
 
+Until the explicit restore command arrives (`scion harness-config restore` and `scion templates restore`, the second phase of [ptone/scion#3544](https://github.com/ptone/scion/issues/3544)), you can bring back a deleted built-in only by deleting the `builtin_resources_seeded` Hub setting and restarting the Hub, or by re-creating the config by hand.
+
 Upgrade note: on the first start after upgrading, the Hub has no record yet, so built-ins you deleted since the last restart before the upgrade reappear once. Delete them again and they stay deleted.
 
 ## Migration guides
