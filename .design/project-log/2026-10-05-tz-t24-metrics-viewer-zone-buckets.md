@@ -45,6 +45,8 @@ All four findings were fixed; none declined.
 
 - Third sync: upstream main 218a758 was merged in as 1d23019, again with no rebase. `git show --remerge-diff` is empty and only this task's 14 files differ from upstream. On the merged tree, `go build ./pkg/hub/...`, the time-literals gate, the targeted pkg/hub tests, web typecheck and the three web test files all pass.
 
+- Fourth sync and upstream review fix: upstream main 1fb0950 was merged in as b3ac52b (remerge-diff empty). The metrics page now lets a request clear or set the page-wide error only when it is the newest request for its view and that view is the active tab (GoogleCloudPlatform/scion#2594 review).
+
 ## Follow-ups noticed (not done)
 
 - `QueryProjectSummary` ("Last 24 hours") stays a rolling 24h window with no buckets, so the zone does not affect it.

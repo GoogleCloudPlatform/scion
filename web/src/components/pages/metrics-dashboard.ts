@@ -305,7 +305,12 @@ export class ScionPageMetrics extends LitElement {
     const seq = ++this.requestSeq;
     this.latestRequestByView.set(view, seq);
     this.loading = true;
-    this.error = null;
+    // this.error is page-global: only a request for the active tab may clear
+    // it or set it, so a background request cannot hide or replace the error
+    // the active tab is showing.
+    if (view === this.activeTab) {
+      this.error = null;
+    }
 
     try {
       const basePath = this.projectId
@@ -345,7 +350,7 @@ export class ScionPageMetrics extends LitElement {
           break;
       }
     } catch (err) {
-      if (this.latestRequestByView.get(view) === seq) {
+      if (this.latestRequestByView.get(view) === seq && view === this.activeTab) {
         this.error = err instanceof Error ? err.message : String(err);
       }
     } finally {

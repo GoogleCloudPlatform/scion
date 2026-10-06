@@ -419,6 +419,46 @@ describe('scion-page-metrics — day-bucket zone', () => {
     expect(errorAlert(element)).toContain('stale failure');
   });
 
+  it('does not surface a failure from a view that is not the active tab', async () => {
+    element = await mountOnTab('sessions');
+    failNextResponse = true;
+    await element.loadView('model-calls');
+    await settle(element);
+    expect(errorAlert(element)).toBeNull();
+
+    // The active view failing still shows its error.
+    failNextResponse = true;
+    await element.loadView('sessions');
+    await settle(element);
+    expect(errorAlert(element)).toContain('stale failure');
+  });
+
+  it('does not surface a failure that lands after the user left that tab', async () => {
+    element = await mountOnTab('sessions');
+    const held = gate();
+    holdNextResponse = held.promise;
+    failNextResponse = true;
+    const sessionsLoad = element.loadView('sessions');
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    held.release();
+    await sessionsLoad;
+    await settle(element);
+    expect(errorAlert(element)).toBeNull();
+  });
+
+  it("does not let a background request clear the active tab's error", async () => {
+    element = await mountOnTab('sessions');
+    failNextResponse = true;
+    await element.loadView('sessions');
+    await settle(element);
+    expect(errorAlert(element)).toContain('stale failure');
+
+    await element.loadView('model-calls');
+    await settle(element);
+    expect(errorAlert(element)).toContain('stale failure');
+  });
+
   it('stops listening for zone changes once disconnected', async () => {
     element = await mountOnTab('sessions');
     element.remove();
