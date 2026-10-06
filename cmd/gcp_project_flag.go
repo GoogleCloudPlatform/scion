@@ -30,15 +30,28 @@ const gcpProjectFlagHint = "--project now selects the scion project; pass the GC
 
 // checkGCPProjectFlag detects the pre-rename invocation `... --project <gcp>`
 // on a command with a required --gcp-project flag, and returns a targeted
-// hint before cobra's required-flag check fires, since that check's generic
-// "required flag(s) \"gcp-project\" not set" message gives no clue that
-// --project changed meaning. Used as PreRunE on both `project
-// service-accounts add` (cmd/project_service_accounts.go) and `hub secret
-// migrate` (cmd/hub_secret_migrate.go); kept in its own file, rather than in
-// either of those command files, since both depend on it.
+// hint instead of cobra's generic "required flag(s) \"gcp-project\" not set"
+// message, which gives no clue that --project changed meaning.
 func checkGCPProjectFlag(cmd *cobra.Command, args []string) error {
 	if !cmd.Flags().Changed("gcp-project") && cmd.Flags().Changed("project") {
 		return errors.New(gcpProjectFlagHint)
 	}
 	return nil
+}
+
+// gcpProjectArgs wraps a command's positional-args validator with
+// checkGCPProjectFlag. It is wired as Args (not PreRunE) on `project
+// service-accounts add` (cmd/project_service_accounts.go) and `hub secret
+// migrate` / `migrate-names`: root's PersistentPreRunE enforces required
+// flags before any PreRunE runs (ptone/scion#2859), so the hint must be
+// returned in cobra's Args phase, which runs first, to beat the generic
+// required-flag error. Being an argument/flag error, it keeps the usage
+// block. Kept in its own file since several commands depend on it.
+func gcpProjectArgs(positional cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := positional(cmd, args); err != nil {
+			return err
+		}
+		return checkGCPProjectFlag(cmd, args)
+	}
 }
