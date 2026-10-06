@@ -65,6 +65,12 @@ resource "google_compute_managed_ssl_certificate" "this" {
 # a NEG by then, the read fails with a not-found error. That race is
 # deliberately NOT papered over with a sleep: re-running the apply succeeds
 # once the NEGs exist. See the README.
+#
+# Building the NEG IDs statically from var.neg_zones would not remove that
+# race: the backend-service API rejects a backend group that does not exist
+# yet, so the failure would only move from this read to the backend-service
+# create. Reading the NEGs also proves they exist in the expected zones, and
+# feeds the neg_zones_read output that hub-gke's annotation-zones check uses.
 data "google_compute_network_endpoint_group" "this" {
   for_each = toset(var.neg_zones)
 
@@ -109,7 +115,8 @@ resource "google_compute_firewall" "health_check" {
   network   = var.network
   direction = "INGRESS"
 
-  source_ranges      = local.health_check_source_ranges
+  source_ranges = local.health_check_source_ranges
+  # Valid on INGRESS: https://docs.cloud.google.com/firewall/docs/firewalls ("Destinations for ingress rules").
   destination_ranges = [var.pod_cidr]
 
   allow {
@@ -189,7 +196,7 @@ resource "google_compute_target_http_proxy" "http_redirect" {
 
   project = var.project_id
   name    = "${local.prefix}-http-proxy"
-  url_map = google_compute_url_map.http_redirect[0].id
+  url_map = one(google_compute_url_map.http_redirect[*].id)
 }
 
 resource "google_compute_global_forwarding_rule" "http_redirect" {
@@ -201,7 +208,7 @@ resource "google_compute_global_forwarding_rule" "http_redirect" {
   ip_protocol           = "TCP"
   ip_address            = google_compute_global_address.this.id
   port_range            = "80"
-  target                = google_compute_target_http_proxy.http_redirect[0].id
+  target                = one(google_compute_target_http_proxy.http_redirect[*].id)
 }
 
 # --- IAP access ---

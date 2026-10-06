@@ -90,7 +90,7 @@ resource "kubernetes_role_binding" "hub" {
   role_ref {
     api_group = "rbac.authorization.k8s.io"
     kind      = "Role"
-    name      = kubernetes_role.hub[0].metadata[0].name
+    name      = one(kubernetes_role.hub[*].metadata[0].name)
   }
 
   # Matches nothing today (GKE can't see this email without

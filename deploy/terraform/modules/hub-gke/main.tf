@@ -209,7 +209,7 @@ resource "kubernetes_secret_v1" "session" {
   }
 
   data = {
-    (local.session_secret_key) = random_password.session[0].result
+    (local.session_secret_key) = one(random_password.session[*].result)
   }
 
   type = "Opaque"
