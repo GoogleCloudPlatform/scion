@@ -73,6 +73,10 @@ func (c gcpMetricsClient) ListTimeSeries(ctx context.Context, req *monitoringpb.
 	return c.MetricClient.ListTimeSeries(ctx, req, opts...)
 }
 
+// cacheSweepThreshold is the minimum cache size at which setCache sweeps
+// expired entries.
+const cacheSweepThreshold = 256
+
 // MetricsDashboardService queries Google Cloud Monitoring for Scion telemetry metrics.
 type MetricsDashboardService struct {
 	client    metricsClient
@@ -81,6 +85,9 @@ type MetricsDashboardService struct {
 
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry
+	// sweepAt is the cache size at which setCache next sweeps expired
+	// entries (0 means cacheSweepThreshold).
+	sweepAt int
 }
 
 type cacheEntry struct {
@@ -138,7 +145,11 @@ type LabeledTimeSeries struct {
 
 // SessionsView contains session count and active agent data.
 type SessionsView struct {
-	PeriodDays   int               `json:"periodDays"`
+	PeriodDays int `json:"periodDays"`
+	// Zone is the IANA zone the daily buckets were computed in ("UTC" when
+	// the request's tz was absent or rejected), so the page labels days by
+	// the zone the data is actually in.
+	Zone         string            `json:"zone"`
 	DailyCounts  []TimeSeriesPoint `json:"dailyCounts"`
 	ActiveAgents []TimeSeriesPoint `json:"activeAgents"`
 }
@@ -146,6 +157,7 @@ type SessionsView struct {
 // ModelCallsView contains API call data grouped by model and harness.
 type ModelCallsView struct {
 	PeriodDays int                 `json:"periodDays"`
+	Zone       string              `json:"zone"` // see SessionsView.Zone
 	ByModel    []LabeledTimeSeries `json:"byModel"`
 	ByHarness  []LabeledTimeSeries `json:"byHarness"`
 }
@@ -153,6 +165,7 @@ type ModelCallsView struct {
 // TokensView contains token usage data grouped by model.
 type TokensView struct {
 	PeriodDays int                 `json:"periodDays"`
+	Zone       string              `json:"zone"` // see SessionsView.Zone
 	Input      []LabeledTimeSeries `json:"input"`
 	Output     []LabeledTimeSeries `json:"output"`
 	CacheRead  []LabeledTimeSeries `json:"cacheRead"`
@@ -172,7 +185,24 @@ func (s *MetricsDashboardService) getCached(key string) (interface{}, bool) {
 func (s *MetricsDashboardService) setCache(key string, data interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cache[key] = &cacheEntry{data: data, fetchedAt: time.Now()}
+	now := time.Now()
+	s.cache[key] = &cacheEntry{data: data, fetchedAt: now}
+	// getCached ignores expired entries but nothing else removes them, and
+	// the per-zone keys multiply the key space, so sweep expired entries once
+	// the map reaches sweepAt. The next sweep waits until the map has doubled
+	// from what survived, so the sweep cost stays amortised O(1) per insert
+	// even when most entries are live.
+	if s.sweepAt == 0 {
+		s.sweepAt = cacheSweepThreshold
+	}
+	if len(s.cache) >= s.sweepAt {
+		for k, e := range s.cache {
+			if now.Sub(e.fetchedAt) > cacheTTL {
+				delete(s.cache, k)
+			}
+		}
+		s.sweepAt = max(cacheSweepThreshold, 2*len(s.cache))
+	}
 }
 
 // QueryOption configures optional query parameters.
@@ -193,6 +223,12 @@ func WithProjectID(id string) QueryOption {
 // so a viewer west of UTC doesn't see the evening's usage under tomorrow's date.
 func WithLocation(loc *time.Location) QueryOption {
 	return func(c *queryConfig) { c.Location = loc }
+}
+
+// zoneName returns the IANA name of the bucketing zone, echoed in the
+// day-bucketed views so the page can label days by the zone actually used.
+func (c *queryConfig) zoneName() string {
+	return c.location().String()
 }
 
 // location returns the configured bucketing time zone, defaulting to UTC.
@@ -289,7 +325,7 @@ func queryGroupedMetricsView[T any](
 	periodDays int,
 	opts []QueryOption,
 	queries []groupedTimeSeriesQuery,
-	build func([][]LabeledTimeSeries) *T,
+	build func(series [][]LabeledTimeSeries, zone string) *T,
 ) (*T, error) {
 	cfg := applyQueryOptions(opts)
 	cacheKey := fmt.Sprintf("%s:%d%s", cachePrefix, periodDays, cfg.cacheKeySuffix())
@@ -306,7 +342,7 @@ func queryGroupedMetricsView[T any](
 	series, err := queryGroupedTimeSeriesSet(combined, func(metricName, groupBy string, extraFilter []string) ([]LabeledTimeSeries, error) {
 		return s.queryGroupedTimeSeries(ctx, metricName, groupBy, window.start, window.end, extraFilter, window.loc)
 	})
-	view := build(series)
+	view := build(series, cfg.zoneName())
 	if err != nil {
 		return view, err
 	}
@@ -396,7 +432,7 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
-	view := &SessionsView{PeriodDays: periodDays}
+	view := &SessionsView{PeriodDays: periodDays, Zone: cfg.zoneName()}
 	var queryErrors []string
 
 	// DailyCounts is a sum of session-count deltas, so it goes through
@@ -430,8 +466,8 @@ func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDay
 	return queryGroupedMetricsView(s, ctx, "model-calls", periodDays, opts, []groupedTimeSeriesQuery{
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.model", errorLabel: "by model"},
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.harness", errorLabel: "by harness"},
-	}, func(series [][]LabeledTimeSeries) *ModelCallsView {
-		return &ModelCallsView{PeriodDays: periodDays, ByModel: series[0], ByHarness: series[1]}
+	}, func(series [][]LabeledTimeSeries, zone string) *ModelCallsView {
+		return &ModelCallsView{PeriodDays: periodDays, Zone: zone, ByModel: series[0], ByHarness: series[1]}
 	})
 }
 
@@ -445,8 +481,8 @@ func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays in
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "output tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeOutput)}},
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache read tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheRead)}},
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache write tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheWrite)}},
-	}, func(series [][]LabeledTimeSeries) *TokensView {
-		return &TokensView{PeriodDays: periodDays, Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
+	}, func(series [][]LabeledTimeSeries, zone string) *TokensView {
+		return &TokensView{PeriodDays: periodDays, Zone: zone, Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
 	})
 }
 

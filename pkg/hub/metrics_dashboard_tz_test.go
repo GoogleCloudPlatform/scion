@@ -16,6 +16,8 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -76,6 +78,126 @@ func TestDailyBucketsUseViewerTimeZone(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, grouped, 1)
 	assert.Equal(t, local, grouped[0].Points)
+
+	// Active Agents per Day (queryDailyUniqueCount): agent a1 is seen at
+	// 11:00 CDT Sep 29, a2 at 20:00 CDT Sep 29 (Sep 30 in UTC) and a3 at
+	// 00:30 CDT Sep 30.
+	sessions := telemetrycontract.MetricSessionCount
+	agent := func(name string, end time.Time) *monitoringpb.TimeSeries {
+		return &monitoringpb.TimeSeries{
+			Metric:     &googlemetricpb.Metric{Type: metricPrefix + sessions, Labels: map[string]string{telemetrycontract.AgentLabel: name}},
+			MetricKind: googlemetricpb.MetricDescriptor_CUMULATIVE,
+			Points:     []*monitoringpb.Point{point(end, 1)},
+		}
+	}
+	client.seriesByFilter[`metric.type = "`+metricPrefix+sessions+`"`] = []*monitoringpb.TimeSeries{
+		agent("a1", time.Date(2026, 9, 29, 16, 0, 0, 0, time.UTC)),
+		agent("a2", time.Date(2026, 9, 30, 1, 0, 0, 0, time.UTC)),
+		agent("a3", time.Date(2026, 9, 30, 5, 30, 0, 0, time.UTC)),
+	}
+	groupBy := "metric.labels." + telemetrycontract.AgentLabel
+	utcAgents, err := svc.queryDailyUniqueCount(context.Background(), sessions, groupBy, start, end, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []TimeSeriesPoint{{Timestamp: "2026-09-29", Value: 1}, {Timestamp: "2026-09-30", Value: 2}}, utcAgents)
+	localAgents, err := svc.queryDailyUniqueCount(context.Background(), sessions, groupBy, start, end, nil, chicago(t))
+	require.NoError(t, err)
+	assert.Equal(t, []TimeSeriesPoint{{Timestamp: "2026-09-29", Value: 2}, {Timestamp: "2026-09-30", Value: 1}}, localAgents)
+}
+
+// TestDailyBucketsAcrossDSTFallBack: US Central falls back on 2026-11-01, so
+// that day runs 05:00Z to 06:00Z the next day (25 hours).
+func TestDailyBucketsAcrossDSTFallBack(t *testing.T) {
+	loc := chicago(t)
+	assert.Equal(t, "2026-10-31", dayKey(time.Date(2026, 11, 1, 4, 59, 0, 0, time.UTC), loc))
+	assert.Equal(t, "2026-11-01", dayKey(time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC), loc))
+	assert.Equal(t, "2026-11-01", dayKey(time.Date(2026, 11, 2, 5, 59, 0, 0, time.UTC), loc))
+	assert.Equal(t, "2026-11-02", dayKey(time.Date(2026, 11, 2, 6, 0, 0, 0, time.UTC), loc))
+}
+
+// TestServeMetricsDashboardBucketsInRequestedZone drives the HTTP handler so
+// the tz query parameter -> WithLocation wiring is covered end to end: the
+// day-bucketed views come back bucketed, and labelled, in the requested zone,
+// and fall back to UTC for an absent or rejected zone.
+func TestServeMetricsDashboardBucketsInRequestedZone(t *testing.T) {
+	// 01:00Z three days ago is the previous evening in US Central.
+	seen := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -3).Add(time.Hour)
+	utcDay := seen.Format("2006-01-02")
+	chicagoDay := seen.In(chicago(t)).Format("2006-01-02")
+	require.NotEqual(t, utcDay, chicagoDay)
+
+	serve := func(t *testing.T, query string) *httptest.ResponseRecorder {
+		t.Helper()
+		client := newFakeMetricsClient()
+		client.seriesByFilter[`metric.type = "`+metricPrefix+telemetrycontract.MetricSessionCount+`"`] = []*monitoringpb.TimeSeries{{
+			Metric:     &googlemetricpb.Metric{Type: metricPrefix + telemetrycontract.MetricSessionCount, Labels: map[string]string{telemetrycontract.AgentLabel: "a1"}},
+			MetricKind: googlemetricpb.MetricDescriptor_CUMULATIVE,
+			Points: []*monitoringpb.Point{{
+				Interval: &monitoringpb.TimeInterval{StartTime: timestamppb.New(seen.Add(-time.Minute)), EndTime: timestamppb.New(seen)},
+				Value:    &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_Int64Value{Int64Value: 1}},
+			}},
+		}}
+		client.seriesByFilter[`metric.type = "`+metricPrefix+telemetrycontract.MetricAPICalls+`"`] = []*monitoringpb.TimeSeries{{
+			Metric:     &googlemetricpb.Metric{Type: metricPrefix + telemetrycontract.MetricAPICalls, Labels: map[string]string{"model": "m", "harness": "h"}},
+			MetricKind: googlemetricpb.MetricDescriptor_CUMULATIVE,
+			Points: []*monitoringpb.Point{{
+				Interval: &monitoringpb.TimeInterval{StartTime: timestamppb.New(seen.Add(-time.Minute)), EndTime: timestamppb.New(seen)},
+				Value:    &monitoringpb.TypedValue{Value: &monitoringpb.TypedValue_Int64Value{Int64Value: 2}},
+			}},
+		}}
+		s := &Server{metricsDashboard: newContractTestService(client)}
+		rec := httptest.NewRecorder()
+		s.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/dashboard?"+query, nil))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return rec
+	}
+
+	for _, tc := range []struct {
+		tz, wantZone, wantDay string
+	}{
+		{"America%2FChicago", "America/Chicago", chicagoDay},
+		{"", "UTC", utcDay},
+		{"Local", "UTC", utcDay},
+		{"Not%2FA_Zone", "UTC", utcDay},
+	} {
+		t.Run(fmt.Sprintf("tz=%s", tc.tz), func(t *testing.T) {
+			var sessions SessionsView
+			require.NoError(t, json.Unmarshal(serve(t, "view=sessions&period=7&tz="+tc.tz).Body.Bytes(), &sessions))
+			assert.Equal(t, tc.wantZone, sessions.Zone)
+			assert.Equal(t, []TimeSeriesPoint{{Timestamp: tc.wantDay, Value: 1}}, sessions.ActiveAgents)
+			assert.Equal(t, []TimeSeriesPoint{{Timestamp: tc.wantDay, Value: 1}}, sessions.DailyCounts)
+
+			var calls ModelCallsView
+			require.NoError(t, json.Unmarshal(serve(t, "view=model-calls&period=7&tz="+tc.tz).Body.Bytes(), &calls))
+			assert.Equal(t, tc.wantZone, calls.Zone)
+			require.Len(t, calls.ByModel, 1)
+			assert.Equal(t, []TimeSeriesPoint{{Timestamp: tc.wantDay, Value: 2}}, calls.ByModel[0].Points)
+
+			var tokens TokensView
+			require.NoError(t, json.Unmarshal(serve(t, "view=tokens&period=7&tz="+tc.tz).Body.Bytes(), &tokens))
+			assert.Equal(t, tc.wantZone, tokens.Zone)
+		})
+	}
+}
+
+// TestSetCacheSweepsExpiredEntries: expired entries are evicted once the
+// cache reaches the sweep threshold, live ones are kept, and the next sweep
+// waits for the map to grow again.
+func TestSetCacheSweepsExpiredEntries(t *testing.T) {
+	svc := newContractTestService(newFakeMetricsClient())
+	stale := time.Now().Add(-2 * cacheTTL)
+	for i := 0; i < cacheSweepThreshold-2; i++ {
+		svc.cache[fmt.Sprintf("old:%d", i)] = &cacheEntry{data: i, fetchedAt: stale}
+	}
+	svc.setCache("live:0", 0)
+	assert.Len(t, svc.cache, cacheSweepThreshold-1, "below the threshold nothing is swept")
+
+	svc.setCache("live:1", 1)
+	assert.Len(t, svc.cache, 2, "reaching the threshold sweeps every expired entry")
+	for _, k := range []string{"live:0", "live:1"} {
+		_, ok := svc.getCached(k)
+		assert.True(t, ok, "live entry %s survives the sweep", k)
+	}
+	assert.Equal(t, cacheSweepThreshold, svc.sweepAt)
 }
 
 func TestQueryConfigLocation(t *testing.T) {

@@ -82,7 +82,7 @@ func TestQueryGroupedMetricsViewUsesConcreteCachedView(t *testing.T) {
 		7,
 		[]QueryOption{WithProjectID("project-1")},
 		nil,
-		func([][]LabeledTimeSeries) *ModelCallsView {
+		func([][]LabeledTimeSeries, string) *ModelCallsView {
 			t.Fatal("cache hit unexpectedly queried metrics")
 			return nil
 		},
