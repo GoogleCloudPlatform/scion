@@ -98,3 +98,24 @@ func TestFlatWake_RefusalSettlesMessage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "refused by the Runtime Broker", got.Message)
 }
+
+// TestFlatLifecycle_RefusalSettlesMessage: the same on the lifecycle start
+// and restart handlers, whose start leg runs under a start claim
+// (startAgentCore): the typed refusal reaches the handler, is relayed with
+// its own status and is recorded as the agent message.
+func TestFlatLifecycle_RefusalSettlesMessage(t *testing.T) {
+	for _, action := range []string{"start", "restart"} {
+		t.Run(action, func(t *testing.T) {
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			a := f.pinnedAgent(t, "settle-"+action, string(state.PhaseStopped))
+			f.client.returnErr = brokerMismatchErr(http.StatusConflict, f.flat.ID)
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
+			d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
+			requireNoStartMarkers(t, d)
+			assert.True(t, f.client.startCalled, "the refusal came from the start dispatch")
+			got, err := f.s.GetAgent(context.Background(), a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "refused by the Runtime Broker", got.Message)
+		})
+	}
+}
