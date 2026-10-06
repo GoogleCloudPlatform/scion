@@ -163,15 +163,21 @@ func TestHealthSummaryBrokers_WorkspaceStorage(t *testing.T) {
 	createSummaryBroker(t, s, &store.RuntimeBroker{
 		ID: tid("hs-unreported"), Name: "hs-unreported", LastHeartbeat: time.Now(),
 	})
+	createSummaryBroker(t, s, &store.RuntimeBroker{
+		ID: tid("hs-nfs-noshare"), Name: "hs-nfs-noshare", LastHeartbeat: time.Now(),
+		WorkspaceStorage: &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendNFS},
+	})
 
 	_, rows := getHealthSummaryBrokers(t, srv)
-	require.Len(t, rows, 4)
+	require.Len(t, rows, 5)
 
 	assert.JSONEq(t, `{"backend":"local"}`, string(rows[tid("hs-local")]["workspace_storage"]),
 		"nfs_healthy must be absent for a local backend")
 	assert.JSONEq(t, `{"backend":"nfs","nfs_healthy":true}`, string(rows[tid("hs-nfs-ok")]["workspace_storage"]))
 	assert.JSONEq(t, `{"backend":"nfs","nfs_healthy":false}`, string(rows[tid("hs-nfs-bad")]["workspace_storage"]))
 	assert.Equal(t, "null", string(rows[tid("hs-unreported")]["workspace_storage"]))
+	assert.JSONEq(t, `{"backend":"nfs","nfs_healthy":false}`, string(rows[tid("hs-nfs-noshare")]["workspace_storage"]),
+		"an nfs backend without a described share is reported unhealthy")
 }
 
 func TestHealthSummaryBrokers_LastHeartbeatAndVersion(t *testing.T) {
@@ -261,4 +267,38 @@ func TestHealthSummaryBrokers_ProblemRowsKeptWhenCapped(t *testing.T) {
 	assert.ElementsMatch(t, []string{tid("hs-cap-offline"), tid("hs-cap-nfs-bad")}, ids)
 	assert.Equal(t, 5, list.Total)
 	assert.True(t, list.Truncated)
+}
+
+// An empty broker status is treated as a problem in both places: the row is
+// ordered ahead of healthy rows when the list is capped, and the overall
+// status is degraded.
+func TestHealthSummaryBrokers_EmptyStatusIsProblem(t *testing.T) {
+	prev := healthSummaryBrokerLimit
+	healthSummaryBrokerLimit = 1
+	t.Cleanup(func() { healthSummaryBrokerLimit = prev })
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+	// Store order is newest first, so the empty-status broker is created
+	// first and would fall past the cap without problem-first ordering.
+	createSummaryBroker(t, s, &store.RuntimeBroker{
+		ID: tid("hs-empty-status"), Name: "hs-empty-status", LastHeartbeat: time.Now(),
+	})
+	// A heartbeat that does not state a status stores an empty one.
+	require.NoError(t, s.UpdateRuntimeBrokerHeartbeat(ctx, tid("hs-empty-status"), ""))
+	time.Sleep(2 * time.Millisecond)
+	createSummaryBroker(t, s, &store.RuntimeBroker{
+		ID: tid("hs-empty-ok"), Name: "hs-empty-ok", LastHeartbeat: time.Now(),
+	})
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	require.Len(t, resp.Brokers.Items, 1)
+	assert.Equal(t, tid("hs-empty-status"), resp.Brokers.Items[0].ID)
+	assert.Equal(t, "", resp.Brokers.Items[0].Status)
+	assert.True(t, resp.Brokers.Truncated)
+	assert.Equal(t, "degraded", resp.Status)
 }

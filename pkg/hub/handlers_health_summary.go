@@ -108,7 +108,9 @@ type HealthSummaryBroker struct {
 
 // HealthBrokerAgents holds per-broker agent counts.
 type HealthBrokerAgents struct {
-	// Total is the number of non-deleted agents placed on the broker.
+	// Total is the number of non-deleted agents placed on the broker, in
+	// any phase: it includes stopped, suspended and errored agents, not
+	// only running ones.
 	Total int `json:"total"`
 }
 
@@ -259,7 +261,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		degrade()
 	}
 	for _, b := range brokerList.Items {
-		if b.Status != "online" && b.Status != "" {
+		if healthSummaryBrokerStatusIsProblem(b.Status) {
 			degrade()
 			break
 		}
@@ -318,11 +320,20 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 // healthSummaryBrokerHasProblem reports whether a runtime broker row needs
 // attention: it is not online, or its NFS workspace share is unhealthy.
 func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
-	if b.Status != store.BrokerStatusOnline {
+	if healthSummaryBrokerStatusIsProblem(b.Status) {
 		return true
 	}
 	ws := b.WorkspaceStorage
 	return ws != nil && ws.NFSHealthy != nil && !*ws.NFSHealthy
+}
+
+// healthSummaryBrokerStatusIsProblem reports whether a broker status needs
+// attention. Anything but online counts, including an empty status: a new
+// broker is stored as offline, so an empty status only comes from a
+// heartbeat that did not state one, and an unknown status is not online.
+// Both the problem-first ordering and the overall status use this check.
+func healthSummaryBrokerStatusIsProblem(status string) bool {
+	return status != store.BrokerStatusOnline
 }
 
 // healthSummaryBroker builds one runtime broker row of the health summary.
