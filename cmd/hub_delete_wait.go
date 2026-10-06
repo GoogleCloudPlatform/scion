@@ -116,8 +116,8 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 			// as abandoned and blocks start; the client cannot tell.
 			blocked = " Starting the agent may stay blocked until a retry succeeds or force is used."
 		}
-		return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Retry with 'scion delete %s', or force-delete it from the web UI.%s",
-			code, msg, what, agentName, blocked)
+		return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Retry with 'scion delete %s', or force it with 'scion delete --force %s'.%s",
+			code, msg, what, agentName, agentName, blocked)
 	case hubclient.DeletionNotTaken:
 		return fmt.Errorf("delete did not take effect (the agent is still live and no delete is running); %s. Retry with 'scion delete %s'",
 			what, agentName)
