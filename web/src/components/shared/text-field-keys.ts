@@ -32,7 +32,7 @@ const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
  * textarea, or contenteditable content. Read-only and disabled fields are
  * not editable.
  */
-export function isEditableTextField(target: EventTarget | null): boolean {
+function isEditableTextField(target: EventTarget | null): boolean {
   if (target instanceof HTMLInputElement) {
     return TEXT_INPUT_TYPES.has(target.type) && !target.readOnly && !target.disabled;
   }
