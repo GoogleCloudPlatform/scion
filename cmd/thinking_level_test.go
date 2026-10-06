@@ -82,3 +82,26 @@ func TestStartThinkingLevelFlagAcceptsShorthands(t *testing.T) {
 		t.Errorf("--thinking-level High parsed to %d, %v; want 75", got, err)
 	}
 }
+
+// TestRunAgentRejectsExplicitEmptyThinkingLevel checks that an explicit
+// --thinking-level "" fails validation instead of being treated as unset.
+func TestRunAgentRejectsExplicitEmptyThinkingLevel(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Chdir(tmp)
+
+	f := startCmd.Flags().Lookup("thinking-level")
+	saved := thinkingLevelFlag
+	t.Cleanup(func() {
+		thinkingLevelFlag = saved
+		f.Changed = false
+	})
+	if err := startCmd.Flags().Set("thinking-level", ""); err != nil {
+		t.Fatalf("setting --thinking-level: %v", err)
+	}
+
+	err := RunAgent(startCmd, []string{"agent-x"}, false)
+	if err == nil || !strings.Contains(err.Error(), "--thinking-level") {
+		t.Fatalf("RunAgent with --thinking-level \"\": got %v, want a --thinking-level error", err)
+	}
+}
