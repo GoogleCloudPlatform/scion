@@ -244,6 +244,30 @@ func TestK8sDeleteRun_OtherRun_LeavesEverythingAndReportsMismatch(t *testing.T) 
 	}
 }
 
+// KubernetesRuntime.Stop is Delete with the caller's RunRef, run included
+// (ptone/scion#3076): a stop naming another run leaves
+// that run's pod and objects and reports ErrRunMismatch, and a stop naming
+// the pod's run removes it. Dropping ref.RunID in Stop fails this test.
+func TestK8sStop_OtherRun_LeavesPodAndReportsMismatch(t *testing.T) {
+	rt, _, _, enf := newRunScopeRuntime(t)
+	rsSeedRun(t, rt, rsLabels(rsRunB, "start-b"), corev1.PodRunning, "b")
+
+	err := rt.Stop(context.Background(), RunRef{ID: rsAgent, RunID: rsRunA})
+	if !errors.Is(err, ErrRunMismatch) {
+		t.Fatalf("Stop error = %v, want ErrRunMismatch", err)
+	}
+	rsExpect(t, rt, rsAllPresent)
+	if n := enf.count(); n != 0 {
+		t.Errorf("a mismatched stop issued %d delete calls", n)
+	}
+
+	if err := rt.Stop(context.Background(), RunRef{ID: rsAgent, RunID: rsRunB}); err != nil {
+		t.Fatalf("Stop of the pod's own run: %v", err)
+	}
+	rsExpect(t, rt, rsAllGone)
+	enf.assertAllConditional(t)
+}
+
 // The UID precondition is the real guard: the pod read by Get is run A's,
 // but it is replaced (by run B) before the delete. The newer pod survives.
 func TestK8sDeleteRun_PodRecreatedBetweenGetAndDelete_Survives(t *testing.T) {

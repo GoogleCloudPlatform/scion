@@ -327,7 +327,7 @@ func (e *ErrorRuntime) Run(ctx context.Context, config RunConfig) (string, error
 	return "", e.Err
 }
 
-func (e *ErrorRuntime) Stop(ctx context.Context, id string) error {
+func (e *ErrorRuntime) Stop(ctx context.Context, ref RunRef) error {
 	return e.Err
 }
 
