@@ -163,7 +163,7 @@ run "rotation_marker_rolls_pods" {
   }
 
   assert {
-    condition     = output.chart_values.hub.podAnnotations["scion.io/db-password-rotation"] == "2026-10-06"
+    condition     = output.chart_values.hub.podAnnotations["scion.dev/db-password-rotation"] == "2026-10-06"
     error_message = "a rotation marker must land in a pod annotation so the pods roll with the new password."
   }
 }

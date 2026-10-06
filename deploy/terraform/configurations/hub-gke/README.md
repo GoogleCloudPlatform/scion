@@ -226,7 +226,7 @@ DB password"): set `db_password_rotation` to a new value in the tfvars and
 keep it there permanently. The chart deliberately does not roll pods on a
 password-only change, because its settings checksum excludes the credential.
 So `hub-gke` puts the marker (never the password) in a pod annotation,
-`scion.io/db-password-rotation`, and the same apply rolls the pods.
+`scion.dev/db-password-rotation`, and the same apply rolls the pods.
 
 ## Health-check firewall
 

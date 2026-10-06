@@ -67,7 +67,7 @@ locals {
       },
       var.db_password_rotation == "" ? {} : {
         podAnnotations = {
-          "scion.io/db-password-rotation" = var.db_password_rotation
+          "scion.dev/db-password-rotation" = var.db_password_rotation
         }
       },
     )

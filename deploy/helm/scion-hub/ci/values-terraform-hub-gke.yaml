@@ -45,7 +45,7 @@ hub:
     - admin@example.com
   webPort: 8080
   podAnnotations:
-    scion.io/db-password-rotation: "2026-10-06"
+    scion.dev/db-password-rotation: "2026-10-06"
 
 serviceAccount:
   create: true
