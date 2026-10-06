@@ -42,6 +42,7 @@ export interface HealthSummaryBroker {
   runtime: { type: string; profile?: string } | null;
   /** Null when the broker never reported its workspace storage. */
   workspace_storage: { backend: string; nfs_healthy?: boolean } | null;
+  /** Per-broker agent counts: total from P1, running and attention from P3. */
   agents?: { running?: number; attention?: number; total?: number };
 }
 
@@ -281,6 +282,7 @@ export class ScionHealthBrokerTable extends LitElement {
     const runtime = b.runtime?.type;
     const profile = b.runtime?.profile;
     const agents = b.agents ?? {};
+    const total = agents.total;
     return html`
       <tr data-broker-id=${b.id}>
         <td class="name"><a href="/brokers/${encodeURIComponent(b.id)}">${b.name || b.id}</a></td>
@@ -299,8 +301,8 @@ export class ScionHealthBrokerTable extends LitElement {
             : html`<span class="pill tone-${storage.tone}">${storage.text}</span>`}
         </td>
         <td class="agents num">
-          ${typeof agents.total === 'number'
-            ? agents.total
+          ${typeof total === 'number'
+            ? total
             : html`<span class="muted">—</span>`}${typeof agents.running === 'number'
             ? html` <span class="muted">(${agents.running} running)</span>`
             : nothing}${agents.attention

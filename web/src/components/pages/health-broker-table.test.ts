@@ -149,6 +149,23 @@ describe('scion-health-broker-table neutral values', () => {
   it('shows a dash in the agents cell when agents are not reported', async () => {
     const root = await mount(list([broker({ agents: undefined })]));
     expect(cell(rows(root)[0]!, 'agents')).toBe('—');
+    const partial = await mount(list([broker({ agents: { total: 4 } })]));
+    expect(cell(rows(partial)[0]!, 'agents')).toBe('4');
+  });
+
+  it('keeps the dash when agents is an empty object', async () => {
+    const root = await mount(list([broker({ agents: {} })]));
+    expect(cell(rows(root)[0]!, 'agents')).toBe('—');
+  });
+
+  it('shows a degraded broker as a problem with a warning status', async () => {
+    const root = await mount(
+      list([broker({ id: 'a', name: 'a' }), broker({ id: 'd', name: 'z', status: 'degraded' })])
+    );
+    expect(rows(root)[0]?.dataset.brokerId).toBe('d');
+    expect(rows(root)[0]?.querySelector('td.status .tone-warn')?.textContent?.trim()).toBe(
+      'degraded'
+    );
   });
 
   it('renders no empty title attributes', async () => {
