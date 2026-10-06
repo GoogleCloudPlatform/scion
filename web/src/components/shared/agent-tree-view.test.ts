@@ -1222,6 +1222,21 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
     }
   });
 
+  it('centers a deep-linked agent at the same zoom as a jump to it', async () => {
+    const agents = el.agents;
+    el.remove();
+    el = document.createElement('scion-agent-tree-view');
+    el.focusId = 'k2';
+    el.agents = agents;
+    document.body.appendChild(el);
+    await settle();
+
+    const name = node('k2')!.querySelector<HTMLElement>('.name')!;
+    const fontPx = parseFloat(getComputedStyle(name).fontSize);
+    expect(fontPx).toBeGreaterThan(0);
+    expectCenteredOn('k2', 16 / fontPx);
+  });
+
   it("derives the zoom from the name label's computed font size", async () => {
     const real = window.getComputedStyle.bind(window);
     const spy = vi

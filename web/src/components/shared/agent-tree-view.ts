@@ -912,11 +912,10 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   /**
-   * Centers the viewport on one node at `scale` (1:1 by default, for
-   * deep-link focus). Returns false, changing nothing, while the canvas has
-   * no size.
+   * Centers the viewport on one node at `scale`. Returns false, changing
+   * nothing, while the canvas has no size.
    */
-  private centerOn(n: PositionedNode, scale = 1): boolean {
+  private centerOn(n: PositionedNode, scale: number): boolean {
     const canvas = this.canvasEl;
     if (!canvas) return false;
     const rect = canvas.getBoundingClientRect();
@@ -1246,7 +1245,8 @@ export class ScionAgentTreeView extends LitElement {
     const agentById = this.getAgentById(agents);
 
     // First render with content: center on the deep-linked agent if there is
-    // one (and it survived filtering), otherwise fit the forest.
+    // one (and it survived filtering), at the same zoom as a jump to it,
+    // otherwise fit the forest.
     // Only commit didAutoFit = true once the canvas has a non-zero size
     // (it can be 0 when the component is hidden or mid-CSS-transition), so
     // the fit retries on the next render rather than getting permanently
@@ -1267,7 +1267,7 @@ export class ScionAgentTreeView extends LitElement {
         }
         this.didAutoFit = true;
         if (focus) {
-          this.centerOn(focus);
+          this.centerOn(focus, this.jumpScaleFor(focus.agent.id));
         } else {
           this.fitToView(capturedW, capturedH);
         }
