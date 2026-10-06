@@ -1623,6 +1623,31 @@ describe('400 invalid_role_set', () => {
     expect(el.dlgInfo).toBe(CATALOG_REFRESHED_MESSAGE);
     expect(el.dialogOpen).toBe(true);
   });
+
+  it('replaces a picked None in Edit mode once the refresh drops the last custom role', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    el.openEditDialog(DAVE);
+    await el.updateComplete;
+    const groupEl = q<HTMLInputElement>(el, 'sl-radio-group')!;
+    groupEl.value = NO_PROJECT_ROLE;
+    groupEl.dispatchEvent(new Event('sl-change'));
+    expect(el.dlgBuiltIn).toBe(NO_PROJECT_ROLE);
+    el.toggleCustomRole('r-msg', true);
+    routeApi(
+      (url, init) =>
+        init?.method === 'PUT'
+          ? apiError(400, 'invalid_role_set', 'unknown role definition: r-msg', {
+              roleDefinitionId: 'r-msg',
+            })
+          : undefined,
+      catalogRoute([R_OWNER, R_ADMIN, R_MEMBER])
+    );
+    await el.handleSave();
+    await el.updateComplete;
+    expect(el.dlgBuiltIn).toBe('r-member');
+    expect(q<HTMLElement & { value: string }>(el, 'sl-radio-group')?.value).toBe('r-member');
+    expect(q(el, '.validation-warning')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

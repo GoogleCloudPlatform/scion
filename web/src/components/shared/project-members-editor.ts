@@ -973,7 +973,7 @@ export class ScionProjectMembersEditor extends LitElement {
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
-    this.syncAddDefault(changed);
+    this.syncBuiltInSelection(changed);
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -1137,17 +1137,28 @@ export class ScionProjectMembersEditor extends LitElement {
   }
 
   /**
+   * Keeps the built-in radio selection valid as the inputs change. Invariant,
+   * for both modes: a hidden None is never left selected.
+   *
    * Add mode can open before the role catalog has loaded (the Add button
    * appears as soon as the capabilities arrive), when the only possible
    * default is None. While the user has not picked a radio, the default is
-   * re-computed whenever the catalog or capabilities change; a hidden None
-   * is never left selected.
+   * re-computed whenever the catalog or capabilities change.
+   *
+   * Edit mode falls back to the member's current built-in role, for example
+   * when a catalog refresh removes the last custom role after None was picked.
    */
-  private syncAddDefault(changed: Map<string, unknown>): void {
-    // The lock check is defensive: Add mode is never locked today.
-    if (!this.dialogOpen || this.dialogMode !== 'add' || this.dlgLockedReason) return;
-    const inputsChanged = changed.has('assignableRoles') || changed.has('capabilities');
+  private syncBuiltInSelection(changed: Map<string, unknown>): void {
+    if (!this.dialogOpen) return;
     const hiddenNone = this.dlgBuiltIn === NO_PROJECT_ROLE && !this.noProjectRoleShown;
+    if (this.dialogMode === 'edit') {
+      // Cannot loop: Edit mode hides None only when the current built-in is not None.
+      if (hiddenNone) this.dlgBuiltIn = this.dlgCurrentBuiltIn;
+      return;
+    }
+    // The lock check is defensive: Add mode is never locked today.
+    if (this.dlgLockedReason) return;
+    const inputsChanged = changed.has('assignableRoles') || changed.has('capabilities');
     if ((inputsChanged && !this.dlgBuiltInTouched) || hiddenNone) {
       this.dlgBuiltIn = defaultBuiltInForAdd(
         this.capabilities,
