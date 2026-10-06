@@ -89,11 +89,34 @@ func TestStopMissLeavesNewerRun_NoWriteNoQuotaNoPublish(t *testing.T) {
 	for _, action := range []string{"stop", "suspend"} {
 		t.Run(action, func(t *testing.T) {
 			srv, s, broker, a, ep := runSwapQuotaAgent(t, "miss-"+action)
+			jti := "jti-" + a.ID
+			insertTestAgentCredential(t, s, a.ID, a.ProjectID, jti)
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
 			if rec.Code >= 300 {
 				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 			}
 			assertNewerRunUntouched(t, s, broker, a, ep)
+			// The response is the current row (run-new's, container
+			// running), not the pre-stop copy, which has no container
+			// status. The run ID itself is not serialised.
+			var resp struct {
+				Agent           *store.Agent `json:"agent"`
+				ContainerStatus string       `json:"containerStatus"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+			gotStatus := resp.ContainerStatus
+			if resp.Agent != nil {
+				gotStatus = resp.Agent.ContainerStatus
+			}
+			if gotStatus != "running" {
+				t.Errorf("%s response containerStatus = %q, want run-new's running: %s", action, gotStatus, rec.Body.String())
+			}
+			// A newer run keeps its credentials.
+			if cred := getTestAgentCredential(t, s, jti); cred.RevokedAt != nil {
+				t.Errorf("%s revoked the newer run's credentials", action)
+			}
 		})
 	}
 	t.Run("stop-all", func(t *testing.T) {

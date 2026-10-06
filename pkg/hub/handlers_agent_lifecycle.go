@@ -408,7 +408,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		// credentials anyway while the row still holds the stopped run (a
 		// check, not a lock), so a stopped container's credentials do not
 		// outlive it; a newer run's are left alone.
-		if s.stopRunStillCurrent(ctx, agent.ID, stopRunID, "suspend") {
+		if s.stopRunStillCurrent(ctx, agent.ID, stopRunID, "suspend (credential revoke)") {
 			s.revokeSuspendedCredentials(ctx, agent.ID)
 		}
 		return err
