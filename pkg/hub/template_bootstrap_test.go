@@ -21,15 +21,18 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -1373,4 +1376,67 @@ type mockRoundTripper struct {
 
 func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return m.roundTrip(req)
+}
+
+// TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted covers AC1 of
+// ptone/scion#3544 for the workstation template path: the bundled default
+// template is re-materialized on disk every start but, once deleted, is not
+// re-imported. A user template next to it keeps today's behaviour.
+func TestBootstrapTemplatesFromDir_DeletedDefaultStaysDeleted(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	globalDir := t.TempDir()
+	templatesDir := filepath.Join(globalDir, "templates")
+	scope := string(store.TemplateScopeGlobal)
+
+	materialize := func() {
+		t.Helper()
+		if err := config.MaterializeBundledTemplates(globalDir, config.MaterializeOptions{Force: true}); err != nil {
+			t.Fatalf("materialize: %v", err)
+		}
+		userTmpl := filepath.Join(templatesDir, "my-template")
+		if err := os.MkdirAll(userTmpl, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(userTmpl, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	materialize()
+	if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+		t.Fatalf("initial bootstrap: %v", err)
+	}
+	def, err := s.GetTemplateBySlug(ctx, "default", scope, "")
+	if err != nil {
+		t.Fatalf("default not imported: %v", err)
+	}
+	user, err := s.GetTemplateBySlug(ctx, "my-template", scope, "")
+	if err != nil {
+		t.Fatalf("user template not imported: %v", err)
+	}
+	if err := s.DeleteTemplate(ctx, def.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTemplate(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range 2 {
+		materialize()
+		if err := srv.BootstrapTemplatesFromDir(ctx, templatesDir); err != nil {
+			t.Fatalf("restart %d bootstrap: %v", i, err)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "default", scope, ""); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("restart %d: deleted default template was re-imported (err=%v)", i, err)
+		}
+		if _, err := s.GetTemplateBySlug(ctx, "my-template", scope, ""); err != nil {
+			t.Fatalf("restart %d: user template not re-imported: %v", i, err)
+		}
+	}
+
+	doc := readBuiltinSeedLedgerDoc(t, s)
+	if doc == nil || !reflect.DeepEqual(doc.Templates, []string{"default"}) {
+		t.Errorf("ledger templates = %+v, want [default]", doc)
+	}
 }

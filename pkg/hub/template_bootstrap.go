@@ -16,12 +16,14 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -50,6 +52,14 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 		return err
 	}
 
+	// Seeded-built-ins ledger (ptone/scion#3544): a deleted built-in stays
+	// deleted even though UpdateDefaultTemplates re-materializes it on disk.
+	ledger, err := s.loadBuiltinSeedLedger(ctx)
+	if err != nil {
+		return fmt.Errorf("template bootstrap: %w", err)
+	}
+	const kind = storage.ResourceKindTemplate
+
 	imported, updated := 0, 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -68,12 +78,21 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			continue
 		}
 
+		builtin := isBuiltinName(kind, slug)
 		if existing == nil {
+			if builtin && ledger.Seen(kind, slug) {
+				s.templateLog.Info("template bootstrap: built-in previously deleted; not re-seeding",
+					"template", name)
+				continue
+			}
 			// New template — import it
 			if err := s.bootstrapSingleTemplate(ctx, name, templatePath, store.TemplateScopeGlobal, ""); err != nil {
 				s.templateLog.Warn("template bootstrap: failed to import template, skipping",
 					"template", name, "error", err)
 				continue
+			}
+			if builtin {
+				ledger.Mark(kind, slug)
 			}
 			imported++
 		} else {
@@ -90,6 +109,9 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 				warnBootstrapOverwrite(s.templateLog, "template", name, existing.ID, templatePath, oldHash,
 					s.currentTemplateHash(ctx, existing.ID))
 			}
+			if builtin {
+				ledger.Mark(kind, slug)
+			}
 		}
 	}
 
@@ -98,7 +120,7 @@ func (s *Server) BootstrapTemplatesFromDir(ctx context.Context, templatesDir str
 			"imported", imported, "updated", updated)
 	}
 
-	return nil
+	return s.saveBuiltinSeedLedger(ctx, ledger)
 }
 
 // syncExistingTemplate re-uploads a local template directory into the Hub's
