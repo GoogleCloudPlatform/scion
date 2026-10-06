@@ -405,6 +405,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'inbox:read',
+    label: 'inbox:read',
+    description: 'Read your own inbox, notifications and direct messages',
+    resource: 'inbox',
+    isAlias: false,
+  },
+  {
+    value: 'inbox:write',
+    label: 'inbox:write',
+    description: 'Send, change and remove your own inbox items and direct messages',
+    resource: 'inbox',
+    isAlias: false,
+  },
+  {
     value: 'project:clone',
     label: 'project:clone',
     description: 'Clone projects',
@@ -557,6 +571,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'user:read',
     description: 'Read users',
     resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user_skill_injection:update',
+    label: 'user_skill_injection:update',
+    description: 'Change the skills injected into your own agents',
+    resource: 'user_skill_injection',
     isAlias: false,
   },
 ];

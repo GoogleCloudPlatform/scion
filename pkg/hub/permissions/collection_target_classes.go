@@ -246,6 +246,10 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// every entry is reviewed empty, matching project.secret_read above.
 	"secret.deliver": {}, "env_var.deliver": {}, "skill_injection.deliver": {},
 	"secret.use": {}, "gcp_service_account.use": {},
+
+	// Self-scoped permissions — always the holder's own existing records,
+	// never a collection-level target.
+	"inbox.read": {}, "inbox.write": {}, "user_skill_injection.update": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID
