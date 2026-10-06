@@ -329,7 +329,7 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	deleteFiles := r.URL.Query().Get("deleteFiles") == "true"
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, existing.StoragePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
 		}
 	}
 

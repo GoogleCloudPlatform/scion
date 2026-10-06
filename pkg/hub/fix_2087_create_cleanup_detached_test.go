@@ -377,6 +377,38 @@ func (c *cancelAfterDeleteStore) DeleteAgent(ctx context.Context, id string) err
 	return err
 }
 
+// WithTx cancels the request once a transaction that deleted targetID has
+// committed: the row is gone only at commit.
+func (c *cancelAfterDeleteStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	tx := &deleteRecordingTx{targetID: c.targetID}
+	if err := c.Store.WithTx(ctx, func(inner store.Store) error {
+		tx.Store = inner
+		return fn(tx)
+	}); err != nil {
+		return err
+	}
+	if tx.deleted {
+		c.deleted = true
+		c.cancelRequest()
+	}
+	return nil
+}
+
+// deleteRecordingTx records whether DeleteAgent of targetID succeeded.
+type deleteRecordingTx struct {
+	store.Store
+	targetID string
+	deleted  bool
+}
+
+func (d *deleteRecordingTx) DeleteAgent(ctx context.Context, id string) error {
+	err := d.Store.DeleteAgent(ctx, id)
+	if err == nil && id == d.targetID {
+		d.deleted = true
+	}
+	return err
+}
+
 // TestHandleExistingAgent_EnvGatherRecreate_CanceledAfterRowDelete_ReleasesQuota
 // covers handleExistingAgent's env-gather re-provisioning branch, which
 // hard-deletes an existing provisioning agent and then releases its

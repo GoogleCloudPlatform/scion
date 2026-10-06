@@ -300,7 +300,7 @@ curl -s -X POST \
   }'
 ```
 
-Replace `PROJECT` and `AGENT` with the target project slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields.
+Replace `PROJECT` and `AGENT` with the target project slug and agent name. A successful response contains a `result` object with `id`, `status`, and `artifacts` fields. Artifacts appear only when the agent explicitly replies to the caller with `scion message`; the agent's final turn text is not forwarded automatically, so a task can complete with no artifact.
 
 ### 8. Docker deployment
 

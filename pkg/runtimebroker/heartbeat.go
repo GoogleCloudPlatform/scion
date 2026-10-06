@@ -101,6 +101,12 @@ type HeartbeatService struct {
 	// health changes. Nil omits the field.
 	workspaceStorage func() *api.BrokerWorkspaceStorage
 
+	// profileAttach, when set, returns the attach capability of each
+	// profile whose attach support the broker currently knows, reported on
+	// every heartbeat so the hub's stored per-profile Attach follows
+	// runtime changes without a re-registration. Nil omits the field.
+	profileAttach func() []hubclient.ProfileAttachState
+
 	// defaultProfile, when set, returns the broker's default (active)
 	// profile name, reported on every heartbeat. A nil func, or a nil
 	// result (unknown), omits the field.
@@ -326,6 +332,9 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
+	}
+	if s.profileAttach != nil {
+		heartbeat.ProfileAttach = s.profileAttach()
 	}
 	if s.defaultProfile != nil {
 		if name := s.defaultProfile(); name != nil {
