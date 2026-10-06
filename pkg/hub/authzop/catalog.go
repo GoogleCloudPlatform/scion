@@ -245,9 +245,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/teams/link/verify", Kind: ExemptionAuthenticationOnly, Reason: "Account linking verification, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/teams/link/status", Kind: ExemptionInternalOnly, Reason: "Chat account link status, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/authz/explain", Kind: ExemptionAuthenticationOnly, Reason: "Authorization explain for self, self-service diagnostic", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/hub/settings/injected-skills", Kind: ExemptionHubAdmin, Reason: "Hub injected skills; GET is open, PUT requires hub-admin (enforced in handler via requireAdmin). Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/pre-start-hooks", Kind: ExemptionHubAdmin, Reason: "Pre-start hooks; GET is open, POST/PUT/DELETE require hub-admin (enforced in handler via requireAdmin). Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/pre-start-hooks/", Kind: ExemptionHubAdmin, Reason: "Pre-start hooks by ID; admin enforcement in handler via requireAdmin. Admin mutation — operation contract deferred to AH1.", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/pre-start-hooks/", Kind: ExemptionHubAdmin, Reason: "Hub pre-start hooks by ID; GET is open to any user with scripts redacted for non-admins and every token; PUT, DELETE and activate are the hub.lifecyclehooks.update operation (requireHubAdmin).", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/usage/me", Kind: ExemptionAuthenticationOnly, Reason: "Own usage statistics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/experiments", Kind: ExemptionAuthenticationOnly, Reason: "Resolved experiments map for signed-in callers, no resource-level authorization", Owner: "route_metadata.go"},
 

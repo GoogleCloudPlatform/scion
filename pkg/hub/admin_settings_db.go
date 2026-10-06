@@ -2396,7 +2396,7 @@ func tokenRefusedServerConfigKeys(rawBody []byte) []string {
 			refused[strings.Join(l.path, ".")] = true
 		}
 	}
-	return sortedBoolKeys(refused)
+	return sortedSettingsKeys(refused)
 }
 
 // tokenRefusedProjectDefaultsKeys returns, sorted, the body keys of a
@@ -2421,10 +2421,10 @@ func tokenRefusedProjectDefaultsKeys(rawBody []byte) []string {
 			refused[key] = true
 		}
 	}
-	return sortedBoolKeys(refused)
+	return sortedSettingsKeys(refused)
 }
 
-func sortedBoolKeys(m map[string]bool) []string {
+func sortedSettingsKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
