@@ -16,7 +16,7 @@ Scion operates in multiple contexts, each with specific security requirements. A
 | **Web Dashboard** | Browser | OAuth 2.0 + Session Cookie | HTTP-only cookie |
 | **CLI (Hub Commands)** | Terminal | OAuth 2.0 + Device Flow | `~/.scion/credentials.json` |
 | **Agent (sciontool)** | Container | Hub-issued JWT | Env Var (`SCION_HUB_TOKEN`) |
-| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/broker-credentials.json` |
+| **Runtime Broker** | Compute Node | HMAC Signature | `~/.scion/hub-credentials/<name>.json` |
 | **Development** | Any | Developer Token (Bearer) | `~/.scion/dev-token` |
 
 ### 1.2 User Authentication (OAuth 2.0)
