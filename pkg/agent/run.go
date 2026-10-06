@@ -155,12 +155,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.RunID == "" {
 		opts.RunID = uuid.NewString()
 	}
-	ctx = api.ContextWithRunID(ctx, opts.RunID)
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
-	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
-	if err == nil {
+	agents, listErr := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	if listErr == nil {
 		for _, a := range agents {
 			// Skip agents from a different project
 			if !matchAgentProject(a, projectName, projectID) {
@@ -194,16 +193,32 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		}
 	}
 
-	// Record this run as the owner of an already provisioned agent's files
-	// (provision-only, a restart, a resume) as soon as the previous run's
-	// container is gone (ptone/scion#2675). From here on the hub keeps this
-	// run even if the start fails, so the files must name it too, or a
-	// delete for this run would leave them behind. A fresh provision below
-	// records it as it writes agent-info.json; without agent-info.json this
-	// is a no-op.
-	if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
-		slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
-			"agent", opts.Name, "run_id", opts.RunID, "error", err)
+	// Record this run as the owner of the agent's files (ptone/scion#2675)
+	// only once the previous run's container is known to be gone: the list
+	// above succeeded and every entry of the name in this project was
+	// removed (a failed pre-clean returns above, a running entry with no
+	// task returns it as is). From here on the hub keeps this run even if
+	// the start fails, so the files must name it too, or a delete for this
+	// run would leave them behind. An already provisioned agent (a restart,
+	// a resume, provision-only) is recorded here; a fresh provision records
+	// the run carried by ctx as it writes agent-info.json; without
+	// agent-info.json SetSavedRunID is a no-op.
+	//
+	// When the list failed, no pre-clean ran and a previous run's container
+	// may remain (ptone/scion#3242). The create would then collide on the
+	// name and the hub may settle on that previous run, so the recorded
+	// owner is left as is, and ctx carries no run, so a fresh provision
+	// records none: either way a delete of the run the hub settles on still
+	// removes the files.
+	if listErr == nil {
+		ctx = api.ContextWithRunID(ctx, opts.RunID)
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", opts.RunID, "error", err)
+		}
+	} else {
+		slog.Warn("Start: could not list existing runtime entries; leaving the recorded owner of the agent's files unchanged",
+			"agent", opts.Name, "run_id", opts.RunID, "error", listErr)
 	}
 
 	// If resuming, verify the agent exists before proceeding. Probe both
