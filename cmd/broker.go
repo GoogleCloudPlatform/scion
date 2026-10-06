@@ -174,9 +174,11 @@ hub-credentials/ directory. Broker-local state stays: the broker daemon log
 (broker.log), the broker's state directory (runtime-broker-state/<broker-id>)
 and the broker template cache (cache/templates). Pass --purge-local to remove
 them as well once the last hub connection is gone and the broker is stopped;
-it also works on a host that is no longer registered. Settings files, the
-hub-id file (it belongs to a local hub) and other hubs' credentials are never
-removed.`,
+it also works on a host that is no longer registered. When the purge cannot
+run, the command exits non-zero (after a successful deregister) and says why.
+Only the default locations are cleaned: a broker run with a custom state or
+template cache directory keeps those. Settings files, the hub-id file (it
+belongs to a local hub) and other hubs' credentials are never removed.`,
 	RunE: runBrokerDeregister,
 }
 
@@ -691,9 +693,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 				fmt.Printf("Broker added as provider to project '%s'\n", resp.Project.Name)
 			}
 		}
-	}
-
-	if isGlobal {
+	} else if isGlobal {
 		fmt.Println("Skipped project linking: the global directory is a local pseudo-project, not a hub project.")
 		fmt.Println("Use 'scion runtime-broker provide --project <name>' to add this broker as a provider for a hub project.")
 	}
@@ -749,7 +749,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 			}
 			if creds == nil {
 				if brokerDeregisterPurgeLocal {
-					return purgeLocalBrokerStateOnly(cmd, "")
+					return purgeLocalBrokerStateOnly(cmd)
 				}
 				return fmt.Errorf("no broker registration found, this host is not registered as a Runtime Broker with the Hub")
 			}
@@ -768,7 +768,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 	brokerID := creds.BrokerID
 	if brokerID == "" {
 		if brokerDeregisterPurgeLocal {
-			return purgeLocalBrokerStateOnly(cmd, "")
+			return purgeLocalBrokerStateOnly(cmd)
 		}
 		return fmt.Errorf("no broker registration found, this host is not registered as a runtime broker with the hub")
 	}
@@ -829,7 +829,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 	}
 
 	// Only clear global settings if no connections remain
-	remaining, _ := multiStore.List()
+	remaining, listErr := multiStore.List()
 	if globalErr == nil && len(remaining) == 0 {
 		_ = config.UpdateSetting(globalDir, "hub.brokerToken", "", true)
 		_ = config.UpdateSetting(globalDir, "hub.brokerId", "", true)
@@ -848,8 +848,10 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 		if daemonRunning, _, _ := daemon.Status(globalDir); daemonRunning {
 			brokerRunning = true
 		}
-		return cleanupAfterDeregister(os.Stdout, multiStore.Dir(), len(remaining), brokerRunning,
-			brokerDeregisterPurgeLocal, brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), brokerID))
+		if err := cleanupAfterDeregister(os.Stdout, multiStore.Dir(), len(remaining), listErr, brokerRunning,
+			brokerDeregisterPurgeLocal, brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), brokerID)); err != nil {
+			return fmt.Errorf("broker '%s' was deregistered, but %w", brokerID, err)
+		}
 	}
 	return nil
 }
@@ -864,11 +866,13 @@ func brokerScionHome(globalDir string) string {
 	return globalDir
 }
 
-// purgeLocalBrokerStateOnly runs 'deregister --purge-local' on a host with
-// no registration left (for example after an earlier deregister): it removes
-// broker-local state only. brokerID names the state directory to remove, if
-// known; otherwise the one recorded in global settings is used.
-func purgeLocalBrokerStateOnly(cmd *cobra.Command, brokerID string) error {
+// purgeLocalBrokerStateOnly runs 'deregister --purge-local' when there is
+// no broker registration to remove (no credentials, or credentials without
+// a broker ID): it removes broker-local state only, for the broker ID
+// recorded on this host. Like the purge after a deregister, it refuses while
+// any hub connection remains in the credentials store, or when the store
+// cannot be listed.
+func purgeLocalBrokerStateOnly(cmd *cobra.Command) error {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return fmt.Errorf("failed to get global directory: %w", err)
@@ -878,16 +882,24 @@ func purgeLocalBrokerStateOnly(cmd *cobra.Command, brokerID string) error {
 	if daemonRunning, _, _ := daemon.Status(globalDir); daemonRunning {
 		running = true
 	}
-	if brokerID == "" {
-		brokerID = getLocalBrokerID()
-	}
-	credsDir := ""
-	if ms, _, msErr := initializeBrokerCredentialStore(); msErr == nil {
-		credsDir = ms.Dir()
-	}
+	credsDir, remaining, listErr := brokerConnectionsLeft()
 	fmt.Println("No broker registration found; removing local broker state only.")
-	return cleanupAfterDeregister(os.Stdout, credsDir, 0, running, true,
-		brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), brokerID))
+	return cleanupAfterDeregister(os.Stdout, credsDir, remaining, listErr, running, true,
+		brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), getLocalBrokerID()))
+}
+
+// brokerConnectionsLeft returns the credentials store directory and the
+// number of hub connections in it.
+func brokerConnectionsLeft() (dir string, remaining int, err error) {
+	ms, _, err := initializeBrokerCredentialStore()
+	if ms != nil {
+		dir = ms.Dir()
+	}
+	if err != nil {
+		return dir, 0, err
+	}
+	all, err := ms.List()
+	return dir, len(all), err
 }
 
 // isServerDaemonManagingBroker checks if the combined server daemon is running
@@ -1281,8 +1293,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		localProjectPath = explicitPath
 	}
 
-	// Show confirmation prompt. Without a terminal, or at end of input, it
-	// aborts with a 'use --yes' message instead of blocking.
+	// Show confirmation prompt
 	confirmed, confirmErr := confirmProvide(os.Stdin, os.Stdout, projectName, brokerName, autoConfirm, util.IsTerminal())
 	if confirmErr != nil {
 		return confirmErr
@@ -1563,14 +1574,16 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 
 	// Check if broker server is responding (could be foreground or daemon)
 	port := resolveBrokerPort(cmd)
+	// One budget (brokerStatusPollTimeout) for all post-start waits below.
+	waitBudget := newStatusWaitBudget()
 	health, err := checkLocalBrokerServer(port)
-	if err != nil && status.DaemonRunning {
-		// A daemon that is up but not serving yet is still starting (status
-		// runs right after start and restart): wait briefly for it.
-		pollUntil(func() bool {
-			health, err = checkLocalBrokerServer(port)
+	if err != nil && status.DaemonRunning && brokerFileRecent(status.PIDFile) {
+		// A daemon started moments ago that is not serving yet is still
+		// starting (status runs right after start and restart): wait for it.
+		waitBudget.poll(func(timeout time.Duration) bool {
+			health, err = checkLocalBrokerServerTimeout(port, timeout)
 			return err == nil
-		}, brokerStatusPollTimeout, brokerStatusPollInterval)
+		}, brokerStatusPollInterval)
 	}
 	brokerUptime := ""
 	if err == nil {
@@ -1707,15 +1720,17 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		// Try to get live status from running broker server. Right after a
 		// (re)start the broker has not connected yet, so wait briefly
 		// (bounded) for its first heartbeat instead of printing "unknown".
-		liveStatus := queryBrokerHubConnections(port)
+		var liveStatus *BrokerHubConnectionsResponse
 		if status.ServerRunning && brokerRecentlyStarted(brokerUptime) {
 			names := make([]string, 0, len(status.HubConnections))
 			for _, conn := range status.HubConnections {
 				names = append(names, conn.Name)
 			}
-			liveStatus = pollBrokerHubConnections(func() *BrokerHubConnectionsResponse {
-				return queryBrokerHubConnections(port)
-			}, names, brokerStatusPollTimeout, brokerStatusPollInterval)
+			liveStatus = pollBrokerHubConnections(waitBudget, func(timeout time.Duration) *BrokerHubConnectionsResponse {
+				return queryBrokerHubConnectionsTimeout(port, timeout)
+			}, names, brokerStatusPollInterval)
+		} else {
+			liveStatus = queryBrokerHubConnections(port)
 		}
 		liveStatusMap := make(map[string]string)
 		if liveStatus != nil {
@@ -2322,13 +2337,19 @@ type BrokerHubConnectionInfo struct {
 // queryBrokerHubConnections queries the local broker server for live hub connection status.
 // Returns nil if the server is not running or the endpoint is not available.
 func queryBrokerHubConnections(port int) *BrokerHubConnectionsResponse {
+	return queryBrokerHubConnectionsTimeout(port, 5*time.Second)
+}
+
+// queryBrokerHubConnectionsTimeout is queryBrokerHubConnections with the
+// given HTTP timeout.
+func queryBrokerHubConnectionsTimeout(port int, timeout time.Duration) *BrokerHubConnectionsResponse {
 	if port <= 0 {
 		port = DefaultBrokerPort
 	}
 
 	url := fmt.Sprintf("http://localhost:%d/api/v1/hub-connections", port)
 
-	httpClient := &http.Client{Timeout: 5 * time.Second}
+	httpClient := &http.Client{Timeout: timeout}
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil

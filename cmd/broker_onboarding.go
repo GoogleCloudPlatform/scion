@@ -60,18 +60,53 @@ func brokerRecentlyStarted(uptime string) bool {
 	return err == nil && d < brokerRecentStartWindow
 }
 
-// pollUntil calls probe until it returns true or timeout elapses, sleeping
-// interval between calls. It reports the last probe result.
-func pollUntil(probe func() bool, timeout, interval time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if probe() {
-			return true
+// brokerFileRecent reports whether path (a daemon PID file, written when
+// the daemon starts) was modified within brokerRecentStartWindow.
+func brokerFileRecent(path string) bool {
+	if path == "" {
+		return false
+	}
+	fi, err := os.Stat(path)
+	return err == nil && time.Since(fi.ModTime()) < brokerRecentStartWindow
+}
+
+// statusWaitBudget is the single time budget runtime-broker status may spend
+// waiting after a (re)start, shared by all its polls, so the total wait
+// stays within brokerStatusPollTimeout (ptone/scion#3536).
+type statusWaitBudget struct {
+	left time.Duration
+}
+
+func newStatusWaitBudget() *statusWaitBudget {
+	return &statusWaitBudget{left: brokerStatusPollTimeout}
+}
+
+// poll calls probe, passing the time left as the probe's own timeout, until
+// it returns true or the budget runs out, sleeping interval (capped by the
+// time left) between calls. The time spent is taken from the budget. It
+// reports the last probe result; with no budget left it does not probe.
+func (b *statusWaitBudget) poll(probe func(timeout time.Duration) bool, interval time.Duration) bool {
+	start := time.Now()
+	deadline := start.Add(b.left)
+	defer func() {
+		b.left -= time.Since(start)
+		if b.left < 0 {
+			b.left = 0
 		}
-		if !time.Now().Before(deadline) {
+	}()
+	for {
+		rem := time.Until(deadline)
+		if rem <= 0 {
 			return false
 		}
-		brokerStatusSleep(interval)
+		if probe(rem) {
+			return true
+		}
+		rem = time.Until(deadline)
+		if rem <= 0 {
+			return false
+		}
+		brokerStatusSleep(min(interval, rem))
 	}
 }
 
@@ -95,14 +130,15 @@ func brokerHubConnectionsSettled(live *BrokerHubConnectionsResponse, names []str
 	return true
 }
 
-// pollBrokerHubConnections queries the live hub connections until all named
-// connections are settled or timeout elapses, and returns the last answer.
-func pollBrokerHubConnections(query func() *BrokerHubConnectionsResponse, names []string, timeout, interval time.Duration) *BrokerHubConnectionsResponse {
+// pollBrokerHubConnections queries the live hub connections, within budget,
+// until all named connections are settled, and returns the last answer (nil
+// when the budget allowed no query).
+func pollBrokerHubConnections(budget *statusWaitBudget, query func(timeout time.Duration) *BrokerHubConnectionsResponse, names []string, interval time.Duration) *BrokerHubConnectionsResponse {
 	var live *BrokerHubConnectionsResponse
-	pollUntil(func() bool {
-		live = query()
+	budget.poll(func(timeout time.Duration) bool {
+		live = query(timeout)
 		return brokerHubConnectionsSettled(live, names)
-	}, timeout, interval)
+	}, interval)
 	return live
 }
 
@@ -178,14 +214,17 @@ func purgeBrokerLocalState(paths []string, out io.Writer) error {
 	return errors.Join(errs...)
 }
 
-// cleanupAfterDeregister handles local broker state once deregister has
-// removed a registration (brokerID; empty when there was none). It removes
-// the credentials directory when it is left empty. With purge it also removes
-// brokerLocalStatePaths, but only when no hub connections remain (the state
-// is shared by all of them) and no broker is running (it is in use);
-// otherwise, and without purge, it lists what is left behind.
-func cleanupAfterDeregister(out io.Writer, credsDir string, remaining int, brokerRunning, purge bool, statePaths []string) error {
-	if remaining == 0 && credsDir != "" {
+// cleanupAfterDeregister handles local broker state after deregister.
+// remaining is the number of hub connections left in the credentials store
+// and listErr the error listing them, if any. It removes the credentials
+// directory when it is known to be left empty. With purge it also removes
+// statePaths (brokerLocalStatePaths), but only when the store was listed,
+// no hub connection remains (the state is shared by all of them) and no
+// broker is running (it is in use). A purge that cannot run returns an
+// error, so a script sees a non-zero exit. Without purge it lists what is
+// left behind.
+func cleanupAfterDeregister(out io.Writer, credsDir string, remaining int, listErr error, brokerRunning, purge bool, statePaths []string) error {
+	if listErr == nil && remaining == 0 && credsDir != "" {
 		if removed, err := removeDirIfEmpty(credsDir); err != nil {
 			_, _ = fmt.Fprintf(out, "Warning: failed to remove empty %s: %v\n", credsDir, err)
 		} else if removed {
@@ -193,24 +232,30 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining int, broke
 		}
 	}
 	left := existingPaths(statePaths)
+	if purge {
+		switch {
+		case listErr != nil:
+			return fmt.Errorf("--purge-local skipped: could not list hub connections (%v); local broker state was left in place", listErr)
+		case remaining > 0:
+			return fmt.Errorf("--purge-local skipped: %d hub connection(s) remain and share the local broker state; deregister them first (see 'scion runtime-broker hubs')", remaining)
+		case brokerRunning:
+			return errors.New("--purge-local skipped: the broker is running; stop it with 'scion runtime-broker stop', then run 'scion runtime-broker deregister --purge-local'")
+		case len(left) == 0:
+			_, _ = fmt.Fprintln(out, "No local broker state to remove.")
+			return nil
+		default:
+			return purgeBrokerLocalState(left, out)
+		}
+	}
 	if len(left) == 0 {
 		return nil
 	}
-	switch {
-	case purge && remaining > 0:
-		_, _ = fmt.Fprintf(out, "Skipped --purge-local: %d other hub connection(s) remain and share the local broker state.\n", remaining)
-	case purge && brokerRunning:
-		_, _ = fmt.Fprintln(out, "Skipped --purge-local: the broker is running. Stop it with 'scion runtime-broker stop', then run 'scion runtime-broker deregister --purge-local'.")
-	case purge:
-		return purgeBrokerLocalState(left, out)
-	default:
-		_, _ = fmt.Fprintln(out, "Local broker state left in place:")
-		for _, p := range left {
-			_, _ = fmt.Fprintf(out, "  %s\n", p)
-		}
-		if remaining == 0 {
-			_, _ = fmt.Fprintln(out, "Remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.")
-		}
+	_, _ = fmt.Fprintln(out, "Local broker state left in place:")
+	for _, p := range left {
+		_, _ = fmt.Fprintf(out, "  %s\n", p)
+	}
+	if listErr == nil && remaining == 0 {
+		_, _ = fmt.Fprintln(out, "Remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.")
 	}
 	return nil
 }

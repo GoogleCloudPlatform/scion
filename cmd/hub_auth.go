@@ -85,11 +85,14 @@ that you can enter on any device with a browser.
 
 ` + hubAuthURLPrecedence + `
 
-After a successful login, when no hub.endpoint is set in settings for the
-current scope (the project's own settings, else global), the hub URL is saved
-there so 'scion hub status' and other hub commands use it. An existing
+After a successful login, when no hub.endpoint is set in the settings that
+apply (the current project's own settings, else global), the hub URL is saved
+so 'scion hub status' and other hub commands use it. It is saved to global
+settings, since credentials are global and project settings are often
+tracked in git; it goes to the project's settings only when that project
+already has hub settings, or with an explicit --global=false. An existing
 hub.endpoint is never overwritten. If hub mode is off, an interactive login
-offers to enable it; otherwise run 'scion hub enable'.
+offers to enable it (in the same settings); otherwise run 'scion hub enable'.
 
 Example:
   scion hub auth login
@@ -162,7 +165,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 	if err := storeTokenAndPrintResult(hubURL, tokenResp); err != nil {
 		return err
 	}
-	persistLoginEndpointForInvocation(hubURL)
+	persistLoginEndpointForInvocation(cmd, hubURL)
 	return nil
 }
 

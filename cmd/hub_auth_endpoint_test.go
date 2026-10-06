@@ -90,7 +90,7 @@ func TestPersistLoginEndpoint_SavesEndpointWhenUnset(t *testing.T) {
 	var out bytes.Buffer
 	asked := 0
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
-		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true,
+		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
 		Interactive: false,
 		Confirm:     func(string) bool { asked++; return true },
 	}))
@@ -109,7 +109,7 @@ func TestPersistLoginEndpoint_InteractiveEnable(t *testing.T) {
 	globalDir := loginEndpointHome(t, "")
 	var out bytes.Buffer
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
-		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true,
+		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
 		Interactive: true,
 		Confirm:     func(string) bool { return true },
 	}))
@@ -124,7 +124,7 @@ func TestPersistLoginEndpoint_InteractiveDecline(t *testing.T) {
 	globalDir := loginEndpointHome(t, "")
 	var out bytes.Buffer
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
-		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true,
+		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
 		Interactive: true,
 		Confirm:     func(string) bool { return false },
 	}))
@@ -139,7 +139,7 @@ func TestPersistLoginEndpoint_NeverOverwritesOtherEndpoint(t *testing.T) {
 	globalDir := loginEndpointHome(t, src)
 	var out bytes.Buffer
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
-		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true,
+		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
 		Interactive: true,
 		Confirm:     func(string) bool { t.Fatal("must not prompt"); return false },
 	}))
@@ -155,7 +155,7 @@ func TestPersistLoginEndpoint_SameEndpointAlreadyEnabled(t *testing.T) {
 	globalDir := loginEndpointHome(t, src)
 	var out bytes.Buffer
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
-		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true,
+		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
 		Interactive: true,
 		Confirm:     func(string) bool { t.Fatal("must not prompt"); return false },
 	}))
@@ -163,4 +163,84 @@ func TestPersistLoginEndpoint_SameEndpointAlreadyEnabled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, src, string(data))
 	assert.Empty(t, out.String())
+}
+
+// loginProject creates a project directory (with a .scion settings file
+// holding projectSettings) under the isolated HOME, changes into it, and
+// returns its resolved project path.
+func loginProject(t *testing.T, projectSettings string) string {
+	t.Helper()
+	root := t.TempDir()
+	scionDir := filepath.Join(root, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(projectSettings), 0o644))
+	t.Chdir(root)
+	resolved, isGlobal, err := config.ResolveProjectPath("")
+	require.NoError(t, err)
+	require.False(t, isGlobal)
+	return resolved
+}
+
+func projectFileHub(t *testing.T, projectPath string) *config.HubClientConfig {
+	t.Helper()
+	s, err := config.LoadSettingsFromDir(config.GetProjectConfigDir(projectPath))
+	require.NoError(t, err)
+	return s.Hub
+}
+
+// TestPersistLoginEndpoint_ProjectWithoutHubConfigSavesGlobal: inside a
+// project that carries no hub configuration, login saves the endpoint to
+// global settings (credentials are global; project settings are often
+// tracked in git).
+func TestPersistLoginEndpoint_ProjectWithoutHubConfigSavesGlobal(t *testing.T) {
+	globalDir := loginEndpointHome(t, "schema_version: \"1\"\n")
+	proj := loginProject(t, "schema_version: \"1\"\n")
+
+	target := loginEndpointTargetGlobal(proj, false, false)
+	assert.True(t, target)
+	var out bytes.Buffer
+	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
+		HubURL: "https://hub.example.com", ProjectPath: proj, TargetGlobal: target,
+	}))
+
+	gs, err := config.LoadSettingsFromDir(globalDir)
+	require.NoError(t, err)
+	require.NotNil(t, gs.Hub)
+	assert.Equal(t, "https://hub.example.com", gs.Hub.Endpoint)
+	if h := projectFileHub(t, proj); h != nil {
+		assert.Empty(t, h.Endpoint, "project settings untouched")
+	}
+	assert.Contains(t, out.String(), "to global settings")
+}
+
+// TestPersistLoginEndpoint_ProjectWithHubConfigSavesProject: a project that
+// already carries hub configuration gets the endpoint in its own settings.
+func TestPersistLoginEndpoint_ProjectWithHubConfigSavesProject(t *testing.T) {
+	globalDir := loginEndpointHome(t, "schema_version: \"1\"\n")
+	proj := loginProject(t, "schema_version: \"1\"\nhub:\n  enabled: true\n")
+
+	target := loginEndpointTargetGlobal(proj, false, false)
+	assert.False(t, target)
+	var out bytes.Buffer
+	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
+		HubURL: "https://hub.example.com", ProjectPath: proj, TargetGlobal: target,
+	}))
+
+	h := projectFileHub(t, proj)
+	require.NotNil(t, h)
+	assert.Equal(t, "https://hub.example.com", h.Endpoint)
+	gs, err := config.LoadSettingsFromDir(globalDir)
+	require.NoError(t, err)
+	if gs.Hub != nil {
+		assert.Empty(t, gs.Hub.Endpoint, "global settings untouched")
+	}
+	assert.Contains(t, out.String(), "to project settings")
+}
+
+func TestLoginEndpointTargetGlobal(t *testing.T) {
+	loginEndpointHome(t, "schema_version: \"1\"\n")
+	plain := loginProject(t, "schema_version: \"1\"\n")
+	assert.True(t, loginEndpointTargetGlobal(plain, false, false), "default: global")
+	assert.False(t, loginEndpointTargetGlobal(plain, false, true), "explicit --global=false: project")
+	assert.True(t, loginEndpointTargetGlobal(plain, true, true), "global context is always global")
 }

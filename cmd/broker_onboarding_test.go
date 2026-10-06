@@ -16,12 +16,16 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -53,12 +57,14 @@ func TestPollBrokerHubConnections_WaitsForFirstHeartbeat(t *testing.T) {
 		{Connections: []BrokerHubConnectionInfo{{Name: "hub-a", Status: "error"}}},
 	}
 	calls := 0
-	query := func() *BrokerHubConnectionsResponse {
+	query := func(timeout time.Duration) *BrokerHubConnectionsResponse {
+		assert.Greater(t, timeout, time.Duration(0))
+		assert.LessOrEqual(t, timeout, brokerStatusPollTimeout, "probe timeout capped by the budget")
 		r := answers[calls]
 		calls++
 		return r
 	}
-	live := pollBrokerHubConnections(query, []string{"hub-a"}, time.Hour, time.Millisecond)
+	live := pollBrokerHubConnections(newStatusWaitBudget(), query, []string{"hub-a"}, time.Millisecond)
 	require.NotNil(t, live)
 	assert.Equal(t, "connected", live.Connections[0].Status)
 	assert.Equal(t, 4, calls)
@@ -71,14 +77,70 @@ func TestPollBrokerHubConnections_Bounded(t *testing.T) {
 
 	calls := 0
 	start := time.Now()
-	live := pollBrokerHubConnections(func() *BrokerHubConnectionsResponse {
+	budget := &statusWaitBudget{left: 50 * time.Millisecond}
+	live := pollBrokerHubConnections(budget, func(time.Duration) *BrokerHubConnectionsResponse {
 		calls++
 		return &BrokerHubConnectionsResponse{Connections: []BrokerHubConnectionInfo{{Name: "hub-a", Status: "disconnected"}}}
-	}, []string{"hub-a"}, 50*time.Millisecond, 10*time.Millisecond)
+	}, []string{"hub-a"}, 10*time.Millisecond)
 	assert.Less(t, time.Since(start), 2*time.Second)
 	assert.Greater(t, calls, 1)
 	require.NotNil(t, live)
 	assert.Equal(t, "disconnected", live.Connections[0].Status, "a hub that stays down is reported as it is")
+	assert.Zero(t, budget.left)
+}
+
+// TestStatusWaitBudget_SharedAcrossPolls: the health wait and the hub
+// connection wait share one budget, so together they never exceed it, and
+// each probe's timeout is capped by the time left.
+func TestStatusWaitBudget_SharedAcrossPolls(t *testing.T) {
+	prev := brokerStatusSleep
+	brokerStatusSleep = func(d time.Duration) { time.Sleep(d) }
+	t.Cleanup(func() { brokerStatusSleep = prev })
+
+	budget := &statusWaitBudget{left: 200 * time.Millisecond}
+	start := time.Now()
+
+	// Phase 1: a slow probe that never succeeds (a hung listener) uses the
+	// whole budget; it gets no more than the time left as its timeout.
+	assert.False(t, budget.poll(func(timeout time.Duration) bool {
+		time.Sleep(min(timeout, 60*time.Millisecond))
+		return false
+	}, 10*time.Millisecond))
+
+	// Phase 2 has nothing left: it must not probe at all.
+	probed := false
+	live := pollBrokerHubConnections(budget, func(time.Duration) *BrokerHubConnectionsResponse {
+		probed = true
+		return nil
+	}, []string{"hub-a"}, 10*time.Millisecond)
+	assert.Nil(t, live)
+	assert.False(t, probed)
+	assert.Less(t, time.Since(start), time.Second, "total wait stays within the budget")
+}
+
+func TestStatusWaitBudget_RemainderCarriesOver(t *testing.T) {
+	prev := brokerStatusSleep
+	brokerStatusSleep = func(time.Duration) {}
+	t.Cleanup(func() { brokerStatusSleep = prev })
+
+	budget := newStatusWaitBudget()
+	assert.True(t, budget.poll(func(time.Duration) bool { return true }, time.Millisecond))
+	var got time.Duration
+	budget.poll(func(timeout time.Duration) bool { got = timeout; return true }, time.Millisecond)
+	assert.Greater(t, got, brokerStatusPollTimeout-time.Second, "a quick first phase leaves the budget for the second")
+	assert.LessOrEqual(t, got, brokerStatusPollTimeout)
+}
+
+func TestBrokerFileRecent(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "broker.pid")
+	assert.False(t, brokerFileRecent(""))
+	assert.False(t, brokerFileRecent(p), "missing file")
+	require.NoError(t, os.WriteFile(p, []byte("1"), 0o644))
+	assert.True(t, brokerFileRecent(p))
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(p, old, old))
+	assert.False(t, brokerFileRecent(p))
 }
 
 func TestBrokerHubConnectionDisplayStatus(t *testing.T) {
@@ -114,7 +176,7 @@ func brokerStateFixture(t *testing.T) (home string, paths []string) {
 func TestCleanupAfterDeregister_PurgeLocal(t *testing.T) {
 	home, paths := brokerStateFixture(t)
 	var out bytes.Buffer
-	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 0, false, true, paths))
+	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 0, nil, false, true, paths))
 
 	for _, gone := range []string{"hub-credentials", "broker.log", "runtime-broker-state/b-1", "cache/templates"} {
 		assert.NoFileExists(t, filepath.Join(home, gone))
@@ -130,31 +192,96 @@ func TestCleanupAfterDeregister_PurgeLocal(t *testing.T) {
 func TestCleanupAfterDeregister_NoPurgeListsResidue(t *testing.T) {
 	home, paths := brokerStateFixture(t)
 	var out bytes.Buffer
-	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 0, false, false, paths))
+	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 0, nil, false, false, paths))
 	assert.NoDirExists(t, filepath.Join(home, "hub-credentials"), "the empty credentials dir is always removed")
 	assert.FileExists(t, filepath.Join(home, "broker.log"))
 	assert.Contains(t, out.String(), "Local broker state left in place")
 	assert.Contains(t, out.String(), "--purge-local")
 }
 
+// TestCleanupAfterDeregister_PurgeSkipped: a purge that cannot run leaves
+// everything in place and returns an error (non-zero exit).
 func TestCleanupAfterDeregister_PurgeSkipped(t *testing.T) {
-	t.Run("other connections remain", func(t *testing.T) {
-		home, paths := brokerStateFixture(t)
-		require.NoError(t, os.WriteFile(filepath.Join(home, "hub-credentials", "other.json"), []byte("{}"), 0o600))
-		var out bytes.Buffer
-		require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 1, false, true, paths))
-		assert.FileExists(t, filepath.Join(home, "hub-credentials", "other.json"))
-		assert.FileExists(t, filepath.Join(home, "broker.log"))
-		assert.Contains(t, out.String(), "other hub connection(s) remain")
-	})
-	t.Run("broker running", func(t *testing.T) {
-		home, paths := brokerStateFixture(t)
-		var out bytes.Buffer
-		require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), 0, true, true, paths))
-		assert.FileExists(t, filepath.Join(home, "broker.log"))
-		assert.DirExists(t, filepath.Join(home, "runtime-broker-state", "b-1"))
-		assert.Contains(t, out.String(), "the broker is running")
-	})
+	tests := []struct {
+		name      string
+		remaining int
+		listErr   error
+		running   bool
+		wantErr   string
+	}{
+		{name: "other connections remain", remaining: 1, wantErr: "1 hub connection(s) remain"},
+		{name: "connections cannot be listed", listErr: errors.New("boom"), wantErr: "could not list hub connections"},
+		{name: "broker running", running: true, wantErr: "the broker is running"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home, paths := brokerStateFixture(t)
+			require.NoError(t, os.WriteFile(filepath.Join(home, "hub-credentials", "other.json"), []byte("{}"), 0o600))
+			var out bytes.Buffer
+			err := cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), tt.remaining, tt.listErr, tt.running, true, paths)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "--purge-local skipped")
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.FileExists(t, filepath.Join(home, "hub-credentials", "other.json"))
+			assert.FileExists(t, filepath.Join(home, "broker.log"))
+			assert.DirExists(t, filepath.Join(home, "runtime-broker-state", "b-1"))
+			assert.DirExists(t, filepath.Join(home, "cache", "templates"))
+		})
+	}
+}
+
+// freeTCPPort returns a local port nothing listens on.
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+	return port
+}
+
+// TestPurgeLocalBrokerStateOnly_RefusesWhileConnectionsRemain covers the
+// path deregister takes when the selected credentials have no broker ID:
+// the purge must still refuse while any hub connection remains.
+func TestPurgeLocalBrokerStateOnly_RefusesWhileConnectionsRemain(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	scionHome := filepath.Join(home, ".scion")
+	credsDir := filepath.Join(scionHome, "hub-credentials")
+	require.NoError(t, os.MkdirAll(credsDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(credsDir, "no-id.json"), []byte(`{"name":"no-id","hubEndpoint":"https://a"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(credsDir, "other.json"), []byte(`{"name":"other","brokerId":"b-2","hubEndpoint":"https://b"}`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(scionHome, "broker.log"), []byte("x"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(scionHome, "cache", "templates"), 0o755))
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Int("port", 0, "")
+	require.NoError(t, cmd.Flags().Set("port", strconv.Itoa(freeTCPPort(t))))
+
+	err := purgeLocalBrokerStateOnly(cmd)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2 hub connection(s) remain")
+	assert.FileExists(t, filepath.Join(scionHome, "broker.log"))
+	assert.DirExists(t, filepath.Join(scionHome, "cache", "templates"))
+	assert.FileExists(t, filepath.Join(credsDir, "other.json"))
+}
+
+func TestPurgeLocalBrokerStateOnly_PurgesWithNoConnections(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	scionHome := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(scionHome, "hub-credentials"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(scionHome, "broker.log"), []byte("x"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(scionHome, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o644))
+
+	cmd := &cobra.Command{}
+	cmd.Flags().Int("port", 0, "")
+	require.NoError(t, cmd.Flags().Set("port", strconv.Itoa(freeTCPPort(t))))
+
+	require.NoError(t, purgeLocalBrokerStateOnly(cmd))
+	assert.NoFileExists(t, filepath.Join(scionHome, "broker.log"))
+	assert.NoDirExists(t, filepath.Join(scionHome, "hub-credentials"))
+	assert.FileExists(t, filepath.Join(scionHome, "settings.yaml"))
 }
 
 func TestConfirmProvide(t *testing.T) {
