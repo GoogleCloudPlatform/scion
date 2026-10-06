@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalSessionRegistry } from './terminal-sessions.js';
+import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
@@ -866,8 +867,9 @@ describe('idle entries', () => {
 
     const item = railItem();
     expect(item.dataset.connection).toBe('idle');
-    const stateLabel = item.querySelector('.terminal-state-label');
-    expect(stateLabel?.textContent).toContain('Not connected');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    const dot = item.querySelector<HTMLElement>('.terminal-connection-dot');
+    expect(dot?.title).toContain('Not connected');
     const reconnectBtn = item.querySelector<HTMLButtonElement>(
       '[aria-label^="Reconnect"].terminal-icon-action'
     );
@@ -881,6 +883,63 @@ describe('idle entries', () => {
     expect(idleOverlay?.textContent).toContain('Select this terminal to connect');
     const errorBanner = pane.shadowRoot?.querySelector('.error-banner');
     expect(errorBanner).toBeNull();
+  });
+
+  it('rail row shows the project name on one line with the full name on hover', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p1',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-1',
+      project: 'A rather long project name',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const item = railItem();
+    const text = item.querySelector('.terminal-rail-text')!;
+    expect(text.children).toHaveLength(2);
+    const project = item.querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('A rather long project name');
+    expect(project?.title).toBe('A rather long project name');
+    expect(item.querySelector('.terminal-state-label')).toBeNull();
+    expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
+  });
+
+  it('rail row falls back to the project id when the project name is unknown', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p2',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    registry.metadata.seed(agentId, {
+      id: agentId,
+      name: 'test',
+      projectId: 'project-id-2',
+      phase: 'running',
+    } as Agent);
+    await flush();
+
+    const project = railItem().querySelector<HTMLElement>('.terminal-project-name');
+    expect(project?.textContent).toBe('project-id-2');
+    expect(project?.title).toBe('project-id-2');
+  });
+
+  it('rail row omits the project line when no agent metadata is loaded', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'p3',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, agentId, { deferConnect: true }));
+    await flush();
+
+    const item = railItem();
+    expect(item.querySelector('.terminal-project-name')).toBeNull();
+    expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
   });
 
   it('selecting an idle entry connects it', async () => {
