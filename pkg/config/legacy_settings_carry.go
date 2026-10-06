@@ -99,51 +99,73 @@ func isLegacySettingsTopLevelKey(k string, isJSON bool) bool {
 // key the mappings are merged the same way, recursively, so converted fields
 // (e.g. server.broker.broker_id from a legacy hub.brokerId) win and carried
 // siblings (e.g. server.broker.port) are kept. Any other clash keeps the
-// converted value.
-func mergeCarriedSettings(root *yamlv3.Node, carried map[string]interface{}) error {
+// converted value; the dotted path of each carried value dropped that way
+// (when it differs from the converted one) is returned, sorted, so the
+// caller can report it.
+func mergeCarriedSettings(root *yamlv3.Node, carried map[string]interface{}) ([]string, error) {
 	keys := make([]string, 0, len(carried))
 	for k := range carried {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	var dropped []string
 	for _, k := range keys {
 		var v yamlv3.Node
 		if err := v.Encode(carried[k]); err != nil {
-			return fmt.Errorf("failed to encode settings key %q: %w", k, err)
+			return nil, fmt.Errorf("failed to encode settings key %q: %w", k, err)
 		}
-		mergeYAMLMappingEntry(root, k, &v)
+		dropped = mergeYAMLMappingEntry(root, k, k, &v, dropped)
 	}
-	return nil
+	sort.Strings(dropped)
+	return dropped, nil
 }
 
 // mergeYAMLMappingEntry sets key to value in mapping unless mapping already
 // has key, in which case two mappings are merged recursively and any other
-// existing value is kept.
-func mergeYAMLMappingEntry(mapping *yamlv3.Node, key string, value *yamlv3.Node) {
+// existing value is kept. path is the dotted path of key; the path of a
+// discarded value that differs from the kept one is appended to dropped.
+func mergeYAMLMappingEntry(mapping *yamlv3.Node, key, path string, value *yamlv3.Node, dropped []string) []string {
 	_, existing := findMapKey(mapping, key)
 	if existing == nil {
 		mapping.Content = append(mapping.Content, newYAMLStringScalar(key), value)
-		return
+		return dropped
 	}
 	if existing.Kind != yamlv3.MappingNode || value.Kind != yamlv3.MappingNode {
-		return
+		if !yamlNodesEqual(existing, value) {
+			dropped = append(dropped, path)
+		}
+		return dropped
 	}
 	for i := 0; i+1 < len(value.Content); i += 2 {
-		mergeYAMLMappingEntry(existing, value.Content[i].Value, value.Content[i+1])
+		k := value.Content[i].Value
+		dropped = mergeYAMLMappingEntry(existing, k, path+"."+k, value.Content[i+1], dropped)
 	}
+	return dropped
+}
+
+// yamlNodesEqual reports whether a and b decode to the same data.
+func yamlNodesEqual(a, b *yamlv3.Node) bool {
+	var av, bv interface{}
+	if a.Decode(&av) != nil || b.Decode(&bv) != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
 }
 
 // marshalMigratedSettings returns the YAML for vs with the carried top-level
-// entries merged in (see mergeCarriedSettings).
-func marshalMigratedSettings(vs *VersionedSettings, carried map[string]interface{}) ([]byte, error) {
+// entries merged in, and the paths of carried values the merge dropped (see
+// mergeCarriedSettings).
+func marshalMigratedSettings(vs *VersionedSettings, carried map[string]interface{}) ([]byte, []string, error) {
 	var root yamlv3.Node
 	if err := root.Encode(vs); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := mergeCarriedSettings(&root, carried); err != nil {
-		return nil, err
+	dropped, err := mergeCarriedSettings(&root, carried)
+	if err != nil {
+		return nil, nil, err
 	}
-	return encodeYAMLDocument(&yamlv3.Node{Kind: yamlv3.DocumentNode, Content: []*yamlv3.Node{&root}}, 4)
+	data, err := encodeYAMLDocument(&yamlv3.Node{Kind: yamlv3.DocumentNode, Content: []*yamlv3.Node{&root}}, 4)
+	return data, dropped, err
 }
 
 // checkMigratedSettingsDecode reports whether data, migrated v1 settings
@@ -176,7 +198,7 @@ func checkCarriedSettingsDecode(vs *VersionedSettings, carried map[string]interf
 	}
 	var bad []string
 	for k, v := range carried {
-		data, err := marshalMigratedSettings(vs, map[string]interface{}{k: v})
+		data, _, err := marshalMigratedSettings(vs, map[string]interface{}{k: v})
 		if err != nil || checkMigratedSettingsDecode(data) != nil {
 			bad = append(bad, k)
 		}

@@ -5368,8 +5368,13 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	// any other schema mismatch (such as an unknown key) is a warning:
 	// dropping such a key is the data loss this step prevents.
 	if len(carried) > 0 {
-		if outputData, err = marshalMigratedSettings(vs, carried); err != nil {
+		var dropped []string
+		if outputData, dropped, err = marshalMigratedSettings(vs, carried); err != nil {
 			return nil, fmt.Errorf("failed to marshal converted settings: %w", err)
+		}
+		for _, p := range dropped {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting %s dropped: it conflicts with the value converted from the legacy settings, which is used instead", p))
 		}
 		if err := checkCarriedSettingsDecode(vs, carried, outputData); err != nil {
 			return nil, fmt.Errorf("cannot migrate %s (left unchanged): %w; fix or remove the key and retry", settingsPath, err)

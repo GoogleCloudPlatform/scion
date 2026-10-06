@@ -254,7 +254,8 @@ server:
     port: 19800
     broker_id: stale-id
 `)
-	if _, err := MigrateSettingsFile(dir, false); err != nil {
+	result, err := MigrateSettingsFile(dir, false)
+	if err != nil {
 		t.Fatalf("MigrateSettingsFile: %v", err)
 	}
 	m := readSettingsMap(t, filepath.Join(dir, "settings.yaml"))
@@ -263,6 +264,77 @@ server:
 	}
 	if id, _ := lookupPath(m, "server", "broker", "broker_id"); id != "broker-123" {
 		t.Errorf("server.broker.broker_id = %v, want the converted broker-123", id)
+	}
+	// The dropped carried value is reported by path only, never by value
+	// (settings can hold secrets such as broker tokens).
+	want := "kept setting server.broker.broker_id dropped: it conflicts with the value converted from the legacy settings, which is used instead"
+	assertWarnings(t, result.Warnings, []string{want}, []string{"server.broker.port", "stale-id"})
+}
+
+// assertWarnings checks every want string is one of warnings, and that no
+// warning mentions any of notMentioned.
+func assertWarnings(t *testing.T, warnings, want, notMentioned []string) {
+	t.Helper()
+	for _, w := range want {
+		found := false
+		for _, got := range warnings {
+			if got == w {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing warning %q; warnings: %q", w, warnings)
+		}
+	}
+	for _, got := range warnings {
+		for _, n := range notMentioned {
+			if strings.Contains(got, n) {
+				t.Errorf("warning %q mentions %q", got, n)
+			}
+		}
+	}
+}
+
+// A carried value whose shape clashes with a converted one (a scalar where
+// the converted settings have a mapping) is dropped, as the converted value
+// wins, and reported. An equal carried value is not reported.
+func TestMigrateSettingsFile_DroppedCarriedValueWarnings(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		want          []string
+		notMentioned  []string
+	}{
+		{
+			name:         "scalar against converted mapping",
+			content:      "hub:\n  brokerId: broker-123\nserver: secret-hello-value\n",
+			want:         []string{"kept setting server dropped: it conflicts with the value converted from the legacy settings, which is used instead"},
+			notMentioned: []string{"secret-hello-value"},
+		},
+		{
+			name:         "list against converted mapping",
+			content:      "hub:\n  brokerId: broker-123\nserver:\n  broker: [secret-list-value]\n",
+			want:         []string{"kept setting server.broker dropped: it conflicts with the value converted from the legacy settings, which is used instead"},
+			notMentioned: []string{"secret-list-value"},
+		},
+		{
+			name:         "equal value",
+			content:      "hub:\n  brokerId: broker-123\nserver:\n  broker:\n    broker_id: broker-123\n    port: 19800\n",
+			notMentioned: []string{"kept setting"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := carryTestDir(t, "settings.yaml", tc.content)
+			result, err := MigrateSettingsFile(dir, false)
+			if err != nil {
+				t.Fatalf("MigrateSettingsFile: %v", err)
+			}
+			assertWarnings(t, result.Warnings, tc.want, tc.notMentioned)
+			// The converted value is what is written.
+			m := readSettingsMap(t, filepath.Join(dir, "settings.yaml"))
+			if id, _ := lookupPath(m, "server", "broker", "broker_id"); id != "broker-123" {
+				t.Errorf("server.broker.broker_id = %v, want broker-123", id)
+			}
+		})
 	}
 }
 
