@@ -1116,6 +1116,7 @@ export class AgentStore {
     const listed = new Set(entry.agents.map((a) => a.id));
     let total: number | undefined;
     let caughtUp = false;
+    let fresh: Agent[] = [];
     try {
       let cursor: string | undefined;
       for (let page = 0; page <= extraPages; page++) {
@@ -1156,7 +1157,7 @@ export class AgentStore {
         cursor = body.nextCursor;
       }
       if (this.feed !== feed) return;
-      const fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
+      fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
       feed.seedAgents(fresh, { token, partial: true });
       // Only a merged probe that caught up moves the mark. An interrupted
       // one reads the same pages again; one that did not catch up leaves
@@ -1170,8 +1171,9 @@ export class AgentStore {
       feed.endSeedEpoch(token);
     }
 
-    // Deleted agents were not seeded, so the merge skips them.
-    const upserted = Array.from(new Set(changed.map((row) => row.id)));
+    // Only the rows seeded: an agent deleted on an earlier feed can still be
+    // held by this one, from a `created` replayed after the delete.
+    const upserted = Array.from(new Set(fresh.map((row) => row.id)));
     if (upserted.length > 0) {
       this.applyChange(
         feed,

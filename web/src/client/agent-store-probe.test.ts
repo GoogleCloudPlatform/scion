@@ -1138,6 +1138,33 @@ describe('AgentStore delta probe', () => {
     expect(h.feeds[1].getAgent('a1')).toBeUndefined();
   });
 
+  it('never brings back an agent deleted on an earlier feed that the next feed holds', async () => {
+    const h = await loaded([row('a1', 1), row('a2', 2)]);
+    await h.emitAgent('deleted', { agentId: 'a1' });
+    const release = h.server.pause();
+    h.events.dispatchEvent(new Event('scion:membership-changed'));
+    await h.connect();
+    // A replayed `created` reaches the next feed, which has not seen the
+    // delete; the walk in flight still drops the agent.
+    await h.emitAgent('created', { agentId: 'a1', projectId: 'p1', name: 'a1', slug: 'a1' });
+    release();
+    await settle();
+    expect(h.feeds[1].getAgent('a1')).toBeDefined();
+    expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+
+    const published: string[][] = [];
+    h.store.retain(HUB, (snapshot) => published.push(ids(snapshot)));
+    const walks = h.server.walks();
+    h.server.agents[0] = row('a1', 10);
+    h.server.totalCount = 1;
+    await tick();
+    expect(h.server.probes()).toBe(1);
+    expect(published.filter((list) => list.includes('a1'))).toEqual([]);
+    expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+    // The list matches the server's count, so no walk follows.
+    expect(h.server.walks()).toBe(walks);
+  });
+
   it('never sets the completeness flag', async () => {
     const h = await loaded([row('a1', 1)], P1);
     const mark = vi.spyOn(StateManager.prototype, 'markAgentSetComplete');
