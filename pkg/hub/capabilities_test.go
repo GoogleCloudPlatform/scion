@@ -369,7 +369,7 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 			if tc.itemsKey == "groups" {
 				// group.read and group.list are hub-only: a project token is
 				// not eligible for them and lists no groups, while a hub
-				// token with the same selectors lists every group.
+				// token with the same selectors lists every project group.
 				body, totalCount = request(scoped, tc.path+"?limit=100")
 				assert.NotContains(t, body, tc.allowedID)
 				assert.NotContains(t, body, tc.deniedID)
@@ -382,7 +382,9 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 				body, totalCount = request(hub, tc.path+"?limit=100")
 				assert.Contains(t, body, tc.allowedID)
 				assert.Contains(t, body, tc.deniedID)
-				assert.Equal(t, tc.unscopedTotal, totalCount)
+				// The seeded hub-members group has no project parent, so a
+				// token cannot resolve its target scope and it is not listed.
+				assert.Equal(t, tc.unscopedTotal-1, totalCount)
 			} else {
 				body, totalCount = request(scoped, tc.path+"?limit=1")
 				assert.NotContains(t, body, tc.deniedID)
