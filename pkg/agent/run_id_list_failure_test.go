@@ -33,10 +33,11 @@ import (
 // delete of it.
 
 // filesRemovedByDeleteOf reports whether a run-scoped delete for runID
-// removes the agent's files: the broker's agentFilesRunOwner leaves them
-// alone only when another run is recorded as their owner.
-func filesRemovedByDeleteOf(projectScionDir, runID string) bool {
-	owner := GetSavedRunID("tz-agent", projectScionDir)
+// removes the agent's files. It mirrors only the broker's
+// agentFilesRunOwner check (the files are left alone when another run is
+// recorded as their owner), not its other-run-in-flight check.
+func filesRemovedByDeleteOf(agentName, projectScionDir, runID string) bool {
+	owner := GetSavedRunID(agentName, projectScionDir)
 	return owner == "" || owner == runID
 }
 
@@ -81,13 +82,14 @@ func TestStart_ListFailureKeepsPreviousRun(t *testing.T) {
 	if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-1" {
 		t.Errorf("recorded run = %q, want run-1 kept", got)
 	}
-	if !filesRemovedByDeleteOf(projectScionDir, "run-1") {
+	if !filesRemovedByDeleteOf("tz-agent", projectScionDir, "run-1") {
 		t.Error("a delete of run-1 would leave the agent's files behind")
 	}
 }
 
-// A fresh provision reached after the list failed records no run, so a
-// delete of whichever run the hub settles on removes the files.
+// A fresh provision reached after the list failed records no run while
+// the create collides, so a delete of whichever run the hub settles on
+// removes the files.
 func TestStart_ListFailureFreshProvisionRecordsNoRun(t *testing.T) {
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	if err := os.RemoveAll(agentDir); err != nil {
@@ -118,7 +120,7 @@ func TestStart_ListFailureFreshProvisionRecordsNoRun(t *testing.T) {
 	if got := GetSavedRunID("tz-agent", projectScionDir); got != "" {
 		t.Errorf("recorded run = %q, want none", got)
 	}
-	if !filesRemovedByDeleteOf(projectScionDir, "run-1") {
+	if !filesRemovedByDeleteOf("tz-agent", projectScionDir, "run-1") {
 		t.Error("a delete of the old run would leave the agent's files behind")
 	}
 }
@@ -167,7 +169,7 @@ func TestStart_ListSuccessRecordsNewRunEvenIfCreateFails(t *testing.T) {
 			if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-2" {
 				t.Errorf("recorded run = %q, want run-2", got)
 			}
-			if !filesRemovedByDeleteOf(projectScionDir, "run-2") {
+			if !filesRemovedByDeleteOf("tz-agent", projectScionDir, "run-2") {
 				t.Error("a delete of run-2 would leave the agent's files behind")
 			}
 		})
@@ -202,5 +204,61 @@ func TestStart_RunningEntryKeepsRecordedRun(t *testing.T) {
 	}
 	if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-1" {
 		t.Errorf("recorded run = %q, want run-1 kept", got)
+	}
+}
+
+// A failed list followed by a successful create (review R1) records the
+// new run once the create succeeds: the name was free, so the failed list
+// hid no previous container and the hub keeps the new run. A delete of the
+// new run removes the files; a late delete of the old run does not.
+func TestStart_ListFailureThenCreateRecordsNewRun(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		name := "provisioned"
+		if fresh {
+			name = "fresh provision"
+		}
+		t.Run(name, func(t *testing.T) {
+			projectScionDir, agentDir := startTZFixture(t, "", `""`)
+			if fresh {
+				if err := os.RemoveAll(agentDir); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeRun1AgentInfo(t, agentDir)
+			}
+			lists := 0
+			rt := &runtime.MockRuntime{
+				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+					lists++
+					if lists == 1 {
+						return nil, errors.New("runtime unavailable")
+					}
+					return []api.AgentInfo{{
+						Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: "running",
+						Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
+					}}, nil
+				},
+				DeleteFunc: func(context.Context, runtime.RunRef) error {
+					t.Error("Start deleted a runtime entry")
+					return nil
+				},
+				RunFunc: func(context.Context, runtime.RunConfig) (string, error) { return "cid-run-2", nil },
+			}
+			if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+				Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+				Template: "default",
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-2" {
+				t.Errorf("recorded run after a successful create = %q, want run-2", got)
+			}
+			if !filesRemovedByDeleteOf("tz-agent", projectScionDir, "run-2") {
+				t.Error("a delete of the live run-2 would leave the agent's files behind")
+			}
+			if filesRemovedByDeleteOf("tz-agent", projectScionDir, "run-1") {
+				t.Error("a late delete of run-1 would remove the live run-2's files")
+			}
+		})
 	}
 }
