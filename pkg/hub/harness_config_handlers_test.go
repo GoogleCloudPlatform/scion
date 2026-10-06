@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -532,6 +533,45 @@ func TestHarnessConfigUpdate_PreservesImageStatus(t *testing.T) {
 	}
 	if stored.ImageStatusCheckedAt == nil || !stored.ImageStatusCheckedAt.Equal(checkedAt) {
 		t.Errorf("image status checked at = %v, want %v", stored.ImageStatusCheckedAt, checkedAt)
+	}
+}
+
+// TestHarnessConfigUpdate_RequiresIdentity verifies that the update handler
+// responds 401 and leaves the stored record unchanged when the request
+// context carries no identity.
+func TestHarnessConfigUpdate_RequiresIdentity(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	hc := createHarnessConfigWithContent(t, s, "hc-update-identity")
+
+	body, err := json.Marshal(store.HarnessConfig{
+		Name:        "Renamed Without Identity",
+		Slug:        hc.Slug,
+		Harness:     hc.Harness,
+		Description: "updated without identity",
+		Status:      hc.Status,
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/harness-configs/"+hc.ID, strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.updateHarnessConfig(rec, req, hc)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		t.Fatalf("failed to get harness config: %v", err)
+	}
+	if stored.Name != hc.Name {
+		t.Errorf("name = %q, want %q", stored.Name, hc.Name)
+	}
+	if stored.Description != hc.Description {
+		t.Errorf("description = %q, want %q", stored.Description, hc.Description)
 	}
 }
 
