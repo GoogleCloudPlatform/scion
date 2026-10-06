@@ -138,3 +138,107 @@ func TestProvision_BuiltinCPULimit_DisabledAddsNothing(t *testing.T) {
 		}
 	}
 }
+
+// A settings default_resources.limits.cpu counts as a tier-set limit: a larger
+// template requests.cpu does not raise it.
+func TestProvision_BuiltinCPULimit_SettingsLimitNotRaised(t *testing.T) {
+	cfg := provisionWithTemplate(t, `schema_version: "1"
+default_harness_config: test-harness
+default_resources:
+  limits:
+    cpu: "3"
+harness_configs:
+  test-harness:
+    harness: test-harness
+`, `{
+		"default_harness_config": "test-harness",
+		"resources": {"requests": {"cpu": "4"}}
+	}`)
+	if cfg.Resources == nil || cfg.Resources.Limits.CPU != "3" {
+		t.Errorf("limits.cpu = %+v, want 3 from settings default_resources", cfg.Resources)
+	}
+	if cfg.Resources != nil && cfg.Resources.Requests.CPU != "4" {
+		t.Errorf("requests.cpu = %q, want 4 from the template", cfg.Resources.Requests.CPU)
+	}
+}
+
+// A settings default_resources.requests.cpu above the built-in, with no limit
+// anywhere, raises the built-in limit to it.
+func TestProvision_BuiltinCPULimit_SettingsRequestRaisesBuiltin(t *testing.T) {
+	cfg := provisionWithTemplate(t, `schema_version: "1"
+default_harness_config: test-harness
+default_resources:
+  requests:
+    cpu: "4"
+harness_configs:
+  test-harness:
+    harness: test-harness
+`, `{
+		"default_harness_config": "test-harness"
+	}`)
+	if cfg.Resources == nil || cfg.Resources.Limits.CPU != "4" {
+		t.Errorf("limits.cpu = %+v, want 4 (built-in raised to settings requests.cpu)", cfg.Resources)
+	}
+}
+
+// applyBuiltinResourceDefaults must replace cfg.Kubernetes with a copy when it
+// raises the Kubernetes CPU limit, never write through a pointer the caller
+// (or a template) still holds.
+func TestApplyBuiltinResourceDefaults_DoesNotMutateHeldKubernetesConfig(t *testing.T) {
+	heldRes := &api.K8sResources{
+		Requests: map[string]string{"cpu": "6"},
+		Limits:   map[string]string{"nvidia.com/gpu": "1"},
+	}
+	held := &api.KubernetesConfig{RuntimeClassName: "gvisor", Resources: heldRes}
+	cfg := &api.ScionConfig{Kubernetes: held}
+
+	applyBuiltinResourceDefaults(cfg)
+
+	if cfg.Kubernetes == held {
+		t.Fatal("cfg.Kubernetes is still the held pointer; want a copy")
+	}
+	if held.Resources != heldRes {
+		t.Error("held KubernetesConfig.Resources pointer was replaced")
+	}
+	if _, ok := heldRes.Limits["cpu"]; ok || len(heldRes.Limits) != 1 || len(heldRes.Requests) != 1 {
+		t.Errorf("held kubernetes resources mutated: %+v", heldRes)
+	}
+	if got := cfg.Kubernetes.Resources.Limits["cpu"]; got != "6" {
+		t.Errorf("cfg kubernetes.resources.limits.cpu = %q, want 6", got)
+	}
+	if cfg.Kubernetes.RuntimeClassName != "gvisor" {
+		t.Errorf("copy lost other Kubernetes fields: %+v", cfg.Kubernetes)
+	}
+	if cfg.Resources == nil || cfg.Resources.Limits.CPU != "2" {
+		t.Errorf("generic limits.cpu = %+v, want 2", cfg.Resources)
+	}
+}
+
+// Without a Kubernetes raise, cfg.Kubernetes stays the same pointer.
+func TestApplyBuiltinResourceDefaults_NoRaiseKeepsKubernetesPointer(t *testing.T) {
+	held := &api.KubernetesConfig{Resources: &api.K8sResources{Requests: map[string]string{"cpu": "1"}}}
+	cfg := &api.ScionConfig{Kubernetes: held}
+
+	applyBuiltinResourceDefaults(cfg)
+
+	if cfg.Kubernetes != held {
+		t.Error("cfg.Kubernetes replaced although nothing was raised")
+	}
+	if cfg.Resources == nil || cfg.Resources.Limits.CPU != "2" {
+		t.Errorf("generic limits.cpu = %+v, want 2", cfg.Resources)
+	}
+}
+
+// A nil Kubernetes block is left nil.
+func TestApplyBuiltinResourceDefaults_NilKubernetes(t *testing.T) {
+	cfg := &api.ScionConfig{Resources: &api.ResourceSpec{Requests: api.ResourceList{CPU: "4"}}}
+
+	applyBuiltinResourceDefaults(cfg)
+
+	if cfg.Kubernetes != nil {
+		t.Errorf("cfg.Kubernetes = %+v, want nil", cfg.Kubernetes)
+	}
+	if cfg.Resources.Limits.CPU != "4" {
+		t.Errorf("limits.cpu = %q, want 4", cfg.Resources.Limits.CPU)
+	}
+}

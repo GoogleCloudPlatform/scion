@@ -1881,19 +1881,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// kubernetes.resources.requests.cpu sets kubernetes.resources.limits.cpu,
 	// which only the Kubernetes runtime reads.
 	if finalScionCfg != nil && config.ShouldEnforceResourceDefaults(settings) {
-		var k8sRes *api.K8sResources
-		if finalScionCfg.Kubernetes != nil {
-			k8sRes = finalScionCfg.Kubernetes.Resources
-		}
-		resources, newK8sRes := config.ApplyBuiltinDefaultResources(finalScionCfg.Resources, k8sRes)
-		finalScionCfg.Resources = resources
-		if newK8sRes != k8sRes {
-			// Copy rather than mutate: the Kubernetes block may be shared with
-			// the template or harness config it was resolved from.
-			kc := *finalScionCfg.Kubernetes
-			kc.Resources = newK8sRes
-			finalScionCfg.Kubernetes = &kc
-		}
+		applyBuiltinResourceDefaults(finalScionCfg)
 	}
 
 	// Mount the resolved workspace if an external source was determined
@@ -2812,4 +2800,25 @@ func templateRef(tpl *config.Template) string {
 		return tpl.Name
 	}
 	return tpl.Path
+}
+
+// applyBuiltinResourceDefaults applies config.ApplyBuiltinDefaultResources to
+// cfg: the built-in CPU limit, raised for a larger CPU request, and a
+// kubernetes.resources CPU limit for a larger Kubernetes-only CPU request.
+//
+// cfg.Kubernetes is replaced with a copy when its resources change, never
+// mutated in place: the Kubernetes block may be shared with the template or
+// harness config it was resolved from.
+func applyBuiltinResourceDefaults(cfg *api.ScionConfig) {
+	var k8sRes *api.K8sResources
+	if cfg.Kubernetes != nil {
+		k8sRes = cfg.Kubernetes.Resources
+	}
+	resources, newK8sRes := config.ApplyBuiltinDefaultResources(cfg.Resources, k8sRes)
+	cfg.Resources = resources
+	if newK8sRes != k8sRes {
+		kc := *cfg.Kubernetes
+		kc.Resources = newK8sRes
+		cfg.Kubernetes = &kc
+	}
 }
