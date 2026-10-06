@@ -428,7 +428,10 @@ export class AgentStore {
   private feedUnavailable = false;
   /** The current feed was marked as holding the complete hub set. */
   private feedHoldsHubSet = false;
-  /** Agents deleted on earlier feeds: a later feed's walks must not bring them back. */
+  /**
+   * Agents deleted on earlier feeds: a later feed's walks and probes must
+   * not bring them back. A restore the feed reports clears one.
+   */
   private readonly carriedTombstones = new Set<string>();
   /** Agent ids whose single-agent read is in flight on the current feed. */
   private readonly hydrating = new Set<string>();
@@ -1242,6 +1245,14 @@ export class AgentStore {
     const onChanged = ((event: CustomEvent<{ data: AgentsChangedDetail }>) => {
       if (this.feed === feed) this.applyChange(feed, event.detail.data);
     }) as EventListener;
+    // Agent ids are not reused: a restore is the one way a deleted agent
+    // comes back, and it is never inferred from a listing, which can still
+    // show an agent while its delete completes.
+    const onCreated = ((event: CustomEvent<{ data: { agentId: string; restored?: boolean } }>) => {
+      if (this.feed === feed && event.detail.data.restored) {
+        this.carriedTombstones.delete(event.detail.data.agentId);
+      }
+    }) as EventListener;
     const onResync = (): void => {
       if (this.feed === feed) this.invalidate('resync');
     };
@@ -1259,11 +1270,13 @@ export class AgentStore {
         entry.walk.feedDropped = true;
       }
     };
+    feed.addEventListener('agent-created', onCreated);
     feed.addEventListener('agents-changed', onChanged);
     feed.addEventListener('agents-resync', onResync);
     feed.addEventListener('connected', onConnected);
     feed.addEventListener('disconnected', onDisconnected);
     this.detachFeed = (): void => {
+      feed.removeEventListener('agent-created', onCreated);
       feed.removeEventListener('agents-changed', onChanged);
       feed.removeEventListener('agents-resync', onResync);
       feed.removeEventListener('connected', onConnected);

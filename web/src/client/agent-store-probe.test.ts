@@ -1167,6 +1167,86 @@ describe('AgentStore delta probe', () => {
     expect(ids(h.store.peek(HUB))).toEqual(['a2']);
   });
 
+  describe('restores of agents deleted on an earlier feed', () => {
+    const restoredAt = t(20);
+
+    /** Run the next full walk and let it finish. */
+    async function walkAgain(h: Harness): Promise<void> {
+      h.feeds[h.feeds.length - 1].dispatchEvent(new CustomEvent('agents-resync'));
+      await settle();
+    }
+
+    it('shows an agent restored after a feed swap, and later walks and probes keep it', async () => {
+      const h = await loaded([row('a1', 1), row('a2', 2)]);
+      await h.emitAgent('deleted', { agentId: 'a1' });
+      h.server.agents.shift();
+      h.events.dispatchEvent(new Event('scion:membership-changed'));
+      await h.connect();
+      expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+
+      h.server.agents.push(row('a1', 20));
+      await h.emitAgent('created', {
+        agentId: 'a1',
+        projectId: 'p1',
+        name: 'a1',
+        slug: 'a1',
+        restoredAt,
+      });
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+
+      const walks = h.server.walks();
+      await walkAgain(h);
+      expect(h.server.walks()).toBe(walks + 1);
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+
+      h.server.agents[1] = row('a1', 30, { name: 'renamed' });
+      await tick();
+      expect(h.server.probes()).toBe(1);
+      expect(find(h.store.peek(HUB), 'a1')?.name).toBe('renamed');
+      expect(h.server.walks()).toBe(walks + 1);
+    });
+
+    it('keeps hiding an agent deleted on an earlier feed that is listed with no restore', async () => {
+      // The delete window: `deleted` is published and the record not yet
+      // removed. A replayed unmarked `created` is no restore either.
+      const h = await loaded([row('a1', 1), row('a2', 2)]);
+      await h.emitAgent('deleted', { agentId: 'a1' });
+      h.events.dispatchEvent(new Event('scion:membership-changed'));
+      await h.connect();
+      await h.emitAgent('created', { agentId: 'a1', projectId: 'p1', name: 'a1', slug: 'a1' });
+
+      await walkAgain(h);
+      expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+      h.server.agents[0] = row('a1', 10);
+      await tick();
+      expect(h.server.probes()).toBe(1);
+      expect(ids(h.store.peek(HUB))).toEqual(['a2']);
+    });
+
+    it('carries no tombstone for an agent restored before a feed swap', async () => {
+      const h = await loaded([row('a1', 1), row('a2', 2)]);
+      await h.emitAgent('deleted', { agentId: 'a1' });
+      await h.emitAgent('created', {
+        agentId: 'a1',
+        projectId: 'p1',
+        name: 'a1',
+        slug: 'a1',
+        restoredAt,
+      });
+      expect(h.feeds[0].getDeletedAgentIds().has('a1')).toBe(false);
+      h.server.agents[0] = row('a1', 20);
+
+      h.events.dispatchEvent(new Event('scion:membership-changed'));
+      await h.connect();
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+      await walkAgain(h);
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+      h.server.agents[0] = row('a1', 30, { name: 'renamed' });
+      await tick();
+      expect(find(h.store.peek(HUB), 'a1')?.name).toBe('renamed');
+    });
+  });
+
   it('never sets the completeness flag', async () => {
     const h = await loaded([row('a1', 1)], P1);
     const mark = vi.spyOn(StateManager.prototype, 'markAgentSetComplete');
