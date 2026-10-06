@@ -280,7 +280,7 @@ type HomeStorageRealization struct {
 }
 
 // SharedDirRealization holds the plan for realizing a project's shared
-// directories when server.shared_dir_storage.backend is "nfs" (design
+// directories that use the "nfs" shared-dir storage backend (design
 // deploy-config-explore §3.2.3/§3.2.4). It is computed once (in
 // pkg/agent.resolveSharedDirs) and consumed by the K8s runtime's buildPod,
 // which mounts PVClaimName by subPath instead of creating per-dir dynamic
@@ -295,15 +295,30 @@ type SharedDirRealization struct {
 	// pv_name); buildPod must fail closed rather than fall back to EmptyDir
 	// (design G5).
 	PVClaimName string
-	// SubPaths maps each shared dir name to its subPath within PVClaimName,
-	// e.g. "projects/<pid>/shared-dirs/<name>".
+	// SubPaths maps each shared dir name served from the NFS export to its
+	// subPath within PVClaimName, e.g. "projects/<pid>/shared-dirs/<name>".
 	SubPaths map[string]string
+	// LocalDirs names the shared dirs that use the local backend instead
+	// (per-dir backends, shared_dir_storage_backends). Every other shared
+	// dir is served from the NFS export and must have a SubPaths entry;
+	// buildPod fails closed when one is missing.
+	LocalDirs map[string]bool
 	// SupplementalGroups are the owning group ids of the shared-dir leaves,
 	// read from each leaf at every start (pkg/agent.sharedDirLeafGroups)
 	// and filtered by its guard. Kubernetes adds them to the pod's
 	// supplementalGroups; Docker and rootful Podman pass them as
 	// --group-add. Empty means no extra group (ptone/scion#3155).
 	SupplementalGroups []int64
+}
+
+// Serves reports whether r serves the shared dir name from the NFS export:
+// r is an nfs realization and LocalDirs does not name name. It is false
+// for a nil r.
+func (r *SharedDirRealization) Serves(name string) bool {
+	if r == nil || r.Backend != "nfs" {
+		return false
+	}
+	return !r.LocalDirs[name]
 }
 
 // RunRef identifies the runtime entry a Delete targets. ID is the backend
