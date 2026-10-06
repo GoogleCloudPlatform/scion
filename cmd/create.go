@@ -57,8 +57,14 @@ The agent is provisioned but not started, even when a task is given. Run
 			case "api-key", "oauth-token", "auth-file", "vertex-ai":
 				// valid
 			default:
-				return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
+				return newUsageError("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
 			}
+		}
+
+		// Validate --template-scope with the other flag checks, before any
+		// hub work (ResolveTemplateForHub keeps its own check as a guard).
+		if err := validateTemplateScope(templateScope); err != nil {
+			return asUsageError(err)
 		}
 
 		// Check if Hub should be used, excluding the target agent from sync requirements.
@@ -366,17 +372,17 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 
 	parsedLabels, err := parseLabels(labelFlags)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --role flag if provided
 	if err := validateAgentRole(agentRoleFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Validate --message-mode flag if provided
 	if err := validateMessageMode(messageModeFlag); err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	// Build create request — always provision-only (create does not start the agent)
