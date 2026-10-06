@@ -290,6 +290,14 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
+		// Artifact service — deferred, not stubbed: no handler behaviour yet
+		// (the routes answer 404); catalog operations land with the handlers.
+		"artifact.read":   "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
+		"artifact.create": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
+		"artifact.update": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
+		"artifact.delete": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
+		"artifact.manage": "Artifact service: no handler behaviour in P0; catalog operations land with the handlers (ptone/scion#3202)",
+
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
 		"secret.deliver":          "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",

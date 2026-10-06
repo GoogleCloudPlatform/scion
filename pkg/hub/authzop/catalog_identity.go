@@ -701,7 +701,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.session.logout",
 		Domain:      "user",
-		Description: "End the caller's sign-in session; part of the sign-in flow, with no resource effect beyond the session",
+		Description: "Sign-in flow logout step; the hub holds no server-side session state for it to change",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/logout", Method: "POST"},
 		},
@@ -714,7 +714,7 @@ var identityOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionAuthenticationOnly,
-			Reason: "Sign-in flow step that acknowledges the end of the caller's own session; no resource permission applies and no caller is refused",
+			Reason: "Sign-in flow step that reads and changes no hub state; no resource permission applies",
 			Scope:  "session logout",
 			Waives: []WaivedObligation{WaiveBasePermission, WaiveDenialCodes},
 		}},

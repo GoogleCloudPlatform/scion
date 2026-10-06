@@ -449,7 +449,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.secrets.access",
 		Domain:      "agent",
-		Description: "List, read and write secrets in the calling agent's own project",
+		Description: "List, read and write the secrets available to the calling agent: its project's and its creating user's",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "GET"},
@@ -463,7 +463,7 @@ var agentOperations = []OperationSpec{
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "agent.secrets.access",
-			ContextFields: []string{"actor_id", "project_id"},
+			ContextFields: []string{"actor_id", "project_id", "scope"},
 			BeforeFields:  []string{"secret_key"},
 			Atomic:        true,
 		},
@@ -471,7 +471,7 @@ var agentOperations = []OperationSpec{
 		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"}},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionInternalOnly,
-			Reason: "The agent authenticates with its own agent JWT, whose subject must match the agent ID in the path; the project comes from the token; no user permission applies",
+			Reason: "The agent authenticates with its own agent JWT, whose subject must match the agent ID in the path; no user permission applies; the project and user scope IDs come from the token",
 			Scope:  "agent self access",
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},

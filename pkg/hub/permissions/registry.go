@@ -48,6 +48,10 @@ const (
 	ResourceSecret         = "secret"
 	ResourceEnvVar         = "env_var"
 	ResourceSkillInjection = "skill_injection"
+	// ResourceArtifact is the artifact service's resource type
+	// (pkg/artifacts). Artifact permissions are checked in the hub's
+	// artifacts.Host adapter against the artifact's home project.
+	ResourceArtifact = "artifact"
 
 	// ResourceInbox and ResourceUserSkillInjection are self-scoped resource
 	// types: their records belong to one user and carry no project or hub
@@ -176,6 +180,12 @@ var Registry = []Permission{
 	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
+
+	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", AgentScopes: []string{"project:artifact:write"}, Description: "Publish new versions of artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},

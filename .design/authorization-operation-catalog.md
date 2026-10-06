@@ -24,7 +24,7 @@
 - [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
 - [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
 - [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
-- [agent.secrets.access](#agentsecretsaccess) — List, read and write secrets in the calling agent's own project
+- [agent.secrets.access](#agentsecretsaccess) — List, read and write the secrets available to the calling agent: its project's and its creating user's
 - [project.membership.add](#projectmembershipadd) — Add a member to a project with a specified role
 - [project.membership.update](#projectmembershipupdate) — Change a project member's role
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
@@ -68,7 +68,7 @@
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [access.constraint.read](#accessconstraintread) — Read access constraint definitions
 - [user.provision](#userprovision) — Create a user directly through the API; refused for every caller, because sign-in flows create users
-- [user.session.logout](#usersessionlogout) — End the caller's sign-in session; part of the sign-in flow, with no resource effect beyond the session
+- [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
@@ -755,7 +755,7 @@
 
 **Domain:** agent
 
-**Description:** List, read and write secrets in the calling agent's own project
+**Description:** List, read and write the secrets available to the calling agent: its project's and its creating user's
 
 ### Entry Points
 
@@ -778,7 +778,7 @@
 ### Audit
 
 - **Event Type:** `agent.secrets.access`
-- **Context Fields:** actor_id, project_id
+- **Context Fields:** actor_id, project_id, scope
 - **Before Fields:** secret_key
 - **Atomic:** Yes
 
@@ -790,7 +790,7 @@
 
 ### Exemptions
 
-- **internal_only:** The agent authenticates with its own agent JWT, whose subject must match the agent ID in the path; the project comes from the token; no user permission applies (scope: agent self access) — waives: `base_permission`
+- **internal_only:** The agent authenticates with its own agent JWT, whose subject must match the agent ID in the path; no user permission applies; the project and user scope IDs come from the token (scope: agent self access) — waives: `base_permission`
 
 ---
 
@@ -2521,7 +2521,7 @@
 
 **Domain:** user
 
-**Description:** End the caller's sign-in session; part of the sign-in flow, with no resource effect beyond the session
+**Description:** Sign-in flow logout step; the hub holds no server-side session state for it to change
 
 ### Entry Points
 
@@ -2545,7 +2545,7 @@
 
 ### Exemptions
 
-- **authentication_only:** Sign-in flow step that acknowledges the end of the caller's own session; no resource permission applies and no caller is refused (scope: session logout) — waives: `base_permission`, `denial_codes`
+- **authentication_only:** Sign-in flow step that reads and changes no hub state; no resource permission applies (scope: session logout) — waives: `base_permission`, `denial_codes`
 
 ---
 
