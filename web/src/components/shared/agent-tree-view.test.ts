@@ -1574,17 +1574,38 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
       expect(selectStartPrevented(document.body)).toBe(false);
       pointer('pointerup');
     }
-    // The primary button still pans.
-    canvas().dispatchEvent(
-      new PointerEvent('pointerdown', {
-        bubbles: true,
-        composed: true,
-        cancelable: true,
-        pointerId: 1,
-        button: 0,
-      })
-    );
-    expect(canvas().classList.contains('dragging')).toBe(true);
+    // The primary button still pans, for a mouse, a touch contact and a pen.
+    for (const pointerType of ['mouse', 'touch', 'pen']) {
+      canvas().dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 0,
+          pointerType,
+        })
+      );
+      expect(canvas().classList.contains('dragging'), pointerType).toBe(true);
+      pointer('pointerup');
+      expect(canvas().classList.contains('dragging')).toBe(false);
+    }
+  });
+
+  // macOS Ctrl+click is a context-menu click that reports button 0.
+  it('does not start a pan on a mouse Ctrl+click', () => {
+    const ev = new PointerEvent('pointerdown', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      pointerId: 1,
+      button: 0,
+      pointerType: 'mouse',
+      ctrlKey: true,
+    });
+    canvas().dispatchEvent(ev);
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(ev.defaultPrevented).toBe(false);
     pointer('pointerup');
   });
 
