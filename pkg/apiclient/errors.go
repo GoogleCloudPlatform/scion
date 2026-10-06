@@ -102,6 +102,13 @@ const (
 	// an unknown agent (pkg/hub/errors.go ErrCodeAgentNotFound), as opposed
 	// to a generic not_found (e.g. "Project not found").
 	ErrCodeAgentNotFound = "agent_not_found"
+
+	// ErrCodeDeleteInProgress is the hub's 409 code for a create, start,
+	// restart or resume that lost to a delete of the same agent
+	// (pkg/hub/errors.go ErrCodeDeleteInProgress). details.warnings, when
+	// present, reports the outcome of the hub's removal of a container the
+	// broker had already started.
+	ErrCodeDeleteInProgress = "delete_in_progress"
 )
 
 // errorResponse matches the API error response format.

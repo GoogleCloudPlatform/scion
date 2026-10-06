@@ -503,6 +503,28 @@ func wrapHubError(err error) error {
 	return &hubError{msg: err.Error() + localOnlyHint, err: err}
 }
 
+// printDeleteInProgressWarnings writes each string in details.warnings of a
+// 409 delete_in_progress hub error to w as a "Warning: ..." line. The hub
+// uses those warnings to report the outcome of removing a container the
+// broker had already started when the create or start lost to a delete, so
+// a failed removal must reach the user. Any other error, a missing or
+// malformed warnings list, and non-string entries print nothing. The error
+// itself is left to the caller. Warnings go to w even in JSON output mode:
+// a failed command prints no JSON result, and its error line also goes to
+// stderr, so stdout stays clean.
+func printDeleteInProgressWarnings(w io.Writer, err error) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != apiclient.ErrCodeDeleteInProgress {
+		return
+	}
+	warnings, _ := apiErr.Details["warnings"].([]interface{})
+	for _, raw := range warnings {
+		if msg, ok := raw.(string); ok {
+			_, _ = fmt.Fprintf(w, "Warning: %s\n", msg)
+		}
+	}
+}
+
 // shouldSuggestLocalOnly reports whether the local-only hint is relevant for
 // err: true for connectivity failures (no structured API response) and 5xx.
 func shouldSuggestLocalOnly(err error) bool {
@@ -1337,6 +1359,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if apiErr, ok := asIncompleteCreate(err); ok {
 			return incompleteCreateError(agentName, apiErr)
 		}
+		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
 	if reusesExisting {
