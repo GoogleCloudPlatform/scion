@@ -123,6 +123,27 @@ let reportedZoneByView: Record<string, string> = {};
  */
 let holdNextResponse: Promise<void> | null = null;
 
+/** When true, the next request fails with HTTP 500. */
+let failNextResponse = false;
+
+/** Returns a promise and the function that resolves it. */
+function gate(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+/** The visible state the request-sequencing guards protect. */
+function spinnerShown(el: MetricsPage): boolean {
+  return !!el.shadowRoot?.querySelector(`sl-tab-panel[name="${el.activeTab}"] sl-spinner`);
+}
+
+function errorAlert(el: MetricsPage): string | null {
+  return el.shadowRoot?.querySelector('sl-alert')?.textContent?.trim() ?? null;
+}
+
 async function mountOnTab(tab: string): Promise<MetricsPage> {
   vi.stubGlobal(
     'fetch',
@@ -137,12 +158,18 @@ async function mountOnTab(tab: string): Promise<MetricsPage> {
       const body = { ...((VIEW_BODIES[view] ?? SUMMARY) as object), timeZone: zone };
       const hold = holdNextResponse ?? Promise.resolve();
       holdNextResponse = null;
-      return hold.then(
-        () =>
-          new Response(JSON.stringify(body), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          })
+      const fail = failNextResponse;
+      failNextResponse = false;
+      return hold.then(() =>
+        fail
+          ? new Response(JSON.stringify({ error: { message: 'stale failure' } }), {
+              status: 500,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          : new Response(JSON.stringify(body), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
       );
     })
   );
@@ -197,6 +224,7 @@ describe('scion-page-metrics — day-bucket zone', () => {
     reportedZone = 'echo';
     reportedZoneByView = {};
     holdNextResponse = null;
+    failNextResponse = false;
     setPreferredTimeZone('');
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -336,6 +364,59 @@ describe('scion-page-metrics — day-bucket zone', () => {
       'Daily Sessions (Asia/Kathmandu)',
       'Active Agents per Day (Asia/Kathmandu)',
     ]);
+  });
+
+  it('keeps the spinner when an older request resolves after a newer one is sent', async () => {
+    element = await mountOnTab('sessions');
+    expect(spinnerShown(element)).toBe(false);
+
+    const older = gate();
+    holdNextResponse = older.promise;
+    const olderLoad = element.loadView('model-calls');
+    const newer = gate();
+    holdNextResponse = newer.promise;
+    const newerLoad = element.loadView('sessions');
+    await settle(element);
+    expect(spinnerShown(element)).toBe(true);
+
+    // The older request finishing must not end the loading state while the
+    // newer one is still in flight.
+    older.release();
+    await olderLoad;
+    await settle(element);
+    expect(spinnerShown(element)).toBe(true);
+
+    newer.release();
+    await newerLoad;
+    await settle(element);
+    expect(spinnerShown(element)).toBe(false);
+  });
+
+  it("does not surface an older request's error after a newer request for the same view", async () => {
+    element = await mountOnTab('sessions');
+    expect(errorAlert(element)).toBeNull();
+
+    const older = gate();
+    holdNextResponse = older.promise;
+    failNextResponse = true;
+    const olderLoad = element.loadView('sessions');
+    await element.loadView('sessions');
+    await settle(element);
+    expect(errorAlert(element)).toBeNull();
+
+    older.release();
+    await olderLoad;
+    await settle(element);
+    expect(errorAlert(element)).toBeNull();
+    expect(spinnerShown(element)).toBe(false);
+  });
+
+  it('control: a failing newest request does surface its error', async () => {
+    element = await mountOnTab('sessions');
+    failNextResponse = true;
+    await element.loadView('sessions');
+    await settle(element);
+    expect(errorAlert(element)).toContain('stale failure');
   });
 
   it('stops listening for zone changes once disconnected', async () => {
