@@ -438,13 +438,6 @@ func writeMoveTargetAmbiguous(w http.ResponseWriter, target string, candidates [
 		map[string]interface{}{"requestedBroker": target, "candidates": summaries})
 }
 
-// isPluginBroker reports whether a broker record is a message-broker plugin
-// rather than a runtime broker.
-func isPluginBroker(b *store.RuntimeBroker) bool {
-	_, ok := b.Labels["scion.io/plugin"]
-	return ok
-}
-
 // moveTargetVisible reports whether the caller may learn that dst exists and
 // see its configuration in a move verdict. A broker the caller cannot see
 // is answered exactly like an unknown one, so --broker is not an existence
