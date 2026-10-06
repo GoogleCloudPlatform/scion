@@ -679,8 +679,11 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
 // TODO: SuspendActor with DATA scope instead, once resume-from-
 // suspend and the $HOME durableDir layout (substrate-runtime.md §11) land, so Stop
 // keeps the workspace and frees the worker rather than deleting the actor.
-func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, RunRef{ID: id})
+//
+// ref.RunID is passed through so Stop picks up Delete's run enforcement.
+// TODO(ptone/scion#2550 P4): Delete does not enforce ref.RunID yet.
+func (r *SubstrateRuntime) Stop(ctx context.Context, ref RunRef) error {
+	return r.Delete(ctx, ref)
 }
 
 // substrateAtespacePrefix is the naming convention substrateAtespaceName
