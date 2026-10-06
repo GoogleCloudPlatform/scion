@@ -21,6 +21,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerownership"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
@@ -140,8 +141,9 @@ func runHubBrokersJoinTokenCreate(cmd *cobra.Command, args []string) error {
 		Name:                brokerName,
 		JoinTokenTTLSeconds: ttlSeconds,
 		PreserveSettings:    true,
+		// The same role label 'runtime-broker register' sets.
 		Labels: map[string]string{
-			"scion.io/broker-role": "remote",
+			brokerownership.LabelBrokerRole: "remote",
 		},
 	})
 	if err != nil {
