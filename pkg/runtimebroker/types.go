@@ -230,6 +230,11 @@ type ListAgentsResponse struct {
 
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
+	// workspaceAbsentAtAdmission is set by createAgent when the hub-managed
+	// project path ~/.scion/projects/<slug> did not exist when the request
+	// arrived. It is never read from the wire.
+	workspaceAbsentAtAdmission bool
+
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
 	Slug        string             `json:"slug,omitempty"` // URL-safe identifier

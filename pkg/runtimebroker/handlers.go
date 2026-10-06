@@ -885,6 +885,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ProjectPath = filepath.Join(globalDir, "projects", req.ProjectSlug)
+		if _, statErr := os.Lstat(req.ProjectPath); os.IsNotExist(statErr) {
+			req.workspaceAbsentAtAdmission = true
+		}
+		// Record the hub project ID for a broker copy of a hub workspace
+		// before any project settings are read.
+		s.alignHubManagedProjectIdentity(ctx, req.ID, req.ProjectPath, req.ProjectSlug, req.ProjectID)
 	}
 
 	// Shared-workspace dispatch verifies the project identity before loading
@@ -1746,9 +1752,16 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		)
 	}
 
-	if syncErr := syncWorkspaceFromGCS(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
+	if syncErr := s.workspaceDownloader()(ctx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir); syncErr != nil {
 		return opts, "failed to download workspace from GCS", "Failed to download workspace from GCS: " + syncErr.Error(),
 			fmt.Errorf("failed to download workspace from GCS: %w", syncErr)
+	}
+
+	if req.ProjectSlug != "" {
+		if recErr := recordBrokerWorkspaceCopy(req.ProjectSlug, req.ProjectID, !req.workspaceAbsentAtAdmission); recErr != nil {
+			s.agentLifecycleLog.Warn("Failed to write broker workspace record",
+				append([]any{"agent_id", req.ID, "project_id", req.ProjectID}, identityErrorAttrs(recErr)...)...)
+		}
 	}
 
 	opts.Workspace = workspaceDir
@@ -1758,7 +1771,9 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 
 	// Write a workspace marker so in-container CLI
 	// can discover the project context and use the Hub API.
-	if req.ProjectID != "" && req.ProjectSlug != "" {
+	// A workspace a hub keeps as its own on this host keeps the hub's
+	// identity entry.
+	if req.ProjectID != "" && req.ProjectSlug != "" && !hubWorkspaceRecordExists(req.ProjectSlug) {
 		if writeErr := config.WriteWorkspaceMarker(workspaceDir, req.ProjectID, req.ProjectSlug, req.ProjectSlug); writeErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
