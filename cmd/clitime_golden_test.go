@@ -102,6 +102,7 @@ func setupGoldenTimeProject(t *testing.T, endpoint string) string {
 // runRootGolden executes the root command with args and returns stdout.
 func runRootGolden(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	restoreAllSilenceUsage(t)
 	origProject, origFormat := projectPath, outputFormat
 	origTZ, origUTC := displayTZ, displayUTC
 	origShowAll, origMsgJSON := messagesShowAll, messagesJSON
