@@ -24,7 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -484,9 +483,11 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 					"agent_id", agent.ID, "project_id", project.ID, "files", len(req.Manifest.Files))
 			}
 			agent.AppliedConfig.WorkspaceStoragePath = ""
+			agent.AppliedConfig.WorkspaceStorageBucket = ""
 		} else {
 			// Store workspace storage path on agent record for broker download
 			agent.AppliedConfig.WorkspaceStoragePath = storagePath
+			agent.AppliedConfig.WorkspaceStorageBucket = workspaceDownloadBucket(stor)
 		}
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			RuntimeError(w, "Failed to update agent config: "+err.Error())
@@ -530,6 +531,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 				return
 			}
 			if relaySkillResolutionError(w, err) {
+				return
+			}
+			if relayWorkspaceStorageUnconfigured(w, err) {
 				return
 			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
@@ -781,11 +785,23 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 
 	// Use the project-level storage path for hub-managed projects
 	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
 			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
 	} else {
 		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
 			"project_id", project.ID, "path", workspacePath)
 	}
+}
+
+// workspaceDownloadBucket returns the bucket a broker should download a
+// workspace upload in stor from, or "" when stor is not GCS: a broker
+// cannot read the hub's local storage, so it is then left to the broker's
+// own bucket setting and its explicit refusal when it has none
+// (ptone/scion#3422).
+func workspaceDownloadBucket(stor storage.Storage) string {
+	if stor == nil || stor.Provider() != storage.ProviderGCS {
+		return ""
+	}
+	return stor.Bucket()
 }

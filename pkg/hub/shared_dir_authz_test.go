@@ -109,9 +109,9 @@ func setupSharedDirAuthzFixture(t *testing.T) (srv *Server, s store.Store, proje
 	srv, s = testServer(t)
 	ctx := context.Background()
 
-	project, workspacePath := createTestHubManagedProject(t, srv, "Target Project")
+	project, _ = createTestHubManagedProject(t, srv, "Target Project")
 	addSharedDirToProject(t, srv, project.ID, "secrets")
-	sdPath = resolveTestSharedDirPath(t, workspacePath, "secrets")
+	sdPath = resolveTestSharedDirPath(t, project, "secrets")
 	require.NoError(t, os.MkdirAll(sdPath, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(sdPath, "secret.txt"), []byte("ORIGINAL SECRET"), 0o644))
 
@@ -170,10 +170,10 @@ func TestSharedDirRoutes_OwnerAllowed(t *testing.T) {
 	for _, tc := range sharedDirAuthzCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := testServer(t)
-			project, workspacePath := createTestHubManagedProject(t, srv, "Owner Project")
+			project, _ := createTestHubManagedProject(t, srv, "Owner Project")
 
 			addSharedDirToProject(t, srv, project.ID, "secrets")
-			sdPath := resolveTestSharedDirPath(t, workspacePath, "secrets")
+			sdPath := resolveTestSharedDirPath(t, project, "secrets")
 			require.NoError(t, os.MkdirAll(sdPath, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(sdPath, "secret.txt"), []byte("ORIGINAL SECRET"), 0o644))
 

@@ -47,6 +47,7 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -145,7 +146,8 @@ type ServerConfig struct {
 
 	// Workspace sync settings
 	// StorageBucket is the GCS bucket name for workspace storage.
-	// Used when workspace sync requests don't specify a bucket.
+	// Used when workspace sync requests, or a create request carrying a
+	// workspace upload, don't specify a bucket.
 	StorageBucket string
 	// WorktreeBase is the base directory for agent worktrees.
 	// Used as a fallback when resolving workspace paths.
@@ -224,7 +226,20 @@ type Server struct {
 	mux        *http.ServeMux
 	mu         sync.RWMutex
 	startTime  time.Time
-	version    string
+
+	// workspaceDownload replaces syncWorkspaceFromGCS for the GCS workspace
+	// bootstrap when set (see SetWorkspaceDownloader).
+	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
+	version           string
+
+	// Workspace transfer and project delete steps, like workspaceDownload:
+	// each replaces its real implementation when set (see the setters in
+	// workspace_handlers.go), per Server, so tests can fake one without
+	// racing parallel tests. Guarded by mu.
+	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectWorkspaceStat func(path string) (os.FileInfo, error)
+	projectPathAbs       func(path string) (string, error)
 
 	// Hub connections (replaces single hubClient, heartbeat, controlChannel, etc.)
 	hubConnections map[string]*HubConnection // keyed by connection name
@@ -941,6 +956,25 @@ func (s *Server) validateBrokerAuthStartup() error {
 	}
 
 	return nil
+}
+
+// SetWorkspaceDownloader replaces the GCS download used to bootstrap an
+// agent workspace from a hub workspace upload. nil restores the default.
+// This is useful for testing.
+func (s *Server) SetWorkspaceDownloader(fn func(ctx context.Context, bucket, prefix, localPath string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workspaceDownload = fn
+}
+
+// workspaceDownloader returns the GCS workspace bootstrap download.
+func (s *Server) workspaceDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.workspaceDownload != nil {
+		return s.workspaceDownload
+	}
+	return syncWorkspaceFromGCS
 }
 
 // SetRequestLogger sets the dedicated request logger.
