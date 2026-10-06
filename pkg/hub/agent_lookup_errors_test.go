@@ -96,7 +96,13 @@ func TestMentionLookupError_ProcessMentions_ReportsErrorPerSlug(t *testing.T) {
 
 	// Enough agents that the walk needs a second page, which then fails.
 	createFillerAgents(t, s, project.ID, sender.Ancestry, 210)
-	srv.store = &failingAgentLookupStore{Store: s, listProjectID: project.ID}
+	// mentionFanoutSetup writes only through the raw store, so installing
+	// here still precedes any goroutine that reads srv.store
+	// (ptone/scion#3184).
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *failingAgentLookupStore {
+		return &failingAgentLookupStore{Store: inner, fault: f, listProjectID: project.ID}
+	})
+	fault.Arm()
 
 	owner, err := s.GetUser(ctx, project.OwnerID)
 	require.NoError(t, err)
@@ -154,7 +160,13 @@ func TestMentionLookupError_AgentFanout_ReportsErrorPerSlug(t *testing.T) {
 	require.NoError(t, err)
 
 	createFillerAgents(t, s, project.ID, sender.Ancestry, 210)
-	srv.store = &failingAgentLookupStore{Store: s, listProjectID: project.ID}
+	// mentionFanoutSetup writes only through the raw store, so installing
+	// here still precedes any goroutine that reads srv.store
+	// (ptone/scion#3184).
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *failingAgentLookupStore {
+		return &failingAgentLookupStore{Store: inner, fault: f, listProjectID: project.ID}
+	})
+	fault.Arm()
 
 	const missingSlug = "no-such-agent"
 	rr := sendViaStructured(t, srv, sender, target,
