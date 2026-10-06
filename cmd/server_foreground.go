@@ -989,7 +989,9 @@ func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
 	// idempotent and keeps this check independent of the load path.
 	cfg.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
 	if err := cfg.WorkspaceStorage.ValidateWorkspaceStorage(); err != nil {
-		return fmt.Errorf("invalid server.workspace_storage: %w", err)
+		// The wrapped error already names the key (for example
+		// server.workspace_storage.nfs.uid), so do not repeat it here.
+		return fmt.Errorf("invalid workspace storage settings: %w", err)
 	}
 	return nil
 }
