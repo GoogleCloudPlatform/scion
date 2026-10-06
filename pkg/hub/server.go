@@ -1525,7 +1525,6 @@ func newInstanceID() string {
 // InstanceID returns the per-process unique identifier for this hub instance.
 func (s *Server) InstanceID() string { return s.instanceID }
 
-// New creates a new Hub API server.
 // cloudLogQueryProjectID returns the GCP project New() builds the Cloud
 // Logging query service for, or "" when that service must not be built:
 // cfg.DisableCloudLogQuery is set, or no project ID is found in the
@@ -1537,6 +1536,7 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 	return logging.ResolveProjectID()
 }
 
+// New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()

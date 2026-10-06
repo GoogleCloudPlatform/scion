@@ -141,8 +141,8 @@ func New(config Config) *Supervisor {
 
 // Run starts and supervises the given command until it exits or the context
 // is cancelled. It returns the exit code of the child process. Run must be
-// called at most once per Supervisor: a second call panics when it closes the
-// already-closed started and done channels.
+// called at most once per Supervisor: a second call after a successful start
+// panics, because it closes the already-closed startedCh.
 func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	if len(args) == 0 {
 		return 1, ErrNoCommand
