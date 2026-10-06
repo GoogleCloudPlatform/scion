@@ -1185,6 +1185,14 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 		if brokerName == "" {
 			brokerName = brokerID[:8]
 		}
+		// The current project's path names a directory on this host only,
+		// so it is never registered for another host's broker
+		// (ptone/scion#2839); the broker then uses its hub-managed project
+		// directory. An explicit --path below is still sent. A --broker
+		// naming this host's own broker keeps the path.
+		if brokerID != getLocalBrokerID() {
+			localProjectPath = ""
+		}
 	}
 
 	// An explicit --path replaces the current-project path. With --project
