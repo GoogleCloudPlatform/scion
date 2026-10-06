@@ -114,7 +114,9 @@ func (s *Server) projectSAMappings(ctx context.Context, projectID string) projec
 					if known {
 						if isKubernetes {
 							for _, gsa := range gsas {
-								view.mapped[gsa] = true
+								// Already lowercase (KubernetesServiceAccountMappingGSAs
+								// skips other keys); normalized here as on the record path.
+								view.mapped[strings.ToLower(gsa)] = true
 							}
 							view.reported = append(view.reported, label)
 						}
