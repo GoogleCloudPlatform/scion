@@ -455,7 +455,7 @@ func newRaceMembersStore(memberCount int) func(store.Store, *storeFaultSwitch) *
 
 func (r *raceMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
 	if !r.fault.Active() {
-		return r.countingAgentStore.Store.ListAgentMembers(ctx, filter, sort, dir, max)
+		return r.Store.ListAgentMembers(ctx, filter, sort, dir, max)
 	}
 	r.mu.Lock()
 	r.membersCalls++
