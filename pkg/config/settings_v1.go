@@ -581,6 +581,82 @@ func (vs *VersionedSettings) ResolveKubernetesServiceAccountMappingForSelection(
 	return "", false
 }
 
+// KubernetesServiceAccountMappingGSAs returns, sorted, every GSA email that
+// ResolveKubernetesServiceAccountMappingForSelection(profileName,
+// runtimeEntryName, gsa) resolves to a KSA: the union of the profile-level
+// and runtime-entry-level kubernetes_service_account_mappings keys with a
+// non-empty value. Keys that are not lowercase are left out, since the
+// resolver lowercases the GSA before the lookup and so never matches them.
+// The result is nil when nothing is mapped.
+//
+// A broker reports this set per profile to the Hub (BrokerProfile
+// ServiceAccountMappings), which uses it to warn about registered GSAs no
+// profile maps (ptone/scion#3329 phase 2).
+func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	add := func(m map[string]string) {
+		for gsa, ksa := range m {
+			if ksa != "" && gsa == strings.ToLower(gsa) {
+				seen[gsa] = true
+			}
+		}
+	}
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok {
+			add(profile.KubernetesServiceAccountMappings)
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok {
+			add(rtConfig.KubernetesServiceAccountMappings)
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for gsa := range seen {
+		out = append(out, gsa)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ProfileKubernetesSAMappings describes profileName for the GSA-mapping
+// early warning (ptone/scion#3329 phase 2): the GSAs it maps to a KSA
+// (KubernetesServiceAccountMappingGSAs over the profile and the runtime
+// entry it selects), and whether its runtime is Kubernetes. The runtime type
+// is the entry's Type, or the entry key when Type is unset, so a custom key
+// such as "gke" with type kubernetes counts. known is false when the
+// profile is not in these settings (for example a broker's synthetic
+// "default" profile) or names no runtime entry, and the other results are
+// then empty.
+func (vs *VersionedSettings) ProfileKubernetesSAMappings(profileName string) (gsas []string, isKubernetes, known bool) {
+	if vs == nil {
+		return nil, false, false
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.Runtime == "" {
+		// A profile without a runtime entry cannot be resolved here; the
+		// caller treats it as unknown.
+		return nil, false, false
+	}
+	runtimeType := profile.Runtime
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.Type != "" {
+		runtimeType = rt.Type
+	}
+	switch runtimeType {
+	// The same names the Hub treats as Kubernetes (isKubernetesRuntimeType).
+	case "kubernetes", "k8s", "remote":
+		return vs.KubernetesServiceAccountMappingGSAs(profileName, profile.Runtime), true, true
+	default:
+		return nil, false, true
+	}
+}
+
 // ResolveKubernetesNamespace returns the namespace configured on the
 // runtimeEntryName entry of the runtimes: map, and whether one is set.
 // Profiles carry no namespace of their own: a profile that needs a
