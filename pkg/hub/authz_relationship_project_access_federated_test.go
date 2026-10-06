@@ -505,6 +505,68 @@ func TestRelationshipProjectAccess_Federated(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, adm.Admitted)
 		})
+
+		// stageKind drives the owner relationship's project-access stage
+		// for the federated owner of a project agent, with a fresh memo.
+		stageKind := func(f *fedFixture, fed Identity, agent *store.Agent) string {
+			kind, _ := f.srv.authzService.relationshipProjectAccessStage(ctx, pc(fed), agentResource(agent), "agent.attach", RelationshipRuleOwner, &ProjectAdmissionCache{})
+			return kind
+		}
+
+		t.Run("ProjectScopeWithoutIDDenied", func(t *testing.T) {
+			f := newFedFixture(t, "r3c6")
+			fed := fedIdentity("r3c6")
+			f.grantFedSuperAdmin(t, fed.ID())
+			otherProject := tid("fed-r3c6-other-project")
+			createRS1Project(t, f.store, otherProject, tid("fed-r3c6-other-owner"))
+			here := f.agent(t, "fedr3c6", fed.ID())
+			there := storeFedAgent(t, f.store, f.owners, otherProject, f.ownerID, "fedr3c6other", fed.ID(), "")
+			require.Empty(t, stageKind(f, fed, here), "precondition: admitted before the constraint row exists")
+			require.Empty(t, stageKind(f, fed, there), "precondition: admitted before the constraint row exists")
+
+			f.fed.set(func(s *federatedBindingStore) {
+				s.extraConstraints = []*store.AccessConstraint{{
+					ID: api.NewUUID(), Name: "project-scope-no-id", SubjectKind: string(SubjectKindAllPrincipals),
+					ScopeType: store.RoleScopeProject, ScopeID: "", MaximumPermissions: []string{"agent.read"},
+				}}
+			})
+			for _, agent := range []*store.Agent{here, there} {
+				assert.Equal(t, RelationshipRejectProjectAccessError, stageKind(f, fed, agent), "project %s", agent.ProjectID)
+				_, err := f.srv.authzService.ProjectTargetAdmission(ctx, pc(fed), agent.ProjectID, "agent.attach", agentResource(agent), nil)
+				require.Error(t, err)
+				assert.True(t, isProjectAccessLookupFault(err))
+			}
+		})
+
+		t.Run("SubjectUnreadableOnOtherProjectAdmits", func(t *testing.T) {
+			f := newFedFixture(t, "r3c7")
+			fed := fedIdentity("r3c7")
+			f.grantFedSuperAdmin(t, fed.ID())
+			agent := f.agent(t, "fedr3c7", fed.ID())
+			f.fed.set(func(s *federatedBindingStore) {
+				s.extraConstraints = []*store.AccessConstraint{unreadable(store.RoleScopeProject, tid("fed-r3c7-project-q"))}
+			})
+			assert.Empty(t, stageKind(f, fed, agent))
+			adm, err := f.srv.authzService.ProjectTargetAdmission(ctx, pc(fed), f.projectID, "agent.attach", agentResource(agent), nil)
+			require.NoError(t, err)
+			assert.True(t, adm.Admitted)
+			assert.Equal(t, ProjectAccessSourceSystemRole, adm.Source)
+		})
+
+		t.Run("SubjectUnreadableOnThisProjectDenied", func(t *testing.T) {
+			f := newFedFixture(t, "r3c8")
+			fed := fedIdentity("r3c8")
+			f.grantFedSuperAdmin(t, fed.ID())
+			agent := f.agent(t, "fedr3c8", fed.ID())
+			require.Empty(t, stageKind(f, fed, agent), "precondition: admitted before the constraint row exists")
+			f.fed.set(func(s *federatedBindingStore) {
+				s.extraConstraints = []*store.AccessConstraint{unreadable(store.RoleScopeProject, f.projectID)}
+			})
+			assert.Equal(t, RelationshipRejectProjectAccessError, stageKind(f, fed, agent))
+			_, err := f.srv.authzService.ProjectTargetAdmission(ctx, pc(fed), f.projectID, "agent.attach", agentResource(agent), nil)
+			require.Error(t, err)
+			assert.True(t, isProjectAccessLookupFault(err))
+		})
 	})
 
 	t.Run("R4_NoBindingDenied", func(t *testing.T) {

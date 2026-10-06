@@ -836,13 +836,12 @@ func (a *AuthzService) requireActiveUser(ctx context.Context, principal Principa
 	return nil
 }
 
-// requireReadableProjectConstraints is the strict access-constraint check
-// SystemAuthorityProof applies for a federated user: every active access
-// constraint whose scope covers projectID must have a recognized, valid
-// subject and scope. A constraint that fails validation (Degraded) cannot
-// be matched reliably against the principal closure, so it denies rather
-// than being skipped. A load failure is a lookup fault. The ordinary
-// reduction (accessConstraintRestrictions) still runs afterwards.
+// requireReadableProjectConstraints checks the access constraints for a
+// federated user's system authority on projectID. Every active constraint
+// must have a readable scope, and every active constraint covering
+// projectID must have a readable subject; an unreadable one is a lookup
+// fault. A load failure is a lookup fault. accessConstraintRestrictions
+// then applies the constraints that cover projectID.
 func (a *AuthzService) requireReadableProjectConstraints(ctx context.Context, projectID string) error {
 	constraints, err := a.loadAllAccessConstraints(ctx)
 	if err != nil {
@@ -853,6 +852,9 @@ func (a *AuthzService) requireReadableProjectConstraints(ctx context.Context, pr
 		hc := storeToHubAccessConstraint(sc)
 		if hc == nil || !hc.IsActive(now) {
 			continue
+		}
+		if err := hc.Scope.Validate(); err != nil {
+			return projectAccessLookupFault(fmt.Errorf("%w: access constraint %q scope is not readable", ErrProjectAccessDenied, hc.ID))
 		}
 		if !constraintScopeApplies(hc, ScopeTypeProject, projectID) {
 			continue
@@ -1148,9 +1150,9 @@ func candidateSetHasPermission(candidates []CandidateBinding, roleDefs map[strin
 // project-agnostic check; use MintTimeSystemGrant for that. Requires
 // permissions.AppliesToExistingProjectTarget(permissionID) to be reviewed
 // true; an unreviewed or hub-only ID denies (ok=false, err=nil). Never
-// recurses into Decide. Local and federated user principals only; for a
-// federated user the constraint check is strict (see
-// requireReadableProjectConstraints).
+// recurses into Decide. Local and federated user principals only. For a
+// federated user, the project's access constraints must also be readable
+// (requireReadableProjectConstraints).
 func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal PrincipalContext, projectID, permissionID string, class ProjectTargetClass) (bool, error) {
 	if err := requireProjectAccessPrincipal(principal); err != nil {
 		return false, err
