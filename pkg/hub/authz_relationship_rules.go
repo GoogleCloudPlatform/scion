@@ -159,6 +159,13 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 		})
 	}
 
+	// Launcher: an agent reading the status of an agent it directly
+	// launched (authz_launcher_read.go). Decided from the target's stored
+	// record, never from the caller's ancestry claim.
+	if c, ok := launcherCandidate(principal, resource, action, permissionID); ok {
+		out = append(out, c)
+	}
+
 	// Owner: a user principal that owns the resource. Assign on a hub-scoped
 	// service account is governed by hub membership instead.
 	if isUserPrincipal(principal.Kind) && resource.OwnerID != "" && resource.OwnerID == principal.ID &&

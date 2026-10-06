@@ -261,6 +261,9 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 			d.log.Warn("Failed to record accepted launch",
 				"agent_id", agent.ID, "launch_id", launchID, "error", err)
 		}
+		d.log.Info("Agent create accepted for async launch",
+			"agent_id", agent.ID, "project_id", agent.ProjectID, "launch_id", launchID,
+			"launched_by", agent.CreatedBy, "relationship", launchRelationship(agent))
 		return resp, nil, &LaunchAccepted{ID: launchID, Owner: resp.LaunchInstanceID}, nil
 	case resp == nil || !resp.LaunchPending:
 		// A broker without async support answered synchronously.
@@ -344,4 +347,15 @@ func mergeDispatchedConfig(dst, src *store.Agent) {
 	if src.TaskSummary != "" {
 		dst.TaskSummary = src.TaskSummary
 	}
+}
+
+// launchRelationship names, for the async launch log line, how the
+// launcher relates to the new agent: "direct_launcher_agent" when an agent
+// launched it (that agent may read its status through the single-agent
+// GET routes), "direct_launcher_user" when a user did.
+func launchRelationship(agent *store.Agent) string {
+	if n := len(agent.Ancestry); n > 1 && agent.Ancestry[n-1] == agent.CreatedBy {
+		return "direct_launcher_agent"
+	}
+	return "direct_launcher_user"
 }
