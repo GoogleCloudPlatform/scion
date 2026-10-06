@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-/** Helpers for the card layout tests: read a component's style rules. */
+/** Helpers for the layout tests: read a component's style rules. */
 
 /** Leaf style rules from Lit cssText, keyed by selector. */
 export function styleRules(cssText: string): Map<string, string> {

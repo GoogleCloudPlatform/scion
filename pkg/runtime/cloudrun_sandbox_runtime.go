@@ -820,7 +820,58 @@ func waitForSandboxLiveness(ctx context.Context, delays []time.Duration, probe f
 	return probeErr
 }
 
+// sandboxMaxEnvArgBytes bounds a single env entry passed to the sandbox
+// CLI. Each entry travels as one "--env KEY=VALUE" argv string, which Linux
+// caps at 128 KiB including the NUL terminator (MAX_ARG_STRLEN). The limit
+// is checked against the whole KEY=VALUE string, not the value alone.
+const sandboxMaxEnvArgBytes = 128 * 1024
+
+// sandboxEnvLimit applies sandboxMaxEnvArgBytes to the full argv string.
+var sandboxEnvLimit = envSizeLimit{maxBytes: sandboxMaxEnvArgBytes, includeKey: true}
+
+// sandboxRuntimeEnvKeys are fixed by envFor, so an env-type secret must not
+// supply them. SCION_HOST_UID/SCION_HOST_GID drive the sandbox user setup
+// (the Cloud Run instance runtime reserves the same two keys).
+// SCION_WORKSPACE_PATH, HOME, USER and LOGNAME describe the sandbox mount
+// layout and let tmux find the pane-exited hook in the agent home; the
+// user cannot change those paths, so a secret must not override them.
+// PATH stays overridable, as in Docker.
+var sandboxRuntimeEnvKeys = []string{
+	"SCION_HOST_UID", "SCION_HOST_GID",
+	"SCION_WORKSPACE_PATH", "HOME", "USER", "LOGNAME",
+}
+
+// applySecretEnvOverrides sets each env-type secret key in env to its value
+// from cfgEnv, after harness, auth and synthesised env have been applied.
+// As in Docker, where the secret -e flag comes last, the secret wins.
+// secretKeys never collide with the caller's original cfg.Env keys, since
+// applyResolvedSecretsToEnv skips those.
+func applySecretEnvOverrides(env map[string]string, cfgEnv []string, secretKeys []string) {
+	if len(secretKeys) == 0 {
+		return
+	}
+	want := make(map[string]struct{}, len(secretKeys))
+	for _, k := range secretKeys {
+		want[k] = struct{}{}
+	}
+	for _, e := range cfgEnv {
+		k, v, ok := strings.Cut(e, "=")
+		if _, isSecret := want[k]; ok && isSecret {
+			env[k] = v
+		}
+	}
+}
+
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	// Fold resolved secrets into cfg.Env before anything is created and
+	// before envFor reads it, so they reach the sandbox as --env values and
+	// are covered by the error-output redaction (externalEnvValues reads
+	// cfg.Env).
+	secretKeys, err := applyResolvedSecretsToEnv(&cfg, sandboxEnvLimit, sandboxRuntimeEnvKeys...)
+	if err != nil {
+		return "", fmt.Errorf("cloudrun-sandbox: %w", err)
+	}
+
 	slug := sanitizeSandboxName(cfg.Name)
 
 	// OQ-14 (§11.12) proved that Vertex AI and gcloud-adc auth modes work
@@ -915,6 +966,11 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			}
 		}
 	}
+
+	// Env-type secrets win over harness, auth and synthesised env, as in
+	// Docker, except sandboxRuntimeEnvKeys. Keys from the caller's cfg.Env
+	// still win over secrets.
+	applySecretEnvOverrides(env, cfg.Env, secretKeys)
 
 	// Build entrypoint command.
 	entrypoint, err := buildEntrypoint(cfg)

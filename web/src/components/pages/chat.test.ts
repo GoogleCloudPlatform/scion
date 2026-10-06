@@ -23,8 +23,9 @@
  *  2. Mobile swipe navigation between the rail / conversation / members
  *     panels, which must ignore vertical scrolling and desktop viewports.
  *
- * Elements are created but never appended, so connectedCallback (and its
- * network calls) never runs.
+ * Most elements are created but never appended, so connectedCallback (and
+ * its network calls) never runs. The few tests that do append a page rely
+ * on the beforeAll below, which warms the lazily imported modules first.
  */
 
 // @vitest-environment happy-dom
@@ -247,6 +248,17 @@ beforeAll(async () => {
   const mod = await import('./chat.js');
   ScionPageChat = mod.ScionPageChat;
   expect(ScionPageChat).toBeDefined();
+  // Mounting a page runs connectedCallback's unawaited initV2(), which
+  // lazily imports chat-space-rail and chat-members (and through them
+  // confirm-dialog, status-badge and agent-state-display). If a first-time
+  // module load is still running when this file finishes, the worker
+  // tears down with the import pending and Vitest reports an
+  // EnvironmentTeardownError. Loading them here, awaited, warms the module
+  // cache so the in-test imports resolve from it.
+  await Promise.all([
+    import('../shared/chat/chat-space-rail.js'),
+    import('../shared/chat/chat-members.js'),
+  ]);
 });
 
 afterEach(() => {
