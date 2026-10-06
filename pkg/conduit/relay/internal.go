@@ -264,7 +264,7 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 // The Want must name the stream kind as its Capability (RemoteSession sets
 // it from the kind), and the opening frame's kind must equal it: the owner
 // opens only what it re-checked admission for. Otherwise the hop is closed
-// 4400 bad_frame.
+// 4400 bad_frame at once, without waiting for the caller to close its side.
 func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sessionID string) {
 	ls, want, ok := r.admitInternal(w, req, sessionID, true)
 	if !ok {
@@ -274,9 +274,15 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	if err != nil {
 		return // Upgrade wrote the error
 	}
+	var hop *wsStream
 	r.bridges.Add(1)
 	r.activeBridges.Add(1)
 	defer func() {
+		if hop != nil {
+			// A hop this side closed keeps its link until the caller
+			// closes its side, capped at the handshake timeout.
+			<-hop.linkClosed()
+		}
 		r.activeBridges.Add(-1)
 		r.bridges.Done()
 	}()
@@ -290,10 +296,10 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	if callerWin == 0 {
 		callerWin = conduit.DefaultStreamWindow
 	}
-	hop := newWSStream(conn, callerWin, 0)
+	hop = newWSStream(conn, callerWin, 0, r.clk, r.handshakeTimeout())
 	if kind, err := conduit.StreamKindFromProto(open.GetKind()); err != nil || string(kind) != want.Capability {
 		r.log.Debug("Conduit internal stream: kind does not match the admitted capability", "peer", peer, "kind", open.GetKind().String(), "capability", want.Capability)
-		_ = hop.CloseWithCode(conduit.CloseProtocolError, reason(ReasonBadFrame, "stream kind does not match the admitted capability"))
+		hop.abort(conduit.CloseProtocolError, reason(ReasonBadFrame, "stream kind does not match the admitted capability"))
 		return
 	}
 
@@ -339,6 +345,16 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	}
 	cancel() // stop the opening watcher; the stream is established
 	splice(st, hop)
+}
+
+// handshakeTimeout is the session handshake timeout (default
+// conduit.DefaultHandshakeTimeout). It also caps how long a closed stream
+// hop waits for its peer to close the link.
+func (r *Relay) handshakeTimeout() time.Duration {
+	if t := r.cfg.Session.HandshakeTimeout; t > 0 {
+		return t
+	}
+	return conduit.DefaultHandshakeTimeout
 }
 
 // readStreamOpen reads the first frame of an internal stream WS, bounded by
