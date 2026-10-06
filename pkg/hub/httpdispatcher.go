@@ -752,7 +752,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		// strategy regardless of whether the broker happens to have the
 		// repo locally.
 		workspace := effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, projectInfo.projectPath)
-		wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
+		wsSpec := workspaceSpecFor(agent, projectInfo)
 		var remoteGCPIdentity *RemoteGCPIdentityConfig
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			remoteGCPIdentity = &RemoteGCPIdentityConfig{
@@ -781,6 +781,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			HarnessConfigHash:         agent.AppliedConfig.HarnessConfigHash,
 			GitClone:                  wsSpec.GitClone,
 			SharedWorkspace:           projectInfo.sharedWorkspace,
+			SharedWorkspaceClone:      wsSpec.SharedWorkspaceClone,
 			GCPIdentity:               remoteGCPIdentity,
 			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
 		}
@@ -1206,6 +1207,9 @@ type projectDispatchInfo struct {
 	sharedDirs      []api.SharedDir
 	sharedWorkspace bool   // true for git-workspace hybrid projects
 	workspaceMode   string // resolved workspace mode label (e.g. "shared", "worktree-per-agent")
+	// sharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings (sharedWorkspaceCloneConfig); nil for every other project.
+	sharedWorkspaceClone *api.GitCloneConfig
 }
 
 // resolveDispatchProjectInfo resolves the project facts a dispatch carries.
@@ -1238,6 +1242,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.sharedDirs = project.SharedDirs
 	info.sharedWorkspace = project.IsSharedWorkspace()
 	info.workspaceMode = dispatchWorkspaceMode(project)
+	info.sharedWorkspaceClone = sharedWorkspaceCloneConfig(project)
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
@@ -2990,7 +2995,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
-	wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
+	wsSpec := workspaceSpecFor(agent, projectInfo)
 	switch resolvedMode {
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"

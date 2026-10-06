@@ -2728,6 +2728,13 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/messages/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own message by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
+	// Artifact service (hub.artifacts experiment). Deferred, not stubbed:
+	// the routes have no handler behaviour yet and answer 404; catalog
+	// operations replace these exemptions when the handlers land
+	// (ptone/scion#3202).
+	{Pattern: "/api/v1/artifacts", Kind: ExemptionAuthenticationOnly, Reason: "Artifact collection, experiment-gated, answers 404 with no handler behaviour yet; replaced by catalog operations when handlers land (ptone/scion#3202)", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/artifacts/", Kind: ExemptionAuthenticationOnly, Reason: "Artifact by ID, experiment-gated, answers 404 with no handler behaviour yet; replaced by catalog operations when handlers land (ptone/scion#3202)", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/artifacts/shared/", Kind: ExemptionPublicEndpoint, Reason: "Artifact share links (token-only by design; still behind the auth middleware until token access ships), experiment-gated, answers 404 with no handler behaviour yet; replaced by a catalog operation when the handler lands (ptone/scion#3202)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/message-channels", Kind: ExemptionAuthenticationOnly, Reason: "List own message channels, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/presence", Kind: ExemptionAuthenticationOnly, Reason: "Chat presence, self-service", Owner: "route_metadata.go"},
