@@ -765,8 +765,9 @@ func TestNewEnvelopeToLegacy_TextInform_Agent(t *testing.T) {
 	}}
 
 	old := NewEnvelopeToLegacy(msg, addrs)
-	if old.Type != messages.TypeAssistantReply {
-		t.Errorf("type: got %q, want assistant-reply", old.Type)
+	// The retired assistant-reply type is never emitted, even for agents.
+	if old.Type != messages.TypeChat {
+		t.Errorf("type: got %q, want chat", old.Type)
 	}
 }
 
@@ -989,19 +990,6 @@ func TestRoundTrip_OldToNewToOld(t *testing.T) {
 				Type:      messages.TypeChat,
 			},
 			expectedType: messages.TypeChat,
-		},
-		{
-			name: "assistant-reply",
-			old: &messages.StructuredMessage{
-				Version:   1,
-				Timestamp: "2026-08-27T10:00:00Z",
-				Sender:    "agent:builder",
-				SenderID:  "agent:builder",
-				Recipient: "user:alice",
-				Msg:       "Done",
-				Type:      messages.TypeAssistantReply,
-			},
-			expectedType: messages.TypeAssistantReply,
 		},
 		{
 			name: "state-change",
