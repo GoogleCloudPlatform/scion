@@ -279,9 +279,14 @@ func isPrincipalInputsLoad(stack []string) bool {
 // authority, a progeny secret whose source agent's delegation chain is
 // walked), the delegation ceiling, and a list-scope resolution, all under
 // an installed memo. It asserts that no call made for a relationship
-// candidate observes either memo key, that the delegation ceiling never
-// observes the input memo, and that the memoized loaders observe the input
-// memo only from their known consumers.
+// candidate observes either memo key, except the project-access stage
+// (relationshipProjectAccessStage), which evaluates the requester's own
+// project access and must read the requester's input memo (never the edges
+// memo); user owners admitted through membership and through system
+// authority exercise it and must decide as without the memo. It also
+// asserts that the delegation ceiling never observes the input memo, and
+// that the memoized loaders observe the input memo only from their known
+// consumers.
 func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 	_, s := authzTestSetup(t)
 	sa := newSystemAuthoritySourceFixture(t, s, "rec-sa")
@@ -321,6 +326,43 @@ func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 	_, err = authz.ResolveListScopes(pctx, member.user, "agent.list")
 	require.NoError(t, err)
 
+	// User owners reach the project-access stage (stage 2c), which reads the
+	// requester's memo by design: one owner admitted through project
+	// membership (attach comes only from the owner relationship) and one
+	// through system authority (the kernel allows; Explain evaluates the
+	// candidates). Each decision must equal its no-memo baseline.
+	ownedByMember := Resource{Type: "agent", ID: tid("rec-member-owned-agent"), ParentType: "project", ParentID: member.projectID, OwnerID: member.userID}
+	sysOwnerID := tid("rec-sys-owner")
+	createTestUserWithRole(t, s, sysOwnerID, sysOwnerID+"@test.com", "member", store.SystemRoleSuperAdmin)
+	sysOwner := NewAuthenticatedUser(sysOwnerID, sysOwnerID+"@test.com", "Sys Owner", "member", "api")
+	ownedBySys := Resource{Type: "agent", ID: tid("rec-sys-owned-agent"), ParentType: "project", ParentID: member.projectID, OwnerID: sysOwnerID}
+	ownerDecide := func(ctx context.Context, ident Identity, res Resource) Decision {
+		return authz.Decide(ctx, AuthzRequest{
+			Principal: principalContextForIdentity(ident), Credential: credentialContextForIdentity(ident),
+			Resource: res, Action: ActionAttach, Permission: "agent.attach", Explain: true,
+		})
+	}
+	octx := withAuthzInputMemo(bg)
+	for _, tc := range []struct {
+		ident Identity
+		res   Resource
+	}{{member.user, ownedByMember}, {sysOwner, ownedBySys}} {
+		want := ownerDecide(bg, tc.ident, tc.res)
+		got := ownerDecide(octx, tc.ident, tc.res)
+		require.True(t, got.Allowed, "owner with project access must be allowed: %q", got.Reason)
+		assert.Equal(t, want.Allowed, got.Allowed)
+		assert.Equal(t, want.Reason, got.Reason)
+		assert.Equal(t, want.MatchedGrant, got.MatchedGrant)
+		require.NotNil(t, got.Provenance)
+		var ownerAccepted bool
+		for _, r := range got.Provenance.Relationships {
+			if r.Rule == RelationshipRuleOwner && r.Accepted {
+				ownerAccepted = true
+			}
+		}
+		assert.True(t, ownerAccepted, "the owner candidate must pass the project-access stage")
+	}
+
 	memoLoaders := map[string]bool{
 		"GetEffectiveGroups":            true,
 		"GetEffectiveGroupsForAgent":    true,
@@ -329,10 +371,20 @@ func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 		"ListAccessConstraints":         true,
 	}
 	var candidateViaSystemAuthority, candidateViaDelegatorPermissions, candidateEdges, inputMemoSeen, ceilingEdgesMemo int
+	var projectAccessStageMemo int
 	for _, rec := range mstore.recordedCalls() {
 		candidate := isRelationshipCandidateCall(rec.stack)
 		ceiling := stackHas(rec.stack, "checkDelegationCeiling")
-		if candidate {
+		// The project-access stage is the one relationship stage that reads
+		// the requester's memo: it evaluates the requester's own access.
+		projectAccessStage := candidate && stackHas(rec.stack, "relationshipProjectAccessStage")
+		if projectAccessStage {
+			assert.False(t, rec.hasEdgesMemo, "%s #%d inside the project-access stage observed the edges memo", rec.method, rec.n)
+			if rec.hasInputMemo {
+				projectAccessStageMemo++
+			}
+		}
+		if candidate && !projectAccessStage {
 			assert.False(t, rec.hasInputMemo, "%s #%d inside a relationship candidate observed the input memo", rec.method, rec.n)
 			assert.False(t, rec.hasEdgesMemo, "%s #%d inside a relationship candidate observed the edges memo", rec.method, rec.n)
 			switch {
@@ -356,7 +408,7 @@ func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 		if rec.hasInputMemo && memoLoaders[rec.method] {
 			inputMemoSeen++
 			known := isPrincipalInputsLoad(rec.stack) || isDecideConstraintLoad(rec.stack) ||
-				stackHas(rec.stack, "applyListScopeConstraints")
+				stackHas(rec.stack, "applyListScopeConstraints") || stackHas(rec.stack, "relationshipProjectAccessStage")
 			assert.True(t, known, "%s #%d observed the input memo outside its known consumers; stack: %v", rec.method, rec.n, rec.stack)
 		}
 	}
@@ -365,6 +417,7 @@ func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 	assert.Positive(t, candidateEdges, "a relationship candidate must look up a source agent's delegation edges")
 	assert.Positive(t, inputMemoSeen, "the requester's own loads must observe the input memo")
 	assert.Positive(t, ceilingEdgesMemo, "the delegation ceiling must observe the edges memo")
+	assert.Positive(t, projectAccessStageMemo, "the project-access stage must read the requester's memo")
 }
 
 // TestMemoInstall_SystemAuthorityConstraintFaultStillDenies fails the

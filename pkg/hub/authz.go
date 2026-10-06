@@ -1878,7 +1878,12 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 	//   - decide's relationship candidates run under maskAllAuthzMemo, which
 	//     covers executionProjectAdmission -> ProjectAdmissionForClass ->
 	//     SystemAuthorityProof and relationshipSourceDelegationHolds -> the
-	//     delegation chain walk;
+	//     delegation chain walk. The one exception is the project-access
+	//     stage (relationshipProjectAccessStage, stage 2c): it evaluates the
+	//     requester's own project access, so decide passes it the request
+	//     context, and its ProjectTargetAdmission -> ProjectMembershipEvidence
+	//     and SystemAuthorityProof -> accessConstraintRestrictions read the
+	//     requester's memoized principals, bindings and constraint slot;
 	//   - the delegation ceiling call site and the chain walk itself run
 	//     under maskAuthzInputs, which covers getEffectivePermissions and
 	//     userRelationshipAuthority;
