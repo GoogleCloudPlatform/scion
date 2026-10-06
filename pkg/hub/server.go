@@ -689,7 +689,13 @@ type RuntimeBrokerClient interface {
 	// StopAgent stops an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
 	// projectID scopes the lookup to a specific project (required for uniqueness).
-	StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error
+	// runID, when non-empty, names the run the stop is for
+	// (ptone/scion#2550): the broker then stops only that run's entry and
+	// answers a run_mismatch 404 (api.BrokerErrorCodeRunMismatch) when
+	// another run holds the name; only that 404 is returned as
+	// ErrStopRunNotFound, and any other 404 as a plain broker error. An
+	// empty runID keeps the legacy name-scoped stop.
+	StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error
 
 	// RestartAgent restarts an agent on a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
@@ -784,6 +790,152 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	// for every other existing-agent operation, so both transports send it
 	// beside runId.
 	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// stopAgentQuery builds the query string for a broker stop request. runId,
+// when set, names the run the stop is for (ptone/scion#2550); an old broker
+// ignores it and stops by name as before.
+func stopAgentQuery(ctx context.Context, projectID, runID string) string {
+	var query string
+	if projectID != "" {
+		query = "projectId=" + url.QueryEscape(projectID)
+	}
+	if runID != "" {
+		if query != "" {
+			query += "&"
+		}
+		query += "runId=" + url.QueryEscape(runID)
+	}
+	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// withRunIDURL appends the runId query parameter to a start or restart
+// request URL (or path) when runID is set (ptone/scion#2550). The run also
+// travels in the body; the parameter lets the broker record it on the
+// tracked start before reading the body, so a run-scoped stop never sees
+// that start without its run. An older broker ignores it.
+func withRunIDURL(endpoint, runID string) string {
+	if runID == "" {
+		return endpoint
+	}
+	if strings.Contains(endpoint, "?") {
+		return endpoint + "&runId=" + url.QueryEscape(runID)
+	}
+	return endpoint + "?runId=" + url.QueryEscape(runID)
+}
+
+// withRunIDQuery is withRunIDURL for a bare query string.
+func withRunIDQuery(query, runID string) string {
+	if runID == "" {
+		return query
+	}
+	if query == "" {
+		return "runId=" + url.QueryEscape(runID)
+	}
+	return query + "&runId=" + url.QueryEscape(runID)
+}
+
+// ErrStopRunNotFound reports that a run-scoped stop found no entry of the
+// requested run on the broker: the broker answered 404 with error code
+// api.BrokerErrorCodeRunMismatch, because a different run holds the
+// agent's name and was left untouched (ptone/scion#2550). Callers must not
+// record the current run as stopped because of it. The error still unwraps
+// to the broker's status error; brokerStopCurrentRunID reads the run the
+// broker reported holding the name.
+var ErrStopRunNotFound = errors.New("runtime broker has no entry for the requested run")
+
+// stopAgentError marks the broker's run-mismatch 404 on a run-scoped stop
+// as ErrStopRunNotFound, on both transports. It keys on the broker's error
+// code, not the status alone, so a 404 from anything else (a proxy, an
+// unknown route) is returned unchanged, as is any error on a legacy stop
+// without a run ID.
+func stopAgentError(err error, runID string) error {
+	if err == nil || runID == "" || !isBrokerStatus(err, http.StatusNotFound) {
+		return err
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != api.BrokerErrorCodeRunMismatch {
+		return err
+	}
+	if current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string); ok && current != "" {
+		return fmt.Errorf("%w (requested run %s; the broker holds run %s): %w", ErrStopRunNotFound, runID, current, err)
+	}
+	return fmt.Errorf("%w (requested run %s): %w", ErrStopRunNotFound, runID, err)
+}
+
+// brokerStopCurrentRunID returns the run the broker reported holding the
+// agent's name when it refused a run-scoped stop (ErrStopRunNotFound), so
+// a hub/broker run drift can be logged. ok is false for any other error or
+// when the broker did not know the run.
+func brokerStopCurrentRunID(err error) (string, bool) {
+	if !errors.Is(err, ErrStopRunNotFound) {
+		return "", false
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		return "", false
+	}
+	current, ok := se.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string)
+	return current, ok && current != ""
+}
+
+// recordStopStatus writes upd, the stopped (or suspended) status a caller
+// records after a stop it dispatched for run runID, only while the row
+// still holds runID (store.AgentStatusUpdate.IfRunID, ptone/scion#2550).
+// A broker's 202 for run X must never mark a newer run Y stopped.
+//
+// It reports whether the status was written. When the row has moved to
+// another run it writes nothing, logs a Warn naming both runs, and returns
+// false with a nil error: the caller must then skip its quota release and
+// publish too. An empty runID (a row from before run IDs) writes
+// unconditionally, as before.
+func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action string, upd store.AgentStatusUpdate) (bool, error) {
+	upd.IfRunID = runID
+	err := s.store.UpdateAgentStatus(ctx, agentID, upd)
+	if errors.Is(err, store.ErrRunChanged) {
+		current := ""
+		if a, gerr := s.store.GetAgent(ctx, agentID); gerr == nil {
+			current = a.RunID
+		}
+		s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
+			"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current)
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// stopRunStillCurrent reports whether the row still holds runID, for a
+// caller that has no status to write after a stop dispatched for runID but
+// must not release a newer run's reservation (ptone/scion#2550). It logs a
+// Warn naming both runs when the run changed. An empty runID, or a failed
+// read, counts as current, as before run IDs.
+func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action string) bool {
+	if runID == "" {
+		return true
+	}
+	current, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || current.RunID == runID {
+		return true
+	}
+	s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
+		"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current.RunID)
+	return false
+}
+
+// logStopRunMismatch logs a run-scoped stop the broker refused because a
+// different run holds the agent's name, naming both runs, so the operator
+// can see a hub/broker run drift behind the failed stop or suspend. It is a
+// no-op for any other error.
+func (s *Server) logStopRunMismatch(agent *store.Agent, action string, err error) {
+	if !errors.Is(err, ErrStopRunNotFound) {
+		return
+	}
+	current, _ := brokerStopCurrentRunID(err)
+	s.agentLifecycleLog.Warn("Agent "+action+": broker holds a different run than the hub recorded; nothing was stopped",
+		"agent_id", agent.ID, "agent", agent.Slug, "hub_run_id", agent.RunID, "broker_run_id", current)
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.
@@ -3848,9 +4000,11 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			endLifecycleOp()
 			continue
 		}
+		stopRunID := agent.RunID
 		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+				s.logStopRunMismatch(agent, "auto-suspend", err)
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
 				// This stop was the system's, not the user's: if it
@@ -3873,11 +4027,16 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			ContainerStatus: "stopped",
 			Activity:        "",
 		}
-		err = s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
+		// Only while the row still holds the run the stop was dispatched
+		// for (ptone/scion#2550).
+		recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
 		endLifecycleOp()
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			continue
+		}
+		if !recorded {
 			continue
 		}
 

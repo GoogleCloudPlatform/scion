@@ -72,7 +72,7 @@ func TestDelete_AmbiguousSlugFailsClosed(t *testing.T) {
 				{Name: "dev", ContainerID: "cid-b", Labels: map[string]string{"scion.project": "proj-b"}},
 			}, nil
 		},
-		StopFunc:   func(ctx context.Context, id string) error { stopped = append(stopped, id); return nil },
+		StopFunc:   func(ctx context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
@@ -93,10 +93,10 @@ func TestStop_AmbiguousSlugFailsClosed(t *testing.T) {
 				{Name: "dev", ContainerID: "cid-b", Labels: map[string]string{"scion.project": "proj-b"}},
 			}, nil
 		},
-		StopFunc: func(ctx context.Context, id string) error { stopped = append(stopped, id); return nil },
+		StopFunc: func(ctx context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "dev", ""); err == nil {
+	if err := mgr.Stop(context.Background(), "dev", "", ""); err == nil {
 		t.Fatal("expected ambiguity error, got nil")
 	}
 	if len(stopped) != 0 {
@@ -112,7 +112,7 @@ func TestDeleteTarget_UsesResolvedContainerWithoutRelisting(t *testing.T) {
 			listed = true
 			return []api.AgentInfo{{Name: "dev", ContainerID: "cid-other-project"}}, nil
 		},
-		StopFunc:   func(ctx context.Context, id string) error { stopped = append(stopped, id); return nil },
+		StopFunc:   func(ctx context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
@@ -130,7 +130,7 @@ func TestDeleteTarget_UsesResolvedContainerWithoutRelisting(t *testing.T) {
 func TestDeleteTarget_FileOnlyAgentSkipsRuntime(t *testing.T) {
 	called := false
 	mock := &runtime.MockRuntime{
-		StopFunc:   func(ctx context.Context, id string) error { called = true; return nil },
+		StopFunc:   func(ctx context.Context, ref runtime.RunRef) error { called = true; return nil },
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { called = true; return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
@@ -170,7 +170,7 @@ func TestStopProjectContainers_RemovesMatchingContainers(t *testing.T) {
 			}
 			return out, nil
 		},
-		StopFunc:   func(ctx context.Context, id string) error { return nil },
+		StopFunc:   func(ctx context.Context, ref runtime.RunRef) error { return nil },
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
