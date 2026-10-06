@@ -562,6 +562,13 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, age
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	// A dry-run move reports the same GCP identity refusal as start and
+	// as an in-place reincarnate, so every dry-run variant agrees.
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
+		return
+	}
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
 	v, ref := evaluateMoveEligibility(in)
 	if ref != nil {

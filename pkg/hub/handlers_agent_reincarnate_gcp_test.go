@@ -37,14 +37,18 @@ func TestReincarnateAgent_RefusedBeforeStopForInadmissibleGCPSA(t *testing.T) {
 		name     string
 		verified bool
 		status   string
-		mutate   func(t *testing.T, s store.Store, sa *store.GCPServiceAccount)
+		mutate   func(t *testing.T, s store.Store, agent *store.Agent, sa *store.GCPServiceAccount)
 		reason   string
 	}{
 		{name: "unverified", status: store.GCPVerificationUnverified, reason: "not verified"},
 		{name: "failed", status: store.GCPVerificationFailed, reason: "not verified"},
 		{name: "deleted", verified: true, status: store.GCPVerificationVerified, reason: "no longer available",
-			mutate: func(t *testing.T, s store.Store, sa *store.GCPServiceAccount) {
+			mutate: func(t *testing.T, s store.Store, _ *store.Agent, sa *store.GCPServiceAccount) {
 				require.NoError(t, s.DeleteGCPServiceAccount(context.Background(), sa.ID))
+			}},
+		{name: "email changed", verified: true, status: store.GCPVerificationVerified, reason: "no longer matches",
+			mutate: func(t *testing.T, s store.Store, agent *store.Agent, _ *store.GCPServiceAccount) {
+				setAgentGCPIdentityEmail(t, s, agent.ID, "other@p.iam.gserviceaccount.com")
 			}},
 	}
 	for i, tc := range cases {
@@ -56,7 +60,7 @@ func TestReincarnateAgent_RefusedBeforeStopForInadmissibleGCPSA(t *testing.T) {
 				agent := newReincarnateTestAgent(t, s, project, broker, nil)
 				sa := assignAgentGCPSA(t, s, agent, fmt.Sprintf("reinc-%d-%v", i, dryRun), tc.verified, tc.status)
 				if tc.mutate != nil {
-					tc.mutate(t, s, sa)
+					tc.mutate(t, s, agent, sa)
 				}
 				before, err := s.GetAgent(ctx, agent.ID)
 				require.NoError(t, err)
@@ -130,4 +134,54 @@ func TestReincarnateAgent_NoGCPSAUnaffected(t *testing.T) {
 
 	settled := waitForReincarnationSettled(t, s, agent.ID)
 	assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State)
+}
+
+// setAgentGCPIdentityEmail changes the email recorded on the agent's
+// applied GCP identity, so it no longer matches the service account row.
+func setAgentGCPIdentityEmail(t *testing.T, s store.Store, agentID, email string) {
+	t.Helper()
+	got, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	got.AppliedConfig.GCPIdentity.ServiceAccountEmail = email
+	require.NoError(t, s.UpdateAgent(context.Background(), got))
+}
+
+// A dry-run move applies the same GCP identity refusal as start and an
+// in-place reincarnate: 400 with the same message, and nothing written.
+func TestReincarnateMove_DryRun_RefusedForInadmissibleGCPSA(t *testing.T) {
+	cases := []struct {
+		name     string
+		verified bool
+		status   string
+		mutate   func(t *testing.T, s store.Store, agent *store.Agent)
+		reason   string
+	}{
+		{name: "unverified", status: store.GCPVerificationUnverified, reason: "not verified"},
+		{name: "email changed", verified: true, status: store.GCPVerificationVerified, reason: "no longer matches",
+			mutate: func(t *testing.T, s store.Store, agent *store.Agent) {
+				setAgentGCPIdentityEmail(t, s, agent.ID, "other@p.iam.gserviceaccount.com")
+			}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := setupMoveFixture(t, true, nil)
+			assignAgentGCPSA(t, f.s, f.agent, fmt.Sprintf("move-%d", i), tc.verified, tc.status)
+			if tc.mutate != nil {
+				tc.mutate(t, f.s, f.agent)
+			}
+			// Compare side effects against the agent as it stands now.
+			current, err := f.s.GetAgent(ctx, f.agent.ID)
+			require.NoError(t, err)
+			f.agent = current
+			count := f.agentCount(t)
+
+			rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+			assert.Contains(t, rec.Body.String(), "Cannot reincarnate agent")
+			assert.Contains(t, rec.Body.String(), tc.reason)
+			f.assertNoMoveSideEffects(t, count)
+		})
+	}
 }
