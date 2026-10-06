@@ -724,26 +724,39 @@ func TestAgentListFailureReply_ThrottleIsPerKind(t *testing.T) {
 
 // TestReplyFallback_OnlyOwnWebhookMessagesResolveAnAgent sends a linked
 // sender's reply on the legacy path in a channel without a default agent.
+// In a thread, the plugin's webhook is the one on the parent channel.
 func TestReplyFallback_OnlyOwnWebhookMessagesResolveAnAgent(t *testing.T) {
+	workerTopic := []string{"scion.project." + luProject + ".agent.worker.messages"}
 	for name, tc := range map[string]struct {
 		webhookID string
+		inThread  bool
 		want      []string
 	}{
-		"reply to the plugin's webhook message goes to its agent": {luPluginWebhook, []string{"scion.project." + luProject + ".agent.worker.messages"}},
-		"reply to another webhook's message goes to no agent":     {"wh-other", nil},
+		"reply to the plugin's webhook message goes to its agent":             {luPluginWebhook, false, workerTopic},
+		"reply to another webhook's message goes to no agent":                 {"wh-other", false, nil},
+		"reply in a thread to the plugin's webhook message goes to its agent": {luPluginWebhook, true, workerTopic},
+		"reply in a thread to another webhook's message goes to no agent":     {"wh-other", true, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newLinkedUserEnv(t)
 			e.linkChannel(t)
 			e.cacheAgents(t, luPrincipal, time.Now(), "worker")
 			b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
-			usePluginWebhook(b, e)
+			usePluginWebhook(b, e) // the plugin webhook lives on luChannel
 			var d deliveries
 			b.InboundHandler = d.handler
 
-			b.handleIncomingMessage(e.session, replyTo(luDiscordUser, &discordgo.Message{
+			m := replyTo(luDiscordUser, &discordgo.Message{
 				ID: "agent-msg", WebhookID: tc.webhookID, Author: &discordgo.User{ID: tc.webhookID, Username: "worker"},
-			}))
+			})
+			if tc.inThread {
+				require.NoError(t, e.session.State.ChannelAdd(&discordgo.Channel{
+					ID: "thread-7", GuildID: testGuildID, ParentID: luChannel, Type: discordgo.ChannelTypeGuildPublicThread,
+				}))
+				b.threadParents["thread-7"] = luChannel
+				m.ChannelID = "thread-7"
+			}
+			b.handleIncomingMessage(e.session, m)
 
 			assert.Equal(t, tc.want, d.topics)
 		})

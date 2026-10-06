@@ -22,6 +22,8 @@ func replySlugBroker(t *testing.T, channelWebhooks ...*discordgo.Webhook) (*Disc
 }
 
 // replySlug resolves the agent for a reply in C1 the way the broker does.
+// It mirrors the reply fallback in handleIncomingMessage (broker.go, the
+// agentFromReply call that checks ownsWebhook); keep the two in sync.
 func replySlug(b *DiscordBroker, ref *discordgo.Message) string {
 	return agentFromReply(ref, func(webhookID string) bool {
 		return b.ownsWebhook("C1", webhookID)
