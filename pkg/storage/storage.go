@@ -228,6 +228,20 @@ func resourcePrefix(kind ResourceKind) string {
 	}
 }
 
+// DirPrefix returns the DeletePrefix/List prefix that matches exactly the
+// objects under the directory-like storage path dir: dir with one trailing
+// "/". Object stores such as GCS match prefixes as plain strings, so passing
+// "a/foo" would also match the sibling "a/foo-bar/...". An empty (or
+// all-slash) dir yields "", which DeletePrefix rejects with ErrInvalidPath,
+// rather than "/", which would match every object in the bucket.
+func DirPrefix(dir string) string {
+	dir = strings.TrimRight(dir, "/")
+	if dir == "" {
+		return ""
+	}
+	return dir + "/"
+}
+
 // ResourceStoragePath returns the storage path for a file-based resource of the
 // given kind, organized by scope. This is the single source of truth for the
 // scope layout shared by all resource kinds; the per-kind helpers below delegate
