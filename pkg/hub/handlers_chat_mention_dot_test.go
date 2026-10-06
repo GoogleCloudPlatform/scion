@@ -596,9 +596,10 @@ func TestSendAgentRouted_MentionRecordingAddsNoMemberLookup(t *testing.T) {
 		t.Errorf("agent-only send recorded %v; want none", got)
 	}
 
-	send("@md-first please ask @md-second, cc @alice-smith")
+	// @nobody matches no agent and no member: a candidate, but no row.
+	send("@md-first please ask @md-second, cc @alice-smith and @nobody")
 	if got := mentionRows(); len(got) != 1 || got[0] != alice.ID {
-		t.Errorf("mention rows = %v; want [%s]", got, alice.ID)
+		t.Errorf("mention rows = %v; want only [%s] (none for @nobody)", got, alice.ID)
 	}
 }
 
