@@ -855,8 +855,9 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 // ProjectTargetAdmission: current membership, or system authority that
 // applies to the target. It gates the messaging ancestry allow in
 // authorizeUserToAgent, mirroring the project-access stage of
-// uatMessageGate. A UAT holder is already checked by uatMessageGate, and
-// any other principal kind is not a local user; both report admitted.
+// uatMessageGate. A UAT holder is already checked by uatMessageGate and
+// reports admitted. Every other principal kind reports not admitted, so an
+// unclassified identity never receives the ancestry allow.
 //
 // It returns (false, false) when the user lacks access or the target does
 // not resolve to projectID, and (false, true) for a store or resolution
@@ -867,7 +868,7 @@ func (a *AuthzService) messageAncestorProjectAccess(ctx context.Context, sender 
 	}
 	principal := principalContextForIdentity(sender)
 	if principal.Kind != PrincipalKindUser && principal.Kind != PrincipalKindDev {
-		return true, false
+		return false, false
 	}
 	res, err := a.ProjectTargetAdmission(ctx, principal, projectID, "agent.message", target, nil)
 	if err != nil {
