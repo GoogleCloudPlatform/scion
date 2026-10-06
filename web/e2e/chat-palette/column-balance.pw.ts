@@ -154,6 +154,29 @@ test('the two-column palette uses the wider desktop panel', async ({ page }) => 
   expect((await measure(page)).panelWidth).toBeCloseTo(720, 0);
 });
 
+test('a long unbreakable group error keeps both columns the same width', async ({ page }) => {
+  await openPaletteWithLongDocument(page);
+  // The palette shows a group's error text as the host passes it, so a
+  // host error naming a URL or an ID can carry one long unbreakable token.
+  const error = `request failed: https://hub.example.test/api/${'x'.repeat(120)}`;
+  await page.locator('scion-quick-palette').evaluate((el, message) => {
+    const palette = el as HTMLElement & { groups: Record<string, unknown> };
+    palette.groups = {
+      ...palette.groups,
+      threads: { status: 'error', candidates: [], error: message },
+    };
+  }, error);
+  await expect(
+    page.locator('scion-quick-palette [data-palette-group="threads"] .palette-group-error')
+  ).toContainText(error);
+  const layout = await measure(page);
+
+  const { agents, threads, documents } = layout.cells;
+  expect(Math.abs(agents.width - threads.width)).toBeLessThanOrEqual(TOLERANCE_PX);
+  expect(Math.abs(agents.width - documents.width)).toBeLessThanOrEqual(TOLERANCE_PX);
+  expect(layout.results.scrollWidth).toBeLessThanOrEqual(layout.results.clientWidth + 1);
+});
+
 test('the document row keeps the full path text', async ({ page }) => {
   await openPaletteWithLongDocument(page);
   const docRow = page
