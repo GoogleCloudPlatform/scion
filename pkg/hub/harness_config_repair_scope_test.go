@@ -51,7 +51,7 @@ type repairScopeFixture struct {
 func newRepairScopeFixture(t *testing.T) *repairScopeFixture {
 	t.Helper()
 	ctx := context.Background()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	require.NoError(t, s.Migrate(ctx))
 	t.Cleanup(func() { _ = s.Close() })
