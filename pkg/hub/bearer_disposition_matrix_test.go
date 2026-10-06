@@ -261,7 +261,9 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
 		},
 		{"project.membership.transfer", "/api/v1/projects/{id}/transfer-ownership"}: {"newOwnerId": f.member},
-		{"agent.lifecycle.create", "/api/v1/agents"}:                                {"name": "bdm-created", "projectId": f.project},
+		// agentRole "none" keeps a single-selector agent:create token
+		// inside its delegation ceiling.
+		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
 	}
 }
 
@@ -282,7 +284,8 @@ func sessionOnlyDetailsOf(rec *httptest.ResponseRecorder) (reason, credential st
 // result against the operation's recorded bearer disposition:
 //   - admit: a hub token with the selector and live authority is not
 //     refused (no 401/403); a token of the same user with an unrelated
-//     selector gets 403; a project token for another project gets 403;
+//     selector, and a project token for another project, are refused
+//     (403, or 404 on a GET, where read handlers hide the record);
 //   - admit_self: a token with an unrelated selector is not refused, and
 //     the disposition names the test that pins its result filter;
 //   - session_only: a hub token of a super-admin carrying every mintable
@@ -342,8 +345,8 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 
 			// (b) ceiling: the same user, an unrelated selector.
 			unrelated := m.mint(t, hubBoundary(), []string{bearerMatrixUnrelatedSelector(sel)})
-			if rec := m.request(t, e, unrelated); rec.Code != http.StatusForbidden {
-				t.Errorf("%s: a token without %s got %d, want 403: %s", label, sel, rec.Code, rec.Body.String())
+			if rec := m.request(t, e, unrelated); !bearerMatrixRefused(ep.Method, rec.Code) {
+				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
 			}
 
 			// (c) boundary: a project token for another project, or for a
@@ -354,8 +357,8 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 				boundProject = m.ids.project
 			}
 			if key := m.tryMint(projectBoundary(boundProject), []string{sel}); key != "" {
-				if rec := m.request(t, e, key); rec.Code != http.StatusForbidden {
-					t.Errorf("%s: a project token for %s got %d, want 403: %s", label, boundProject, rec.Code, rec.Body.String())
+				if rec := m.request(t, e, key); !bearerMatrixRefused(ep.Method, rec.Code) {
+					t.Errorf("%s: a project token for %s got %d, want %s: %s", label, boundProject, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
 				}
 			} else {
 				t.Logf("%s: a project token for %s with %s cannot be minted; the boundary is enforced at mint", label, boundProject, sel)
@@ -391,6 +394,20 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 	if counts["admit"] == 0 || counts["session_only"] == 0 {
 		t.Fatalf("the matrix exercised no admit or no session_only entry point: %v", counts)
 	}
+}
+
+// bearerMatrixRefused reports whether status refuses a token. A refusal is
+// 403; a GET entry point may answer 404 instead, because read handlers do
+// not reveal whether a record exists to a caller that may not read it.
+func bearerMatrixRefused(method string, status int) bool {
+	return status == http.StatusForbidden || (method == http.MethodGet && status == http.StatusNotFound)
+}
+
+func bearerMatrixRefusal(method string) string {
+	if method == http.MethodGet {
+		return "403 or 404"
+	}
+	return "403"
 }
 
 func bearerMatrixHasBoundary(d authzop.BearerDisposition, b authzop.BearerBoundary) bool {
