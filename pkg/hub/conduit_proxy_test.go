@@ -305,6 +305,7 @@ func TestConduitProxyLoopbackHosts(t *testing.T) {
 		conduit bool
 	}{
 		{host: "127.0.0.1", conduit: true},
+		{host: "127.0.0.2", conduit: true},
 		{host: "localhost", conduit: true},
 		{host: "LocalHost", conduit: true},
 		{host: "::1", conduit: true},
@@ -343,7 +344,7 @@ func TestConduitProxyLoopbackHosts(t *testing.T) {
 
 // TestConduitProxyIPv6OnlyListener: a ::1 registration still targets
 // 127.0.0.1 inside the agent, so a service listening only on ::1 answers
-// 502 (nothing listening) over conduit, not the tunnel path's 501.
+// 502 (nothing listening) over conduit, not 503 agent_offline (old route).
 func TestConduitProxyIPv6OnlyListener(t *testing.T) {
 	ln, err := net.Listen("tcp", "[::1]:0")
 	if err != nil {
