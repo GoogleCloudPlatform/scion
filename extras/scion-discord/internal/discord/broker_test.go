@@ -1924,6 +1924,7 @@ func TestConfigure_SessionReplacement_ClearsSubs(t *testing.T) {
 	// Calling Configure with bot_token should close old session and clear subs.
 	err := b.Configure(map[string]string{
 		"bot_token": "Bot fake-token-for-test",
+		"db_path":   filepath.Join(t.TempDir(), "discord.db"),
 	})
 	require.NoError(t, err)
 
@@ -1953,6 +1954,7 @@ func TestConfigure_BootstrapSkippedWhenDone(t *testing.T) {
 	err := b.Configure(map[string]string{
 		"hub_url":  "http://localhost:8080",
 		"hmac_key": "test-key",
+		"db_path":  filepath.Join(t.TempDir(), "discord.db"),
 	})
 	require.NoError(t, err)
 
