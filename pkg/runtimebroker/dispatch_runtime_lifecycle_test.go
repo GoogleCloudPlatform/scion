@@ -526,7 +526,7 @@ func TestTryProvisionWorktree_RecoveredProjectPathNotUsedAsRoot(t *testing.T) {
 	before := dirEntries(t, dotScion)
 
 	opts := api.StartOptions{}
-	provisioned, err := f.srv.tryProvisionWorktree(context.Background(), startContextInputs{
+	provisioned, _, err := f.srv.tryProvisionWorktree(context.Background(), startContextInputs{
 		Name:                     "wt-agent",
 		AgentID:                  "wt-agent-id",
 		ProjectID:                "wt-project-id",

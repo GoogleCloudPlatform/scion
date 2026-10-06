@@ -314,14 +314,15 @@ THE IMAGE
 
   This must be a hub image built from the root Dockerfile with
   --target hub-gke: non-root at uid 1000, web UI embedded, no baked KUBECONFIG.
-  The hub-gke stage arrives with the image-build change that accompanies this
-  chart; until then that build reports an unknown target.
+  image-build/cloudbuild-hub-gke.yaml builds it and pushes it as
+  <registry>/scion-hub-gke:<git short sha>.
 
   The published artifact named "scion-hub"
   (us-central1-docker.pkg.dev/PROJECT_ID/public-docker/scion-hub, built from
   image-build/hub/Dockerfile) is NOT that image. It runs as root and it is built
   without the embedded web UI, so --enable-web has nothing to serve. The shared
-  name is a coincidence. There is no published hub-gke image yet; you build it.
+  name is a coincidence. There is no published hub-gke image yet; you build it
+  (see image-build/README.md).
 
   The chart sets runAsNonRoot on the pod and on the hub container and offers no
   way to turn it off, so a root image fails admission with a clear message
