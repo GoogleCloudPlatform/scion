@@ -64,6 +64,9 @@ hub:
   hubId: ci-settings
   name: CI Settings Hub
   baseUrl: https://ci-settings.example.com
+  # Mirrors values-settings.yaml so the two renders differ only by auth.
+  adminEmails:
+    - ci-admin@example.com
 
 image:
   repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
@@ -114,6 +117,12 @@ auth:
       google:
         clientId: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
         clientSecret: ci-oauth-web-google-client-secret-not-a-real-secret
+
+# The GKE shape: Secret Manager, IAM granted outside the chart.
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: probe-project
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

@@ -193,7 +193,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 
 	parsedLabels, err := parseLabels(filterLabels)
 	if err != nil {
-		return err
+		return asUsageError(err)
 	}
 
 	opts := &hubclient.ListAgentsOptions{
@@ -795,7 +795,7 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 // validateListFlags checks that filter and sort flag values are valid.
 func validateListFlags() error {
 	if listCount < 0 {
-		return fmt.Errorf("invalid --count value %d: must be non-negative", listCount)
+		return newUsageError("invalid --count value %d: must be non-negative", listCount)
 	}
 	if filterPhase != "" {
 		filterPhase = strings.ToLower(filterPhase)
@@ -804,7 +804,7 @@ func validateListFlags() error {
 			for _, p := range state.Phases() {
 				valid = append(valid, string(p))
 			}
-			return fmt.Errorf("invalid phase %q; valid values: %s", filterPhase, strings.Join(valid, ", "))
+			return newUsageError("invalid phase %q; valid values: %s", filterPhase, strings.Join(valid, ", "))
 		}
 	}
 	if filterActivity != "" {
@@ -814,7 +814,7 @@ func validateListFlags() error {
 			for _, a := range state.Activities() {
 				valid = append(valid, string(a))
 			}
-			return fmt.Errorf("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
+			return newUsageError("invalid activity %q; valid values: %s", filterActivity, strings.Join(valid, ", "))
 		}
 	}
 	if sortField != "" {
@@ -825,7 +825,7 @@ func validateListFlags() error {
 				valid = append(valid, k)
 			}
 			sort.Strings(valid)
-			return fmt.Errorf("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
+			return newUsageError("invalid sort field %q; valid values: %s", sortField, strings.Join(valid, ", "))
 		}
 	}
 	return nil

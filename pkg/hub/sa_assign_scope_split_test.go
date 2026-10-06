@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -34,10 +35,9 @@ import (
 // preSplitScopesForRole returns the literal scope list each AgentRole
 // carried before this split — a fixed snapshot, not derived from the
 // current ScopesForRole, so a later addition to a role's bundle cannot
-// silently change what "legacy" means here. Only AgentRoleFull's pre-split
-// list (10 scopes) differs from its current one (11); every other role
-// never carried ScopeAgentCreate, so its pre-split list is the same as its
-// current one.
+// silently change what "legacy" means here. Every role's list is a frozen
+// literal: AgentRoleFull's pre-split list carried no ScopeAgentSAAssign, and
+// no legacy list carries the artifact read scope added later.
 func preSplitScopesForRole(role AgentRole) []AgentTokenScope {
 	if role == AgentRoleFull {
 		return []AgentTokenScope{
@@ -53,7 +53,22 @@ func preSplitScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentSetMessageMode,
 		}
 	}
-	return ScopesForRole(role)
+	// Frozen literal lists: a scope a role gains later (the artifact read
+	// scope) must never appear in a "legacy" token.
+	switch role {
+	case AgentRoleReadOnly:
+		return []AgentTokenScope{ScopeProjectRead}
+	case AgentRoleBaseline:
+		return []AgentTokenScope{
+			ScopeProjectRead,
+			ScopeAgentStatusUpdate,
+			ScopeAgentTokenRefresh,
+			ScopeAgentNotify,
+			ScopeAgentPortForward,
+		}
+	default:
+		return nil
+	}
 }
 
 // TestAgentScopesToPermissionIDs_CreateAndAssignAreDisjoint is the
@@ -192,18 +207,18 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 	golden := map[AgentRole][]string{
 		AgentRoleNone: {},
 		AgentRoleReadOnly: {
-			"project.read", "skill.read", "skill.list",
+			"project.read", "artifact.read", "skill.read", "skill.list",
 			"template.read", "template.list",
 			"harness_config.read", "harness_config.list",
 		},
 		AgentRoleBaseline: {
-			"project.read", "skill.read", "skill.list",
+			"project.read", "artifact.read", "skill.read", "skill.list",
 			"template.read", "template.list",
 			"harness_config.read", "harness_config.list",
 			"agent.status_update", "agent.token_refresh", "agent.notify", "agent.port_forward",
 		},
 		AgentRoleFull: {
-			"project.read", "skill.read", "skill.list",
+			"project.read", "artifact.read", "skill.read", "skill.list",
 			"template.read", "template.list",
 			"harness_config.read", "harness_config.list",
 			"agent.status_update", "agent.token_refresh", "agent.notify", "agent.port_forward",
@@ -235,8 +250,11 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 				legacyScopeSchema: true,
 			}}
 			got := agentScopesToPermissionIDs(effectiveAgentScopes(legacyIdentity))
-			assert.ElementsMatch(t, want, got,
-				"a legacy pre-split token for role %s must authorize exactly what a current one does", role)
+			// Legacy tokens predate project:artifact:read, so they lack
+			// exactly artifact.read.
+			wantLegacy := slices.DeleteFunc(slices.Clone(want), func(p string) bool { return p == "artifact.read" })
+			assert.ElementsMatch(t, wantLegacy, got,
+				"a legacy pre-split token for role %s must authorize what a current token does, except for scopes added after it was minted", role)
 			assert.NotContains(t, got, "gcp_service_account.use")
 		})
 	}

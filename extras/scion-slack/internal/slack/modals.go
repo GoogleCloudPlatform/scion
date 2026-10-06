@@ -93,10 +93,12 @@ func HandleAskModalSubmit(
 
 	if deliverInbound != nil {
 		userID := callback.User.ID
-		sender := "slack:" + userID
-		if mapping, mapErr := store.GetUserMapping(ctx, userID); mapErr == nil && mapping != nil && mapping.ScionEmail != "" {
-			sender = "user:" + mapping.ScionEmail
+		// The response is sent as the linked user.
+		email, ok := requireLinkedUser(ctx, client, store, pending.ChannelID, userID, log)
+		if !ok {
+			return
 		}
+		sender := "user:" + email
 
 		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		msg := &messages.StructuredMessage{
@@ -117,8 +119,10 @@ func HandleAskModalSubmit(
 		}
 
 		if he := deliverInbound(topic, msg); he != nil {
+			// The request stays open so the user can answer again.
 			log.Error("Failed to deliver ask-user modal response",
 				"request_id", requestID, "error", he)
+			postEphemeral(client, pending.ChannelID, userID, he.userFacingMessage(email))
 			return
 		}
 	}

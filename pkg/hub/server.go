@@ -584,6 +584,9 @@ type WorkspaceDispatchSpec struct {
 	// "worktree-per-agent"), the same value create sends as
 	// RemoteCreateAgentRequest.WorkspaceMode.
 	WorkspaceMode string
+	// SharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings (RemoteAgentConfig.SharedWorkspaceClone); nil otherwise.
+	SharedWorkspaceClone *api.GitCloneConfig
 }
 
 // StartExtras carries the dispatch-time metadata that the create path already
@@ -645,6 +648,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
+	if extras.Workspace.SharedWorkspaceClone != nil {
+		payload["sharedWorkspaceClone"] = extras.Workspace.SharedWorkspaceClone
 	}
 	if extras.RunID != "" {
 		payload["runId"] = extras.RunID
@@ -744,13 +750,16 @@ type RuntimeBrokerClient interface {
 // marking. RunID, when non-empty, is sent as runId: the broker then deletes
 // only the runtime entry labelled with that run and answers 404 (an
 // idempotent success) when only a different run holds the name
-// (ptone/scion#2550).
+// (ptone/scion#2550). NotAfter, when non-zero, is sent as notAfter: the
+// broker refuses the delete with 409 stale_dispatch, doing nothing, if it
+// arrives after that instant (ptone/scion#2906, see agent_delete_fence.go).
 type DeleteAgentOptions struct {
 	DeleteFiles  bool
 	RemoveBranch bool
 	SoftDelete   bool
 	DeletedAt    time.Time
 	RunID        string
+	NotAfter     time.Time
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -764,6 +773,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	query += deleteProjectPathQuery(ctx)
 	if opts.RunID != "" {
 		query += "&runId=" + url.QueryEscape(opts.RunID)
+	}
+	if !opts.NotAfter.IsZero() {
+		query += "&notAfter=" + url.QueryEscape(opts.NotAfter.UTC().Format(time.RFC3339))
 	}
 	if opts.SoftDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(opts.DeletedAt.UTC().Format(time.RFC3339)))
@@ -940,6 +952,14 @@ type RemoteAgentConfig struct {
 	// workspace (git-workspace hybrid mode). When true, the broker skips
 	// worktree/clone creation and configures per-agent git credentials.
 	SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+
+	// SharedWorkspaceClone carries a shared-plain git project's workspace
+	// clone settings (URL, default branch, full depth). Unlike GitClone it
+	// never makes the broker clone into a per-agent workspace: only the
+	// Kubernetes runtime uses it, to clone into an NFS-backed shared
+	// workspace from the workspace-provision init container. A broker that
+	// does not know the field ignores it.
+	SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
 
 	// GCPIdentity holds the GCP identity assignment for the agent.
 	GCPIdentity *RemoteGCPIdentityConfig `json:"gcpIdentity,omitempty"`
@@ -1341,6 +1361,15 @@ type Server struct {
 	// startClaimCfg holds the current start-claim settings (see
 	// start_claim_settings.go); set at New and by ApplySnapshot.
 	startClaimCfg atomic.Pointer[StartClaimSettings]
+	// startClaimsOn turns start claims on (start_claim.go). Off until every
+	// start trigger runs under a claim.
+	startClaimsOn bool
+	// startClaimTestHook, when set, adjusts a claim run before its renewal
+	// starts (tests only).
+	startClaimTestHook func(*startClaimRun)
+	// claimStops records when the start-claim reaper last stopped an
+	// agent's container (agent ID -> time.Time), to rate-limit it.
+	claimStops sync.Map
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
@@ -4850,6 +4879,14 @@ func (s *Server) registerSchedulerHandlers() {
 	// future drift) without a separate one-shot migration.
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
+	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
+	go func() {
+		// Bounded: a store that does not answer at startup must not leave
+		// this goroutine behind.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.demoteOwnClaimsOnRestart(ctx)
+	}()
 
 	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
 	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {
@@ -5352,6 +5389,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/gcs/object", s.guarded("/api/v1/gcs/object", s.handleGCSObject))
 	s.mux.HandleFunc("/api/v1/conduit/grant-keys", s.guarded("/api/v1/conduit/grant-keys", s.handleConduitGrantKeys))
 	s.mux.HandleFunc("/api/v1/conduit", s.guarded("/api/v1/conduit", s.handleConduit))
+
+	// Artifact service (pkg/artifacts), behind the hub.artifacts experiment.
+	// The patterns are literal here, not mounted through
+	// artifacts.Service.RegisterRoutes, because the route-metadata tests and
+	// the route-authz manifest lint read registrations from this file;
+	// TestArtifactRoutesMatchService pins them to artifacts.RoutePatterns().
+	artifactsHandler := s.artifactsHandler()
+	s.mux.Handle("/api/v1/artifacts", s.artifactsGuard("/api/v1/artifacts", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/", s.artifactsGuard("/api/v1/artifacts/", artifactsHandler))
+	s.mux.Handle("/api/v1/artifacts/shared/", s.artifactsGuard("/api/v1/artifacts/shared/", artifactsHandler))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
