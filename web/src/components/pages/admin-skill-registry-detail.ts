@@ -30,6 +30,7 @@ import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { navigateTo } from '../../client/navigation.js';
 
 interface PinnedHash {
   uri: string;
@@ -87,6 +88,8 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       display: flex;
       align-items: flex-start;
       justify-content: space-between;
+      /* A long name takes its own line and the actions drop below it. */
+      flex-wrap: wrap;
       margin-bottom: 1.5rem;
       gap: 1rem;
     }
@@ -98,11 +101,16 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.75rem;
+      overflow-wrap: anywhere;
+    }
+    .header h1 sl-icon {
+      flex-shrink: 0;
     }
     .header-actions {
       display: flex;
       gap: 0.5rem;
       flex-shrink: 0;
+      margin-left: auto;
     }
 
     .card {
@@ -436,8 +444,7 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to delete registry'));
       }
-      window.history.pushState({}, '', '/admin/skill-registries');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      navigateTo('/admin/skill-registries');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to delete');
     } finally {

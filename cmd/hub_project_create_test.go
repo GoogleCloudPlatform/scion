@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -458,4 +459,92 @@ func TestSplitFilesIgnoredWarning(t *testing.T) {
 	got, rest = splitFilesIgnoredWarning([]string{ignored})
 	assert.True(t, got)
 	assert.Nil(t, rest)
+}
+
+func TestHubProjectCloneURLLabel(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"https://github.com/org/repo", "https://github.com/org/repo.git"},
+		{"https://github.com/org/repo.git?ref=main", "https://github.com/org/repo.git"},
+		{"github.com/org/repo#readme", "https://github.com/org/repo.git"},
+		{"git@github.com:org/repo.git?x=1", "https://github.com/org/repo.git"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, hubProjectCloneURLLabel(tt.in), tt.in)
+	}
+}
+
+func TestHubProjectGitSourceLabels_NoCredentials(t *testing.T) {
+	const pw = "FAKE-KEY-SENTINEL-not-a-real-credential"
+	tests := []struct {
+		name, in, wantClone, wantSource string
+	}{
+		{"https userinfo", "https://user:" + pw + "@github.com/org/repo", "https://github.com/org/repo.git", "https://github.com/org/repo"},
+		{"https token-only", "https://" + pw + "@github.com/org/repo.git", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"scp userinfo in path", "git@user:" + pw + "@host:org/repo", "", ""},
+		{"query token", "https://github.com/org/repo?access_token=" + pw, "https://github.com/org/repo.git", "https://github.com/org/repo"},
+		{"clean scp", "git@github.com:org/repo.git", "https://github.com/org/repo.git", "git@github.com:org/repo.git"},
+		{"scp custom login", "deploy@host:org/repo", "https://host/org/repo.git", "deploy@host:org/repo"},
+		{"ssh port", "ssh://git@host:22/org/repo", "https://host/org/repo.git", "ssh://git@host:22/org/repo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			labels := hubProjectGitSourceLabels(tt.in, "main")
+			assert.Equal(t, "main", labels[store.LabelDefaultBranch])
+			gotClone, cloneOK := labels[store.LabelCloneURL]
+			gotSource, sourceOK := labels[store.LabelSourceURL]
+			assert.Equal(t, tt.wantClone, gotClone)
+			assert.Equal(t, tt.wantSource, gotSource)
+			assert.Equal(t, tt.wantClone != "", cloneOK, "clone-url omitted when it cannot be sanitized")
+			assert.Equal(t, tt.wantSource != "", sourceOK, "source-url omitted when it cannot be sanitized")
+			for k, v := range labels {
+				assert.NotContains(t, v, pw, "credential survived in %s", k)
+			}
+		})
+	}
+}
+
+// TestRunHubProjectCreate_CredentialedURLNotSent drives `hub project create`
+// with credential-bearing URLs and checks that neither the git remote nor the
+// clone-url/source-url labels sent to the hub keep the credential.
+func TestRunHubProjectCreate_CredentialedURLNotSent(t *testing.T) {
+	const pw = "FAKE-KEY-SENTINEL-not-a-real-credential"
+	for _, tc := range []struct {
+		name, url   string
+		checkRemote bool // false: the CLI refuses the URL before sending anything
+	}{
+		{"https userinfo", "https://user:" + pw + "@github.com/acme/widgets.git", true},
+		{"query token", "https://github.com/acme/widgets.git?access_token=" + pw, true},
+		{"fragment token", "https://github.com/acme/widgets.git#" + pw, true},
+		{"scp userinfo in path", "git@user:" + pw + "@host:acme/widgets", false},
+		{"query char inside password", "https://user:" + pw + "?W@github.com/acme/widgets.git", false},
+		{"fragment char inside password", "https://user:" + pw + "#W@github.com/acme/widgets.git", false},
+		{"invalid URL not echoed", "https://user:" + pw + "@host", false},
+		{"query char inside password with path-like prefix", "https://user:" + pw + "/x?W@github.com/acme/widgets.git", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := setupProjectCreateTest(t)
+			hubProjectCreateName = "widgets"
+			hubProjectCreateBranch = "main" // skip git ls-remote
+
+			err := runHubProjectCreate(hubProjectCreateCmd, []string{tc.url})
+			if !tc.checkRemote {
+				require.Error(t, err)
+				assert.NotContains(t, strings.ToLower(err.Error()), strings.ToLower(pw), "the error must not echo the credential")
+				mock.mu.Lock()
+				defer mock.mu.Unlock()
+				assert.Empty(t, mock.creates, "nothing may be sent to the hub")
+				return
+			}
+			require.NoError(t, err)
+
+			body := mock.lastCreate(t)
+			labels, _ := body["labels"].(map[string]interface{})
+			for k, v := range labels {
+				s, _ := v.(string)
+				assert.NotContains(t, strings.ToLower(s), strings.ToLower(pw), "credential sent in label %s", k)
+			}
+			remote, _ := body["gitRemote"].(string)
+			assert.NotContains(t, strings.ToLower(remote), strings.ToLower(pw), "credential sent in gitRemote")
+		})
+	}
 }

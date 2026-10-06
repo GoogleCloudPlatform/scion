@@ -22,6 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // artifactHost is the hub's implementation of artifacts.Host: it answers the
@@ -78,8 +79,10 @@ func (h *artifactHost) Principal(ctx context.Context) (kind, ref, homeScope stri
 //   - a scoped user access token: its boundary must reach the project and
 //     its ceiling must allow the permission;
 //   - a token-backed agent: its token must carry one of the permission's
-//     dedicated agent scopes. There is no project boundary: grants to other
-//     projects are how agents collaborate across projects (ptone/scion#3202);
+//     dedicated agent scopes, and its delegation chain must allow the
+//     permission at use time (agentChainAllows). There is no project
+//     boundary: grants to other projects are how agents collaborate across
+//     projects (ptone/scion#3202);
 //   - anything else: no.
 //
 // It fails closed on an empty scope or a permission that is not an artifact
@@ -103,10 +106,32 @@ func (h *artifactHost) Permits(ctx context.Context, scopeRef, permission string)
 		return BoundaryAllows(id.Boundary(), TargetScope{Kind: TargetScopeProject, ProjectID: scopeRef}) &&
 			id.Ceiling().Allows(perm.ID)
 	case *agentIdentityWrapper:
-		return id.TokenID() != "" && agentHasAnyScope(id, perm.AgentScopes)
+		return id.TokenID() != "" && agentHasAnyScope(id, perm.AgentScopes) && h.agentChainAllows(ctx, id, perm)
 	default:
 		return false
 	}
+}
+
+// agentChainAllows reports whether the agent's delegation chain allows perm
+// right now: the chain is walked in the agent's own project, so an agent
+// whose edge is gone, whose delegator no longer holds the permission, or
+// whose recorded ceiling excludes it is refused for the life of its token,
+// on every path including ownership and grants. It is deliberately not a
+// full Authorize: a grant to read an artifact homed in another project must
+// still work for an agent whose chain allows artifact reads in its own
+// project.
+func (h *artifactHost) agentChainAllows(ctx context.Context, agent *agentIdentityWrapper, perm permissions.Permission) bool {
+	if h.server == nil || h.server.authzService == nil {
+		return false
+	}
+	project := agent.ProjectID()
+	if project == "" || agent.ID() == "" {
+		return false
+	}
+	resource := Resource{Type: permissions.ResourceArtifact, ParentType: permissions.ResourceProject, ParentID: project}
+	allowed, _, err := h.server.authzService.walkDelegationChainWithCause(ctx, resource, Action(perm.Action), perm.ID,
+		agent.ID(), AncestryIsHubAttested(agent), store.RoleScopeProject, project, nil, nil)
+	return err == nil && allowed
 }
 
 // Authorize reports whether the caller may exercise permission on artifacts
@@ -163,7 +188,9 @@ func agentHasAnyScope(agent AgentIdentity, scopes []string) bool {
 // artifactsGuard is the artifacts.Guard the hub mounts the artifact service
 // with. The hub.artifacts experiment is checked first, per request, so every
 // artifact route (including the share-link route) answers 404 while it is
-// off, before any authentication outcome is visible. Then the route goes
+// off, before any authentication outcome is visible. The artifacts settings
+// section's enabled switch (false also when the section is malformed) closes
+// the routes the same way. Then the route goes
 // through the declarative route guard for its routeMetadataTable row.
 //
 // The experiment check is per request rather than requireExperiment because
@@ -173,16 +200,10 @@ func agentHasAnyScope(agent AgentIdentity, scopes []string) bool {
 func (s *Server) artifactsGuard(pattern string, handler http.Handler) http.Handler {
 	guarded := s.guarded(pattern, handler.ServeHTTP)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.experimentEnabled(experiments.Artifacts) {
+		if !s.experimentEnabled(experiments.Artifacts) || !s.artifactsConfig().Enabled {
 			NotFound(w, "route")
 			return
 		}
 		guarded(w, r)
 	})
-}
-
-// artifactsHandler returns the artifact service's handler, built over this
-// server's artifacts.Host.
-func (s *Server) artifactsHandler() http.Handler {
-	return artifacts.NewService(newArtifactHost(s)).Handler()
 }
