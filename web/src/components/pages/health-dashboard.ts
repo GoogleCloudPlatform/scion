@@ -20,7 +20,7 @@
  * Displays a centralized health view of the Scion system including:
  * - Hub status and version
  * - Database pool health
- * - Broker status (per-broker cards)
+ * - Runtime brokers (compact table, see health-broker-table.ts)
  * - Agent health summary
  * - Dispatch pipeline status
  * - Stall detection configuration (editable)
@@ -33,7 +33,10 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
-import { formatRelative } from '../../utils/time.js';
+import type { HealthSummaryBrokerList } from './health-broker-table.js';
+import './health-broker-table.js';
+
+export { formatHeartbeatAge } from './health-broker-table.js';
 
 interface HealthSummary {
   status: string;
@@ -56,17 +59,7 @@ interface HealthSummary {
     pool_wait_count_total: number;
     pool_idle: number;
   };
-  brokers: Array<{
-    id: string;
-    name: string;
-    status: string;
-    runtime: string;
-    runtime_available: boolean;
-    agent_count: number;
-    agent_healthy: number;
-    /** Null or the Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
-    last_heartbeat: string | null;
-  }>;
+  runtime_brokers: HealthSummaryBrokerList;
   agents: {
     total: number;
     by_phase: Record<string, number>;
@@ -400,34 +393,6 @@ export class ScionPageHealthDashboard extends LitElement {
       word-break: break-word;
     }
 
-    .broker-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-    }
-
-    .broker-card {
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text, #1e293b);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
-      padding: 1rem;
-      min-width: 200px;
-      flex: 1;
-    }
-
-    .broker-name {
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin-bottom: 0.5rem;
-    }
-
-    .broker-stat {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      padding: 0.125rem 0;
-    }
-
     .agent-summary {
       display: flex;
       gap: 1.5rem;
@@ -723,47 +688,9 @@ export class ScionPageHealthDashboard extends LitElement {
   }
 
   private renderBrokersCard(d: HealthSummary) {
-    if (d.brokers.length === 0) {
-      return html`
-        <div class="grid-full">
-          <div class="card">
-            <div class="card-title">Brokers</div>
-            <div style="font-size:0.875rem;color:var(--scion-text-muted,#64748b)">
-              No brokers registered
-            </div>
-          </div>
-        </div>
-      `;
-    }
-
     return html`
       <div class="grid-full">
-        <div class="card">
-          <div class="card-title">Brokers</div>
-          <div class="broker-grid">
-            ${d.brokers.map(
-              (b) => html`
-                <div class="broker-card">
-                  <div class="broker-name">${b.name || b.id}</div>
-                  <div class="status-line" style="font-size:0.875rem">
-                    <span style="color: ${this.statusColor(b.status)}"
-                      >${this.statusIcon(b.status)}</span
-                    >
-                    ${b.status}
-                  </div>
-                  <div class="broker-stat">Agents: ${b.agent_healthy}/${b.agent_count} healthy</div>
-                  <div class="broker-stat">
-                    Runtime: ${b.runtime} ${b.runtime_available ? '✓' : '✗'}
-                  </div>
-                  <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
-                    NFS: not reported
-                  </div>
-                  <div class="broker-stat">Heartbeat: ${formatHeartbeatAge(b.last_heartbeat)}</div>
-                </div>
-              `
-            )}
-          </div>
-        </div>
+        <scion-health-broker-table .brokers=${d.runtime_brokers}></scion-health-broker-table>
       </div>
     `;
   }
@@ -919,21 +846,4 @@ export class ScionPageHealthDashboard extends LitElement {
       </div>
     `;
   }
-}
-
-/**
- * Formats a broker heartbeat as a relative age. A null, undefined or
- * empty value, the Go zero time (`0001-01-01T00:00:00Z`), or any other
- * non-positive instant (the Unix epoch itself or any earlier time) means
- * the heartbeat was never reported and renders as "never". An unparsable
- * value renders as "unknown" and a future instant as "just now".
- */
-export function formatHeartbeatAge(isoDate: string | null | undefined): string {
-  if (!isoDate) return 'never';
-  const ms = new Date(isoDate).getTime();
-  if (Number.isNaN(ms)) return 'unknown';
-  if (ms <= 0) return 'never';
-  // A future instant is clock skew between hub and browser.
-  if (ms > Date.now()) return 'just now';
-  return formatRelative(isoDate, { style: 'narrow' });
 }
