@@ -47,6 +47,7 @@ All four findings were fixed; none declined.
 
 - Fourth sync and upstream review fix: upstream main 1fb0950 was merged in as b3ac52b (remerge-diff empty). The metrics page now lets a request clear or set the page-wide error only when it is the newest request for its view and that view is the active tab (GoogleCloudPlatform/scion#2594 review).
 - Review round 4 (R4-1): a new test switches tabs through the real `sl-tab-show` event, so it fails if `handleTabChange` sets `activeTab` after calling `loadView`.
+- Fifth sync: upstream main 0a770f3 was merged in as 49f9c24 (remerge-diff empty, no conflicts).
 
 ## Follow-ups noticed (not done)
 
