@@ -39,8 +39,12 @@ describe('stateLabel', () => {
     });
   });
 
+  it("shows the 'waiting_for_input' activity as 'waiting on parent' (ptone/scion#3301)", () => {
+    expect(stateLabel('waiting_for_input')).toBe('waiting on parent');
+    expect(ACTIVITY_DISPLAY.waiting_for_input.label).toBe('waiting on parent');
+  });
+
   it('uses other defined display labels', () => {
-    expect(stateLabel('waiting_for_input')).toBe('waiting for input');
     expect(stateLabel('limits_exceeded')).toBe('limits exceeded');
   });
 

@@ -736,8 +736,9 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
 
 	tests := []struct {
-		name   string
-		config RunConfig
+		name      string
+		config    RunConfig
+		wantField string
 	}{
 		{
 			name: "invalid CPU request",
@@ -745,6 +746,23 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 				Name: "test", Image: "test:latest",
 				Resources: &api.ResourceSpec{Requests: api.ResourceList{CPU: "not-a-cpu"}},
 			},
+			wantField: "requests.cpu",
+		},
+		{
+			name: "invalid memory request",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Resources: &api.ResourceSpec{Requests: api.ResourceList{Memory: "lots"}},
+			},
+			wantField: "requests.memory",
+		},
+		{
+			name: "invalid CPU limit",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "two"}},
+			},
+			wantField: "limits.cpu",
 		},
 		{
 			name: "invalid memory limit",
@@ -752,6 +770,7 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 				Name: "test", Image: "test:latest",
 				Resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "xyz"}},
 			},
+			wantField: "limits.memory",
 		},
 		{
 			name: "invalid disk",
@@ -759,6 +778,31 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 				Name: "test", Image: "test:latest",
 				Resources: &api.ResourceSpec{Disk: "bogus"},
 			},
+			wantField: "disk (ephemeral-storage)",
+		},
+		{
+			name: "invalid k8s memory request",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Kubernetes: &api.KubernetesConfig{
+					Resources: &api.K8sResources{
+						Requests: map[string]string{"memory": "plenty"},
+					},
+				},
+			},
+			wantField: "kubernetes.resources.requests.memory",
+		},
+		{
+			name: "empty k8s memory limit",
+			config: RunConfig{
+				Name: "test", Image: "test:latest",
+				Kubernetes: &api.KubernetesConfig{
+					Resources: &api.K8sResources{
+						Limits: map[string]string{"memory": ""},
+					},
+				},
+			},
+			wantField: "kubernetes.resources.limits.memory",
 		},
 		{
 			name: "invalid k8s extended resource",
@@ -770,6 +814,7 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 					},
 				},
 			},
+			wantField: "kubernetes.resources.limits.nvidia.com/gpu",
 		},
 	}
 
@@ -777,7 +822,10 @@ func TestBuildPod_SafeResourceParsing_InvalidValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := rt.buildPod("default", tt.config)
 			if err == nil {
-				t.Error("expected error for invalid resource value, got nil")
+				t.Fatal("expected error for invalid resource value, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantField) {
+				t.Errorf("expected error to name %q, got %v", tt.wantField, err)
 			}
 		})
 	}

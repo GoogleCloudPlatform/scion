@@ -96,7 +96,7 @@ func (wm *WebhookManager) getOrCreateWebhook(channelID string) (*discordgo.Webho
 	}
 
 	for _, wh := range webhooks {
-		if wh.Name == webhookName && wh.User != nil && wh.User.ID == botUserID {
+		if isOwnWebhook(wh, botUserID) {
 			wm.cache[channelID] = wh
 			wm.log.Debug("Reusing existing webhook",
 				"channel_id", channelID,
@@ -116,6 +116,13 @@ func (wm *WebhookManager) getOrCreateWebhook(channelID string) (*discordgo.Webho
 		"channel_id", channelID,
 		"webhook_id", wh.ID)
 	return wh, nil
+}
+
+// isOwnWebhook reports whether wh is the relay webhook this plugin
+// manages: it carries webhookName and was created by the bot user, whose
+// ID is known.
+func isOwnWebhook(wh *discordgo.Webhook, botUserID string) bool {
+	return botUserID != "" && wh != nil && wh.Name == webhookName && wh.User != nil && wh.User.ID == botUserID
 }
 
 // owns reports whether webhookID is the webhook this plugin uses in
@@ -153,7 +160,7 @@ func (wm *WebhookManager) owns(channelID, webhookID string) bool {
 		botUserID = wm.session.State.User.ID
 	}
 	for _, wh := range webhooks {
-		if wh.Name == webhookName && wh.User != nil && wh.User.ID == botUserID {
+		if isOwnWebhook(wh, botUserID) {
 			wm.mu.Lock()
 			if _, cached := wm.cache[channelID]; !cached {
 				wm.cache[channelID] = wh

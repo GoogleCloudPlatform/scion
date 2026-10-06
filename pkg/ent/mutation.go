@@ -4597,6 +4597,7 @@ type AgentMutation struct {
 	deletion_request           *string
 	run_intent                 *string
 	run_intent_at              *time.Time
+	run_intent_marked_at       *time.Time
 	start_claim_id             *string
 	start_claim_kind           *string
 	start_claim_state          *string
@@ -8026,6 +8027,55 @@ func (m *AgentMutation) ResetRunIntentAt() {
 	delete(m.clearedFields, agent.FieldRunIntentAt)
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (m *AgentMutation) SetRunIntentMarkedAt(t time.Time) {
+	m.run_intent_marked_at = &t
+}
+
+// RunIntentMarkedAt returns the value of the "run_intent_marked_at" field in the mutation.
+func (m *AgentMutation) RunIntentMarkedAt() (r time.Time, exists bool) {
+	v := m.run_intent_marked_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunIntentMarkedAt returns the old "run_intent_marked_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunIntentMarkedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunIntentMarkedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunIntentMarkedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunIntentMarkedAt: %w", err)
+	}
+	return oldValue.RunIntentMarkedAt, nil
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (m *AgentMutation) ClearRunIntentMarkedAt() {
+	m.run_intent_marked_at = nil
+	m.clearedFields[agent.FieldRunIntentMarkedAt] = struct{}{}
+}
+
+// RunIntentMarkedAtCleared returns if the "run_intent_marked_at" field was cleared in this mutation.
+func (m *AgentMutation) RunIntentMarkedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunIntentMarkedAt]
+	return ok
+}
+
+// ResetRunIntentMarkedAt resets all changes to the "run_intent_marked_at" field.
+func (m *AgentMutation) ResetRunIntentMarkedAt() {
+	m.run_intent_marked_at = nil
+	delete(m.clearedFields, agent.FieldRunIntentMarkedAt)
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (m *AgentMutation) SetStartClaimID(s string) {
 	m.start_claim_id = &s
@@ -8734,7 +8784,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 79)
+	fields := make([]string, 0, 80)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8939,6 +8989,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.run_intent_at != nil {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.run_intent_marked_at != nil {
+		fields = append(fields, agent.FieldRunIntentMarkedAt)
+	}
 	if m.start_claim_id != nil {
 		fields = append(fields, agent.FieldStartClaimID)
 	}
@@ -9116,6 +9169,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.RunIntent()
 	case agent.FieldRunIntentAt:
 		return m.RunIntentAt()
+	case agent.FieldRunIntentMarkedAt:
+		return m.RunIntentMarkedAt()
 	case agent.FieldStartClaimID:
 		return m.StartClaimID()
 	case agent.FieldStartClaimKind:
@@ -9283,6 +9338,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRunIntent(ctx)
 	case agent.FieldRunIntentAt:
 		return m.OldRunIntentAt(ctx)
+	case agent.FieldRunIntentMarkedAt:
+		return m.OldRunIntentMarkedAt(ctx)
 	case agent.FieldStartClaimID:
 		return m.OldStartClaimID(ctx)
 	case agent.FieldStartClaimKind:
@@ -9790,6 +9847,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRunIntentAt(v)
 		return nil
+	case agent.FieldRunIntentMarkedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunIntentMarkedAt(v)
+		return nil
 	case agent.FieldStartClaimID:
 		v, ok := value.(string)
 		if !ok {
@@ -10137,6 +10201,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRunIntentAt) {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.FieldCleared(agent.FieldRunIntentMarkedAt) {
+		fields = append(fields, agent.FieldRunIntentMarkedAt)
+	}
 	if m.FieldCleared(agent.FieldStartClaimID) {
 		fields = append(fields, agent.FieldStartClaimID)
 	}
@@ -10336,6 +10403,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ClearRunIntentAt()
+		return nil
+	case agent.FieldRunIntentMarkedAt:
+		m.ClearRunIntentMarkedAt()
 		return nil
 	case agent.FieldStartClaimID:
 		m.ClearStartClaimID()
@@ -10581,6 +10651,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ResetRunIntentAt()
+		return nil
+	case agent.FieldRunIntentMarkedAt:
+		m.ResetRunIntentMarkedAt()
 		return nil
 	case agent.FieldStartClaimID:
 		m.ResetStartClaimID()
@@ -12750,6 +12823,9 @@ type AgentReincarnationMutation struct {
 	previous_applied_config *string
 	new_applied_config      *string
 	handoff                 *string
+	source_broker_id        *string
+	target_broker_id        *string
+	source_cleanup          *string
 	clearedFields           map[string]struct{}
 	done                    bool
 	oldValue                func(context.Context) (*AgentReincarnation, error)
@@ -13410,6 +13486,153 @@ func (m *AgentReincarnationMutation) ResetHandoff() {
 	delete(m.clearedFields, agentreincarnation.FieldHandoff)
 }
 
+// SetSourceBrokerID sets the "source_broker_id" field.
+func (m *AgentReincarnationMutation) SetSourceBrokerID(s string) {
+	m.source_broker_id = &s
+}
+
+// SourceBrokerID returns the value of the "source_broker_id" field in the mutation.
+func (m *AgentReincarnationMutation) SourceBrokerID() (r string, exists bool) {
+	v := m.source_broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceBrokerID returns the old "source_broker_id" field's value of the AgentReincarnation entity.
+// If the AgentReincarnation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentReincarnationMutation) OldSourceBrokerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceBrokerID: %w", err)
+	}
+	return oldValue.SourceBrokerID, nil
+}
+
+// ClearSourceBrokerID clears the value of the "source_broker_id" field.
+func (m *AgentReincarnationMutation) ClearSourceBrokerID() {
+	m.source_broker_id = nil
+	m.clearedFields[agentreincarnation.FieldSourceBrokerID] = struct{}{}
+}
+
+// SourceBrokerIDCleared returns if the "source_broker_id" field was cleared in this mutation.
+func (m *AgentReincarnationMutation) SourceBrokerIDCleared() bool {
+	_, ok := m.clearedFields[agentreincarnation.FieldSourceBrokerID]
+	return ok
+}
+
+// ResetSourceBrokerID resets all changes to the "source_broker_id" field.
+func (m *AgentReincarnationMutation) ResetSourceBrokerID() {
+	m.source_broker_id = nil
+	delete(m.clearedFields, agentreincarnation.FieldSourceBrokerID)
+}
+
+// SetTargetBrokerID sets the "target_broker_id" field.
+func (m *AgentReincarnationMutation) SetTargetBrokerID(s string) {
+	m.target_broker_id = &s
+}
+
+// TargetBrokerID returns the value of the "target_broker_id" field in the mutation.
+func (m *AgentReincarnationMutation) TargetBrokerID() (r string, exists bool) {
+	v := m.target_broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTargetBrokerID returns the old "target_broker_id" field's value of the AgentReincarnation entity.
+// If the AgentReincarnation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentReincarnationMutation) OldTargetBrokerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTargetBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTargetBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTargetBrokerID: %w", err)
+	}
+	return oldValue.TargetBrokerID, nil
+}
+
+// ClearTargetBrokerID clears the value of the "target_broker_id" field.
+func (m *AgentReincarnationMutation) ClearTargetBrokerID() {
+	m.target_broker_id = nil
+	m.clearedFields[agentreincarnation.FieldTargetBrokerID] = struct{}{}
+}
+
+// TargetBrokerIDCleared returns if the "target_broker_id" field was cleared in this mutation.
+func (m *AgentReincarnationMutation) TargetBrokerIDCleared() bool {
+	_, ok := m.clearedFields[agentreincarnation.FieldTargetBrokerID]
+	return ok
+}
+
+// ResetTargetBrokerID resets all changes to the "target_broker_id" field.
+func (m *AgentReincarnationMutation) ResetTargetBrokerID() {
+	m.target_broker_id = nil
+	delete(m.clearedFields, agentreincarnation.FieldTargetBrokerID)
+}
+
+// SetSourceCleanup sets the "source_cleanup" field.
+func (m *AgentReincarnationMutation) SetSourceCleanup(s string) {
+	m.source_cleanup = &s
+}
+
+// SourceCleanup returns the value of the "source_cleanup" field in the mutation.
+func (m *AgentReincarnationMutation) SourceCleanup() (r string, exists bool) {
+	v := m.source_cleanup
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceCleanup returns the old "source_cleanup" field's value of the AgentReincarnation entity.
+// If the AgentReincarnation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentReincarnationMutation) OldSourceCleanup(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceCleanup is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceCleanup requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceCleanup: %w", err)
+	}
+	return oldValue.SourceCleanup, nil
+}
+
+// ClearSourceCleanup clears the value of the "source_cleanup" field.
+func (m *AgentReincarnationMutation) ClearSourceCleanup() {
+	m.source_cleanup = nil
+	m.clearedFields[agentreincarnation.FieldSourceCleanup] = struct{}{}
+}
+
+// SourceCleanupCleared returns if the "source_cleanup" field was cleared in this mutation.
+func (m *AgentReincarnationMutation) SourceCleanupCleared() bool {
+	_, ok := m.clearedFields[agentreincarnation.FieldSourceCleanup]
+	return ok
+}
+
+// ResetSourceCleanup resets all changes to the "source_cleanup" field.
+func (m *AgentReincarnationMutation) ResetSourceCleanup() {
+	m.source_cleanup = nil
+	delete(m.clearedFields, agentreincarnation.FieldSourceCleanup)
+}
+
 // Where appends a list predicates to the AgentReincarnationMutation builder.
 func (m *AgentReincarnationMutation) Where(ps ...predicate.AgentReincarnation) {
 	m.predicates = append(m.predicates, ps...)
@@ -13444,7 +13667,7 @@ func (m *AgentReincarnationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentReincarnationMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 15)
 	if m.agent_id != nil {
 		fields = append(fields, agentreincarnation.FieldAgentID)
 	}
@@ -13481,6 +13704,15 @@ func (m *AgentReincarnationMutation) Fields() []string {
 	if m.handoff != nil {
 		fields = append(fields, agentreincarnation.FieldHandoff)
 	}
+	if m.source_broker_id != nil {
+		fields = append(fields, agentreincarnation.FieldSourceBrokerID)
+	}
+	if m.target_broker_id != nil {
+		fields = append(fields, agentreincarnation.FieldTargetBrokerID)
+	}
+	if m.source_cleanup != nil {
+		fields = append(fields, agentreincarnation.FieldSourceCleanup)
+	}
 	return fields
 }
 
@@ -13513,6 +13745,12 @@ func (m *AgentReincarnationMutation) Field(name string) (ent.Value, bool) {
 		return m.NewAppliedConfig()
 	case agentreincarnation.FieldHandoff:
 		return m.Handoff()
+	case agentreincarnation.FieldSourceBrokerID:
+		return m.SourceBrokerID()
+	case agentreincarnation.FieldTargetBrokerID:
+		return m.TargetBrokerID()
+	case agentreincarnation.FieldSourceCleanup:
+		return m.SourceCleanup()
 	}
 	return nil, false
 }
@@ -13546,6 +13784,12 @@ func (m *AgentReincarnationMutation) OldField(ctx context.Context, name string) 
 		return m.OldNewAppliedConfig(ctx)
 	case agentreincarnation.FieldHandoff:
 		return m.OldHandoff(ctx)
+	case agentreincarnation.FieldSourceBrokerID:
+		return m.OldSourceBrokerID(ctx)
+	case agentreincarnation.FieldTargetBrokerID:
+		return m.OldTargetBrokerID(ctx)
+	case agentreincarnation.FieldSourceCleanup:
+		return m.OldSourceCleanup(ctx)
 	}
 	return nil, fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -13639,6 +13883,27 @@ func (m *AgentReincarnationMutation) SetField(name string, value ent.Value) erro
 		}
 		m.SetHandoff(v)
 		return nil
+	case agentreincarnation.FieldSourceBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceBrokerID(v)
+		return nil
+	case agentreincarnation.FieldTargetBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTargetBrokerID(v)
+		return nil
+	case agentreincarnation.FieldSourceCleanup:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceCleanup(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)
 }
@@ -13714,6 +13979,15 @@ func (m *AgentReincarnationMutation) ClearedFields() []string {
 	if m.FieldCleared(agentreincarnation.FieldHandoff) {
 		fields = append(fields, agentreincarnation.FieldHandoff)
 	}
+	if m.FieldCleared(agentreincarnation.FieldSourceBrokerID) {
+		fields = append(fields, agentreincarnation.FieldSourceBrokerID)
+	}
+	if m.FieldCleared(agentreincarnation.FieldTargetBrokerID) {
+		fields = append(fields, agentreincarnation.FieldTargetBrokerID)
+	}
+	if m.FieldCleared(agentreincarnation.FieldSourceCleanup) {
+		fields = append(fields, agentreincarnation.FieldSourceCleanup)
+	}
 	return fields
 }
 
@@ -13745,6 +14019,15 @@ func (m *AgentReincarnationMutation) ClearField(name string) error {
 		return nil
 	case agentreincarnation.FieldHandoff:
 		m.ClearHandoff()
+		return nil
+	case agentreincarnation.FieldSourceBrokerID:
+		m.ClearSourceBrokerID()
+		return nil
+	case agentreincarnation.FieldTargetBrokerID:
+		m.ClearTargetBrokerID()
+		return nil
+	case agentreincarnation.FieldSourceCleanup:
+		m.ClearSourceCleanup()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation nullable field %s", name)
@@ -13789,6 +14072,15 @@ func (m *AgentReincarnationMutation) ResetField(name string) error {
 		return nil
 	case agentreincarnation.FieldHandoff:
 		m.ResetHandoff()
+		return nil
+	case agentreincarnation.FieldSourceBrokerID:
+		m.ResetSourceBrokerID()
+		return nil
+	case agentreincarnation.FieldTargetBrokerID:
+		m.ResetTargetBrokerID()
+		return nil
+	case agentreincarnation.FieldSourceCleanup:
+		m.ResetSourceCleanup()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentReincarnation field %s", name)

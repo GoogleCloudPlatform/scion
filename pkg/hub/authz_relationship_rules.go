@@ -24,6 +24,12 @@ package hub
 //     principal kind and resource type in permissions.RelationshipPolicies;
 //  2. untrusted_ancestry   — a relationship derived from the ancestry chain
 //     requires hub-attested ancestry, for every principal kind;
+//     2b. execution_project — an agent's progeny read requires its source
+//     user's live admission to the agent's project;
+//     2c. project_access — a local user's owner or ancestor relationship on
+//     a project-scoped target requires the user's active access to that
+//     project (Decide only, for interactive and UAT requests; not the
+//     delegation-ceiling walk; see relationshipProjectAccessStage);
 //  3. relationship_fact    — the rule's store fact holds (hub membership, a
 //     progeny sharing source); a lookup failure rejects the candidate;
 //  4. source_inactive      — the sharing source's owner is still active;
@@ -70,6 +76,15 @@ const (
 	RelationshipRejectUntrustedAncestry = "untrusted_ancestry"
 	RelationshipRejectFact              = "relationship_fact"
 	RelationshipRejectSourceInactive    = "source_inactive"
+
+	// RelationshipRejectProjectAccess: the user principal holds no active
+	// access (membership or applicable system authority) to the target's
+	// project. A policy fact; the deny is not tagged as a fault.
+	RelationshipRejectProjectAccess = "project_access"
+	// RelationshipRejectProjectAccessError: the project-access check failed
+	// on a store or resolution fault. The candidate is rejected (fail
+	// closed) and a resulting deny is tagged DenyCauseResolutionError.
+	RelationshipRejectProjectAccessError = "project_access_error"
 )
 
 // relationshipRejectKeepsKernelReason reports whether a rejection kind
@@ -131,6 +146,27 @@ type relationshipOutcome struct {
 	// restrictedBy is the first rejection kind that names a restriction on
 	// an applicable relationship (see relationshipRejectKeepsKernelReason).
 	restrictedBy string
+	// projectAccessFault is set when any candidate was rejected by
+	// RelationshipRejectProjectAccessError. Decide tags a resulting deny as
+	// DenyCauseResolutionError.
+	projectAccessFault bool
+}
+
+// relationshipProjectAccess enables the project-access stage (2c) for one
+// evaluation and carries the request-scoped admission memo. A nil
+// *relationshipProjectAccess disables the stage: only Decide's step 9
+// (interactive and UAT requests) enables it. The delegation-ceiling walk
+// (userRelationshipAuthority) evaluates a delegator's relationships with the
+// stage disabled; that path is not covered by this decision.
+type relationshipProjectAccess struct {
+	memo *ProjectAdmissionCache
+	// requestCtx, when set, is the request's own context, used for the
+	// stage's admission lookup instead of the memo-masked context the
+	// other stages run on. The stage evaluates the requester's own project
+	// access, so it may read the requester's memoized principals and
+	// bindings; every other stage reads on behalf of another principal and
+	// must not.
+	requestCtx context.Context
 }
 
 // isHubScopedServiceAccount reports whether the resource is a hub-scoped
@@ -139,8 +175,8 @@ func isHubScopedServiceAccount(resource Resource) bool {
 	return resource.Type == "gcp_service_account" && resource.ParentType == "" && resource.ParentID == ""
 }
 
-// relationshipCandidates lists, in a stable order (ancestor, owner,
-// hub-member assign, creator skill, progeny), the relationships that
+// relationshipCandidates lists, in a stable order (ancestor, launcher,
+// owner, hub-member assign, creator skill, progeny), the relationships that
 // structurally hold for this principal and resource.
 func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resource Resource, action Action, permissionID string) []relationshipCandidate {
 	var out []relationshipCandidate
@@ -157,6 +193,13 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 				MatchedGrant: "ancestor",
 			},
 		})
+	}
+
+	// Launcher: an agent reading the status of an agent it directly
+	// launched (authz_launcher_read.go). Decided from the target's stored
+	// record, never from the caller's ancestry claim.
+	if c, ok := launcherCandidate(principal, resource, action, permissionID); ok {
+		out = append(out, c)
 	}
 
 	// Owner: a user principal that owns the resource. Assign on a hub-scoped
@@ -282,6 +325,7 @@ func (a *AuthzService) evaluateRelationshipCandidates(
 	permissionID string,
 	restrictions []Restriction,
 	stopAtFirst bool,
+	projectAccess *relationshipProjectAccess,
 ) relationshipOutcome {
 	var out relationshipOutcome
 	policyKind := permissions.RelationshipPrincipalKind(string(principal.Kind))
@@ -294,9 +338,12 @@ func (a *AuthzService) evaluateRelationshipCandidates(
 			if out.restrictedBy == "" && !relationshipRejectKeepsKernelReason(kind) {
 				out.restrictedBy = kind
 			}
+			if kind == RelationshipRejectProjectAccessError {
+				out.projectAccessFault = true
+			}
 		}
 
-		src, ok := a.runRelationshipStages(ctx, principal, policyKind, resource, permissionID, restrictions, c, reject)
+		src, ok := a.runRelationshipStages(ctx, principal, policyKind, resource, permissionID, restrictions, c, projectAccess, reject)
 		if src != nil {
 			res.Source = &RelationshipSource{Kind: src.Kind}
 		}
@@ -332,6 +379,7 @@ func (a *AuthzService) runRelationshipStages(
 	permissionID string,
 	restrictions []Restriction,
 	c relationshipCandidate,
+	projectAccess *relationshipProjectAccess,
 	reject func(kind, detail string),
 ) (*SharingSource, bool) {
 	// Stage 1: relationship policy.
@@ -356,6 +404,20 @@ func (a *AuthzService) runRelationshipStages(
 	if isAgentPrincipal(principal.Kind) && executionProjectRule(c.rule) {
 		if ok, detail := a.executionProjectAdmission(ctx, principal, permissionID); !ok {
 			reject(RelationshipRejectExecutionProject, detail)
+			return nil, false
+		}
+	}
+
+	// Stage 2c: project access (ptone/scion#2141). See
+	// relationshipProjectAccessStage for the covered principals, rules and
+	// targets.
+	if projectAccess != nil {
+		stageCtx := ctx
+		if projectAccess.requestCtx != nil {
+			stageCtx = projectAccess.requestCtx
+		}
+		if kind, detail := a.relationshipProjectAccessStage(stageCtx, principal, resource, permissionID, c.rule, projectAccess.memo); kind != "" {
+			reject(kind, detail)
 			return nil, false
 		}
 	}
@@ -394,6 +456,81 @@ func (a *AuthzService) runRelationshipStages(
 		}
 	}
 	return src, true
+}
+
+// projectAccessRelationshipRule reports whether rule is a user resource
+// relationship that requires active project access on a project-scoped
+// target: owner and ancestor.
+func projectAccessRelationshipRule(rule RelationshipRuleID) bool {
+	return rule == RelationshipRuleOwner || rule == RelationshipRuleAncestor
+}
+
+// relationshipProjectAccessStage is stage 2c (ptone/scion#2141). It returns
+// an empty kind when the candidate passes or the stage does not apply, and
+// otherwise the rejection kind and detail.
+//
+// Covered principals: user principals (isUserPrincipal). That is local
+// users (PrincipalKindUser and PrincipalKindDev), which includes
+// session users and UAT holders (a *ScopedUserIdentity is
+// PrincipalKindUser), and federated users (PrincipalKindFederatedUser,
+// ptone/scion#3427), whose access comes only from hub-recorded bindings
+// keyed to user:<issuer>:<sub>. Agents, federated agents, federated
+// services and every other principal kind are unchanged.
+//
+// Covered rules: owner and ancestor (projectAccessRelationshipRule).
+// Progeny and hub-member service-account assign are unchanged.
+//
+// Covered targets: any target whose structural project scope is set
+// (resourceProjectScope: a project-parented resource, or the project
+// itself; a project-parented target with no project ID is rejected),
+// for every permission the owner and ancestor policies list on
+// that resource type — agent create, read, list, update, delete,
+// lifecycle, attach, message, port access and the remaining agent
+// permissions; project-scoped template, harness config, skill and GCP
+// service account operations; and any other project-parented resource type
+// with an owner row. Hub-level and user-scoped targets are unchanged.
+//
+// The check is ProjectTargetAdmission: current project membership, or
+// system authority that applies to the target's project-scoped class.
+// Historical creation ancestry or resource ownership never satisfies it.
+// The request memo is shared with the bearer gate, so a UAT request reads
+// the store once for both checks. A store or resolution fault rejects with
+// RelationshipRejectProjectAccessError; any other error or a miss rejects
+// with RelationshipRejectProjectAccess.
+func (a *AuthzService) relationshipProjectAccessStage(
+	ctx context.Context,
+	principal PrincipalContext,
+	resource Resource,
+	permissionID string,
+	rule RelationshipRuleID,
+	memo *ProjectAdmissionCache,
+) (string, string) {
+	if !isUserPrincipal(principal.Kind) {
+		return "", ""
+	}
+	if !projectAccessRelationshipRule(rule) {
+		return "", ""
+	}
+	projectID := resourceProjectScope(resource)
+	if projectID == "" {
+		// A project-parented target whose project ID is missing cannot be
+		// admitted; it is not treated as a non-project target.
+		if resource.ParentType == "project" {
+			return RelationshipRejectProjectAccess, "target project is not resolved"
+		}
+		return "", ""
+	}
+	res, err := a.ProjectTargetAdmission(ctx, principal, projectID, permissionID, resource, memo)
+	if err != nil {
+		if isProjectAccessLookupFault(err) {
+			return RelationshipRejectProjectAccessError, "project access check failed (fail-closed)"
+		}
+		return RelationshipRejectProjectAccess, "principal lacks active access to the target project"
+	}
+	if !res.Admitted {
+		return RelationshipRejectProjectAccess, "principal lacks active access to the target project"
+	}
+	return "", ""
 }
 
 // relationshipSourceActive reports whether a sharing-source owner is

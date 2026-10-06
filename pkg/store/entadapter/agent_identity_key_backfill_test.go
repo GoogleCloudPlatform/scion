@@ -56,7 +56,7 @@ func setAgentCreated(t *testing.T, cs *CompositeStore, agentID string, created t
 	db := cs.DB()
 	require.NotNil(t, db)
 	_, err := db.ExecContext(context.Background(),
-		"UPDATE agents SET created = ? WHERE id = ?", created, agentID)
+		rebindForDialect(cs.Dialect(), "UPDATE agents SET created = ? WHERE id = ?"), created, agentID)
 	require.NoError(t, err)
 }
 
