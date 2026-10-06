@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -44,7 +43,7 @@ func TestReincarnateAgent_RefusedBeforeStopForInadmissibleGCPSA(t *testing.T) {
 		{name: "failed", status: store.GCPVerificationFailed, reason: "not verified"},
 		{name: "deleted", verified: true, status: store.GCPVerificationVerified, reason: "no longer available",
 			mutate: func(t *testing.T, s store.Store, _ *store.Agent, sa *store.GCPServiceAccount) {
-				require.NoError(t, s.DeleteGCPServiceAccount(context.Background(), sa.ID))
+				require.NoError(t, s.DeleteGCPServiceAccount(t.Context(), sa.ID))
 			}},
 		{name: "email changed", verified: true, status: store.GCPVerificationVerified, reason: "no longer matches",
 			mutate: func(t *testing.T, s store.Store, agent *store.Agent, _ *store.GCPServiceAccount) {
@@ -54,7 +53,7 @@ func TestReincarnateAgent_RefusedBeforeStopForInadmissibleGCPSA(t *testing.T) {
 	for i, tc := range cases {
 		for _, dryRun := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/dryRun=%v", tc.name, dryRun), func(t *testing.T) {
-				ctx := context.Background()
+				ctx := t.Context()
 				disp := newReincarnateTestDispatcher()
 				srv, s, project, broker := setupReincarnateTestServer(t, disp)
 				agent := newReincarnateTestAgent(t, s, project, broker, nil)
@@ -141,10 +140,10 @@ func TestReincarnateAgent_NoGCPSAUnaffected(t *testing.T) {
 // applied GCP identity, so it no longer matches the service account row.
 func setAgentGCPIdentityEmail(t *testing.T, s store.Store, agentID, email string) {
 	t.Helper()
-	got, err := s.GetAgent(context.Background(), agentID)
+	got, err := s.GetAgent(t.Context(), agentID)
 	require.NoError(t, err)
 	got.AppliedConfig.GCPIdentity.ServiceAccountEmail = email
-	require.NoError(t, s.UpdateAgent(context.Background(), got))
+	require.NoError(t, s.UpdateAgent(t.Context(), got))
 }
 
 // A dry-run move applies the same GCP identity refusal as start and an
@@ -170,7 +169,7 @@ func TestReincarnateMove_DryRun_RefusedForInadmissibleGCPSA(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			var mutateDst func(dst *store.RuntimeBroker)
 			if tc.dstNoAgentMove {
 				// On its own, this target gives the 412 capability verdict.
