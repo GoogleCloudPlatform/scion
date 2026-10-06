@@ -89,7 +89,7 @@ func TestStartClaim_DisabledRecordsIntentAndTakesNoClaim(t *testing.T) {
 		assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID)
 		return nil
 	}
-	require.NoError(t, f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false))
+	require.NoError(t, f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser}))
 	assert.True(t, called)
 	assert.Equal(t, store.RunIntentRunning, getAgent(t, f.s, a.ID).RunIntent)
 }
@@ -104,7 +104,7 @@ func TestStartClaim_SuccessHoldsClaimDuringDispatchThenReleases(t *testing.T) {
 		assert.Equal(t, f.srv.instanceID, got.StartClaimOwner)
 		return nil
 	}
-	require.NoError(t, f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false))
+	require.NoError(t, f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser}))
 	got := getAgent(t, f.s, a.ID)
 	assert.Empty(t, got.StartClaimID, "a successful start releases its claim")
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
@@ -127,7 +127,7 @@ func TestStartClaim_OutcomeByError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f, d, a := newClaimFixture(t)
 			d.start = func(ctx context.Context, cur *store.Agent) error { return tc.err }
-			err := f.srv.startAgentCore(context.Background(), a, store.StartClaimCreate, nil, "", false)
+			err := f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimCreate})
 			require.ErrorIs(t, err, tc.err)
 			got := getAgent(t, f.s, a.ID)
 			assert.Equal(t, tc.want, got.StartClaimState)
@@ -147,7 +147,7 @@ func TestStartClaim_HeldClaimRefusesWithoutDispatch(t *testing.T) {
 		t.Fatal("a start must not be dispatched while another claim is held")
 		return nil
 	}
-	err = f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false)
+	err = f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser})
 	var held *store.ClaimHeldError
 	require.ErrorAs(t, err, &held)
 	assert.Equal(t, store.StartClaimRecovery, held.Kind)
@@ -173,7 +173,7 @@ func TestStartClaim_TwoReplicasOneWins(t *testing.T) {
 		go func(i int, srv *Server) {
 			defer wg.Done()
 			cp := *a
-			errs[i] = srv.startAgentCore(context.Background(), &cp, store.StartClaimUser, nil, "", false)
+			errs[i] = srv.startAgentCore(context.Background(), &cp, StartOpts{Kind: store.StartClaimUser})
 		}(i, srv)
 	}
 	require.Eventually(t, func() bool { return dispatched.Load() == 1 }, 5*time.Second, 5*time.Millisecond)
@@ -226,7 +226,7 @@ func TestStartClaim_StalledRenewFencesTheHolder(t *testing.T) {
 		startErr = ctx.Err()
 		return ctx.Err()
 	}
-	err := f.srv.startAgentCore(context.Background(), a, store.StartClaimRecovery, nil, "", false)
+	err := f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimRecovery})
 	require.ErrorIs(t, err, errStartClaimLost)
 	assert.ErrorIs(t, startErr, context.Canceled, "the start is cancelled at the fence deadline")
 	got := getAgent(t, f.s, a.ID)
@@ -241,7 +241,7 @@ func TestStartClaim_FencedBeforeDispatchDoesNotDispatch(t *testing.T) {
 		t.Fatal("dispatched past the fence deadline")
 		return nil
 	}
-	err := f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false)
+	err := f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser})
 	require.ErrorIs(t, err, errStartClaimLost)
 	assert.Equal(t, store.StartClaimLive, getAgent(t, f.s, a.ID).StartClaimState, "no outcome is written")
 }
@@ -255,7 +255,7 @@ func TestStartClaim_ZeroRowsRenewCancelsAtOnce(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	err := f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false)
+	err := f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser})
 	require.ErrorIs(t, err, errStartClaimLost)
 	assert.Less(t, time.Since(started), 2*time.Second, "a lost claim cancels at the first renew, before the fence deadline")
 }
@@ -274,7 +274,7 @@ func TestStartClaim_RenewErrorsThenSuccessKeepsClaim(t *testing.T) {
 			return nil
 		}
 	}
-	require.NoError(t, f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false))
+	require.NoError(t, f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser}))
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the claim was kept and then released on success")
 }
 
@@ -285,7 +285,7 @@ func TestStartClaim_MaxDurationBoundsTheStart(t *testing.T) {
 		<-ctx.Done() // a cross-node wait that never answers
 		return ctx.Err()
 	}
-	err := f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false)
+	err := f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser})
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState, "a start cut off by the deadline is unconfirmed")
 }
@@ -296,7 +296,7 @@ func TestStartClaim_CompensatingStop(t *testing.T) {
 		_, err := f.s.SetRunIntent(context.Background(), a.ID, store.RunIntentStopped) // a stop accepted meanwhile
 		return err
 	}
-	require.NoError(t, f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false))
+	require.NoError(t, f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser}))
 	assert.Equal(t, int32(1), d.stops.Load(), "a start that completed after a stop was accepted is stopped")
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the compensating stop releases its stop claim")
 }
@@ -346,7 +346,7 @@ func TestStartClaim_CompensatingStopSkipsNewerStart(t *testing.T) {
 		return err
 	}
 	f.srv.store = startBeforeStopClaimStore{Store: f.s}
-	require.NoError(t, f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false))
+	require.NoError(t, f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser}))
 	assert.Equal(t, int32(0), d.stops.Load())
 }
 
@@ -366,7 +366,7 @@ func TestStartClaim_RenewalStopsAtStartDeadline(t *testing.T) {
 		time.Sleep(1500 * time.Millisecond) // ignores ctx
 		return nil
 	}
-	err := f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false)
+	err := f.srv.startAgentCore(context.Background(), a, StartOpts{Kind: store.StartClaimUser})
 	require.ErrorIs(t, err, errStartClaimLost)
 	got := getAgent(t, f.s, a.ID)
 	require.NotNil(t, got.StartClaimLeaseUntil)

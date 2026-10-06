@@ -761,8 +761,8 @@ func TestAgentGetAgent_ProjectIsolation(t *testing.T) {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
 
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping, blocked by credential scope restriction")
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"CO1: agent.read has no AgentScopes mapping, so the denial is answered as a missing agent")
 	})
 
 	t.Run("Agent cannot GET details of agents in different project", func(t *testing.T) {

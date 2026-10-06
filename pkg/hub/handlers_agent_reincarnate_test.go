@@ -2178,13 +2178,16 @@ func TestReincarnateAgent_FailReincarnationConflictDoesNotWedgeAgent(t *testing.
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
-	orig := srv.store
-	srv.store = &conflictOnFailedWriteStore{Store: orig}
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *conflictOnFailedWriteStore {
+		return &conflictOnFailedWriteStore{Store: inner}
+	})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = orig
 
 	after, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
@@ -3296,13 +3299,16 @@ func TestReincarnateAgent_AdvanceToStartingFailure_RerendersPreviousConfig(t *te
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
-	orig := srv.store
-	srv.store = &failAdvanceToStartingStore{Store: orig}
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *failAdvanceToStartingStore {
+		return &failAdvanceToStartingStore{Store: inner}
+	})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	r := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = orig
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	assert.Contains(t, r.Error, "failed to advance record to starting")
 
@@ -3341,13 +3347,16 @@ func TestReincarnateAgent_StartingWriteFailure_RerendersPreviousConfig(t *testin
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
-	orig := srv.store
-	srv.store = &failStartingWriteStore{Store: orig}
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *failStartingWriteStore {
+		return &failStartingWriteStore{Store: inner}
+	})
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	r := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = orig
 	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 	assert.Contains(t, r.Error, "failed to record starting state")
 
@@ -4470,6 +4479,12 @@ func TestReincarnateAgent_SweptWorkerFailureCASErrorDoesNotClobberNewClaim(t *te
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
+	// Installed (disarmed) before the worker starts and armed below, instead
+	// of swapping srv.store under the running worker and restoring it while
+	// the worker may still read it (ptone/scion#3184).
+	fs, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, fault: f, failCASTo: store.AgentReincarnationStateFailed}
+	})
 
 	rec := httptest.NewRecorder()
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
@@ -4496,8 +4511,7 @@ func TestReincarnateAgent_SweptWorkerFailureCASErrorDoesNotClobberNewClaim(t *te
 	require.NoError(t, s.UpdateAgent(ctx, a))
 
 	// One transient, NOT-landed error on the worker's own failure CAS.
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateFailed}
-	srv.store = fs
+	fault.Arm()
 
 	// The first worker's dispatch now returns (error), driving it into
 	// failReincarnation.
@@ -4519,7 +4533,6 @@ func TestReincarnateAgent_SweptWorkerFailureCASErrorDoesNotClobberNewClaim(t *te
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	srv.store = s
 
 	after, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
@@ -4860,6 +4873,7 @@ func TestReincarnateAgent_SweepDecidesFromRecordNotLaggingAgentRow(t *testing.T)
 //     never delegating — a DB that never recovers within the retry budget.
 type casFaultStore struct {
 	store.Store
+	fault      *storeFaultSwitch // nil: always active
 	failCASTo  string
 	landReal   bool
 	persistent bool
@@ -4872,7 +4886,7 @@ type casFaultStore struct {
 }
 
 func (f *casFaultStore) TryAdvanceAgentReincarnation(ctx context.Context, r *store.AgentReincarnation, expectState string, olderThan time.Time) (bool, error) {
-	targeted := f.failCASTo != "" && r.State == f.failCASTo
+	targeted := f.fault.Active() && f.failCASTo != "" && r.State == f.failCASTo
 	if targeted && (f.persistent || f.failedOnce.CompareAndSwap(false, true)) {
 		if f.landReal {
 			_, _ = f.Store.TryAdvanceAgentReincarnation(ctx, r, expectState, olderThan)
@@ -4902,8 +4916,12 @@ func (f *casFaultStore) TryAdvanceAgentReincarnation(ctx context.Context, r *sto
 func TestReincarnateAgent_CompletionCASTransientErrorDoesNotLoseMigration(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateCompleted}
-	srv.store = fs
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, failCASTo: store.AgentReincarnationStateCompleted}
+	})
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
@@ -4911,7 +4929,6 @@ func TestReincarnateAgent_CompletionCASTransientErrorDoesNotLoseMigration(t *tes
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	settled := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = s
 
 	assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State)
 	after, err := s.GetAgent(context.Background(), agent.ID)
@@ -4937,8 +4954,12 @@ func TestReincarnateAgent_CompletionCASTransientErrorDoesNotLoseMigration(t *tes
 func TestReincarnateAgent_CompletionCASErrorAfterLandedWriteIsTreatedAsOwned(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateCompleted, landReal: true}
-	srv.store = fs
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, failCASTo: store.AgentReincarnationStateCompleted, landReal: true}
+	})
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
@@ -4946,7 +4967,6 @@ func TestReincarnateAgent_CompletionCASErrorAfterLandedWriteIsTreatedAsOwned(t *
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	settled := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = s
 
 	assert.Equal(t, store.AgentReincarnationStateCompleted, settled.State)
 	after, err := s.GetAgent(context.Background(), agent.ID)
@@ -4965,8 +4985,12 @@ func TestReincarnateAgent_CompletionCASErrorAfterLandedWriteIsTreatedAsOwned(t *
 func TestReincarnateAgent_StepCASPersistentErrorEndsFailed(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	fs := &casFaultStore{Store: s, failCASTo: store.AgentReincarnationStateProvisioning, persistent: true}
-	srv.store = fs
+	// Installed before the request and never restored: the worker goroutine
+	// reads srv.store and can outlive waitForReincarnationSettled, so a
+	// restore write would race it (ptone/scion#3184).
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *casFaultStore {
+		return &casFaultStore{Store: inner, failCASTo: store.AgentReincarnationStateProvisioning, persistent: true}
+	})
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
 	self := agentIdentityFor(agent.ID, project.ID)
 
@@ -4974,7 +4998,6 @@ func TestReincarnateAgent_StepCASPersistentErrorEndsFailed(t *testing.T) {
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	settled := waitForReincarnationSettled(t, s, agent.ID)
-	srv.store = s
 
 	assert.Equal(t, store.AgentReincarnationStateFailed, settled.State)
 	assert.Contains(t, settled.Error, "failed to advance record to provisioning")
@@ -5636,6 +5659,58 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 				require.False(t, want.NoAuth,
 					"precondition: the assigned GCPIdentity must satisfy the harness config's auth type, so create must NOT have taken the auto-no-auth fallback")
 			}
+		})
+	}
+}
+
+// claimRefusedTxStore refuses the reincarnation claim inside the claim
+// transaction with err.
+type claimRefusedTxStore struct {
+	store.Store
+	err error
+}
+
+func (s *claimRefusedTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&claimRefusedTx{Store: tx, err: s.err})
+	})
+}
+
+type claimRefusedTx struct {
+	store.Store
+	err error
+}
+
+func (t *claimRefusedTx) ClaimAgentReincarnation(context.Context, string, int64, time.Time) (int64, error) {
+	return 0, t.err
+}
+
+// A reincarnation claim refused inside the claim transaction answers 409
+// with the refusal's message and leaves no reincarnation record.
+func TestReincarnateAgent_ClaimRefusedInTransaction(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		msg  string
+	}{
+		{"already pending", store.ErrClaimPredicate, "a reincarnation is already pending for this agent"},
+		{"start in progress", &store.ClaimHeldError{ClaimID: "c", Kind: store.StartClaimUser, State: store.StartClaimLive, Since: time.Now()}, "a start is in progress for this agent; retry once it completes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			agent := newReincarnateTestAgent(t, s, project, broker, nil)
+			self := agentIdentityFor(agent.ID, project.ID)
+			srv.store = &claimRefusedTxStore{Store: srv.store, err: tc.err}
+
+			rec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.msg)
+			list, err := s.ListAgentReincarnations(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Empty(t, list, "a refused claim leaves no record")
 		})
 	}
 }

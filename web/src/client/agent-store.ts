@@ -412,6 +412,21 @@ function shouldAddFor(q: AgentQuery): (agent: Agent) => boolean {
 const VISIBILITY_RESOURCES = new Set(['agent', 'project']);
 const VISIBILITY_ACTIONS = new Set(['read', 'list']);
 
+/**
+ * Whether a listing row shows the agent present with no delete running: its
+ * deletion view is an explicit null (no delete active or failed) or a failed
+ * delete. Such a row read on a later feed means the agent was restored since
+ * an earlier feed saw it deleted. A row still deleting, one with a state this
+ * client does not know, or one without the deletion key says nothing about a
+ * restore.
+ */
+export function listedWithoutActiveDelete(row: Agent): boolean {
+  const deletion = row.deletion;
+  if (deletion === null) return true;
+  if (deletion === undefined) return false;
+  return deletion.state === 'failed';
+}
+
 function defaultFetch(path: string, options: ApiFetchOptions): Promise<Response> {
   // The store reports its own failures to its callers. Letting a store
   // request raise the global access-denied event would also make the store
@@ -430,9 +445,9 @@ export class AgentStore {
   private feedHoldsHubSet = false;
   /**
    * Agents deleted on earlier feeds: a later feed's walks and probes must
-   * not bring them back. A restore the feed reports clears one; a restore
-   * while no feed is open goes unseen, and the agent stays hidden until a
-   * reload.
+   * not bring them back. A restore the feed reports clears one. A restore
+   * while no feed is open goes unseen; a later walk or probe row that lists
+   * the agent with no delete running clears it (see releaseRestored).
    */
   private readonly carriedTombstones = new Set<string>();
   /** Agent ids whose single-agent read is in flight on the current feed. */
@@ -894,8 +909,10 @@ export class AgentStore {
                 ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
               };
             },
-            onPage: (_page, all) => {
-              if (entry.walk !== walk || !firstLoad) return;
+            onPage: (page, all) => {
+              if (entry.walk !== walk || this.feed !== feed) return;
+              this.releaseRestored(page);
+              if (!firstLoad) return;
               const tombstones = this.tombstonesOf(feed);
               // Changes SSE delivered since the walk began win over its pages.
               const listed = dropTombstoned([...all], tombstones).map((a) =>
@@ -1134,6 +1151,11 @@ export class AgentStore {
         const body = (await response.json()) as ProbePage;
         if (signal.aborted || entry.probe !== controller) return;
         const rows = Array.isArray(body.agents) ? body.agents : [];
+        // The abort and identity check above already covers a feed swap
+        // today (a swap starts a walk, which aborts this probe). The feed
+        // check only guards a future path that swaps the feed without
+        // aborting the probe.
+        if (this.feed === feed) this.releaseRestored(rows);
         if (typeof body.totalCount === 'number') total = body.totalCount;
         for (const row of rows) {
           const held = feed.getAgent(row.id);
@@ -1248,9 +1270,9 @@ export class AgentStore {
       if (this.feed === feed) this.applyChange(feed, event.detail.data);
     }) as EventListener;
     // Agent ids are not reused: a restore is the one way a deleted agent
-    // comes back, and it is never inferred from a listing, which can still
-    // show an agent while its delete completes. The restore mark is subject
-    // to the replay limit documented in state.ts.
+    // comes back. A listing row still deleting never counts as one (see
+    // releaseRestored). The restore mark is subject to the replay limit
+    // documented in state.ts.
     const onCreated = ((event: CustomEvent<{ data: { agentId: string; restored?: boolean } }>) => {
       if (this.feed === feed && event.detail.data.restored) {
         this.carriedTombstones.delete(event.detail.data.agentId);
@@ -1352,6 +1374,25 @@ export class AgentStore {
       this.feedIdleTimer = null;
       this.closeFeed();
     }, this.feedIdleMs);
+  }
+
+  /**
+   * Forget the tombstones that earlier feeds carried for agents these listing
+   * rows (walk or probe pages) show restored (see
+   * {@link listedWithoutActiveDelete}). The restore event went out while no
+   * feed was open. Every walk and probe on the current feed starts after those
+   * tombstones were carried, so its rows were read after the deletes were
+   * seen. A hard delete is published before its row is removed, so a row still
+   * deleting keeps the tombstone. The current feed's own tombstones are left
+   * alone: a page read before a delete on this feed can still list the agent.
+   */
+  private releaseRestored(rows: readonly Agent[]): void {
+    if (this.carriedTombstones.size === 0) return;
+    for (const row of rows) {
+      if (this.carriedTombstones.has(row.id) && listedWithoutActiveDelete(row)) {
+        this.carriedTombstones.delete(row.id);
+      }
+    }
   }
 
   /** Tombstones of the current feed and of the feeds before it. */
