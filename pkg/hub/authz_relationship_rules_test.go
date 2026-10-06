@@ -916,7 +916,8 @@ func (s *actorPathFailingStore) GetRoleDefinitionsByIDs(ctx context.Context, ids
 // without explain), a token project mismatch before the kernel, a
 // principal resolution error, a role-binding lookup error, a role
 // definition lookup error, a kernel role-binding allow, a relationship
-// allow with and without explain, and a deny with explain.
+// allow with and without explain, a relationship deny at the project-access
+// stage, and a deny with explain.
 func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-actor-path-owner"))
@@ -931,6 +932,12 @@ func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 	roleDefsFail := NewAuthzService(&actorPathFailingStore{Store: s, failRoleDefs: lookupErr}, authz.logger)
 	projectID := tid("relrule-actor-path-proj")
 	agent := agentResource(&store.Agent{ID: tid("relrule-actor-path-agent"), ProjectID: projectID, OwnerID: owner.ID()})
+	// The owner relationship requires active project access
+	// (ptone/scion#2141); the binding grants no permission itself.
+	grantProjectAccessOnly(t, s, owner.ID(), projectID)
+	// An owner without project access is denied at the project-access stage.
+	formerOwner := createCharacterizationUser(t, s, tid("relrule-actor-path-former-owner"))
+	formerAgent := agentResource(&store.Agent{ID: tid("relrule-actor-path-former-agent"), ProjectID: projectID, OwnerID: formerOwner.ID()})
 	otherProjectToken := NewScopedUserIdentity(owner, tid("relrule-actor-path-other-proj"), []string{"agent:read"})
 	actor := &DecisionActor{Kind: PrincipalKindAgent, ID: tid("relrule-actor-path-actor")}
 
@@ -965,6 +972,8 @@ func TestDecide_ActorAndPurposeOnEveryReturnPath(t *testing.T) {
 		{"relationship allow", nil, request(owner, agent, ActionRead, "agent.read", false), true, "relationship grant: resource owner"},
 		{"relationship allow explain", nil, request(owner, agent, ActionRead, "agent.read", true), true, "relationship grant: resource owner"},
 		{"relationship deny explain", nil, request(owner, agent, ActionUpdate, "hub.config.update", true), false, ""},
+		{"relationship project-access deny", nil, request(formerOwner, formerAgent, ActionRead, "agent.read", false), false, "relationship grant restricted by " + RelationshipRejectProjectAccess},
+		{"relationship project-access deny explain", nil, request(formerOwner, formerAgent, ActionRead, "agent.read", true), false, "relationship grant restricted by " + RelationshipRejectProjectAccess},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := authz
