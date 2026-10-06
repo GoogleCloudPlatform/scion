@@ -284,9 +284,13 @@ func Execute() {
 
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
-		if showUsageForError(cmd, err, autoHelp) {
-			_ = cmd.Usage()
+		// A failure already reported in the JSON output only sets the exit
+		// status; printing it again would add noise for JSON consumers.
+		if !isReportedInJSON(err) {
+			fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
+			if showUsageForError(cmd, err, autoHelp) {
+				_ = cmd.Usage()
+			}
 		}
 		os.Exit(exitCodeFor(err))
 	}

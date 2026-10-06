@@ -197,11 +197,11 @@ already removes the container.`,
 			if len(errs) > 0 {
 				status = "partial"
 			}
-			return outputJSON(map[string]interface{}{
+			return outputJSONResult(map[string]interface{}{
 				"status":  status,
 				"command": "delete",
 				"results": results,
-			})
+			}, len(errs) > 0, "failed to delete some agents")
 		}
 
 		if len(errs) > 0 {
@@ -335,11 +335,11 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 		if len(errs) > 0 {
 			status = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  status,
 			"command": "delete",
 			"results": results,
-		})
+		}, len(errs) > 0, "failed to delete some agents via Hub")
 	}
 
 	if len(errs) > 0 {

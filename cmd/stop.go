@@ -262,11 +262,11 @@ func stopAllAgents() error {
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "stop",
 			"results": jsonResults,
-		})
+		}, hasErrors, "failed to stop some agents")
 	}
 
 	var errs []string
@@ -466,11 +466,11 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 		if hasErrors {
 			overallStatus = "partial"
 		}
-		return outputJSON(map[string]interface{}{
+		return outputJSONResult(map[string]interface{}{
 			"status":  overallStatus,
 			"command": "stop",
 			"results": jsonResults,
-		})
+		}, hasErrors, "failed to stop some agents via Hub")
 	}
 
 	var errs []string

@@ -481,11 +481,15 @@ func TestDeleteAgentsViaHub_TwoAgentsPartial(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		env, fastDir := setup(t)
 		setJSONOutput(t)
-		stdout, _ := captureStdIO(t, func() {
-			// JSON mode reports per-agent errors in the body and returns nil,
-			// as it did before this change.
-			require.NoError(t, deleteAgentsViaHub(env.hubCtx, []string{"fast-agent", "slow-agent"}))
+		var err error
+		stdout, stderr := captureStdIO(t, func() {
+			err = deleteAgentsViaHub(env.hubCtx, []string{"fast-agent", "slow-agent"})
 		})
+		// JSON mode reports per-agent errors in the body and exits non-zero,
+		// like text mode (ptone/scion#2894), without a second error report.
+		require.Error(t, err)
+		assert.True(t, isReportedInJSON(err), "error must be marked as already reported: %v", err)
+		assert.Empty(t, stderr)
 		var out struct {
 			Status  string                   `json:"status"`
 			Results []map[string]interface{} `json:"results"`

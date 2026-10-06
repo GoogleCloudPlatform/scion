@@ -172,7 +172,9 @@ start or stop was recorded first. With `--rm`, a queued stop does not remove the
 
 - **Flags:**
     - `--rm`: Remove the agent after stopping.
-    - `-a, --all`: Stop all running agents in the current project.
+    - `-a, --all`: Stop all running agents in the current project. If any agent fails to stop
+      (or, with `--rm`, to be removed), the command exits 1. With `--format json` the result
+      object (`"status": "partial"`) is still printed on stdout, and no separate error message is added.
 
 ### `scion suspend`
 
@@ -441,7 +443,11 @@ Lists all agents and their status.
 
 Deletes an agent, removing its container, home directory, and worktree.
 
-**Usage:** `scion delete <agent-name> [flags]`
+You can name several agents. If any of them cannot be deleted, the command exits 1 after
+handling the rest. With `--format json` the result object (`"status": "partial"`, with an entry
+per agent) is still printed on stdout, and no separate error message is added.
+
+**Usage:** `scion delete <agent-name>... [flags]`
 
 - **Flags:**
     - `-b, --preserve-branch`: Preserve the git branch associated with the worktree (default: deleted).

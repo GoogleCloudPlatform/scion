@@ -323,9 +323,12 @@ func TestDeleteAgentsViaHub_202MixedOutcomes(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		env := setup(t)
 		setJSONOutput(t)
+		var err error
 		stdout, _ := captureStdIO(t, func() {
-			require.NoError(t, deleteAgentsViaHub(env.hubCtx, names))
+			err = deleteAgentsViaHub(env.hubCtx, names)
 		})
+		require.Error(t, err, "a partial failure exits non-zero in JSON mode too (ptone/scion#2894)")
+		assert.True(t, isReportedInJSON(err))
 		var out struct {
 			Status  string                   `json:"status"`
 			Results []map[string]interface{} `json:"results"`
