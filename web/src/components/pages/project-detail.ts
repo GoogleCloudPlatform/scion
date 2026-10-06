@@ -550,6 +550,10 @@ export class ScionPageProjectDetail extends LitElement {
       min-width: 0;
       overflow-wrap: anywhere;
     }
+    /* The linked-project icon inside the title keeps the primary colour. */
+    .header h1 sl-icon {
+      color: var(--scion-primary, #3b82f6);
+    }
 
     .header-path {
       font-family: var(--scion-font-mono, monospace);

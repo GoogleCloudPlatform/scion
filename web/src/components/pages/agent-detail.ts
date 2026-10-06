@@ -292,6 +292,9 @@ export class ScionPageAgentDetail extends LitElement {
       border-radius: var(--scion-radius, 0.5rem);
       font-size: 0.875rem;
       color: var(--scion-text-muted, #64748b);
+      /* One long template name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .project-link,
     .broker-link {
@@ -301,6 +304,9 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-text-muted, #64748b);
       text-decoration: none;
       font-size: 0.875rem;
+      /* One long project or broker name breaks inside its own item. */
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .project-link:hover,
     .broker-link:hover {

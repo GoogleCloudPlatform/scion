@@ -19,6 +19,7 @@ import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
+import { styleRules } from './__fixtures__/card-layout.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the header tests do.
@@ -26,28 +27,6 @@ vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
   stateManager: new EventTarget(),
 }));
-
-/** Leaf style rules from Lit cssText. */
-function styleRules(cssText: string): Map<string, string> {
-  const rules = new Map<string, string>();
-  const stack: string[] = [];
-  let buf = '';
-  for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
-    if (ch === '{') {
-      stack.push(buf.trim());
-      buf = '';
-    } else if (ch === '}') {
-      const selector = stack.pop() ?? '';
-      if (!selector.startsWith('@')) {
-        for (const part of selector.split(',')) rules.set(part.trim(), buf);
-      }
-      buf = '';
-    } else {
-      buf += ch;
-    }
-  }
-  return rules;
-}
 
 describe('agent detail layout', () => {
   let rules: Map<string, string>;
@@ -72,6 +51,14 @@ describe('agent detail layout', () => {
     const meta = rules.get('.header-meta') ?? '';
     expect(meta).toMatch(/display:\s*flex/);
     expect(meta).toMatch(/flex-wrap:\s*wrap/);
+  });
+
+  it('breaks one long template, project or broker name inside its item', () => {
+    for (const sel of ['.template-badge', '.project-link', '.broker-link']) {
+      const rule = rules.get(sel) ?? '';
+      expect(rule, sel).toMatch(/(^|;)\s*min-width:\s*0/);
+      expect(rule, sel).toMatch(/overflow-wrap:\s*anywhere/);
+    }
   });
 
   it('keeps the message-mode select inside its column', () => {

@@ -161,13 +161,17 @@ export class ScionPageAdminRoleDetail extends LitElement {
 
     .header-info {
       flex: 1;
+      min-width: 0;
     }
 
+    /* A long role name breaks inside its line beside the actions. */
     .header h1 {
       font-size: 1.5rem;
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0 0 0.25rem 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     .header-description {

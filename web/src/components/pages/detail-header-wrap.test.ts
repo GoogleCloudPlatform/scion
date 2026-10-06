@@ -12,6 +12,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ */
 
 /**
  * Detail page header rows wrap on narrow screens (ptone/scion#3386): the
@@ -24,6 +25,8 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, type CSSResult, type TemplateResult } from 'lit';
 
+import { styleRules } from './__fixtures__/card-layout.js';
+
 // Some page module graphs reach the app entry point, which bootstraps the
 // SPA on load; stub it as the agent page tests do.
 vi.mock('../../client/main.js', () => ({
@@ -32,28 +35,6 @@ vi.mock('../../client/main.js', () => ({
 }));
 
 const LONG_NAME = 'a-very-long-resource-name-that-will-not-fit-on-one-line-beside-its-badges';
-
-/** Leaf style rules from Lit cssText (media blocks are flattened). */
-function styleRules(cssText: string): Map<string, string> {
-  const rules = new Map<string, string>();
-  const stack: string[] = [];
-  let buf = '';
-  for (const ch of cssText.replace(/\/\*[\s\S]*?\*\//g, '')) {
-    if (ch === '{') {
-      stack.push(buf.trim());
-      buf = '';
-    } else if (ch === '}') {
-      const selector = stack.pop() ?? '';
-      if (!selector.startsWith('@')) {
-        for (const part of selector.split(',')) rules.set(part.trim(), buf);
-      }
-      buf = '';
-    } else {
-      buf += ch;
-    }
-  }
-  return rules;
-}
 
 interface PageCase {
   /** Page module, relative to this file. */
@@ -204,6 +185,7 @@ const cases: Array<[string, PageCase]> = [
 ];
 
 const loaded = new Map<string, Map<string, string>>();
+const rulesOf = (c: { tag: string }): Map<string, string> => loaded.get(c.tag)!;
 
 beforeAll(async () => {
   for (const [, c] of cases) {
@@ -259,6 +241,20 @@ describe.each(cases)('%s detail header', (_label, c) => {
   });
 });
 
+describe('project detail linked badge', () => {
+  const c = cases.find(([label]) => label === 'project')![1];
+
+  it('keeps the primary colour on the linked icon inside the title', () => {
+    // The row icon rule is a direct-child selector, so the nested linked
+    // icon needs its own colour rule.
+    expect(rulesOf(c).get('.header h1 sl-icon') ?? '').toMatch(
+      /(^|;)\s*color:\s*var\(--scion-primary/
+    );
+    const icon = renderHeader(c).querySelector('.header-title-text > h1 sl-icon');
+    expect(icon?.getAttribute('name')).toBe('link-45deg');
+  });
+});
+
 describe('harness config detail header actions', () => {
   const c = cases.find(([label]) => label === 'harness config')![1];
 
@@ -271,5 +267,87 @@ describe('harness config detail header actions', () => {
       'resource-title-main',
       'header-actions',
     ]);
+  });
+});
+
+// Admin pages put the title in a flex header beside the actions: a long
+// name breaks inside the h1 instead of pushing the actions off the page.
+interface AdminCase {
+  module: string;
+  tag: string;
+  state: Record<string, unknown>;
+  method: 'renderHeader' | 'renderDetail';
+}
+
+const adminCases: Array<[string, AdminCase]> = [
+  [
+    'skill registry',
+    {
+      module: './admin-skill-registry-detail.js',
+      tag: 'scion-page-admin-skill-registry-detail',
+      state: {
+        loading: false,
+        registry: { id: 'r-1', name: LONG_NAME, status: 'active', trustLevel: 'open' },
+      },
+      method: 'renderHeader',
+    },
+  ],
+  [
+    'role',
+    {
+      module: './admin-role-detail.js',
+      tag: 'scion-page-admin-role-detail',
+      state: {
+        loading: false,
+        roleData: {
+          id: 'role-1',
+          name: LONG_NAME,
+          description: '',
+          scopeType: 'hub',
+          permissions: [],
+          system: false,
+          createdAt: '2026-01-01T00:00:00Z',
+          updatedAt: '2026-01-01T00:00:00Z',
+        },
+      },
+      method: 'renderDetail',
+    },
+  ],
+];
+
+describe.each(adminCases)('%s detail header', (label, c) => {
+  let rules: Map<string, string>;
+
+  beforeAll(async () => {
+    await import(/* @vite-ignore */ c.module);
+    const ctor = customElements.get(c.tag) as unknown as { elementStyles: CSSResult[] };
+    rules = styleRules(ctor.elementStyles.map((s) => s.cssText).join('\n'));
+  }, 60_000);
+
+  it('breaks a long name inside the title beside the actions', () => {
+    const h1 = rules.get('.header h1') ?? '';
+    expect(h1).toMatch(/(^|;)\s*min-width:\s*0/);
+    expect(h1).toMatch(/overflow-wrap:\s*anywhere/);
+    if (label === 'skill registry') {
+      // The actions drop below a name that does not fit, still on the right.
+      expect(rules.get('.header') ?? '').toMatch(/flex-wrap:\s*wrap/);
+      expect(rules.get('.header-actions') ?? '').toMatch(/margin-left:\s*auto/);
+      expect(rules.get('.header h1 sl-icon') ?? '').toMatch(/flex-shrink:\s*0/);
+    } else {
+      expect(rules.get('.header-info') ?? '').toMatch(/(^|;)\s*min-width:\s*0/);
+    }
+  });
+
+  it('renders the long name in the header h1 with no inline width', () => {
+    const el = document.createElement(c.tag);
+    Object.assign(el, c.state);
+    const host = document.createElement('div');
+    render((el as unknown as Record<string, () => TemplateResult>)[c.method](), host);
+    const header = host.querySelector('.header')!;
+    expect(header.querySelector('h1')!.textContent).toContain(LONG_NAME);
+    expect(header.querySelector('.header-actions')).not.toBeNull();
+    for (const node of [header, ...Array.from(header.querySelectorAll('[style]'))]) {
+      expect(node.getAttribute('style') ?? '').not.toMatch(/(min-|max-)?width/);
+    }
   });
 });
