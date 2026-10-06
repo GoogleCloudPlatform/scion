@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -34,22 +36,54 @@ import (
 // workspace identity of hub-cloned projects with their hub project IDs.
 const clonedProjectIdentityTimeout = 5 * time.Minute
 
-// identityAlignment describes what alignWorkspaceProjectIdentity changed.
+// alignOutcome is the result of aligning one workspace identity.
+type alignOutcome string
+
+const (
+	// alignAlreadyMatching: the workspace identity already is the hub
+	// project ID. Nothing was changed.
+	alignAlreadyMatching alignOutcome = "already_matching"
+	// alignNoIdentity: the workspace has no .scion entry. Nothing was
+	// changed.
+	alignNoIdentity alignOutcome = "no_identity"
+	// alignAligned: the hub project ID was recorded as the workspace
+	// identity (after moving the project config directory when there was
+	// one to move).
+	alignAligned alignOutcome = "aligned"
+	// alignSkippedInUse: an agent of the project may be using its project
+	// config directory. Nothing was changed.
+	alignSkippedInUse alignOutcome = "skipped_in_use"
+	// alignSkippedTargetExists: both the current project config directory
+	// and the one named after the hub project ID hold files. Nothing was
+	// changed; the two need to be reconciled by hand.
+	alignSkippedTargetExists alignOutcome = "skipped_target_exists"
+	// alignSkippedUnexpectedIdentity: the recorded identity does not name
+	// a directory directly under the project-configs directory in the
+	// <slug>__<id8> form. Nothing was changed.
+	alignSkippedUnexpectedIdentity alignOutcome = "skipped_unexpected_identity"
+)
+
+// identityAlignment describes what alignWorkspaceProjectIdentity did.
 type identityAlignment struct {
-	// Changed is true when the workspace identity was rewritten.
-	Changed bool
-	// PreviousID is the identity the workspace held before the rewrite.
-	PreviousID string
-	// ConfigDir is the project config directory named after the hub
-	// project ID (~/.scion/project-configs/<slug>__<id8>).
-	ConfigDir string
-	// Relocated is true when the previous project config directory was
-	// moved to ConfigDir.
+	Outcome alignOutcome
+	// Relocated is true when the project config directory was moved to
+	// the name derived from the hub project ID.
 	Relocated bool
-	// RetainedDir is set when the previous project config directory was
-	// left in place because ConfigDir already held files.
-	RetainedDir string
 }
+
+// Changed reports whether the workspace identity was rewritten.
+func (a identityAlignment) Changed() bool { return a.Outcome == alignAligned }
+
+// alignError is a failure of alignWorkspaceProjectIdentity at a named step.
+type alignError struct {
+	step string
+	err  error
+}
+
+func (e *alignError) Error() string { return e.step + ": " + e.err.Error() }
+func (e *alignError) Unwrap() error { return e.err }
+
+func alignFailed(step string, err error) error { return &alignError{step: step, err: err} }
 
 // workspaceIdentity is the project identity recorded in a workspace's .scion
 // entry, in either of its two on-disk forms.
@@ -66,7 +100,7 @@ type workspaceIdentity struct {
 // workspacePath. It returns (nil, nil) when the workspace has no .scion entry.
 func readWorkspaceIdentity(workspacePath string) (*workspaceIdentity, error) {
 	scionPath := filepath.Join(workspacePath, config.DotScion)
-	info, err := os.Stat(scionPath)
+	info, err := os.Lstat(scionPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -74,23 +108,26 @@ func readWorkspaceIdentity(workspacePath string) (*workspaceIdentity, error) {
 		return nil, err
 	}
 
-	if !info.IsDir() {
+	switch {
+	case info.Mode().IsRegular():
 		marker, err := config.ReadProjectMarker(scionPath)
 		if err != nil {
 			return nil, err
 		}
 		return &workspaceIdentity{scionPath: scionPath, marker: marker, id: marker.ProjectID, slug: marker.ProjectSlug}, nil
+	case info.IsDir():
+		id, err := config.ReadProjectID(scionPath)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		return &workspaceIdentity{
+			scionPath: scionPath,
+			id:        id,
+			slug:      api.Slugify(config.GetProjectName(scionPath)),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported .scion entry type")
 	}
-
-	id, err := config.ReadProjectID(scionPath)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	return &workspaceIdentity{
-		scionPath: scionPath,
-		id:        id,
-		slug:      api.Slugify(config.GetProjectName(scionPath)),
-	}, nil
 }
 
 // matches reports whether the identity already is projectID under slug.
@@ -112,109 +149,160 @@ func (w *workspaceIdentity) write(slug, projectID string) error {
 	return config.WriteProjectMarker(w.scionPath, &updated)
 }
 
-// projectConfigRoot returns ~/.scion/project-configs/<slug>__<id8>.
-func projectConfigRoot(slug, projectID string) (string, error) {
-	ext, err := config.ProjectMarker{ProjectID: projectID, ProjectSlug: slug}.ExternalProjectPath()
+// projectConfigsDir returns ~/.scion/project-configs.
+func projectConfigsDir() (string, error) {
+	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Dir(ext), nil
+	return filepath.Join(globalDir, config.ProjectConfigsDir), nil
+}
+
+// confinedProjectConfigRoot returns ~/.scion/project-configs/<slug>__<id8>
+// for slug and projectID. ok is false unless projectID is a valid project
+// ID, slug is a valid project slug, and the result is a direct child of
+// configsDir named exactly <slug>__<id8>.
+func confinedProjectConfigRoot(configsDir, slug, projectID string) (root string, ok bool) {
+	if !shareddirs.ValidProjectID(projectID) || validateProjectSlug(slug) != nil {
+		return "", false
+	}
+	marker := config.ProjectMarker{ProjectID: projectID, ProjectSlug: slug}
+	ext, err := marker.ExternalProjectPath()
+	if err != nil {
+		return "", false
+	}
+	root = filepath.Dir(ext)
+	if filepath.Dir(root) != filepath.Clean(configsDir) || filepath.Base(root) != marker.DirName() {
+		return "", false
+	}
+	return root, true
 }
 
 // alignWorkspaceProjectIdentity makes projectID (the hub project ID) the
 // identity of the hub-cloned workspace at workspacePath, so that its project
 // config directory is named <slug>__<first 8 chars of projectID>.
 //
+// Both the recorded identity and the hub record must name a directory
+// directly under ~/.scion/project-configs in the <slug>__<id8> form;
+// otherwise nothing is changed (alignSkippedUnexpectedIdentity).
+//
 // When the workspace holds a different identity, its project config
 // directory is first moved to the hub-derived name, then the identity is
-// rewritten. If the hub-derived directory already holds files, nothing is
-// moved: the previous directory is kept as is and reported in RetainedDir.
-// Moving before rewriting keeps the operation repeatable: a run interrupted
-// between the two steps finishes on the next run. Once the identity matches,
-// the call is a no-op.
+// rewritten. A hub-derived directory made up only of empty directories is
+// replaced. If both directories hold files, nothing is changed
+// (alignSkippedTargetExists). Moving before rewriting keeps the operation
+// repeatable: a run interrupted between the two steps finishes on the next
+// run. Once the identity matches, the call is a no-op.
 //
-// The caller must ensure no agent of the project is using the project
-// config directory.
-func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string) (identityAlignment, error) {
-	var res identityAlignment
-	if projectID == "" || slug == "" {
-		return res, fmt.Errorf("project ID and slug are required")
-	}
-
+// inUse is called after all checks and immediately before the first change;
+// when it reports true, nothing is changed (alignSkippedInUse).
+func alignWorkspaceProjectIdentity(workspacePath, slug, projectID string, inUse func() (bool, error)) (identityAlignment, error) {
 	current, err := readWorkspaceIdentity(workspacePath)
 	if err != nil {
-		return res, fmt.Errorf("read workspace project identity: %w", err)
+		return identityAlignment{}, alignFailed("read workspace identity", err)
 	}
-	if current == nil || current.matches(slug, projectID) {
-		return res, nil
+	if current == nil {
+		return identityAlignment{Outcome: alignNoIdentity}, nil
+	}
+	if current.matches(slug, projectID) {
+		return identityAlignment{Outcome: alignAlreadyMatching}, nil
 	}
 
-	target, err := projectConfigRoot(slug, projectID)
+	configsDir, err := projectConfigsDir()
 	if err != nil {
-		return res, err
+		return identityAlignment{}, alignFailed("locate project-configs directory", err)
 	}
-	res.ConfigDir = target
-	res.PreviousID = current.id
-
-	if current.id != "" && current.slug != "" {
-		previous, err := projectConfigRoot(current.slug, current.id)
-		if err != nil {
-			return res, err
-		}
-		relocated, retained, err := moveProjectConfigRoot(previous, target)
-		if err != nil {
-			return res, err
-		}
-		res.Relocated = relocated
-		if retained {
-			res.RetainedDir = previous
+	target, ok := confinedProjectConfigRoot(configsDir, slug, projectID)
+	if !ok {
+		return identityAlignment{Outcome: alignSkippedUnexpectedIdentity}, nil
+	}
+	var previous string
+	if current.id != "" {
+		if previous, ok = confinedProjectConfigRoot(configsDir, current.slug, current.id); !ok {
+			return identityAlignment{Outcome: alignSkippedUnexpectedIdentity}, nil
 		}
 	}
 
+	move, err := planConfigRootMove(previous, target)
+	if err != nil {
+		return identityAlignment{}, alignFailed("inspect project config directories", err)
+	}
+	if move == moveBlocked {
+		return identityAlignment{Outcome: alignSkippedTargetExists}, nil
+	}
+
+	busy, err := inUse()
+	if err != nil {
+		return identityAlignment{}, alignFailed("list project agents", err)
+	}
+	if busy {
+		return identityAlignment{Outcome: alignSkippedInUse}, nil
+	}
+
+	res := identityAlignment{Outcome: alignAligned}
+	if move == moveReplaceEmpty {
+		if err := removeEmptyDirs(target); err != nil {
+			return identityAlignment{}, alignFailed("clear empty project config directory", err)
+		}
+	}
+	if move == moveRename || move == moveReplaceEmpty {
+		if err := os.Rename(previous, target); err != nil {
+			return identityAlignment{}, alignFailed("move project config directory", err)
+		}
+		res.Relocated = true
+	}
 	if err := current.write(slug, projectID); err != nil {
-		return res, fmt.Errorf("write workspace project identity: %w", err)
+		return identityAlignment{Outcome: alignAligned, Relocated: res.Relocated}, alignFailed("write workspace identity", err)
 	}
-	res.Changed = true
 	return res, nil
 }
 
-// moveProjectConfigRoot moves the project config directory previous to
-// target. It does nothing when previous does not exist or both name the same
-// directory. A target made up only of empty directories is replaced; a target
-// holding any file is kept and retained is returned true.
-func moveProjectConfigRoot(previous, target string) (relocated, retained bool, err error) {
-	if filepath.Clean(previous) == filepath.Clean(target) {
-		return false, false, nil
+// configRootMove is the planned handling of the project config directory.
+type configRootMove int
+
+const (
+	// moveNone: there is no previous directory to move (none recorded,
+	// absent, or the same directory as the target).
+	moveNone configRootMove = iota
+	// moveRename: the previous directory is moved to the absent target.
+	moveRename
+	// moveReplaceEmpty: the target holds only empty directories; they are
+	// removed and the previous directory is moved in their place.
+	moveReplaceEmpty
+	// moveBlocked: the target holds files; nothing is moved.
+	moveBlocked
+)
+
+// planConfigRootMove decides how the project config directory previous is
+// brought to target. It only inspects the filesystem.
+func planConfigRootMove(previous, target string) (configRootMove, error) {
+	if previous == "" || previous == target {
+		return moveNone, nil
 	}
 	if _, err := os.Lstat(previous); err != nil {
 		if os.IsNotExist(err) {
-			return false, false, nil
+			return moveNone, nil
 		}
-		return false, false, err
+		return moveNone, err
 	}
-
-	if _, err := os.Lstat(target); err == nil {
-		empty, err := onlyEmptyDirs(target)
-		if err != nil {
-			return false, false, err
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return moveRename, nil
 		}
-		if !empty {
-			return false, true, nil
-		}
-		if err := removeEmptyDirs(target); err != nil {
-			return false, false, err
-		}
-	} else if !os.IsNotExist(err) {
-		return false, false, err
+		return moveNone, err
 	}
-
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return false, false, err
+	if !info.IsDir() {
+		return moveBlocked, nil
 	}
-	if err := os.Rename(previous, target); err != nil {
-		return false, false, fmt.Errorf("move project config directory: %w", err)
+	empty, err := onlyEmptyDirs(target)
+	if err != nil {
+		return moveNone, err
 	}
-	return true, false, nil
+	if !empty {
+		return moveBlocked, nil
+	}
+	return moveReplaceEmpty, nil
 }
 
 // onlyEmptyDirs reports whether root is a directory tree containing nothing
@@ -257,8 +345,8 @@ func removeEmptyDirs(root string) error {
 }
 
 // projectConfigInUse reports whether an agent of the project may be using
-// its project config directory. Agents that are created but not started,
-// stopped, or in error do not hold it; any other phase does.
+// its project config directory: any non-deleted agent whose phase is not
+// stopped or error.
 func (s *Server) projectConfigInUse(ctx context.Context, projectID string) (bool, error) {
 	cursor := ""
 	for {
@@ -272,7 +360,7 @@ func (s *Server) projectConfigInUse(ctx context.Context, projectID string) (bool
 		}
 		for _, a := range result.Items {
 			switch state.Phase(a.Phase) {
-			case state.PhaseCreated, state.PhaseStopped, state.PhaseError:
+			case state.PhaseStopped, state.PhaseError:
 			default:
 				return true, nil
 			}
@@ -281,6 +369,62 @@ func (s *Server) projectConfigInUse(ctx context.Context, projectID string) (bool
 			return false, nil
 		}
 		cursor = result.NextCursor
+	}
+}
+
+// alignErrorAttrs returns log attributes for an alignment failure that carry
+// no filesystem paths: the failed step, and for filesystem errors the
+// operation and the underlying error only.
+func alignErrorAttrs(err error) []any {
+	attrs := []any{}
+	var ae *alignError
+	if errors.As(err, &ae) {
+		attrs = append(attrs, "step", ae.step)
+	}
+	var pathErr *fs.PathError
+	var linkErr *os.LinkError
+	switch {
+	case errors.As(err, &pathErr):
+		attrs = append(attrs, "op", pathErr.Op, "error", fmt.Sprint(pathErr.Err))
+	case errors.As(err, &linkErr):
+		attrs = append(attrs, "op", linkErr.Op, "error", fmt.Sprint(linkErr.Err))
+	}
+	return attrs
+}
+
+// identityAlignmentCounts summarizes one alignClonedProjectIdentities pass.
+type identityAlignmentCounts struct {
+	aligned, alreadyMatching, noIdentity, skippedInUse, skippedTargetExists,
+	skippedUnexpectedIdentity, failed, notReached int
+}
+
+func (c *identityAlignmentCounts) add(outcome alignOutcome) {
+	switch outcome {
+	case alignAligned:
+		c.aligned++
+	case alignAlreadyMatching:
+		c.alreadyMatching++
+	case alignNoIdentity:
+		c.noIdentity++
+	case alignSkippedInUse:
+		c.skippedInUse++
+	case alignSkippedTargetExists:
+		c.skippedTargetExists++
+	case alignSkippedUnexpectedIdentity:
+		c.skippedUnexpectedIdentity++
+	}
+}
+
+func (c identityAlignmentCounts) attrs() []any {
+	return []any{
+		"aligned", c.aligned,
+		"already_matching", c.alreadyMatching,
+		"no_identity", c.noIdentity,
+		"skipped_in_use", c.skippedInUse,
+		"skipped_target_exists", c.skippedTargetExists,
+		"skipped_unexpected_identity", c.skippedUnexpectedIdentity,
+		"failed", c.failed,
+		"not_reached", c.notReached,
 	}
 }
 
@@ -300,84 +444,96 @@ func (s *Server) startClonedProjectIdentityAlignment(ctx context.Context) {
 }
 
 // alignClonedProjectIdentities makes the hub project ID the workspace
-// identity of every hub-cloned (shared-workspace git) project on this hub.
-// A project whose identity already matches is left untouched. A project with
-// an agent that may be using its project config directory is skipped and
-// handled on a later hub start. Failures are logged per project and do not
-// stop the pass.
-func (s *Server) alignClonedProjectIdentities(ctx context.Context) {
+// identity of every hub-cloned (shared-workspace git) project on this hub,
+// and logs one summary line of counts. Each project that is skipped or
+// fails is logged by project ID; a skipped or failed project is handled
+// again on the next hub start.
+func (s *Server) alignClonedProjectIdentities(ctx context.Context) identityAlignmentCounts {
 	logger := s.projectsLogger()
-	const pageSize = 500
+	var counts identityAlignmentCounts
 	cursor := ""
+	total, seen := 0, 0
 	for {
 		result, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
-			Limit:  pageSize,
+			Limit:  500,
 			Cursor: cursor,
 		})
 		if err != nil {
+			if ctx.Err() != nil {
+				counts.notReached = total - seen
+				logger.Warn("cloned project identity: pass stopped before all projects were reached", counts.attrs()...)
+				return counts
+			}
 			logger.Warn("cloned project identity: failed to list projects", "error", err.Error())
-			return
+			counts.failed++
+			logger.Info("cloned project identity: pass finished", counts.attrs()...)
+			return counts
+		}
+		if cursor == "" {
+			total = result.TotalCount
 		}
 		for i := range result.Items {
 			if ctx.Err() != nil {
-				return
+				counts.notReached = max(total-seen, len(result.Items)-i)
+				logger.Warn("cloned project identity: pass stopped before all projects were reached", counts.attrs()...)
+				return counts
 			}
-			s.alignClonedProjectIdentity(ctx, &result.Items[i])
+			seen++
+			project := &result.Items[i]
+			if !project.IsSharedWorkspace() {
+				continue
+			}
+			outcome, ok := s.alignClonedProjectIdentity(ctx, project)
+			if !ok {
+				counts.failed++
+				continue
+			}
+			counts.add(outcome)
 		}
-		if result.NextCursor == "" || len(result.Items) < pageSize {
-			return
+		if result.NextCursor == "" {
+			break
 		}
 		cursor = result.NextCursor
 	}
+	logger.Info("cloned project identity: pass finished", counts.attrs()...)
+	return counts
 }
 
-// alignClonedProjectIdentity aligns one project; see
-// alignClonedProjectIdentities.
-func (s *Server) alignClonedProjectIdentity(ctx context.Context, project *store.Project) {
-	if !project.IsSharedWorkspace() {
-		return
-	}
+// alignClonedProjectIdentity aligns one hub-cloned project and logs any skip
+// or failure by project ID. ok is false when the project failed.
+func (s *Server) alignClonedProjectIdentity(ctx context.Context, project *store.Project) (alignOutcome, bool) {
 	logger := s.projectsLogger()
 
 	workspacePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		return
-	}
-	current, err := readWorkspaceIdentity(workspacePath)
-	if err != nil {
-		logger.Warn("cloned project identity: failed to read workspace identity",
-			"project_id", project.ID, "error", err.Error())
-		return
-	}
-	if current == nil || current.matches(project.Slug, project.ID) {
-		return
+		logger.Warn("cloned project identity: no workspace location for project", "project_id", project.ID)
+		return "", false
 	}
 
-	inUse, err := s.projectConfigInUse(ctx, project.ID)
+	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID, func() (bool, error) {
+		return s.projectConfigInUse(ctx, project.ID)
+	})
 	if err != nil {
-		logger.Warn("cloned project identity: failed to list project agents",
-			"project_id", project.ID, "error", err.Error())
-		return
-	}
-	if inUse {
-		logger.Info("cloned project identity: project has agents in use, will retry on next hub start",
-			"project_id", project.ID)
-		return
+		attrs := append([]any{"project_id", project.ID, "relocated", res.Relocated}, alignErrorAttrs(err)...)
+		logger.Warn("cloned project identity: failed to align workspace identity", attrs...)
+		return "", false
 	}
 
-	res, err := alignWorkspaceProjectIdentity(workspacePath, project.Slug, project.ID)
-	if err != nil {
-		logger.Warn("cloned project identity: failed to align workspace identity",
-			"project_id", project.ID, "error", err.Error())
-		return
-	}
-	if res.RetainedDir != "" {
-		logger.Warn("cloned project identity: project config directory already holds files, previous directory kept",
-			"project_id", project.ID, "config_dir", res.ConfigDir, "previous_dir", res.RetainedDir)
-	}
-	if res.Changed {
+	switch res.Outcome {
+	case alignAligned:
 		logger.Info("cloned project identity: workspace identity set to hub project ID",
-			"project_id", project.ID, "previous_id", res.PreviousID,
-			"config_dir", res.ConfigDir, "relocated", res.Relocated)
+			"project_id", project.ID, "relocated", res.Relocated)
+	case alignNoIdentity:
+		logger.Info("cloned project identity: workspace has no project identity, skipped", "project_id", project.ID)
+	case alignSkippedInUse:
+		logger.Info("cloned project identity: project has agents in use, skipped until a later hub start",
+			"project_id", project.ID)
+	case alignSkippedTargetExists:
+		logger.Warn("cloned project identity: project config directory for the hub project ID already holds files, skipped",
+			"project_id", project.ID)
+	case alignSkippedUnexpectedIdentity:
+		logger.Warn("cloned project identity: recorded workspace identity is not in the expected form, skipped",
+			"project_id", project.ID)
 	}
+	return res.Outcome, true
 }

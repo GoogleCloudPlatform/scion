@@ -260,9 +260,10 @@ type InitProjectOpts struct {
 	// Use this when initializing on a hub server where agents run on remote brokers.
 	SkipRuntimeCheck bool
 
-	// ProjectID, when set, is the identity recorded for a newly initialized
-	// project instead of a generated one. An identity already present in
-	// the project is kept.
+	// ProjectID, when set, is the identity recorded for the project instead
+	// of a generated one. It replaces a different identity already present
+	// in the project. When empty, an existing identity is kept and a new
+	// project gets a generated one.
 	ProjectID string
 }
 
@@ -272,6 +273,21 @@ func (o InitProjectOpts) newProjectID() string {
 		return o.ProjectID
 	}
 	return GenerateProjectID()
+}
+
+// keepsMarker reports whether the existing marker file at markerPath is kept
+// as the identity of the project rooted at projectRoot. It is kept unless
+// ProjectID is set and the marker does not already record ProjectID under
+// the slug derived from projectRoot.
+func (o InitProjectOpts) keepsMarker(markerPath, projectRoot string) bool {
+	if o.ProjectID == "" {
+		return true
+	}
+	marker, err := ReadProjectMarker(markerPath)
+	if err != nil {
+		return false
+	}
+	return marker.ProjectID == o.ProjectID && marker.ProjectSlug == api.Slugify(filepath.Base(projectRoot))
 }
 
 func InitProject(targetDir string, harnesses []api.Harness, opts ...InitProjectOpts) error {
@@ -335,7 +351,7 @@ func initExternalProject(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// If a marker file already exists, read it and use the existing external path
-	if IsProjectMarkerFile(markerPath) {
+	if IsProjectMarkerFile(markerPath) && opt.keepsMarker(markerPath, projectRoot) {
 		resolved, err := ResolveProjectMarker(markerPath)
 		if err != nil {
 			return fmt.Errorf("existing project marker is invalid: %w", err)
@@ -399,16 +415,22 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 		return fmt.Errorf("failed to create settings directory: %w", err)
 	}
 
-	// Ensure project-id file exists for split storage
-	if _, err := ReadProjectID(projectDir); err != nil {
-		if os.IsNotExist(err) {
-			projectID := opt.newProjectID()
-			if err := WriteProjectID(projectDir, projectID); err != nil {
+	// Ensure project-id file exists for split storage, recording
+	// opt.ProjectID when set.
+	existingID, err := ReadProjectID(projectDir)
+	switch {
+	case err == nil:
+		if opt.ProjectID != "" && existingID != opt.ProjectID {
+			if err := WriteProjectID(projectDir, opt.ProjectID); err != nil {
 				return fmt.Errorf("failed to write project-id: %w", err)
 			}
-		} else {
-			return fmt.Errorf("failed to read project-id: %w", err)
 		}
+	case os.IsNotExist(err):
+		if err := WriteProjectID(projectDir, opt.newProjectID()); err != nil {
+			return fmt.Errorf("failed to write project-id: %w", err)
+		}
+	default:
+		return fmt.Errorf("failed to read project-id: %w", err)
 	}
 
 	// Seed settings.yaml in the external config dir (machine-specific, not committed)
