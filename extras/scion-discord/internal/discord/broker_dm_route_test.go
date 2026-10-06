@@ -214,7 +214,8 @@ func TestIsDiscordSnowflake(t *testing.T) {
 
 // A direct message that is not addressed to a user (for example an
 // agent-to-agent copy) has no Discord channel to resolve: it is dropped
-// without an error and nothing is sent.
+// without an error and nothing is sent, not even to a Discord channel ID
+// carried in the message metadata.
 func TestPublish_DirectMessage_NonUserRecipient_SendsNothingWithoutError(t *testing.T) {
 	for _, recipient := range []string{"agent:reviewer", ""} {
 		t.Run(fmt.Sprintf("recipient=%q", recipient), func(t *testing.T) {
@@ -222,11 +223,13 @@ func TestPublish_DirectMessage_NonUserRecipient_SendsNothingWithoutError(t *test
 			msg := directMessage(t, dmTestEmail, dmTestUserID)
 			msg.Recipient = recipient
 			msg.RecipientID = "33333333-3333-4333-8333-333333333333"
+			msg.Metadata = map[string]string{"discord_channel_id": "900000000000000001"}
 
 			require.NoError(t, f.broker.Publish(context.Background(), dmTestTopic(), msg))
 
-			assert.Empty(t, sentChannelIDs(f.transport), "nothing is sent, including to the project's linked channels")
+			assert.Empty(t, sentChannelIDs(f.transport), "nothing is sent, including to the metadata channel and the project's linked channels")
 			assert.Empty(t, f.dmCreateCalls())
+			assert.Empty(t, f.transport.paths, "no Discord REST call is made")
 		})
 	}
 }
