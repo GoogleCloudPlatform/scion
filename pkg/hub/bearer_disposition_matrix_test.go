@@ -221,6 +221,9 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	id := string(e.Spec.ID)
 	params := opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
 	if params == nil {
+		params = bearerMatrixPatternOverrides(m.ids)[ep.Pattern]
+	}
+	if params == nil {
 		params = patternOverrides(m.ids)[ep.Pattern]
 	}
 	path := substituteLiveInventoryParams(ep.Pattern, params)
@@ -250,6 +253,15 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	rec := httptest.NewRecorder()
 	m.srv.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// bearerMatrixPatternOverrides holds path parameters for entry points the
+// live method inventory does not probe (it covers HTTP routes only), so
+// that the matrix addresses a seeded record.
+func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
+	return map[string]map[string]string{
+		"/api/v1/agents/{id}/pty": {"id": f.agent},
+	}
 }
 
 // bearerMatrixBodyOverrides holds request bodies the matrix sends in place
