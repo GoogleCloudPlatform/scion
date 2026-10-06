@@ -2643,19 +2643,7 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 
 	if !util.IsTerminal() {
 		fmt.Printf("\nSkipping template sync (non-interactive mode).\n")
-		fmt.Println("Run 'scion templates sync --all' to upload project templates.")
-		return
-	}
-
-	// Show discovered templates
-	fmt.Printf("\nFound %d project template(s) not yet synced to Hub:\n", len(projectTemplates))
-	for _, t := range projectTemplates {
-		fmt.Printf("  - %s\n", t.Name)
-	}
-
-	if !hubsync.ConfirmAction("Sync these templates to the Hub?", true, autoConfirm) {
-		fmt.Println("Skipping template sync.")
-		fmt.Println("Run 'scion templates sync --all' to upload project templates later.")
+		fmt.Println("Run 'scion templates sync <name>' to upload project templates.")
 		return
 	}
 
@@ -2665,24 +2653,9 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 		return
 	}
 
-	fmt.Println("\nSyncing project templates to Hub...")
-	var synced int
-	for _, tpl := range projectTemplates {
-		harnessType, err := detectHarnessType(tpl)
-		if err != nil {
-			fmt.Printf("  %s: skipped (failed to detect harness: %v)\n", tpl.Name, err)
-			continue
-		}
-
-		// Use force=false — don't overwrite existing Hub templates
-		err = syncTemplateToHub(hubCtx, tpl.Name, tpl.Path, "project", harnessType)
-		if err != nil {
-			fmt.Printf("  %s: failed: %v\n", tpl.Name, err)
-			continue
-		}
-		synced++
-	}
-	fmt.Printf("%d template(s) synced to project scope.\n", synced)
+	syncNewTemplatesOnLink(hubCtx, projectTemplates, func(prompt string) bool {
+		return hubsync.ConfirmAction(prompt, true, autoConfirm)
+	})
 }
 
 // registerProjectOnHub registers a new project on the Hub.
