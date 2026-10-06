@@ -257,19 +257,25 @@ func TestDeleteAgent_MarkerFileHubNativeProject_StaleDispatch_KeepsProvisionDir(
 		// first runtime List, after the arrival check.
 		passDuringResolution bool
 		wantStatus           int
+		// refusedOnArrival: the arrival check must refuse before target
+		// resolution, so the runtime is never listed.
+		refusedOnArrival bool
 	}{
-		{"passed on arrival", -deleteNotAfterSkew - time.Second, false, http.StatusConflict},
-		{"passes during resolution", 10 * time.Second, true, http.StatusConflict},
-		{"in time", 30 * time.Second, false, http.StatusNoContent},
+		{"passed on arrival", -deleteNotAfterSkew - time.Second, false, http.StatusConflict, true},
+		{"passes during resolution", 10 * time.Second, true, http.StatusConflict, false},
+		{"in time", 30 * time.Second, false, http.StatusNoContent, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var entries []api.AgentInfo
 			var deleted []string
 			clock := &fakeDeleteClock{now: fenceT0}
 			notAfter := fenceT0.Add(tc.notAfter)
-			var onList func()
-			if tc.passDuringResolution {
-				onList = func() { clock.Set(notAfter.Add(deleteNotAfterSkew + time.Second)) }
+			lists := 0
+			onList := func() {
+				lists++
+				if tc.passDuringResolution {
+					clock.Set(notAfter.Add(deleteNotAfterSkew + time.Second))
+				}
 			}
 			srv, home := newProvisionDirsServerOnList(t, &entries, &deleted, onList)
 			srv.config.DeleteClock = clock.Now
@@ -291,6 +297,9 @@ func TestDeleteAgent_MarkerFileHubNativeProject_StaleDispatch_KeepsProvisionDir(
 			}
 			if len(deleted) != 0 {
 				t.Errorf("runtime deletes = %v, want none (no container)", deleted)
+			}
+			if tc.refusedOnArrival && lists != 0 {
+				t.Errorf("runtime List called %d times, want 0: the delete was not refused on arrival", lists)
 			}
 		})
 	}
