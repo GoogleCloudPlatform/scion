@@ -1590,7 +1590,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			matched := embeddedBroker
 			callerUser := GetUserIdentityFromContext(ctx)
 			brokerIdent := GetBrokerIdentityFromContext(ctx)
-			allowed, err := s.authorizedForBrokerOwnerAction(ctx, callerUser, brokerIdent, matched.ID,
+			allowed, err := s.authorizedForBrokerRotate(ctx, callerUser, brokerIdent, matched.ID,
 				func() (*store.RuntimeBroker, error) { return matched, nil })
 			if err != nil {
 				writeErrorFromErr(w, err, "")
