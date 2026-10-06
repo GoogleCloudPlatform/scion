@@ -420,7 +420,7 @@ It is only a warning: it never fails a request, and an unmapped GSA is fine if i
 Where the Hub gets the mappings from:
 
 - **A broker in the same process as the Hub** (the embedded broker): the Hub reads its settings live, the same global settings and database overlay the broker reads at dispatch. Changes show up right away.
-- **A standalone broker**: it reports, for each profile, the GSAs that profile maps (its own `kubernetes_service_account_mappings` plus its runtime entry's) when it registers with `scion broker register`. The Hub treats that report as current until the next registration. After changing a mapping, re-run `scion broker register` on that broker for the warning to reflect it. A broker that predates this report, or could not read its settings, counts as unknown and produces no warning on its own. When other profiles did report, the warning says how many profiles did not.
+- **A standalone broker**: it reports, for each Kubernetes profile, the GSAs that profile maps (its own `kubernetes_service_account_mappings` plus those of the runtime entry it selects, with the runtime type taken from the entry's `type`, so a custom entry key with `type: kubernetes` counts). It sends them when it joins and on its heartbeat: on the first heartbeat after the broker starts, and again whenever the mappings change. A mapping edit therefore shows up within a heartbeat or two without restarting or re-registering the broker. This also covers brokers registered before this report existed. A broker version that predates the report, or a broker that could not read its settings, counts as unknown and produces no warning on its own; when other profiles did report, the warning says how many profiles did not.
 
 The warning says a profile maps the GSA, not that the Workload Identity binding works: the Hub cannot see the KSA annotation or the IAM binding.
 
@@ -757,7 +757,7 @@ This checks:
 - (GKE mode) Secrets Store CSI driver installation
 - (GKE mode) GCS FUSE CSI driver installation
 
-In its Hub checks, `scion doctor` also reports `gcp-sa-mappings`: a warning for each GSA registered in the linked project that no Kubernetes broker profile maps (see [early warning for unmapped service accounts](#gcp-identity-mode-assign-workload-identity-mapping)). This check never fails.
+In its Hub checks, `scion doctor` also reports `gcp-sa-mappings`: a warning for each GSA registered in the linked project that no Kubernetes broker profile maps (see [early warning for unmapped service accounts](#gcp-identity-mode-assign-workload-identity-mapping)). This check never fails. Outside a project linked to a Hub (no `hub.project_id` in the project's settings), or without a reachable Hub, it is skipped.
 
 Use `scion doctor --format json` for machine-readable output.
 

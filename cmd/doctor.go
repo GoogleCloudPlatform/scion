@@ -599,7 +599,7 @@ func checkDoctorSAMappings(hubEP string, hubConnected bool, client hubclient.Cli
 			Status: "warn",
 			Message: fmt.Sprintf("%d of %d registered GCP service account(s) not mapped on any Kubernetes broker profile:\n    %s",
 				len(warnings), len(sas), strings.Join(warnings, "\n    ")),
-			Remediation: "Add the service account to kubernetes_service_account_mappings in the broker's settings (and provision the bound Kubernetes ServiceAccount), then re-register the broker; or assign a mapped service account on Kubernetes profiles",
+			Remediation: "Add the service account to kubernetes_service_account_mappings in the broker's settings (and provision the bound Kubernetes ServiceAccount); the broker reports the change on its next heartbeat. Or assign a mapped service account on Kubernetes profiles",
 		}
 	}
 	return scionruntime.CheckResult{

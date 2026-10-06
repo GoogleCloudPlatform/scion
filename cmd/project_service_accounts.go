@@ -147,7 +147,11 @@ func init() {
 }
 
 // resolveProjectForSA resolves the project ID and creates a hub client for SA operations.
-func resolveProjectForSA() (hubclient.Client, string, error) {
+// resolveProjectForSA is a variable so tests can point the service-account
+// commands at a fake Hub.
+var resolveProjectForSA = resolveLinkedProjectForSA
+
+func resolveLinkedProjectForSA() (hubclient.Client, string, error) {
 	settings, client, err := loadHubClient()
 	if err != nil {
 		return nil, "", err

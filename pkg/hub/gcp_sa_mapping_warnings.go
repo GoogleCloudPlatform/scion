@@ -56,12 +56,19 @@ type projectSAMappingView struct {
 	unreported int
 }
 
-// isKubernetesBrokerProfile reports whether p is a Kubernetes profile for
-// this check: its runtime key names Kubernetes (isKubernetesRuntimeType), or
-// it reports GSA mappings, which only the Kubernetes runtime uses.
+// isKubernetesBrokerProfile reports whether a stored profile p is a
+// Kubernetes profile for this check: its runtime key names Kubernetes
+// (isKubernetesRuntimeType), or it reported mappings. Brokers report
+// mappings only for Kubernetes profiles (by resolved runtime type), so a
+// custom runtime key such as "gke" with type kubernetes counts once its
+// broker reports.
 func isKubernetesBrokerProfile(p store.BrokerProfile) bool {
-	return isKubernetesRuntimeType(p.Type) || len(p.ServiceAccountMappings) > 0
+	return isKubernetesRuntimeType(p.Type) || p.MappingsReported || len(p.ServiceAccountMappings) > 0
 }
+
+// localOnlyProfileTypes are runtime keys that are never Kubernetes. The
+// embedded broker's live settings are not loaded for profiles keyed by them.
+var localOnlyProfileTypes = map[string]bool{"docker": true, "podman": true, "container": true}
 
 // projectSAMappings collects the Kubernetes profile mappings of every
 // provider broker of projectID. Errors reading providers or brokers are
@@ -84,34 +91,48 @@ func (s *Server) projectSAMappings(ctx context.Context, projectID string) projec
 			slog.Debug("SA mapping warning: provider broker unavailable", "project_id", projectID, "broker", provider.BrokerID, "error", err)
 			continue
 		}
+		embedded := embeddedID != "" && broker.ID == embeddedID
+		// The embedded broker's live settings, loaded at most once and only
+		// when a profile that could be Kubernetes is reached.
 		var live *config.VersionedSettings
-		liveKnown := false
-		if embeddedID != "" && broker.ID == embeddedID {
-			vs, err := loadEmbeddedBrokerMappingSettings()
-			if err != nil {
-				slog.Debug("SA mapping warning: loading embedded broker settings failed", "broker", broker.ID, "error", err)
-			} else {
-				live, liveKnown = vs, true
-			}
-		}
+		liveLoaded, liveOK := false, false
 		for _, p := range broker.Profiles {
+			label := broker.Name + "/" + p.Name
+			if embedded && !localOnlyProfileTypes[p.Type] {
+				if !liveLoaded {
+					liveLoaded = true
+					if vs, err := loadEmbeddedBrokerMappingSettings(); err != nil {
+						slog.Debug("SA mapping warning: loading embedded broker settings failed", "broker", broker.ID, "error", err)
+					} else {
+						live, liveOK = vs, true
+					}
+				}
+				if liveOK {
+					// The profile's own runtime entry and resolved type, from
+					// the same settings the broker resolves at dispatch.
+					gsas, isKubernetes, known := live.ProfileKubernetesSAMappings(p.Name)
+					if known {
+						if isKubernetes {
+							for _, gsa := range gsas {
+								view.mapped[gsa] = true
+							}
+							view.reported = append(view.reported, label)
+						}
+						continue
+					}
+					// Not in the live settings (the synthetic "default"
+					// profile): fall back to the stored record below.
+				}
+			}
 			if !isKubernetesBrokerProfile(p) {
 				continue
 			}
-			label := broker.Name + "/" + p.Name
-			switch {
-			case liveKnown:
-				// The profile's Type is its runtime entry key.
-				for _, gsa := range live.KubernetesServiceAccountMappingGSAs(p.Name, p.Type) {
-					view.mapped[gsa] = true
-				}
-				view.reported = append(view.reported, label)
-			case p.MappingsReported:
+			if p.MappingsReported {
 				for _, m := range p.ServiceAccountMappings {
 					view.mapped[strings.ToLower(m.GSA)] = true
 				}
 				view.reported = append(view.reported, label)
-			default:
+			} else {
 				view.unreported++
 			}
 		}
@@ -120,30 +141,35 @@ func (s *Server) projectSAMappings(ctx context.Context, projectID string) projec
 	return view
 }
 
-// warningFor returns the warning for gsaEmail, or "" when no Kubernetes
-// profile reported its mappings (nothing to compare against) or one maps it.
-func (v projectSAMappingView) warningFor(gsaEmail string) string {
-	if len(v.reported) == 0 {
-		return ""
-	}
-	gsa := strings.ToLower(gsaEmail)
-	if v.mapped[gsa] {
-		return ""
-	}
+// unmapped reports whether a warning applies to gsaEmail: at least one
+// Kubernetes profile reported its mappings and none maps it.
+func (v projectSAMappingView) unmapped(gsaEmail string) bool {
+	return len(v.reported) > 0 && !v.mapped[strings.ToLower(gsaEmail)]
+}
+
+// warningFor returns the warning text for an unmapped gsaEmail. withContext
+// adds the profiles checked (and the count of unreported ones), which
+// projectSAMappingWarnings includes only once per response.
+func (v projectSAMappingView) warningFor(gsaEmail string, withContext bool) string {
 	msg := fmt.Sprintf(
-		"GCP service account %s is not mapped to a Kubernetes ServiceAccount on any Kubernetes broker profile of this project (%s); "+
+		"GCP service account %s is not mapped to a Kubernetes ServiceAccount on any Kubernetes broker profile of this project; "+
 			"agents assigned it on those profiles fail to start until a broker operator adds it to kubernetes_service_account_mappings",
-		gsa, strings.Join(v.reported, ", "))
-	if v.unreported > 0 {
-		msg += fmt.Sprintf(" (%d Kubernetes profile(s) did not report their mappings)", v.unreported)
+		strings.ToLower(gsaEmail))
+	if withContext {
+		msg += fmt.Sprintf(" (profiles checked: %s", strings.Join(v.reported, ", "))
+		if v.unreported > 0 {
+			msg += fmt.Sprintf("; %d Kubernetes profile(s) did not report their mappings", v.unreported)
+		}
+		msg += ")"
 	}
 	return msg
 }
 
 // projectSAMappingWarnings returns one warning per project-scoped service
 // account in sas (of projectID) that no Kubernetes broker profile of the
-// project maps. Hub-scoped accounts get no warning. Nil when there is
-// nothing to warn about.
+// project maps. The first warning also lists the profiles checked, so the
+// set is not repeated per account. Hub-scoped accounts get no warning. Nil
+// when there is nothing to warn about.
 func (s *Server) projectSAMappingWarnings(ctx context.Context, projectID string, sas ...*store.GCPServiceAccount) []string {
 	var candidates []*store.GCPServiceAccount
 	for _, sa := range sas {
@@ -157,8 +183,8 @@ func (s *Server) projectSAMappingWarnings(ctx context.Context, projectID string,
 	view := s.projectSAMappings(ctx, projectID)
 	var warnings []string
 	for _, sa := range candidates {
-		if w := view.warningFor(sa.Email); w != "" {
-			warnings = append(warnings, w)
+		if view.unmapped(sa.Email) {
+			warnings = append(warnings, view.warningFor(sa.Email, len(warnings) == 0))
 		}
 	}
 	return warnings

@@ -17,6 +17,7 @@ package runtimebroker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -106,6 +107,16 @@ type HeartbeatService struct {
 	// every heartbeat so the hub's stored per-profile Attach follows
 	// runtime changes without a re-registration. Nil omits the field.
 	profileAttach func() []hubclient.ProfileAttachState
+
+	// profileSAMappings, when set, returns each Kubernetes profile's GSA
+	// mappings, or nil when they cannot be read. They are sent on the first
+	// successful heartbeat and again whenever they change
+	// (sentSAMappingsKey), so a broker restart or a mapping edit refreshes
+	// the hub without a re-registration.
+	profileSAMappings func() []hubclient.ProfileSAMappingsState
+	// sentSAMappingsKey is the fingerprint of the last profileSAMappings
+	// the hub accepted, "" before the first (guarded by mu).
+	sentSAMappingsKey string
 
 	// defaultProfile, when set, returns the broker's default (active)
 	// profile name, reported on every heartbeat. A nil func, or a nil
@@ -299,7 +310,42 @@ func (s *HeartbeatService) run(ctx context.Context) {
 // sendHeartbeat sends a single heartbeat to the Hub.
 func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 	heartbeat := s.buildHeartbeat(ctx)
-	return s.client.Heartbeat(ctx, s.brokerID, heartbeat)
+	saKey := s.addProfileSAMappings(heartbeat)
+	if err := s.client.Heartbeat(ctx, s.brokerID, heartbeat); err != nil {
+		return err
+	}
+	if saKey != "" {
+		s.mu.Lock()
+		s.sentSAMappingsKey = saKey
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+// addProfileSAMappings sets heartbeat.ProfileSAMappings when the current
+// mappings differ from the last ones the hub accepted (always on the first
+// heartbeat), and returns their fingerprint, or "" when nothing was added.
+func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeartbeat) string {
+	if s.profileSAMappings == nil {
+		return ""
+	}
+	mappings := s.profileSAMappings()
+	if mappings == nil {
+		return ""
+	}
+	b, err := json.Marshal(mappings)
+	if err != nil {
+		return ""
+	}
+	key := string(b)
+	s.mu.Lock()
+	unchanged := key == s.sentSAMappingsKey
+	s.mu.Unlock()
+	if unchanged {
+		return ""
+	}
+	heartbeat.ProfileSAMappings = mappings
+	return key
 }
 
 // buildHeartbeat constructs the heartbeat payload from current state.

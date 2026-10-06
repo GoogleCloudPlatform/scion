@@ -17,8 +17,12 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -50,16 +54,23 @@ func profileByName(t *testing.T, profiles []hubclient.BrokerProfile, name string
 func TestBuildBrokerProfiles_ReportsSAMappings(t *testing.T) {
 	stubBrokerMappingSettings(t, &config.VersionedSettings{
 		Profiles: map[string]config.V1ProfileConfig{
-			"gke": {Runtime: "k8s", KubernetesServiceAccountMappings: map[string]string{"p@x.iam.gserviceaccount.com": "ksa-p"}},
+			"gke":   {Runtime: "gke-entry", KubernetesServiceAccountMappings: map[string]string{"p@x.iam.gserviceaccount.com": "ksa-p"}},
+			"empty": {Runtime: "k8s"},
+			"local": {Runtime: "docker"},
 		},
 		Runtimes: map[string]config.V1RuntimeConfig{
-			"k8s": {KubernetesServiceAccountMappings: map[string]string{"r@x.iam.gserviceaccount.com": "ksa-r"}},
+			// A custom entry key whose type is kubernetes counts.
+			"gke-entry": {Type: "kubernetes", KubernetesServiceAccountMappings: map[string]string{"r@x.iam.gserviceaccount.com": "ksa-r"}},
+			"k8s":       {},
+			"docker":    {},
 		},
 	}, nil)
 
 	profiles := buildBrokerProfiles(&config.Settings{Profiles: map[string]config.ProfileConfig{
-		"gke":   {Runtime: "k8s"},
-		"local": {Runtime: "docker"},
+		"gke":     {Runtime: "gke-entry"},
+		"empty":   {Runtime: "k8s"},
+		"local":   {Runtime: "docker"},
+		"missing": {Runtime: "k8s"}, // not in the global settings
 	}})
 
 	gke := profileByName(t, profiles, "gke")
@@ -68,15 +79,22 @@ func TestBuildBrokerProfiles_ReportsSAMappings(t *testing.T) {
 		{GSA: "p@x.iam.gserviceaccount.com"}, {GSA: "r@x.iam.gserviceaccount.com"},
 	}, gke.ServiceAccountMappings, "profile mapping plus its runtime entry's")
 
+	empty := profileByName(t, profiles, "empty")
+	assert.True(t, empty.MappingsReported, "a Kubernetes profile reports, with nothing mapped")
+	assert.Empty(t, empty.ServiceAccountMappings)
+
 	local := profileByName(t, profiles, "local")
-	assert.True(t, local.MappingsReported, "reported, with nothing mapped")
-	assert.Empty(t, local.ServiceAccountMappings)
+	assert.False(t, local.MappingsReported, "only Kubernetes profiles report")
+	assert.False(t, profileByName(t, profiles, "missing").MappingsReported, "a profile the settings lack is unknown")
 
 	// Wire shape: additive, omitempty fields.
 	b, err := json.Marshal(gke)
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"serviceAccountMappings":[{"gsa":"p@x.iam.gserviceaccount.com"}`)
 	assert.Contains(t, string(b), `"mappingsReported":true`)
+	b, err = json.Marshal(local)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "mappingsReported")
 }
 
 func TestBuildBrokerProfiles_UnreadableSettingsReportUnknown(t *testing.T) {
@@ -139,4 +157,80 @@ func TestCheckDoctorSAMappings(t *testing.T) {
 		res := checkDoctorSAMappings("http://hub", true, c, "proj-1")
 		assert.Equal(t, "warn", res.Status)
 	})
+}
+
+// captureStdoutStderr runs fn with os.Stdout and os.Stderr redirected and
+// returns what each received.
+func captureStdoutStderr(t *testing.T, fn func()) (stdout, stderr string) {
+	t.Helper()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	rOut, wOut, err := os.Pipe()
+	require.NoError(t, err)
+	rErr, wErr, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout, os.Stderr = wOut, wErr
+	outCh, errCh := make(chan string), make(chan string)
+	go func() { b, _ := io.ReadAll(rOut); outCh <- string(b) }()
+	go func() { b, _ := io.ReadAll(rErr); errCh <- string(b) }()
+	defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+	fn()
+	_ = wOut.Close()
+	_ = wErr.Close()
+	return <-outCh, <-errCh
+}
+
+// The service-account commands print the Hub's warnings to stderr; with
+// --json, stdout carries only the JSON document.
+func TestProjectServiceAccountCommands_WarningsOnStderr(t *testing.T) {
+	const warning = "GCP service account a@p.iam.gserviceaccount.com is not mapped"
+	sa := map[string]interface{}{"id": "sa-1", "email": "a@p.iam.gserviceaccount.com", "warnings": []string{warning}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"items": []interface{}{sa}, "warnings": []string{warning}})
+		case strings.HasSuffix(r.URL.Path, "/mint"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(sa)
+		case strings.HasSuffix(r.URL.Path, "/verify"):
+			_ = json.NewEncoder(w).Encode(sa)
+		default: // create
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(sa)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	prevResolve, prevFormat, prevListJSON := resolveProjectForSA, outputFormat, saOutputJSON
+	t.Cleanup(func() { resolveProjectForSA, outputFormat, saOutputJSON = prevResolve, prevFormat, prevListJSON })
+	resolveProjectForSA = func() (hubclient.Client, string, error) { return client, "proj-1", nil }
+
+	cases := []struct {
+		name string
+		run  func() error
+		json func(bool)
+	}{
+		{"add", func() error { return runSAAdd(nil, []string{"a@p.iam.gserviceaccount.com"}) }, func(b bool) { outputFormat = map[bool]string{true: "json", false: ""}[b] }},
+		{"mint", func() error { return runSAMint(nil, nil) }, func(b bool) { outputFormat = map[bool]string{true: "json", false: ""}[b] }},
+		{"verify", func() error { return runSAVerify(nil, []string{"sa-1"}) }, func(b bool) { outputFormat = map[bool]string{true: "json", false: ""}[b] }},
+		{"list", func() error { return runSAList(nil, nil) }, func(b bool) { saOutputJSON = b }},
+	}
+	for _, tc := range cases {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s json=%v", tc.name, asJSON), func(t *testing.T) {
+				tc.json(asJSON)
+				var runErr error
+				stdout, stderr := captureStdoutStderr(t, func() { runErr = tc.run() })
+				require.NoError(t, runErr, "warnings never fail the command")
+				assert.Contains(t, stderr, "Warning: "+warning)
+				assert.NotContains(t, stdout, "Warning: ")
+				if asJSON {
+					var v interface{}
+					assert.NoError(t, json.Unmarshal([]byte(stdout), &v), "stdout must be one clean JSON document: %q", stdout)
+				}
+			})
+		}
+	}
 }

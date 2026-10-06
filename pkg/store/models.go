@@ -1008,7 +1008,8 @@ type BrokerProfile struct {
 	// ServiceAccountMappings lists the GCP service accounts this profile
 	// maps to a Kubernetes ServiceAccount (kubernetes_service_account_mappings
 	// in the broker's global settings, profile and runtime-entry level).
-	// Reported at broker join; the Hub uses it only to warn about registered
+	// Reported at broker join and refreshed by heartbeat (ProfileSAMappings),
+	// only for Kubernetes profiles; the Hub uses it only to warn about registered
 	// service accounts no profile maps (ptone/scion#3329 phase 2).
 	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
 	// MappingsReported is true when the broker reported

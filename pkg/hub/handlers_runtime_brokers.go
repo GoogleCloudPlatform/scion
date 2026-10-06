@@ -656,6 +656,11 @@ type brokerHeartbeatRequest struct {
 	// an older broker, in which case the stored profiles are left
 	// unchanged.
 	ProfileAttach []brokerProfileAttach `json:"profileAttach,omitempty"`
+	// ProfileSAMappings refreshes the GSA mappings of the broker's stored
+	// Kubernetes profiles (see hubclient.ProfileSAMappingsState). Omitted
+	// by an older broker, or when unchanged since the broker last sent it,
+	// in which case the stored mappings are left unchanged.
+	ProfileSAMappings []brokerProfileSAMappings `json:"profileSAMappings,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// (see hubclient.BrokerHeartbeat.StartsInFlight). Trusted to be complete
 	// only when Capabilities.StartsInFlight is set.
@@ -702,6 +707,44 @@ func applyProfileAttach(profiles []store.BrokerProfile, reported []brokerProfile
 			continue
 		}
 		profiles[i].Attach = boolPtr(v)
+		changed = true
+	}
+	return changed
+}
+
+// brokerProfileSAMappings is one profile's GSA mappings in a heartbeat.
+type brokerProfileSAMappings struct {
+	Name                   string                         `json:"name"`
+	ServiceAccountMappings []store.BrokerProfileSAMapping `json:"serviceAccountMappings"`
+}
+
+// applyProfileSAMappings stores each reported profile's GSA mappings on the
+// stored profile of the same name and marks it MappingsReported, and
+// reports whether anything changed. Like applyProfileAttach, a reported
+// name with no stored profile is ignored, and a broker with no stored
+// profiles (a flat Runtime Broker row) gets nothing.
+func applyProfileSAMappings(profiles []store.BrokerProfile, reported []brokerProfileSAMappings) bool {
+	if len(reported) == 0 || len(profiles) == 0 {
+		return false
+	}
+	byName := make(map[string][]store.BrokerProfileSAMapping, len(reported))
+	for _, r := range reported {
+		byName[r.Name] = r.ServiceAccountMappings
+	}
+	changed := false
+	for i := range profiles {
+		mappings, ok := byName[profiles[i].Name]
+		if !ok {
+			continue
+		}
+		if profiles[i].MappingsReported && reflect.DeepEqual(profiles[i].ServiceAccountMappings, mappings) {
+			continue
+		}
+		if len(mappings) == 0 && len(profiles[i].ServiceAccountMappings) == 0 && profiles[i].MappingsReported {
+			continue
+		}
+		profiles[i].ServiceAccountMappings = mappings
+		profiles[i].MappingsReported = true
 		changed = true
 	}
 	return changed
@@ -830,7 +873,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// and the target health check also probes live reachability.
 	// ProfileAttach follows the same rule: only profiles the heartbeat
 	// names are updated, and only when their stored Attach differs.
-	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 {
+	// ProfileSAMappings likewise.
+	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -849,6 +893,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				changed = true
 			}
 			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
+				changed = true
+			}
+			if applyProfileSAMappings(broker.Profiles, heartbeat.ProfileSAMappings) {
 				changed = true
 			}
 			if changed {

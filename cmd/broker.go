@@ -1992,7 +1992,7 @@ func buildBrokerProfiles(settings *config.Settings) []hubclient.BrokerProfile {
 		if runtimeType == "" {
 			runtimeType = "docker" // default
 		}
-		mappings, reported := brokerProfileSAMappings(mappingVS, mappingErr, name, profileCfg.Runtime)
+		mappings, reported := brokerProfileSAMappings(mappingVS, mappingErr, name)
 
 		// Look up runtime config to get additional info (context, namespace for K8s)
 		var context, namespace string
@@ -2027,15 +2027,21 @@ var loadBrokerMappingSettings = func() (*config.VersionedSettings, error) {
 }
 
 // brokerProfileSAMappings returns the GSAs profileName maps to a KSA (its
-// own mapping plus its runtime entry's) and whether they were reported.
-// Not reported when the settings could not be loaded: the Hub then treats
-// the profile's mappings as unknown instead of empty.
-func brokerProfileSAMappings(vs *config.VersionedSettings, loadErr error, profileName, runtimeEntryName string) ([]hubclient.BrokerProfileSAMapping, bool) {
-	if loadErr != nil || vs == nil {
+// own mapping plus its runtime entry's) and whether they are reported. Only
+// Kubernetes profiles report (by resolved runtime type, so a custom entry
+// key with type kubernetes counts). Not reported when the settings could not
+// be loaded or do not have the profile: the Hub then treats the profile's
+// mappings as unknown instead of empty.
+func brokerProfileSAMappings(vs *config.VersionedSettings, loadErr error, profileName string) ([]hubclient.BrokerProfileSAMapping, bool) {
+	if loadErr != nil {
+		return nil, false
+	}
+	gsas, isKubernetes, known := vs.ProfileKubernetesSAMappings(profileName)
+	if !known || !isKubernetes {
 		return nil, false
 	}
 	var out []hubclient.BrokerProfileSAMapping
-	for _, gsa := range vs.KubernetesServiceAccountMappingGSAs(profileName, runtimeEntryName) {
+	for _, gsa := range gsas {
 		out = append(out, hubclient.BrokerProfileSAMapping{GSA: gsa})
 	}
 	return out, true

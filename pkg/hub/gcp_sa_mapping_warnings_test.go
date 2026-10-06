@@ -154,6 +154,17 @@ func TestProjectSAMappingWarnings_Matrix(t *testing.T) {
 			profiles: [][]store.BrokerProfile{{{Name: "gke", Type: "gke-prod", MappingsReported: true, ServiceAccountMappings: []store.BrokerProfileSAMapping{{GSA: mappedGSA}}}}},
 			want:     []string{unmappedGSA},
 		},
+		{
+			name:     "custom-named kubernetes runtime reported with nothing mapped",
+			email:    unmappedGSA,
+			profiles: [][]store.BrokerProfile{{{Name: "gke", Type: "gke", MappingsReported: true}}},
+			want:     []string{unmappedGSA, "b0/gke"},
+		},
+		{
+			name:     "upper-case reported GSA still matches",
+			email:    mappedGSA,
+			profiles: [][]store.BrokerProfile{{k8sProfile("k8s", true, "Mapped@p.iam.gserviceaccount.com")}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -189,19 +200,34 @@ func TestProjectSAMappingWarnings_HubScopedAccountNeverWarned(t *testing.T) {
 // registration record.
 func TestProjectSAMappingWarnings_EmbeddedBrokerReadsLiveSettings(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	// The embedded broker's record does not report mappings; live settings
-	// map mappedGSA on the profile's runtime entry ("kubernetes", the
-	// profile's Type).
-	b := addProviderBroker(t, s, projectID, "embedded", k8sProfile("remote", false))
+	// The embedded broker's record does not report mappings and its stored
+	// Type for "gke" is the key "gke-entry", which is not a Kubernetes name.
+	// The live settings resolve the profile's own runtime entry and its
+	// type, and map mappedGSA there.
+	b := addProviderBroker(t, s, projectID, "embedded",
+		store.BrokerProfile{Name: "gke", Type: "gke-entry"},
+		store.BrokerProfile{Name: "local", Type: "docker"},
+		store.BrokerProfile{Name: "default", Type: "kubernetes"}, // synthetic, not in live settings
+	)
 	srv.SetEmbeddedBrokerID(b.ID)
+	loads := 0
+	live := &config.VersionedSettings{
+		Profiles: map[string]config.V1ProfileConfig{
+			"gke":   {Runtime: "gke-entry"},
+			"local": {Runtime: "docker"},
+		},
+		Runtimes: map[string]config.V1RuntimeConfig{
+			"gke-entry": {Type: "kubernetes", KubernetesServiceAccountMappings: map[string]string{mappedGSA: "ksa"}},
+			// The profile's Type is not its runtime entry: a mapping keyed
+			// by Type must not be read.
+			"kubernetes": {KubernetesServiceAccountMappings: map[string]string{unmappedGSA: "ksa"}},
+		},
+	}
 	prev := loadEmbeddedBrokerMappingSettings
 	t.Cleanup(func() { loadEmbeddedBrokerMappingSettings = prev })
 	loadEmbeddedBrokerMappingSettings = func() (*config.VersionedSettings, error) {
-		return &config.VersionedSettings{
-			Runtimes: map[string]config.V1RuntimeConfig{
-				"kubernetes": {KubernetesServiceAccountMappings: map[string]string{mappedGSA: "ksa"}},
-			},
-		}, nil
+		loads++
+		return live, nil
 	}
 
 	mapped := mappingTestSA(t, s, projectID, mappedGSA)
@@ -209,13 +235,145 @@ func TestProjectSAMappingWarnings_EmbeddedBrokerReadsLiveSettings(t *testing.T) 
 	got := srv.projectSAMappingWarnings(context.Background(), projectID, mapped, unmapped)
 	require.Len(t, got, 1)
 	assert.Contains(t, got[0], unmappedGSA)
+	assert.Contains(t, got[0], "embedded/gke", "gke counts as Kubernetes by its live runtime type")
+	assert.NotContains(t, got[0], "embedded/local")
+	assert.Contains(t, got[0], "1 Kubernetes profile(s) did not report",
+		"the synthetic default profile falls back to its record, which did not report")
+	assert.Equal(t, 1, loads, "live settings are loaded once per broker")
 
-	// Unreadable live settings: fall back to the record, which does not
+	// Unreadable live settings: fall back to the records, none of which
 	// report mappings, so unknown and no warning.
 	loadEmbeddedBrokerMappingSettings = func() (*config.VersionedSettings, error) {
 		return nil, errors.New("boom")
 	}
 	assert.Empty(t, srv.projectSAMappingWarnings(context.Background(), projectID, unmapped))
+}
+
+// Live settings are not loaded for an embedded broker whose profiles are
+// all local-only.
+func TestProjectSAMappingWarnings_EmbeddedBrokerLoadsLazily(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	b := addProviderBroker(t, s, projectID, "embedded", store.BrokerProfile{Name: "local", Type: "docker"})
+	srv.SetEmbeddedBrokerID(b.ID)
+	prev := loadEmbeddedBrokerMappingSettings
+	t.Cleanup(func() { loadEmbeddedBrokerMappingSettings = prev })
+	loadEmbeddedBrokerMappingSettings = func() (*config.VersionedSettings, error) {
+		t.Fatal("live settings must not be loaded without a possible Kubernetes profile")
+		return nil, nil
+	}
+	assert.Empty(t, srv.projectSAMappingWarnings(context.Background(), projectID, mappingTestSA(t, s, projectID, unmappedGSA)))
+}
+
+// The profiles checked are listed once per response, not per warning.
+func TestProjectSAMappingWarnings_ContextListedOnce(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", true))
+	a := mappingTestSA(t, s, projectID, "a@p.iam.gserviceaccount.com")
+	c := mappingTestSA(t, s, projectID, "c@p.iam.gserviceaccount.com")
+	got := srv.projectSAMappingWarnings(context.Background(), projectID, a, c)
+	require.Len(t, got, 2)
+	assert.Contains(t, got[0], "profiles checked: b/k8s")
+	assert.NotContains(t, got[1], "profiles checked")
+}
+
+// --- heartbeat refresh ---
+
+func TestApplyProfileSAMappings(t *testing.T) {
+	m := func(gsas ...string) []store.BrokerProfileSAMapping {
+		out := []store.BrokerProfileSAMapping{}
+		for _, g := range gsas {
+			out = append(out, store.BrokerProfileSAMapping{GSA: g})
+		}
+		return out
+	}
+	t.Run("sets and marks reported, ignores unknown names", func(t *testing.T) {
+		profiles := []store.BrokerProfile{{Name: "k8s", Type: "kubernetes"}, {Name: "local", Type: "docker"}}
+		changed := applyProfileSAMappings(profiles, []brokerProfileSAMappings{
+			{Name: "k8s", ServiceAccountMappings: m(mappedGSA)},
+			{Name: "ghost", ServiceAccountMappings: m(unmappedGSA)},
+		})
+		assert.True(t, changed)
+		assert.True(t, profiles[0].MappingsReported)
+		assert.Equal(t, m(mappedGSA), profiles[0].ServiceAccountMappings)
+		assert.False(t, profiles[1].MappingsReported, "a profile not named keeps its value")
+	})
+	t.Run("unchanged report is not a change", func(t *testing.T) {
+		profiles := []store.BrokerProfile{{Name: "k8s", MappingsReported: true, ServiceAccountMappings: m(mappedGSA)}}
+		assert.False(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: m(mappedGSA)}}))
+	})
+	t.Run("reported empty after mappings is a change", func(t *testing.T) {
+		profiles := []store.BrokerProfile{{Name: "k8s", MappingsReported: true, ServiceAccountMappings: m(mappedGSA)}}
+		assert.True(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: m()}}))
+		assert.Empty(t, profiles[0].ServiceAccountMappings)
+		assert.True(t, profiles[0].MappingsReported)
+	})
+	t.Run("first empty report marks reported", func(t *testing.T) {
+		profiles := []store.BrokerProfile{{Name: "k8s"}}
+		assert.True(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: nil}}))
+		assert.True(t, profiles[0].MappingsReported)
+	})
+	t.Run("flat row (no stored profiles) gets nothing", func(t *testing.T) {
+		var profiles []store.BrokerProfile
+		assert.False(t, applyProfileSAMappings(profiles, []brokerProfileSAMappings{{Name: "k8s", ServiceAccountMappings: m(mappedGSA)}}))
+		assert.Empty(t, profiles)
+	})
+	t.Run("no field (older broker) changes nothing", func(t *testing.T) {
+		profiles := []store.BrokerProfile{{Name: "k8s", MappingsReported: true, ServiceAccountMappings: m(mappedGSA)}}
+		assert.False(t, applyProfileSAMappings(profiles, nil))
+		assert.Equal(t, m(mappedGSA), profiles[0].ServiceAccountMappings)
+	})
+}
+
+func postHeartbeat(t *testing.T, srv *Server, brokerID string, hb brokerHeartbeatRequest) {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", hb)
+	require.Equal(t, http.StatusOK, rec.Code, "heartbeat: %s", rec.Body.String())
+}
+
+// End to end through the heartbeat handler: the report is persisted, a
+// heartbeat without the field leaves it unchanged, and it drives warnings.
+func TestBrokerHeartbeat_ProfileSAMappingsPersisted(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	b := addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", false))
+	sa := mappingTestSA(t, s, projectID, unmappedGSA)
+	assert.Empty(t, srv.projectSAMappingWarnings(context.Background(), projectID, sa), "unknown before any report")
+
+	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{
+		Status: "online",
+		ProfileSAMappings: []brokerProfileSAMappings{
+			{Name: "k8s", ServiceAccountMappings: []store.BrokerProfileSAMapping{{GSA: mappedGSA}}},
+		},
+	})
+	stored, err := s.GetRuntimeBroker(context.Background(), b.ID)
+	require.NoError(t, err)
+	require.Len(t, stored.Profiles, 1)
+	assert.True(t, stored.Profiles[0].MappingsReported)
+	assert.Equal(t, []store.BrokerProfileSAMapping{{GSA: mappedGSA}}, stored.Profiles[0].ServiceAccountMappings)
+	assert.Len(t, srv.projectSAMappingWarnings(context.Background(), projectID, sa), 1, "the report drives the warning")
+
+	// An older broker (or an unchanged report) sends no field.
+	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online"})
+	stored, err = s.GetRuntimeBroker(context.Background(), b.ID)
+	require.NoError(t, err)
+	assert.True(t, stored.Profiles[0].MappingsReported)
+	assert.Equal(t, []store.BrokerProfileSAMapping{{GSA: mappedGSA}}, stored.Profiles[0].ServiceAccountMappings)
+}
+
+// A flat row stores no profiles, so profile-scoped heartbeat data is dropped.
+func TestBrokerHeartbeat_ProfileSAMappingsDroppedForFlatRow(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	b := addProviderBroker(t, s, projectID, "flat")
+	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{
+		Status: "online",
+		ProfileSAMappings: []brokerProfileSAMappings{
+			{Name: "k8s", ServiceAccountMappings: []store.BrokerProfileSAMapping{{GSA: mappedGSA}}},
+		},
+	})
+	stored, err := s.GetRuntimeBroker(context.Background(), b.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.Profiles)
 }
 
 // --- HTTP surfaces ---
