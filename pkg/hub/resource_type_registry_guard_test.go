@@ -152,8 +152,10 @@ func declaredAsResource(x *ast.Ident) bool {
 // cannot resolve statically (a variable, a call, a concatenation, or an
 // identifier that shadows a package constant) are returned in unresolved
 // as "file: expr". Literals passed directly to a logOnlyResourceFuncs
-// function are skipped. Not scanned: Type values set through any other
-// path, such as a Resource returned by a call or a field of another struct.
+// function are skipped. Not scanned: unkeyed (positional) Resource
+// literals, and Type values set through any other path, such as a
+// Resource returned by a call, a field of another struct, an index
+// expression, a range variable over a Resource slice, or new(Resource).
 //
 // The guard is type-level only: it checks that each type is one the
 // registry defines, not that each (type, action) pair resolves. Pair
@@ -233,7 +235,9 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 			if !ok || logOnly[lit] {
 				return true
 			}
-			// Mark element literals whose Resource type is elided.
+			// Mark element literals whose Resource type is elided. This
+			// is one level deep only: a nested elided literal, such as
+			// an element of a slice of Resource slices, is not scanned.
 			var elt ast.Expr
 			switch t := lit.Type.(type) {
 			case *ast.ArrayType:
