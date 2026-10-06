@@ -261,8 +261,9 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
 		},
 		{"project.membership.transfer", "/api/v1/projects/{id}/transfer-ownership"}: {"newOwnerId": f.member},
-		// agentRole "none" keeps a single-selector agent:create token
-		// inside its delegation ceiling.
+		// The delegation ceiling applies to the role an agent is granted:
+		// a token carrying only agent:create covers no usable role, so the
+		// probe asks for agentRole "none", which every creator may grant.
 		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
 	}
 }
@@ -344,9 +345,12 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			}
 
 			// (b) ceiling: the same user, an unrelated selector.
+			refusedWith404 := false
 			unrelated := m.mint(t, hubBoundary(), []string{bearerMatrixUnrelatedSelector(sel)})
 			if rec := m.request(t, e, unrelated); !bearerMatrixRefused(ep.Method, rec.Code) {
 				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
+			} else if rec.Code == http.StatusNotFound {
+				refusedWith404 = true
 			}
 
 			// (c) boundary: a project token for another project, or for a
@@ -357,7 +361,11 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 				boundProject = m.ids.project
 			}
 			if key := m.tryMint(projectBoundary(boundProject), []string{sel}); key != "" {
-				if rec := m.request(t, e, key); !bearerMatrixRefused(ep.Method, rec.Code) {
+				rec := m.request(t, e, key)
+				if rec.Code == http.StatusNotFound {
+					refusedWith404 = true
+				}
+				if !bearerMatrixRefused(ep.Method, rec.Code) {
 					t.Errorf("%s: a project token for %s got %d, want %s: %s", label, boundProject, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
 				}
 			} else {
@@ -369,8 +377,22 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			if !bearerMatrixHasBoundary(d, authzop.BearerBoundaryHub) {
 				boundary = projectBoundary(m.ids.project)
 			}
-			if rec := m.request(t, e, m.mint(t, boundary, []string{sel})); rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
+			rec := m.request(t, e, m.mint(t, boundary, []string{sel}))
+			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 				t.Errorf("%s: a %s token with %s got %d, want neither 401 nor 403: %s", label, boundary.Kind, sel, rec.Code, rec.Body.String())
+			}
+			// A 404 counts as a refusal only when the admitting token
+			// proves the same target exists: a 2xx, or for a WebSocket
+			// entry point the 400 that answers a request without an
+			// upgrade once the target was found.
+			if refusedWith404 {
+				found := rec.Code >= 200 && rec.Code < 300 ||
+					(ep.Kind == authzop.EntryPointWebSocket && rec.Code == http.StatusBadRequest)
+				if !found {
+					t.Errorf("%s: refused with 404, but the admitting token got %d, so the target is not shown to exist: %s", label, rec.Code, rec.Body.String())
+				} else {
+					t.Logf("404 refusal on %s: the admitting token got %d on the same target", label, rec.Code)
+				}
 			}
 			counts["admit"]++
 
