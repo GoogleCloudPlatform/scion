@@ -155,7 +155,7 @@ func TestReaper_FreshStateIsDisarmed_DeadlineRuleStillApplies(t *testing.T) {
 	require.NoError(t, err)
 	// Force the deadline into the past so this tick's deadline selection
 	// (never gated by arming) picks it up on the very first tick.
-	setAgentLaunchDeadline(t, ctx, s, a.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestReaper_ArmsAfterFirstTick_ThenReapsStaleness(t *testing.T) {
 
 	// Not yet armed: staleness must not fire even if last_report_at looks
 	// old, because 8x keepalive hasn't elapsed since arming.
-	setAgentLastReportAt(t, ctx, s, a.ID, time.Now().Add(-time.Hour))
+	setAgentLastReportAt(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Hour))
 	result, err = s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	assert.False(t, result.Armed)
@@ -297,7 +297,7 @@ func TestReaper_WindDownReap(t *testing.T) {
 	require.NoError(t, err)
 	setLaunchReaperArmedSince(t, ctx, s, readStoreNow(t, ctx, s).Add(-time.Hour))
 
-	setAgentLastReportAt(t, ctx, s, a.ID, time.Now().Add(-time.Hour))
+	setAgentLastReportAt(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Hour))
 	result, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
 	require.Len(t, result.Reaped, 1)
@@ -314,7 +314,7 @@ func TestReaper_NeverTouchesRunningAgent(t *testing.T) {
 
 	launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, a.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	// A racing status write reaches "running" before the tick runs, which
 	// ends the launch as running_observed (design §3.3). The reaper must not
@@ -341,7 +341,7 @@ func TestReaper_LateFailedAfterReapRefinesInsteadOfCompleting(t *testing.T) {
 
 	launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, a.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
 	require.NoError(t, err)
@@ -382,7 +382,7 @@ func TestReaper_ReleasesReservationOnDeadlineReap(t *testing.T) {
 
 	_, err = s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, a.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
 	require.NoError(t, err)
@@ -409,11 +409,11 @@ func TestReaper_DeletedRowIsNoOp(t *testing.T) {
 
 	_, err := s.BeginLaunch(ctx, good.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, good.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, good.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	_, err = s.BeginLaunch(ctx, vanished.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, vanished.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, vanished.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 	uid, err := parseUUID(vanished.ID)
 	require.NoError(t, err)
 	require.NoError(t, s.client.Agent.DeleteOneID(uid).Exec(ctx))
@@ -440,11 +440,11 @@ func TestReaper_PostgresRowLock_SkippedAndRetriedNextTick(t *testing.T) {
 
 	_, err := s.BeginLaunch(ctx, locked.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, locked.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, locked.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	_, err = s.BeginLaunch(ctx, other.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, other.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, other.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	// Hold a row lock on the first agent on a separate connection/transaction
 	// for longer than one tick. The second, unlocked due row must still be
@@ -602,7 +602,7 @@ func TestReaper_R10_5_SavepointErrorMapsToFailed(t *testing.T) {
 	a := createLaunchableAgent(t, ctx, s, projectID, "reaper-savepoint-fail")
 	_, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, a.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	withLaunchReaperFailureHook(t, func(point string) error {
 		if point == "savepoint" {
@@ -638,12 +638,12 @@ func TestReaper_R10_5_RowErrorDoesNotDisarm(t *testing.T) {
 	good := createLaunchableAgent(t, ctx, s, projectID, "reaper-row-good")
 	_, err = s.BeginLaunch(ctx, good.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, good.ID, time.Now().Add(-time.Hour))
+	setAgentLaunchDeadline(t, ctx, s, good.ID, readStoreNow(t, ctx, s).Add(-time.Hour))
 
 	poison := createLaunchableAgent(t, ctx, s, projectID, "reaper-row-poison")
 	_, err = s.BeginLaunch(ctx, poison.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, poison.ID, time.Now().Add(-time.Hour))
+	setAgentLaunchDeadline(t, ctx, s, poison.ID, readStoreNow(t, ctx, s).Add(-time.Hour))
 
 	// A genuine per-row write failure (rolled back to its own savepoint, not
 	// a tick-level failure) on the poison row only: the good row still
@@ -805,7 +805,7 @@ func TestReaper_R10_2_ReleasesReservationOnPGWithSingleConnection(t *testing.T) 
 
 	_, err = s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 	require.NoError(t, err)
-	setAgentLaunchDeadline(t, ctx, s, a.ID, time.Now().Add(-time.Second))
+	setAgentLaunchDeadline(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Second))
 
 	result, err := s.RunLaunchReaperTick(ctx, testReaperParams)
 	require.NoError(t, err)
@@ -1037,8 +1037,8 @@ func TestReaper_H2_TwoReplicas_NotAcquiredDoesNotAdvanceLossClock(t *testing.T) 
 	// never changed throughout — is finally reaped. Simulate that window
 	// without sleeping: shift the armed_since the recovery tick wrote back by
 	// 9 minutes, past the 8-minute arming threshold. The last report stays an
-	// hour stale, and the 65s ok_at window means a CI stall between the two
-	// ticks cannot re-disarm the cluster.
+	// hour stale, and the 65s ok_at window means any realistic CI stall
+	// between the two ticks cannot re-disarm the cluster.
 	shiftLaunchReaperArmedSince(t, ctx, s, 9*time.Minute)
 	result, err = s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
 	require.NoError(t, err)
