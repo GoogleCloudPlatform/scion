@@ -32,10 +32,17 @@
 # SAFETY: `pull_request_target` runs with base-repo context and read access
 # to secrets, so it is only safe to use here because this workflow never
 # checks out the PR head or executes any code from the fork/branch -- it
-# only reads PR metadata via the GitHub API with the default, read-only
-# GITHUB_TOKEN. Do not add an `actions/checkout` step (or anything else that
-# runs PR-controlled code) to this file without re-reviewing for secret
-# exposure; see GitHub's pull_request_target security guidance.
+# only reads PR metadata via the GitHub API. Do not add an `actions/checkout`
+# step (or anything else that runs PR-controlled code) to this file without
+# re-reviewing for secret exposure; see GitHub's pull_request_target
+# security guidance.
+#
+# The job's token also has `actions: write` (job level only; the workflow
+# default stays read-only). It is used for one call: the live-head guard's
+# request to re-run an existing run of this same workflow. This is safe
+# because no PR-controlled code runs that could reach the token, the re-run
+# target is picked only from API data (PR number -> live head SHA -> run ID),
+# and PR-controlled strings (title, body, branch name) never reach a shell.
 #
 # Known gap (deferred, see ptone/scion#1294): this only re-evaluates on PR
 # events (opened/synchronize/reopened/ready_for_review). A PR that goes
@@ -51,38 +58,53 @@ on: # zizmor: ignore[dangerous-triggers] -- no PR code checked out or run; see S
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
-# One gate run per PR head (ptone/scion#2845): duplicate runs for the same
-# PR head (e.g. ready_for_review and synchronize for one push) collapse, and a
-# newer run for that head cancels the in-flight one.
+# Concurrency (ptone/scion#3408, refining ptone/scion#2845): at most one
+# in-progress plus one pending gate run per PR. The group is keyed on the PR
+# number only, with cancel-in-progress false. Per GitHub's docs, a run that
+# joins a group whose slot is held becomes `pending`, and a newer arrival
+# cancels and replaces it. A run that is no longer `pending` (including one
+# still waiting for a runner) is never cancelled. Replacement follows the
+# order in which runs reach the group, which GitHub documents as not
+# guaranteed to match event order, and a re-run of an older run joins as a
+# new arrival. The live-head guard step makes the invariant independent of
+# that order. Relies on the default `queue: single`; do not set `queue: max`.
 #
-# INVARIANT: every PR's latest head must end with a completed (not cancelled)
-# Mergeability Gate result. The head SHA is part of the group key, so a run
-# can only be cancelled by another run for the *same* head, and every run
-# executes the job (no job-level `if:`), so the surviving run for each head
-# completes. Runs for different heads never cancel each other, which keeps
-# the invariant independent of the order in which GitHub creates runs: an
-# older-head run created late cannot cancel the newest head's run. The cost
-# is that a superseded head's run finishes instead of being cancelled; it is
-# cheap (API reads only: usually a few seconds, at most about a minute of
-# runner time if mergeable_state stays unknown through all 15 polls, 4 s
-# apart). If you add a trigger type whose run may be skipped, or a
-# job-level `if:`, set cancel-in-progress to false (queue
-# instead of cancel), or a skipped run could leave the head with only a
-# cancelled gate result.
+# Trade-off: the slot holder keeps the slot through its runner wait, so the
+# latest head's run stays `pending` until it finishes. With a saturated
+# runner pool the latest head's result can take up to about 2x the runner
+# queue wait (about 1x with a per-head group).
+#
+# INVARIANT: every PR's latest head ends with a completed (not cancelled)
+# gate result. (1) The run that reaches the group last for a PR is never
+# cancelled and, with no job-level `if:`, runs to completion. (2) If its
+# event head is not the live head, its guard sees every run for the live
+# head cancelled and re-runs the newest one. That attempt joins the group
+# while this run holds the slot, so it is now the last arrival and (1)
+# applies to it. The guard's attempt backstop (below) can stop this repair;
+# it then emits a warning instead.
+# Do NOT set cancel-in-progress to true: a later arrival could cancel the
+# latest head's run mid-run, and the guard cannot repair that because it
+# runs inside the cancelled run. Do not add a job-level `if:` or a trigger
+# whose run may skip the job.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
-  # pull_request_target is this workflow's only trigger, so this is always
-  # true; written as an expression to document that cancelling is PR-only.
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 permissions:
-  contents: read
-  pull-requests: read
+  contents: read # no checkout; kept explicit as the read-only default
+  pull-requests: read # read the PR's mergeable_state and head SHA
 
 jobs:
   mergeability:
     name: Mergeability Gate
     runs-on: ubuntu-latest
+    # Job-level permissions replace the workflow default for this job, so the
+    # two read scopes are repeated. `actions: write` is only for the live-head
+    # guard's re-run request; see the SAFETY note at the top of the file.
+    permissions:
+      contents: read # no checkout; kept explicit as the read-only default
+      pull-requests: read # read the PR's mergeable_state and head SHA
+      actions: write # live-head guard: re-run this workflow's own run
     steps:
       - name: Check PR mergeable state
         env:
@@ -114,3 +136,65 @@ jobs:
               echo "mergeable_state '${state}' does not indicate a merge conflict; not blocking."
               ;;
           esac
+
+      # Live-head guard (see INVARIANT above). Repair only: it never changes
+      # the gate verdict, and continue-on-error keeps a guard API error from
+      # failing the gate. `!cancelled()` runs it even when the check fails.
+      #
+      # Termination bound: the guard acts only in a run whose event head is
+      # not the live head, while every run for the live head is cancelled.
+      # It then makes at most one re-run request, with no retry, and the
+      # re-run carries the live head, so it does not trigger the guard again
+      # unless the PR gets a new head (which is a new event, not the guard).
+      # Runs in one group never overlap, so guards for a PR never race. As a
+      # hard backstop it never re-runs a run already at attempt 3 or later,
+      # so it cannot re-queue the same run indefinitely.
+      - name: Live-head guard
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+          MAX_ATTEMPT: "3"
+        run: |
+          set -euo pipefail
+
+          pr=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '{state, sha: .head.sha}')
+          pr_state=$(jq -r '.state' <<<"$pr")
+          live=$(jq -r '.sha' <<<"$pr")
+          if [ "$pr_state" != "open" ] || [ "$live" = "$EVENT_HEAD" ]; then
+            echo "This run is for the live head (or the PR is not open); nothing to do."
+            exit 0
+          fi
+          if ! [[ "$live" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::warning title=Live-head guard::Unexpected head SHA from the API; skipping."
+            exit 0
+          fi
+
+          # Gate runs for the live head, newest first.
+          runs=$(gh api "repos/${REPO}/actions/workflows/pr-mergeability-gate.yml/runs?event=pull_request_target&head_sha=${live}&per_page=100" \
+            --jq '[.workflow_runs[] | {id, run_attempt, conclusion}] | sort_by(.id) | reverse')
+          # No run yet: the live head's own event run arrives later and completes.
+          # Any run not cancelled (pending, queued, in progress, or completed): fine.
+          if jq -e 'length == 0 or any(.[]; .conclusion != "cancelled")' <<<"$runs" >/dev/null; then
+            echo "The live head ${live} has no gate run yet, or has one that was not cancelled; nothing to do."
+            exit 0
+          fi
+
+          target=$(jq -r '.[0].id' <<<"$runs")
+          attempt=$(jq -r '.[0].run_attempt' <<<"$runs")
+          if ! [[ "$target" =~ ^[0-9]+$ && "$attempt" =~ ^[0-9]+$ ]]; then
+            echo "::warning title=Live-head guard::Unexpected run data from the API; skipping."
+            exit 0
+          fi
+          if [ "$attempt" -ge "$MAX_ATTEMPT" ]; then
+            echo "::warning title=Live-head guard::Every gate run for the live head ${live} was cancelled and run ${target} is already at attempt ${attempt}; not re-running it again. Push an update or re-run that run by hand."
+            exit 0
+          fi
+
+          echo "Every gate run for the live head ${live} was cancelled; re-running run ${target} (attempt ${attempt})."
+          if ! gh api -X POST "repos/${REPO}/actions/runs/${target}/rerun"; then
+            echo "::warning title=Live-head guard::Re-run request for run ${target} failed. Push an update or re-run that run by hand."
+          fi
