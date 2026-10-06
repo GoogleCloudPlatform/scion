@@ -37,7 +37,7 @@
       }
     }
   },
-  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "auth"],
+  "required": ["replicaCount", "image", "hub", "probes", "service", "serviceAccount", "rbac", "runtime", "agents", "config", "database", "cloudsql", "storage", "secrets", "auth"],
   "properties": {
     "global": {
       "type": "object",
@@ -73,7 +73,7 @@
         "repository": {
           "type": "string",
           "minLength": 1,
-          "description": "REQUIRED, with no default. A hub image built from the root Dockerfile with --target hub-gke - a stage the accompanying image-build change adds and which is not in the root Dockerfile yet. It is not published anywhere, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root, and it is built with -tags no_embed_web so it has no embedded web UI."
+          "description": "REQUIRED, with no default. A hub image built from the root Dockerfile with --target hub-gke (image-build/cloudbuild-hub-gke.yaml builds and pushes it as scion-hub-gke). The chart has no canonical registry to point at, so any default the chart could ship would point at an empty path or at another artifact. The published artifact named scion-hub is not this image: it runs as root, and it is built with -tags no_embed_web so it has no embedded web UI."
         },
         "tag": {
           "type": "string",
@@ -113,6 +113,11 @@
         "name": {
           "type": "string",
           "description": "Display name for the hub. Cosmetic."
+        },
+        "adminEmails": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[^\\s,]+@[^\\s,]+$"},
+          "description": "Email addresses auto-promoted to the admin role, rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig, pkg/config/settings_v1.go). One address per entry: an entry containing a comma is refused, because the hub comma-splits a one-element list but keeps commas literal in a longer one, so the same entry would mean different things depending on its neighbours. Empty omits the key."
         },
         "baseUrl": {
           "type": "string",
@@ -348,7 +353,7 @@
       "properties": {
         "imageRegistry": {
           "type": "string",
-          "description": "Registry prefix agent images are pulled from. Rendered as the top-level image_registry key of settings.yaml."
+          "description": "Registry prefix agent images are pulled from. Rendered as the top-level image_registry key of settings.yaml. Required by the template when the chart renders settings.yaml, because the hub refuses to start its in-process broker without a registry; config.extra image_registry for the active profile, or a non-empty hub.extraEnv SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY, also satisfies it."
         }
       }
     },
@@ -547,6 +552,34 @@
         "bucket": {
           "type": "string",
           "description": "GCS bucket name, no gs:// prefix. Required when database.driver is postgres."
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend"],
+      "description": "The hub's secret backend, rendered as server.secrets. local renders nothing. The chart grants no IAM for gcpsm.",
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["local", "gcpsm"],
+          "description": "local keeps secrets in the hub database. gcpsm uses Google Cloud Secret Manager and requires secrets.gcpsm.projectId."
+        },
+        "gcpsm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "projectId": {
+              "type": "string",
+              "description": "Rendered as server.secrets.gcp_project_id. Required when backend is gcpsm; refused otherwise."
+            },
+            "replicationLocations": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1},
+              "description": "Rendered as server.secrets.gcp_replication_locations. Non-empty selects user-managed regional replication. Refused unless backend is gcpsm."
+            }
+          }
         }
       }
     },

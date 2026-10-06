@@ -59,6 +59,7 @@ type mockRuntimeBrokerClient struct {
 	createCalled               bool
 	startCalled                bool
 	stopCalled                 bool
+	lastStopRunID              string
 	restartCalled              bool
 	deleteCalled               bool
 	messageCalled              bool
@@ -83,6 +84,7 @@ type mockRuntimeBrokerClient struct {
 	lastDeleteOpts             struct {
 		deleteFiles, removeBranch bool
 		runID                     string
+		notAfter                  time.Time
 	}
 	returnErr            error
 	cleanupErr           error
@@ -150,8 +152,9 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 	}, nil
 }
 
-func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string) error {
+func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	m.stopCalled = true
+	m.lastStopRunID = runID
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
@@ -187,6 +190,7 @@ func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, bro
 	m.lastDeleteOpts.deleteFiles = opts.DeleteFiles
 	m.lastDeleteOpts.removeBranch = opts.RemoveBranch
 	m.lastDeleteOpts.runID = opts.RunID
+	m.lastDeleteOpts.notAfter = opts.NotAfter
 	return m.returnErr
 }
 
@@ -560,7 +564,7 @@ func TestHTTPRuntimeBrokerClient_StopAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.StopAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "")
+	err := client.StopAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", "")
 	if err != nil {
 		t.Fatalf("StopAgent failed: %v", err)
 	}
