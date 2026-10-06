@@ -204,21 +204,26 @@ func (s *BrokerDispatchStore) CompleteBrokerDispatch(ctx context.Context, id, re
 }
 
 // FailBrokerDispatch marks a dispatch failed, records the error, and bumps the
-// attempt counter (so a reaper/retry can bound re-drives). The update is
-// guarded by state=in_progress (CAS) so a completed or already-failed dispatch
-// cannot be overwritten by a stale failure call.
-func (s *BrokerDispatchStore) FailBrokerDispatch(ctx context.Context, id, errMsg string) error {
+// attempt counter (so a reaper/retry can bound re-drives). A non-empty result
+// is written in the same update, so a reader that sees the failed state also
+// sees its result. The update is guarded by state=in_progress (CAS) so a
+// completed or already-failed dispatch cannot be overwritten by a stale
+// failure call.
+func (s *BrokerDispatchStore) FailBrokerDispatch(ctx context.Context, id, errMsg, result string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	affected, err := s.client.BrokerDispatch.Update().
+	upd := s.client.BrokerDispatch.Update().
 		Where(brokerdispatch.IDEQ(uid), brokerdispatch.StateEQ(store.DispatchStateInProgress)).
 		SetState(store.DispatchStateFailed).
 		SetError(errMsg).
 		AddAttempts(1).
-		SetUpdatedAt(time.Now()).
-		Save(ctx)
+		SetUpdatedAt(time.Now())
+	if result != "" {
+		upd.SetResult(result)
+	}
+	affected, err := upd.Save(ctx)
 	if err != nil {
 		return mapError(err)
 	}

@@ -529,7 +529,10 @@ Key API surface:
   `levels: [{max, value}]` plus optional `default`) via `map_thinking_level`.
   Returns the native value string, or `None` when the provisioner should emit
   nothing. Writing the value to the harness's native knob stays in
-  provision.py. Requires `INTERFACE_VERSION >= 3`.
+  provision.py. Requires `INTERFACE_VERSION >= 3`. Three writers ship as
+  examples: codex writes a TOML key (`model_reasoning_effort`), antigravity
+  adds a CLI flag in its wrapper script (`agy --effort`), and claude adds an
+  env var to the `write_outputs(env=...)` overlay (`CLAUDE_CODE_EFFORT_LEVEL`).
 - **Auth engine** — `AuthSpec(harness, [methods])` with
   `env_method(name, any_of=/all_of=, hint=, env_fallback=)` and
   `file_method(name, path=, secret_key=, hint=)`. `select_auth` honors an
@@ -656,8 +659,8 @@ Map into the normalized event vocabulary: `session-start`, `session-end`,
 `prompt-submit`, `tool-start`, `tool-end`, `model-start`, `model-end`,
 `agent-end`, `subagent-end`, `response-complete`, `notification`.
 Extractable fields include `prompt`, `tool_name`, `tool_input`,
-`tool_output`, `message`, `session_id`, `success`, `error`, `assistant_text`,
-`file_path`, and the token fields `input_tokens` (→ `input`), `output_tokens`
+`tool_output`, `message`, `session_id`, `success`, `error`, `file_path`,
+and the token fields `input_tokens` (→ `input`), `output_tokens`
 (→ `output`), `cached_tokens` (→ `cache_read`), `cache_write_tokens` (→
 `cache_write`) and `reasoning_tokens` (→ `reasoning`, informational only).
 `output_tokens` must be the *total* output including reasoning (canonical

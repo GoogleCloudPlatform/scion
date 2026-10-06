@@ -54,6 +54,12 @@ return an error instead of blocking.`,
 		if err := cmd.ValidateFlagGroups(); err != nil {
 			return err
 		}
+		// Likewise required flags, which cobra checks only after this hook:
+		// a missing required flag is a usage error and must be reported as
+		// one (with usage), before SilenceUsage is set below.
+		if err := cmd.ValidateRequiredFlags(); err != nil {
+			return err
+		}
 
 		// Warn (once per process) about legacy environment variables that
 		// scion no longer reads. For real top-level invocations this has
@@ -71,6 +77,32 @@ return an error instead of blocking.`,
 			return err
 		}
 		clitime.SetZone(loc)
+
+		if outputFormat != "" {
+			if outputFormat != "json" && outputFormat != "plain" {
+				return fmt.Errorf("invalid format: %s (allowed: json, plain)", outputFormat)
+			}
+			// Reject --format json for interactive/streaming commands
+			if outputFormat == "json" {
+				if reason, ok := interactiveOnlyCommands[cmd.CommandPath()]; ok {
+					return fmt.Errorf("--format json is not supported for '%s' because %s", cmd.CommandPath(), reason)
+				}
+				// Silently ignore --format json for commands that don't support structured output
+				if jsonNoOpCommands[cmd.CommandPath()] {
+					outputFormat = ""
+				}
+			}
+		}
+
+		// Invocation is now known to be well-formed: cobra has parsed the
+		// flags and validated the positional args (both happen before this
+		// hook runs), and the checks above cover flag groups, required
+		// flags and flag values. Anything that fails from here on — the
+		// rest of this hook, PreRunE, RunE — is a runtime failure, so stop
+		// Execute from printing the usage block after it (see
+		// shouldShowUsageOnError). Doing it here, once, covers every
+		// subcommand without each RunE having to opt in (ptone/scion#2859).
+		cmd.SilenceUsage = true
 
 		// --non-interactive implies --yes
 		if nonInteractive {
@@ -186,22 +218,6 @@ return an error instead of blocking.`,
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
 		}
 
-		if outputFormat != "" {
-			if outputFormat != "json" && outputFormat != "plain" {
-				return fmt.Errorf("invalid format: %s (allowed: json, plain)", outputFormat)
-			}
-			// Reject --format json for interactive/streaming commands
-			if outputFormat == "json" {
-				if reason, ok := interactiveOnlyCommands[cmd.CommandPath()]; ok {
-					return fmt.Errorf("--format json is not supported for '%s' because %s", cmd.CommandPath(), reason)
-				}
-				// Silently ignore --format json for commands that don't support structured output
-				if jsonNoOpCommands[cmd.CommandPath()] {
-					outputFormat = ""
-				}
-			}
-		}
-
 		// Check image_registry is configured for commands that need it.
 		// Skip for config commands (users need those to set the registry).
 		// Skip in hub context (inside a container, the agent is already
@@ -307,16 +323,22 @@ func exitCodeFor(err error) int {
 // block after a failed invocation. cobra's own SilenceUsage handling is
 // bypassed here because Execute prints the error and usage itself (for the
 // colored error banner above), so this helper re-implements the same intent:
-// a subcommand sets SilenceUsage on itself once argument parsing has already
-// succeeded, so a later runtime failure isn't mistaken for a usage error.
+// a subcommand's SilenceUsage is set once its invocation is known to be
+// well-formed, so a later runtime failure isn't mistaken for a usage error.
 //
-// rootCmd itself sets SilenceUsage: true, but only so cobra's own internal
-// auto-print never double-prints usage under the banner above — it is not an
-// opt-out signal for this helper. ExecuteC returns rootCmd as cmd for
-// root-level usage errors (an unknown command or an unknown global flag), and
-// those must still show usage, so only a non-root command's SilenceUsage is
-// honored here. This is a no-op for every subcommand that never sets
-// SilenceUsage on itself, which today is every command except attach.
+// rootCmd's PersistentPreRunE sets SilenceUsage on the executing command
+// after flag parsing, positional-arg validation, flag-group/required-flag
+// checks and flag-value checks have passed, so every subcommand gets this
+// behaviour centrally: argument and flag errors (which fail before that
+// point) show usage; errors from the rest of the hook, PreRunE or RunE do
+// not. Commands may still set SilenceUsage themselves (attach does, in RunE).
+//
+// rootCmd itself sets SilenceUsage: true statically, but only so cobra's own
+// internal auto-print never double-prints usage under the banner above — it
+// is not an opt-out signal for this helper. ExecuteC returns rootCmd as cmd
+// for root-level usage errors (an unknown command or an unknown global flag),
+// and those must still show usage, so only a non-root command's SilenceUsage
+// is honored here.
 func shouldShowUsageOnError(cmd *cobra.Command, autoHelp bool) bool {
 	if cmd == nil || !autoHelp {
 		return false
@@ -324,16 +346,63 @@ func shouldShowUsageOnError(cmd *cobra.Command, autoHelp bool) bool {
 	return !cmd.HasParent() || !cmd.SilenceUsage
 }
 
-// showUsageForError combines shouldShowUsageOnError with an error-based
-// filter: hub failures (a wrapped *apiclient.APIError, or anything that went
-// through wrapHubError, including connectivity failures) are runtime errors
-// about the hub's answer, not about how the command was invoked, so the Usage
-// block is suppressed for them. Other errors keep the existing behaviour.
+// showUsageForError decides whether Execute prints the Usage block after a
+// failed invocation. This is the single statement of the usage policy
+// (ptone/scion#2859):
+//
+//   - Argument and flag errors show usage. They are reported by cobra's own
+//     flag parsing and Args validators, by the flag checks at the top of
+//     root's PersistentPreRunE (flag groups, required flags, --tz, --format),
+//     or, for checks that live in RunE, by returning a usageError
+//     (newUsageError / asUsageError).
+//   - Everything else is a runtime failure and shows no usage: root's hook
+//     sets SilenceUsage on the command once the invocation is known to be
+//     well-formed (see shouldShowUsageOnError), and hub failures
+//     (isHubFailure) never show it.
+//
+// A usageError shows usage even after SilenceUsage was set, which is what
+// lets a RunE flag check keep its usage block.
 func showUsageForError(cmd *cobra.Command, err error, autoHelp bool) bool {
+	if cmd == nil || !autoHelp {
+		return false
+	}
+	if isUsageError(err) {
+		return true
+	}
 	if isHubFailure(err) {
 		return false
 	}
 	return shouldShowUsageOnError(cmd, autoHelp)
+}
+
+// usageError marks an argument or flag validation error returned from RunE
+// (or a helper it calls), after root's hook has set SilenceUsage. Error() is
+// the wrapped error's message unchanged, and Unwrap exposes it, so
+// errors.Is/As and the exit code behave as for the unwrapped error.
+type usageError struct{ err error }
+
+func (e *usageError) Error() string { return e.err.Error() }
+func (e *usageError) Unwrap() error { return e.err }
+
+// newUsageError is fmt.Errorf for argument/flag validation errors in RunE:
+// the result shows the Usage block (see showUsageForError).
+func newUsageError(format string, a ...any) error {
+	return &usageError{err: fmt.Errorf(format, a...)}
+}
+
+// asUsageError marks an existing validation error (e.g. from a shared flag
+// parser) as a usage error. It returns nil for a nil err.
+func asUsageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &usageError{err: err}
+}
+
+// isUsageError reports whether err, or anything it wraps, is a usageError.
+func isUsageError(err error) bool {
+	var ue *usageError
+	return errors.As(err, &ue)
 }
 
 func commandInSubtree(cmd *cobra.Command, name string) bool {
@@ -367,7 +436,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output (equivalent to SCION_DEBUG=1)")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output; agents started by this command also get SCION_DEBUG=1. 'scion server start' has its own --debug (see its help).")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which
