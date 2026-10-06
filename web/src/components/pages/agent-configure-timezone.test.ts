@@ -462,9 +462,14 @@ type BusyEl = ConfigureEl & {
   handleTimezoneUnpin(): Promise<void>;
 };
 
+/**
+ * Reads the `disabled` attribute the page binds with `?disabled=`. Not the
+ * property: Shoelace elements are not registered in this test (the page no
+ * longer imports client/main.ts, ptone/scion#3118), so sl-button has none.
+ */
 function isDisabled(el: Element | null): boolean {
   expect(el).not.toBeNull();
-  return (el as HTMLElement & { disabled: boolean }).disabled;
+  return el!.hasAttribute('disabled');
 }
 
 /** The main form's footer button with the given label. */

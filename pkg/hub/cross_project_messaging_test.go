@@ -40,6 +40,26 @@ import (
 func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB string, ownerA, ownerB *store.User, agentA, agentB *store.Agent) {
 	t.Helper()
 	srv, s = testServer(t)
+	projectA, projectB, ownerA, ownerB, agentA, agentB = cpmSetupOn(t, srv, s)
+	return srv, s, projectA, projectB, ownerA, ownerB, agentA, agentB
+}
+
+// cpmSetupWithFault is cpmSetup with a switch-gated store wrapper (see
+// installStoreFault) installed before the fixture's audited setup
+// (seedProjectCreatorMembership emits mutation audits whose goroutines read
+// srv.store). Tests call fault.Arm() where they used to assign srv.store,
+// which would race those goroutines (ptone/scion#3184). It returns only
+// what the fault tests use.
+func cpmSetupWithFault[W store.Store](t *testing.T, wrap func(inner store.Store, fault *storeFaultSwitch) W) (srv *Server, projectB string, wrapped W, fault *storeFaultSwitch) {
+	t.Helper()
+	var s store.Store
+	srv, s, wrapped, fault = testServerWithStoreFault(t, wrap)
+	_, projectB, _, _, _, _ = cpmSetupOn(t, srv, s)
+	return srv, projectB, wrapped, fault
+}
+
+func cpmSetupOn(t *testing.T, srv *Server, s store.Store) (projectA, projectB string, ownerA, ownerB *store.User, agentA, agentB *store.Agent) {
+	t.Helper()
 	ctx := context.Background()
 
 	// Create owners
@@ -130,7 +150,7 @@ func cpmSetup(t *testing.T) (srv *Server, s store.Store, projectA, projectB stri
 	// Enable cross-project messaging via OperationalSettings.
 	enableCPM(t, srv, s)
 
-	return srv, s, projectA, projectB, ownerA, ownerB, agentA, agentB
+	return projectA, projectB, ownerA, ownerB, agentA, agentB
 }
 
 // enableCPM sets up OperationalSettings with cross_project_messaging_enabled=true.

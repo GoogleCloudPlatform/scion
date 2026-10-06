@@ -56,34 +56,67 @@ func (o hubDeleteOutcome) Confirmed() bool {
 // a successful Delete could have been a 202, so the outcome is reported as
 // accepted but unobservable, never as confirmed.
 func deleteViaHubAndWait(ctx context.Context, svc hubclient.AgentService, agentName string, opts *hubclient.DeleteAgentOptions, onAccepted func()) (hubDeleteOutcome, error) {
-	resulter, ok := svc.(hubclient.AgentDeleteResulter)
-	if !ok {
-		if err := svc.Delete(ctx, agentName, opts); err != nil {
-			return hubDeleteOutcome{}, err
-		}
-		return hubDeleteOutcome{Accepted: true, Wait: hubclient.DeletionWaitResult{
-			Outcome: hubclient.DeletionUnobservable,
-			Err:     errDeleteResultUnknown,
-		}}, nil
-	}
-	res, err := resulter.DeleteWithResult(ctx, agentName, opts)
+	sent, err := sendHubDelete(ctx, svc, agentName, opts)
 	if err != nil {
 		return hubDeleteOutcome{}, err
 	}
-	if !res.Accepted {
-		return hubDeleteOutcome{}, nil
-	}
-	if onAccepted != nil {
+	if sent.NeedsPoll() && onAccepted != nil {
 		onAccepted()
+	}
+	return sent.Wait(ctx), nil
+}
+
+// sentHubDelete is a DELETE the hub has answered. Either the outcome is
+// already known (204, or a client that cannot tell 202 from 204), or the hub
+// answered 202 and Wait must poll for it.
+type sentHubDelete struct {
+	svc       hubclient.AgentService
+	needsPoll bool   // the hub answered 202
+	pollID    string // ID to poll; meaningful only when needsPoll
+	outcome   hubDeleteOutcome
+}
+
+// NeedsPoll reports whether the hub answered 202, so Wait will poll.
+func (s sentHubDelete) NeedsPoll() bool { return s.needsPoll }
+
+// Wait returns the outcome, polling first if the hub answered 202. The poll
+// has its own budget, independent of ctx: ctx is the DELETE request's
+// context, which may have little time left after the hub's ~20s wait. Wait
+// is safe to call from several goroutines at once for different deletes.
+func (s sentHubDelete) Wait(ctx context.Context) hubDeleteOutcome {
+	if !s.NeedsPoll() {
+		return s.outcome
+	}
+	wait := hubclient.WaitForAgentDeletion(context.WithoutCancel(ctx), s.svc, s.pollID, hubDeletionWaitOptions)
+	return hubDeleteOutcome{Accepted: true, Wait: wait}
+}
+
+// sendHubDelete sends DELETE for agentName and returns without polling. A
+// DELETE error is returned unchanged. See deleteViaHubAndWait for the
+// fail-closed rule.
+func sendHubDelete(ctx context.Context, svc hubclient.AgentService, agentName string, opts *hubclient.DeleteAgentOptions) (sentHubDelete, error) {
+	resulter, ok := svc.(hubclient.AgentDeleteResulter)
+	if !ok {
+		if err := svc.Delete(ctx, agentName, opts); err != nil {
+			return sentHubDelete{}, err
+		}
+		return sentHubDelete{svc: svc, outcome: hubDeleteOutcome{Accepted: true, Wait: hubclient.DeletionWaitResult{
+			Outcome: hubclient.DeletionUnobservable,
+			Err:     errDeleteResultUnknown,
+		}}}, nil
+	}
+	res, err := resulter.DeleteWithResult(ctx, agentName, opts)
+	if err != nil {
+		return sentHubDelete{}, err
+	}
+	if !res.Accepted {
+		return sentHubDelete{svc: svc}, nil
 	}
 	pollID := res.AgentID
 	if pollID == "" {
 		pollID = agentName
 	}
-	// The poll has its own budget, independent of the DELETE request's ctx,
-	// which may have little time left after the hub's ~20s wait.
-	wait := hubclient.WaitForAgentDeletion(context.WithoutCancel(ctx), svc, pollID, hubDeletionWaitOptions)
-	return hubDeleteOutcome{Accepted: true, Wait: wait}, nil
+	return sentHubDelete{svc: svc, needsPoll: true, pollID: pollID}, nil
 }
 
 // hubDeleteFailure returns the error for an accepted delete that FAILED or
@@ -116,8 +149,8 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 			// as abandoned and blocks start; the client cannot tell.
 			blocked = " Starting the agent may stay blocked until a retry succeeds or force is used."
 		}
-		return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Retry with 'scion delete %s', or force-delete it from the web UI.%s",
-			code, msg, what, agentName, blocked)
+		return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Retry with 'scion delete %s', or force it with 'scion delete --force %s'.%s",
+			code, msg, what, agentName, agentName, blocked)
 	case hubclient.DeletionNotTaken:
 		return fmt.Errorf("delete did not take effect (the agent is still live and no delete is running); %s. Retry with 'scion delete %s'",
 			what, agentName)

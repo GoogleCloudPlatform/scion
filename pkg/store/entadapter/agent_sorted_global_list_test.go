@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -240,7 +241,8 @@ func TestCountAgentsByPhaseIDs_MatchesFilterAndPhases(t *testing.T) {
 // parameter conversion renders Go's verbose Stringer form, which appends
 // " m=+X.XXXXXXXXX" while the value still carries a monotonic reading -- a
 // form Go's public time API cannot construct directly, since a monotonic
-// reading can only come from an actual time.Now() call.
+// reading can only come from an actual time.Now() call. SQLite only: callers
+// must call enttest.SkipOnPostgres before building their fixtures.
 func setRawCreatedUpdatedText(t *testing.T, s *AgentStore, id, createdText, updatedText string) {
 	t.Helper()
 	err := s.client.Driver().Exec(context.Background(),
@@ -259,6 +261,9 @@ func setRawCreatedUpdatedText(t *testing.T, s *AgentStore, id, createdText, upda
 // DESC, including exact ties on created (broken by id) between a
 // suffix-bearing and a suffix-free row.
 func TestListAgents_SortedSurvivesMonotonicSuffixAndVariableFractions(t *testing.T) {
+	// Skip before creating fixtures: setRawCreatedUpdatedText (this test's
+	// only caller of it) writes SQLite-only TEXT timestamps.
+	enttest.SkipOnPostgres(t, "writes SQLite TEXT timestamps (with a monotonic suffix) that only the SQLite driver produces")
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 

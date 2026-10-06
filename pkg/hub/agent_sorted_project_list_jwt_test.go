@@ -98,7 +98,7 @@ func TestListProjectAgentsSortedAgentJWT_CursorBinding(t *testing.T) {
 // decisions (4 + 8P, no gate, no effective-page-size reduction on this
 // path), and so do limit=501 and limit=100000 via the limit clamp.
 func TestListProjectAgentsSortedAgentJWT_DecisionCounts_Paged(t *testing.T) {
-	f := sortedListSetup(t)
+	f, counting, fault := sortedListSetupWithFault(t, newCountingAgentStore)
 	self := f.createAgent(t, "self3", string(state.PhaseRunning), nil)
 	f.createAgentsBulk(t, 500, "pagedjwt", string(state.PhaseStopped), nil)
 	tok := f.agentJWTFor(t, self.ID)
@@ -110,8 +110,7 @@ func TestListProjectAgentsSortedAgentJWT_DecisionCounts_Paged(t *testing.T) {
 	// ids: an unclamped 501-row page would reach the end (no cursor) and
 	// ask for 501 ids, even though the store's own read cap would still
 	// hand back only 500 rows.
-	counting := &countingAgentStore{Store: f.store}
-	f.srv.store = counting
+	fault.Arm()
 	for _, limit := range []int{500, 501, 100000} {
 		counting.mu.Lock()
 		counting.listAgentsIDs = nil
@@ -171,10 +170,10 @@ func TestListProjectAgentsSortedAgentJWT_DecisionCounts_Complete(t *testing.T) {
 // exactly zero decisions are recorded, since there is no agent.list gate on
 // this path at all.
 func TestListProjectAgentsSortedAgentJWT_CandidateCeiling(t *testing.T) {
-	f := sortedListSetup(t)
+	f, counting, fault := sortedListSetupWithFault(t, newCountingAgentStore)
 	self := f.createAgent(t, "self5", string(state.PhaseRunning), nil)
-	counting := &countingAgentStore{Store: f.store, fakeCandidateSize: authorizedListMaxCandidates + 1}
-	f.srv.store = counting
+	counting.fakeCandidateSize = authorizedListMaxCandidates + 1
+	fault.Arm()
 	tok := f.agentJWTFor(t, self.ID)
 
 	emitter := &recordingDecisionAuditEmitter{}
@@ -194,11 +193,10 @@ func TestListProjectAgentsSortedAgentJWT_CandidateCeiling(t *testing.T) {
 // the member read returns more than the ceiling (the pool grew in between).
 // The response is still the 422, at zero decisions, with no full-row read.
 func TestListProjectAgentsSortedAgentJWT_CandidateCeiling_Race(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raceStore, fault := sortedListSetupWithFault(t, newRaceMembersStore(authorizedListMaxCandidates+1))
+	counting := raceStore.countingAgentStore
 	self := f.createAgent(t, "self5r", string(state.PhaseRunning), nil)
-	counting := &countingAgentStore{Store: f.store}
-	raceStore := &raceMembersStore{countingAgentStore: counting, memberCount: authorizedListMaxCandidates + 1}
-	f.srv.store = raceStore
+	fault.Arm()
 	tok := f.agentJWTFor(t, self.ID)
 
 	emitter := &recordingDecisionAuditEmitter{}
@@ -271,12 +269,13 @@ func TestListProjectAgentsSortedAgentJWT_CursorPhaseReplayRejected(t *testing.T)
 // row whose ProjectID no longer matches is dropped on the agent-JWT path at
 // no decision cost: 4 scope decisions plus 8 for the one kept row.
 func TestListProjectAgentsSortedAgentJWT_Race_ProjectMismatch(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newReprojectingListAgentsStore)
 	self := f.createAgent(t, "rp-self", string(state.PhaseRunning), nil)
 	moved := f.createAgent(t, "rp-moved", string(state.PhaseStopped), nil)
 	tok := f.agentJWTFor(t, self.ID)
 
-	f.srv.store = &reprojectingListAgentsStore{Store: f.store, agentID: moved.ID, newProjectID: tid("sl-other-project")}
+	raced.agentID, raced.newProjectID = moved.ID, tid("sl-other-project")
+	fault.Arm()
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
@@ -294,7 +293,7 @@ func TestListProjectAgentsSortedAgentJWT_Race_ProjectMismatch(t *testing.T) {
 // a short page that still carries a cursor, and that following the cursor
 // continues after it with no row repeated.
 func TestListProjectAgentsSortedAgentJWT_Race_MissingRow(t *testing.T) {
-	f := sortedListSetup(t)
+	f, raced, fault := sortedListSetupWithFault(t, newDeletingAfterMembersStore)
 	self := f.createAgent(t, "rm-self", string(state.PhaseRunning), nil)
 	sibs := make([]string, 4)
 	for i := range sibs {
@@ -304,7 +303,8 @@ func TestListProjectAgentsSortedAgentJWT_Race_MissingRow(t *testing.T) {
 
 	// updated desc: the newest sibling is first on page 0.
 	newest := sibs[len(sibs)-1]
-	f.srv.store = &deletingAfterMembersStore{Store: f.store, agentID: newest}
+	raced.agentID = newest
+	fault.Arm()
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
@@ -330,12 +330,13 @@ func TestListProjectAgentsSortedAgentJWT_Race_MissingRow(t *testing.T) {
 // pins that a row whose labels change so it fails the label filter is
 // dropped on the agent-JWT path at no decision cost.
 func TestListProjectAgentsSortedAgentJWT_Race_LabelChange_NoLongerMatchesFilter(t *testing.T) {
-	f := sortedListSetup(t)
+	f, mutating, fault := sortedListSetupWithFault(t, newMutatingAfterMembersStore)
 	self := f.createAgent(t, "rf-self", string(state.PhaseRunning), map[string]string{"team": "a"})
 	raced := f.createAgent(t, "rf-raced", string(state.PhaseStopped), map[string]string{"team": "a"})
 	tok := f.agentJWTFor(t, self.ID)
 
-	f.srv.store = &mutatingAfterMembersStore{Store: f.store, agentID: raced.ID, newLabels: map[string]string{"team": "b"}}
+	mutating.agentID, mutating.newLabels = raced.ID, map[string]string{"team": "b"}
+	fault.Arm()
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
@@ -354,13 +355,14 @@ func TestListProjectAgentsSortedAgentJWT_Race_LabelChange_NoLongerMatchesFilter(
 // decisions. The capabilities are compared against a legacy agent-JWT
 // listing of the same row after the change.
 func TestListProjectAgentsSortedAgentJWT_Race_LabelChange_StillMatchesFilter(t *testing.T) {
-	f := sortedListSetup(t)
+	f, mutating, fault := sortedListSetupWithFault(t, newMutatingAfterMembersStore)
 	self := f.createAgent(t, "rs-self", string(state.PhaseRunning), nil)
 	raced := f.createAgent(t, "rs-raced", string(state.PhaseStopped), map[string]string{"team": "a", "extra": "1"})
 	tok := f.agentJWTFor(t, self.ID)
 
 	newLabels := map[string]string{"team": "a", "extra": "2"}
-	f.srv.store = &mutatingAfterMembersStore{Store: f.store, agentID: raced.ID, newLabels: newLabels}
+	mutating.agentID, mutating.newLabels = raced.ID, newLabels
+	fault.Arm()
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
