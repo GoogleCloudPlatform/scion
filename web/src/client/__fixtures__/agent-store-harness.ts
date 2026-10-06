@@ -214,9 +214,12 @@ const ALWAYS_EMITTED: ReadonlySet<string> = new Set([
   'deletion',
 ]);
 
-/** Whether Go's `omitempty` drops `value`: null, an empty string, list or map. */
+/**
+ * Whether Go's `omitempty` drops `value`: absent, null, or an empty string,
+ * list or map, as the store's own emptiness check reads it.
+ */
 function isEmpty(value: unknown): boolean {
-  if (value === null || value === '') return true;
+  if (value === undefined || value === null || value === '') return true;
   if (Array.isArray(value)) return value.length === 0;
   return typeof value === 'object' && Object.keys(value).length === 0;
 }
