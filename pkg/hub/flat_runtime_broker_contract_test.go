@@ -1643,7 +1643,7 @@ func TestFlatRegistration_NameOrSlugCollisionOnCreateRejected(t *testing.T) {
 	for _, name := range []string{"taken-name", "taken-slug"} {
 		rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: tid("new-flat-" + name), Name: name, RuntimeTarget: f.target})
 		d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
-		assert.Equal(t, existing.ID, d["existingRuntimeBrokerId"])
+		requireNameConflictDetails(t, rec, d, existing.ID)
 		_, err := f.s.GetRuntimeBroker(ctx, tid("new-flat-"+name))
 		assert.ErrorIs(t, err, store.ErrNotFound, "no row is created")
 	}
@@ -1713,13 +1713,24 @@ func TestFlatRegistration_ExperimentOffRejectsNewAllowsExisting(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "an existing flat row re-registers with the experiment off: %s", rec.Body.String())
 }
 
+// requireNameConflictDetails asserts the runtime_broker_name_conflict details
+// carry name and slug only: no other Runtime Broker's ID appears anywhere in
+// the response.
+func requireNameConflictDetails(t *testing.T, rec *httptest.ResponseRecorder, d map[string]interface{}, otherID string) {
+	t.Helper()
+	assert.Contains(t, d, "name")
+	assert.Contains(t, d, "slug")
+	assert.NotContains(t, d, "existingRuntimeBrokerId")
+	assert.NotContains(t, rec.Body.String(), otherID, "the response must not include the other Runtime Broker's ID")
+}
+
 func TestLegacyRegistration_NameCollidingWithFlatRowRefused_Brokerauth(t *testing.T) {
 	t.Skip(pendingFlatDispatch)
 	f := newFlatRegFixture(t, true)
 	flatID := f.registerFlat(t, tid("flat-reg-collide"), "flat-collide")
 	rec := f.register(t, f.other, CreateBrokerRegistrationRequest{Name: "FLAT-COLLIDE"})
 	d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeBrokerNameConflict)
-	assert.Equal(t, flatID, d["existingRuntimeBrokerId"])
+	requireNameConflictDetails(t, rec, d, flatID)
 	_, err := f.s.GetLegacyRuntimeBrokerByName(context.Background(), "flat-collide")
 	assert.ErrorIs(t, err, store.ErrNotFound, "no duplicate legacy row next to a flat row")
 }
