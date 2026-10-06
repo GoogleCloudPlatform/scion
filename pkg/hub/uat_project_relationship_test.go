@@ -819,9 +819,9 @@ func TestProjectUAT_PTYTicketPathFailsClosed(t *testing.T) {
 // TestSessionOwnerAttach_DeniedAfterProjectAccessRemoved pins the rule for
 // interactive sessions: an owner/ancestor relationship grant on a project
 // target requires the user's active project access at use time, so a
-// session user whose project binding was removed no longer passes attach
-// or port-access authorization on their own agent. The row-level coverage
-// is in authz_relationship_project_access_test.go.
+// session user whose project binding was removed is denied attach and
+// port access on their own agent. The row-level coverage is in
+// authz_relationship_project_access_test.go.
 func TestSessionOwnerAttach_DeniedAfterProjectAccessRemoved(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := tid("uatp-session-project")
