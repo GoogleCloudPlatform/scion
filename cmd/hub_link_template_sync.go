@@ -25,31 +25,43 @@ import (
 
 // splitTemplatesByHubPresence splits local project templates into those not
 // yet on the Hub in the project scope and those that already exist there. It
-// uses the same lookup as syncTemplateToHub (exact name, project scope,
-// active), so a template it reports as missing is one sync would create.
+// lists the project's active project-scoped templates once, following
+// pagination, and matches names exactly, the same criteria syncTemplateToHub
+// uses, so a template it reports as missing is one sync would create.
 func splitTemplatesByHubPresence(ctx context.Context, hubCtx *HubContext, templates []*config.Template) (missing, existing []*config.Template, err error) {
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, tpl := range templates {
-		resp, err := hubCtx.Client.Templates().List(ctx, &hubclient.ListTemplatesOptions{
-			Name:      tpl.Name,
-			Scope:     "project",
-			ProjectID: projectID,
-			Status:    "active",
-		})
+
+	onHub := make(map[string]bool)
+	opts := &hubclient.ListTemplatesOptions{
+		Scope:     "project",
+		ProjectID: projectID,
+		Status:    "active",
+	}
+	seenCursors := make(map[string]bool)
+	for {
+		resp, err := hubCtx.Client.Templates().List(ctx, opts)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to check Hub for template %q: %w", tpl.Name, err)
+			return nil, nil, fmt.Errorf("failed to list project templates on the Hub: %w", err)
 		}
-		found := false
 		for i := range resp.Templates {
-			if resp.Templates[i].Name == tpl.Name {
-				found = true
-				break
-			}
+			onHub[resp.Templates[i].Name] = true
 		}
-		if found {
+		next := resp.Page.NextCursor
+		if next == "" {
+			break
+		}
+		if seenCursors[next] {
+			return nil, nil, fmt.Errorf("failed to list project templates on the Hub: pagination cursor repeated")
+		}
+		seenCursors[next] = true
+		opts.Page.Cursor = next
+	}
+
+	for _, tpl := range templates {
+		if onHub[tpl.Name] {
 			existing = append(existing, tpl)
 		} else {
 			missing = append(missing, tpl)

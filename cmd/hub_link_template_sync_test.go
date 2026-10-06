@@ -30,28 +30,42 @@ import (
 )
 
 // TestSplitTemplatesByHubPresence verifies that hub link offers only
-// templates the Hub does not have yet in the project scope: the lookup uses
-// the exact name, project scope, project ID and active status, the same
-// lookup syncTemplateToHub uses to decide between create and update.
+// templates the Hub does not have yet in the project scope. It lists the
+// project's active project-scoped templates once per page (no per-template
+// lookups), follows the pagination cursor to the last page, and matches
+// names exactly, the same criteria syncTemplateToHub uses.
 func TestSplitTemplatesByHubPresence(t *testing.T) {
 	const projectID = "proj-123"
+	var mu sync.Mutex
+	var cursors []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		q := r.URL.Query()
 		if r.URL.Path != "/api/v1/templates" || r.Method != http.MethodGet ||
-			q.Get("scope") != "project" || q.Get("projectId") != projectID || q.Get("status") != "active" {
+			q.Get("scope") != "project" || q.Get("projectId") != projectID || q.Get("status") != "active" ||
+			q.Has("name") {
 			http.Error(w, "unexpected request "+r.URL.String(), http.StatusBadRequest)
 			return
 		}
-		templates := []map[string]interface{}{}
-		switch q.Get("name") {
-		case "on-hub":
-			templates = append(templates, map[string]interface{}{"id": "t1", "name": "on-hub"})
-		case "prefix-only":
-			// A fuzzy match with a different name does not count.
-			templates = append(templates, map[string]interface{}{"id": "t2", "name": "prefix-only-other"})
+		mu.Lock()
+		cursors = append(cursors, q.Get("cursor"))
+		mu.Unlock()
+		switch q.Get("cursor") {
+		case "":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"templates": []map[string]interface{}{
+					// A similar name does not count as the same template.
+					{"id": "t2", "name": "prefix-only-other"},
+				},
+				"nextCursor": "page-2",
+			})
+		case "page-2":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"templates": []map[string]interface{}{{"id": "t1", "name": "on-hub"}},
+			})
+		default:
+			http.Error(w, "unexpected cursor", http.StatusBadRequest)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": templates})
 	}))
 	defer server.Close()
 
@@ -71,7 +85,8 @@ func TestSplitTemplatesByHubPresence(t *testing.T) {
 		return out
 	}
 	require.Equal(t, []string{"new-one", "prefix-only"}, names(missing))
-	require.Equal(t, []string{"on-hub"}, names(existing))
+	require.Equal(t, []string{"on-hub"}, names(existing), "a template on a later page must be found")
+	require.Equal(t, []string{"", "page-2"}, cursors, "one list call per page, not per template")
 }
 
 // TestSplitTemplatesByHubPresence_ListError verifies that a failed Hub lookup
@@ -88,7 +103,28 @@ func TestSplitTemplatesByHubPresence_ListError(t *testing.T) {
 
 	_, _, err = splitTemplatesByHubPresence(context.Background(), hubCtx, []*config.Template{{Name: "a"}})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), `template "a"`)
+	require.Contains(t, err.Error(), "failed to list project templates on the Hub")
+}
+
+// TestSplitTemplatesByHubPresence_RepeatedCursor verifies that a Hub that
+// keeps returning the same cursor ends in an error instead of looping.
+func TestSplitTemplatesByHubPresence_RepeatedCursor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"templates":  []map[string]interface{}{},
+			"nextCursor": "same",
+		})
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "proj-123"}
+
+	_, _, err = splitTemplatesByHubPresence(context.Background(), hubCtx, []*config.Template{{Name: "a"}})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cursor repeated")
 }
 
 // linkSyncHubCalls records the mutating calls syncNewTemplatesOnLink made.
@@ -117,11 +153,9 @@ func newLinkSyncMockHub(t *testing.T, calls *linkSyncHubCalls, listFails bool) *
 				http.Error(w, `{"error":{"code":"internal","message":"boom"}}`, http.StatusInternalServerError)
 				return
 			}
-			templates := []map[string]interface{}{}
-			if r.URL.Query().Get("name") == "on-hub" {
-				templates = append(templates, map[string]interface{}{"id": "t-existing", "name": "on-hub"})
-			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": templates})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []map[string]interface{}{
+				{"id": "t-existing", "name": "on-hub"},
+			}})
 		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
 			var req hubclient.CreateTemplateRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
