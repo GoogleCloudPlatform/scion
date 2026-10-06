@@ -86,10 +86,9 @@ on: # zizmor: ignore[dangerous-triggers] -- no PR code checked out or run; see S
 # its event head is not the live head and the newest run for the live head
 # is not active, awaiting approval, or completed with a gate result, its
 # guard re-runs that newest run; otherwise a live-head run is still to come
-# or already fine.
-# That attempt joins the group while this run holds the slot, so it is now
-# the last arrival and (1) applies to it. If the guard fails or its attempt
-# backstop fires, the repair stops with a warning.
+# or already fine. That attempt joins the group while this run holds the
+# slot, so it is now the last arrival and (1) applies to it. If the guard
+# fails or its attempt backstop fires, the repair stops with a warning.
 #
 # Do NOT set cancel-in-progress to true: a later arrival could cancel the
 # latest head's run mid-run, and the guard cannot repair that because it
@@ -152,10 +151,9 @@ jobs:
       # Termination bound: the guard acts only in a run whose event head is
       # not the live head, while the newest run for the live head is not
       # active, awaiting approval, or completed with a gate result. It then
-      # makes at most one re-run
-      # request, with no retry, and the re-run carries the live head, so it
-      # does not trigger the guard again unless the PR gets a new head (which
-      # is a new event, not the guard).
+      # makes at most one re-run request, with no retry, and the re-run
+      # carries the live head, so it does not trigger the guard again unless
+      # the PR gets a new head (which is a new event, not the guard).
       # Runs in this group never overlap. (A re-run of a run created under an
       # older version of this file may use a different group; the bound does
       # not depend on mutual exclusion.) As a hard backstop it never re-runs
