@@ -13,11 +13,12 @@
 // limitations under the License.
 
 // Package suppgroups decides which supplementary groups sciontool keeps
-// when it drops from root to the agent user, and whether it applies umask
-// 002 for nfs shared-dir writers (ptone/scion#3155). Both runtimes set
-// EnvVar: Docker/Podman with --group-add, Kubernetes with exactly the pod's
-// supplementalGroups (pods start as the agent user, so there it only
-// drives the umask).
+// when it drops from root to the agent user, and whether it clears the
+// group bits of the umask (022 becomes 002, 077 becomes 007) for nfs
+// shared-dir writers (ptone/scion#3155). Both runtimes set EnvVar:
+// Docker/Podman with --group-add, Kubernetes with the nfs leaf gids the pod
+// holds (sharedDirGroups: its supplementalGroups plus a leaf gid equal to
+// fsGroup). Pods start as the agent user, so there it only drives the umask.
 //
 // Go's exec with SysProcAttr.Credential calls setgroups(Groups), so an
 // empty Groups clears every supplementary group, including those the

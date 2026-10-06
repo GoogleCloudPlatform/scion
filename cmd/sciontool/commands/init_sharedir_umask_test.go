@@ -62,8 +62,9 @@ func runInitChildUmask(t *testing.T, env string, granted []int) (child, atSetup 
 	return strings.TrimSpace(string(data)), atSetup
 }
 
-// Granted nfs shared-dir groups: init applies umask 002 before
-// setupHostUser, and the harness child inherits it (ptone/scion#3155).
+// Granted nfs shared-dir groups: init clears the umask group bits
+// (022 becomes 002) before setupHostUser, and the harness child inherits it
+// (ptone/scion#3155).
 func TestRunInit_SharedDirGroups_Umask002InheritedByChild(t *testing.T) {
 	child, atSetup := runInitChildUmask(t, "4242", []int{0, 4242})
 	if child != "0002" {

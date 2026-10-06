@@ -91,3 +91,21 @@ func TestApplySharedDirUmask_ClearsOnlyGroupBits(t *testing.T) {
 		assert.Equal(t, tc.want, *cur, "from %04o", tc.from)
 	}
 }
+
+// Reading the current umask must never set a looser mask, even for a
+// moment: a child forked in between (substrate-serve's exec endpoint runs
+// concurrently with RunInit) would keep it for life. The first call sets
+// the strictest mask, 0777, never 0.
+func TestApplySharedDirUmask_ReadNeverLoosens(t *testing.T) {
+	t.Setenv(EnvVar, "1500")
+	withGranted(t, []int{1500}, nil)
+	_, calls := withUmaskStub(t, 0o022)
+
+	applied, _, _ := ApplySharedDirUmask()
+	assert.True(t, applied)
+	if assert.Len(t, *calls, 2) {
+		assert.NotZero(t, (*calls)[0], "first umask call must not set 0")
+		assert.Equal(t, 0o777, (*calls)[0], "first umask call must set the strictest mask")
+		assert.Equal(t, 0o002, (*calls)[1])
+	}
+}

@@ -39,7 +39,11 @@ func ApplySharedDirUmask() (applied bool, previous, current int) {
 	if !ShouldApplyUmask() {
 		return false, 0, 0
 	}
-	previous = umask(0)
+	// Read the current mask by setting the strictest one (0777), never 0:
+	// under substrate-serve the exec endpoint can fork while this runs, and
+	// a child forked between the two calls keeps that mask for life, so
+	// the moment must be stricter, not looser.
+	previous = umask(0o777)
 	current = previous &^ sharedDirUmaskGroupBits
 	umask(current)
 	return true, previous, current

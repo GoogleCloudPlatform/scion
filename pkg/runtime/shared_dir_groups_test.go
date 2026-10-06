@@ -119,9 +119,10 @@ func podEnvValues(_ any, containers []corev1.Container, name string) []string {
 	return vals
 }
 
-// The broker owns SCION_SUPPLEMENTAL_GIDS in the pod env too: exactly the
-// pod's supplementalGroups when there are any, so sciontool applies umask
-// 002; pods start as the agent user, so it drives nothing else
+// The broker owns SCION_SUPPLEMENTAL_GIDS in the pod env too: the nfs leaf
+// gids the pod holds (sharedDirGroups, including a leaf gid equal to
+// fsGroup), so sciontool clears the umask group bits (077 becomes 007);
+// pods start as the agent user, so it drives nothing else
 // (ptone/scion#3155).
 func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
 	rt := newNFSTestK8sRuntime()
@@ -135,7 +136,7 @@ func TestBuildPod_SupplementalGIDsEnv(t *testing.T) {
 		assert.Empty(t, podEnvValues(pod, pod.Spec.InitContainers, SupplementalGIDsEnvVar), "init containers unchanged")
 	})
 	// The leaf gid equals fsGroup: no supplementalGroups entry, but the pod
-	// holds it through fsGroup, so it still gets umask 002.
+	// holds it through fsGroup, so its umask group bits are still cleared.
 	t.Run("leaf gid equal to fsGroup still sets it", func(t *testing.T) {
 		pod, err := rt.buildPod("default", sharedDirGroupsRunConfig(fsGroup))
 		require.NoError(t, err)

@@ -47,16 +47,23 @@ func TestManager_ServiceInheritsSharedDirUmask(t *testing.T) {
 	if err := mgr.Start(context.Background(), specs, 0, 0, "", false); err != nil {
 		t.Fatalf("Start() error: %v", err)
 	}
-	time.Sleep(1 * time.Second)
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = mgr.Shutdown(shutdownCtx)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = mgr.Shutdown(shutdownCtx)
+	}()
 
-	data, err := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".scion", "services", "logs", "umask-printer.stdout.log"))
-	if err != nil {
-		t.Fatalf("read stdout log: %v", err)
+	// Poll for the service's output instead of sleeping a fixed time.
+	logPath := filepath.Join(os.Getenv("HOME"), ".scion", "services", "logs", "umask-printer.stdout.log")
+	var got string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if data, err := os.ReadFile(logPath); err == nil {
+			if got = strings.TrimSpace(string(data)); got != "" {
+				break
+			}
+		}
 	}
-	if got := strings.TrimSpace(string(data)); got != "0002" {
+	if got != "0002" {
 		t.Errorf("service umask = %q, want 0002", got)
 	}
 }

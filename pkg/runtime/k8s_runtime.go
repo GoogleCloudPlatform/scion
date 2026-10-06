@@ -2132,8 +2132,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// SCION_SUPPLEMENTAL_GIDS is broker-owned: drop any template, user env
 	// or secret value, and set it to the nfs leaf gids the pod holds (its
 	// supplementalGroups plus a leaf gid skipped there because it equals
-	// fsGroup, which the pod holds through fsGroup), so sciontool applies
-	// umask 002 for nfs shared-dir writers (ptone/scion#3155). Pods start
+	// fsGroup, which the pod holds through fsGroup), so sciontool clears the
+	// umask group bits for nfs shared-dir writers (ptone/scion#3155). Pods start
 	// as the agent user via runAsUser, so sciontool does no privilege drop
 	// here; the variable only drives the umask.
 	envVars = withSupplementalGIDsEnv(envVars, sharedDirGroups(config))

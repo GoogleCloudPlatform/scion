@@ -1242,7 +1242,8 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 // granted. sciontool keeps only ids that are also in its own supplementary
 // groups (what the runtime actually granted), keeps them when it drops from
 // root to the agent user (Go's privilege drop otherwise clears them), and
-// applies umask 002 when any remain. Both runtimes set it and own it:
+// clears the group bits of the umask (077 becomes 007) when any remain.
+// Both runtimes set it and own it:
 // Docker/Podman via appendSharedDirGroupArgs (buildCommonRunArgs drops
 // template or user values), Kubernetes via withSupplementalGIDsEnv with
 // the leaf gids the pod holds (supplementalGroups plus one equal to
