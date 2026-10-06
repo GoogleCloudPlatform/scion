@@ -2442,6 +2442,19 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     ).toBe(agentLoads);
   });
 
+  it('on a Mac, Ctrl+K in the open palette search field edits the query, and Cmd+K closes it', async () => {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+    const input = palette.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input')!;
+
+    expect(press({ key: 'k', ctrlKey: true, composed: true }, input)).toBe(true);
+    expect(palette.open).toBe(true);
+
+    expect(press({ key: 'k', metaKey: true, composed: true }, input)).toBe(false);
+    expect(palette.open).toBe(false);
+  });
+
   it('a second press while the palette is still loading cancels the open', async () => {
     press({ key: 'k', metaKey: true });
     press({ key: 'k', metaKey: true });
