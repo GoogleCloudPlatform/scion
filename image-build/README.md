@@ -245,13 +245,22 @@ gcloud builds submit \
 ```
 
 `--ignore-file` is required because the default `.gcloudignore` drops the web
-source the Dockerfile builds. Use `gcloudignore-hub-gke`, not
-`gcloudignore-omni`: both keep the web source, but omni's unanchored
-`agents.md` and `.gemini/` patterns also drop the embedded default-template
-files under `pkg/config/embeds/` and `resources/` (gitignore semantics match a
-slash-less pattern at any depth), so the build succeeds with those files
-missing from the binary. `gcloudignore-hub-gke` anchors those patterns to the
-repo root, as the root `.dockerignore` does.
+source the Dockerfile builds. `gcloudignore-hub-gke` keeps it; its exclusions
+are currently the same as `gcloudignore-omni`'s.
+
+All Cloud Build ignore files (`.gcloudignore` and `image-build/gcloudignore-*`)
+anchor every pattern that names a repo-root path with a leading `/`, as the
+root `.dockerignore` does. Gitignore semantics match a slash-less pattern at
+any depth, so an unanchored `agents.md`, `.gemini/`, `.claude/` or `README.md`
+would also drop files under `//go:embed` roots (`pkg/config/embeds/`,
+`resources/templates/`, `harnesses/`): the build would succeed with those files
+missing from the binary. Patterns left unanchored on purpose (`*_test.go`,
+`.git/`, `testdata/`, `downloads/`) say why in a comment.
+`cmd/gcloudignore_contract_test.go` fails if any ignore file matches a tracked
+file under a `//go:embed` root. Note that gcloud resolves `#!include:.gitignore`
+relative to the ignore file, so the `image-build/` files include the empty
+`image-build/.gitignore`, and only the root `.gcloudignore` pulls in the root
+`.gitignore`.
 
 No moving tag is pushed: repointing one needs an explicit ACK, and the chart
 prefers pinning the image by digest (`image.digest` over `image.tag`).

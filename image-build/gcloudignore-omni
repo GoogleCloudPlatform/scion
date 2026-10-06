@@ -9,24 +9,35 @@
 #
 # Usage: pass --ignore-file=image-build/gcloudignore-omni to
 # gcloud builds submit when building the omni target.
+#
+# Gitignore semantics: a pattern without a slash matches at any depth, which
+# would also drop files under //go:embed roots (e.g. pkg/config/embeds/,
+# resources/templates/, harnesses/) from the upload: the build still passes,
+# but the files are missing from the binary. So every pattern that names a
+# repo-root path is anchored with a leading "/" (patterns with an inner slash,
+# such as web/dist/, are already anchored). The few patterns left unanchored
+# on purpose say why. cmd/gcloudignore_contract_test.go checks that no tracked
+# file under a //go:embed root is matched by any Cloud Build ignore file.
 
 #!include:.gitignore
+# (gcloud resolves this next to this file: image-build/.gitignore, not the
+# root .gitignore.)
 
 # ---------------------------------------------------------------------------
 # Directories not needed by omni builds
 # ---------------------------------------------------------------------------
-changelog/
-docs/
-docs-repo/
-docs-site/
-examples/
-extras/
-hack/
+/changelog/
+/docs/
+/docs-repo/
+/docs-site/
+/examples/
+/extras/
+/hack/
 /internal/
-reviews/
-scratch/
+/reviews/
+/scratch/
 /scripts/
-shared-dirs/
+/shared-dirs/
 /skills/
 
 # ---------------------------------------------------------------------------
@@ -41,43 +52,51 @@ web/.env*
 # ---------------------------------------------------------------------------
 # Test files — Cloud Build compiles Go but never runs tests
 # ---------------------------------------------------------------------------
+# Unanchored on purpose: Go tests sit next to the code in every package.
 *_test.go
 
 # ---------------------------------------------------------------------------
 # Build artifacts and tool state
 # ---------------------------------------------------------------------------
+# .git/, testdata/ and downloads/ are unanchored on purpose:
+#   .git/      - VCS metadata of any nested checkout is never build input.
+#   testdata/  - Go test fixtures live next to each package (pkg/*/testdata)
+#                and Cloud Build does not run tests.
+#   downloads/ - agent/harness runtime downloads can land in any directory
+#                (mirrors the any-depth downloads/ in .gitignore).
+# Everything else here names a repo-root path and is anchored with "/".
 .git/
-.claude/
-.design/
-.scratch/
-.tasks/
-.scion/
-build/
-.build/
+/.claude/
+/.design/
+/.scratch/
+/.tasks/
+/.scion/
+/build/
+/.build/
 testdata/
 downloads/
 
 # ---------------------------------------------------------------------------
 # CI / IDE / config files not needed for image builds
 # ---------------------------------------------------------------------------
-.gemini/
-.geminiignore
-.github/
-.gitignore
+/.gemini/
+/.geminiignore
+/.github/
+/.gitignore
 
 # ---------------------------------------------------------------------------
 # Root files not needed for image builds
 # ---------------------------------------------------------------------------
-claude.md
-gemini.md
-.claudeignore
-.dockerignore
-.coordinator-state.md
-.eng-manager-state.md
-agents.md
-CHANGELOG.md
-GLOSSARY.md
-LICENSE
-Makefile
-README.md
-pr-*-review*.md
+/claude.md
+/gemini.md
+/.claudeignore
+/.dockerignore
+/.coordinator-state.md
+/.eng-manager-state.md
+/agents.md
+/CHANGELOG.md
+/GLOSSARY.md
+/LICENSE
+/Makefile
+/README.md
+/pr-*-review*.md
