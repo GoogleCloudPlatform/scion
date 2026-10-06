@@ -32,7 +32,6 @@ func TestEnsureSigningKey_RequireStableRefusesGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
-	defer func() { _ = st.Close() }()
 
 	s := &Server{
 		hubID:  "host-with-no-key",
@@ -79,7 +78,6 @@ func TestEnsureSigningKey_GeneratesWhenNotRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
-	defer func() { _ = st.Close() }()
 
 	s := &Server{hubID: "host1", store: st, config: ServerConfig{}}
 

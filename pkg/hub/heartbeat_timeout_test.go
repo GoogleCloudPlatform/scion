@@ -66,7 +66,6 @@ func setupHeartbeatTestServer(t *testing.T) (*Server, store.Store, *trackingEven
 	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 
 	ep := &trackingEventPublisher{}
 

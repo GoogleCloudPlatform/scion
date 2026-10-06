@@ -91,7 +91,6 @@ func newTestQuotaService(t *testing.T) (*QuotaService, store.Store) {
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}
-	t.Cleanup(func() { _ = baseStore.Close() })
 
 	wrapped := newLockingStoreWrapper(baseStore)
 

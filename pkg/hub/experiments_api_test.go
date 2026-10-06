@@ -55,7 +55,6 @@ func newBareTestStore(t *testing.T) store.Store {
 		t.Fatalf("Migrate: %v", err)
 	}
 	_ = base.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
-	t.Cleanup(func() { _ = base.Close() })
 	return base
 }
 

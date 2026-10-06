@@ -229,7 +229,6 @@ func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	// Create a raw store — no testServer, so no automatic seeding.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = s.Close() })
 	require.NoError(t, s.Migrate(context.Background()))
 	ctx := context.Background()
 

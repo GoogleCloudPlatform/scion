@@ -52,7 +52,6 @@ func newSQLiteOpsServer(t *testing.T, bootstrap *koanf.Koanf, seed map[string]st
 	if err != nil {
 		t.Fatalf("failed to create sqlite store: %v", err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	ctx := context.Background()
 	for section, doc := range seed {

@@ -34,7 +34,6 @@ import (
 func TestSeedLimitDefinitions_FreshDBSeedsMaxAgentsPerBrokerAt100(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	defer func() { _ = s.Close() }()
 
 	ctx := context.Background()
 	seedLimitDefinitions(ctx, s)
@@ -54,7 +53,6 @@ func TestSeedLimitDefinitions_ExistingRowUntouchedByReseed(t *testing.T) {
 		t.Run(fmt.Sprintf("existing_%d", existing), func(t *testing.T) {
 			s, err := newTestStore(t, ":memory:")
 			require.NoError(t, err)
-			defer func() { _ = s.Close() }()
 
 			ctx := context.Background()
 

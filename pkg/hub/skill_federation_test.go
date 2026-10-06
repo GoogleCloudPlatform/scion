@@ -32,7 +32,6 @@ func newFederationTestServer(t *testing.T, mock *httptest.Server) (*Server, stor
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	t.Cleanup(func() { _ = s.Close() })
 	fedClient := mock.Client()
 	fedClient.Timeout = federationTimeout
 	fedClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
