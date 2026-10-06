@@ -2860,7 +2860,33 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	}
 	// Stop exactly the resolved entry: StopTarget does not re-resolve by
 	// name, so the run checked above is the run stopped.
-	if err := mgr.StopTarget(ctx, resolvedStopRef(target, match)); err != nil {
+	stopRef := resolvedStopRef(target, match)
+	if err := mgr.StopTarget(ctx, stopRef); err != nil {
+		if errors.Is(err, scionrt.ErrRunMismatch) {
+			// The runtime enforces stopRef.RunID (Kubernetes Stop is a
+			// run-checked Delete, GoogleCloudPlatform/scion#2515): the
+			// resolved entry was replaced by another run between the lookup
+			// and the stop, and nothing was stopped. The runtime's error
+			// names the run now holding the name; the 404 leaves
+			// currentRunId out, since it is not known here.
+			if runID != "" {
+				span.SetStatus(codes.Error, "run mismatch")
+				s.agentLifecycleLog.Info("Agent stop: runtime entry now belongs to another run; leaving it untouched",
+					"agent_id", id, "project_id", projectID, "run_id", runID,
+					"resolved_run_id", stopRef.RunID, "error", err)
+				StopRunMismatch(w, runID, "")
+				return
+			}
+			// A legacy stop names no run: the entry it resolved is gone,
+			// which is the "not found" outcome, answered as such. The newer
+			// run's entry is left running.
+			s.agentLifecycleLog.Info("Agent stopped (resolved entry replaced by another run)",
+				"agent_id", id, "project_id", projectID,
+				"resolved_run_id", stopRef.RunID, "error", err,
+				"phase", string(state.PhaseStopped))
+			s.writeStopAccepted(w, id)
+			return
+		}
 		if isContainerStopTolerable(err) {
 			// Container doesn't exist, is already stopped, or podman/docker can't find it.
 			// Treat as success so the hub can update its state.
@@ -2975,9 +3001,11 @@ func (s *Server) trackedStartRunID(id, projectID, queryRunID, bodyRunID string) 
 	return bodyRunID
 }
 
-// resolvedStopRef is the runtime entry a broker stop acts on: the resolved
-// target, with the matched entry's run when the target is that entry's
-// container. Both callers, stopAgent and restartAgent's stop leg, pass it
+// resolvedStopRef is the runtime entry a broker stop acts on. When the
+// target is the matched entry's container, it is that entry as an
+// operation ID (AgentOperationID: namespace/pod for a Kubernetes entry),
+// with the entry's run; otherwise it is the bare target with no run, so
+// another entry's namespace or run is never applied. Both callers, stopAgent and restartAgent's stop leg, pass it
 // to Manager.StopTarget, so the resolved entry is stopped without
 // re-resolving by name.
 func resolvedStopRef(target string, m agentMatch) scionrt.RunRef {

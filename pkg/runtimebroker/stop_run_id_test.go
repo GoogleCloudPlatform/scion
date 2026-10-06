@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
@@ -361,6 +363,64 @@ func TestStopAgent_RunMismatch404Details(t *testing.T) {
 	})
 }
 
+// The runtime enforces the stop ref's run (Kubernetes Stop is a run-checked
+// Delete, GoogleCloudPlatform/scion#2515), so the entry the broker resolved
+// can turn out to be replaced by another run when the runtime acts, and
+// StopTarget returns a wrapped ErrRunMismatch with nothing stopped
+// (merge review 6, B1). A run-scoped stop answers the run-mismatch 404,
+// with no forced heartbeat; it is never a 500.
+func TestStopAgent_RuntimeRunMismatch_RunScoped404(t *testing.T) {
+	f := newStopRunFixture(t, "")
+	f.mgr.stopErr = fmt.Errorf("pod ns/dev belongs to run %q, not %q: %w", "run-newer", "run-new", scionrt.ErrRunMismatch)
+	rec := f.stop(t, "projectId="+scopeProjB+"&runId=run-new")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != api.BrokerErrorCodeRunMismatch {
+		t.Errorf("code = %q, want %q", body.Error.Code, api.BrokerErrorCodeRunMismatch)
+	}
+	if got := body.Error.Details[api.BrokerErrorDetailRunID]; got != "run-new" {
+		t.Errorf("details runId = %v, want run-new", got)
+	}
+	if got, ok := body.Error.Details[api.BrokerErrorDetailCurrentRunID]; ok {
+		t.Errorf("details currentRunId = %v, want it omitted (unknown)", got)
+	}
+	if f.stopCalls() != 1 || f.mgr.lastStopAgentID != "cid-new" || f.mgr.lastStopRunID != "run-new" {
+		t.Errorf("stop calls = %d, last = %q run %q; want one stop of cid-new run-new",
+			f.stopCalls(), f.mgr.lastStopAgentID, f.mgr.lastStopRunID)
+	}
+	if n := f.waitHeartbeats(1, 200*time.Millisecond); n != 0 {
+		t.Errorf("run-mismatched stop forced %d heartbeat(s)", n)
+	}
+}
+
+// The same runtime run mismatch on a legacy stop (no runId; the resolved
+// entry's run is still on the ref): the entry it resolved is gone, so the
+// stop is the "not found" 202, never a 500.
+func TestStopAgent_RuntimeRunMismatch_Legacy202(t *testing.T) {
+	f := newStopRunFixture(t, "")
+	f.mgr.stopErr = fmt.Errorf("pod ns/dev was replaced before it could be deleted: %w", scionrt.ErrRunMismatch)
+	rec := f.stop(t, "projectId="+scopeProjB)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "accepted" {
+		t.Errorf("body = %v, want status accepted", body)
+	}
+	if f.stopCalls() != 1 || f.mgr.lastStopAgentID != "cid-new" || f.mgr.lastStopRunID != "run-new" {
+		t.Errorf("stop calls = %d, last = %q run %q; want one stop of cid-new run-new",
+			f.stopCalls(), f.mgr.lastStopAgentID, f.mgr.lastStopRunID)
+	}
+}
+
 // A project-blind run-scoped stop with nothing of the requested run never
 // passes the bare slug to the runtime (review N1): it takes the not-found
 // path. Without a runId the legacy bare-slug pass-through is unchanged.
@@ -405,5 +465,51 @@ func TestRestartAgent_StopLegCarriesEntryRun(t *testing.T) {
 	}
 	if got := f.mgr.LastStartOpts().RunID; got != "run-next" {
 		t.Errorf("restart start run = %q, want run-next", got)
+	}
+}
+
+// resolvedStopRef (merge review 6, N3): the matched entry's container is
+// addressed by its operation ID, qualified with a Kubernetes entry's
+// namespace, and carries the entry's run; any other target is passed bare
+// with no run, so another entry's namespace or run is never applied.
+func TestResolvedStopRef(t *testing.T) {
+	k8sEntry := func(id, ns, run string) api.AgentInfo {
+		return api.AgentInfo{ContainerID: id, RunID: run, Runtime: "kubernetes",
+			Kubernetes: &api.AgentK8sMetadata{Namespace: ns, PodName: id}}
+	}
+	cases := []struct {
+		name   string
+		target string
+		match  agentMatch
+		want   scionrt.RunRef
+	}{
+		{"kubernetes entry in ns-a is namespace-qualified with its run", "dev",
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", "run-1"), matched: true},
+			scionrt.RunRef{ID: "ns-a/dev", RunID: "run-1"}},
+		{"legacy kubernetes entry with no run is qualified, no run", "dev",
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "ns-a", ""), matched: true},
+			scionrt.RunRef{ID: "ns-a/dev"}},
+		{"kubernetes entry with no namespace stays bare", "dev",
+			agentMatch{containerID: "dev", entry: k8sEntry("dev", "", "run-1"), matched: true},
+			scionrt.RunRef{ID: "dev", RunID: "run-1"}},
+		{"docker entry ID is unchanged, with its run", "3f2a9c1d0b7e",
+			agentMatch{containerID: "3f2a9c1d0b7e", entry: api.AgentInfo{ContainerID: "3f2a9c1d0b7e", RunID: "run-1", Runtime: "docker"}, matched: true},
+			scionrt.RunRef{ID: "3f2a9c1d0b7e", RunID: "run-1"}},
+		{"label-overridden container ID is qualified as the target", "dev",
+			agentMatch{containerID: "dev", entry: k8sEntry("pod-xyz", "ns-a", "run-1"), matched: true},
+			scionrt.RunRef{ID: "ns-a/dev", RunID: "run-1"}},
+		{"target other than the matched container is bare, no run", "dev",
+			agentMatch{containerID: "other", entry: k8sEntry("other", "ns-a", "run-1"), matched: true},
+			scionrt.RunRef{ID: "dev"}},
+		{"no match: bare target (legacy pass-through)", "dev",
+			agentMatch{},
+			scionrt.RunRef{ID: "dev"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolvedStopRef(tc.target, tc.match); got != tc.want {
+				t.Errorf("resolvedStopRef(%q) = %+v, want %+v", tc.target, got, tc.want)
+			}
+		})
 	}
 }
