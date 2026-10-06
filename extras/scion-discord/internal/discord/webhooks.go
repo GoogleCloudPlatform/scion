@@ -119,9 +119,10 @@ func (wm *WebhookManager) getOrCreateWebhook(channelID string) (*discordgo.Webho
 }
 
 // isOwnWebhook reports whether wh is the relay webhook this plugin
-// manages: it carries webhookName and was created by the bot user.
+// manages: it carries webhookName and was created by the bot user, whose
+// ID is known.
 func isOwnWebhook(wh *discordgo.Webhook, botUserID string) bool {
-	return wh != nil && wh.Name == webhookName && wh.User != nil && wh.User.ID == botUserID
+	return botUserID != "" && wh != nil && wh.Name == webhookName && wh.User != nil && wh.User.ID == botUserID
 }
 
 // owns reports whether webhookID is the webhook this plugin uses in
