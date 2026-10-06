@@ -128,6 +128,7 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 const (
 	createStageStorage           = "storage"
 	createStageUploadURL         = "upload_url"
+	createStageWorkspaceStorage  = "workspace_storage"
 	createStageManaged           = "managed"
 	createStageRunIntent         = "run_intent"
 	createStageDispatchEnvGather = "dispatch_env_gather"

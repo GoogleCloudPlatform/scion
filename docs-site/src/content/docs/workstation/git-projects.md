@@ -19,7 +19,7 @@ Before diving in, it's important to understand the two workspace models Scion of
 | **Hub required** | No | Yes |
 | **Best for** | Solo development, fast iteration | Team workflows, remote brokers, CI-like dispatch |
 
-**Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents always use **HTTPS clone-based provisioning**. Local worktrees are a local-mode feature only. This is intentional: the Hub enforces a consistent workspace strategy across all brokers and users.
+**Key takeaway**: When a project is managed by the Hub — whether created from a URL or linked from a local directory — agents use **HTTPS clone-based provisioning** by default. The Hub enforces a consistent workspace strategy across all brokers and users, rather than depending on what a given broker machine happens to have checked out. A project can instead select worktree-per-agent mode, which gives Hub-dispatched agents the same host-side shared-clone-plus-worktree strategy local mode uses, gated on the broker's git version being 2.48 or later.
 
 For the full technical details on workspace strategies, see [About Workspaces](/scion/local/workspace/).
 
@@ -226,11 +226,11 @@ Or create a Pull Request directly from the branch on GitHub.
 
 ## Linked Projects: When Local Becomes Remote
 
-If you already have a local checkout linked to the Hub via `scion hub link`, be aware that **the workspace strategy changes**. Once linked, even if the broker machine has the repository on disk, agents use clone-based provisioning — not local worktrees.
+If you already have a local checkout linked to the Hub via `scion hub link`, be aware that **the workspace strategy changes**. Once linked, even if the broker machine has the repository on disk, agents use clone-based provisioning by default, unless the project is configured for worktree-per-agent mode (requires git 2.48+ on the broker).
 
-This means you need a `GITHUB_TOKEN` secret set on the project, just like a project created from a URL.
+This means you need a `GITHUB_TOKEN` secret set on the project for clone-based provisioning, just like a project created from a URL.
 
-To temporarily fall back to local worktree mode:
+To temporarily fall back to local worktree mode outside the Hub entirely:
 
 ```bash
 # Disable hub for a single command
