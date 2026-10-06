@@ -493,21 +493,6 @@ func patchNeedsUpdateError(err error, wantPatched []string, cred hubsync.Credent
 
 // checkHubAppliedPatch fails when the response's plan does not list every
 // requested patch field: the hub ignored them.
-// checkHubAppliedSharedDirs reports an error when req asks for a shared dir
-// backend change and resp's plan does not echo it exactly. A hub that
-// predates the change ignores the request fields and plans a plain
-// reincarnation.
-func checkHubAppliedSharedDirs(req *hubclient.ReincarnateAgentRequest, resp *hubclient.ReincarnateAgentResponse) error {
-	if len(req.SharedDirBackends) == 0 {
-		return nil
-	}
-	if resp == nil || !maps.Equal(resp.Plan.SharedDirBackends, req.SharedDirBackends) ||
-		resp.Plan.AllowEmptySharedDir != req.AllowEmptySharedDir {
-		return fmt.Errorf("this hub does not support --shared-dir-backend; upgrade the hub")
-	}
-	return nil
-}
-
 func checkHubAppliedPatch(want []string, resp *hubclient.ReincarnateAgentResponse) error {
 	if len(want) == 0 {
 		return nil
@@ -522,6 +507,21 @@ func checkHubAppliedPatch(want []string, resp *hubclient.ReincarnateAgentRespons
 		if !got[f] {
 			return fmt.Errorf("this hub does not support reincarnate patch flags; upgrade the hub")
 		}
+	}
+	return nil
+}
+
+// checkHubAppliedSharedDirs reports an error when req asks for a shared dir
+// backend change and resp's plan does not echo it exactly. A hub that
+// predates the change ignores the request fields and plans a plain
+// reincarnation.
+func checkHubAppliedSharedDirs(req *hubclient.ReincarnateAgentRequest, resp *hubclient.ReincarnateAgentResponse) error {
+	if len(req.SharedDirBackends) == 0 {
+		return nil
+	}
+	if resp == nil || !maps.Equal(resp.Plan.SharedDirBackends, req.SharedDirBackends) ||
+		resp.Plan.AllowEmptySharedDir != req.AllowEmptySharedDir {
+		return fmt.Errorf("this hub does not support --shared-dir-backend; upgrade the hub")
 	}
 	return nil
 }
