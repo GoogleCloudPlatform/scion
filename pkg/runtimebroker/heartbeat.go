@@ -128,6 +128,14 @@ type HeartbeatService struct {
 	// result (unknown), omits the field.
 	defaultProfile func() *string
 
+	// flat, when set, makes this the heartbeat of a flat Runtime Broker
+	// instance (.design/flat-runtime-brokers-contract.md): it is sent under
+	// the instance's own Runtime Broker ID (brokerID), lists only the
+	// instance's single runtime target (the default manager), and carries
+	// no profile-scoped data: no DefaultProfile, ProfileAttach or
+	// ProfileSAMappings, and no per-agent profile.
+	flat bool
+
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
 	// listings holds the listing in progress for each target key (guarded
@@ -337,7 +345,7 @@ const saMappingsResendInterval = 10 * time.Minute
 // heartbeat) or saMappingsResendInterval has passed since then, and returns
 // their fingerprint, or "" when nothing was added.
 func (s *HeartbeatService) addProfileSAMappings(heartbeat *hubclient.BrokerHeartbeat) string {
-	if s.profileSAMappings == nil {
+	if s.flat || s.profileSAMappings == nil {
 		return ""
 	}
 	mappings := s.profileSAMappings()
@@ -393,10 +401,10 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
 	}
-	if s.profileAttach != nil {
+	if s.profileAttach != nil && !s.flat {
 		heartbeat.ProfileAttach = s.profileAttach()
 	}
-	if s.defaultProfile != nil {
+	if s.defaultProfile != nil && !s.flat {
 		if name := s.defaultProfile(); name != nil {
 			v := *name
 			heartbeat.DefaultProfile = &v
@@ -646,7 +654,8 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 		targets = append(targets, listTarget{key: key, id: id, runtimeName: runtimeName, mgr: m})
 	}
 	addListTarget(mgr, "default")
-	if s.auxiliaryManagers != nil {
+	// A flat instance serves exactly one runtime target: its own manager.
+	if s.auxiliaryManagers != nil && !s.flat {
 		for i, auxMgr := range s.auxiliaryManagers() {
 			addListTarget(auxMgr, fmt.Sprintf("auxiliary-%d", i))
 		}
@@ -731,7 +740,7 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 			Activity:        ag.Activity,
 			ContainerStatus: ag.ContainerStatus,
 			HarnessAuth:     ag.HarnessAuth,
-			Profile:         ag.Profile,
+			Profile:         heartbeatAgentProfile(ag, s.flat),
 			ExitCode:        ag.ExitCode,
 			ExitReason:      ag.ExitReason,
 			RuntimeTarget:   agentTargets[heartbeatAgentKey(ag)],
@@ -756,6 +765,15 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 	}
 
 	return projects, inventory
+}
+
+// heartbeatAgentProfile is the profile reported for an agent: none for a
+// flat instance, which never resolves profiles.
+func heartbeatAgentProfile(ag api.AgentInfo, flat bool) string {
+	if flat {
+		return ""
+	}
+	return ag.Profile
 }
 
 // ForceHeartbeat sends an immediate heartbeat, bypassing the interval.

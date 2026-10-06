@@ -106,6 +106,12 @@ func (hc *HubConnection) setStatus(status ConnectionStatus) {
 
 // Start starts the heartbeat and control channel services for this connection.
 func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
+	// A flat instance's heartbeat and control channel run only under its
+	// own persisted Runtime Broker ID.
+	if fi := server.flatInstance(); fi != nil && hc.BrokerID != fi.Identity.RuntimeBrokerID {
+		return fmt.Errorf("flat Runtime Broker instance: hub connection %q has Runtime Broker %s, not the instance's %s; no heartbeat or control channel is started",
+			hc.Name, hc.BrokerID, fi.Identity.RuntimeBrokerID)
+	}
 	hasValidCredentials := hc.Credentials != nil && hc.Credentials.SecretKey != ""
 
 	// Start heartbeat service if enabled.
@@ -118,24 +124,7 @@ func (hc *HubConnection) Start(ctx context.Context, server *Server) error {
 				interval = DefaultHeartbeatInterval
 			}
 
-			projectFilter := server.buildProjectFilterForHub(hc.HubEndpoint)
-
-			hb := NewHeartbeatService(
-				hc.HubClient.RuntimeBrokers(),
-				hc.BrokerID,
-				interval,
-				server.manager,
-				projectFilter,
-				logging.Subsystem("broker.heartbeat"),
-			)
-			hb.auxiliaryManagers = server.getAuxiliaryManagers
-			hb.workspaceStorage = server.workspaceStorageDescriptor
-			hb.profileAttach = server.heartbeatProfileAttach
-			hb.profileSAMappings = server.heartbeatProfileSAMappings
-			hb.startsInFlight = server.startsInFlightSnapshot
-			hb.defaultProfile = server.defaultProfile
-			hb.SetVersion(server.version)
-			hb.SetDefaultRuntime(server.runtime)
+			hb := server.newHeartbeatService(hc.HubClient.RuntimeBrokers(), hc.BrokerID, hc.HubEndpoint, interval)
 			hc.mu.Lock()
 			hc.Heartbeat = hb
 			hc.mu.Unlock()
@@ -305,4 +294,27 @@ func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []
 	}
 
 	return opts
+}
+
+// newHeartbeatService builds the heartbeat service for one hub connection.
+// A flat instance's service is in flat mode (HeartbeatService.flat).
+func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brokerID, hubEndpoint string, interval time.Duration) *HeartbeatService {
+	hb := NewHeartbeatService(
+		client,
+		brokerID,
+		interval,
+		s.manager,
+		s.buildProjectFilterForHub(hubEndpoint),
+		logging.Subsystem("broker.heartbeat"),
+	)
+	hb.auxiliaryManagers = s.getAuxiliaryManagers
+	hb.workspaceStorage = s.workspaceStorageDescriptor
+	hb.profileAttach = s.heartbeatProfileAttach
+	hb.profileSAMappings = s.heartbeatProfileSAMappings
+	hb.startsInFlight = s.startsInFlightSnapshot
+	hb.defaultProfile = s.defaultProfile
+	hb.flat = s.isFlat()
+	hb.SetVersion(s.version)
+	hb.SetDefaultRuntime(s.runtime)
+	return hb
 }
