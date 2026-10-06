@@ -892,7 +892,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(text(q(el, '.slug-error'))).not.toContain('My_Notes');
     expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('true');
     expect(q(el, '.error-banner')).toBeNull();
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
     expect(posts(requests).map((r) => r.path)).toEqual(['/api/v1/projects']);
   });
 
@@ -926,7 +926,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(text(q(el, '.slug-error'))).toBe(SLUG_FORMAT_ERROR.message);
     expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('true');
     expect(q(el, '.error-banner')).toBeNull();
-    expect(window.history.pushState).not.toHaveBeenCalled();
+    expect(navigateTo).not.toHaveBeenCalled();
   });
 
   it('shows a clone 409 inline on Slug without navigating', async () => {

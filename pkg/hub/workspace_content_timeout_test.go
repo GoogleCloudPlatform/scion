@@ -271,8 +271,15 @@ func TestExecutePostDeletionEffects_LogsUnresolvedProjectPath(t *testing.T) {
 
 	out := logs.String()
 	assert.Contains(t, out, "skipping removal, the directory may be left behind")
-	assert.Contains(t, out, "project_id="+project.ID)
-	assert.Contains(t, out, "slug="+f.slug)
+	var skipLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "skipping removal, the directory may be left behind") {
+			skipLine = line
+		}
+	}
+	assert.Contains(t, skipLine, "project_id="+project.ID)
+	assert.NotContains(t, skipLine, f.slug, "the skip warning names only the project")
+	assert.NotContains(t, skipLine, f.tmpHome, "the skip warning carries no filesystem path")
 	assert.DirExists(t, f.localDir, "nothing is removed when the path is unresolved")
 }
 

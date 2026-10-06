@@ -102,21 +102,21 @@ func TestClassifyStartError(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 0)
 		defer cancel()
 		<-ctx.Done()
-		code, _ := classifyStartError(ctx, errors.New("some runtime error"))
+		code, _ := classifyStartError(ctx, errors.New("some runtime error"), "")
 		if code != "launch_timeout" {
 			t.Fatalf("code = %q, want launch_timeout", code)
 		}
 	})
 
 	t.Run("template not found", func(t *testing.T) {
-		code, _ := classifyStartError(context.Background(), config.ErrTemplateNotFound)
+		code, _ := classifyStartError(context.Background(), config.ErrTemplateNotFound, "")
 		if code != "template_not_found" {
 			t.Fatalf("code = %q, want template_not_found", code)
 		}
 	})
 
 	t.Run("harness config not found", func(t *testing.T) {
-		code, _ := classifyStartError(context.Background(), config.ErrHarnessConfigNotFound)
+		code, _ := classifyStartError(context.Background(), config.ErrHarnessConfigNotFound, "")
 		if code != "template_not_found" {
 			t.Fatalf("code = %q, want template_not_found", code)
 		}
@@ -124,7 +124,7 @@ func TestClassifyStartError(t *testing.T) {
 
 	t.Run("required skill resolution failure", func(t *testing.T) {
 		skillErr := &agent.SkillResolutionError{URI: "gh://owner/repo/my-skill@main", Code: agent.SkillErrCodeNotFound, Message: "skill not found"}
-		code, message := classifyStartError(context.Background(), fmt.Errorf("start: %w", skillErr))
+		code, message := classifyStartError(context.Background(), fmt.Errorf("start: %w", skillErr), "")
 		if code != ErrCodeSkillResolution {
 			t.Fatalf("code = %q, want %q", code, ErrCodeSkillResolution)
 		}
@@ -134,7 +134,7 @@ func TestClassifyStartError(t *testing.T) {
 	})
 
 	t.Run("other errors are runtime_error", func(t *testing.T) {
-		code, _ := classifyStartError(context.Background(), errors.New("boom"))
+		code, _ := classifyStartError(context.Background(), errors.New("boom"), "")
 		if code != "runtime_error" {
 			t.Fatalf("code = %q, want runtime_error", code)
 		}

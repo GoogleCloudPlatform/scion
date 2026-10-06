@@ -103,6 +103,11 @@ type BrokerCapabilities struct {
 	// reincarnate --broker`). The hub refuses a move unless both brokers
 	// report it (412).
 	AgentMove bool `json:"agentMove"`
+	// ReprovisionEmptyPerAgent indicates this broker's reprovision reuses an
+	// empty-per-agent agent's private workspace in place (same-broker
+	// `scion reincarnate`, miller79/scion#167). Set on every runtime: the
+	// hub checks runtime suitability separately.
+	ReprovisionEmptyPerAgent bool `json:"reprovisionEmptyPerAgent,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
@@ -220,6 +225,11 @@ type ListAgentsResponse struct {
 
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
+	// workspaceAbsentAtAdmission is set by createAgent when the hub-managed
+	// project path ~/.scion/projects/<slug> did not exist when the request
+	// arrived. It is never read from the wire.
+	workspaceAbsentAtAdmission bool
+
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
 	Slug        string             `json:"slug,omitempty"` // URL-safe identifier

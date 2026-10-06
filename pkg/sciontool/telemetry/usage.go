@@ -603,7 +603,6 @@ type UsageDeriver struct {
 	providers        *Providers
 	calls            otelmetric.Int64Counter
 	tokens           otelmetric.Int64Counter
-	selection        UsageSelection
 	resourceIdentity string
 
 	derived, duplicate, malformed atomic.Int64
@@ -633,55 +632,36 @@ type usageRuleDiagnostics interface {
 	baselinedAfterCapCount() int64
 }
 
-// Env var names that select usage derivation. SCION_USAGE_SOURCE is
-// declared by each harness's provision.py, so in an agent container it
-// normally arrives through the harness env overlay rather than init's own
-// environment (see Pipeline.ApplyHarnessEnvOverlay).
-const (
-	EnvUsageSource = "SCION_USAGE_SOURCE"
-	EnvHarness     = "SCION_HARNESS"
-)
-
-// UsageSelection is the input that decides whether and how the usage
-// deriver runs: the declared usage source (only "native" enables it, D4) and
-// the harness whose rules apply.
-type UsageSelection struct {
-	Source  string
-	Harness string
-}
-
-// usageSelectionFromEnv reads the selection from the current process's
-// environment.
-func usageSelectionFromEnv() UsageSelection {
-	return UsageSelection{Source: os.Getenv(EnvUsageSource), Harness: os.Getenv(EnvHarness)}
-}
+// UsageSourceNative is the only SCION_USAGE_SOURCE value that enables the
+// native UsageDeriver.
+const UsageSourceNative = "native"
 
 // NewUsageDeriver constructs the deriver for the current process's
 // environment. It never fails on a harness with no rule, or when usage
 // derivation is not the active source (D10): both return a nil-safe no-op
 // deriver rather than an error.
 func NewUsageDeriver(ctx context.Context, config *Config) (*UsageDeriver, error) {
-	return newUsageDeriver(ctx, config, usageSelectionFromEnv())
+	return newUsageDeriverForSource(ctx, config, os.Getenv("SCION_USAGE_SOURCE"))
 }
 
-// newUsageDeriver constructs the deriver for an explicit selection, so a
-// caller whose selection does not live in os.Environ (init, whose harness
-// env overlay is passed only to the child) never has to mutate its own
-// environment to enable derivation.
-func newUsageDeriver(ctx context.Context, config *Config, sel UsageSelection) (*UsageDeriver, error) {
-	if sel.Source != "native" {
-		return &UsageDeriver{selection: sel}, nil
+// newUsageDeriverForSource is NewUsageDeriver with the usage source passed
+// explicitly rather than read from this process's environment, so a source
+// selected after Pipeline.Start (see Pipeline.ActivateUsageSource) can be
+// honored. Any value other than UsageSourceNative yields a no-op deriver.
+func newUsageDeriverForSource(ctx context.Context, config *Config, source string) (*UsageDeriver, error) {
+	if source != UsageSourceNative {
+		return &UsageDeriver{}, nil
 	}
-	rules := rulesForHarness(sel.Harness)
+	rules := rulesForHarness(os.Getenv("SCION_HARNESS"))
 	if len(rules) == 0 {
-		return &UsageDeriver{selection: sel}, nil
+		return &UsageDeriver{}, nil
 	}
 	providers, err := NewProviders(ctx, config, false)
 	if err != nil {
 		return nil, fmt.Errorf("creating usage deriver providers: %w", err)
 	}
 	if providers == nil || providers.MeterProvider == nil {
-		return &UsageDeriver{selection: sel}, nil
+		return &UsageDeriver{}, nil
 	}
 	meter := providers.MeterProvider.Meter(usageMetricScope)
 	calls, err := meter.Int64Counter(telemetrycontract.MetricAPICalls,
@@ -706,19 +686,18 @@ func newUsageDeriver(ctx context.Context, config *Config, sel UsageSelection) (*
 		providers:        providers,
 		calls:            calls,
 		tokens:           tokens,
-		selection:        sel,
-		resourceIdentity: resourceIdentityFingerprint(sel.Harness),
+		resourceIdentity: resourceIdentityFingerprint(),
 	}, nil
 }
 
 // resourceIdentityFingerprint is the resource-identity component of the
 // dedupe fingerprint (design §3.3): stable for the process lifetime, so it
 // is computed once.
-func resourceIdentityFingerprint(harness string) string {
+func resourceIdentityFingerprint() string {
 	return strings.Join([]string{
 		os.Getenv("SCION_AGENT_ID"),
 		projectkeys.ProjectIDFromEnv(os.Getenv),
-		harness,
+		os.Getenv("SCION_HARNESS"),
 	}, "\x00")
 }
 
@@ -953,7 +932,7 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 // scion.usage.tokens gets harness, model, token_type only.
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
 	model := telemetrycontract.ResolveModelLabel(increment.Model, os.Getenv("SCION_MODEL"))
-	harness := d.selection.Harness
+	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
 		attrs := []attribute.KeyValue{}
