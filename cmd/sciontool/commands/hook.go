@@ -248,6 +248,11 @@ func writeHookResponse(w io.Writer, mappingDialect *dialects.MappingDialect, raw
 	return nil
 }
 
+// hookOTelErrorHandler logs OTel SDK errors (failed exports) at debug level.
+var hookOTelErrorHandler = otel.ErrorHandlerFunc(func(err error) {
+	log.Debug("Hook telemetry export dropped: %v", err)
+})
+
 // runHookTelemetry exports the hook event as telemetry to the loopback
 // receiver, if telemetry is enabled. It runs after the response is written
 // and is best effort: exports are bounded by telemetry.HookExportTimeout and
@@ -262,11 +267,11 @@ func runHookTelemetry(event *hooks.Event) {
 	// The OTel SDK reports failed exports to its global error handler, which
 	// by default logs to stderr. In the hook a missing receiver is expected
 	// (for example when the pipeline failed to start), so keep it at debug.
-	prevHandler := otel.GetErrorHandler()
-	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		log.Debug("Hook telemetry export dropped: %v", err)
-	}))
-	defer otel.SetErrorHandler(prevHandler)
+	// This is process-wide and deliberately not restored: otel pins the
+	// default handler's delegate to the first handler ever set, so a restore
+	// would not take effect anyway. The hook subcommands run in their own
+	// short-lived process, so sciontool init is unaffected.
+	otel.SetErrorHandler(hookOTelErrorHandler)
 
 	redactor := telemetry.NewRedactor(cfg.Redaction)
 

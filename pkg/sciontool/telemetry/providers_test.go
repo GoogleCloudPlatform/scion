@@ -496,13 +496,17 @@ func TestNewHookProviders_NilAndDisabled(t *testing.T) {
 	}
 }
 
-// With nothing listening, hook providers must fail every export immediately
-// (no retry) instead of waiting out the OTLP default 10s timeout.
-func TestNewHookProviders_NoReceiverFailsFast(t *testing.T) {
-	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
-	if err != nil {
-		t.Fatalf("NewHookProviders: %v", err)
-	}
+// hookProviderTestBound is the CI bound for a full hook-provider export cycle
+// (span, log, metric flush on shutdown) when the receiver is missing or
+// unresponsive. The designed worst case is 2*HookExportTimeout +
+// HookShutdownTimeout (0.75s); the OTLP defaults this replaces take 10s or
+// more, so 2s leaves CI headroom while still catching a regression.
+const hookProviderTestBound = 2 * time.Second
+
+// exerciseHookProviders runs one span, one log record and one counter through
+// p, shuts it down within HookShutdownTimeout, and returns the elapsed time.
+func exerciseHookProviders(t *testing.T, p *Providers) time.Duration {
+	t.Helper()
 	ctx := context.Background()
 	start := time.Now()
 	_, span := p.TracerProvider.Tracer("hook.test").Start(ctx, "tool.call")
@@ -517,9 +521,62 @@ func TestNewHookProviders_NoReceiverFailsFast(t *testing.T) {
 	counter.Add(ctx, 1)
 	shutdownCtx, cancel := context.WithTimeout(ctx, HookShutdownTimeout)
 	defer cancel()
-	_ = p.Shutdown(shutdownCtx) // the metric flush fails: nothing is listening
-	if elapsed := time.Since(start); elapsed > 2*HookExportTimeout+HookShutdownTimeout {
-		t.Fatalf("hook export with no receiver took %s", elapsed)
+	_ = p.Shutdown(shutdownCtx) // the metric flush fails: no usable receiver
+	return time.Since(start)
+}
+
+// With nothing listening, hook providers must fail every export immediately
+// because retries are disabled; this takes a few milliseconds. With retries
+// on, the OTLP exporter retries Unavailable until each export's
+// HookExportTimeout, so the three exports take about 3*HookExportTimeout.
+// The 2*HookExportTimeout bound separates the two with wide margin on both
+// sides.
+func TestNewHookProviders_NoReceiverFailsFast(t *testing.T) {
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	if elapsed := exerciseHookProviders(t, p); elapsed > 2*HookExportTimeout {
+		t.Fatalf("hook export with no receiver took %s; are retries enabled?", elapsed)
+	}
+}
+
+// A receiver that accepts TCP connections but never answers cannot fail
+// fast, so only HookExportTimeout and HookShutdownTimeout bound the exports.
+// Without them each export waits the OTLP default 10s.
+func TestNewHookProviders_UnresponsiveReceiverIsBounded(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+
+	p, err := NewHookProviders(context.Background(), &Config{Enabled: true, GRPCPort: listener.Addr().(*net.TCPAddr).Port})
+	if err != nil {
+		t.Fatalf("NewHookProviders: %v", err)
+	}
+	if elapsed := exerciseHookProviders(t, p); elapsed > hookProviderTestBound {
+		t.Fatalf("hook export with an unresponsive receiver took %s", elapsed)
 	}
 }
 
