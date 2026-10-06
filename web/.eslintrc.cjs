@@ -77,6 +77,8 @@ module.exports = {
                 'src/components/shared/header.test.ts',
                 'src/components/shared/group-member-editor-membership.test.ts',
                 'src/components/pages/onboarding.test.ts',
+                'src/components/pages/agent-placement.test.ts',
+                'src/components/pages/agent-detail-placement.test.ts',
             ],
             parserOptions: { project: './src/components/tsconfig.component-tests.json' },
         },

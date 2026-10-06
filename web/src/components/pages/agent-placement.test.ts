@@ -53,7 +53,9 @@ function broker(overrides: Partial<RuntimeBroker>): RuntimeBroker {
 
 describe('agentPlacementView', () => {
   it('is null for an unpinned agent (legacy rendering is kept)', () => {
-    expect(agentPlacementView(agent({ pinnedRuntimeTarget: undefined }), broker({}))).toBeNull();
+    const unpinned = agent({});
+    delete unpinned.pinnedRuntimeTarget;
+    expect(agentPlacementView(unpinned, broker({}))).toBeNull();
   });
 
   it('shows the stored Runtime Broker, target display name and type', () => {

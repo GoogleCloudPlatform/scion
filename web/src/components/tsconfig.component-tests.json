@@ -21,7 +21,9 @@
     "terminal/terminal-pane.test.ts",
     "shared/header.test.ts",
     "shared/group-member-editor-membership.test.ts",
-    "pages/onboarding.test.ts"
+    "pages/onboarding.test.ts",
+    "pages/agent-placement.test.ts",
+    "pages/agent-detail-placement.test.ts"
   ],
   "exclude": []
 }

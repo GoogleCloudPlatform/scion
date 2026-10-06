@@ -26,7 +26,6 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, nothing, type TemplateResult } from 'lit';
 
 import type { Agent, RuntimeBroker } from '../../shared/types.js';
-import type { ScionPageAgentDetail } from './agent-detail.js';
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
@@ -75,7 +74,7 @@ function host(tpl: TemplateResult | typeof nothing): HTMLElement {
 }
 
 function page(broker: RuntimeBroker | null): Internals {
-  const el = document.createElement('scion-page-agent-detail') as ScionPageAgentDetail;
+  const el = document.createElement('scion-page-agent-detail');
   const internals = el as unknown as Internals;
   internals.placementBroker = broker;
   return internals;
@@ -116,7 +115,7 @@ describe('agent detail Placement card', () => {
   });
 
   it('hides the Runtime Broker Profile for a pinned agent and keeps it for a legacy agent', () => {
-    const labels = (a: Agent) =>
+    const labels = (a: Agent): (string | undefined)[] =>
       Array.from(
         host(page(null).renderRuntimeCard(a, undefined)).querySelectorAll('.info-label')
       ).map((l) => l.textContent?.trim());
