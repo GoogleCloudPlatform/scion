@@ -347,6 +347,50 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([{ path: '/agents' }]);
   });
 
+  it('SPA-redirects after delete behind a reverse-proxy base path', async () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    try {
+      const tracker = stubLocation();
+      tracker.pathname = `/scion/agents/${AGENT_ID}`;
+      const el = await mount(makeAgent());
+      const internals = el as unknown as {
+        handleAction(action: string, event?: MouseEvent): Promise<void>;
+      };
+
+      apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      await internals.handleAction('delete');
+      vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+      await Promise.resolve();
+
+      expect(tracker.assignedHref).toBeUndefined();
+      expect(navClicks).toEqual([{ path: '/agents' }]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('does not redirect from a route that merely ends with this agent path', async () => {
+    const tracker = stubLocation();
+    const el = await mount(makeAgent());
+    const internals = el as unknown as {
+      handleAction(action: string, event?: MouseEvent): Promise<void>;
+    };
+
+    apiFetch.mockImplementationOnce(() => Promise.resolve(noContent()));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+    // Not this agent's route (and no base path is configured), though an
+    // endsWith check would have accepted it.
+    tracker.pathname = `/projects/p1/agents/${AGENT_ID}`;
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS);
+    await Promise.resolve();
+
+    expect(navClicks).toEqual([]);
+  });
+
   it('shows the deleted state before the SPA redirect fires (fake timers)', async () => {
     stubLocation();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });

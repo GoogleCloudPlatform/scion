@@ -88,7 +88,7 @@ import { terminalHref } from '../../client/open-terminal.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, stripBasePath } from '../../client/navigation.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -768,15 +768,15 @@ export class ScionPageAgentDetail extends LitElement {
    * {@link showDeletedStateThenRedirect}: `renderRoute` (main.ts) keeps the
    * previous page connected-but-hidden behind `/terminals`, so
    * `isConnected` alone cannot distinguish "visible" from "hidden behind
-   * another route". An `endsWith` check (rather than importing
-   * `stripBasePath` from main.ts, which is out of scope for this fix)
-   * tolerates a reverse-proxy base path. Trailing slashes are stripped
-   * first so `/agents/<id>/` still counts as this agent's route.
+   * another route". The base path is stripped the same way the router does
+   * (so this works behind a reverse proxy), then the app path must be
+   * exactly this agent's route. Trailing slashes are stripped first so
+   * `/agents/<id>/` still counts as this agent's route.
    */
   private isOnThisAgentRoute(): boolean {
     if (!this.isConnected || typeof window === 'undefined') return false;
-    const pathname = window.location.pathname.replace(/\/+$/, '');
-    return pathname.endsWith(`/agents/${this.agentId}`);
+    const appPath = stripBasePath(window.location.pathname).replace(/\/+$/, '');
+    return appPath === `/agents/${this.agentId}`;
   }
 
   /**
