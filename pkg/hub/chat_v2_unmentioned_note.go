@@ -25,13 +25,16 @@ import (
 
 // Unmentioned thread replies.
 //
-// A thread reply with no @mention and no reply-to target may have been
-// meant for the agent that last posted in the thread. When no agent
-// receives it, it is never silently routed to that agent. Instead the hub
-// appends a note to the stored body that @mentions the most recent human
-// poster other than the sender, who gets the ordinary human mention
-// notification, and names the most recent agent poster. No agent is
-// invoked. A reply that reaches a live default agent is left untouched.
+// A thread reply that resolves no agent recipient (no default agent, no
+// reply-to agent, and no @mention that names an agent or a project member;
+// a mention of nobody, such as a typo, counts as none) may have been meant
+// for the agent that last posted in the thread. It is never silently routed
+// to that agent. Instead the hub appends a note to the stored body that
+// @mentions the most recent human poster other than the sender (else the
+// thread creator), who gets the ordinary human mention notification, and
+// names the most recent agent poster by plain slug so that agent does not
+// read as addressed. No agent is invoked. A reply that reaches a live
+// default agent is left untouched.
 //
 // The note is a suffix on the message body rather than a separate message
 // so it reuses the existing persist, publish and mention notification
@@ -49,7 +52,7 @@ func unmentionedReplyNote(mention, poster string) string {
 	b.WriteString(mention)
 	b.WriteString(": this may be a reply that did not mention the agent it was replying to")
 	if poster != "" {
-		b.WriteString(", so it may need the attention of @")
+		b.WriteString(", so it may need the attention of ")
 		b.WriteString(poster)
 	}
 	b.WriteString("]")
@@ -72,10 +75,9 @@ func appendUnmentionedNote(content, mention, poster string) (string, bool) {
 }
 
 // recentThreadPosters returns the slug of the most recent agent poster in
-// thread key, and the most recent human poster other than senderUserID
-// who is in members (nil when there is none). Mention fan-out copies are
-// ignored.
-func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID string, members []chatMemberEntry) (string, *chatMemberEntry, error) {
+// thread key, and the IDs of human posters other than senderUserID, most
+// recent first and without duplicates. Mention fan-out copies are ignored.
+func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID string) (string, []string, error) {
 	res, err := s.store.ListMessages(ctx, store.MessageFilter{
 		ThreadID:    key,
 		ExcludeType: messages.TypeMention,
@@ -83,70 +85,93 @@ func (s *Server) recentThreadPosters(ctx context.Context, key, senderUserID stri
 	if err != nil {
 		return "", nil, err
 	}
-	byID := make(map[string]*chatMemberEntry, len(members))
-	for i := range members {
-		byID[members[i].ID] = &members[i]
-	}
 	var agentSlug string
-	var human *chatMemberEntry
+	var humans []string
+	seen := make(map[string]bool)
 	for _, m := range res.Items {
 		if agentSlug == "" {
 			if slug, ok := strings.CutPrefix(m.Sender, "agent:"); ok && slug != "" {
 				agentSlug = slug
 			}
 		}
-		if human == nil && strings.HasPrefix(m.Sender, "user:") &&
-			m.SenderID != "" && m.SenderID != senderUserID {
-			human = byID[m.SenderID]
-		}
-		if agentSlug != "" && human != nil {
-			break
+		if strings.HasPrefix(m.Sender, "user:") && m.SenderID != "" &&
+			m.SenderID != senderUserID && !seen[m.SenderID] {
+			seen[m.SenderID] = true
+			humans = append(humans, m.SenderID)
 		}
 	}
-	return agentSlug, human, nil
+	return agentSlug, humans, nil
 }
 
 // memberMentionToken returns an @mention token (without the @) that
-// resolves to m through the human mention path: the hyphenated display
-// name the web autocomplete inserts, else the email local part. It
-// returns "" when neither survives mention extraction intact.
-func memberMentionToken(m chatMemberEntry) string {
+// resolves to m, and to no other member, through the human mention path:
+// the hyphenated display name the web autocomplete inserts, else the email
+// local part, else the full email. Uniqueness matters because the mention
+// notifier resolves each token to a single member. It returns "" when no
+// candidate survives mention extraction intact and uniquely.
+func memberMentionToken(m chatMemberEntry, members []chatMemberEntry) string {
 	var candidates []string
 	if m.DisplayName != "" {
 		candidates = append(candidates, strings.ReplaceAll(m.DisplayName, " ", "-"))
 	}
 	if at := strings.IndexByte(m.Email, '@'); at > 0 {
-		candidates = append(candidates, m.Email[:at])
+		candidates = append(candidates, m.Email[:at], m.Email)
 	}
 	for _, c := range candidates {
 		got := messages.ExtractMentions("@" + c)
-		if len(got) == 1 && got[0] == c && mentionMatchesMember(c, m) {
+		if len(got) != 1 || got[0] != c || !mentionMatchesMember(c, m) {
+			continue
+		}
+		unique := true
+		for _, o := range members {
+			if o.ID != m.ID && mentionMatchesMember(c, o) {
+				unique = false
+				break
+			}
+		}
+		if unique {
 			return c
 		}
 	}
 	return ""
 }
 
-// unmentionedHumanNote returns content with a note to the most recent
-// human poster (other than the sender) for a thread reply that reaches no
-// agent, plus that person's mention token. ok is false, and content is
+// unmentionedHumanNote returns content with a note for a thread reply that
+// reaches no agent, plus the mention token it adds. The note goes to the
+// first of these who is a project member other than the sender and can be
+// mentioned unambiguously: the human posters in the thread, most recent
+// first, then the thread creator (creatorID). ok is false, and content is
 // unchanged, when there is no such person or a lookup fails.
-func (s *Server) unmentionedHumanNote(ctx context.Context, projectID, key, senderUserID, content string) (string, string, bool) {
-	members, err := s.projectHumanMembersStrict(ctx, projectID)
-	if err != nil || len(members) == 0 {
+func (s *Server) unmentionedHumanNote(ctx context.Context, members func() ([]chatMemberEntry, error), key, creatorID, senderUserID, content string) (string, string, bool) {
+	all, err := members()
+	if err != nil || len(all) == 0 {
 		return content, "", false
 	}
-	poster, human, err := s.recentThreadPosters(ctx, key, senderUserID, members)
-	if err != nil || human == nil {
+	poster, humans, err := s.recentThreadPosters(ctx, key, senderUserID)
+	if err != nil {
 		return content, "", false
 	}
-	token := memberMentionToken(*human)
-	if token == "" {
-		return content, "", false
+	if creatorID != "" && creatorID != senderUserID {
+		humans = append(humans, creatorID)
 	}
-	out, ok := appendUnmentionedNote(content, token, poster)
-	if !ok {
-		return content, "", false
+	byID := make(map[string]chatMemberEntry, len(all))
+	for _, m := range all {
+		byID[m.ID] = m
 	}
-	return out, token, true
+	for _, id := range humans {
+		m, ok := byID[id]
+		if !ok {
+			continue
+		}
+		token := memberMentionToken(m, all)
+		if token == "" {
+			continue
+		}
+		out, ok := appendUnmentionedNote(content, token, poster)
+		if !ok {
+			return content, "", false
+		}
+		return out, token, true
+	}
+	return content, "", false
 }

@@ -1248,14 +1248,19 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	// --- Human-to-human message ---
 	// No agent recipient was resolved. A thread message is no_recipient
 	// unless a lookup failed or it is addressed to a person.
+	members := s.projectMembersOnce(ctx, projectID)
 	noRecipient := !isDM && !routingLookupFailed &&
-		s.threadMessageUnaddressed(ctx, projectID, plan.MentionNames, body.ReplyToID, user.ID())
+		s.threadMessageUnaddressed(ctx, members, plan.MentionNames, body.ReplyToID, user.ID())
 	mentionNames := plan.MentionNames
 	if noRecipient {
-		// Address the reply to the most recent other human poster with a
-		// note instead of leaving it unseen; no agent is invoked. Without
-		// such a person it stays no_recipient.
-		if noted, token, ok := s.unmentionedHumanNote(ctx, projectID, key, user.ID(), content); ok {
+		// Address the reply to the most recent other human poster (or the
+		// thread creator) with a note instead of leaving it unseen; no
+		// agent is invoked. Without such a person it stays no_recipient.
+		creatorID := ""
+		if threadTopic != nil {
+			creatorID = threadTopic.CreatedBy
+		}
+		if noted, token, ok := s.unmentionedHumanNote(ctx, members, key, creatorID, user.ID(), content); ok {
 			content = noted
 			mentionNames = append(append([]string(nil), mentionNames...), token)
 			noRecipient = false
