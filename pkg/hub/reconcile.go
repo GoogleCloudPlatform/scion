@@ -284,9 +284,6 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		// Both only while the row still holds the run the stop was queued
 		// for (agent.RunID, the intent's run): a newer run keeps its state
 		// and reservation (ptone/scion#2550).
-		// The start claim held when the stop was recorded is superseded
-		// (compare-and-set on the stop's intent time, whatever the run).
-		s.releaseSupersededClaim(ctx, agent.ID, supersedes, *intentAt)
 		if agent.ContainerStatus == containerStatusStopQueued {
 			recorded, err := s.recordStopStatus(ctx, agent.ID, agent.RunID, "queued stop", store.AgentStatusUpdate{
 				ContainerStatus: "stopped",
@@ -304,6 +301,11 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 			// release loses its reservation until the backfill restores it.
 			s.releaseBrokerQuota(ctx, agent)
 		}
+		// The start claim held when the stop was recorded is superseded
+		// (compare-and-set on the stop's intent time, whatever the run). It
+		// is released last: released before the status write and the quota
+		// release, a new start could take it and then lose both to them.
+		s.releaseSupersededClaim(ctx, agent.ID, supersedes, *intentAt)
 	}
 	return "", nil
 }

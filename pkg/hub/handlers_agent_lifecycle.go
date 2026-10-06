@@ -394,7 +394,11 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 			s.logStopRunMismatch(agent, "suspend", err)
 			return err
 		}
-		s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+		// The superseded start claim is released last, after the
+		// suspension's status write and quota release: released earlier, a
+		// new start could take the claim and then lose its status and
+		// reservation to them.
+		defer s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
 	}
 
 	// Record the suspension only while the row still holds the run the stop
@@ -654,7 +658,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// The max_agents_per_broker reservation is released once the
 		// stopped status is recorded below, for the run that was stopped.
 		if dispatchErr == nil {
-			s.releaseSupersededClaim(ctx, agent.ID, stopSupersedes, stopIntentAt)
+			// Released last, after the stopped status write and the quota
+			// release below (see suspendAgent).
+			defer s.releaseSupersededClaim(ctx, agent.ID, stopSupersedes, stopIntentAt)
 		}
 	case api.AgentActionSuspend:
 		// Only running agents can be suspended via the HTTP lifecycle handler.
@@ -1339,7 +1345,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				s.syncWorkspaceOnStop(opCtx, agent)
 				dispatchErr = dispatcher.DispatchAgentStop(opCtx, agent)
 				if dispatchErr == nil {
-					s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+					// Released last, after this agent's stopped status
+					// write and quota release (see suspendAgent).
+					defer s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
 				}
 			}
 
