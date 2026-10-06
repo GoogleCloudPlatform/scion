@@ -17,12 +17,15 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -38,11 +41,20 @@ type AgentInfo struct {
 }
 
 // HubClient provides access to the Scion hub API for project and agent listing.
+//
+// Methods that take onBehalfOf act as the linked Scion user identified by
+// that principal ("user:<email>", see linkedUserPrincipal). User-initiated
+// reads must pass the requesting user's principal.
 type HubClient interface {
-	ListProjects(ctx context.Context) ([]ProjectOption, error)
+	// ListProjectsFresh lists every project served by this broker. It is
+	// not scoped to a user and must not feed user-facing project pickers.
 	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-	ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error)
-	ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error)
+	// ListProjectsForUser returns the projects visible to the linked user,
+	// following pagination. At the page limit the list is truncated.
+	ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error)
+	// ListAgents returns the agents of a project as seen by the linked user,
+	// following pagination. At the page limit the list is truncated.
+	ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error)
 
 	// HubBaseURL returns the base URL of the hub (e.g. "https://hub.example.com").
 	HubBaseURL() string
@@ -56,7 +68,48 @@ type CommandHandler struct {
 	botUsername    string
 	log            *slog.Logger
 	cachedProjects []ProjectOption
+	projectsMu     sync.Mutex // guards cachedProjects
+
+	// memberCache remembers successful group-membership checks for /status,
+	// keyed by "userID:chatID".
+	memberCache   map[string]memberCacheEntry
+	memberCacheMu sync.Mutex
 }
+
+type memberCacheEntry struct {
+	member    bool
+	failed    bool
+	checkedAt time.Time
+}
+
+// ttl returns how long the entry is reused.
+func (e memberCacheEntry) ttl() time.Duration {
+	if e.failed {
+		return memberFailureCacheTTL
+	}
+	return memberCacheTTL
+}
+
+// errMembershipCheckFailed reports a recently failed membership check that
+// is not retried yet.
+var errMembershipCheckFailed = errors.New("group membership check failed recently")
+
+const (
+	// memberCacheTTL bounds how long a group-membership check is reused.
+	memberCacheTTL = 2 * time.Minute
+	// memberFailureCacheTTL bounds how long a failed check is remembered.
+	memberFailureCacheTTL = 30 * time.Second
+	// memberCheckWorkers bounds concurrent membership checks for /status.
+	memberCheckWorkers = 6
+	// memberCheckLimit caps membership checks per /status; further groups
+	// are reported as not checked.
+	memberCheckLimit = 50
+	// statusMemberCheckBudget is the share of the /status time budget given
+	// to membership checks.
+	statusMemberCheckBudget = 6 * time.Second
+	// statusUncheckedNote is appended when some groups could not be checked.
+	statusUncheckedNote = "(some groups could not be checked)"
+)
 
 // NewCommandHandler creates a new CommandHandler.
 func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient, botUsername string, log *slog.Logger) *CommandHandler {
@@ -72,9 +125,45 @@ func NewCommandHandler(store Store, api *TelegramAPIClient, hubClient HubClient,
 	}
 }
 
-// SetProjects updates the cached project list used by /setup.
+// SetProjects updates the cached project list used to display project names
+// (e.g. in /status). It is not offered in setup pickers.
 func (h *CommandHandler) SetProjects(projects []ProjectOption) {
+	h.projectsMu.Lock()
 	h.cachedProjects = projects
+	h.projectsMu.Unlock()
+}
+
+// registerHint is the reply sent when a command needs a linked Scion account
+// and the sender has none.
+const registerHint = "Please /register first to use this bot. Send /register to me in a direct message."
+
+// requireLinkedSender looks up the sender's link mapping and returns the
+// principal to act as on hub reads. When the sender is not linked it replies
+// with a register hint and returns ok=false.
+func (h *CommandHandler) requireLinkedSender(ctx context.Context, msg *TGMessage) (mapping *TelegramUserMapping, principal string, ok bool) {
+	chatID := msg.Chat.ID
+	if msg.From == nil {
+		h.reply(chatID, registerHint)
+		return nil, "", false
+	}
+	senderID := strconv.FormatInt(msg.From.ID, 10)
+	mapping, err := h.store.GetUserMapping(ctx, senderID)
+	if err != nil {
+		h.log.Error("Failed to look up user mapping", "sender_id", senderID, "error", err)
+		h.reply(chatID, "Something went wrong. Please try again.")
+		return nil, "", false
+	}
+	if mapping == nil {
+		h.reply(chatID, registerHint)
+		return nil, "", false
+	}
+	principal = linkedUserPrincipal(mapping)
+	if principal == "" {
+		// Linked without a Scion email: the link cannot be used.
+		h.reply(chatID, staleLinkText)
+		return nil, "", false
+	}
+	return mapping, principal, true
 }
 
 // HandleCommand dispatches an incoming message to the appropriate command
@@ -138,6 +227,12 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Setup offers the sender's own projects, so it needs a linked account.
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
 	link, err := h.store.GetGroupLink(ctx, chatID)
 	if err != nil {
 		h.log.Error("Failed to get group link", "chat_id", chatID, "error", err)
@@ -151,55 +246,28 @@ func (h *CommandHandler) handleSetup(msg *TGMessage) {
 		return
 	}
 
-	var projects []ProjectOption
-	promptText := "Select a project to link this group to:"
-
-	senderID := ""
-	if msg.From != nil {
-		senderID = strconv.FormatInt(msg.From.ID, 10)
-	}
-
-	if senderID != "" {
-		mapping, mapErr := h.store.GetUserMapping(ctx, senderID)
-		if mapErr != nil {
-			h.log.Warn("Failed to check user mapping for /setup filtering", "error", mapErr)
-		}
-		if mapping != nil && mapping.ScionUserID != "" {
-			userProjects, userErr := h.hubClient.ListProjectsForUser(ctx, mapping.ScionUserID)
-			if userErr != nil {
-				h.log.Warn("Failed to list user projects, falling back to all", "error", userErr)
-			} else if len(userProjects) > 0 {
-				projects = userProjects
-				h.log.Debug("Using user-filtered project list for /setup", "user_id", mapping.ScionUserID, "count", len(projects))
-			}
-		}
+	projects, err := h.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		h.log.Warn("Failed to list projects for linked user", "error", err)
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText))
+		return
 	}
 
 	if len(projects) == 0 {
-		fresh, freshErr := h.hubClient.ListProjectsFresh(ctx)
-		if freshErr == nil && len(fresh) > 0 {
-			projects = fresh
-			h.cachedProjects = fresh
-			h.log.Debug("Using fresh project list from hub for /setup", "count", len(projects))
-		} else {
-			if freshErr != nil {
-				h.log.Warn("Failed to fetch fresh projects, falling back", "error", freshErr)
-			}
-			if len(h.cachedProjects) > 0 {
-				projects = h.cachedProjects
-				h.log.Debug("Using cached project list for /setup", "count", len(projects))
-			}
-		}
-	}
-
-	if len(projects) == 0 {
-		h.reply(chatID, "No projects found. Create a project in the hub first.")
+		h.reply(chatID, noUserProjectsText)
 		return
 	}
 
 	kb := buildProjectSelectionKeyboard(projects)
-	h.replyWithKeyboard(chatID, promptText, kb)
+	h.replyWithKeyboard(chatID, "Select a project to link this group to:", kb)
 }
+
+// Replies for the setup project pickers, which list only the linked user's
+// projects.
+const (
+	setupProjectsFailedText = "Failed to fetch your projects. Please try again later."
+	noUserProjectsText      = "Your Scion account isn't a member of any project yet. Ask a project owner to add you, then run /setup again."
+)
 
 func (h *CommandHandler) handleDefault(msg *TGMessage) {
 	chatID := msg.Chat.ID
@@ -220,11 +288,16 @@ func (h *CommandHandler) handleDefault(msg *TGMessage) {
 		return
 	}
 
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
 	// Always fetch fresh agent list so the keyboard reflects current state.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
-		h.reply(chatID, "Failed to fetch agents. Please try again later.")
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -279,10 +352,15 @@ func (h *CommandHandler) handleTerminal(msg *TGMessage) {
 		return
 	}
 
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
-		h.reply(chatID, "Failed to fetch agents. Please try again later.")
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -323,11 +401,16 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 		return
 	}
 
+	mapping, principal, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
+		return
+	}
+
 	// Always fetch fresh state for /agents display — bypass the cache.
-	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents", "project_id", link.ProjectID, "error", err)
-		h.reply(chatID, "Failed to fetch agents. Please try again later.")
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -431,20 +514,40 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		return
 	}
 
+	if msg.From == nil {
+		h.reply(chatID, "Could not identify your user.")
+		return
+	}
+
+	// Registration status first, on its own short budget.
+	regStatus := h.registrationStatus(msg.From.ID)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	links, err := h.store.GetAllGroupLinks(ctx)
+	allLinks, err := h.store.GetAllGroupLinks(ctx)
 	if err != nil {
 		h.log.Error("Failed to get group links", "error", err)
 		h.reply(chatID, "Something went wrong. Please try again.")
 		return
 	}
-
-	if len(links) == 0 {
-		h.reply(chatID, "No groups are currently linked.")
-		return
+	var activeLinks []*GroupLink
+	for _, link := range allLinks {
+		if link.Active {
+			activeLinks = append(activeLinks, link)
+		}
 	}
+
+	// List only groups the sender linked or is currently a member of.
+	// Membership checks get their own share of the budget so title
+	// lookups below still have time.
+	memberCtx, memberCancel := context.WithTimeout(ctx, statusMemberCheckBudget)
+	links, unchecked := h.groupsVisibleTo(memberCtx, msg.From.ID, activeLinks)
+	memberCancel()
+
+	h.projectsMu.Lock()
+	cachedProjects := h.cachedProjects
+	h.projectsMu.Unlock()
 
 	var lines []string
 	for _, link := range links {
@@ -457,8 +560,8 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		}
 		// Resolve slug from cached projects if stored as UUID.
 		slug := link.ProjectSlug
-		if slug == link.ProjectID && len(h.cachedProjects) > 0 {
-			for _, p := range h.cachedProjects {
+		if slug == link.ProjectID && len(cachedProjects) > 0 {
+			for _, p := range cachedProjects {
 				if p.ID == link.ProjectID {
 					slug = p.DisplayName()
 					break
@@ -477,21 +580,191 @@ func (h *CommandHandler) handleStatus(msg *TGMessage) {
 		lines = append(lines, line)
 	}
 
-	// Build status with registration info first.
-	regStatus := "Not registered"
-	if msg.From != nil {
-		senderID := strconv.FormatInt(msg.From.ID, 10)
-		if m, _ := h.store.GetUserMapping(ctx, senderID); m != nil {
-			if m.ScionEmail != "" {
-				regStatus = "Registered as " + m.ScionEmail
-			} else if m.ScionUserID != "" {
-				regStatus = "Registered (user ID: " + m.ScionUserID + ")"
+	groups := "No groups you linked or belong to are linked to a project."
+	if len(lines) > 0 {
+		groups = "Linked groups:\n" + strings.Join(lines, "\n")
+	} else if unchecked {
+		groups = "No linked groups could be confirmed for you."
+	}
+	if unchecked {
+		groups += "\n" + statusUncheckedNote
+	}
+	h.reply(chatID, "Registration: "+regStatus+"\n\n"+groups)
+}
+
+// registrationStatus describes the Telegram user's link to Scion for
+// /status. A store error is reported as unknown, not as unregistered.
+func (h *CommandHandler) registrationStatus(userID int64) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	m, err := h.store.GetUserMapping(ctx, strconv.FormatInt(userID, 10))
+	switch {
+	case err != nil:
+		h.log.Warn("Failed to look up user mapping for /status", "error", err)
+		return "Unknown (could not be checked)"
+	case m == nil:
+		return "Not registered"
+	case m.ScionEmail == "":
+		// Linked without a Scion email: the link cannot be used.
+		return staleLinkText
+	default:
+		return "Registered as " + m.ScionEmail
+	}
+}
+
+// groupsVisibleTo returns, in their original order, the group links that
+// the Telegram user linked or is currently a member of. Membership is
+// checked with bounded concurrency, for at most memberCheckLimit groups per
+// call, and cached briefly per user and chat. unchecked reports that some
+// groups could not be checked (check failed, limit reached, or ctx ended);
+// those groups are left out.
+func (h *CommandHandler) groupsVisibleTo(ctx context.Context, userID int64, links []*GroupLink) (visible []*GroupLink, unchecked bool) {
+	senderID := strconv.FormatInt(userID, 10)
+	const (
+		notMember = iota
+		member
+		failed
+	)
+	results := make([]int, len(links))
+
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < memberCheckWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				ok, err := h.isGroupMember(ctx, links[i].ChatID, userID)
+				switch {
+				case err != nil:
+					results[i] = failed
+				case ok:
+					results[i] = member
+				}
 			}
+		}()
+	}
+	queued := 0
+	for i, link := range links {
+		if link.LinkedBy == senderID {
+			results[i] = member
+			continue
+		}
+		// Cached answers are free and do not count toward the limit.
+		if e, ok := h.cachedMembership(link.ChatID, userID); ok {
+			switch {
+			case e.failed:
+				results[i] = failed
+			case e.member:
+				results[i] = member
+			}
+			continue
+		}
+		if queued >= memberCheckLimit {
+			results[i] = failed
+			continue
+		}
+		queued++
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+
+	for i, link := range links {
+		switch results[i] {
+		case member:
+			visible = append(visible, link)
+		case failed:
+			unchecked = true
 		}
 	}
+	return visible, unchecked
+}
 
-	output := "Registration: " + regStatus + "\n\nLinked groups:\n" + strings.Join(lines, "\n")
-	h.reply(chatID, output)
+// isNotVisibleChatError reports whether a getChatMember error means the
+// group is not visible to the user, as opposed to the check itself failing:
+// the user is not in the chat (400 user/member not found), the chat is gone
+// (400 chat not found), or the bot can no longer see the chat (403, e.g.
+// the bot was kicked).
+func isNotVisibleChatError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Code {
+	case http.StatusForbidden:
+		return true
+	case http.StatusBadRequest:
+		desc := strings.ToLower(apiErr.Description)
+		return strings.Contains(desc, "user not found") ||
+			strings.Contains(desc, "member not found") ||
+			strings.Contains(desc, "participant_id_invalid") ||
+			strings.Contains(desc, "chat not found")
+	default:
+		return false
+	}
+}
+
+func memberCacheKey(chatID, userID int64) string {
+	return strconv.FormatInt(userID, 10) + ":" + strconv.FormatInt(chatID, 10)
+}
+
+// cachedMembership returns the unexpired cached membership check.
+func (h *CommandHandler) cachedMembership(chatID, userID int64) (memberCacheEntry, bool) {
+	h.memberCacheMu.Lock()
+	defer h.memberCacheMu.Unlock()
+	e, ok := h.memberCache[memberCacheKey(chatID, userID)]
+	if !ok || time.Since(e.checkedAt) >= e.ttl() {
+		return memberCacheEntry{}, false
+	}
+	return e, true
+}
+
+// isGroupMember reports whether the user is currently in the chat, using a
+// short-lived cache of results and of failed checks.
+func (h *CommandHandler) isGroupMember(ctx context.Context, chatID, userID int64) (bool, error) {
+	key := memberCacheKey(chatID, userID)
+	if entry, ok := h.cachedMembership(chatID, userID); ok {
+		if entry.failed {
+			return false, errMembershipCheckFailed
+		}
+		return entry.member, nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	result := memberCacheEntry{checkedAt: time.Now()}
+	m, err := h.api.GetChatMember(ctx, chatID, userID)
+	switch {
+	case err == nil:
+		result.member = m.IsCurrentMember()
+	case isNotVisibleChatError(err):
+		// Not visible to the user: not a member.
+	case ctx.Err() != nil:
+		// The request ended with the caller's context; not remembered.
+		return false, err
+	default:
+		h.log.Debug("Could not check group membership for /status", "chat_id", chatID, "error", err)
+		result.failed = true
+	}
+
+	h.memberCacheMu.Lock()
+	if h.memberCache == nil {
+		h.memberCache = make(map[string]memberCacheEntry)
+	}
+	for k, e := range h.memberCache {
+		if time.Since(e.checkedAt) >= e.ttl() {
+			delete(h.memberCache, k)
+		}
+	}
+	h.memberCache[key] = result
+	h.memberCacheMu.Unlock()
+
+	if result.failed {
+		return false, err
+	}
+	return result.member, nil
 }
 
 func (h *CommandHandler) handleSettings(msg *TGMessage) {
@@ -527,80 +800,23 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	senderID := ""
-	if msg.From != nil {
-		senderID = strconv.FormatInt(msg.From.ID, 10)
-	}
-	if senderID == "" {
-		h.reply(chatID, "Could not identify your user.")
+	mapping, _, ok := h.requireLinkedSender(ctx, msg)
+	if !ok {
 		return
 	}
 
-	mapping, err := h.store.GetUserMapping(ctx, senderID)
+	// Only group-linked projects the linked user can read are offered.
+	result, err := buildNotificationEntries(ctx, h.store, h.hubClient, h.log, mapping)
 	if err != nil {
-		h.log.Error("Failed to check user mapping", "error", err)
-		h.reply(chatID, "Something went wrong. Please try again.")
+		h.log.Warn("Failed to build notification toggles", "error", err)
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText))
 		return
 	}
-	if mapping == nil {
-		h.reply(chatID, "Please /register first to manage notifications.")
-		return
-	}
-
-	links, err := h.store.GetAllGroupLinks(ctx)
-	if err != nil {
-		h.log.Error("Failed to get group links", "error", err)
-		h.reply(chatID, "Something went wrong. Please try again.")
-		return
-	}
-
-	if len(links) == 0 {
+	if result.LinkedProjects == 0 {
 		h.reply(chatID, "No linked projects found. Link a group to a project with /setup first.")
 		return
 	}
-
-	existingPrefs, err := h.store.GetNotificationPrefs(ctx, senderID)
-	if err != nil {
-		h.log.Error("Failed to get notification prefs", "error", err)
-		h.reply(chatID, "Something went wrong. Please try again.")
-		return
-	}
-	prefMap := make(map[string]bool)
-	for _, p := range existingPrefs {
-		prefMap[p.ProjectID+":"+p.AgentSlug] = p.Enabled
-	}
-
-	seen := make(map[string]bool)
-	var entries []notificationAgentEntry
-	for _, link := range links {
-		if !link.Active {
-			continue
-		}
-		if seen[link.ProjectID] {
-			continue
-		}
-		seen[link.ProjectID] = true
-
-		agents, agentErr := h.getAgents(ctx, link.ProjectID)
-		if agentErr != nil {
-			h.log.Warn("Failed to list agents for notification prefs", "project_id", link.ProjectID, "error", agentErr)
-			continue
-		}
-
-		for _, agent := range agents {
-			enabled := true
-			if val, ok := prefMap[link.ProjectID+":"+agent.Slug]; ok {
-				enabled = val
-			}
-			entries = append(entries, notificationAgentEntry{
-				ProjectSlug: link.ProjectSlug,
-				ProjectID:   link.ProjectID,
-				AgentSlug:   agent.Slug,
-				Enabled:     enabled,
-			})
-		}
-	}
-
+	entries := result.Entries
 	if len(entries) == 0 {
 		h.reply(chatID, "No agents found across linked projects.")
 		return
@@ -608,37 +824,6 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 
 	kb := buildNotificationsKeyboard(entries)
 	h.replyWithKeyboard(chatID, "Tap an agent to toggle notifications:", kb)
-}
-
-// getAgents returns agents for a project, using the store cache with a
-// fallback to the hub API.
-func (h *CommandHandler) getAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
-	cached, err := h.store.GetProjectAgents(ctx, projectID)
-	if err != nil {
-		h.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
-	}
-	if cached != nil && time.Since(cached.RefreshedAt) < 5*time.Minute {
-		return cached.Agents, nil
-	}
-
-	agents, err := h.hubClient.ListAgents(ctx, projectID)
-	if err != nil {
-		if cached != nil {
-			return cached.Agents, nil
-		}
-		return nil, err
-	}
-
-	saveErr := h.store.SaveProjectAgents(ctx, &ProjectAgents{
-		ProjectID:   projectID,
-		Agents:      agents,
-		RefreshedAt: time.Now(),
-	})
-	if saveErr != nil {
-		h.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
-	}
-
-	return agents, nil
 }
 
 // agentSlugs extracts just the slug strings from a slice of AgentInfo.
@@ -705,7 +890,8 @@ func NewHTTPHubClient(hubURL, hmacKey, brokerID string, httpClient *http.Client)
 }
 
 type hubProjectsResponse struct {
-	Projects []hubProject `json:"projects"`
+	Projects   []hubProject `json:"projects"`
+	NextCursor string       `json:"nextCursor,omitempty"`
 }
 
 type hubProject struct {
@@ -715,7 +901,8 @@ type hubProject struct {
 }
 
 type hubAgentsResponse struct {
-	Agents []hubAgent `json:"agents"`
+	Agents     []hubAgent `json:"agents"`
+	NextCursor string     `json:"nextCursor,omitempty"`
 }
 
 type hubAgent struct {
@@ -723,45 +910,6 @@ type hubAgent struct {
 	Slug     string `json:"slug"`
 	Activity string `json:"activity"`
 	Phase    string `json:"phase"`
-}
-
-func (c *httpHubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects"
-
-	slog.Debug("Listing projects from hub", "url", url, "broker_id", c.brokerID)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create list projects request: %w", err)
-	}
-
-	if err := c.signRequest(req); err != nil {
-		return nil, fmt.Errorf("sign request: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("list projects request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		slog.Debug("Hub returned non-OK for list projects", "status", resp.StatusCode, "url", url)
-		return nil, fmt.Errorf("list projects returned status %d", resp.StatusCode)
-	}
-
-	var result hubProjectsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode list projects response: %w", err)
-	}
-
-	slog.Debug("Hub returned projects", "count", len(result.Projects))
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
 }
 
 func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption, error) {
@@ -786,7 +934,7 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 
 	if resp.StatusCode != http.StatusOK {
 		slog.Debug("Hub returned non-OK for list fresh projects", "status", resp.StatusCode, "url", url)
-		return nil, fmt.Errorf("list fresh projects returned status %d", resp.StatusCode)
+		return nil, newHubError("list fresh projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -803,15 +951,47 @@ func (c *httpHubClient) ListProjectsFresh(ctx context.Context) ([]ProjectOption,
 	return projects, nil
 }
 
-func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
-	url := c.hubURL + "/api/v1/projects?ownerId=" + ownerID
+// maxUserProjectPages bounds how many pages ListProjectsForUser follows.
+const maxUserProjectPages = 20
 
-	slog.Debug("Listing projects for user from hub", "url", url, "owner_id", ownerID)
+// ListProjectsForUser follows nextCursor for up to maxUserProjectPages
+// pages, sending the linked user on each. If more pages remain at the limit
+// it returns the projects fetched so far (truncated) and logs a warning. An
+// error on any page returns the error, not a partial list.
+func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error) {
+	var projects []ProjectOption
+	cursor := ""
+	for page := 0; page < maxUserProjectPages; page++ {
+		result, err := c.listUserProjectsPage(ctx, onBehalfOf, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range result.Projects {
+			projects = append(projects, ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug})
+		}
+		if result.NextCursor == "" {
+			return projects, nil
+		}
+		cursor = result.NextCursor
+	}
+	slog.Warn("User project list truncated at page limit", "pages", maxUserProjectPages, "count", len(projects))
+	return projects, nil
+}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// listUserProjectsPage fetches one page of the linked user's projects.
+func (c *httpHubClient) listUserProjectsPage(ctx context.Context, onBehalfOf, cursor string) (*hubProjectsResponse, error) {
+	endpoint := c.hubURL + "/api/v1/projects"
+	if cursor != "" {
+		endpoint += "?cursor=" + neturl.QueryEscape(cursor)
+	}
+
+	slog.Debug("Listing projects for linked user from hub", "url", endpoint, "on_behalf_of", onBehalfOf)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -824,27 +1004,54 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, ownerID string)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list user projects returned status %d", resp.StatusCode)
+		return nil, newHubError("list user projects", resp)
 	}
 
 	var result hubProjectsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode list user projects response: %w", err)
 	}
-
-	projects := make([]ProjectOption, len(result.Projects))
-	for i, p := range result.Projects {
-		projects[i] = ProjectOption{ID: p.ID, Name: p.Name, Slug: p.Slug}
-	}
-	return projects, nil
+	return &result, nil
 }
 
-func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
-	url := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+// maxAgentPages bounds how many pages ListAgents follows.
+const maxAgentPages = 20
+
+// ListAgents follows nextCursor for up to maxAgentPages pages, sending the
+// linked user on each. If more pages remain at the limit it returns the
+// agents fetched so far (truncated) and logs a warning. An error on any page
+// returns the error, not a partial list.
+func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
+	var agents []AgentInfo
+	cursor := ""
+	for page := 0; page < maxAgentPages; page++ {
+		result, err := c.listAgentsPage(ctx, projectID, onBehalfOf, cursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range result.Agents {
+			agents = append(agents, AgentInfo{ID: a.ID, Slug: a.Slug, Activity: a.Activity, Phase: a.Phase})
+		}
+		if result.NextCursor == "" {
+			return agents, nil
+		}
+		cursor = result.NextCursor
+	}
+	slog.Warn("Agent list truncated at page limit", "project_id", projectID, "pages", maxAgentPages, "count", len(agents))
+	return agents, nil
+}
+
+// listAgentsPage fetches one page of a project's agents as the linked user.
+func (c *httpHubClient) listAgentsPage(ctx context.Context, projectID, onBehalfOf, cursor string) (*hubAgentsResponse, error) {
+	endpoint := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, projectID)
+	if cursor != "" {
+		endpoint += "?cursor=" + neturl.QueryEscape(cursor)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
@@ -857,23 +1064,54 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID string) ([]Age
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list agents returned status %d", resp.StatusCode)
+		return nil, newHubError("list agents", resp)
 	}
 
 	var result hubAgentsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode list agents response: %w", err)
 	}
-
-	agents := make([]AgentInfo, len(result.Agents))
-	for i, a := range result.Agents {
-		agents[i] = AgentInfo{ID: a.ID, Slug: a.Slug, Activity: a.Activity, Phase: a.Phase}
-	}
-	return agents, nil
+	return &result, nil
 }
 
 func (c *httpHubClient) HubBaseURL() string {
 	return c.hubURL
+}
+
+// onBehalfOfHeader names the linked user the plugin acts for on a request.
+const onBehalfOfHeader = "X-Scion-On-Behalf-Of"
+
+// setOnBehalfOf makes req act as the linked user identified by onBehalfOf
+// ("user:<email>"). An empty principal leaves the request unchanged.
+// Call it before signRequest.
+func setOnBehalfOf(req *http.Request, onBehalfOf string) {
+	if onBehalfOf == "" {
+		return
+	}
+	req.Header.Set(onBehalfOfHeader, onBehalfOf)
+
+	// Add the header name to the semicolon-separated signed-headers list,
+	// keeping any names already listed on the request.
+	name := strings.ToLower(onBehalfOfHeader)
+	listed := req.Header.Get(apiclient.HeaderSignedHeaders)
+	for _, n := range strings.Split(listed, ";") {
+		if strings.EqualFold(strings.TrimSpace(n), name) {
+			return
+		}
+	}
+	if strings.TrimSpace(listed) != "" {
+		name = listed + ";" + name
+	}
+	req.Header.Set(apiclient.HeaderSignedHeaders, name)
+}
+
+// linkedUserPrincipal returns the "user:<email>" principal for a linked
+// Telegram user, or "" when there is no mapping or it has no Scion email.
+func linkedUserPrincipal(m *TelegramUserMapping) string {
+	if m == nil || m.ScionEmail == "" {
+		return ""
+	}
+	return "user:" + m.ScionEmail
 }
 
 func (c *httpHubClient) signRequest(req *http.Request) error {

@@ -46,7 +46,8 @@ type CallbackHandler struct {
 	cachedProjects []ProjectOption         // hub-injected project list
 }
 
-// SetProjects updates the cached project list used by the "change project" flow.
+// SetProjects updates the cached project list used to display project names.
+// It is not offered in setup pickers.
 func (h *CallbackHandler) SetProjects(projects []ProjectOption) {
 	h.mu.Lock()
 	h.cachedProjects = projects
@@ -161,11 +162,42 @@ func (h *CallbackHandler) handleSetupCallback(ctx context.Context, cb *CallbackQ
 	}
 }
 
+// requireLinkedPresser returns the link mapping and principal of the user
+// who pressed the button. When that user cannot act as a linked Scion user
+// it answers the callback with a hint and returns ok=false.
+func (h *CallbackHandler) requireLinkedPresser(ctx context.Context, cb *CallbackQuery) (mapping *TelegramUserMapping, principal string, ok bool) {
+	if cb.From != nil {
+		senderID := strconv.FormatInt(cb.From.ID, 10)
+		var err error
+		mapping, err = h.store.GetUserMapping(ctx, senderID)
+		if err != nil {
+			h.log.Warn("Failed to look up user mapping", "sender_id", senderID, "error", err)
+			h.answerCallback(ctx, cb.ID, "Something went wrong. Please try again.", false)
+			return nil, "", false
+		}
+	}
+	if mapping == nil {
+		h.answerCallback(ctx, cb.ID, registerHint, true)
+		return nil, "", false
+	}
+	principal = linkedUserPrincipal(mapping)
+	if principal == "" {
+		h.answerCallback(ctx, cb.ID, staleLinkText, true)
+		return nil, "", false
+	}
+	return mapping, principal, true
+}
+
 func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQuery, chatID, messageID int64, projectID string) error {
-	agentInfos, err := h.hubClient.ListAgents(ctx, projectID)
+	mapping, principal, ok := h.requireLinkedPresser(ctx, cb)
+	if !ok {
+		return nil
+	}
+
+	agentInfos, err := h.hubClient.ListAgents(ctx, projectID, principal)
 	if err != nil {
 		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
-		h.answerCallback(ctx, cb.ID, "Failed to fetch agents. Try again.", false)
+		h.answerCallback(ctx, cb.ID, hubErrorText(err, mapping.ScionEmail, h.projectDisplayName(projectID), "Failed to fetch agents. Try again."), isForbiddenHubError(err))
 		return err
 	}
 	agents := agentSlugs(agentInfos)
@@ -182,8 +214,8 @@ func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQu
 		}
 	}
 	if projectSlug == projectID {
-		// Not in cache — try fresh fetch
-		if fresh, err := h.hubClient.ListProjectsFresh(ctx); err == nil {
+		// Not in cache — look it up among the user's projects.
+		if fresh, err := h.hubClient.ListProjectsForUser(ctx, principal); err == nil {
 			for _, p := range fresh {
 				if p.ID == projectID {
 					projectSlug = p.DisplayName()
@@ -211,6 +243,19 @@ func (h *CallbackHandler) handleSetupProject(ctx context.Context, cb *CallbackQu
 		fmt.Sprintf("Project *%s* selected.\nChoose a default agent:\nAny plain message (without a / command or @mention) will be sent to the default agent. Mention a specific agent by name to route there instead.", projectSlug), kb)
 	h.answerCallback(ctx, cb.ID, "", false)
 	return nil
+}
+
+// projectDisplayName returns the cached display name of a project, or the
+// project ID when it is not cached.
+func (h *CallbackHandler) projectDisplayName(projectID string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, p := range h.cachedProjects {
+		if p.ID == projectID {
+			return p.DisplayName()
+		}
+	}
+	return projectID
 }
 
 func (h *CallbackHandler) handleSetupDefaultAgent(ctx context.Context, cb *CallbackQuery, chatID, messageID int64, agentSlug string) error {
@@ -268,25 +313,21 @@ func (h *CallbackHandler) finishSetup(ctx context.Context, cb *CallbackQuery, ch
 }
 
 func (h *CallbackHandler) handleSetupChange(ctx context.Context, cb *CallbackQuery, chatID, messageID int64) error {
-	fresh, freshErr := h.hubClient.ListProjectsFresh(ctx)
-	var projects []ProjectOption
-	if freshErr == nil && len(fresh) > 0 {
-		projects = fresh
-		h.mu.Lock()
-		h.cachedProjects = fresh
-		h.mu.Unlock()
-		h.log.Debug("Using fresh project list for setup change", "count", len(projects))
-	} else {
-		if freshErr != nil {
-			h.log.Warn("Failed to fetch fresh projects, falling back", "error", freshErr)
-		}
-		h.mu.Lock()
-		projects = h.cachedProjects
-		h.mu.Unlock()
+	mapping, principal, ok := h.requireLinkedPresser(ctx, cb)
+	if !ok {
+		return nil
+	}
+
+	projects, err := h.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		h.log.Warn("Failed to list projects for linked user", "error", err)
+		h.editMessage(ctx, chatID, messageID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText), nil)
+		h.answerCallback(ctx, cb.ID, "", false)
+		return nil
 	}
 
 	if len(projects) == 0 {
-		h.editMessage(ctx, chatID, messageID, "No projects found. Please /register first.", nil)
+		h.editMessage(ctx, chatID, messageID, noUserProjectsText, nil)
 		h.answerCallback(ctx, cb.ID, "", false)
 		return nil
 	}
@@ -563,12 +604,26 @@ func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *Callback
 		messageID = cb.Message.MessageID
 	}
 
-	senderID := ""
-	if cb.From != nil {
-		senderID = strconv.FormatInt(cb.From.ID, 10)
+	mapping, _, ok := h.requireLinkedPresser(ctx, cb)
+	if !ok {
+		return nil
 	}
-	if senderID == "" {
-		h.answerCallback(ctx, cb.ID, "Could not identify user.", false)
+	senderID := mapping.TelegramUserID
+
+	// Build the scoped toggle list first; on failure keep the current
+	// keyboard and report the error.
+	result, err := buildNotificationEntries(ctx, h.store, h.hubClient, h.log, mapping)
+	if err != nil {
+		h.log.Warn("Failed to build notification toggles", "error", err)
+		h.answerCallback(ctx, cb.ID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText), true)
+		return nil
+	}
+	if !result.Readable[projectID] {
+		h.answerCallback(ctx, cb.ID, "Your Scion account can no longer read this project.", true)
+		return nil
+	}
+	if !result.has(projectID, agentSlug) {
+		h.answerCallback(ctx, cb.ID, "This agent is no longer available. Run /notifications again.", true)
 		return nil
 	}
 
@@ -579,12 +634,9 @@ func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *Callback
 		return err
 	}
 
-	newEnabled := false
-	if existing == nil {
-		newEnabled = false
-	} else {
-		newEnabled = !existing.Enabled
-	}
+	// No stored preference means notifications are on, so the first press
+	// turns them off.
+	newEnabled := existing != nil && !existing.Enabled
 
 	if err := h.store.SaveNotificationPref(ctx, &NotificationPref{
 		TelegramUserID: senderID,
@@ -597,51 +649,8 @@ func (h *CallbackHandler) handleNotifyCallback(ctx context.Context, cb *Callback
 		return err
 	}
 
-	allPrefs, err := h.store.GetNotificationPrefs(ctx, senderID)
-	if err != nil {
-		h.log.Error("Failed to reload notification prefs", "error", err)
-		h.answerCallback(ctx, cb.ID, "Updated but failed to refresh.", false)
-		return err
-	}
-	prefMap := make(map[string]bool)
-	for _, p := range allPrefs {
-		prefMap[p.ProjectID+":"+p.AgentSlug] = p.Enabled
-	}
-
-	links, err := h.store.GetAllGroupLinks(ctx)
-	if err != nil {
-		h.log.Error("Failed to get group links", "error", err)
-		h.answerCallback(ctx, cb.ID, "Updated but failed to refresh.", false)
-		return err
-	}
-
-	seen := make(map[string]bool)
-	var entries []notificationAgentEntry
-	for _, link := range links {
-		if !link.Active || seen[link.ProjectID] {
-			continue
-		}
-		seen[link.ProjectID] = true
-
-		cached, _ := h.store.GetProjectAgents(ctx, link.ProjectID)
-		if cached == nil {
-			continue
-		}
-		for _, agent := range cached.Agents {
-			enabled := true
-			if val, ok := prefMap[link.ProjectID+":"+agent.Slug]; ok {
-				enabled = val
-			}
-			entries = append(entries, notificationAgentEntry{
-				ProjectSlug: link.ProjectSlug,
-				ProjectID:   link.ProjectID,
-				AgentSlug:   agent.Slug,
-				Enabled:     enabled,
-			})
-		}
-	}
-
-	kb := buildNotificationsKeyboard(entries)
+	result.set(projectID, agentSlug, newEnabled)
+	kb := buildNotificationsKeyboard(result.Entries)
 	h.editMarkup(ctx, chatID, messageID, kb)
 
 	label := "off"

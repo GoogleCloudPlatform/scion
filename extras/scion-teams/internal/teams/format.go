@@ -184,13 +184,7 @@ func buildAskUserCard(msg *messages.StructuredMessage, agentSlug string) *Adapti
 		requestID = msg.Metadata["request_id"]
 	}
 
-	// Parse choices from metadata.
-	var choices []string
-	if msg.Metadata != nil {
-		if choicesJSON, ok := msg.Metadata["choices"]; ok && choicesJSON != "" {
-			_ = json.Unmarshal([]byte(choicesJSON), &choices)
-		}
-	}
+	choices := askUserMetadataChoices(msg)
 
 	if len(choices) > 0 {
 		for _, choice := range choices {
@@ -202,10 +196,11 @@ func buildAskUserCard(msg *messages.StructuredMessage, agentSlug string) *Adapti
 				style = "destructive"
 			}
 
-			card.Actions = append(card.Actions, ActionSubmit{
-				Type:  "Action.Submit",
+			card.Actions = append(card.Actions, ActionExecute{
+				Type:  "Action.Execute",
 				Title: choice,
 				Style: style,
+				Verb:  "ask_response",
 				Data: map[string]string{
 					"action":     "ask_response",
 					"request_id": requestID,
@@ -216,20 +211,22 @@ func buildAskUserCard(msg *messages.StructuredMessage, agentSlug string) *Adapti
 	} else {
 		// Default: Approve + Reject buttons.
 		card.Actions = append(card.Actions,
-			ActionSubmit{
-				Type:  "Action.Submit",
+			ActionExecute{
+				Type:  "Action.Execute",
 				Title: "Approve",
 				Style: "positive",
+				Verb:  "ask_response",
 				Data: map[string]string{
 					"action":     "ask_response",
 					"request_id": requestID,
 					"choice":     "approve",
 				},
 			},
-			ActionSubmit{
-				Type:  "Action.Submit",
+			ActionExecute{
+				Type:  "Action.Execute",
 				Title: "Reject",
 				Style: "destructive",
+				Verb:  "ask_response",
 				Data: map[string]string{
 					"action":     "ask_response",
 					"request_id": requestID,
@@ -240,9 +237,10 @@ func buildAskUserCard(msg *messages.StructuredMessage, agentSlug string) *Adapti
 	}
 
 	// Custom Reply button.
-	card.Actions = append(card.Actions, ActionSubmit{
-		Type:  "Action.Submit",
+	card.Actions = append(card.Actions, ActionExecute{
+		Type:  "Action.Execute",
 		Title: "Custom Reply...",
+		Verb:  "ask_input",
 		Data: map[string]string{
 			"action":     "ask_input",
 			"request_id": requestID,
@@ -250,6 +248,26 @@ func buildAskUserCard(msg *messages.StructuredMessage, agentSlug string) *Adapti
 	})
 
 	return card
+}
+
+// askUserMetadataChoices returns the choices listed in an ask-user message's
+// "choices" metadata (a JSON array), or nil when there are none.
+func askUserMetadataChoices(msg *messages.StructuredMessage) []string {
+	var choices []string
+	if msg.Metadata != nil {
+		if choicesJSON, ok := msg.Metadata["choices"]; ok && choicesJSON != "" {
+			_ = json.Unmarshal([]byte(choicesJSON), &choices)
+		}
+	}
+	return choices
+}
+
+// askUserChoices returns the button choices shown on an ask-user card.
+func askUserChoices(msg *messages.StructuredMessage) []string {
+	if choices := askUserMetadataChoices(msg); len(choices) > 0 {
+		return choices
+	}
+	return []string{"approve", "reject"}
 }
 
 // buildStatusCard creates an Adaptive Card for system/status update messages.

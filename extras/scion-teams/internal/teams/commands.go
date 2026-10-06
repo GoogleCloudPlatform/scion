@@ -119,6 +119,12 @@ func (h *CommandHandler) Handle(ctx context.Context, activity *Activity) (bool, 
 func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, args []string) error {
 	conversationID := stripThreadSuffix(activity.Conversation.ID)
 
+	// Setup requires a linked user; only that user's projects are offered.
+	mapping, ok := h.requireLinkedUser(ctx, activity)
+	if !ok {
+		return nil
+	}
+
 	// Check if already linked.
 	store := h.getStore()
 	if store != nil {
@@ -132,51 +138,24 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 		}
 	}
 
-	// Check if user is registered.
-	teamsUserID := activity.From.AadObjectID
-	if teamsUserID == "" {
-		teamsUserID = activity.From.ID
-	}
-	var mapping *TeamsUserMapping
-	if store != nil {
-		var err error
-		mapping, err = store.GetUserMapping(ctx, teamsUserID)
-		if err != nil {
-			h.log.Warn("Error checking user mapping", "error", err)
-		}
-	}
-	if mapping == nil {
-		return h.sendReply(ctx, activity, "Please link your Teams account first with the `register` command.")
+	hubClient := h.broker.hubClient
+	if hubClient == nil {
+		return h.sendReply(ctx, activity, "Hub client not configured.")
 	}
 
 	if len(args) > 0 {
 		// Direct setup with project slug.
-		projectSlug := args[0]
-		return h.completeSetup(ctx, activity, projectSlug)
+		return h.completeSetup(ctx, activity, mapping, args[0])
 	}
 
-	// Get projects - try user-scoped first, then fall back to broker endpoint.
-	hubClient := h.broker.hubClient
-	var projects []ProjectOption
-	if hubClient != nil {
-		if mapping.ScionUserID != "" {
-			var err error
-			projects, err = hubClient.ListProjectsForUser(ctx, mapping.ScionUserID)
-			if err != nil {
-				h.log.Warn("Failed to list user projects", "error", err, "user_id", mapping.ScionUserID)
-			}
-		}
-		if len(projects) == 0 {
-			var err error
-			projects, err = hubClient.ListProjects(ctx)
-			if err != nil {
-				h.log.Warn("Failed to list projects from hub", "error", err)
-			}
-		}
+	projects, err := hubClient.ListUserProjects(ctx, onBehalfOfUser(mapping), "")
+	if err != nil {
+		h.log.Warn("Failed to list user projects", "error", err, "user_id", mapping.ScionUserID)
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, "", "Failed to retrieve your projects. Please try again."))
 	}
 
 	if len(projects) == 0 {
-		return h.sendReply(ctx, activity, "No projects found. Create a project in the hub first.")
+		return h.sendReply(ctx, activity, noUserProjectsText(mapping))
 	}
 
 	// Build Adaptive Card with project buttons.
@@ -225,30 +204,55 @@ func (h *CommandHandler) handleSetup(ctx context.Context, activity *Activity, ar
 	return h.sendCardReply(ctx, activity, card)
 }
 
+// noUserProjectsText is shown when the linked user has no projects.
+func noUserProjectsText(mapping *TeamsUserMapping) string {
+	return fmt.Sprintf("Your Scion account (%s) isn't a member of any projects. Ask a project owner to add you, or create a project in the hub.", mapping.ScionEmail)
+}
+
+// findUserProject resolves slugOrName to one of the linked user's projects.
+// It returns nil when the user has no such project. The slug lookup uses
+// ?slug=; the name-match fallback scans only the first page (hub default
+// limit 500).
+func findUserProject(ctx context.Context, hubClient *HubClient, mapping *TeamsUserMapping, slugOrName string) (*ProjectOption, error) {
+	onBehalfOf := onBehalfOfUser(mapping)
+	projects, err := hubClient.ListUserProjects(ctx, onBehalfOf, strings.ToLower(slugOrName))
+	if err != nil {
+		return nil, err
+	}
+	if len(projects) == 0 {
+		// Fall back to matching by name across the user's projects.
+		projects, err = hubClient.ListUserProjects(ctx, onBehalfOf, "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range projects {
+		if strings.EqualFold(p.Slug, slugOrName) || strings.EqualFold(p.Name, slugOrName) || p.ID == slugOrName {
+			return &p, nil
+		}
+	}
+	return nil, nil
+}
+
 // completeSetup finishes the setup process by creating the channel link.
-func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, projectSlug string) error {
+// The project must be one of the linked user's projects.
+func (h *CommandHandler) completeSetup(ctx context.Context, activity *Activity, mapping *TeamsUserMapping, projectSlug string) error {
 	store := h.getStore()
 	if store == nil {
 		return h.sendReply(ctx, activity, "Setup failed: store not initialized.")
 	}
 
-	// Resolve project ID from slug via hub if possible.
-	// TODO: Consider caching the project list or adding a GetProjectBySlug
-	// hub endpoint to avoid the O(N) scan on every setup invocation.
-	projectID := projectSlug
-	hubClient := h.broker.hubClient
-	if hubClient != nil {
-		projects, err := hubClient.ListProjects(ctx)
-		if err == nil {
-			for _, p := range projects {
-				if strings.EqualFold(p.Slug, projectSlug) || strings.EqualFold(p.Name, projectSlug) {
-					projectID = p.ID
-					projectSlug = p.Slug
-					break
-				}
-			}
-		}
+	project, err := findUserProject(ctx, h.broker.hubClient, mapping, projectSlug)
+	if err != nil {
+		h.log.Warn("Failed to resolve project for setup", "error", err, "project", projectSlug)
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, projectSlug, "Failed to look up the project. Please try again."))
 	}
+	if project == nil {
+		return h.sendReply(ctx, activity,
+			fmt.Sprintf("Project **%s** was not found among your Scion projects. Run `setup` to pick one of your projects.", projectSlug))
+	}
+	projectID := project.ID
+	projectSlug = project.Slug
 
 	// Extract team/channel info.
 	teamID := ""
@@ -359,10 +363,15 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 		return h.sendReply(ctx, activity, "Hub client not configured.")
 	}
 
-	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
+	mapping, ok := h.requireLinkedUser(ctx, activity)
+	if !ok {
+		return nil
+	}
+
+	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents from hub", "error", err, "project_id", link.ProjectID)
-		return h.sendReply(ctx, activity, "Failed to retrieve agents. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve agents. Please try again."))
 	}
 
 	// Cache agent slugs in store.
@@ -430,17 +439,22 @@ func (h *CommandHandler) handleStatus(ctx context.Context, activity *Activity, a
 		return h.sendReply(ctx, activity, "Hub client not configured.")
 	}
 
+	mapping, ok := h.requireLinkedUser(ctx, activity)
+	if !ok {
+		return nil
+	}
+
 	if len(args) > 0 {
 		// Show specific agent status.
 		agentSlug := args[0]
-		return h.showAgentStatus(ctx, activity, link, agentSlug)
+		return h.showAgentStatus(ctx, activity, link, mapping, agentSlug)
 	}
 
 	// Show project overview.
-	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents for status", "error", err)
-		return h.sendReply(ctx, activity, "Failed to retrieve project status. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve project status. Please try again."))
 	}
 
 	card := NewAdaptiveCard()
@@ -491,12 +505,12 @@ func (h *CommandHandler) handleStatus(ctx context.Context, activity *Activity, a
 // showAgentStatus shows detailed status for a specific agent.
 // TODO: Consider adding a GetAgent(ctx, projectID, slug) hub endpoint
 // instead of re-fetching the full agent list for a single agent lookup.
-func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity, link *ChannelLink, agentSlug string) error {
+func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity, link *ChannelLink, mapping *TeamsUserMapping, agentSlug string) error {
 	hubClient := h.broker.hubClient
-	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
+	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents for agent status", "error", err)
-		return h.sendReply(ctx, activity, "Failed to retrieve agent status. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve agent status. Please try again."))
 	}
 
 	for _, agent := range agents {
@@ -677,26 +691,7 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 			}
 
 			if status == "confirmed" && userID != "" {
-				// Save user mapping.
-				store := h.getStore()
-
-				if store != nil {
-					mapping := &TeamsUserMapping{
-						TeamsUserID:      teamsUserID,
-						TeamsDisplayName: activity.From.Name,
-						ScionUserID:      userID,
-						ScionEmail:       email,
-						LinkedAt:         time.Now(),
-					}
-					if err := store.CreateUserMapping(ctx, mapping); err != nil {
-						h.log.Error("Failed to save user mapping", "error", err)
-					}
-				}
-
-				// Send confirmation reply.
-				replyCtx, replyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_ = h.sendReply(replyCtx, activity, fmt.Sprintf("Linked! Your Teams account is now connected to Scion user **%s**.", email))
-				replyCancel()
+				h.saveConfirmedLink(ctx, activity, teamsUserID, userID, email)
 
 				// Clean up pending link.
 				h.pendingMu.Lock()
@@ -708,6 +703,44 @@ func (h *CommandHandler) pollForConfirmation(ctx context.Context, activity *Acti
 			}
 		}
 	}
+}
+
+// saveLinkFailedText is shown when a confirmed link cannot be stored.
+const saveLinkFailedText = "Couldn't save your account link. Please run `register` again."
+
+// saveConfirmedLink stores the confirmed link and tells the user. A link
+// without a Scion email is not stored, because requests are made as
+// "user:<email>".
+func (h *CommandHandler) saveConfirmedLink(ctx context.Context, activity *Activity, teamsUserID, userID, email string) {
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer replyCancel()
+
+	if email == "" {
+		h.log.Error("Confirmed link has no Scion email, not saving", "teams_user_id", teamsUserID, "user_id", userID)
+		_ = h.sendReply(replyCtx, activity, "Couldn't finish linking: your Scion account has no email address. Please run `register` again, or ask a hub admin for help.")
+		return
+	}
+
+	store := h.getStore()
+	if store == nil {
+		h.log.Error("Store not initialized, cannot save user mapping")
+		_ = h.sendReply(replyCtx, activity, saveLinkFailedText)
+		return
+	}
+	mapping := &TeamsUserMapping{
+		TeamsUserID:      teamsUserID,
+		TeamsDisplayName: activity.From.Name,
+		ScionUserID:      userID,
+		ScionEmail:       email,
+		LinkedAt:         time.Now(),
+	}
+	if err := store.CreateUserMapping(ctx, mapping); err != nil {
+		h.log.Error("Failed to save user mapping", "error", err)
+		_ = h.sendReply(replyCtx, activity, saveLinkFailedText)
+		return
+	}
+
+	_ = h.sendReply(replyCtx, activity, fmt.Sprintf("Linked! Your Teams account is now connected to Scion user **%s**.", email))
 }
 
 // handleUnregister removes the user's Teams-to-Scion identity link.
@@ -785,10 +818,15 @@ func (h *CommandHandler) handleDefault(ctx context.Context, activity *Activity, 
 		return h.sendReply(ctx, activity, "Hub client not configured.")
 	}
 
-	agents, err := hubClient.ListAgents(ctx, link.ProjectID)
+	mapping, ok := h.requireLinkedUser(ctx, activity)
+	if !ok {
+		return nil
+	}
+
+	agents, err := hubClient.ListAgents(ctx, link.ProjectID, onBehalfOfUser(mapping))
 	if err != nil {
 		h.log.Error("Failed to list agents for validation", "error", err)
-		return h.sendReply(ctx, activity, "Failed to validate agent. Please try again.")
+		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to validate agent. Please try again."))
 	}
 
 	var found bool
@@ -856,6 +894,32 @@ func (h *CommandHandler) getStore() Store {
 }
 
 // --- Helpers ---
+
+// teamsUserIDOf returns the stable Teams identifier of the activity sender.
+func teamsUserIDOf(activity *Activity) string {
+	if activity.From.AadObjectID != "" {
+		return activity.From.AadObjectID
+	}
+	return activity.From.ID
+}
+
+// requireLinkedUser returns the sender's linked Scion account. When the link
+// cannot be used it replies with what to do next and returns false.
+func (h *CommandHandler) requireLinkedUser(ctx context.Context, activity *Activity) (*TeamsUserMapping, bool) {
+	teamsUserID := teamsUserIDOf(activity)
+	mapping, err := linkedUserByTeamsID(ctx, h.getStore(), teamsUserID)
+	if problem := linkProblem(mapping, err, registerHint); problem != "" {
+		if err != nil {
+			h.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
+		}
+		_ = h.sendReply(ctx, activity, problem)
+		return nil, false
+	}
+	return mapping, true
+}
+
+// registerHint tells an unlinked user how to link their account.
+const registerHint = "Please link your Teams account first with the `register` command."
 
 // resolveChannelLink looks up the channel link for the current conversation.
 // Returns an error (with a reply sent to the user) if not linked.

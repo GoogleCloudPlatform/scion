@@ -16,7 +16,10 @@ package telegram
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,26 +304,29 @@ func TestStore_ProjectAgents_SaveAndGet(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
+	refreshed := time.Now().UTC().Truncate(time.Second)
 	pa := &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}, {Slug: "tester"}},
-		RefreshedAt: time.Date(2026, 5, 10, 8, 0, 0, 0, time.UTC),
+		RefreshedAt: refreshed,
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	got, err := store.GetProjectAgents(ctx, "proj-1")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
+	assert.Equal(t, "user:alice@example.com", got.User)
 	assert.Equal(t, "proj-1", got.ProjectID)
 	assert.Equal(t, []AgentInfo{{Slug: "coder", Activity: "executing"}, {Slug: "reviewer", Activity: "idle"}, {Slug: "tester"}}, got.Agents)
-	assert.Equal(t, 2026, got.RefreshedAt.Year())
+	assert.True(t, refreshed.Equal(got.RefreshedAt))
 }
 
 func TestStore_ProjectAgents_GetNotFound(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	got, err := store.GetProjectAgents(ctx, "nonexistent")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "nonexistent")
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
@@ -330,17 +336,18 @@ func TestStore_ProjectAgents_Upsert(t *testing.T) {
 	ctx := context.Background()
 
 	pa := &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{{Slug: "coder"}},
-		RefreshedAt: time.Now().UTC(),
+		RefreshedAt: time.Now().UTC().Add(-time.Minute),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
 	pa.Agents = []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}
-	pa.RefreshedAt = time.Now().UTC().Add(time.Hour)
+	pa.RefreshedAt = time.Now().UTC()
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	got, err := store.GetProjectAgents(ctx, "proj-1")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, []AgentInfo{{Slug: "coder"}, {Slug: "reviewer"}}, got.Agents)
@@ -351,16 +358,212 @@ func TestStore_ProjectAgents_EmptySlice(t *testing.T) {
 	ctx := context.Background()
 
 	pa := &ProjectAgents{
+		User:        "user:alice@example.com",
 		ProjectID:   "proj-1",
 		Agents:      []AgentInfo{},
 		RefreshedAt: time.Now().UTC(),
 	}
 	require.NoError(t, store.SaveProjectAgents(ctx, pa))
 
-	got, err := store.GetProjectAgents(ctx, "proj-1")
+	got, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, []AgentInfo{}, got.Agents)
+}
+
+func TestStore_ProjectAgents_PerUser(t *testing.T) {
+	testProjectAgentsPerUser(t, newTestStore(t))
+}
+
+func TestStore_ProjectAgents_EvictsExpiredEntries(t *testing.T) {
+	testProjectAgentsEviction(t, newTestStore(t))
+}
+
+func TestStore_ProjectAgents_ExpiredEntryNotServed(t *testing.T) {
+	testProjectAgentsExpiredNotServed(t, newTestStore(t))
+}
+
+func TestStore_ProjectAgents_EmptyUserNotServed(t *testing.T) {
+	testProjectAgentsEmptyUserNotServed(t, newTestStore(t))
+}
+
+func TestStore_ProjectAgents_DropsProjectKeyedCache(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE project_agents (project_id TEXT PRIMARY KEY, agent_slugs TEXT NOT NULL, refreshed_at TEXT NOT NULL);
+INSERT INTO project_agents VALUES ('proj-1', '[{"slug":"coder"}]', '` + time.Now().UTC().Format(time.RFC3339) + `');`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { store.Close() })
+
+	var oldTables int
+	require.NoError(t, rawAgentCache(t, store).db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'project_agents'`).Scan(&oldTables))
+	assert.Zero(t, oldTables, "the project-keyed cache table is dropped")
+	testProjectAgentsDropsProjectKeyedCache(t, store)
+}
+
+func TestStore_ProjectAgents_FailedEvictionDoesNotFailSave(t *testing.T) {
+	store := newTestStore(t)
+	_, err := rawAgentCache(t, store).db.Exec(`CREATE TRIGGER block_evict BEFORE DELETE ON user_project_agents BEGIN SELECT RAISE(ABORT, 'eviction blocked'); END`)
+	require.NoError(t, err)
+	rawAgentCache(t, store).insert(t, "user:alice@example.com", "proj-1", time.Now().Add(-agentCacheRetention-time.Minute))
+
+	require.NoError(t, store.SaveProjectAgents(context.Background(), &ProjectAgents{
+		User: "user:bob@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "reviewer"}}, RefreshedAt: time.Now(),
+	}), "the list is saved even when evicting old rows fails")
+
+	got, err := store.GetProjectAgents(context.Background(), "user:bob@example.com", "proj-1")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, []AgentInfo{{Slug: "reviewer"}}, got.Agents)
+}
+
+// testProjectAgentsPerUser checks that a cached agent list is only returned
+// for the user it was saved for.
+func testProjectAgentsPerUser(t *testing.T, store Store) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:alice@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "coder"}}, RefreshedAt: now,
+	}))
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:bob@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "reviewer"}}, RefreshedAt: now,
+	}))
+
+	alice, err := store.GetProjectAgents(ctx, "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	require.NotNil(t, alice)
+	assert.Equal(t, []AgentInfo{{Slug: "coder"}}, alice.Agents)
+
+	bob, err := store.GetProjectAgents(ctx, "user:bob@example.com", "proj-1")
+	require.NoError(t, err)
+	require.NotNil(t, bob)
+	assert.Equal(t, []AgentInfo{{Slug: "reviewer"}}, bob.Agents)
+
+	carol, err := store.GetProjectAgents(ctx, "user:carol@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, carol)
+
+	none, err := store.GetProjectAgents(ctx, "", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, none, "no list without a user")
+
+	assert.Error(t, store.SaveProjectAgents(ctx, &ProjectAgents{ProjectID: "proj-1", RefreshedAt: now}),
+		"a list cannot be cached without a user")
+}
+
+// agentCacheTable gives raw SQL access to the agent-list cache table of a
+// store, bypassing the Store methods.
+type agentCacheTable struct {
+	db    *sql.DB
+	table string
+	// postgres selects $n placeholders and TIMESTAMPTZ values.
+	postgres bool
+}
+
+func rawAgentCache(t *testing.T, store Store) agentCacheTable {
+	t.Helper()
+	switch s := store.(type) {
+	case *sqliteStore:
+		return agentCacheTable{db: s.db, table: "user_project_agents"}
+	case *postgresStore:
+		return agentCacheTable{db: s.db, table: "telegram_user_project_agents", postgres: true}
+	}
+	t.Fatalf("unsupported store %T", store)
+	return agentCacheTable{}
+}
+
+func (c agentCacheTable) query(q string) string {
+	if !c.postgres {
+		return q
+	}
+	for i := 1; strings.Contains(q, "?"); i++ {
+		q = strings.Replace(q, "?", fmt.Sprintf("$%d", i), 1)
+	}
+	return q
+}
+
+// insert writes a cache row directly.
+func (c agentCacheTable) insert(t *testing.T, user, projectID string, refreshedAt time.Time) {
+	t.Helper()
+	var ts interface{} = refreshedAt.UTC().Format(time.RFC3339)
+	if c.postgres {
+		ts = refreshedAt.UTC()
+	}
+	_, err := c.db.Exec(c.query(`INSERT INTO `+c.table+` (user_principal, project_id, agent_slugs, refreshed_at) VALUES (?, ?, '[{"slug":"coder"}]', ?)`),
+		user, projectID, ts)
+	require.NoError(t, err)
+}
+
+// count returns how many cache rows exist for user and project.
+func (c agentCacheTable) count(t *testing.T, user, projectID string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, c.db.QueryRow(c.query(`SELECT count(*) FROM `+c.table+` WHERE user_principal = ? AND project_id = ?`), user, projectID).Scan(&n))
+	return n
+}
+
+// testProjectAgentsEviction checks that saving a list deletes rows older
+// than the retention window and keeps younger ones.
+func testProjectAgentsEviction(t *testing.T, store Store) {
+	t.Helper()
+	ctx := context.Background()
+	raw := rawAgentCache(t, store)
+	raw.insert(t, "user:alice@example.com", "proj-1", time.Now().Add(-agentCacheRetention-time.Minute))
+	raw.insert(t, "user:alice@example.com", "proj-2", time.Now().Add(-agentCacheRetention+time.Minute))
+
+	require.NoError(t, store.SaveProjectAgents(ctx, &ProjectAgents{
+		User: "user:bob@example.com", ProjectID: "proj-1", Agents: []AgentInfo{{Slug: "reviewer"}}, RefreshedAt: time.Now(),
+	}))
+
+	assert.Zero(t, raw.count(t, "user:alice@example.com", "proj-1"), "an expired row is deleted")
+	assert.Equal(t, 1, raw.count(t, "user:alice@example.com", "proj-2"), "a row within retention is kept")
+	assert.Equal(t, 1, raw.count(t, "user:bob@example.com", "proj-1"))
+}
+
+// testProjectAgentsExpiredNotServed checks that a row older than the
+// retention window is not returned even though nothing evicted it.
+func testProjectAgentsExpiredNotServed(t *testing.T, store Store) {
+	t.Helper()
+	raw := rawAgentCache(t, store)
+	raw.insert(t, "user:alice@example.com", "proj-1", time.Now().Add(-agentCacheRetention-time.Minute))
+	raw.insert(t, "user:alice@example.com", "proj-2", time.Now().Add(-agentCacheRetention+time.Minute))
+
+	got, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "a row past retention is not served")
+	require.Equal(t, 1, raw.count(t, "user:alice@example.com", "proj-1"), "the expired row is still stored")
+
+	kept, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-2")
+	require.NoError(t, err)
+	assert.NotNil(t, kept, "a row within retention is served")
+}
+
+// testProjectAgentsEmptyUserNotServed checks that a row stored under an
+// empty user is never returned.
+func testProjectAgentsEmptyUserNotServed(t *testing.T, store Store) {
+	t.Helper()
+	rawAgentCache(t, store).insert(t, "", "proj-1", time.Now())
+
+	got, err := store.GetProjectAgents(context.Background(), "", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "no list without a user")
+}
+
+// testProjectAgentsDropsProjectKeyedCache checks that a list cached per
+// project before the store opened is not served to any user.
+func testProjectAgentsDropsProjectKeyedCache(t *testing.T, store Store) {
+	t.Helper()
+	got, err := store.GetProjectAgents(context.Background(), "user:alice@example.com", "proj-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "a list cached per project is not served to any user")
+	testProjectAgentsPerUser(t, store)
 }
 
 // --- TelegramUserMapping ---
