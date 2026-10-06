@@ -1818,6 +1818,10 @@ Commit-sized, ordered, each independently reviewable.
   > criterion already governs it unmodified: it may only name `/keys`/`scion keys` once that
   > replacement works in the same build, and a permanent test must execute it. Nothing about the
   > keys cutover needs a different or additional AC-15a rule.
+  >
+  > **Post-removal note (Keys 4.2, ptone/scion#2201).** The cutover skipped the deprecation
+  > warning: `--raw` was removed outright and now fails in argument validation with guidance naming
+  > `scion keys` (pinned by `TestRemovedFlag_Raw` and `TestMessageCmd_RawFlag_ZeroWireCalls`).
 
   > **Amended 2026-08-27 after S5 round 2. The verifier must assert it verified something.**
   > The round-2 test resolved every single-quoted `'scion …'` reference correctly and was

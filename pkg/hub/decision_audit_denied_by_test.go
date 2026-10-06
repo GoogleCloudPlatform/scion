@@ -91,7 +91,9 @@ func TestDecide_PersistsDeniedBy(t *testing.T) {
 	ctx := context.Background()
 
 	srv.authzService.DecisionAuditSampleRate = 1.0
-	srv.authzService.SetDecisionAuditEmitter(NewStoreDecisionAuditEmitter(s, slog.Default()))
+	auditEmitter := NewStoreDecisionAuditEmitter(s, slog.Default())
+	t.Cleanup(func() { auditEmitter.Close(context.Background()) })
+	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
 
 	projectID := tid("deniedby-proj")
 	ownerID := tid("deniedby-owner")

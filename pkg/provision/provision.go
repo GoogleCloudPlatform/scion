@@ -2214,6 +2214,89 @@ func lockLooksAbandoned(dir, path string) bool {
 	return now.Sub(last) > provisionLockStaleAfter
 }
 
+// ErrCommondirPresent is returned by SafeGitCommand when the target
+// base's .git/commondir file exists. A hub-native shared base is always the
+// main working copy of its own repository (never itself a linked worktree),
+// so it never legitimately has one; its presence means git's common-
+// directory resolution for this gitdir would be redirected somewhere other
+// than the mounted, host-managed .git. Rather than operate against an
+// unknown/unverified location, the broker refuses.
+var ErrCommondirPresent = errors.New("refusing git operation: base .git/commondir is present")
+
+// SafeGitCommand builds an *exec.Cmd for a broker-side git invocation
+// against a project's shared hub-native worktree-per-agent base repo, with
+// the invocation-level protections for the broker-git worktree containment
+// change applied. It ensures the broker's own git operations honor only the
+// host-managed config/hooks/refs for the base — never a redirected or
+// otherwise unexpected location — and returns an error instead of running if
+// it cannot establish that.
+//
+// Two mechanisms enforce this:
+//   - GIT_COMMON_DIR is pinned to <dir>/.git on every invocation. Git
+//     resolves config/hooks/refs through whatever "common directory" applies
+//     to the gitdir it operates on; without pinning it, a top-level
+//     <dir>/.git/commondir file (which git honors for the base's own gitdir,
+//     not only for linked worktrees) can redirect that resolution elsewhere.
+//     Pinning makes the common directory explicit and authoritative for
+//     every call through this wrapper, independent of what any commondir
+//     file says.
+//   - As an additional check (and for detection), the wrapper first checks whether
+//     <dir>/.git/commondir exists at all and refuses (ErrCommondirPresent)
+//     if so, since a hub-native base never legitimately has one.
+//
+// It deliberately does NOT disable hooks (core.hooksPath), filters, aliases,
+// or the global/system gitconfig — once the above holds, any hook/filter
+// still configured for the base is host-managed and must keep running (most
+// notably git-lfs: a post-checkout hook + filter.lfs.* smudge/clean driver).
+// Specifically:
+//   - GIT_CONFIG_NOSYSTEM=1 / GIT_CONFIG_GLOBAL=/dev/null were considered and
+//     REJECTED: `git lfs install` writes filter.lfs.* to the global or system
+//     gitconfig (not repo-local), so this would silently break LFS. It would
+//     also strip broker-host config the broker legitimately relies on
+//     (safe.directory, credential.helper, url.insteadOf, http.*,
+//     core.sshCommand for its own auth) for no corresponding benefit.
+//   - core.sshCommand is left alone for the same reason: this wrapper also
+//     covers the base clone/pull paths, which may legitimately depend on the
+//     broker's configured SSH transport.
+//   - Alias neutralization is unnecessary: every caller here invokes an
+//     explicit, hardcoded subcommand, never a user-suppliable one.
+//
+// What it does additionally clear:
+//   - core.fsmonitor (both boolean and hook-path forms): not used by git-lfs
+//     or any other broker operation, so clearing it costs nothing.
+//   - core.pager=cat: purely cosmetic — a pager must never block
+//     non-interactive broker output.
+//
+// dir is the working directory (cmd.Dir) and the base whose common directory
+// is pinned; it must be non-empty. args are the git subcommand and its
+// arguments, e.g. "worktree", "add", "--relative-paths", ... The returned
+// cmd.Env starts as a copy of the broker process's environment plus
+// GIT_COMMON_DIR; callers that need to layer additional env (e.g. the
+// GIT_CONFIG_COUNT/KEY_0/VALUE_0 credential-helper technique) must append to
+// cmd.Env rather than replace it, or the pin is lost.
+func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("SafeGitCommand: dir is required")
+	}
+	commondirFile := filepath.Join(dir, ".git", "commondir")
+	if _, err := os.Stat(commondirFile); err == nil {
+		slog.Error("SafeGitCommand: refusing to operate, base .git/commondir is present",
+			"dir", dir, "commondir_file", commondirFile)
+		return nil, fmt.Errorf("%w: %s", ErrCommondirPresent, commondirFile)
+	}
+
+	safeArgs := []string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.fsmonitor=",
+		"-c", "core.pager=cat",
+	}
+	fullArgs := append(safeArgs, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_COMMON_DIR="+filepath.Join(dir, ".git"))
+	return cmd, nil
+}
+
 // markedWorkspaceNeedsClone reports whether a shared-plain git workspace that
 // already has its provisioning marker still needs its clone:
 //   - it holds nothing but entries that may sit next to a clone
@@ -2999,9 +3082,69 @@ func dirHasEntries(dir string) (bool, error) {
 }
 
 // WorktreePath returns the canonical worktree path for a given agent within
-// a shared base checkout: <hostPath>/worktrees/<agentID>.
+// a shared base checkout: <hostPath>/<WorktreesSubdir>/<agentID>.
 func WorktreePath(hostPath, agentID string) string {
-	return filepath.Join(hostPath, "worktrees", agentID)
+	return filepath.Join(hostPath, WorktreesSubdir, agentID)
+}
+
+// IsValidJoinWorktree is the single check every ensureWorktree JOIN or reuse
+// site uses to decide whether a candidate worktree path is genuine and safe
+// to act on against base. It layers two checks:
+//
+//  1. A cheap, explicit rejection of a symlinked .git at candidate, checked
+//     first via Lstat. This is the most common mismatch shape, fails fast
+//     and unambiguously, and narrows the window between this check and the
+//     deeper resolved-path work ValidateWorktreeForBase does below.
+//  2. ValidateWorktreeForBase's full lexical-and-resolved relationship
+//     proof, including the admin-directory back-link reverse-check: it is
+//     not enough for a gitdir pointer to resolve into a real-looking admin
+//     directory under base/.git/worktrees, because that admin directory
+//     could belong to a different, unrelated worktree. The back-link (the
+//     admin directory's own "gitdir" file) must resolve back to candidate's
+//     own .git, which only a real `git worktree add` relationship produces.
+//
+// Returns nil when candidate is a genuine worktree of base at the canonical
+// base/worktrees/<name> layout. Returns a descriptive error otherwise.
+//
+// candidate must already be in its exact, Clean-ed form (filepath.Clean(p)
+// == p); a non-canonical spelling (redundant separators, "." or ".."
+// segments, a trailing slash) is refused outright rather than silently
+// normalized. ValidateWorktreeForBase cleans both of its arguments
+// internally before computing the worktree relationship, but this function
+// is the shared JOIN/reuse gate every caller relies on to decide what is
+// actually safe to trust — it must not pass a candidate as valid when the
+// value callers go on to store, compare, or mount is not the identical
+// string that was just checked.
+func IsValidJoinWorktree(base, candidate string) error {
+	if filepath.Clean(candidate) != candidate {
+		return fmt.Errorf("worktree relationship: %q is not in canonical form", candidate)
+	}
+	gitPath := filepath.Join(candidate, ".git")
+	if fi, err := os.Lstat(gitPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("worktree relationship: %s is a symlink, not a regular gitfile", gitPath)
+	}
+	return ValidateWorktreeForBase(base, candidate)
+}
+
+// validateJoinCandidate reports whether path is a genuine, in-tree worktree
+// of base (IsValidJoinWorktree) and is therefore safe for ensureWorktree to
+// attach a joining agent to. source is a short label identifying which JOIN
+// discovery path produced the candidate, for the warning log.
+//
+// A candidate that fails this check is not joined. At the git worktree
+// list site, ensureWorktree goes on to the create step, where git itself
+// rejects a branch that is still checked out elsewhere, and its add-failure
+// fallbacks return an error when their own candidate also fails this
+// check. The sharer-registry JOIN check in ensureWorktree does not route
+// through this function: it refuses a registry entry that is not a valid
+// worktree outright.
+func validateJoinCandidate(base, path, agentID, branchName, source string) bool {
+	if err := IsValidJoinWorktree(base, path); err != nil {
+		slog.Warn("ProvisionShared: join candidate failed worktree relationship validation, refusing to join",
+			"agent_id", agentID, "branch", branchName, "path", path, "source", source, "error", err)
+		return false
+	}
+	return true
 }
 
 // IsRealWorktreeDir reports whether path is a git worktree that belongs to
@@ -3010,8 +3153,15 @@ func WorktreePath(hostPath, agentID string) string {
 // "gitdir: " target resolves inside base's own .git/worktrees admin
 // directory. Any other entry at path — a plain file, a directory without a
 // matching worktree admin entry, or a symlink at any point in the chain —
-// is not a worktree this checkout owns, and must never be reused, mounted,
-// or removed as if it were one.
+// is not a worktree this checkout owns.
+//
+// This is a forward-only check: it does not confirm that the admin
+// directory's own back-link resolves to path in turn (linkedWorktreeState
+// does that separately). It is used only for a mounted worktree's own
+// reuse-or-recreate decision and for its removal, where the admin-link
+// states have their own, more specific handling; a path named by another
+// agent's sharer registration or by git's own worktree list is instead
+// proven with IsValidJoinWorktree, which does include the back-link check.
 func IsRealWorktreeDir(path, base string) bool {
 	fi, err := os.Lstat(path)
 	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
@@ -3048,31 +3198,6 @@ func IsRealWorktreeDir(path, base string) bool {
 		return false
 	}
 	return true
-}
-
-// isDirectChildOfWorktreesDir reports whether path, once symlinks are
-// resolved, is a direct child of base's own "worktrees" directory — not the
-// worktrees directory itself, and not anything nested deeper. Only direct
-// entries of worktrees/ are ever mounted read-write into a container, so a
-// path that is a real worktree by IsRealWorktreeDir's check but sits any
-// deeper (or is the worktrees directory itself) must still be refused.
-func isDirectChildOfWorktreesDir(base, path string) bool {
-	worktreesDir := filepath.Join(base, "worktrees")
-	// The exact string is what is stored and mounted, and downstream
-	// consumers clean it lexically rather than resolving symlinks, so it
-	// must already be the canonical worktrees/<name> form.
-	if filepath.Clean(path) != path || filepath.Dir(path) != worktreesDir {
-		return false
-	}
-	resolvedWorktreesDir, err := filepath.EvalSymlinks(worktreesDir)
-	if err != nil {
-		return false
-	}
-	resolvedPath, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return false
-	}
-	return resolvedPath != resolvedWorktreesDir && filepath.Dir(resolvedPath) == resolvedWorktreesDir
 }
 
 // worktreeOutcome reports what ensureWorktree did.
@@ -3141,7 +3266,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 				return o, fmt.Errorf("ProvisionShared: update the sharer registry: %w", err)
 			}
 		}
-		return o, RegisterSharer(base, branchName, path, in.AgentID)
+		return o, RegisterSharer(base, "", branchName, path, in.AgentID)
 	}
 
 	// If this agent's own worktree directory already exists, reuse it only
@@ -3149,8 +3274,20 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 	// directory, or a symlink, none of which this checkout created and none
 	// of which are safe to mount or to remove.
 	if _, err := os.Lstat(worktreePath); err == nil {
+		if !in.MountedWorktree {
+			// The local/Docker path proves the full worktree relationship
+			// (including the admin-directory back-link), not just the
+			// gitfile's own forward-pointing shape.
+			if joinErr := IsValidJoinWorktree(base, worktreePath); joinErr != nil {
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it: %w", worktreePath, joinErr)
+			}
+			slog.Debug("ProvisionShared: worktree already exists",
+				"agent_id", in.AgentID, "path", worktreePath)
+			return registered(worktreePath)
+		}
+
 		reuse := IsRealWorktreeDir(worktreePath, base)
-		if reuse && in.MountedWorktree {
+		if reuse {
 			// The directory must also be known to git: its admin entry
 			// must exist and point back to it.
 			switch linkedWorktreeState(base, worktreePath) {
@@ -3170,24 +3307,24 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 					mountedDisplayPath(in, worktreePath), mountedDisplayPath(in, worktreePath))
 			}
 		}
-		if reuse {
-			slog.Debug("ProvisionShared: worktree already exists",
-				"agent_id", in.AgentID, "path", worktreePath)
-			return registered(worktreePath)
-		}
-	}
-	if _, err := os.Lstat(worktreePath); err == nil {
-		state := mountedDirState(worktreePath)
-		switch {
-		case in.MountedWorktree && state == mountedDirStandalone:
-			slog.Info("ProvisionShared: the agent's directory already holds its own checkout; keeping it",
-				"agent_id", in.AgentID, "path", worktreePath)
-			return worktreeOutcome{}, nil
-		case in.MountedWorktree && state == mountedDirEmpty:
-			// Created empty by the broker so the pod can mount it: add the
-			// worktree into it below.
-		default:
-			return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", mountedDisplayPath(in, worktreePath))
+		// Re-check: moveWorktreeAside (linkedWorktreeNoAdmin, above) already
+		// relocated the agent's directory out of worktreePath, so a !reuse
+		// reached that way finds nothing here and falls through to CREATE
+		// below, the same as a worktree that never existed.
+		if !reuse {
+			if _, err := os.Lstat(worktreePath); err == nil {
+				switch mountedDirState(worktreePath) {
+				case mountedDirStandalone:
+					slog.Info("ProvisionShared: the agent's directory already holds its own checkout; keeping it",
+						"agent_id", in.AgentID, "path", worktreePath)
+					return worktreeOutcome{}, nil
+				case mountedDirEmpty:
+					// Created empty by the broker so the pod can mount it: add the
+					// worktree into it below.
+				default:
+					return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %s exists but is not a git worktree of this checkout; refusing to reuse or remove it", mountedDisplayPath(in, worktreePath))
+				}
+			}
 		}
 	}
 
@@ -3217,15 +3354,24 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 	// worktree-mode agent's own container (it lives under the shared,
 	// read-write-mounted .git); only join the path it names when that path
 	// is both a real worktree of this same base and a direct child of its
-	// "worktrees" directory.
-	sharers, existingWtPath, err := ListSharers(base, branchName)
+	// "worktrees" directory. ensureWorktree always operates in the
+	// base/worktrees/<name> shape, so ListSharersForJoin reads the marker
+	// with no projectDir (the ProvisionAgent-layout shape never applies
+	// here), and reports a recorded path that matches no scion-created
+	// worktree shape as-is rather than as "".
+	//
+	// A registered path that exists on disk but is not a valid worktree of
+	// this base (IsValidJoinWorktree) refuses the dispatch, for the local and
+	// MountedWorktree paths alike: the agent neither joins it nor creates a
+	// fresh worktree in its place.
+	sharers, existingWtPath, err := ListSharersForJoin(base, branchName)
 	if err != nil {
 		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: list sharers for branch %q: %w", branchName, err)
 	}
 	if len(sharers) > 0 && existingWtPath != "" {
 		if _, statErr := os.Lstat(existingWtPath); statErr == nil {
-			if !IsRealWorktreeDir(existingWtPath, base) || !isDirectChildOfWorktreesDir(base, existingWtPath) {
-				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it", branchName, existingWtPath)
+			if valErr := IsValidJoinWorktree(base, existingWtPath); valErr != nil {
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: the sharer registry for branch %q names %s, which is not a direct worktree of this checkout; refusing to join it: %w", branchName, existingWtPath, valErr)
 			}
 			switch {
 			case in.MountedWorktree && currentBranch(ctx, existingWtPath) != branchName:
@@ -3242,19 +3388,27 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 				return registered(existingWtPath)
 			}
 		} else {
+			// A registry entry naming a path that does not exist at all is
+			// ordinary stale state (for example, this agent's own worktree
+			// was just moved aside by the admin-link self-heal above) for
+			// both the local and MountedWorktree paths alike — not evidence
+			// of an unexpected shape, so this falls through to create a
+			// fresh worktree either way rather than refusing.
 			slog.Warn("ProvisionShared: registry points to missing path, will create new worktree",
 				"agent_id", in.AgentID, "branch", branchName, "stale_path", existingWtPath)
 		}
 	}
 
 	// 2. Check git worktree list for a prior-run worktree without a registry entry.
-	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" && IsRealWorktreeDir(existingPath, base) && isDirectChildOfWorktreesDir(base, existingPath) {
-		if in.MountedWorktree {
-			return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingPath)
+	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
+		if validateJoinCandidate(base, existingPath, in.AgentID, branchName, "git-worktree-list") {
+			if in.MountedWorktree {
+				return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingPath)
+			}
+			slog.Info("ProvisionShared: joining pre-existing worktree (git)",
+				"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
+			return registered(existingPath)
 		}
-		slog.Info("ProvisionShared: joining pre-existing worktree (git)",
-			"agent_id", in.AgentID, "branch", branchName, "path", existingPath)
-		return registered(existingPath)
 	}
 
 	// --- CREATE: no existing worktree for this branch ---
@@ -3294,8 +3448,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 
 	// git worktree add --relative-paths -b <branch> <path>
 	// --relative-paths is mandatory for container path-identity (design §6).
-	cmd := exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
-	cmd.Dir = base
+	cmd, err := SafeGitCommand(ctx, base, "worktree", "add", "--relative-paths", "-b", branchName, worktreePath)
+	if err != nil {
+		return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", err)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outputStr := strings.TrimSpace(string(output))
@@ -3307,11 +3463,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 		// proactive JOIN checks above — it is not guaranteed safe just because
 		// git reported it.
 		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
-			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
-				if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
-					return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
-						branchName, attachPath)
-				}
+			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+				validateJoinCandidate(base, attachPath, in.AgentID, branchName, "git-fallback") {
 				if in.MountedWorktree {
 					return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
 				}
@@ -3325,17 +3478,16 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 
 		// If branch already exists (but not checked out), try without -b.
 		if strings.Contains(outputStr, "already exists") {
-			cmd = exec.CommandContext(ctx, "git", "worktree", "add", "--relative-paths", worktreePath, branchName)
-			cmd.Dir = base
+			cmd, err = SafeGitCommand(ctx, base, "worktree", "add", "--relative-paths", worktreePath, branchName)
+			if err != nil {
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", err)
+			}
 			output, err = cmd.CombinedOutput()
 			if err != nil {
 				reuse := strings.TrimSpace(string(output))
 				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
-					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" {
-						if !IsRealWorktreeDir(attachPath, base) || !isDirectChildOfWorktreesDir(base, attachPath) {
-							return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out, but %s is not a direct worktree of this checkout; refusing to join it",
-								branchName, attachPath)
-						}
+					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+						validateJoinCandidate(base, attachPath, in.AgentID, branchName, "reuse-fallback") {
 						if in.MountedWorktree {
 							return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
 						}
@@ -3528,7 +3680,7 @@ func reuseMountedWorktree(ctx context.Context, in ProvisionInput, path, branch s
 		if err != nil {
 			return o, fmt.Errorf("ProvisionShared: update the sharer registry: %w", err)
 		}
-		return o, RegisterSharer(base, branch, path, in.AgentID)
+		return o, RegisterSharer(base, "", branch, path, in.AgentID)
 	}
 	if startBranch(base, path) == branch {
 		slog.Info("ProvisionShared: reusing the agent's worktree, which is now on another branch",
@@ -3643,8 +3795,13 @@ var gitSupportsRelativeWorktrees = func() bool {
 func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string, error) {
 	// Prune first so a worktree dir removed on disk (but not unregistered in git)
 	// isn't returned as a stale join target pointing at a non-existent path.
-	_ = exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "prune").Run()
-	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "worktree", "list", "--porcelain")
+	if pruneCmd, err := SafeGitCommand(ctx, repoDir, "worktree", "prune"); err == nil {
+		_ = pruneCmd.Run()
+	}
+	cmd, err := SafeGitCommand(ctx, repoDir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("git worktree list: %w", err)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git worktree list: %w", err)
@@ -3666,19 +3823,49 @@ func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string,
 
 // prepareBaseForWorktrees configures a freshly cloned base checkout for
 // worktree-per-agent use: detaches HEAD (so no branch is "owned" by the base),
-// disables auto-gc, and excludes worktrees/ from untracked file lists.
+// disables auto-gc, sets branch.autoSetupMerge=false, and excludes worktrees/
+// from untracked file lists.
+//
+// branch.autoSetupMerge=false is a mitigation for hub-native worktree mode,
+// where .git/config is mounted read-only into the agent container (see
+// pkg/runtime/common.go's narrowGitAdminMounts): with config unwritable,
+// commands that need to record a new tracking relationship (e.g. `checkout
+// -b <local> <remote>/<branch>`, DWIM `switch <remote-branch>`) would
+// otherwise fail outright because git cannot write the upstream it just
+// computed. Disabling automatic upstream setup means those commands create a
+// plain untracked local branch instead of failing. It does not help
+// operations that write config for other reasons (`push -u`, `branch -m`,
+// `branch --set-upstream-to`) — those still fail or partially apply with
+// config read-only; that is a documented limitation of hub-native worktree
+// mode, not a regression this setting is meant to cover.
 func prepareBaseForWorktrees(ctx context.Context, hostPath string) error {
 	if err := gitDetach(ctx, hostPath); err != nil {
 		return err
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "config", "gc.auto", "0")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
+	if err := runSafeGitConfig(ctx, hostPath, "gc.auto", "0"); err != nil {
+		return err
+	}
+	if err := runSafeGitConfig(ctx, hostPath, "branch.autoSetupMerge", "false"); err != nil {
+		return err
 	}
 
 	return appendGitExclude(hostPath, "worktrees/")
+}
+
+// runSafeGitConfig is a small helper for the legitimate broker-side
+// `git config <key> <value>` writes in prepareBaseForWorktrees and
+// prepareExistingBaseForWorktrees.
+func runSafeGitConfig(ctx context.Context, hostPath, key, value string) error {
+	cmd, err := SafeGitCommand(ctx, hostPath, "config", key, value)
+	if err != nil {
+		return err
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git config %s %s: %s", key, value, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 // prepareExistingBaseForWorktrees adds what worktrees need to a shared
@@ -3691,9 +3878,8 @@ func prepareExistingBaseForWorktrees(ctx context.Context, hostPath string) error
 		// No checkout: ensureWorktree reports this.
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "config", "gc.auto", "0")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git config gc.auto 0: %s", strings.TrimSpace(string(output)))
+	if err := runSafeGitConfig(ctx, hostPath, "gc.auto", "0"); err != nil {
+		return err
 	}
 	return appendGitExclude(hostPath, "worktrees/")
 }
@@ -3702,11 +3888,17 @@ func prepareExistingBaseForWorktrees(ctx context.Context, hostPath string) error
 // no branch. Tries 'git switch --detach' first, falls back to 'git checkout
 // --detach' for older git versions.
 func gitDetach(ctx context.Context, hostPath string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", hostPath, "switch", "--detach")
+	cmd, err := SafeGitCommand(ctx, hostPath, "switch", "--detach")
+	if err != nil {
+		return err
+	}
 	if _, err := cmd.CombinedOutput(); err == nil {
 		return nil
 	}
-	cmd = exec.CommandContext(ctx, "git", "-C", hostPath, "checkout", "--detach")
+	cmd, err = SafeGitCommand(ctx, hostPath, "checkout", "--detach")
+	if err != nil {
+		return err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git detach: %s", strings.TrimSpace(string(output)))
@@ -4009,20 +4201,23 @@ func isLockArtifactPath(path string) bool {
 	return base == provisionFileLockName || strings.HasPrefix(base, provisionFileLockName+".")
 }
 
-// resolveUID returns the NFS UID to use for chown, defaulting to 1000.
-func resolveUID(in ProvisionInput) int {
-	if in.NFSUID != 0 {
-		return in.NFSUID
+// DefaultOwnerID returns id, or the default owner id 1000 when id is 0
+// (unset).
+func DefaultOwnerID(id int) int {
+	if id != 0 {
+		return id
 	}
 	return 1000
 }
 
+// resolveUID returns the NFS UID to use for chown, defaulting to 1000.
+func resolveUID(in ProvisionInput) int {
+	return DefaultOwnerID(in.NFSUID)
+}
+
 // resolveGID returns the NFS GID to use for chown, defaulting to 1000.
 func resolveGID(in ProvisionInput) int {
-	if in.NFSGID != 0 {
-		return in.NFSGID
-	}
-	return 1000
+	return DefaultOwnerID(in.NFSGID)
 }
 
 // writeSentinel writes the provisioning sentinel file atomically using

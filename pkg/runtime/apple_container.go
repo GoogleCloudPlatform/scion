@@ -125,8 +125,12 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	return id, nil
 }
 
-func (r *AppleContainerRuntime) Stop(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "stop", id)
+// Stop stops the container ref.ID and ignores ref.RunID, with the same
+// caveat as Delete: Apple's ID is the container name, so the caller's
+// run_id filter narrows but does not close the List-to-Stop window.
+// P4: enforce ref.RunID (ptone/scion#2550).
+func (r *AppleContainerRuntime) Stop(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "stop", ref.ID)
 	return err
 }
 
@@ -213,28 +217,8 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 	var agents []api.AgentInfo
 	for _, c := range raw {
 		// Filter by labels if requested
-		if len(labelFilter) > 0 {
-			match := true
-			for k, v := range labelFilter {
-				actual := c.Configuration.Labels[k]
-				if actual == "" {
-					switch k {
-					case projectkeys.LabelProject:
-						actual = projectkeys.ProjectNameFromLabels(c.Configuration.Labels)
-					case projectkeys.LabelProjectID:
-						actual = projectkeys.ProjectIDFromLabels(c.Configuration.Labels)
-					case projectkeys.LabelProjectPath:
-						actual = projectkeys.ProjectPathFromLabels(c.Configuration.Labels)
-					}
-				}
-				if !projectkeys.LabelValuesMatch(k, actual, v) {
-					match = false
-					break
-				}
-			}
-			if !match {
-				continue
-			}
+		if !LabelsMatchFilter(c.Configuration.Labels, labelFilter) {
+			continue
 		}
 
 		info := api.AgentInfo{

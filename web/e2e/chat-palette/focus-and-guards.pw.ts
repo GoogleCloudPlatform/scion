@@ -436,6 +436,11 @@ test('IME composition does not commit or toggle while the palette is open', asyn
 
   const input = paletteInput(page);
   const urlBeforeEnter = page.url();
+  // A typed query selects a row, so only the composing guard can stop Enter
+  // from committing it. It names a different agent from the one the route
+  // already points at, so a commit would change the URL.
+  await input.fill('Review');
+  await expect(page.locator('scion-quick-palette .palette-option.active')).toHaveCount(1);
   await input.dispatchEvent('compositionstart');
   await input.evaluate((el: HTMLInputElement) => {
     el.dispatchEvent(
@@ -450,12 +455,8 @@ test('IME composition does not commit or toggle while the palette is open', asyn
   expect(page.url()).toBe(urlBeforeEnter);
 
   // Positive control: ending composition and pressing Enter now *does*
-  // commit — proves the guard above is what blocked it, not something else
-  // (e.g. the dialog being broken). Retype to select a *different* agent
-  // than the one this fixture already starts on (the global best for an
-  // empty query is the same agent the route already points at, so an
-  // empty-query commit would produce an identical URL and prove nothing).
-  await input.fill('Review');
+  // commit the same selected row — proves the guard above is what blocked
+  // it, not something else (e.g. the dialog being broken).
   await input.dispatchEvent('compositionend');
   await page.keyboard.press('Enter');
   await expect(paletteDialog(page)).toBeHidden();

@@ -354,6 +354,8 @@ type heartbeatReport struct {
 	startsLoaded bool
 	starts       map[string]bool
 	startsErr    error
+	// Agents with a queued stop dispatch, read with the starts.
+	stops map[string]bool
 }
 
 func newHeartbeatReport() *heartbeatReport {
@@ -410,15 +412,28 @@ func (r *heartbeatReport) pendingStarts(ctx context.Context, s *Server, brokerID
 		return nil, err
 	}
 	r.starts = make(map[string]bool, len(rows))
+	r.stops = map[string]bool{}
 	for _, d := range rows {
+		if d.AgentID == "" {
+			continue
+		}
 		switch d.Op {
 		case "create", "start", "restart":
-			if d.AgentID != "" {
-				r.starts[d.AgentID] = true
-			}
+			r.starts[d.AgentID] = true
+		case "stop":
+			r.stops[d.AgentID] = true
 		}
 	}
 	return r.starts, nil
+}
+
+// pendingStops returns the agents with a queued stop dispatch for brokerID,
+// from the same read as pendingStarts.
+func (r *heartbeatReport) pendingStops(ctx context.Context, s *Server, brokerID string) (map[string]bool, error) {
+	if _, err := r.pendingStarts(ctx, s, brokerID); err != nil {
+		return nil, err
+	}
+	return r.stops, nil
 }
 
 // pendingLifecycleAgents returns the IDs of agents with a queued lifecycle

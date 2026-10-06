@@ -108,7 +108,10 @@ export class ScionQuickPalette extends LitElement {
   @state() private queryText = '';
   /** The globally-selected candidate ID, or null when nothing matches. */
   @state() private activeId: string | null = null;
-  /** True once Up/Down/click has picked a candidate; a query edit clears it back to "auto". */
+  /**
+   * True once Up/Down/Tab/click has picked a candidate; a query edit clears
+   * it back to "auto". With an empty query, only a pick makes a row active.
+   */
   private manualSelection = false;
   /** True once Enter has committed a selection this open, so a stray repeat can't double-fire. */
   private committed = false;
@@ -434,20 +437,20 @@ export class ScionQuickPalette extends LitElement {
    * Recompute the active (globally-selected) candidate after the ranked list
    * changes (query edit or a group finishing/refreshing load).
    *
-   * A query edit always resets to the new global best. A group refresh
-   * preserves a manual selection by stable ID when it is still present,
-   * otherwise falls back to the new global best.
+   * A group refresh preserves the user's pick by stable ID while it is still
+   * present, so a row arriving above it never takes its place. Otherwise
+   * (a query edit, no pick, or a picked row that went away) the selection
+   * follows the ranking: the best match for a typed query, and no row at
+   * all for an empty query. An empty query ranks by the host's default
+   * order (newest activity in chat), which is not a choice the user made,
+   * so nothing is selected and Enter commits nothing until the user picks a
+   * row with the arrow keys or Tab.
    */
   private reconcileActiveId(
     ranked: Array<RankedCandidate<PaletteCandidate>>,
     queryChanged: boolean
   ): void {
-    if (queryChanged) {
-      this.manualSelection = false;
-      this.setActiveId(ranked[0]?.candidate.id ?? null);
-      return;
-    }
-    if (this.manualSelection && this.activeId !== null) {
+    if (!queryChanged && this.manualSelection && this.activeId !== null) {
       const stillPresent = ranked.some((r) => r.candidate.id === this.activeId);
       if (stillPresent) {
         // A background refresh (new candidates loaded) may have moved this
@@ -460,7 +463,9 @@ export class ScionQuickPalette extends LitElement {
         return;
       }
     }
-    this.setActiveId(ranked[0]?.candidate.id ?? null);
+    this.manualSelection = false;
+    const hasQuery = this.queryText.trim() !== '';
+    this.setActiveId(hasQuery ? (ranked[0]?.candidate.id ?? null) : null);
   }
 
   override willUpdate(changed: PropertyValues<ScionQuickPalette>): void {

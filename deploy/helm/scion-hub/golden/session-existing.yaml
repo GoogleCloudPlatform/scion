@@ -33,14 +33,6 @@ stringData:
     # pod-local; see ptone/scion#1091 before making it writable.
     #
     # Positions deliberately left unrendered, each owned by a later change:
-    #   server.database.url        Cloud SQL. Note the key is url, not dsn.
-    #   server.secrets             the secret backend (gcpsm).
-    #   server.auth.proxy,
-    #   server.auth.transport      the subtree selected by server.auth.mode.
-    #   server.oauth               NOW RENDERED: web client credentials land here
-    #                              as server.oauth.web.<provider>.client_id and
-    #                              client_secret, in snake_case. cli and device
-    #                              are reachable through config.extra.
     #   server.workspace_storage   Filestore NFS - a different subsystem from
     #                              server.storage, which is the hub's GCS blob
     #                              store and is rendered below.
@@ -48,6 +40,7 @@ stringData:
     # The session secret is not here and does not belong here: it arrives as an
     # environment variable from its own Secret.
     active_profile: default
+    image_registry: us-docker.pkg.dev/example-project/example-repo
     profiles:
       default:
         runtime: kubernetes
@@ -258,7 +251,7 @@ spec:
       annotations:
         scion.io/hub-id: "ci-session-existing"
         checksum/env-config: a5129982fbf978f91fe3200ec6505e24f1b5abf41f72fd600603bd65cfd7c509
-        checksum/settings: 84ad4267eb9cbad06b022bc7432a9b0163869ded32c87c2da12d9b85ba41ce51
+        checksum/settings: 556186542ed0f83b2c9799a90bb4d28d9f7ebd16ea3f6bc53a1adb69336affce
     spec:
       serviceAccountName: scion-scion-hub
       securityContext:

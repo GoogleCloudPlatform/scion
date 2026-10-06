@@ -29,6 +29,10 @@ hub:
   hubId: ci-settings
   name: CI Settings Hub
   baseUrl: https://ci-settings.example.com
+  # Rendered as server.hub.admin_emails. hack/verify.sh's delivery table reads
+  # this permutation for the admin-emails channel.
+  adminEmails:
+    - ci-admin@example.com
 
 image:
   repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
@@ -68,6 +72,12 @@ auth:
     mode: iap
     oidcAudience: probe-ci-settings-oauth-client.apps.googleusercontent.com
     platformAuthSa: probe-ci-settings@probe-project.iam.gserviceaccount.com
+
+# The GKE shape: Secret Manager, IAM granted outside the chart.
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: probe-project
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

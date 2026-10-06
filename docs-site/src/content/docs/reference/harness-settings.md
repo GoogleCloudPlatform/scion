@@ -11,7 +11,7 @@ While Scion manages the orchestration and execution of containers, the tools run
 Each agent has a dedicated "Home" directory that is mounted into the container. Harness-specific settings are typically found in a hidden subdirectory:
 - **Gemini**: `/home/gemini/.gemini/settings.json`
 - **Claude**: `/home/claude/.claude.json` (or similar)
-- **Opencode**: `/home/opencode/opencode.json`
+- **Opencode**: `/home/scion/.config/opencode/opencode.json` (opencode 1.x does not read the old `.opencode.json` name)
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
@@ -191,7 +191,9 @@ for the full chain.
 ### Thinking Level Map (`thinking`)
 
 Scion carries the thinking level as a harness-agnostic integer from 0 to 100 (`--thinking-level` on
-`scion start`, Hub agent defaults, templates). Inside the container it arrives as
+`scion start`, Hub agent defaults, templates). `--thinking-level` also accepts the shorthands
+`low` (25), `medium` (50), `high` (75) and `max` (100), case-insensitive; they are stored as those
+integers. Inside the container it arrives as
 `SCION_THINKING_LEVEL`. A harness that honours it declares a `thinking:` block in its
 `config.yaml`, next to `model_aliases`. The block maps level ranges to the harness's native tier
 strings:

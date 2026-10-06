@@ -44,6 +44,11 @@ const (
 	// SurfaceAgentPatch is assignment onto an already-existing agent.
 	SurfaceAgentPatch = "agent-patch"
 
+	// SurfaceAgentReincarnate is assignment onto an existing agent's next
+	// generation by `scion reincarnate --service-account`
+	// (ptone/scion#3302). Unlike PATCH it applies to a running agent.
+	SurfaceAgentReincarnate = "agent-reincarnate"
+
 	// SurfaceProjectDefault is an SA assigned from project settings rather than
 	// supplied by the caller. P10 changed the ruling: project-default assignment
 	// now runs the full authorization gate (ActionAssign + actAs) against the
@@ -261,8 +266,8 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 //     should be reported rather than explained away by §8.2 — that ruling is
 //     about hub-scoped accounts and plain hub members, and nothing else.
 //
-// surface names the call site for the audit record — SurfaceAgentCreate or
-// SurfaceAgentPatch. It affects labelling only, never the decision.
+// surface names the call site for the audit record — SurfaceAgentCreate,
+// SurfaceAgentPatch or SurfaceAgentReincarnate. It affects labelling only, never the decision.
 //
 // Returns true if the assignment may proceed. On false it has already written
 // the response and the caller must return immediately.
