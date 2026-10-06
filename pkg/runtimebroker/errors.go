@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -79,6 +80,12 @@ const (
 	// Either way this constant lets broker-level callers and tests branch on
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
+
+	// ErrCodeStaleDispatch marks a delete refused because it arrived after
+	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
+	// hub's claim on the delete may have lapsed, so acting could remove an
+	// agent the user started again. Nothing was done.
+	ErrCodeStaleDispatch = "stale_dispatch"
 
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
@@ -193,6 +200,20 @@ func NotFound(w http.ResponseWriter, resource string) {
 	writeError(w, http.StatusNotFound, code, resource+" not found", nil)
 }
 
+// StopRunMismatch writes the 404 for a stop naming run runID when another
+// run holds the agent's name (ptone/scion#2550). The code
+// (api.BrokerErrorCodeRunMismatch) lets the hub tell it apart from any
+// other 404; the details name the requested run and the run that holds
+// the name (current, omitted when unknown), so a hub/broker run drift is
+// diagnosable.
+func StopRunMismatch(w http.ResponseWriter, runID, current string) {
+	details := map[string]interface{}{api.BrokerErrorDetailRunID: runID}
+	if current != "" {
+		details[api.BrokerErrorDetailCurrentRunID] = current
+	}
+	writeError(w, http.StatusNotFound, api.BrokerErrorCodeRunMismatch, "Agent not found for the requested run", details)
+}
+
 // BadRequest writes a 400 Bad Request response.
 func BadRequest(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, message, nil)
@@ -230,6 +251,12 @@ func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods 
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// StaleDispatch writes a 409 Conflict response with the stable
+// ErrCodeStaleDispatch code.
+func StaleDispatch(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeStaleDispatch, message, nil)
 }
 
 // AgentIdentityUnknown writes a 409 Conflict response with the stable
@@ -417,6 +444,8 @@ func Unprocessable(w http.ResponseWriter, message string) {
 //   - upstream_unavailable: 502, GitHub itself returned repeated 5xx.
 //   - unreachable: 502, a network-level failure (DNS, connection refused,
 //     TLS) rather than a response GitHub chose to send.
+//   - forbidden: 403, the Hub's per-URI code for a gh:// ref the caller may
+//     not resolve GitHub skills for in this project.
 //   - anything else — including an uncategorized local failure and the Hub's
 //     own per-URI codes for PreResolvedSkills (storage_error, internal_error,
 //     federation_error) — keeps the existing 500, not a client error: the
@@ -426,6 +455,8 @@ func skillResolutionHTTPStatus(code string) int {
 	switch code {
 	case agent.SkillErrCodeNotFound:
 		return http.StatusNotFound
+	case agent.SkillErrCodeForbidden:
+		return http.StatusForbidden
 	case agent.SkillErrCodeRateLimited:
 		return http.StatusTooManyRequests
 	case agent.SkillErrCodeTimeout:
@@ -443,12 +474,24 @@ func skillResolutionHTTPStatus(code string) int {
 // mapped status gets the same {skill, cause} detail payload so the response
 // is actionable without broker logs, including the uncategorized/5xx default.
 func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
+	skillResolutionFailedWithDetails(w, err, nil)
+}
+
+// skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
+// details (for example the start markers from startFailureDetails) merged
+// alongside the skill and cause.
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, extra map[string]interface{}) {
 	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
 		w.Header().Set("Retry-After", err.RetryAfter)
 	}
+	details := make(map[string]interface{}, len(extra)+2)
+	for k, v := range extra {
+		details[k] = v
+	}
+	details["skill"] = err.URI
+	details["cause"] = err.Code
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
-		"Failed to provision agent: "+err.Error(),
-		map[string]interface{}{"skill": err.URI, "cause": err.Code})
+		"Failed to provision agent: "+err.Error(), details)
 }
 
 // writeStartContextError writes the HTTP response for an error returned by
@@ -466,7 +509,10 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior.
+// behavior. The one exception is errSavedProfileUnresolved (a saved profile
+// that no longer resolves), which is checked ahead of every other case and
+// written as the retryable 503 from writeSavedProfileUnresolved; its text is
+// client-safe by construction.
 //
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
@@ -487,6 +533,12 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // so the detail reaches the broker's own diagnostics before being redacted
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
+	// errSavedProfileUnresolved's text names only the agent, the profile
+	// and a fixed or ResolveRuntime cause, and is client-safe as is.
+	if errors.Is(err, errSavedProfileUnresolved) {
+		writeSavedProfileUnresolved(w, err)
+		return http.StatusServiceUnavailable
+	}
 	sce, ok := err.(*startContextError)
 	if !ok {
 		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", err)

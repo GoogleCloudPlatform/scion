@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-webchat-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -72,18 +72,21 @@ test-fast:
 	@echo "Running tests (no SQLite)..."
 	@go test -tags no_sqlite ./...
 
-## test-hub-sqlite: Run pkg/hub (and perf/bench/seed) tests with SQLite
+## test-hub-sqlite: Run pkg/hub, perf/bench/seed, pkg/conduit and pkg/store/entadapter tests with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus
-# perf/bench/seed's own SQLite-backed tests, which carry the same
-# `//go:build !no_sqlite` constraint for the same reason (ptone/scion#2393).
+# perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests,
+# which carry the same `//go:build !no_sqlite` constraint for the same
+# reason (ptone/scion#2393, ptone/scion#2851), and pkg/conduit's
+# relay/router tests, which run against the SQLite-backed conduit
+# registry store.
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit + pkg/store/entadapter tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 40m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/... ./perf/bench/seed/...
+		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/...
 
 ## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
 # internal/fixturegen's tests carry `//go:build !no_sqlite`, so
@@ -145,6 +148,10 @@ test-fixture-coverage:
 # Postgres and SQLite (generation/epoch upsert ... RETURNING, generation-CAS
 # deletes, concurrent epoch allocation), so the same suite runs on both.
 #
+# It also includes the project owner_id store-contract tests
+# (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
+# owner_id on either backend, so SetProjectOwnerID stays its only writer.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -177,7 +184,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestPreviousRunIDs_|TestSeedMaintenanceOperations)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -186,6 +193,42 @@ test-launch-store-postgres:
 		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
+
+## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
+# Requires SCION_TEST_POSTGRES_DSN (a pgx connection string). The selected
+# tests self-skip without it, so the target fails if the variable is unset,
+# if any selected test skips, or if any test listed in
+# WEBCHAT_POSTGRES_TESTS reports no PASS line. CI runs this in
+# the T1 Launch Store PostgreSQL Tests job. The tests drop and recreate the
+# webchat_* tables, so point the DSN at a scratch database.
+WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
+	TestC4Fix_Postgres_FreshDB \
+	TestC4Fix_Postgres_PreExistingDB \
+	TestC4Fix_Postgres_Idempotent \
+	TestC4Fix_Postgres_PreExistingDB_Idempotent
+
+test-webchat-postgres:
+	@echo "Running web chat store tests against Postgres..."
+	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
+		echo "ERROR: SCION_TEST_POSTGRES_DSN is not set -- the Postgres tests would silently skip instead of running." >&2; \
+		exit 1; \
+	fi
+	@go test -count=1 -timeout 10m -v \
+		-run '^($(subst $(eval) ,|,$(strip $(WEBCHAT_POSTGRES_TESTS))))$$' \
+		./pkg/hub/ > /tmp/test-webchat-postgres.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-webchat-postgres.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-webchat-postgres.log; then \
+		echo "ERROR: a web chat Postgres test was skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	for t in $(WEBCHAT_POSTGRES_TESTS); do \
+		if ! grep -qE "^--- PASS: $$t " /tmp/test-webchat-postgres.log; then \
+			echo "ERROR: $$t did not pass." >&2; \
+			exit 1; \
+		fi; \
+	done
 
 ## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
 # It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values

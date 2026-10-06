@@ -34,6 +34,7 @@ import (
 	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
 )
 
@@ -155,7 +156,9 @@ func execUserCredential(username, shPath string) (envPairs []string, homeDir str
 	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
 		return envPairs, u.HomeDir, nil, nil
 	}
-	return envPairs, u.HomeDir, &syscall.Credential{Uid: uid, Gid: gid}, nil
+	// Keeps the runtime-granted nfs shared-dir groups (ptone/scion#3155);
+	// an empty set when none were granted, as before.
+	return envPairs, u.HomeDir, suppgroups.Credential(uid, gid), nil
 }
 
 // checkExecHomeDir verifies that homeDir, the exec user's passwd home

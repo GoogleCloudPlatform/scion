@@ -204,7 +204,7 @@ func TestCloudRunRuntime_LifecycleMethods(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{"Stop", func() error { return rt.Stop(ctx, "x") }},
+		{"Stop", func() error { return rt.Stop(ctx, RunRef{ID: "x"}) }},
 		{"Delete", func() error { return rt.Delete(ctx, RunRef{ID: "x"}) }},
 		{"Attach", func() error { return rt.Attach(ctx, "x") }},
 		{"Exec", func() error { _, e := rt.Exec(ctx, "x", []string{"ls"}); return e }},
@@ -399,7 +399,7 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 }
 
 func TestCloudRunNFSExportPaths(t *testing.T) {
-	paths, err := cloudRunNFSExportPaths("/scion-workspaces/", "proj-123", "agent-456")
+	paths, err := cloudRunNFSExportPaths("/scion-workspaces/", "", "proj-123", "agent-456")
 	if err != nil {
 		t.Fatalf("cloudRunNFSExportPaths: %v", err)
 	}
@@ -448,7 +448,7 @@ func TestCloudRunNFSExportPathsRejectUnsafeInputs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := cloudRunNFSExportPaths(tt.export, tt.projectID, tt.agentID)
+			_, err := cloudRunNFSExportPaths(tt.export, "", tt.projectID, tt.agentID)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -462,7 +462,7 @@ func TestCloudRunNFSExportPathsRejectUnsafeInputs(t *testing.T) {
 func TestCloudRunNFSHostPaths(t *testing.T) {
 	hostWorkspace := filepath.Join(string(filepath.Separator), "mnt", "nfs", "share1", "projects", "proj-123", "workspace")
 
-	paths, err := cloudRunNFSHostPaths(hostWorkspace, "proj-123", "agent-456")
+	paths, err := cloudRunNFSHostPaths(hostWorkspace, "", "proj-123", "agent-456")
 	if err != nil {
 		t.Fatalf("cloudRunNFSHostPaths: %v", err)
 	}
@@ -499,12 +499,70 @@ func TestCloudRunNFSHostPathsRejectLocalAssumptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := cloudRunNFSHostPaths(tt.hostWorkspace, "proj-123", "agent-456")
+			_, err := cloudRunNFSHostPaths(tt.hostWorkspace, "", "proj-123", "agent-456")
 			if err == nil {
 				t.Fatal("expected error")
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %q, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCloudRunNFSPathsHonourSubPathRoot checks that a configured
+// workspace_storage.nfs.subpath_root, including a multi-segment one, replaces
+// the default in both the export and host paths.
+func TestCloudRunNFSPathsHonourSubPathRoot(t *testing.T) {
+	for _, root := range []string{"trees", "team/trees"} {
+		t.Run(root, func(t *testing.T) {
+			paths, err := cloudRunNFSExportPaths("/scion-workspaces", root, "proj-123", "agent-456")
+			if err != nil {
+				t.Fatalf("cloudRunNFSExportPaths: %v", err)
+			}
+			if want := "/scion-workspaces/" + root + "/proj-123/workspace"; paths.workspaceExportPath != want {
+				t.Errorf("workspaceExportPath = %q, want %q", paths.workspaceExportPath, want)
+			}
+			if want := "/scion-workspaces/" + root + "/proj-123/agents/agent-456/home"; paths.homeExportPath != want {
+				t.Errorf("homeExportPath = %q, want %q", paths.homeExportPath, want)
+			}
+
+			hostBase := filepath.Join(string(filepath.Separator), "mnt", "nfs", "share1")
+			hostWorkspace := filepath.Join(hostBase, filepath.FromSlash(root), "proj-123", "workspace")
+			host, err := cloudRunNFSHostPaths(hostWorkspace, root, "proj-123", "agent-456")
+			if err != nil {
+				t.Fatalf("cloudRunNFSHostPaths: %v", err)
+			}
+			if host.hostBase != hostBase {
+				t.Errorf("hostBase = %q, want %q", host.hostBase, hostBase)
+			}
+			if want := root + "/proj-123/workspace"; host.serverRelativePath != want {
+				t.Errorf("serverRelativePath = %q, want %q", host.serverRelativePath, want)
+			}
+			if want := filepath.Join(hostBase, filepath.FromSlash(root), "proj-123", "agents", "agent-456", "secrets"); host.secretsHostPath != want {
+				t.Errorf("secretsHostPath = %q, want %q", host.secretsHostPath, want)
+			}
+
+			// A host path laid out under the default root no longer matches.
+			defaultLayout := filepath.Join(hostBase, "projects", "proj-123", "workspace")
+			if _, err := cloudRunNFSHostPaths(defaultLayout, root, "proj-123", "agent-456"); err == nil {
+				t.Error("expected a default-layout host path to be rejected for a non-default subpath_root")
+			}
+		})
+	}
+}
+
+// TestCloudRunNFSPathsRejectInvalidSubPathRoot checks that an invalid
+// subpath_root is rejected before any path is built from it.
+func TestCloudRunNFSPathsRejectInvalidSubPathRoot(t *testing.T) {
+	hostWorkspace := filepath.Join(string(filepath.Separator), "mnt", "nfs", "share1", "projects", "proj-123", "workspace")
+	for _, root := range []string{"/projects", "../projects", "projects/../other", "projects/", "./projects", "a//b"} {
+		t.Run(root, func(t *testing.T) {
+			if _, err := cloudRunNFSExportPaths("/scion-workspaces", root, "proj-123", "agent-456"); err == nil || !strings.Contains(err.Error(), "subpath_root") {
+				t.Errorf("cloudRunNFSExportPaths error = %v, want a subpath_root error", err)
+			}
+			if _, err := cloudRunNFSHostPaths(hostWorkspace, root, "proj-123", "agent-456"); err == nil || !strings.Contains(err.Error(), "subpath_root") {
+				t.Errorf("cloudRunNFSHostPaths error = %v, want a subpath_root error", err)
 			}
 		})
 	}

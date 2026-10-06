@@ -27,6 +27,12 @@
 # narrower claim is the one that survives and the one the diff should be read
 # against.
 #
+# THE SAME HOLDS IN THE OTHER DIRECTION since the IAP settings landed:
+# values-settings.yaml carries auth.proxy and auth.transport, which this mode
+# does not read and the chart refuses here as inert (the audience) or does not
+# need (transport). So the renders also differ by server.auth.proxy and
+# server.auth.transport - again part of what selecting the mode means.
+#
 # THE FIVE BLOCK-1 KEYS RENDER IN EITHER AUTHENTICATION MODE, and that is what
 # the paired diff is for: the hub ID, the Postgres driver, the database URL, GCS
 # storage with a bucket and a durable session secret are required whichever mode
@@ -37,10 +43,11 @@
 # THE PREFLIGHT AS A WHOLE IS NOT MODE-BLIND, THOUGH, AND THIS FILE USED TO SAY
 # IT WAS. Measured by walking validateHostedHAPreflight gate by gate on the
 # settings.yaml each fixture renders (hack/ha-gates.txt records both arms): this
-# file is refused by a STRICT SUBSET of what values-settings.yaml is refused by.
-# The preflight's IAP gates sit inside `if cfg.Auth.Mode == "proxy"`, so an
-# oauth shape never reaches any of them and stops at the two gates that are
-# mode-independent: server.database.url and the durable session/signing secret.
+# file and values-settings.yaml now stop at the same single gate, the durable
+# session secret, which arrives by environment variable rather than through
+# settings.yaml. They get there differently: the preflight's IAP gates sit inside
+# `if cfg.Auth.Mode == "proxy"`, so this file never reaches them, while
+# values-settings.yaml reaches them and the chart satisfies them.
 #
 # [HISTORY 2026-08-17] THIS SAID THE OPPOSITE: "this file is refused by one gate
 # more than values-settings.yaml. The extra one is server.auth.mode=proxy
@@ -53,17 +60,13 @@
 # the plausible hand-fix and would be a SECOND false sentence: the difference is
 # the whole IAP family, not one gate.
 
-# SET BECAUSE THIS FIXTURE IS EXACTLY THE SHAPE THE FLAG EXISTS FOR. Postgres
-# alone makes the hub's isHADeployment test true, so without this the chart
-# refuses to render this file at all. The fixture's job is to exercise the
-# rendered settings.yaml, not to install, and the acknowledgement is how it says
-# so. Deleted with the flag when Cloud SQL and ingress/IAP land.
-acknowledgeHAUnlanded: true
-
 hub:
   hubId: ci-settings
   name: CI Settings Hub
   baseUrl: https://ci-settings.example.com
+  # Mirrors values-settings.yaml so the two renders differ only by auth.
+  adminEmails:
+    - ci-admin@example.com
 
 image:
   repository: us-docker.pkg.dev/scion-ci/scion/scion-hub
@@ -114,6 +117,12 @@ auth:
       google:
         clientId: ci-oauth-web-google-client-id.apps.googleusercontent.invalid
         clientSecret: ci-oauth-web-google-client-secret-not-a-real-secret
+
+# The GKE shape: Secret Manager, IAM granted outside the chart.
+secrets:
+  backend: gcpsm
+  gcpsm:
+    projectId: probe-project
 
 agents:
   imageRegistry: us-docker.pkg.dev/scion-ci/scion

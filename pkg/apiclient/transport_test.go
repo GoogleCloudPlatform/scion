@@ -18,8 +18,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -360,5 +363,238 @@ func TestDo_StillRetriesOn5xx(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 3 {
 		t.Errorf("expected exactly 3 server hits (2 failures + 1 success), got %d", got)
+	}
+}
+
+// TestDo_RetryResendsFullBodyOn5xx is an end-to-end smoke test over a real
+// socket: a bodied POST that gets a 503 is retried, the server sees two
+// requests carrying the identical JSON payload, and the caller gets the
+// second attempt's 200. It is NOT a regression guard for the body rewind:
+// Go's *http.Transport can itself re-read GetBody on this connection path,
+// so it passes even if Do stops rewinding. The regression guard is
+// TestDo_RetryResendsFullBodyOn5xx_RoundTripper.
+func TestDo_RetryResendsFullBodyOn5xx(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		bodies []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		n := len(bodies)
+		mu.Unlock()
+		if n == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	tr := NewTransport(server.URL, WithRetry(3, time.Millisecond))
+	resp, err := tr.Post(context.Background(), "/api/v1/resources", map[string]string{"name": "test"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 after one retry, got %d", resp.StatusCode)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("expected exactly 2 server hits (503 then 200), got %d", len(bodies))
+	}
+	const want = `{"name":"test"}`
+	for i, b := range bodies {
+		if b != want {
+			t.Errorf("attempt %d: server received body %q, want %q", i+1, b, want)
+		}
+	}
+}
+
+// flakyBodyRoundTripper fails the first failures calls — with a transport
+// error, or with failStatus when it is non-zero — and answers 200
+// afterwards, recording the body every call carried. Unlike a real
+// *http.Transport it never rewinds a drained body on its own, so it observes
+// exactly what Transport.Do hands each attempt.
+type flakyBodyRoundTripper struct {
+	failures   int
+	failStatus int
+	calls      int
+	bodies     []string
+}
+
+func (rt *flakyBodyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.calls++
+	var b []byte
+	if req.Body != nil {
+		b, _ = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+	}
+	rt.bodies = append(rt.bodies, string(b))
+	status := http.StatusOK
+	if rt.calls <= rt.failures {
+		if rt.failStatus == 0 {
+			return nil, errors.New("simulated connection reset")
+		}
+		status = rt.failStatus
+	}
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Header:     make(http.Header),
+		Request:    req,
+	}, nil
+}
+
+// TestDo_RetryResendsFullBodyOn5xx_RoundTripper is the RoundTripper-level
+// twin of TestDo_RetryResendsFullBodyOn5xx. Over a real socket, Go's
+// *http.Transport can itself recover a drained body via GetBody on some
+// connection paths, which hides a missing rewind in Do; this variant has no
+// such fallback, so it fails if Do stops rewinding on the 5xx path.
+func TestDo_RetryResendsFullBodyOn5xx_RoundTripper(t *testing.T) {
+	rt := &flakyBodyRoundTripper{failures: 2, failStatus: http.StatusServiceUnavailable}
+	tr := NewTransport("http://hub.invalid",
+		WithHTTPClient(&http.Client{Transport: rt}),
+		WithRetry(3, time.Millisecond))
+
+	resp, err := tr.Post(context.Background(), "/api/v1/resources", map[string]string{"name": "test"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 after retries, got %d", resp.StatusCode)
+	}
+	if rt.calls != 3 {
+		t.Fatalf("expected 3 RoundTrip calls (2 x 503 + 1 x 200), got %d", rt.calls)
+	}
+	const want = `{"name":"test"}`
+	for i, b := range rt.bodies {
+		if b != want {
+			t.Errorf("attempt %d carried body %q, want %q", i+1, b, want)
+		}
+	}
+}
+
+// TestDo_RetryResendsFullBodyOnTransportError covers the transient
+// transport-error retry path: the retried attempt carries the same body as
+// the failed one.
+func TestDo_RetryResendsFullBodyOnTransportError(t *testing.T) {
+	rt := &flakyBodyRoundTripper{failures: 2}
+	tr := NewTransport("http://hub.invalid",
+		WithHTTPClient(&http.Client{Transport: rt}),
+		WithRetry(3, time.Millisecond))
+
+	resp, err := tr.Post(context.Background(), "/api/v1/resources", map[string]string{"name": "test"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if rt.calls != 3 {
+		t.Fatalf("expected 3 RoundTrip calls (2 failures + 1 success), got %d", rt.calls)
+	}
+	const want = `{"name":"test"}`
+	for i, b := range rt.bodies {
+		if b != want {
+			t.Errorf("attempt %d carried body %q, want %q", i+1, b, want)
+		}
+	}
+}
+
+// opaqueReader hides the concrete reader type so http.NewRequest cannot
+// populate GetBody: the request body is not rewindable.
+type opaqueReader struct{ r io.Reader }
+
+func (o opaqueReader) Read(p []byte) (int, error) { return o.r.Read(p) }
+
+func newOpaqueBodyRequest(t *testing.T, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url,
+		opaqueReader{strings.NewReader(`{"name":"test"}`)})
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	if req.GetBody != nil {
+		t.Fatal("test setup: expected a request without GetBody")
+	}
+	return req
+}
+
+// TestDo_NonRewindableBodyNotRetriedOn5xx proves a bodied request without
+// GetBody is sent once and its first 5xx response is returned unchanged,
+// even with WithRetry configured.
+func TestDo_NonRewindableBodyNotRetriedOn5xx(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	tr := NewTransport(server.URL, WithRetry(3, time.Millisecond))
+	resp, err := tr.Do(context.Background(), newOpaqueBodyRequest(t, server.URL+"/api/v1/resources"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected the first 503 to be returned, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("expected exactly 1 server hit for a non-rewindable body, got %d", got)
+	}
+}
+
+// TestDo_NonRewindableBodyNotRetriedOnTransportError is the transport-error
+// counterpart: one RoundTrip call, and the first error is returned.
+func TestDo_NonRewindableBodyNotRetriedOnTransportError(t *testing.T) {
+	rt := &countingErrorRoundTripper{err: errors.New("simulated connection reset")}
+	tr := NewTransport("http://hub.invalid",
+		WithHTTPClient(&http.Client{Transport: rt}),
+		WithRetry(3, time.Millisecond))
+
+	_, err := tr.Do(context.Background(), newOpaqueBodyRequest(t, "http://hub.invalid/api/v1/resources"))
+	if err == nil {
+		t.Fatal("expected the transport error to be returned")
+	}
+	if !strings.Contains(err.Error(), "simulated connection reset") {
+		t.Errorf("expected the first attempt's error, got %v", err)
+	}
+	if got := atomic.LoadInt32(&rt.calls); got != 1 {
+		t.Errorf("expected exactly 1 RoundTrip call for a non-rewindable body, got %d", got)
+	}
+}
+
+// TestDoNoRetry_BodiedPOSTHitOnceOn503 pins the no-retry send for a bodied
+// POST against a 503 now that Do genuinely retries bodied requests.
+func TestDoNoRetry_BodiedPOSTHitOnceOn503(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	tr := NewTransport(server.URL, WithRetry(3, time.Millisecond))
+	resp, err := tr.PostNoRetry(context.Background(), "/api/v1/agents/a/keys", map[string]string{"keys": "Escape"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", resp.StatusCode)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("expected exactly 1 server hit on the no-retry path, got %d", got)
 	}
 }

@@ -101,7 +101,8 @@ function evictOldest(collection, maxEntries) {
 // emitted, the provider/model pair for each assistant message, which
 // session IDs are task-tool subagent children (see routeSessionCreated), and
 // which sessions have been busy (or retrying) since their last emitted
-// agent-end (see routeSessionIdle).
+// agent-end (see routeSessionIdle), and the pending error name/status for
+// an armed session whose turn failed (see routeSessionError).
 export function createBridgeState() {
   return {
     liveMessageIds: new Set(),
@@ -109,6 +110,7 @@ export function createBridgeState() {
     modelByMessage: new Map(),
     childSessionIds: new Set(),
     busySessionIds: new Set(),
+    pendingErrors: new Map(),
   };
 }
 
@@ -129,11 +131,12 @@ export function route(state, event) {
       return routeSessionIdle(state, event);
     case 'session.status':
       return routeSessionStatus(state, event);
-    // session.error is deliberately unmapped: see routeSessionIdle's doc
+    // session.error never emits by itself: see routeSessionIdle's doc
     // comment for why a session's turn must end exactly once, on
-    // session.idle, and never a second time here.
+    // session.idle, and never a second time here. Its error name/status is
+    // only remembered, and carried on that turn's single agent-end.
     case 'session.error':
-      return [];
+      return routeSessionError(state, event);
     // Real runtime event names, confirmed against a live capture (npm
     // opencode-ai 1.18.33): "permission.asked" / "permission.replied", each
     // shaped as {properties: {id, sessionID, permission, patterns, ...}} /
@@ -208,14 +211,75 @@ function routeSessionCreated(state, event) {
 //    session.idle only produces agent-end, and clears the busy flag, the
 //    first time it fires after a busy/retry was seen; a second idle with
 //    nothing new in between (OpenCode's own duplicate idle, or the idle
-//    that always follows an unmapped session.error) is silently dropped.
+//    that always follows a session.error) is silently dropped.
+//
+// A pending error recorded by routeSessionError is attached to that one
+// gated emission as `error`, then cleared, so a failed turn's agent-end
+// carries its error status while still counting the turn exactly once.
 function routeSessionIdle(state, event) {
   const sessionID = event.properties?.sessionID;
   if (!sessionID) return [];
   if (state.childSessionIds.has(sessionID)) return [];
   if (!state.busySessionIds.has(sessionID)) return [];
   state.busySessionIds.delete(sessionID);
-  return [{ name: 'session.idle', data: { session_id: sessionID } }];
+  const data = { session_id: sessionID };
+  const error = state.pendingErrors.get(sessionID);
+  if (error) data.error = error;
+  state.pendingErrors.delete(sessionID);
+  return [{ name: 'session.idle', data }];
+}
+
+// routeSessionError never emits a hook event by itself (routing it to any
+// lifecycle event would count a failed turn twice; see routeSessionIdle).
+// It records a bounded error string for the session, which the next gated
+// session.idle attaches to its agent-end and clears. Recorded only when:
+//
+// - the session is a top-level session (a child's idle is never emitted,
+//   so its error would never be consumed);
+// - the session is armed (busy/retry seen since its last agent-end): an
+//   error outside an active turn belongs to no turn, and keeping it would
+//   mislabel the next, unrelated one;
+// - the error is not a user abort (MessageAbortedError): an abort is the
+//   user ending the turn, not the turn failing.
+//
+// routeSessionStatus clears a pending error when the session goes busy or
+// retries again afterwards: the run continued past the error (OpenCode's
+// context-overflow auto-compaction path publishes session.error with no
+// idle and keeps running), so the turn did not end on it.
+function routeSessionError(state, event) {
+  const sessionID = event.properties?.sessionID;
+  if (!sessionID) return [];
+  if (state.childSessionIds.has(sessionID)) return [];
+  if (!state.busySessionIds.has(sessionID)) return [];
+  const err = event.properties?.error;
+  if (err?.name === 'MessageAbortedError') return [];
+  state.pendingErrors.set(sessionID, sessionErrorText(err));
+  evictOldest(state.pendingErrors, MAX_CACHE_ENTRIES);
+  return [];
+}
+
+// ERROR_NAME_RE accepts an error class name (e.g. "APIError",
+// "ProviderAuthError"): an identifier, bounded in length. Anything else in
+// the `name` field is not carried.
+const ERROR_NAME_RE = /^[A-Za-z][A-Za-z0-9_.]{0,63}$/;
+
+// sessionErrorText renders an OpenCode session.error `error` object
+// ({name, data: {message, statusCode, ...}}) for turn-end telemetry (span
+// status and log). It carries only structured fields: the error class name
+// and, when present, the numeric HTTP status -- e.g. "APIError (status
+// 429)" or "ProviderAuthError". Free-text fields (data.message, response
+// body, headers, URL) are never carried: provider messages can echo
+// credentials or account details, and no pattern list can reliably scrub
+// them. The full error remains in opencode's own log. The result is bounded
+// by construction (a 64-character name plus a 3-digit status).
+export function sessionErrorText(err) {
+  const rawName = typeof err?.name === 'string' ? err.name.trim() : '';
+  const name = ERROR_NAME_RE.test(rawName) ? rawName : 'session error';
+  const status = Number(err?.data?.statusCode);
+  if (Number.isInteger(status) && status >= 100 && status <= 599) {
+    return `${name} (status ${status})`;
+  }
+  return name;
 }
 
 // routeSessionStatus never emits a hook event by itself. It only remembers
@@ -232,6 +296,9 @@ function routeSessionStatus(state, event) {
   if (state.childSessionIds.has(sessionID)) return [];
   state.busySessionIds.add(sessionID);
   evictOldest(state.busySessionIds, MAX_CACHE_ENTRIES);
+  // The run kept going after a recorded error, so the turn did not end on
+  // it (see routeSessionError).
+  state.pendingErrors.delete(sessionID);
   return [];
 }
 
@@ -307,12 +374,9 @@ function routeMessagePartUpdated(state, event) {
 
   const model = state.modelByMessage.get(messageID);
   if (model) {
-    // No current Scion consumer reads this field: hook-sourced usage
-    // (pkg/sciontool/hooks/handlers/telemetry.go) attributes `model` from
-    // the SCION_MODEL environment variable for every harness, the same as
-    // it does for Claude, Gemini and Codex hook events. It is included here
-    // so the payload already carries the joined value if a future change
-    // adds per-event model attribution.
+    // dialect.yaml maps this onto the event's model, which hook-sourced
+    // usage (pkg/sciontool/hooks/handlers/telemetry.go) prefers over
+    // SCION_MODEL for the model label (design §3.2).
     data.model = `${model.providerID}/${model.modelID}`;
   }
 

@@ -167,10 +167,14 @@ type ServerConfigUpdateRequest struct {
 // GET: Returns the current global settings.yaml contents (sensitive fields masked).
 // PUT: Updates global settings.yaml and optionally reloads applicable runtime settings.
 func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request) {
-	// In postgres mode, delegate to the DB-backed handlers that use
-	// OperationalSettings for Layer-1 reads/writes (design §3.8).
-	// File/SQLite mode keeps the exact current behavior (file read/write).
-	if ops := s.GetOperationalSettings(); ops != nil && s.IsPostgres() {
+	// Whenever OperationalSettings is wired (every DB driver, SQLite
+	// included, since #1432) delegate to the DB-backed handlers: Layer-1
+	// reads/writes go through the DB (design §3.8) and Layer-0 keys are
+	// rejected with 422 exactly as on postgres. Writing settings.yaml on a
+	// DB-backed SQLite hub let the next ops.Update re-apply the stale DB rows
+	// and silently revert the write (ptone/scion#1091). Only a hub with no
+	// OperationalSettings service keeps the file read/write path.
+	if ops := s.GetOperationalSettings(); ops != nil {
 		switch r.Method {
 		case http.MethodGet:
 			s.handleGetServerConfigDB(w, r, ops)
@@ -231,7 +235,8 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 // handleAdminServerConfigSectionReset handles
 // DELETE /api/v1/admin/server-config/sections/{name}
 // Resets a managed section back to bootstrap material by deleting the DB row.
-// Postgres mode only; admin-gated. Design §3.2.4.
+// Available whenever OperationalSettings is wired (any DB driver); admin-gated.
+// Design §3.2.4.
 func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 
@@ -241,9 +246,9 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	}
 
 	ops := s.GetOperationalSettings()
-	if ops == nil || !s.IsPostgres() {
+	if ops == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"Section reset is only available in postgres mode", nil)
+			"Section reset requires DB-backed operational settings", nil)
 		return
 	}
 
@@ -458,6 +463,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// home_storage_backend and home_storage_leaf on runtime and profile
+	// entries, and server.home_storage, must hold known values.
+	if errs := config.ValidateHomeStorageOverrides(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
+	if req.Server != nil {
+		if err := req.Server.HomeStorage.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+	}
+
 	// shared_dir_storage_backend on runtime and profile entries must be
 	// "local" or "nfs", and "nfs" needs a complete
 	// server.shared_dir_storage.nfs block (from this request, else the
@@ -467,6 +485,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// cannot strand an existing nfs override. Configuration only; no mount
 	// is checked.
 	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
+	// Values and per-dir names do not depend on the current settings, so
+	// they are checked even when those cannot be read below.
+	if errs := config.ValidateSharedDirStorageBackendValues(req.Runtimes, req.Profiles); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+		return
+	}
 	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
 		runtimes, profiles := req.Runtimes, req.Profiles
 		var sdGlobal *config.V1SharedDirStorageConfig
@@ -521,6 +545,22 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw == nil {
 		raw = make(map[string]interface{})
+	}
+
+	// GET masks secrets and clients send the GET body back on save: restore
+	// every still-masked field before anything is written. The stored view
+	// is decoded from the same read that is merged and written below, so the
+	// restore and the write see the same file contents.
+	if req.Server != nil {
+		stored, err := serverConfigFromRaw(raw)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
+			return
+		}
+		if err := restoreMaskedServerSecrets(req.Server, stored); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
 	}
 
 	// Apply updates by marshaling the request fields and merging
@@ -601,11 +641,13 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
-// profile that sets safe_to_evict on a non-Kubernetes runtime. The value is
-// saved and ignored at agent start; this is the same rule as config
-// validate. Used by both the file-mode and DB-mode PUT handlers.
+// profile that sets safe_to_evict, or home_storage_backend "nfs", on a
+// non-Kubernetes runtime. The value is saved and ignored at agent start;
+// this is the same rule as config validate. Used by both the file-mode and
+// DB-mode PUT handlers.
 func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
 	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
+	warnings = append(warnings, config.HomeStorageIgnoredWarnings(runtimes, profiles)...)
 	for _, msg := range warnings {
 		slog.Warn("Server config saved with an ignored setting", "warning", msg)
 	}
@@ -616,8 +658,9 @@ func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profile
 // Returns a summary of what was reloaded and what requires a restart.
 //
 // This is the file-mode path: it loads GlobalConfig from settings.yaml,
-// builds a Layer1Snapshot, and delegates to applySnapshot. In postgres mode,
-// the OperationalSettings service provides the snapshot instead.
+// builds a Layer1Snapshot, and delegates to applySnapshot. It is used only by
+// a hub without OperationalSettings; with it (any DB driver) the service
+// provides the snapshot instead.
 func (s *Server) reloadSettings() map[string]interface{} {
 	results := map[string]interface{}{
 		"applied":          []string{},
@@ -836,79 +879,6 @@ func marshalToMap(v interface{}) interface{} {
 		return v
 	}
 	return m
-}
-
-// maskSensitiveFields redacts secrets from the response before sending to the client.
-func maskSensitiveFields(resp *ServerConfigResponse) {
-	if resp.Server == nil {
-		return
-	}
-
-	// Mask OAuth client secrets
-	if resp.Server.OAuth != nil {
-		maskOAuthClient(resp.Server.OAuth.Web)
-		maskOAuthClient(resp.Server.OAuth.CLI)
-		maskOAuthClient(resp.Server.OAuth.Device)
-	}
-
-	// Mask auth tokens
-	if resp.Server.Auth != nil {
-		if resp.Server.Auth.DevToken != "" {
-			resp.Server.Auth.DevToken = "********"
-		}
-	}
-
-	// Mask broker token
-	if resp.Server.Broker != nil {
-		if resp.Server.Broker.BrokerToken != "" {
-			resp.Server.Broker.BrokerToken = "********"
-		}
-	}
-
-	// Mask database URL (may contain credentials)
-	if resp.Server.Database != nil {
-		if resp.Server.Database.URL != "" {
-			resp.Server.Database.URL = "********"
-		}
-	}
-
-	// Mask secrets backend credentials
-	if resp.Server.Secrets != nil {
-		if resp.Server.Secrets.GCPCredentials != "" {
-			resp.Server.Secrets.GCPCredentials = "********"
-		}
-	}
-
-	// N1: Mask GitHubApp private key and webhook secret (pre-existing gap,
-	// applies to both DB-mode and file-mode GET paths).
-	if resp.Server.GitHubApp != nil {
-		if resp.Server.GitHubApp.PrivateKey != "" {
-			resp.Server.GitHubApp.PrivateKey = "********"
-		}
-		if resp.Server.GitHubApp.WebhookSecret != "" {
-			resp.Server.GitHubApp.WebhookSecret = "********"
-		}
-	}
-
-	// Mask notification channel params (may contain webhook URLs/tokens)
-	for i := range resp.Server.NotificationChannels {
-		for k := range resp.Server.NotificationChannels[i].Params {
-			resp.Server.NotificationChannels[i].Params[k] = "********"
-		}
-	}
-}
-
-// maskOAuthClient masks OAuth client secrets in the response.
-func maskOAuthClient(c *config.V1OAuthClientConfig) {
-	if c == nil {
-		return
-	}
-	if c.Google != nil && c.Google.ClientSecret != "" {
-		c.Google.ClientSecret = "********"
-	}
-	if c.GitHub != nil && c.GitHub.ClientSecret != "" {
-		c.GitHub.ClientSecret = "********"
-	}
 }
 
 // user returns the email or ID string for logging purposes.

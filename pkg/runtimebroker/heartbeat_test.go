@@ -181,7 +181,11 @@ func (m *heartbeatMockManager) Start(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
-func (m *heartbeatMockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+func (m *heartbeatMockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+	return nil
+}
+
+func (m *heartbeatMockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
 	return nil
 }
 
@@ -198,10 +202,6 @@ func (m *heartbeatMockManager) List(ctx context.Context, filter map[string]strin
 }
 
 func (m *heartbeatMockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
-	return nil
-}
-
-func (m *heartbeatMockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
 	return nil
 }
 

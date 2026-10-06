@@ -158,8 +158,18 @@ SCION_AUTO_EXPOSE_PORTS_LIST=8000,8080,3000
 
 Administrators can control whether port forwarding and auto-expose are permitted at both the global Hub level and individual Project level.
 
+### Which Setting Wins
+`SCION_AUTO_EXPOSE_PORTS` can come from four places. Highest first:
+
+1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's configure page. This is recorded as the agent's explicit choice and survives reincarnate.
+2. **The project annotation** `scion.io/auto-expose-ports-enabled` (see below).
+3. **Template or harness-config env.**
+4. **The Hub default** `auto_expose_ports.enabled` (see below).
+
+A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks template and harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
+
 ### Global Server Configuration
-The global default for new agents is configured via `settings.yaml` under the operational (Layer-1) settings hierarchy:
+The Hub-wide default, the lowest tier above, is configured via `settings.yaml` under the operational (Layer-1) settings hierarchy:
 
 ```yaml
 # settings.yaml
@@ -169,7 +179,7 @@ auto_expose_ports:
 
 * **File Mode**: Editable directly in the global config file.
 * **Database Mode**: Managed via the Hub Admin Settings API (`PUT /api/v1/admin/server-config`) or UI.
-* **Seeds**: Can be seeded initially using the `SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED` environment variable.
+* **Seeds**: Seeded initially from `auto_expose_ports.enabled` in `settings.yaml`. No `SCION_SEED_*` variable maps to this key.
 
 ### Project-Level Overrides
 Project owners and admins can control the auto-expose feature for all agents within a specific project using project annotations:
@@ -179,7 +189,13 @@ Project owners and admins can control the auto-expose feature for all agents wit
 scion.io/auto-expose-ports-enabled: "true"
 ```
 
-If set to `true`, the Hub automatically injects `SCION_AUTO_EXPOSE_PORTS=true` into the environment of any new agent container started under that Project, unless the agent configuration explicitly defines it otherwise (agent-level settings take precedence).
+When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` with the annotation's value. It overrides template, harness-config and Hub-default values, but not a value set on the agent itself. The value is applied when the agent is created and re-read when it is reincarnated.
+
+### Precedence
+
+The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project or template value, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
+
+In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project or template, or Hub default), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project, template, and Hub default values.
 
 ---
 

@@ -514,6 +514,9 @@ export class StateManager extends EventTarget {
   /** IDs that received a `created` event since the last flush (§7). */
   private pendingCreatedIds = new Set<string>();
 
+  /** IDs among {@link pendingCreatedIds} whose `created` marked a restore. */
+  private pendingRestoredIds = new Set<string>();
+
   private flushScheduled = false;
   private flushRafHandle: number | null = null;
   private flushTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -708,6 +711,7 @@ export class StateManager extends EventTarget {
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.seedEpochs.clear();
     this.completeFlag = null;
     this.generation++;
@@ -941,6 +945,7 @@ export class StateManager extends EventTarget {
       this.dirty.upserted.delete(agentId);
       this.dirty.unknown.delete(agentId);
       this.pendingCreatedIds.delete(agentId);
+      this.pendingRestoredIds.delete(agentId);
       this.dirty.deleted.add(agentId);
       this.scheduleFlush();
       return;
@@ -971,18 +976,36 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // A `created` for a tombstoned ID is treated as stale: the hub can
-    // publish it concurrently with, or replay it after, the `deleted` that
-    // already removed the agent. Drop it like any other late delta, so it
-    // cannot re-add the agent (ptone/scion#2886). A new agent with the same
-    // *name* has a new ID and is unaffected.
+    // A `created` for a tombstoned ID is stale unless it is marked as a
+    // restore. The hub never publishes an unmarked `created` for a deleted
+    // or delete-claimed agent (ptone/scion#2972), but an older `created`
+    // can still be delivered after the `deleted` that removed the agent
+    // (e.g. replayed by a lagging hub instance after an SSE reconnect).
+    // Drop it like any other late delta, so it cannot re-add the agent
+    // (ptone/scion#2886). A new agent with the same *name* has a new ID
+    // and is unaffected.
     //
-    // Known limitation (ptone/scion#2951): restoring a soft-deleted agent
-    // reuses its ID and publishes `created`, so a browser that already saw
-    // `deleted` keeps hiding the restored agent until the next scope change
-    // (setScope clears the tombstones) or a full reload.
+    // A restore of a soft-deleted agent reuses its ID, and its `created`
+    // carries `restoredAt` (ptone/scion#2951): that one clears the
+    // tombstone and re-adds the agent. Known limit: a stale *restore*
+    // `created` replayed after a later `deleted` would still re-add it;
+    // closing that needs SSE replay ordering (Last-Event-ID), out of scope.
     if (eventType === 'created' && this.state.deletedAgentIds.has(agentId)) {
-      return;
+      const restoredAt = (data as { restoredAt?: unknown } | null)?.restoredAt;
+      if (typeof restoredAt !== 'string' || restoredAt === '') {
+        return;
+      }
+      this.state.deletedAgentIds.delete(agentId);
+      this.dirty.deleted.delete(agentId);
+    }
+    let restored = false;
+    if (eventType === 'created' && data && typeof data === 'object' && 'restoredAt' in data) {
+      const restoredAt = (data as { restoredAt?: unknown }).restoredAt;
+      restored = typeof restoredAt === 'string' && restoredAt !== '';
+      // Event metadata, not an agent field.
+      const rest = { ...(data as Record<string, unknown>) };
+      delete rest.restoredAt;
+      data = rest;
     }
 
     const existing = this.state.agents.get(agentId);
@@ -1061,6 +1084,7 @@ export class StateManager extends EventTarget {
       // server-omitted agent (see chat.ts loop guard) know the suppression
       // no longer applies to this ID.
       this.pendingCreatedIds.add(agentId);
+      if (restored) this.pendingRestoredIds.add(agentId);
     }
     if (changed || eventType === 'created') {
       this.scheduleFlush();
@@ -1270,24 +1294,31 @@ export class StateManager extends EventTarget {
   /**
    * Emit the coalesced notifications for everything dirtied since the last
    * flush, in order: `agent-created` per created ID, `agents-changed`, then
-   * the legacy `agents-updated` once for the whole flush (§7).
+   * the legacy `agents-updated` once for the whole flush (§7). The
+   * `agent-created` of an agent restored with its old ID carries
+   * `restored: true`.
    */
   private flush(): void {
     if (!this.flushScheduled) return;
     this.cancelScheduledFlush();
 
     const createdIds = Array.from(this.pendingCreatedIds);
+    const restoredIds = new Set(this.pendingRestoredIds);
     const upserted = Array.from(this.dirty.upserted);
     const deleted = Array.from(this.dirty.deleted);
     const unknown = new Map(this.dirty.unknown);
 
     this.pendingCreatedIds.clear();
+    this.pendingRestoredIds.clear();
     this.dirty.upserted.clear();
     this.dirty.deleted.clear();
     this.dirty.unknown.clear();
 
     for (const agentId of createdIds) {
-      this.notifyWithData('agent-created', { agentId });
+      this.notifyWithData(
+        'agent-created',
+        restoredIds.has(agentId) ? { agentId, restored: true } : { agentId }
+      );
     }
 
     const changed: AgentsChangedDetail = {

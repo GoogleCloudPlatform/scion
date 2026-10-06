@@ -37,6 +37,7 @@ func validSpec() OperationSpec {
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestOperation"}},
+		Bearer:           SessionOnly(ReasonInteractiveState),
 	}
 }
 
@@ -63,6 +64,7 @@ func validAuthoritySpec() OperationSpec {
 		},
 		DenialCodes: []DenialCode{DenialRoleAssignmentForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestGrant"}},
+		Bearer:      SessionOnly(ReasonGovernancePending),
 	}
 }
 
@@ -96,6 +98,7 @@ func validExternalSpec() OperationSpec {
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestDispatch"}},
+		Bearer:      SessionOnly(ReasonInteractiveState),
 	}
 }
 
@@ -372,6 +375,9 @@ func TestValidate_AllValidCredentialKinds(t *testing.T) {
 	for _, k := range kinds {
 		s := validSpec()
 		s.Credentials = []CredentialKind{k}
+		if k == CredentialScopedUAT {
+			s.Bearer = AdmitOn(BearerTargetProjectPath, BearerBoundaryProject)
+		}
 		if err := s.Validate(); err != nil {
 			t.Errorf("valid credential %q caused error: %v", k, err)
 		}

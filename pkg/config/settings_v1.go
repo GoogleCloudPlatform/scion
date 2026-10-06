@@ -15,15 +15,22 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -298,6 +305,52 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	return out, source
 }
 
+// ResolveSharedDirStorageBackend returns the backend ("local" or "nfs")
+// that applies to the shared dir dirName for agents using profileName,
+// the settings key it came from, and whether that key is a per-dir
+// shared_dir_storage_backends entry. The nearest level wins: the
+// profile's shared_dir_storage_backends entry for dirName, else the
+// profile's shared_dir_storage_backend, else the same two keys on the
+// profile's runtime entry, else server.shared_dir_storage.backend. A
+// profile's single value therefore wins over a runtime entry's per-dir
+// entry; to keep one dir on another backend, name it in the profile's
+// own shared_dir_storage_backends. If profileName is empty,
+// vs.ActiveProfile is used. backend is "" and source is "" when nothing
+// is configured (the local layout). The value is returned as written;
+// callers validate it.
+//
+// For a dir no per-dir entry names, the result matches the backend of
+// ResolveSharedDirStorage. Call this only on global settings, as for
+// ResolveSharedDirStorage.
+func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
+	if vs == nil {
+		return "", "", false
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profile, ok := vs.Profiles[profileName]; ok {
+		if v := profile.SharedDirStorageBackends[dirName]; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backends." + dirName, true
+		}
+		if v := profile.SharedDirStorageBackend; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backend", false
+		}
+		if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+			if v := rt.SharedDirStorageBackends[dirName]; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backends." + dirName, true
+			}
+			if v := rt.SharedDirStorageBackend; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backend", false
+			}
+		}
+	}
+	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
+		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
+	}
+	return "", "", false
+}
+
 // SharedDirStorageNFSAnywhere reports whether the global backend or any
 // runtime or profile override selects nfs, and returns the nfs-backed
 // config to use for project-wide operations such as cleanup. It is nil
@@ -316,12 +369,12 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	}
 	found := false
 	for _, rt := range vs.Runtimes {
-		if rt.SharedDirStorageBackend == "nfs" {
+		if rt.SharedDirStorageBackend == "nfs" || mapSelectsNFS(rt.SharedDirStorageBackends) {
 			found = true
 		}
 	}
 	for _, p := range vs.Profiles {
-		if p.SharedDirStorageBackend == "nfs" {
+		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
 			found = true
 		}
 	}
@@ -335,19 +388,72 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	return out, true
 }
 
-// ValidateSharedDirStorageBackends checks shared_dir_storage_backend on
-// every runtime and profile entry: the value must be empty, "local" or
-// "nfs", and "nfs" needs a complete server.shared_dir_storage.nfs block
-// (global may be nil). This checks configuration only; it never looks at
-// the filesystem. Each error's Path names the settings key. Results are
-// sorted by path.
+// SharedDirNamePattern is the shared dir name rule of api.ValidateSharedDirs
+// as a regular expression, for the settings schemas.
+const SharedDirNamePattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+
+// ValidateSharedDirStorageBackendValues checks the parts of
+// shared_dir_storage_backend and shared_dir_storage_backends that do not
+// depend on server.shared_dir_storage: each single value is empty, "local"
+// or "nfs", and each per-dir entry is keyed by a valid shared dir name and
+// is "local" or "nfs". ValidateSharedDirStorageBackends checks these and
+// the nfs block. Results are sorted by path.
+func ValidateSharedDirStorageBackendValues(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, nil, false)
+}
+
+// mapSelectsNFS reports whether any entry of a shared_dir_storage_backends
+// map selects nfs.
+func mapSelectsNFS(m map[string]string) bool {
+	for _, v := range m {
+		if v == "nfs" {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateSharedDirStorageBackends checks shared_dir_storage_backend and
+// shared_dir_storage_backends on every runtime and profile entry: a single
+// value must be empty, "local" or "nfs"; a per-dir entry must be keyed by a
+// valid shared dir name and be "local" or "nfs". "nfs" needs a complete
+// server.shared_dir_storage.nfs block (global may be nil). A per-dir entry
+// for a dir that a project does not have is valid: settings are global,
+// shared dirs are per project, and agent start ignores such an entry. This
+// checks configuration only; it never looks at the filesystem. Each
+// error's Path names the settings key. Results are sorted by path.
 func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, global, true)
+}
+
+// validateSharedDirStorageBackends implements
+// ValidateSharedDirStorageBackends, and ValidateSharedDirStorageBackendValues
+// when checkNFSBlock is false.
+func validateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig, checkNFSBlock bool) []ValidationError {
 	var errs []ValidationError
-	check := func(path, backend string) {
+	var check func(path, backend string)
+	checkDirs := func(prefix string, dirs map[string]string) {
+		for name, backend := range dirs {
+			path := prefix + ".shared_dir_storage_backends." + name
+			if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+				errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("invalid shared dir name %q (must be lowercase alphanumeric with hyphens, e.g. \"build-cache\")", name)})
+				continue
+			}
+			if backend == "" {
+				errs = append(errs, ValidationError{Path: path, Message: "must be \"local\" or \"nfs\" (got \"\")"})
+				continue
+			}
+			check(path, backend)
+		}
+	}
+	check = func(path, backend string) {
 		switch backend {
 		case "", "local":
 			return
 		case "nfs":
+			if !checkNFSBlock {
+				return
+			}
 			cfg := &V1SharedDirStorageConfig{Backend: "nfs"}
 			if global != nil {
 				cfg.NFS = global.NFS
@@ -361,9 +467,11 @@ func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profi
 	}
 	for name, rt := range runtimes {
 		check("runtimes."+name+".shared_dir_storage_backend", rt.SharedDirStorageBackend)
+		checkDirs("runtimes."+name, rt.SharedDirStorageBackends)
 	}
 	for name, p := range profiles {
 		check("profiles."+name+".shared_dir_storage_backend", p.SharedDirStorageBackend)
+		checkDirs("profiles."+name, p.SharedDirStorageBackends)
 	}
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
 	return errs
@@ -995,9 +1103,12 @@ type V1ServerConfig struct {
 	// directories, independent of WorkspaceStorage (design
 	// deploy-config-explore §3.2). See V1SharedDirStorageConfig.
 	SharedDirStorage *V1SharedDirStorageConfig `json:"shared_dir_storage,omitempty" yaml:"shared_dir_storage,omitempty" koanf:"shared_dir_storage"`
-	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// HomeStorage selects where the agent home of Kubernetes agents lives.
+	// See V1HomeStorageConfig.
+	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
+	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
+	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -1232,6 +1343,18 @@ type V1ServerHubConfig struct {
 	// runtime broker's complete heartbeat inventory before the Hub marks it
 	// as having no container (e.g., "3m"; minimum "1m").
 	MissingAgentGrace string `json:"missing_agent_grace,omitempty" yaml:"missing_agent_grace,omitempty" koanf:"missing_agent_grace"`
+	// StartClaimLeaseTTL is the lease of a start claim; the holder renews it
+	// every third of this (e.g., "90s"; 30s to 5m).
+	StartClaimLeaseTTL string `json:"start_claim_lease_ttl,omitempty" yaml:"start_claim_lease_ttl,omitempty" koanf:"start_claim_lease_ttl"`
+	// StartMaxDuration is the hard deadline on any agent start, including a
+	// wait for another hub node (e.g., "12m"; minimum 11m).
+	StartMaxDuration string `json:"start_max_duration,omitempty" yaml:"start_max_duration,omitempty" koanf:"start_max_duration"`
+	// StartUnconfirmedHold is the longest a start whose outcome is unknown
+	// blocks other starts of the agent (e.g., "13m"; minimum 12m40s).
+	StartUnconfirmedHold string `json:"start_unconfirmed_hold,omitempty" yaml:"start_unconfirmed_hold,omitempty" koanf:"start_unconfirmed_hold"`
+	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
+	// create-and-start (e.g., "5m"; 3m up to StartUnconfirmedHold).
+	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// AsyncAgentLaunch is the non-blocking agent create kill switch.
@@ -1239,9 +1362,52 @@ type V1ServerHubConfig struct {
 	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
 	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
 	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
-	// Today it only sets the reaper's staleness window (8x this value); it
-	// will also be sent to the broker once the async dispatch path lands.
+	// It is sent to the broker with each asynchronous create and sets the
+	// reaper's staleness window (8x this value).
 	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
+	// Conduit holds the conduit relay and grant settings (hub.conduit
+	// experiment). Read at startup; changes need a restart.
+	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+}
+
+// V1ServerHubConduitConfig holds the conduit settings of the hub server
+// (design v2.4 §3.9, §3.10). All values are validated at startup
+// (HubConduitConfig.Validate); an invalid value is a startup error.
+type V1ServerHubConduitConfig struct {
+	// GrantKeyActivation is the publish-before-sign delay of a new grant
+	// key (e.g. "15m"; minimum "1m").
+	GrantKeyActivation string `json:"grant_key_activation,omitempty" yaml:"grant_key_activation,omitempty" koanf:"grant_key_activation"`
+	// TCPAllowedPorts lists additional agent-local ports a TCP stream
+	// grant may target besides the agent's exposed ports. The reserved
+	// ports (9810, 18380) are always refused. Empty: exposed ports only.
+	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
+	// InternalListen is the host:port of the internal relay API listener.
+	// It must be reachable only inside the cluster/VPC. TLS on the
+	// internal hop is recommended (a service mesh or TLS-terminating proxy,
+	// advertised as https://); plain http:// is accepted.
+	InternalListen string `json:"internal_listen,omitempty" yaml:"internal_listen,omitempty" koanf:"internal_listen"`
+	// InternalAdvertise is the base URL other hub nodes use to reach this
+	// node's internal listener (default: derived from POD_IP or the listen
+	// host).
+	InternalAdvertise string `json:"internal_advertise,omitempty" yaml:"internal_advertise,omitempty" koanf:"internal_advertise"`
+	// PeerAuth selects relay-peer authentication. Requests are always
+	// HMAC-signed with a key derived from the hub signing secret; "oidc"
+	// also requires an OIDC ID token, "auto" (default) adds it on GCP, and
+	// "hmac" uses the signature alone.
+	PeerAuth string `json:"peer_auth,omitempty" yaml:"peer_auth,omitempty" koanf:"peer_auth"`
+	// PeerServiceAccounts is the OIDC allow-list of caller service-account
+	// emails (default: this node's own service account).
+	PeerServiceAccounts []string `json:"peer_service_accounts,omitempty" yaml:"peer_service_accounts,omitempty" koanf:"peer_service_accounts"`
+	// PeerAudience is the OIDC ID token audience (default
+	// "scion-conduit-relay-peer"); it must be identical on every node.
+	PeerAudience string `json:"peer_audience,omitempty" yaml:"peer_audience,omitempty" koanf:"peer_audience"`
+	// ReconnectWindow is the jitter window a planned close (GoAway) gives
+	// targets to redial in (e.g. "5s"; default "5s", 0s-5m).
+	ReconnectWindow string `json:"reconnect_window,omitempty" yaml:"reconnect_window,omitempty" koanf:"reconnect_window"`
+	// InstanceID is this node's relay instance id; it must be unique among
+	// live hub processes (default: POD_NAME, else the host name plus a
+	// random per-process suffix).
+	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1447,11 +1613,39 @@ type V1GKESharedVolumeConfig struct {
 	SubPathRoot string `json:"subpath_root,omitempty" yaml:"subpath_root,omitempty" koanf:"subpath_root"`
 }
 
+// DefaultWorkspaceSubPathRoot is the subpath_root used by every storage
+// backend (workspace_storage nfs, cloudrun_volume and gke_shared_volume, and
+// shared_dir_storage nfs) when none is configured. It is the single source of
+// that default: code that needs the effective value must call
+// SubPathRootOrDefault or ResolveSubPathRoot rather than repeat the literal.
+const DefaultWorkspaceSubPathRoot = "projects"
+
+// SubPathRootOrDefault returns subPathRoot, or DefaultWorkspaceSubPathRoot
+// when it is empty. It does not validate; see ResolveSubPathRoot.
+func SubPathRootOrDefault(subPathRoot string) string {
+	if subPathRoot == "" {
+		return DefaultWorkspaceSubPathRoot
+	}
+	return subPathRoot
+}
+
+// ResolveSubPathRoot returns the effective subpath_root (the default when
+// subPathRoot is empty) after checking it with ValidateSubPathRoot. Callers
+// that build filesystem or export paths from a subpath_root must use this, so
+// no path is ever built from an unvalidated value.
+func ResolveSubPathRoot(subPathRoot string) (string, error) {
+	root := SubPathRootOrDefault(subPathRoot)
+	if err := ValidateSubPathRoot(root); err != nil {
+		return "", fmt.Errorf("subpath_root %w", err)
+	}
+	return root, nil
+}
+
 // ApplyNFSDefaults fills default values for NFS sub-fields when Backend is "nfs".
 // When Backend is empty or "local", the NFS block is left as-is (no materialization).
 // This is idempotent and safe to call multiple times.
 func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
-	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return
 	}
 	if ws.NFS == nil {
@@ -1467,19 +1661,120 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 		ws.NFS.GID = 1000
 	}
 	if ws.NFS.SubPathRoot == "" {
-		ws.NFS.SubPathRoot = "projects"
+		ws.NFS.SubPathRoot = DefaultWorkspaceSubPathRoot
 	}
 }
 
 // ValidateNFS returns an error if Backend is "nfs" but the NFS block is
 // misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
 func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
-	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return nil
 	}
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	return nil
+}
+
+// Workspace storage backend names accepted in workspace_storage.backend.
+// An empty backend means "local".
+const (
+	WorkspaceStorageBackendLocal           = "local"
+	WorkspaceStorageBackendNFS             = "nfs"
+	WorkspaceStorageBackendCloudRunVolume  = "cloudrun-volume"
+	WorkspaceStorageBackendGKESharedVolume = "gke-shared-volume"
+)
+
+// ApplyWorkspaceStorageDefaults fills default values for the block selected
+// by Backend: ApplyNFSDefaults for "nfs", and the subpath_root default for
+// "cloudrun-volume" and "gke-shared-volume" when their block is present (a
+// missing volume block is left nil for ValidateWorkspaceStorage to report).
+// Other backends, including unknown ones, are left as-is. Idempotent.
+func (ws *V1WorkspaceStorageConfig) ApplyWorkspaceStorageDefaults() {
+	if ws == nil {
+		return
+	}
+	switch ws.Backend {
+	case WorkspaceStorageBackendNFS:
+		ws.ApplyNFSDefaults()
+	case WorkspaceStorageBackendCloudRunVolume:
+		if ws.CloudRunVolume != nil {
+			ws.CloudRunVolume.SubPathRoot = SubPathRootOrDefault(ws.CloudRunVolume.SubPathRoot)
+		}
+	case WorkspaceStorageBackendGKESharedVolume:
+		if ws.GKESharedVolume != nil {
+			ws.GKESharedVolume.SubPathRoot = SubPathRootOrDefault(ws.GKESharedVolume.SubPathRoot)
+		}
+	}
+}
+
+// ValidateWorkspaceStorage returns an error if the workspace storage config
+// cannot be used: an unknown backend name, an "nfs" backend without shares
+// (ValidateNFS), a volume backend without its block or without a
+// volume_name, or a subpath_root that ValidateSubPathRoot rejects. A nil
+// config, an empty backend and "local" are valid. Call after
+// ApplyWorkspaceStorageDefaults.
+//
+// Backend names are matched exactly (case-sensitive), as in every consumer
+// (ApplyNFSDefaults and ValidateNFS included): a backend like "NFS" was
+// previously treated as local by the hub and the runtimes.
+func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
+	if ws == nil {
+		return nil
+	}
+
+	switch ws.Backend {
+	case "", WorkspaceStorageBackendLocal:
+		return nil
+	case WorkspaceStorageBackendNFS:
+		if err := ws.ValidateNFS(); err != nil {
+			return err
+		}
+	case WorkspaceStorageBackendCloudRunVolume:
+		if ws.CloudRunVolume == nil || ws.CloudRunVolume.VolumeName == "" {
+			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.cloudrun_volume.volume_name is not set; "+
+				"set it to the name of the volume declared in the Cloud Run service", ws.Backend)
+		}
+	case WorkspaceStorageBackendGKESharedVolume:
+		if ws.GKESharedVolume == nil || ws.GKESharedVolume.VolumeName == "" {
+			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.gke_shared_volume.volume_name is not set; "+
+				"set it to the pod volume that mounts the shared PVC at /mnt/<volume_name>", ws.Backend)
+		}
+	default:
+		return fmt.Errorf("workspace_storage.backend %q is not supported; use one of %q, %q, %q or %q",
+			ws.Backend, WorkspaceStorageBackendLocal, WorkspaceStorageBackendNFS,
+			WorkspaceStorageBackendCloudRunVolume, WorkspaceStorageBackendGKESharedVolume)
+	}
+
+	return ws.ValidateSelectedSubPathRoot()
+}
+
+// ValidateSelectedSubPathRoot checks, with ValidateSubPathRoot, the
+// subpath_root of the block Backend selects (an empty value is the default
+// and valid). It returns nil for a backend without a subpath_root, an
+// unknown backend, or a missing block; ValidateWorkspaceStorage reports
+// those. It is the part of ValidateWorkspaceStorage a Runtime Broker also
+// runs at startup: the runtime workspace backends reject an invalid
+// subpath_root on every agent start, so the broker warns about it early.
+func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
+	if ws == nil {
+		return nil
+	}
+	var subPathRoot, block string
+	switch {
+	case ws.Backend == WorkspaceStorageBackendNFS && ws.NFS != nil:
+		subPathRoot, block = ws.NFS.SubPathRoot, "nfs"
+	case ws.Backend == WorkspaceStorageBackendCloudRunVolume && ws.CloudRunVolume != nil:
+		subPathRoot, block = ws.CloudRunVolume.SubPathRoot, "cloudrun_volume"
+	case ws.Backend == WorkspaceStorageBackendGKESharedVolume && ws.GKESharedVolume != nil:
+		subPathRoot, block = ws.GKESharedVolume.SubPathRoot, "gke_shared_volume"
+	default:
+		return nil
+	}
+	if err := ValidateSubPathRoot(SubPathRootOrDefault(subPathRoot)); err != nil {
+		return fmt.Errorf("workspace_storage.%s.subpath_root %w", block, err)
 	}
 	return nil
 }
@@ -1506,9 +1801,11 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 // C1/T1/S-F2). A project's settings must not be able to redirect Docker
 // bind-mount sources to an operator-unapproved host path.
 //
-// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
-// StorageClass) are not used by shared_dir_storage. Warning about them being
-// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+// The workspace-storage-only fields on V1NFSConfig (UID, MountOptions,
+// StorageClass, AutoMount) are not used by shared_dir_storage; see
+// IgnoredNFSFields. GID is used: when non-zero it is the only leaf group id
+// an agent may be given as a supplemental group (ptone/scion#3155, see
+// pkg/agent.sharedDirLeafGroups).
 type V1SharedDirStorageConfig struct {
 	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
 	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
@@ -1551,16 +1848,16 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.shares[0].id is empty")
 	}
 	if s.NFS.SubPathRoot != "" {
-		if err := validateSubPathRoot(s.NFS.SubPathRoot); err != nil {
+		if err := ValidateSubPathRoot(s.NFS.SubPathRoot); err != nil {
 			return fmt.Errorf("server.shared_dir_storage.nfs.subpath_root %w", err)
 		}
 	}
 	return nil
 }
 
-// validateSubPathRoot rejects a subpath_root that would produce a
+// ValidateSubPathRoot rejects a subpath_root that would produce a
 // confusing error or an unsafe path-component chain once joined with the
-// project ID and shared-dir name (round 6 review nit #6). An absolute
+// project ID and shared-dir name. An absolute
 // value (e.g. "/projects") produces a leading empty path component when
 // the resulting relative path is split on "/", which the component walk in
 // pkg/agent/shared_dir_storage_unix.go then reports as a confusing
@@ -1570,18 +1867,41 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 // actionable message instead. "." and ".." components have no meaningful
 // interpretation here either: subpath_root exists to name one literal,
 // fixed subdirectory of the export, not to navigate the tree.
-func validateSubPathRoot(subPathRoot string) error {
-	if filepath.IsAbs(subPathRoot) {
+//
+// It is the one subpath_root validator shared by every storage backend and
+// by the runtimes that build paths from the value (see ResolveSubPathRoot).
+// The value must already be clean (path.Clean of its slash form leaves it
+// unchanged), so the configured string is exactly the path segment chain
+// that gets joined; an unclean value is reported with its clean form.
+func ValidateSubPathRoot(subPathRoot string) error {
+	slashed := filepath.ToSlash(subPathRoot)
+	if filepath.IsAbs(subPathRoot) || strings.HasPrefix(slashed, "/") {
 		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
 	}
-	for _, comp := range strings.Split(filepath.ToSlash(subPathRoot), "/") {
+	// Compared in slash form with path.Clean, not filepath.Clean: on Windows
+	// filepath.Clean("team/projects") is `team\projects`, which would reject
+	// every valid multi-segment root. Checked before the component loop so
+	// that an unclean value ("projects/", "./projects", "a//b") reports the
+	// clean value to use instead. A value with a ".." component is rejected
+	// for that first and gets no suggestion (cleaning "projects/../escape"
+	// to "escape" is not what the operator meant); nor does one that cleans
+	// to ".", which the component loop below reports.
+	comps := strings.Split(slashed, "/")
+	// ".." is reported first, whatever else is wrong with the value: it is
+	// the component that would climb out of the export ("./a/../b" must name
+	// "..", not ".").
+	if slices.Contains(comps, "..") {
+		return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
+	}
+	if cleaned := path.Clean(slashed); cleaned != slashed && cleaned != "." {
+		return fmt.Errorf("must be a clean path (got %q, use %q)", subPathRoot, cleaned)
+	}
+	for _, comp := range comps {
 		switch comp {
 		case "":
 			return fmt.Errorf("must not contain an empty path component (got %q)", subPathRoot)
 		case ".":
 			return fmt.Errorf("must not contain a \".\" path component (got %q)", subPathRoot)
-		case "..":
-			return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
 		}
 	}
 	return nil
@@ -1595,14 +1915,13 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	set  func(nfs *V1NFSConfig) bool
 }{
 	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
-	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
 	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
+// fields (uid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -1636,10 +1955,7 @@ func (s *V1SharedDirStorageConfig) ResolvedLayoutSummary() string {
 		hostBase = filepath.Join(s.NFS.MountRoot, s.NFS.Shares[0].ID)
 		pvName = s.NFS.Shares[0].PVName
 	}
-	subPathRoot := s.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := SubPathRootOrDefault(s.NFS.SubPathRoot)
 	return fmt.Sprintf("backend=nfs host_base=%s subpath_root=%s pv_name=%s", hostBase, subPathRoot, pvName)
 }
 
@@ -1756,13 +2072,13 @@ type V1TelemetrySamplingConfig struct {
 
 // CloudRunConfig holds Cloud Run runtime settings.
 type CloudRunConfig struct {
-	ProjectID      string `json:"project_id,omitempty" koanf:"project_id"`
-	Location       string `json:"location,omitempty" koanf:"location"`
-	ServiceAccount string `json:"service_account,omitempty" koanf:"service_account"`
-	Network        string `json:"network,omitempty" koanf:"network"`
-	Subnetwork     string `json:"subnetwork,omitempty" koanf:"subnetwork"`
-	NFSServer      string `json:"nfs_server,omitempty" koanf:"nfs_server"`
-	NFSExport      string `json:"nfs_export,omitempty" koanf:"nfs_export"`
+	ProjectID      string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	Location       string `json:"location,omitempty" yaml:"location,omitempty" koanf:"location"`
+	ServiceAccount string `json:"service_account,omitempty" yaml:"service_account,omitempty" koanf:"service_account"`
+	Network        string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork     string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	NFSServer      string `json:"nfs_server,omitempty" yaml:"nfs_server,omitempty" koanf:"nfs_server"`
+	NFSExport      string `json:"nfs_export,omitempty" yaml:"nfs_export,omitempty" koanf:"nfs_export"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
@@ -1924,6 +2240,20 @@ type V1RuntimeConfig struct {
 	// server.shared_dir_storage.nfs. Read from global settings only; see
 	// ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents whose
+	// profile uses this runtime entry. A dir it does not name uses
+	// SharedDirStorageBackend. The profile's own settings win over this
+	// entry. See ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents whose profile uses this runtime entry. A profile's
+	// own value wins over it. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents whose profile uses this runtime entry.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -2159,6 +2489,20 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents using this
+	// profile. A dir it does not name uses SharedDirStorageBackend. Both
+	// win over the profile's runtime entry. See
+	// ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents using this profile. It wins over the same key on
+	// the profile's runtime entry. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents using this profile.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// KubernetesServiceAccountMappings overrides, per GSA email, the
 	// runtime-level mapping of the same name for agents created under this
 	// profile. See V1RuntimeConfig.KubernetesServiceAccountMappings and
@@ -2256,6 +2600,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 		return versionedEnvKeyMapper(key), value
 	}), nil)
+	splitKoanfListKeys(k, conduitV1EnvListKeys)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
@@ -2377,15 +2722,35 @@ func versionedEnvKeyMapper(s string) string {
 	return key
 }
 
+// conduitV1EnvListKeys are the v1 keys of the conduit list settings whose
+// env vars hold comma-separated lists.
+var conduitV1EnvListKeys = []string{
+	"server.hub.conduit.peer_service_accounts",
+	"server.hub.conduit.tcp_allowed_ports",
+}
+
 // knownCompoundFields lists multi-word snake_case field names used in server config.
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
+	"start_create_unconfirmed_hold",
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
+	"start_unconfirmed_hold",
+	"start_claim_lease_ttl",
 	"soft_delete_retention",
+	"peer_service_accounts",
+	"grant_key_activation",
 	"missing_agent_grace",
+	"internal_advertise",
+	"start_max_duration",
+	"tcp_allowed_ports",
 	"stalled_threshold",
+	"reconnect_window",
+	"internal_listen",
+	"peer_audience",
+	"instance_id",
+	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
 	"interval_seconds",
@@ -2697,8 +3062,37 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.MissingAgentGrace = d
 			}
 		}
+		for _, f := range []struct {
+			v   string
+			dst *time.Duration
+		}{
+			{v1.Hub.StartClaimLeaseTTL, &gc.Hub.StartClaimLeaseTTL},
+			{v1.Hub.StartMaxDuration, &gc.Hub.StartMaxDuration},
+			{v1.Hub.StartUnconfirmedHold, &gc.Hub.StartUnconfirmedHold},
+			{v1.Hub.StartCreateUnconfirmedHold, &gc.Hub.StartCreateUnconfirmedHold},
+		} {
+			if f.v == "" {
+				continue
+			}
+			if d, err := time.ParseDuration(f.v); err == nil {
+				*f.dst = d
+			}
+		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
 			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
+		}
+		if c := v1.Hub.Conduit; c != nil {
+			gc.Hub.Conduit = HubConduitConfig{
+				GrantKeyActivation:  c.GrantKeyActivation,
+				TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:      c.InternalListen,
+				InternalAdvertise:   c.InternalAdvertise,
+				PeerAuth:            c.PeerAuth,
+				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:        c.PeerAudience,
+				ReconnectWindow:     c.ReconnectWindow,
+				InstanceID:          c.InstanceID,
+			}
 		}
 	}
 
@@ -2912,7 +3306,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 
 	// Workspace storage — thread into GlobalConfig so the hub can read it.
 	if v1.WorkspaceStorage != nil {
-		v1.WorkspaceStorage.ApplyNFSDefaults()
+		v1.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
 		gc.WorkspaceStorage = v1.WorkspaceStorage
 	}
 
@@ -3021,6 +3415,31 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
+	if c := gc.Hub.Conduit; !c.IsZero() {
+		v1Hub.Conduit = &V1ServerHubConduitConfig{
+			GrantKeyActivation:  c.GrantKeyActivation,
+			TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:      c.InternalListen,
+			InternalAdvertise:   c.InternalAdvertise,
+			PeerAuth:            c.PeerAuth,
+			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:        c.PeerAudience,
+			ReconnectWindow:     c.ReconnectWindow,
+			InstanceID:          c.InstanceID,
+		}
+	}
+	if gc.Hub.StartClaimLeaseTTL > 0 {
+		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
+	}
+	if gc.Hub.StartMaxDuration > 0 {
+		v1Hub.StartMaxDuration = gc.Hub.StartMaxDuration.String()
+	}
+	if gc.Hub.StartUnconfirmedHold > 0 {
+		v1Hub.StartUnconfirmedHold = gc.Hub.StartUnconfirmedHold.String()
+	}
+	if gc.Hub.StartCreateUnconfirmedHold > 0 {
+		v1Hub.StartCreateUnconfirmedHold = gc.Hub.StartCreateUnconfirmedHold.String()
 	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
@@ -3869,9 +4288,384 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 }
 
 // UpdateVersionedSetting updates a specific setting key in a v1 versioned settings file.
-// It loads only the single file at dir (not merged settings), maps legacy key names to
-// their v1 equivalents, updates the appropriate field, and saves via SaveVersionedSettings.
+// It edits only the single file at dir (not merged settings) and maps legacy key names
+// to their v1 equivalents (hub.brokerId -> server.broker.broker_id, project_id ->
+// hub.project_id, ...).
+//
+// A YAML file is edited in place: only the target key changes, so comments, key order,
+// unknown keys and formatting elsewhere in the file survive. The file is not rewritten
+// when the value is already set, and is otherwise replaced atomically. A JSON file goes
+// through the struct round-trip in updateVersionedSettingStruct, which saves back to the
+// same file name.
+//
+// Fallback cliff: if a node on the edited YAML path is an alias, carries an anchor, or
+// is a mapping with a key the edit cannot match by name (a merge key, an alias key, a
+// non-scalar key or a key that decodes to other text; see hasYAMLOpaqueKey), an
+// in-place edit could change other keys or miss the decoded ones. The whole file is
+// then rewritten from the struct instead, which loses comments and unknown keys and
+// reorders keys (logged at debug level).
 func UpdateVersionedSetting(dir string, key string, value string) error {
+	// Held from the first read to the rename (see LockSettingsFile).
+	unlock := LockSettingsFile()
+	defer unlock()
+
+	settingsPath := GetSettingsPath(dir)
+	if filepath.Ext(settingsPath) == ".json" {
+		return updateVersionedSettingStruct(dir, key, value)
+	}
+	edit, err := versionedSettingEditFor(key, value)
+	if err != nil {
+		return err
+	}
+	if edit.noop {
+		// Keys with no v1 equivalent are accepted and ignored. Loading still
+		// runs the legacy-key migration and surfaces a malformed file, as
+		// before.
+		_, err := LoadSingleFileVersioned(dir)
+		return err
+	}
+	err = updateVersionedSettingYAML(dir, settingsPath, edit)
+	if errors.Is(err, errYAMLEditThroughAlias) {
+		slog.Debug("settings: alias, anchor or key the edit cannot match by name on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
+			"path", settingsPath, "key", key)
+		return updateVersionedSettingStruct(dir, key, value)
+	}
+	return err
+}
+
+// versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
+// for one key: set path to value, or delete path when value is nil (an empty
+// string for an omitempty field). noop marks keys with no v1 equivalent.
+type versionedSettingEdit struct {
+	path  []string
+	value *yamlv3.Node
+	noop  bool
+}
+
+// versionedSettingKey describes where a settable key lives in the v1 file.
+type versionedSettingKey struct {
+	path   []string
+	isBool bool
+}
+
+// versionedSettingKeys maps every key UpdateVersionedSetting accepts (other
+// than the project ID aliases and the ignored keys) to its v1 path. It must
+// stay in step with the switch in updateVersionedSettingStruct; the
+// TestUpdateVersionedSetting_MatchesStructPath table test enforces that.
+var versionedSettingKeys = map[string]versionedSettingKey{
+	"active_profile":           {path: []string{"active_profile"}},
+	"default_template":         {path: []string{"default_template"}},
+	"default_harness_config":   {path: []string{"default_harness_config"}},
+	"workspace_path":           {path: []string{"workspace_path"}},
+	"image_registry":           {path: []string{"image_registry"}},
+	"cli.autohelp":             {path: []string{"cli", "autohelp"}, isBool: true},
+	"hub.enabled":              {path: []string{"hub", "enabled"}, isBool: true},
+	"hub.linked":               {path: []string{"hub", "linked"}, isBool: true},
+	"hub.endpoint":             {path: []string{"hub", "endpoint"}},
+	"hub.local_only":           {path: []string{"hub", "local_only"}, isBool: true},
+	"hub.brokerId":             {path: []string{"server", "broker", "broker_id"}},
+	"hub.brokerToken":          {path: []string{"server", "broker", "broker_token"}},
+	"hub.brokerNickname":       {path: []string{"server", "broker", "broker_nickname"}},
+	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
+	"server.auth.email":        {path: []string{"server", "auth", "email"}},
+	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+}
+
+// versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
+// key=value. Typing matches the struct path: booleans are true only for the
+// exact string "true", and every string field is omitempty, so an empty
+// string removes the key.
+func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
+	var k versionedSettingKey
+	switch {
+	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
+		k = versionedSettingKey{path: []string{"hub", "project_id"}}
+	case key == "hub.token", key == "hub.apiKey", key == "hub.lastSyncedAt",
+		key == "bucket.provider", key == "bucket.name", key == "bucket.prefix",
+		strings.HasPrefix(key, "hub_connections."):
+		// Deprecated or unsupported in v1: accepted and ignored.
+		return versionedSettingEdit{noop: true}, nil
+	default:
+		var ok bool
+		if k, ok = versionedSettingKeys[key]; !ok {
+			return versionedSettingEdit{}, fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
+		}
+	}
+	edit := versionedSettingEdit{path: k.path}
+	switch {
+	case k.isBool:
+		edit.value = newYAMLBoolScalar(value == "true")
+	case value != "":
+		edit.value = newYAMLStringScalar(value)
+	}
+	return edit, nil
+}
+
+// updateVersionedSettingYAML applies edit to the YAML settings file at
+// settingsPath (or creates dir/settings.yaml when settingsPath is empty).
+func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingEdit) error {
+	targetPath := settingsPath
+	var orig []byte
+	var override string
+	if targetPath == "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+		targetPath = newSettingsFilePath(dir)
+	} else {
+		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs.
+		_, override = migrateProjectSettingsFile(targetPath)
+		var err error
+		if orig, err = os.ReadFile(targetPath); err != nil {
+			return fmt.Errorf("failed to read %s: %w", targetPath, err)
+		}
+	}
+
+	doc, err := parseYAMLMappingDocument(orig)
+	if err != nil {
+		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
+	}
+	// Refuse to edit a file the struct loader would reject, as before.
+	var vs VersionedSettings
+	if err := doc.Decode(&vs); err != nil {
+		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
+	}
+	root := doc.Content[0]
+	indent := detectYAMLIndent(root)
+
+	// fullEncode marks edits beyond the single key, which the byte-level
+	// splice does not cover.
+	fullEncode := len(orig) == 0
+	if _, sv := findMapKey(root, "schema_version"); sv == nil || isYAMLNull(sv) || (sv.Kind == yamlv3.ScalarNode && sv.Value == "") {
+		if sv != nil {
+			deleteMapKey(root, "schema_version")
+		}
+		svKey := newYAMLStringScalar("schema_version")
+		if len(root.Content) > 0 {
+			// Keep a file's leading comment at the top of the file.
+			svKey.HeadComment, root.Content[0].HeadComment = root.Content[0].HeadComment, ""
+		}
+		root.Content = append([]*yamlv3.Node{svKey, newYAMLStringScalar("1")}, root.Content...)
+		fullEncode = true
+	}
+	if override != "" && (vs.Hub == nil || vs.Hub.ProjectID == "") {
+		if _, err := setYAMLPath(root, []string{"hub", "project_id"}, newYAMLStringScalar(override)); err != nil {
+			return err
+		}
+		fullEncode = true
+	}
+
+	var changed bool
+	if edit.value == nil {
+		changed, err = deleteYAMLPath(root, edit.path)
+	} else {
+		changed, err = setYAMLPath(root, edit.path, edit.value)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to update %s: %w", targetPath, err)
+	}
+	if !changed && !fullEncode {
+		return nil
+	}
+
+	// Both candidate outputs must decode to exactly the edited tree's data.
+	// Only the first YAML document is parsed, compared and re-encoded, so a
+	// full re-encode drops any later documents, as the struct path always
+	// did; loaders ignore them. A splice keeps them.
+	var want interface{}
+	if err := doc.Decode(&want); err != nil {
+		return fmt.Errorf("failed to decode edited settings: %w", err)
+	}
+	out, err := encodeSettingsYAML(doc, indent)
+	if err != nil {
+		return fmt.Errorf("failed to marshal versioned settings: %w", err)
+	}
+	if !fullEncode {
+		if spliced, ok := spliceVersionedSettingEdit(orig, edit, indent); ok && yamlDecodesTo(spliced, want) && decodeVersionedSettingsYAML(spliced) == nil {
+			out = spliced
+		}
+	}
+	if !yamlDecodesTo(out, want) {
+		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; set %s by editing the file", targetPath, strings.Join(edit.path, "."))
+	}
+	// Generic data equality is weaker than loadability (an alias key can
+	// duplicate a struct field without a duplicate map key), so the output
+	// must also decode into VersionedSettings without error, as the input did.
+	if err := decodeVersionedSettingsYAML(out); err != nil {
+		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; set %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
+	}
+	if bytes.Equal(out, orig) {
+		return nil
+	}
+	return writeSettingsFileAtomic(targetPath, out)
+}
+
+// decodeVersionedSettingsYAML reports whether data decodes into a
+// VersionedSettings, as LoadSingleFileVersioned decodes a YAML file.
+func decodeVersionedSettingsYAML(data []byte) error {
+	var vs VersionedSettings
+	return yamlv3.Unmarshal(data, &vs)
+}
+
+// encodeSettingsYAML is encodeYAMLDocument. It is a variable so tests can
+// reach the round-trip refusal in updateVersionedSettingYAML.
+var encodeSettingsYAML = encodeYAMLDocument
+
+// newSettingsFilePath returns the YAML file a settings write in dir targets
+// when there is no readable settings file to write back to: settings.yaml if
+// anything exists at that name (a file, or a link, possibly dangling, which
+// the write follows), else a dangling settings.yml link whose target
+// resolves (no loop, see resolveSettingsWriteTarget) into an existing
+// directory the current user may write to (written through, keeping the
+// link), else settings.yaml. Any other dangling .yml link is skipped, as
+// the loaders skip it, and settings.yaml is written as before.
+func newSettingsFilePath(dir string) string {
+	yamlPath := filepath.Join(dir, "settings.yaml")
+	if _, err := os.Lstat(yamlPath); err == nil {
+		return yamlPath
+	}
+	ymlPath := filepath.Join(dir, "settings.yml")
+	if fi, err := os.Lstat(ymlPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if _, err := os.Stat(ymlPath); err != nil {
+			if target, err := resolveSettingsWriteTarget(ymlPath); err == nil && dirWritable(filepath.Dir(target)) {
+				return ymlPath
+			}
+		}
+	}
+	return yamlPath
+}
+
+// spliceVersionedSettingEdit applies edit to orig as a byte-level splice.
+func spliceVersionedSettingEdit(orig []byte, edit versionedSettingEdit, indent int) ([]byte, bool) {
+	var doc yamlv3.Node
+	if err := yamlv3.Unmarshal(orig, &doc); err != nil || doc.Kind != yamlv3.DocumentNode || len(doc.Content) == 0 {
+		return nil, false
+	}
+	if edit.value == nil {
+		return spliceDeleteYAMLPath(orig, doc.Content[0], edit.path)
+	}
+	return spliceSetYAMLPath(orig, doc.Content[0], edit.path, edit.value, indent)
+}
+
+// writeSettingsFileAtomic atomically replaces the settings file at path.
+// A symlinked settings file is followed (see resolveSettingsWriteTarget) so
+// the link itself survives. If the directory refuses new files (no write
+// permission, read-only mount) the file is written in place instead, as a
+// plain os.WriteFile always did, so a writable file in a read-only
+// directory can still be updated.
+func writeSettingsFileAtomic(path string, data []byte) error {
+	target, err := resolveSettingsWriteTarget(path)
+	if err != nil {
+		return err
+	}
+	err = writeFileAtomic(target, data)
+	if errors.Is(err, errAtomicTempCreate) && (errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS)) {
+		if werr := os.WriteFile(target, data, 0644); werr != nil {
+			return fmt.Errorf("%w; in-place write also failed: %w", err, werr)
+		}
+		return nil
+	}
+	return err
+}
+
+// resolveSettingsWriteTarget returns the file a write to path should
+// replace, following symlinks the way the kernel does so the write lands in
+// the file that reads see. An existing target is resolved with
+// filepath.EvalSymlinks. A dangling link is walked by hand to its final
+// (missing) target, resolving each hop's parent directory physically before
+// applying a relative link, so `..` in a link under a symlinked directory
+// means what it means to the kernel. The write then creates that target and
+// keeps the link, as os.WriteFile would. It is an error if the dangling
+// target's directory does not exist.
+func resolveSettingsWriteTarget(path string) (string, error) {
+	if _, err := os.Stat(path); err == nil {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve settings file %s: %w", path, err)
+		}
+		return resolved, nil
+	}
+	p := path
+	for hops := 0; hops < 40; hops++ {
+		fi, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			if p == path {
+				return p, nil
+			}
+			physical, derr := physicalParentPath(p)
+			if derr != nil {
+				return "", fmt.Errorf("settings file %s is a dangling symlink to %s, which cannot be created: %w", path, p, derr)
+			}
+			return physical, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect settings file %s: %w", p, err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return p, nil
+		}
+		link, err := os.Readlink(p)
+		if err != nil {
+			return "", fmt.Errorf("failed to read symlink %s: %w", p, err)
+		}
+		if !filepath.IsAbs(link) {
+			dir, _ := splitLastPathElem(p)
+			parent, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve the directory of symlink %s: %w", p, err)
+			}
+			// Not filepath.Join: that would clean `..` in link lexically.
+			// Lstat lets the kernel resolve it, and the next hop resolves
+			// the parent with EvalSymlinks.
+			link = parent + string(filepath.Separator) + link
+		}
+		p = link
+	}
+	return "", fmt.Errorf("settings file %s: too many levels of symbolic links", path)
+}
+
+// splitLastPathElem splits p at its last separator without cleaning it
+// (filepath.Dir would collapse `..` lexically).
+func splitLastPathElem(p string) (dir, base string) {
+	i := strings.LastIndex(p, string(filepath.Separator))
+	if i < 0 {
+		return ".", p
+	}
+	dir, base = p[:i], p[i+1:]
+	if dir == "" {
+		dir = string(filepath.Separator)
+	}
+	return dir, base
+}
+
+// physicalParentPath resolves the directory part of p (which may contain
+// unresolved `..` after a symlink) with filepath.EvalSymlinks, which
+// applies `..` to the resolved path, and rejoins the last element.
+func physicalParentPath(p string) (string, error) {
+	dir, base := splitLastPathElem(p)
+	if base == "" || base == "." || base == ".." {
+		return "", fmt.Errorf("%s does not name a file", p)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	if st, err := os.Stat(resolved); err != nil {
+		return "", err
+	} else if !st.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", resolved)
+	}
+	return filepath.Join(resolved, base), nil
+}
+
+// updateVersionedSettingStruct is the struct round-trip form of
+// UpdateVersionedSetting: it loads the single file at dir into a
+// VersionedSettings, sets the field and saves via saveVersionedSettingsInPlace.
+// That drops comments and unknown keys, so it is only used for JSON files
+// and YAML that cannot be edited in place (an alias, an anchor, or a key the
+// edit cannot match by name; see hasYAMLOpaqueKey). A YAML file is
+// saved back to the same path (settings.yml stays settings.yml).
+func updateVersionedSettingStruct(dir string, key string, value string) error {
 	vs, err := LoadSingleFileVersioned(dir)
 	if err != nil {
 		return err
@@ -3882,7 +4676,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 			vs.Hub = &V1HubClientConfig{}
 		}
 		vs.Hub.ProjectID = value
-		return SaveVersionedSettings(dir, vs)
+		return saveVersionedSettingsInPlace(dir, vs)
 	}
 
 	switch key {
@@ -3999,7 +4793,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 	}
 
-	return SaveVersionedSettings(dir, vs)
+	return saveVersionedSettingsInPlace(dir, vs)
 }
 
 // GetVersionedSettingValue retrieves a specific setting value from a VersionedSettings struct.
@@ -4325,8 +5119,34 @@ func scalarValueString(v reflect.Value) (s string, ok bool) {
 	}
 }
 
-// SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir.
+// SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir
+// (or through a dangling settings.yml link when settings.yaml is absent; see
+// newSettingsFilePath). The file is replaced atomically, and left untouched when its
+// bytes would not change.
+//
+// It takes the settings-file lock for the write (see LockSettingsFile). A
+// caller that loaded vs from the file and wants the read-modify-write cycle
+// protected must not hold the lock itself; the lock covers the write only.
 func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
+	unlock := LockSettingsFile()
+	defer unlock()
+	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
+}
+
+// saveVersionedSettingsInPlace saves vs back to the YAML settings file in
+// dir it was loaded from (settings.yaml or settings.yml; the mode is kept).
+// A JSON or missing file is saved like SaveVersionedSettings, to
+// newSettingsFilePath(dir).
+func saveVersionedSettingsInPlace(dir string, vs *VersionedSettings) error {
+	if p := GetSettingsPath(dir); p != "" && filepath.Ext(p) != ".json" {
+		return writeVersionedSettingsFile(dir, p, vs)
+	}
+	// Not SaveVersionedSettings: callers already hold the settings-file lock.
+	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
+}
+
+// writeVersionedSettingsFile marshals vs to targetPath in dir.
+func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
@@ -4336,8 +5156,10 @@ func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
 		return fmt.Errorf("failed to marshal versioned settings: %w", err)
 	}
 
-	targetPath := filepath.Join(dir, "settings.yaml")
-	return os.WriteFile(targetPath, data, 0644)
+	if existing, err := os.ReadFile(targetPath); err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	return writeSettingsFileAtomic(targetPath, data)
 }
 
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.

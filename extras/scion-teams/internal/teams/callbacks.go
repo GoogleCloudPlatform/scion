@@ -19,12 +19,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
-// CallbackHandler processes Adaptive Card Action.Submit invoke activities.
+// CallbackHandler processes Adaptive Card Action.Execute invoke activities.
 type CallbackHandler struct {
 	broker *TeamsBroker
 	log    *slog.Logger
@@ -58,7 +60,7 @@ func (h *CallbackHandler) HandleInvoke(ctx context.Context, activity *Activity) 
 	// Parse the Value to extract action data.
 	var data map[string]interface{}
 	if activity.Value != nil {
-		// The Teams SDK wraps the Action.Submit data inside {"action": {"data": ...}}
+		// Teams wraps Action.Execute data inside {"action": {"data": ...}}
 		// but in practice the data is the Value itself or under a "data" wrapper.
 		var raw json.RawMessage
 		if err := json.Unmarshal(activity.Value, &raw); err != nil {
@@ -119,13 +121,13 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 
 	store := h.getStore()
 	if store == nil {
-		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
+		return h.respondWithMessage("Store not initialized."), nil
 	}
 
 	pending, err := store.GetPendingAskUser(ctx, requestID)
 	if err != nil {
 		h.log.Error("Failed to look up pending ask-user", "request_id", requestID, "error", err)
-		return h.respondWithUpdatedCard(activity, "An error occurred processing your response."), nil
+		return h.respondWithMessage("An error occurred processing your response. Please try again."), nil
 	}
 
 	if pending == nil {
@@ -140,23 +142,58 @@ func (h *CallbackHandler) handleAskResponse(ctx context.Context, activity *Activ
 		return h.respondWithUpdatedCard(activity, "This request has expired."), nil
 	}
 
-	// When the choice is "custom", use the text typed into the Input.Text field.
+	// When the choice is "custom", use the text typed into the Input.Text
+	// field. Other choices must be one of the request's choices. Invalid input
+	// keeps the card so the user can answer again.
 	responseText := choice
 	if choice == "custom" {
-		if replyText, ok := data["reply_text"].(string); ok && replyText != "" {
-			responseText = replyText
+		replyText, _ := data["reply_text"].(string)
+		if strings.TrimSpace(replyText) == "" {
+			return h.respondWithMessage("Please type a reply before sending."), nil
 		}
+		responseText = replyText
+	} else if !containsChoice(pending.Choices, choice) {
+		return h.respondWithMessage("That choice isn't available for this question. Please use one of the buttons."), nil
 	}
 
-	// Deliver the response to the hub.
-	if err := h.deliverAskUserResponse(ctx, activity, pending, responseText); err != nil {
+	// Replies go back to the conversation the answer came from.
+	conversationID := stripThreadSuffix(activity.Conversation.ID)
+
+	// Answers are sent as the linked user. Without a usable link, show what to
+	// do next and keep the card so the request can still be answered.
+	teamsUserID := teamsUserIDOf(activity)
+	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserID)
+	if problem := linkProblem(mapping, err, registerHint); problem != "" {
+		if err != nil {
+			h.log.Warn("Error looking up user mapping", "error", err, "teams_user_id", teamsUserID)
+		}
+		return h.respondWithMessage(problem), nil
+	}
+
+	// Claim the request so only one click is delivered. A click that loses
+	// the claim is told the request was already answered.
+	claimed, err := store.MarkAskUserResponded(ctx, requestID)
+	if err != nil {
+		h.log.Error("Failed to mark ask-user as responded", "request_id", requestID, "error", err)
+		return h.respondWithMessage("An error occurred processing your response. Please try again."), nil
+	}
+	if !claimed {
+		return h.respondWithUpdatedCard(activity, "This request has already been responded to."), nil
+	}
+
+	// Deliver the response to the hub. On failure release the claim and keep
+	// the card so the answer can be retried.
+	if err := h.deliverAskUserResponse(ctx, activity, pending, mapping, conversationID, responseText); err != nil {
 		h.log.Error("Failed to deliver ask-user response to hub", "error", err)
-		return h.respondWithUpdatedCard(activity, "Failed to deliver your response. Please try again."), nil
-	}
-
-	// Mark as responded.
-	if err := store.MarkAskUserResponded(ctx, requestID); err != nil {
-		h.log.Warn("Failed to mark ask-user as responded", "error", err)
+		// Reopen even if the click's context has been cancelled.
+		resetCtx, resetCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		resetErr := store.ResetAskUserResponded(resetCtx, requestID)
+		resetCancel()
+		if resetErr != nil {
+			h.log.Error("Failed to reopen ask-user request", "request_id", requestID, "error", resetErr)
+		}
+		return h.respondWithMessage(
+			hubErrorText(err, mapping, h.projectSlugFor(ctx, conversationID, pending.ProjectID), "Failed to deliver your response. Please try again.")), nil
 	}
 
 	// Build updated card showing the response.
@@ -181,11 +218,16 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 
 	store := h.getStore()
 	if store == nil {
-		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
+		return h.respondWithMessage("Store not initialized."), nil
 	}
 
 	pending, err := store.GetPendingAskUser(ctx, requestID)
-	if err != nil || pending == nil {
+	if err != nil {
+		// Keep the card so the user can try again.
+		h.log.Error("Failed to look up pending ask-user", "request_id", requestID, "error", err)
+		return h.respondWithMessage("An error occurred loading this request. Please try again."), nil
+	}
+	if pending == nil {
 		return h.respondWithUpdatedCard(activity, "This request has expired or was not found."), nil
 	}
 
@@ -210,7 +252,7 @@ func (h *CallbackHandler) handleAskInput(ctx context.Context, activity *Activity
 			InputText{Type: "Input.Text", ID: "reply_text", IsMultiline: true, Placeholder: "Type your reply..."},
 		},
 		Actions: []CardAction{
-			ActionExecute{Type: "Action.Execute", Title: "Send Reply", Style: "positive",
+			ActionExecute{Type: "Action.Execute", Title: "Send Reply", Style: "positive", Verb: "ask_response",
 				Data: map[string]interface{}{"action": "ask_response", "request_id": requestID, "choice": "custom"}},
 		},
 	}
@@ -252,7 +294,18 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 
 	store := h.getStore()
 	if store == nil {
-		return h.respondWithUpdatedCard(activity, "Store not initialized."), nil
+		return h.respondWithMessage("Store not initialized."), nil
+	}
+
+	// Setup requires a linked user, and the project must be one of theirs.
+	// Retryable failures show a message and keep the card; final outcomes
+	// replace it.
+	mapping, err := linkedUserByTeamsID(ctx, store, teamsUserIDOf(activity))
+	if problem := linkProblem(mapping, err, registerHint); problem != "" {
+		if err != nil {
+			h.log.Warn("Error looking up user mapping", "error", err)
+		}
+		return h.respondWithMessage(problem), nil
 	}
 
 	// Normalize conversation ID — strip thread suffix for consistent lookups.
@@ -262,16 +315,33 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	existing, err := store.GetChannelLink(ctx, convID)
 	if err != nil {
 		h.log.Error("Failed to check existing channel link", "error", err)
-		return h.respondWithUpdatedCard(activity, "An error occurred while checking existing link."), nil
+		return h.respondWithMessage("An error occurred while checking the existing link. Please try again."), nil
 	}
 	if existing != nil {
 		return h.respondWithUpdatedCard(activity,
 			fmt.Sprintf("This conversation is already linked to project **%s**.", existing.ProjectSlug)), nil
 	}
 
-	if projectID == "" {
-		projectID = projectSlug
+	hubClient := h.broker.hubClient
+	if hubClient == nil {
+		return h.respondWithMessage("Hub client not configured."), nil
 	}
+	lookup := projectSlug
+	if lookup == "" {
+		lookup = projectID
+	}
+	project, err := findUserProject(ctx, hubClient, mapping, lookup)
+	if err != nil {
+		h.log.Warn("Failed to resolve project for setup", "error", err, "project", lookup)
+		return h.respondWithMessage(
+			hubErrorText(err, mapping, projectSlug, "Failed to look up the project. Please try again.")), nil
+	}
+	if project == nil || (projectID != "" && project.ID != projectID) {
+		return h.respondWithUpdatedCard(activity,
+			fmt.Sprintf("Project **%s** was not found among your Scion projects.", lookup)), nil
+	}
+	projectID = project.ID
+	projectSlug = project.Slug
 
 	// Extract team info.
 	teamID := ""
@@ -289,19 +359,18 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 	}
 
 	link := &ChannelLink{
-		ConversationID:     convID,
-		TeamID:             teamID,
-		ProjectID:          projectID,
-		ProjectSlug:        projectSlug,
-		LinkedBy:           linkedBy,
-		LinkedAt:           time.Now(),
-		Active:             true,
-		ShowAssistantReply: true,
+		ConversationID: convID,
+		TeamID:         teamID,
+		ProjectID:      projectID,
+		ProjectSlug:    projectSlug,
+		LinkedBy:       linkedBy,
+		LinkedAt:       time.Now(),
+		Active:         true,
 	}
 
 	if err := store.CreateChannelLink(ctx, link); err != nil {
 		h.log.Error("Failed to create channel link from card", "error", err)
-		return h.respondWithUpdatedCard(activity, "Failed to link conversation. Please try again."), nil
+		return h.respondWithMessage("Failed to link conversation. Please try again."), nil
 	}
 
 	return h.respondWithUpdatedCard(activity,
@@ -310,60 +379,67 @@ func (h *CallbackHandler) handleSetupConfirm(ctx context.Context, activity *Acti
 
 // --- Helpers ---
 
-// deliverAskUserResponse sends the user's choice to the hub via inbound delivery.
-func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *Activity, pending *PendingAskUser, responseText string) error {
+// deliverAskUserResponse sends the user's choice to the hub via inbound
+// delivery as the linked user. conversationID is the conversation the answer
+// came from; the agent's follow-up is routed there. pending.ConversationID is
+// where the card was first posted and is informational only.
+func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, activity *Activity, pending *PendingAskUser, mapping *TeamsUserMapping, conversationID, responseText string) error {
 	hubClient := h.broker.hubClient
 	if hubClient == nil {
 		return fmt.Errorf("hub client not configured")
 	}
 
-	// Resolve user identity.
-	senderID := activity.From.AadObjectID
-	if senderID == "" {
-		senderID = activity.From.ID
-	}
-	senderName := activity.From.Name
-
-	// Try to resolve Teams user to Scion identity.
-	store := h.getStore()
-	if store != nil {
-		mapping, err := store.GetUserMapping(ctx, senderID)
-		if err == nil && mapping != nil && mapping.ScionEmail != "" {
-			senderID = "user:" + mapping.ScionEmail
-		} else {
-			senderID = "teams:" + senderID
-		}
-	} else {
-		senderID = "teams:" + senderID
-	}
-
+	// Sender is the linked Scion principal, SenderID the Teams user ID.
 	recipient := "agent:" + pending.AgentSlug
 
 	msg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Sender:    senderName,
-		SenderID:  senderID,
+		Sender:    onBehalfOfUser(mapping),
+		SenderID:  teamsUserIDOf(activity),
 		Recipient: recipient,
 		Msg:       responseText,
 		Type:      messages.TypeInstruction,
 		Channel:   "teams",
-		ThreadID:  pending.ConversationID,
+		ThreadID:  conversationID,
 		Metadata: map[string]string{
-			"teams_conversation_id": pending.ConversationID,
+			"teams_conversation_id": conversationID,
 			"project_id":            pending.ProjectID,
 			"ask_request_id":        pending.RequestID,
 		},
 	}
 
-	// Build the topic from project and agent.
-	topic := pending.ProjectID
-	if pending.AgentSlug != "" {
-		topic = topic + "." + pending.AgentSlug
-	}
+	topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 
 	return hubClient.DeliverInbound(ctx, topic, msg)
 }
+
+// containsChoice reports whether choice is one of choices.
+func containsChoice(choices []string, choice string) bool {
+	for _, c := range choices {
+		if c == choice {
+			return true
+		}
+	}
+	return false
+}
+
+// respondWithMessage creates an InvokeResponse that shows text to the user
+// and leaves the original card in place.
+func (h *CallbackHandler) respondWithMessage(text string) *InvokeResponse {
+	return &InvokeResponse{
+		Status: 200,
+		Body: map[string]interface{}{
+			"statusCode": 200,
+			"type":       invokeMessageResponseType,
+			"value":      text,
+		},
+	}
+}
+
+// invokeMessageResponseType is the invoke response type that shows a message
+// without replacing the card.
+const invokeMessageResponseType = "application/vnd.microsoft.activity.message"
 
 // respondWithUpdatedCard creates an InvokeResponse that replaces the original
 // card with a simple text card (buttons removed).
@@ -395,4 +471,18 @@ func (h *CallbackHandler) respondWithUpdatedCard(activity *Activity, text string
 		Status: 200,
 		Body:   updatedAttachment,
 	}
+}
+
+// projectSlugFor returns the slug of the project linked to conversationID
+// when that is projectID, or "" otherwise.
+func (h *CallbackHandler) projectSlugFor(ctx context.Context, conversationID, projectID string) string {
+	store := h.getStore()
+	if store == nil {
+		return ""
+	}
+	link, err := store.GetChannelLink(ctx, stripThreadSuffix(conversationID))
+	if err != nil || link == nil || link.ProjectID != projectID {
+		return ""
+	}
+	return link.ProjectSlug
 }

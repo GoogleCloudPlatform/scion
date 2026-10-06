@@ -586,7 +586,8 @@ Where "global settings" lives depends on your deployment mode:
 
 - **File-only mode** (no database configured): this is `~/.scion/settings.yaml` on the
   broker host, as shown above.
-- **Hosted mode with a database** (the Cloud Run + Cloud SQL setup in this guide): as
+- **Broker in the same process as a database-backed Hub** (the Cloud Run + Cloud SQL
+  setup in this guide, which starts the Hub and the Runtime Broker together): as
   §3c below explains, `runtimes` and `profiles` are persisted to the database on first
   boot and the database then takes over as the source of truth for those sections —
   editing the `settings.yaml` secret afterward and redeploying has no effect on them,
@@ -596,6 +597,9 @@ Where "global settings" lives depends on your deployment mode:
   effect — a mapping added only to the `settings.yaml` secret after first boot is
   silently ignored, and every `assign` dispatch then fails with "no mapping" even though
   the file looks correct.
+- **Standalone Runtime Broker** (running in a separate process from the Hub, even when the Hub
+  uses a database): the broker reads only its own `~/.scion/settings.yaml`; the Hub
+  database's `runtimes` and `profiles` do not apply to it.
 
 A Kubernetes dispatch with GCP identity mode `assign` whose GSA has no entry here fails
 at dispatch time with an actionable error naming this setting — it does not fall back to
@@ -990,7 +994,7 @@ gcloud run deploy scion-hub \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
   --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SESSION_SECRET=$SESSION_SECRET" \
   --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
-  --min-instances=1 \
+  --min-instances=2 \
   --max-instances=3 \
   --cpu=1 \
   --memory=512Mi \
@@ -1001,6 +1005,14 @@ gcloud run deploy scion-hub \
   --no-allow-unauthenticated \
   --quiet
 ```
+
+:::note[Why min-instances=2?]
+An HA Hub needs at least two running replicas, so that losing one instance
+(crash, host maintenance, scale-in) never leaves the Hub with zero warm
+replicas. With `--min-instances=1` there is no failover peer, and the
+deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)).
+`--max-instances=3` leaves room for Cloud Run to scale up under load.
+:::
 
 :::caution[Cloud Run Timeout Warning]
 We explicitly set `--timeout=900` (15 minutes). When dispatching the very first agent, GKE Autopilot triggers node provisioning to scale up from 0 nodes, which routinely takes 5-10 minutes. The default Cloud Run timeout (300 seconds) will prematurely kill the request, return a `503 Service Unavailable`, and tear down the initiating container. Set the timeout to at least 900 seconds to prevent this.
@@ -1165,6 +1177,16 @@ gcloud run deploy scion-discord \
   --no-allow-unauthenticated \
   --quiet
 ```
+
+:::note[The Discord service is a singleton, not HA]
+`--min-instances=1 --max-instances=1` is intentional. The Discord plugin
+holds a single, unsharded Gateway connection per bot token; a second instance
+would receive and process every event twice, so the service runs as exactly
+one instance and is not replicated like the Hub. It is not covered by the HA
+guarantee. While it is down or restarting (for example during the redeploy
+checklist in Section 7a), the Hub keeps serving but the Discord integration is
+unavailable.
+:::
 
 ---
 
