@@ -109,6 +109,25 @@ func validateAgentRole(role string) error {
 	}
 }
 
+// validateHarnessAuthFlag checks a --harness-auth value. Empty is valid
+// (no override).
+func validateHarnessAuthFlag(v string) error {
+	switch v {
+	case "", "api-key", "oauth-token", "auth-file", "vertex-ai":
+		return nil
+	default:
+		return fmt.Errorf("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", v)
+	}
+}
+
+// validateThinkingLevelFlag checks a --thinking-level value; -1 means unset.
+func validateThinkingLevelFlag(v int) error {
+	if v != -1 && (v < 0 || v > 100) {
+		return fmt.Errorf("invalid --thinking-level value %d: must be between 0 and 100", v)
+	}
+	return nil
+}
+
 func parseLabels(raw []string) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -648,14 +667,8 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
-	// Validate --harness-auth value
-	if harnessAuthFlag != "" {
-		switch harnessAuthFlag {
-		case "api-key", "oauth-token", "auth-file", "vertex-ai":
-			// valid
-		default:
-			return newUsageError("invalid --harness-auth value %q: must be one of api-key, oauth-token, auth-file, vertex-ai", harnessAuthFlag)
-		}
+	if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
+		return asUsageError(err)
 	}
 
 	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
@@ -687,8 +700,8 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		inlineCfg.Model = normalizedModel
 	}
 	if thinkingLevelFlag != -1 {
-		if thinkingLevelFlag < 0 || thinkingLevelFlag > 100 {
-			return newUsageError("invalid --thinking-level value %d: must be between 0 and 100", thinkingLevelFlag)
+		if err := validateThinkingLevelFlag(thinkingLevelFlag); err != nil {
+			return asUsageError(err)
 		}
 		if inlineCfg == nil {
 			inlineCfg = &api.ScionConfig{}
