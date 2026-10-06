@@ -63,6 +63,13 @@ import (
 //     deleted) is stripped along with the rest, since this job cannot tell
 //     that case apart from a value that predates the write-path fix.
 //
+// The auto-expose keys in autoExposeAllowlistExemptKeys are exempt from this
+// allowlist (the secret checks still apply): the hub derives
+// SCION_AUTO_EXPOSE_PORTS into AppliedConfig.Env from the project annotation,
+// and no plain source this job can see produces that value. Stamped
+// auto-expose values are normalized by a separate migration,
+// auto-expose-env-normalize (AutoExposeEnvNormalizeExecutor).
+//
 // InlineConfig.Env keys are decided by a narrower rule: only the GITHUB_TOKEN
 // and live-secret-name checks above apply. InlineConfig is itself one of the
 // currently-resolvable plain sources the AppliedConfig.Env allowlist checks
@@ -279,7 +286,7 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 			applied = append(applied, k)
 			continue
 		}
-		if narrowEnv {
+		if narrowEnv || autoExposeAllowlistExemptKeys[k] {
 			continue
 		}
 		if values, ok := plainValues[k]; ok && values[v] {
