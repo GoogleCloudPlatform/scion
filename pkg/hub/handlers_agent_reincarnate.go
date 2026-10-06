@@ -167,6 +167,17 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// its marker.
 	admittedDeletionClaim := agent.DeletionClaim
 
+	// Authority re-record: a requester other than the agent itself becomes
+	// the agent's recorded delegator, so it must pass CanDelegate and its
+	// ceiling must cover the stored role. Checked right after the start
+	// gate, before the request body, the broker and the agent state are
+	// examined and before anything is written, so a refused request claims
+	// nothing and a dry run reports the same refusal.
+	auth, ok := s.reincarnateAuthorityFor(w, r, agent)
+	if !ok {
+		return
+	}
+
 	var req ReincarnateAgentRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -380,57 +391,21 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// AC-8 / design §3.4 Amendment A3: claim the agent BEFORE creating the
-	// reincarnation record, guarded by the agent row's own optimistic lock
-	// (state_version).
-	// The previous order — create the record, then a guarded UpdateAgent —
-	// was check-then-act: a version conflict (or any error) on that second
-	// write left the just-created record stuck in "pending" forever, with no
-	// worker running for it and no API to clear it, wedging every later
-	// request behind a permanent 409. Claiming first means a conflict here
-	// happens before anything else is written, so there is nothing to leave
-	// behind: the request simply fails, unclaimed.
+	// The claim is guarded by the agent row's own optimistic lock
+	// (state_version), and the claim and the reincarnation record commit
+	// together, so a version conflict or any other failure leaves no record
+	// stuck in "pending".
 	//
-	// The already-pending/already-starting check itself now lives above,
-	// before the plan is computed, so it also gates --dry-run (design §3.4
-	// Amendment A11 item 3); a concurrent real request could still slip in
-	// between that check and this claim, but ClaimAgentReincarnation's state_version
-	// CAS below catches that race exactly as it always has.
-	previousReincarnationState := agent.ReincarnationState
-	previousReincarnationUpdatedAt := agent.ReincarnationUpdatedAt
+	// The already-pending/already-starting check itself lives above, before
+	// the plan is computed, so it also gates --dry-run; a concurrent real
+	// request could slip in between that check and this claim, and the
+	// claim's state_version CAS catches that race.
 	agent.ReincarnationState = store.ReincarnationStatePending
 	// Design §3.4 Amendment A6.6: ReincarnationUpdatedAt (not Updated) is
 	// what the replica-safe sweep's agent-state backstop keys its staleness
-	// check on, because Updated is also bumped by every broker heartbeat —
-	// which would keep a claim that never got a worker (see the revert
-	// below) looking fresh forever.
+	// check on, because Updated is also bumped by every broker heartbeat.
 	claimedAt := time.Now()
 	agent.ReincarnationUpdatedAt = &claimedAt
-	// The claim also requires that no start claim is held, live or
-	// unconfirmed: a start whose outcome is unknown may still create a
-	// container this reincarnation would then compete with.
-	newVersion, err := s.store.ClaimAgentReincarnation(ctx, agent.ID, agent.StateVersion, claimedAt)
-	if err != nil {
-		var held *store.ClaimHeldError
-		switch {
-		case errors.Is(err, store.ErrVersionConflict):
-			Conflict(w, "agent was concurrently modified; retry")
-		case errors.As(err, &held):
-			Conflict(w, "a start is in progress for this agent; retry once it completes")
-		case errors.Is(err, store.ErrClaimPredicate):
-			Conflict(w, "a reincarnation is already pending for this agent")
-		default:
-			writeErrorFromErr(w, err, "")
-		}
-		return
-	}
-	agent.StateVersion = newVersion
-	// A reincarnation starts the agent (also one that was stopped): record
-	// that the agent is meant to run, now, before the worker's start, so a
-	// stop the user records during the reincarnation is newer and wins.
-	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-		s.agentLifecycleLog.Warn("Reincarnate: failed to record run intent", "agent_id", agent.ID, "error", err)
-	}
 
 	requestedBy := ""
 	requesterIdentity := GetIdentityFromContext(ctx)
@@ -447,20 +422,40 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		PreviousAppliedConfig: agent.AppliedConfig,
 		Handoff:               req.Handoff,
 	}
-	if err := s.store.CreateAgentReincarnation(ctx, rec); err != nil {
-		// The claim above already landed. Revert it so this failure does not
-		// wedge the agent behind a permanent 409 with no record to show for
-		// it. Best effort: if the revert itself fails, log loudly — an
-		// operator can clear agents.reincarnation_state by hand, which is a
-		// far smaller recovery than an unrecoverable stuck claim.
-		agent.ReincarnationState = previousReincarnationState
-		agent.ReincarnationUpdatedAt = previousReincarnationUpdatedAt
-		if revertErr := s.store.UpdateAgent(ctx, agent); revertErr != nil {
-			s.agentLifecycleLog.Error("handleReincarnateAgent: failed to revert claimed reincarnation_state after record creation failure",
-				"agent_id", agent.ID, "revert_error", revertErr, "original_error", err)
+	// The claim, the reincarnation record, the authority re-record, the
+	// reincarnate-claim hooks and the audit record commit in one
+	// transaction (reincarnateClaimTx), so a failure at any step leaves the
+	// agent unclaimed with no record behind it.
+	// The claim also requires that no start claim is held, live or
+	// unconfirmed: a start whose outcome is unknown may still create a
+	// container this reincarnation would then compete with.
+	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, auditActorFromContext(ctx)); err != nil {
+		var held *store.ClaimHeldError
+		if errors.Is(err, store.ErrVersionConflict) {
+			Conflict(w, "agent was concurrently modified; retry")
+			return
+		}
+		if errors.As(err, &held) {
+			Conflict(w, "a start is in progress for this agent; retry once it completes")
+			return
+		}
+		if errors.Is(err, store.ErrClaimPredicate) {
+			Conflict(w, "a reincarnation is already pending for this agent")
+			return
+		}
+		if errors.Is(err, errAgentCreateWriteInvalid) {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: incomplete authority re-record", "agent_id", agent.ID, "error", err)
+			InternalError(w)
+			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	// A reincarnation starts the agent (also one that was stopped): record
+	// that the agent is meant to run, now, before the worker's start, so a
+	// stop the user records during the reincarnation is newer and wins.
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+		s.agentLifecycleLog.Warn("Reincarnate: failed to record run intent", "agent_id", agent.ID, "error", err)
 	}
 
 	// design §3.4 Amendment A3: the requester and the creator must both
@@ -658,4 +653,84 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 	}
 
 	s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, subscriberType, subscriberID, requestedBy)
+}
+
+// reincarnateAuthorityFor decides what authority a reincarnation of agent
+// re-records. A self-reincarnation re-records nothing: it
+// returns nil, and the existing edge with its frozen provenance and ceiling
+// stays in force. Any other requester becomes the recorded delegator, so it
+// must pass CanDelegate for the stored role, and its source ceiling must
+// cover that role (childRoleWithinCeiling, role explicit). On a refusal the
+// response is written (403, 503 for a ceiling lookup fault, or 500 for a
+// nil agent) and ok is false; nothing has been written to the store.
+func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent) (auth *reincarnateAuthority, ok bool) {
+	if agent == nil {
+		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
+		InternalError(w)
+		return nil, false
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && agentIdent.ID() == agent.ID {
+		return nil, true
+	}
+	resource := Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}
+	if identity == nil {
+		writeForbidden(w, "Reincarnation requires an authenticated requester")
+		return nil, false
+	}
+	if s.authzService == nil {
+		s.agentLifecycleLog.Error("handleReincarnateAgent: no authorization service to re-record authority", "agent_id", agent.ID)
+		InternalError(w)
+		return nil, false
+	}
+
+	role, _ := agentRoleAndScopes(agent)
+	decision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
+		Type:      GrantTypeAgentDelegation,
+		AgentRole: string(role),
+		ProjectID: agent.ProjectID,
+		ScopeType: store.RoleScopeProject,
+		ScopeID:   agent.ProjectID,
+	})
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionLifecycle, "CanDelegate denied: "+decision.Reason)
+		writeForbidden(w, "Cannot delegate agent authority you do not hold: "+decision.Reason)
+		return nil, false
+	}
+
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	if err != nil {
+		cause, structural := ceilingDenyCauseForError(err)
+		if !structural {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: effect ceiling lookup failed",
+				"agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
+			return nil, false
+		}
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+err.Error())
+		writeForbiddenDenial(w, ceilingSourceDenialMessage(cause), DeniedByDelegationCeiling)
+		return nil, false
+	}
+	if _, cause, allowed := childRoleWithinCeiling(ceiling, role, true); !allowed {
+		msg := fmt.Sprintf("the credential's scopes do not cover the agent's role %q", role)
+		logAuthzDenial(r, identity, resource, ActionLifecycle,
+			"effect ceiling denied: "+string(cause)+": "+msg)
+		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
+		return nil, false
+	}
+
+	delegatorType := store.DelegationPrincipalUser
+	if GetAgentIdentityFromContext(ctx) != nil {
+		delegatorType = store.DelegationPrincipalAgent
+	}
+	return &reincarnateAuthority{
+		DelegatorType: delegatorType,
+		DelegatorID:   identity.ID(),
+		Role:          string(role),
+		Ceiling:       ceiling,
+		Provenance:    prov,
+	}, true
 }

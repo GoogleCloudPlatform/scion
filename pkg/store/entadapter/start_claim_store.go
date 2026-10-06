@@ -529,34 +529,43 @@ func (s *AgentStore) ListAgentsWithStartClaim(ctx context.Context) ([]*store.Age
 
 // ClaimAgentReincarnation implements store.AgentStore.ClaimAgentReincarnation.
 func (s *AgentStore) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
-	var newVersion int64
-	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
-		if row.StateVersion != expectedVersion {
-			return false, store.ErrVersionConflict
-		}
-		if held := heldClaimError(row); held != nil {
-			return false, held
-		}
-		switch row.ReincarnationState {
-		case store.ReincarnationStateNone, store.ReincarnationStateFailed:
-		default:
-			return false, store.ErrClaimPredicate
-		}
-		newVersion = row.StateVersion + 1
-		if _, err := claimUpdate(c, row).
-			SetReincarnationState(store.ReincarnationStatePending).
-			SetReincarnationUpdatedAt(at).
-			SetStateVersion(newVersion).
-			SetUpdated(now).
-			Save(ctx); err != nil {
-			return false, mapError(err)
-		}
-		return true, nil
-	})
+	uid, err := parseUUID(agentID)
 	if err != nil {
 		return 0, err
 	}
-	return newVersion, nil
+	// One conditional update, so the claim is atomic on its own and also
+	// inside a caller's transaction (it opens none of its own).
+	newVersion := expectedVersion + 1
+	n, err := s.client.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.StateVersionEQ(expectedVersion),
+			agent.StartClaimIDIsNil(),
+			agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
+		).
+		SetReincarnationState(store.ReincarnationStatePending).
+		SetReincarnationUpdatedAt(at).
+		SetStateVersion(newVersion).
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if n == 1 {
+		return newVersion, nil
+	}
+	row, err := s.client.Agent.Get(ctx, uid)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	switch {
+	case row.StateVersion != expectedVersion:
+		return 0, store.ErrVersionConflict
+	case heldClaimError(row) != nil:
+		return 0, heldClaimError(row)
+	default:
+		return 0, store.ErrClaimPredicate
+	}
 }
 
 // notFoundAsLost maps ErrNotFound to nil: for a holder or the reaper, a
