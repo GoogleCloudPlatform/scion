@@ -419,6 +419,32 @@ func TestStopAgent_RuntimeRunMismatch_Legacy202(t *testing.T) {
 		t.Errorf("stop calls = %d, last = %q run %q; want one stop of cid-new run-new",
 			f.stopCalls(), f.mgr.lastStopAgentID, f.mgr.lastStopRunID)
 	}
+	if n := f.waitHeartbeats(1, time.Second); n == 0 {
+		t.Error("the legacy 202 did not force a heartbeat")
+	}
+}
+
+// The runtime run mismatch after a run-scoped stop already cancelled its
+// own run's launch (merge review 7, B1): the stop did act, so it is
+// accepted (202, with the forced heartbeat), not the zero-side-effect 404,
+// as in the restart overlap.
+func TestStopAgent_RuntimeRunMismatch_AfterOwnCancel202(t *testing.T) {
+	f := newStopRunFixture(t, "run-new")
+	f.mgr.stopErr = fmt.Errorf("pod ns/dev was replaced before it could be deleted: %w", scionrt.ErrRunMismatch)
+	rec := f.stop(t, "projectId="+scopeProjB+"&runId=run-new")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if n := f.cancels.Load(); n != 1 {
+		t.Errorf("cancels = %d, want the own run's launch cancelled once", n)
+	}
+	if f.stopCalls() != 1 || f.mgr.lastStopAgentID != "cid-new" || f.mgr.lastStopRunID != "run-new" {
+		t.Errorf("stop calls = %d, last = %q run %q; want one stop of cid-new run-new",
+			f.stopCalls(), f.mgr.lastStopAgentID, f.mgr.lastStopRunID)
+	}
+	if n := f.waitHeartbeats(1, time.Second); n == 0 {
+		t.Error("the accepted stop did not force a heartbeat")
+	}
 }
 
 // A project-blind run-scoped stop with nothing of the requested run never

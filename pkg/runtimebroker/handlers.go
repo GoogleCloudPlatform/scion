@@ -2727,6 +2727,9 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	var (
 		match     agentMatch
 		lookupErr error
+		// cancelledOwn counts the requested run's own launch and starts a
+		// run-scoped stop woke or cancelled (always 0 for a legacy stop).
+		cancelledOwn int
 	)
 	if runID == "" {
 		// Wake any local launch waiting on this agent (design §3.8.1); see
@@ -2754,7 +2757,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// lookup above and the cancel, which a stale miss would report as
 		// "not found" while that container runs.
 		wokeLaunch := s.cancelLocalLaunchForRun(key, runID)
-		cancelledOwn := s.cancelInFlightStartRun(ctx, key, runID)
+		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
 		if wokeLaunch {
 			cancelledOwn++
 		}
@@ -2865,10 +2868,22 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		if errors.Is(err, scionrt.ErrRunMismatch) {
 			// The runtime enforces stopRef.RunID (Kubernetes Stop is a
 			// run-checked Delete, GoogleCloudPlatform/scion#2515): the
-			// resolved entry was replaced by another run between the lookup
-			// and the stop, and nothing was stopped. The runtime's error
-			// names the run now holding the name; the 404 leaves
-			// currentRunId out, since it is not known here.
+			// resolved entry was replaced (by another run, or recreated)
+			// between the lookup and the stop, and nothing was stopped.
+			// The runtime's error names the run now holding the name; the
+			// 404 leaves currentRunId out, since it is not known here.
+			if runID != "" && cancelledOwn > 0 {
+				// This stop already cancelled the requested run's own start
+				// or launch, so it did act: a 404 must have no side effects,
+				// and would make the hub keep showing the run as running.
+				// Accept it, as for the restart overlap above; the entry
+				// now holding the name is left alone.
+				s.agentLifecycleLog.Warn("Agent stop: cancelled the requested run's start; the runtime entry was replaced and is left untouched",
+					"agent_id", id, "project_id", projectID, "run_id", runID,
+					"resolved_run_id", stopRef.RunID, "error", err)
+				s.writeStopAccepted(w, id)
+				return
+			}
 			if runID != "" {
 				span.SetStatus(codes.Error, "run mismatch")
 				s.agentLifecycleLog.Info("Agent stop: runtime entry now belongs to another run; leaving it untouched",
@@ -3005,9 +3020,9 @@ func (s *Server) trackedStartRunID(id, projectID, queryRunID, bodyRunID string) 
 // target is the matched entry's container, it is that entry as an
 // operation ID (AgentOperationID: namespace/pod for a Kubernetes entry),
 // with the entry's run; otherwise it is the bare target with no run, so
-// another entry's namespace or run is never applied. Both callers, stopAgent and restartAgent's stop leg, pass it
-// to Manager.StopTarget, so the resolved entry is stopped without
-// re-resolving by name.
+// another entry's namespace or run is never applied. Both callers,
+// stopAgent and restartAgent's stop leg, pass it to Manager.StopTarget, so
+// the resolved entry is stopped without re-resolving by name.
 func resolvedStopRef(target string, m agentMatch) scionrt.RunRef {
 	ref := scionrt.RunRef{ID: target}
 	if m.containerID == target {
