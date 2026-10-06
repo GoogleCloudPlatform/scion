@@ -2727,8 +2727,10 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	var (
 		match     agentMatch
 		lookupErr error
-		// cancelledOwn counts the requested run's own launch and starts a
-		// run-scoped stop woke or cancelled (always 0 for a legacy stop).
+		// cancelledOwn counts the launch and tracked starts a run-scoped
+		// stop woke or cancelled as its own: those of the requested run, and
+		// unlabelled ones (no run recorded), which match any run. Always 0
+		// for a legacy stop.
 		cancelledOwn int
 	)
 	if runID == "" {
@@ -2869,9 +2871,15 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			// The runtime enforces stopRef.RunID (Kubernetes Stop is a
 			// run-checked Delete, GoogleCloudPlatform/scion#2515): the
 			// resolved entry was replaced (by another run, or recreated)
-			// between the lookup and the stop, and nothing was stopped.
-			// The runtime's error names the run now holding the name; the
-			// 404 leaves currentRunId out, since it is not known here.
+			// between the lookup and the stop, and the entry now holding
+			// the name was left running. Kubernetes reports this in two
+			// ways: the pod read already belonged to another run (nothing
+			// deleted), or the pod was replaced between its read and its
+			// delete, in which case the requested run's own Secrets and
+			// SecretProviderClass were already removed. Nothing of another
+			// run is touched either way. The runtime's error names the run
+			// now holding the name; the 404 leaves currentRunId out, since
+			// it is not known here.
 			if runID != "" && cancelledOwn > 0 {
 				// This stop already cancelled the requested run's own start
 				// or launch, so it did act: a 404 must have no side effects,

@@ -88,7 +88,7 @@ func TestManagerStopAndDelete_KubernetesPodAddressedByNamespace(t *testing.T) {
 }
 
 // A run-scoped Manager.Stop addresses the pod by its namespace-qualified
-// operation ID too (manager.go's run-scoped branch, merge review 6 N2): the
+// operation ID too (manager.go's run-scoped branch): the
 // pod of the requested run is stopped and nothing goes to "default". A stop
 // naming another run finds no target and leaves the pod alone.
 func TestManagerStop_RunScoped_KubernetesPodAddressedByNamespace(t *testing.T) {

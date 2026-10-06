@@ -366,8 +366,8 @@ func TestStopAgent_ProfileRuntimeListsAllNamespaces_StopsByPodNamespace(t *testi
 	}
 }
 
-// A run-scoped stop through the same all-namespaces profile runtime (merge
-// review 6, N3): the pod's own run stops it in its namespace; another run
+// A run-scoped stop through the same all-namespaces profile runtime: the
+// pod's own run stops it in its namespace; another run
 // is refused with the run-mismatch 404 and the pod is kept. Neither sends
 // anything to the default namespace.
 func TestStopAgent_ProfileRuntimeListsAllNamespaces_RunScopedStopsByPodNamespace(t *testing.T) {

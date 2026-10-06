@@ -366,11 +366,14 @@ func TestStopAgent_RunMismatch404Details(t *testing.T) {
 // The runtime enforces the stop ref's run (Kubernetes Stop is a run-checked
 // Delete, GoogleCloudPlatform/scion#2515), so the entry the broker resolved
 // can turn out to be replaced by another run when the runtime acts, and
-// StopTarget returns a wrapped ErrRunMismatch with nothing stopped
-// (merge review 6, B1). A run-scoped stop answers the run-mismatch 404,
-// with no forced heartbeat; it is never a 500.
+// StopTarget returns a wrapped ErrRunMismatch, leaving the entry that now
+// holds the name running. A run-scoped stop that cancelled nothing of its
+// own answers the run-mismatch 404 with no side effects: another run's
+// launch is not cancelled, and no heartbeat or launch report is sent. It
+// is never a 500. (The same with another run's tracked start in flight:
+// TestStopAgent_RuntimeRunMismatch_OtherRunsStartAndLaunchUntouched.)
 func TestStopAgent_RuntimeRunMismatch_RunScoped404(t *testing.T) {
-	f := newStopRunFixture(t, "")
+	f := newStopRunFixture(t, "run-other")
 	f.mgr.stopErr = fmt.Errorf("pod ns/dev belongs to run %q, not %q: %w", "run-newer", "run-new", scionrt.ErrRunMismatch)
 	rec := f.stop(t, "projectId="+scopeProjB+"&runId=run-new")
 	if rec.Code != http.StatusNotFound {
@@ -393,8 +396,17 @@ func TestStopAgent_RuntimeRunMismatch_RunScoped404(t *testing.T) {
 		t.Errorf("stop calls = %d, last = %q run %q; want one stop of cid-new run-new",
 			f.stopCalls(), f.mgr.lastStopAgentID, f.mgr.lastStopRunID)
 	}
+	if n := f.cancels.Load(); n != 0 {
+		t.Errorf("run-mismatched stop cancelled another run's launch (%d cancels)", n)
+	}
+	if !f.srv.launchRegistry.runInFlight(f.launchKey, "run-other") {
+		t.Error("another run's launch is no longer registered")
+	}
 	if n := f.waitHeartbeats(1, 200*time.Millisecond); n != 0 {
 		t.Errorf("run-mismatched stop forced %d heartbeat(s)", n)
+	}
+	if n := len(f.hubSvc.getLaunchReports()); n != 0 {
+		t.Errorf("run-mismatched stop sent %d launch report(s)", n)
 	}
 }
 
@@ -425,7 +437,7 @@ func TestStopAgent_RuntimeRunMismatch_Legacy202(t *testing.T) {
 }
 
 // The runtime run mismatch after a run-scoped stop already cancelled its
-// own run's launch (merge review 7, B1): the stop did act, so it is
+// own run's launch: the stop did act, so it is
 // accepted (202, with the forced heartbeat), not the zero-side-effect 404,
 // as in the restart overlap.
 func TestStopAgent_RuntimeRunMismatch_AfterOwnCancel202(t *testing.T) {
@@ -494,7 +506,7 @@ func TestRestartAgent_StopLegCarriesEntryRun(t *testing.T) {
 	}
 }
 
-// resolvedStopRef (merge review 6, N3): the matched entry's container is
+// resolvedStopRef: the matched entry's container is
 // addressed by its operation ID, qualified with a Kubernetes entry's
 // namespace, and carries the entry's run; any other target is passed bare
 // with no run, so another entry's namespace or run is never applied.

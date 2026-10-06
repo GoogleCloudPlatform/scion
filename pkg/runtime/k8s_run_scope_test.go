@@ -245,7 +245,7 @@ func TestK8sDeleteRun_OtherRun_LeavesEverythingAndReportsMismatch(t *testing.T) 
 }
 
 // KubernetesRuntime.Stop is Delete with the caller's RunRef, run included
-// (ptone/scion#3076; merge review 7, N1): a stop naming another run leaves
+// (ptone/scion#3076): a stop naming another run leaves
 // that run's pod and objects and reports ErrRunMismatch, and a stop naming
 // the pod's run removes it. Dropping ref.RunID in Stop fails this test.
 func TestK8sStop_OtherRun_LeavesPodAndReportsMismatch(t *testing.T) {

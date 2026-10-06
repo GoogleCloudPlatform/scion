@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,15 +187,10 @@ func TestStopAgent_RunScopedCancelsAndWaitsForSameRunStart(t *testing.T) {
 // tracked-start leg of cancelledOwn, not a woken launch), and whose
 // StopTarget then gets a runtime run mismatch (for example Kubernetes
 // reporting the pod recreated under a new UID), did act: it is accepted
-// with 202 and a forced heartbeat, never the zero-side-effect 404 (merge
-// review 8, nit 1).
+// with 202 and a forced heartbeat, never the zero-side-effect 404.
 func TestStopAgent_RuntimeRunMismatchAfterCancelledOwnStart_202(t *testing.T) {
 	srv, mgr, _, _ := newSyncStartTestServer(t)
-	hubSvc := &mockRuntimeBrokerService{}
-	hb := NewHeartbeatService(hubSvc, "test-host", time.Hour, mgr, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	srv.hubMu.Lock()
-	srv.hubConnections["local"] = &HubConnection{Name: "local", Heartbeat: hb}
-	srv.hubMu.Unlock()
+	hubSvc := attachHeartbeat(srv, mgr)
 	setAgents(mgr, trackedRunEntry("c-1", "run-b"))
 	mgr.mu.Lock()
 	mgr.stopErr = fmt.Errorf("pod ns/same-name was replaced before it could be deleted: %w", runtime.ErrRunMismatch)
@@ -219,13 +215,79 @@ func TestStopAgent_RuntimeRunMismatchAfterCancelledOwnStart_202(t *testing.T) {
 		t.Errorf("stop calls = %d, last {%q, %q}; want one stop of {c-1, run-b}",
 			mgr.StopCalls(), mgr.lastStopAgentID, mgr.lastStopRunID)
 	}
-	deadline := time.Now().Add(time.Second)
-	for len(hubSvc.getHeartbeatCalls()) == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if len(hubSvc.getHeartbeatCalls()) == 0 {
+	if n := waitHubHeartbeats(hubSvc, 1, time.Second); n == 0 {
 		t.Error("the accepted stop did not force a heartbeat")
 	}
+}
+
+// attachHeartbeat gives srv a hub connection whose heartbeat service reports
+// to the returned mock, so forced heartbeats and launch reports are visible.
+func attachHeartbeat(srv *Server, mgr *startFuncManager) *mockRuntimeBrokerService {
+	hubSvc := &mockRuntimeBrokerService{}
+	hb := NewHeartbeatService(hubSvc, "test-host", time.Hour, mgr, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.hubMu.Lock()
+	srv.hubConnections["local"] = &HubConnection{Name: "local", Heartbeat: hb}
+	srv.hubMu.Unlock()
+	return hubSvc
+}
+
+// waitHubHeartbeats waits up to d for at least want heartbeats and returns
+// the count seen (forced heartbeats are sent asynchronously).
+func waitHubHeartbeats(hubSvc *mockRuntimeBrokerService, want int, d time.Duration) int {
+	deadline := time.Now().Add(d)
+	for {
+		n := len(hubSvc.getHeartbeatCalls())
+		if n >= want || time.Now().After(deadline) {
+			return n
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A run-scoped stop whose StopTarget gets a runtime run mismatch, with
+// another run's tracked start and async launch both in flight, cancelled
+// nothing of its own: it answers the run-mismatch 404 with no side effects.
+// The other run's start keeps running and its launch is not woken, and no
+// heartbeat or launch report goes to the hub.
+func TestStopAgent_RuntimeRunMismatch_OtherRunsStartAndLaunchUntouched(t *testing.T) {
+	srv, mgr, _, _ := newSyncStartTestServer(t)
+	hubSvc := attachHeartbeat(srv, mgr)
+	setAgents(mgr, trackedRunEntry("c-b", "run-b"))
+	mgr.mu.Lock()
+	mgr.stopErr = fmt.Errorf("pod ns/same-name belongs to run %q, not %q: %w", "run-c", "run-b", runtime.ErrRunMismatch)
+	mgr.mu.Unlock()
+	relA, doneA := startInFlight(t, srv, mgr, "run-a", nil)
+	var launchCancels atomic.Int32
+	rec := newLaunchRecord("async-a", "same-name", "create", "", time.Time{}, func() { launchCancels.Add(1) })
+	rec.RunID = "run-a"
+	key := launchKey{Slug: "same-name"}
+	srv.launchRegistry.Begin(key, rec)
+
+	sw := actionWithRun(srv, "stop", "runId=run-b", "")
+	if sw.Code != http.StatusNotFound {
+		t.Fatalf("stop: status %d, want 404: %s", sw.Code, sw.Body.String())
+	}
+	var body ErrorResponse
+	if err := json.Unmarshal(sw.Body.Bytes(), &body); err != nil || body.Error.Code != api.BrokerErrorCodeRunMismatch {
+		t.Errorf("stop body = %s, want %s", sw.Body.String(), api.BrokerErrorCodeRunMismatch)
+	}
+	if mgr.StopCalls() != 1 || mgr.lastStopAgentID != "c-b" || mgr.lastStopRunID != "run-b" {
+		t.Errorf("stop calls = %d, last {%q, %q}; want one stop of {c-b, run-b}",
+			mgr.StopCalls(), mgr.lastStopAgentID, mgr.lastStopRunID)
+	}
+	if n := launchCancels.Load(); n != 0 {
+		t.Errorf("the other run's launch was woken (%d cancels)", n)
+	}
+	if !srv.launchRegistry.runInFlight(key, "run-a") {
+		t.Error("the other run's launch is no longer registered")
+	}
+	if n := waitHubHeartbeats(hubSvc, 1, 200*time.Millisecond); n != 0 {
+		t.Errorf("run-mismatched stop forced %d heartbeat(s)", n)
+	}
+	if n := len(hubSvc.getLaunchReports()); n != 0 {
+		t.Errorf("run-mismatched stop sent %d launch report(s)", n)
+	}
+	assertStartNotCancelled(t, srv, relA, doneA)
 }
 
 // After cancelling its own run's start, a run-scoped stop resolves again:
