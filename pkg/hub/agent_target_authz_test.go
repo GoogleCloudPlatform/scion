@@ -66,6 +66,17 @@ func addProjectEdge(t *testing.T, s store.Store, delegatorType, delegatorID, del
 	return id
 }
 
+// revokeDelegateEdges deactivates every active delegation edge of the agent
+// delegateID, attributed to a test op ID, and fails the test when there was
+// none to deactivate.
+func revokeDelegateEdges(t *testing.T, s store.Store, delegateID string) {
+	t.Helper()
+	n, err := s.DeactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, delegateID,
+		store.Deactivation{Cause: store.EdgeDeactivationAgentHardDelete, OpID: "test-revoke-" + uuid.NewString()})
+	require.NoError(t, err)
+	require.Positive(t, n, "an active edge to revoke")
+}
+
 // decodeTargetAPIError decodes an error response body.
 func decodeTargetAPIError(t *testing.T, rec *httptest.ResponseRecorder) APIError {
 	t.Helper()
@@ -192,10 +203,10 @@ func TestAgentTargetAction_CeilingDeniedByDetail(t *testing.T) {
 	stop := "/api/v1/agents/" + f.child.ID + "/stop"
 
 	t.Run("live chain passes the gate", func(t *testing.T) {
-		edgeID := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
 		rec := f.asAgent(t, http.MethodPost, stop, nil, ScopeAgentLifecycle)
 		assert.NotEqual(t, http.StatusForbidden, rec.Code, rec.Body.String())
-		require.NoError(t, f.store.DeactivateDelegationEdge(context.Background(), edgeID))
+		revokeDelegateEdges(t, f.store, f.caller.ID)
 	})
 
 	t.Run("no active edge is a ceiling denial", func(t *testing.T) {
@@ -273,12 +284,12 @@ func TestAgentPTY_ReauthorizesEachConnection(t *testing.T) {
 		markEdgeBackfillComplete(t, f.store)
 		connectFixtureBroker(t, f, f.child)
 		path := "/api/v1/agents/" + f.child.ID + "/pty"
-		edgeID := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
 
 		rec := f.asAgent(t, http.MethodGet, path, nil, ScopeAgentLifecycle)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-		require.NoError(t, f.store.DeactivateDelegationEdge(context.Background(), edgeID))
+		revokeDelegateEdges(t, f.store, f.caller.ID)
 		rec = f.asAgent(t, http.MethodGet, path, nil, ScopeAgentLifecycle)
 		assertAgentTargetDenied(t, rec, true)
 	})
@@ -341,7 +352,7 @@ func TestAgentPTY_AgentAncestorUpgrade(t *testing.T) {
 	hub := httptest.NewServer(f.srv.Handler())
 	t.Cleanup(hub.Close)
 	path := "/api/v1/agents/" + f.child.ID + "/pty"
-	edgeID := addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+	addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
 
 	conn, status := dialAgentPTY(t, hub, f, path, ScopeAgentLifecycle)
 	require.Equal(t, http.StatusSwitchingProtocols, status)
@@ -352,7 +363,7 @@ func TestAgentPTY_AgentAncestorUpgrade(t *testing.T) {
 	assert.Equal(t, f.child.Slug, open.Slug)
 	require.NoError(t, conn.Close())
 
-	require.NoError(t, f.store.DeactivateDelegationEdge(context.Background(), edgeID))
+	revokeDelegateEdges(t, f.store, f.caller.ID)
 	conn, status = dialAgentPTY(t, hub, f, path, ScopeAgentLifecycle)
 	assert.Nil(t, conn)
 	assert.Equal(t, http.StatusForbidden, status)

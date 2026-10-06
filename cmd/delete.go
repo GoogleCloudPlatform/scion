@@ -33,17 +33,34 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var deleteStopped bool
+var (
+	deleteStopped bool
+	deleteForce   bool
+)
 
 // deleteCmd represents the delete command
 var deleteCmd = &cobra.Command{
-	Use:               "delete <agent> [agent...]",
-	Aliases:           []string{"rm"},
-	Short:             "Delete one or more agents",
-	Long:              `Stop and remove one or more agent containers and their associated files and worktrees.`,
+	Use:     "delete <agent> [agent...]",
+	Aliases: []string{"rm"},
+	Short:   "Delete one or more agents",
+	Long: `Stop and remove one or more agent containers and their associated files and worktrees.
+
+With a Hub, --force removes the agent from the Hub even when its runtime
+broker cannot be reached or cannot resolve the agent. A forced delete is
+permanent: it skips soft-delete retention, so the agent cannot be
+restored. Runtime resources left on the broker (containers, worktrees)
+may then need separate cleanup on that broker. --force does not purge an
+agent that is already soft-deleted.
+
+--force cannot be combined with --stopped; name the agents to
+force-delete. In local mode (no Hub), --force has no effect: local delete
+already removes the container.`,
 	ValidArgsFunction: getMultiAgentNames,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if deleteStopped {
+			if deleteForce {
+				return fmt.Errorf("--force cannot be combined with --stopped; name the agents to force-delete")
+			}
 			if len(args) > 0 {
 				return fmt.Errorf("no arguments allowed when using --stopped")
 			}
@@ -62,7 +79,7 @@ var deleteCmd = &cobra.Command{
 
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		if preserveBranch && !util.IsGitRepoDir(projectDir) {
-			fmt.Println("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
+			statusln("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
 		}
 
 		// Check if Hub should be used, excluding all target agents from sync requirements.
@@ -73,6 +90,12 @@ var deleteCmd = &cobra.Command{
 		hubCtx, err := CheckHubAvailabilityForAgents(projectPath, excludedAgents, true)
 		if err != nil {
 			return err
+		}
+
+		// --force only changes Hub behaviour. Local delete already removes the
+		// container unconditionally, so warn and proceed rather than fail.
+		if deleteForce && hubCtx == nil {
+			statusln("Warning: --force has no effect without a Hub; deleting locally as usual.")
 		}
 
 		if deleteStopped {
@@ -194,6 +217,7 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 	opts := &hubclient.DeleteAgentOptions{
 		DeleteFiles:  true,
 		RemoveBranch: !preserveBranch,
+		Force:        deleteForce,
 	}
 
 	var errs []string
@@ -379,4 +403,5 @@ func init() {
 	rootCmd.AddCommand(deleteCmd)
 	deleteCmd.Flags().BoolVarP(&preserveBranch, "preserve-branch", "b", false, "Preserve the git branch associated with the worktree")
 	deleteCmd.Flags().BoolVar(&deleteStopped, "stopped", false, "Delete all agents with stopped containers")
+	deleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Delete from the Hub even if the broker is unreachable or cannot find the agent; permanent (no soft-delete)")
 }

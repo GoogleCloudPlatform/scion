@@ -98,8 +98,11 @@ type RunConfig struct {
 	// HomeStorageBackend selects where the agent home lives on the
 	// Kubernetes runtime. Empty (or "local") keeps the home in the pod and
 	// the pod spec unchanged. HomeStorageNFS builds an NFS-home pod (see
-	// k8s_nfs_home.go). Nothing sets HomeStorageNFS yet.
+	// k8s_nfs_home.go); HomeStorage then describes the home.
 	HomeStorageBackend string
+	// HomeStorage describes the NFS agent home. Set exactly when
+	// HomeStorageBackend is HomeStorageNFS.
+	HomeStorage *HomeStorageRealization
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
@@ -114,6 +117,11 @@ type RunConfig struct {
 	// workspace (e.g. "projects/<pid>/workspace"). Used by K8s buildPod to scope
 	// the volume mount — pod sees only its project subtree (design §9.4).
 	NFSSubPath string
+	// NFSSubPathRoot is workspace_storage.nfs.subpath_root, set when
+	// WorkspaceBackendName is "nfs". Empty means
+	// config.DefaultWorkspaceSubPathRoot. The Cloud Run runtime builds its
+	// NFS export and host paths from it (via config.ResolveSubPathRoot).
+	NFSSubPathRoot string
 	// NFSWorkspacePreCreated is true when, before the pod was built, the
 	// broker either created the NFSSubPath directory (and the directory of
 	// each shared dir served from the same claim) on its own mount of the
@@ -243,6 +251,31 @@ func (h launchHooks) created(handle api.ResourceHandle) {
 		return
 	}
 	h.createdFn(handle)
+}
+
+// HomeStorageRealization describes the NFS agent home of one start: the
+// agent's home directory <SubPathRoot>/<ProjectID>/agents/<AgentSlug>/home-<AgentID>
+// on the claim PVClaimName (see NFSHomeSubPaths). Computed in pkg/agent
+// from the agent's recorded home storage and consumed by the Kubernetes
+// runtime.
+type HomeStorageRealization struct {
+	PVClaimName string
+	SubPathRoot string
+	ProjectID   string
+	AgentSlug   string
+	AgentID     string
+	// Leaf is "pod" (the home-leaf init container creates the home
+	// directory) or "broker" (the broker created it before Run).
+	Leaf string
+	// GID is the export's group, which owns the agent and home directories.
+	GID int
+	// StopGraceSeconds is the pod's termination grace period;
+	// TerminationWaitSeconds the extra time a start waits for the previous
+	// pod to stop.
+	StopGraceSeconds       int
+	TerminationWaitSeconds int
+	// SkeletonMaxBytes caps the image home copied into a new home.
+	SkeletonMaxBytes int64
 }
 
 // SharedDirRealization holds the plan for realizing a project's shared

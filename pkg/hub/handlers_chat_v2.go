@@ -100,75 +100,55 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// List all projects and filter by ActionRead using batch capability check.
-	allProjects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	// List every project as a summary: the rail needs only identity, naming,
+	// the emoji annotation and the authorization inputs, not the agent,
+	// contributor and broker counts ListProjects computes per project.
+	allProjects, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list projects", nil)
 		return
 	}
 
+	// Decide ActionRead only: it is the one capability this handler reads,
+	// and ComputeCapabilitiesForActions runs the same decision path
+	// ComputeCapabilitiesBatch does for that action.
 	identity := GetIdentityFromContext(ctx)
 	resources := make([]Resource, len(allProjects.Items))
 	for i := range allProjects.Items {
 		resources[i] = projectResource(&allProjects.Items[i])
 	}
-	caps := s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "project")
+	caps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
 
 	// Get user prefs.
 	prefs, _ := wcs.GetUserPrefs(ctx, user.ID())
 
-	var spaces []chatSpaceEntry
-	for i, p := range allProjects.Items {
-		if !capabilityAllows(caps[i], ActionRead) {
-			continue
+	visible := make([]*store.Project, 0, len(allProjects.Items))
+	for i := range allProjects.Items {
+		if capabilityAllows(caps[i], ActionRead) {
+			visible = append(visible, &allProjects.Items[i])
 		}
+	}
 
-		// Get topics for this space to compute unread count.
-		topics, _ := wcs.ListTopics(ctx, p.ID)
-		convKeys := make([]string, 0, len(topics))
-		for _, t := range topics {
-			convKeys = append(convKeys, t.ID)
-		}
+	rollups := chatSpaceRollups(ctx, wcs, user.ID(), visible, s.chatSpacesBatch)
 
-		var unreadCount int
-		if len(convKeys) > 0 {
-			readStates, _ := wcs.GetReadStates(ctx, user.ID(), convKeys)
-			readMap := make(map[string]WebChatReadState, len(readStates))
-			for _, rs := range readStates {
-				readMap[rs.ConversationKey] = rs
-			}
-			for _, t := range topics {
-				rs, ok := readMap[t.ID]
-				// A muted thread is silent all the way up: it contributes
-				// nothing to the space badge, so muting every unread thread in
-				// a space clears the badge instead of leaving the space
-				// shouting about threads the user asked to be quiet (#1029).
-				// Mentions are covered by the same rule — the rail already
-				// hides the mention dot on a muted thread, and a rollup that
-				// disagreed with it would put two numbers on screen.
-				if ok && rs.Muted {
-					continue
-				}
-				if !ok || rs.LastReadMessageID == "" || (t.LastMessageID != "" && t.LastMessageID != rs.LastReadMessageID) {
-					if t.LastMessageID != "" {
-						unreadCount++
-					}
-				}
-			}
-		}
-
-		spaces = append(spaces, chatSpaceEntry{
+	spaces := make([]chatSpaceEntry, 0, len(visible))
+	for _, p := range visible {
+		ru := rollups[p.ID]
+		entry := chatSpaceEntry{
 			ProjectID:   p.ID,
 			ProjectName: p.Name,
 			ProjectSlug: p.Slug,
 			Emoji:       p.Annotations[spaceEmojiAnnotationKey],
-			ThreadCount: len(topics),
-			UnreadCount: unreadCount,
-		})
-	}
-
-	if spaces == nil {
-		spaces = []chatSpaceEntry{}
+			ThreadCount: ru.threadCount,
+			UnreadCount: ru.unreadCount,
+		}
+		// last_activity_at is unset until a thread's first message, so a
+		// space whose threads have no messages has no activity to report.
+		if !ru.lastActivityAt.IsZero() {
+			last := ru.lastActivityAt
+			entry.LastActivityAt = &last
+		}
+		spaces = append(spaces, entry)
 	}
 
 	resp := chatSpacesResponse{
@@ -183,6 +163,115 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// Default batch sizes for the spaces-list rollup queries. They bound the
+// number of bind parameters in one rollup query, keeping each well under
+// SQLite's limit while still covering a typical hub in a single query each.
+const (
+	defaultChatSpacesTopicBatch     = 200
+	defaultChatSpacesReadStateBatch = 500
+)
+
+// chatSpacesBatchSizes holds the rollup batch sizes a Server uses. A zero
+// field means the matching default; tests set small values on their own
+// Server to exercise batch boundaries without touching shared state.
+type chatSpacesBatchSizes struct {
+	topics     int
+	readStates int
+}
+
+// withDefaults returns b with every zero field replaced by its default.
+func (b chatSpacesBatchSizes) withDefaults() chatSpacesBatchSizes {
+	if b.topics <= 0 {
+		b.topics = defaultChatSpacesTopicBatch
+	}
+	if b.readStates <= 0 {
+		b.readStates = defaultChatSpacesReadStateBatch
+	}
+	return b
+}
+
+// chatSpaceRollup is one space's thread rollup for the spaces list.
+type chatSpaceRollup struct {
+	threadCount    int
+	unreadCount    int
+	lastActivityAt time.Time
+}
+
+// chatSpaceRollups computes the thread count, unread count and newest
+// thread activity of every project in projects for userID, fetching topics
+// and read states in batches across projects rather than per project.
+//
+// A failed batch read is logged and otherwise degrades as the per-project
+// lookups this replaces did: a failed topic read leaves its projects with
+// no threads, and a failed read-state read leaves its threads with no
+// read state. batch sets the batch sizes; zero fields take the defaults.
+func chatSpaceRollups(ctx context.Context, wcs WebChatStore, userID string, projects []*store.Project, batch chatSpacesBatchSizes) map[string]chatSpaceRollup {
+	batch = batch.withDefaults()
+	out := make(map[string]chatSpaceRollup, len(projects))
+	if len(projects) == 0 {
+		return out
+	}
+
+	var topics []WebChatTopic
+	for start := 0; start < len(projects); start += batch.topics {
+		end := min(start+batch.topics, len(projects))
+		ids := make([]string, 0, end-start)
+		for _, p := range projects[start:end] {
+			ids = append(ids, p.ID)
+		}
+		page, err := wcs.ListTopicsByProjects(ctx, ids)
+		if err != nil {
+			slog.Warn("chat spaces: batched topic read failed",
+				"projects", len(ids), "error", err)
+			continue
+		}
+		topics = append(topics, page...)
+	}
+	if len(topics) == 0 {
+		return out
+	}
+
+	readMap := make(map[string]WebChatReadState, len(topics))
+	for start := 0; start < len(topics); start += batch.readStates {
+		end := min(start+batch.readStates, len(topics))
+		keys := make([]string, 0, end-start)
+		for _, t := range topics[start:end] {
+			keys = append(keys, t.ID)
+		}
+		states, err := wcs.GetReadStates(ctx, userID, keys)
+		if err != nil {
+			slog.Warn("chat spaces: batched read-state read failed",
+				"threads", len(keys), "error", err)
+			continue
+		}
+		for _, rs := range states {
+			readMap[rs.ConversationKey] = rs
+		}
+	}
+
+	for _, t := range topics {
+		ru := out[t.ProjectID]
+		ru.threadCount++
+		if t.LastActivityAt.After(ru.lastActivityAt) {
+			ru.lastActivityAt = t.LastActivityAt
+		}
+		rs, ok := readMap[t.ID]
+		// A muted thread is silent all the way up: it contributes nothing
+		// to the space badge, so muting every unread thread in a space
+		// clears the badge instead of leaving the space shouting about
+		// threads the user asked to be quiet (#1029). Mentions are covered
+		// by the same rule — the rail already hides the mention dot on a
+		// muted thread, and a rollup that disagreed with it would put two
+		// numbers on screen.
+		if (!ok || !rs.Muted) && t.LastMessageID != "" &&
+			(!ok || rs.LastReadMessageID == "" || t.LastMessageID != rs.LastReadMessageID) {
+			ru.unreadCount++
+		}
+		out[t.ProjectID] = ru
+	}
+	return out
 }
 
 // handleChatSpaceRoutes dispatches sub-routes under /api/v1/chat/spaces/.
@@ -344,7 +433,6 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
-	// ListTopics lazily creates #general.
 	topics, err := wcs.ListTopics(r.Context(), projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list threads", nil)
@@ -1555,6 +1643,20 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	s.touchConversationActivity(ctx, key, storeMsg.ID)
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
+	// Record "web" reply-channel affinity so untagged agent replies
+	// (e.g. `scion message user:...` or sciontool Stop-hook assistant-reply
+	// mirror) route back to web chat rather than a stale external bridge
+	// channel (Discord/Telegram). See #2448.
+	s.mu.RLock()
+	affinityWcs := s.webChatStore
+	s.mu.RUnlock()
+	if affinityWcs != nil && user.ID() != "" && primaryAgent.ProjectID != "" && primaryAgent.ID != "" {
+		if err := affinityWcs.RecordChannel(ctx, user.ID(), primaryAgent.ProjectID, primaryAgent.ID, "web", now); err != nil {
+			s.messageLog.Error("Failed to record web channel affinity for primary agent",
+				"user_id", user.ID(), "agent_id", primaryAgent.ID, "error", err)
+		}
+	}
+
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -1728,6 +1830,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 				mentionPersisted = false
 			} else {
+				if affinityWcs != nil && user.ID() != "" && mentionAgent.ProjectID != "" && mentionAgent.ID != "" {
+					if err := affinityWcs.RecordChannel(ctx, user.ID(), mentionAgent.ProjectID, mentionAgent.ID, "web", now); err != nil {
+						s.messageLog.Error("Failed to record web channel affinity for mentioned agent",
+							"user_id", user.ID(), "agent_id", mentionAgent.ID, "error", err)
+					}
+				}
 				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs)
 			}
 
@@ -2970,7 +3078,8 @@ func (s *Server) writeConversationReadState(
 // recent messages, newest first — the (created_at, id) DESC order
 // ListMessages uses by default, the same order handleConversationRead's
 // monotonic guard reasons in. It resolves the same filter
-// handleConversationHistory and nativeDMLastMessage use, honouring the
+// handleConversationHistory and the DM list (nativeDMLastMessages) use,
+// honouring the
 // ConversationEnvelopeSwitch when it is on so mark-unread sees the same
 // message set the history view and the DM list's "last message" do.
 //
@@ -2985,10 +3094,11 @@ func (s *Server) conversationRecentMessages(
 ) ([]store.Message, error) {
 	var filter store.MessageFilter
 	if isDM {
-		// Mention fan-out copies are excluded, matching nativeDMLastMessage —
+		// Mention fan-out copies are excluded, matching nativeDMLastMessages —
 		// chat-thread does not display them, so they must not count as the
 		// "latest message" mark-unread reasons about.
-		filter = store.MessageFilter{Channel: "web", ThreadID: key, ExcludeType: messages.TypeMention}
+		filter = store.MessageFilter{Channel: nativeDMMessageScope.Channel, ThreadID: key,
+			ExcludeType: nativeDMMessageScope.ExcludeType}
 		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
 			parts := strings.Split(key, ":")
 			if len(parts) != 5 {
@@ -2999,7 +3109,7 @@ func (s *Server) conversationRecentMessages(
 				return nil, err
 			}
 			if conv == nil {
-				// Never-used DM: matches nativeDMLastMessage's prior
+				// Never-used DM: matches nativeDMLastMessages' prior
 				// behaviour exactly (nil, nil) rather than falling back to
 				// a ThreadID filter, which would show unrelated legacy rows
 				// once envelope mode is the source of truth.
@@ -3561,27 +3671,105 @@ func (s *Server) handleSpaceEmoji(w http.ResponseWriter, r *http.Request, projec
 // DM Endpoints
 // ---------------------------------------------------------------------------
 
-// nativeDMLastMessage uses the same scope as the history endpoint, not the
-// cross-channel activity watermark. That watermark can point to an external
-// message, a deleted message, or one moved into a promoted thread, none of
-// which can be acknowledged by viewing this DM. Mention fan-out copies are
-// also excluded because chat-thread does not display them.
+// nativeDMMessageScope is the message scope shared by every native DM
+// "latest message" read: web channel only, mention fan-out copies excluded.
+// It matches the history endpoint's scope, not the cross-channel activity
+// watermark, which can point to an external message, a deleted message, or
+// one moved into a promoted thread — none of which viewing the DM can
+// acknowledge. Mention copies are excluded because chat-thread does not
+// display them.
 //
-// Delegates to conversationRecentMessages (limit 1) rather than keeping a
-// second copy of this filter: the two are used together — this to know
-// "unread compared to what", mark-unread's predecessor lookup to know
-// "unread from what" — and a mention-exclusion (or envelope-switch) fix
-// applied to only one would silently reintroduce a mention row masking
-// mark-unread's effect.
-func (s *Server) nativeDMLastMessage(ctx context.Context, key string) (*store.Message, error) {
-	recent, err := s.conversationRecentMessages(ctx, key, true, nil, 1)
+// conversationRecentMessages (mark-unread's "unread from what") and
+// nativeDMLastMessages (the DM list's "unread compared to what") both build
+// their filters from it, so a mention-exclusion fix cannot reach only one
+// of them and let a mention row mask mark-unread's effect.
+var nativeDMMessageScope = store.LatestMessageOptions{Channel: "web", ExcludeType: messages.TypeMention}
+
+// nativeDMLastMessages returns the last visible message of each DM for the
+// DM list — for every key, the message conversationRecentMessages(key,
+// isDM, limit 1) would return — with a constant number of store queries:
+// one latest-message lookup, plus one conversation lookup when the
+// conversation envelope switch is on. The result maps a conversation key to
+// its last visible message; keys with no visible message are absent.
+//
+// A failed batched read is logged and degrades rather than failing the
+// list: every DM it covered is listed without last-message enrichment.
+func (s *Server) nativeDMLastMessages(ctx context.Context, keys []string) map[string]*store.Message {
+	result := make(map[string]*store.Message, len(keys))
+	if len(keys) == 0 {
+		return result
+	}
+
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.ConversationEnvelopeSwitch() {
+		latest, err := s.store.LatestMessagesByThreadIDs(ctx, keys, nativeDMMessageScope)
+		if err != nil {
+			slog.Warn("chat dms: batched last-message read failed",
+				"dms", len(keys), "error", err)
+			return result
+		}
+		for _, key := range keys {
+			if msg := latest[key]; msg != nil {
+				result[key] = msg
+			}
+		}
+		return result
+	}
+
+	// Envelope mode: resolve each key to its DM conversation exactly as
+	// conversationRecentMessages does, then read by conversation ID. A key
+	// that does not resolve (malformed, or a never-used DM) has no last
+	// message.
+	refByKey := make(map[string]string, len(keys))
+	refs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts := strings.Split(key, ":")
+		if len(parts) != 5 {
+			slog.Warn("chat dms: invalid DM key, listed without last message",
+				"key", key, "error", fmt.Errorf("invalid DM key: %q", key))
+			continue
+		}
+		ref, ok := messaging.DMReadExternalRef(s.messageLog, parts[1], parts[2], parts[3], parts[4])
+		if !ok {
+			continue
+		}
+		refByKey[key] = ref
+		refs = append(refs, ref)
+	}
+	if len(refs) == 0 {
+		return result
+	}
+	convs, err := s.store.GetConversationsByExternalRefs(ctx, "native", refs)
 	if err != nil {
-		return nil, err
+		slog.Warn("chat dms: batched conversation read failed",
+			"dms", len(refs), "error", err)
+		return result
 	}
-	if len(recent) == 0 {
-		return nil, nil
+	convIDs := make([]string, 0, len(convs))
+	for _, conv := range convs {
+		if conv != nil {
+			convIDs = append(convIDs, conv.ID)
+		}
 	}
-	return &recent[0], nil
+	if len(convIDs) == 0 {
+		return result
+	}
+	latest, err := s.store.LatestMessagesByConversationIDs(ctx, convIDs, nativeDMMessageScope)
+	if err != nil {
+		slog.Warn("chat dms: batched last-message read failed",
+			"dms", len(convIDs), "error", err)
+		return result
+	}
+	for key, ref := range refByKey {
+		conv := convs[ref]
+		if conv == nil {
+			continue
+		}
+		if msg := latest[conv.ID]; msg != nil {
+			result[key] = msg
+		}
+	}
+	return result
 }
 
 // handleChatDMs handles GET /api/v1/chat/dms.
@@ -3614,6 +3802,58 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every per-DM lookup below is batched across the whole list, so the
+	// request costs a constant number of store queries however many DMs the
+	// caller has: one each for last messages (two in envelope mode), user
+	// peers, agent peers, and read states.
+	keys := make([]string, 0, len(dms))
+	var userPeerIDs, agentPeerIDs []string
+	for _, dm := range dms {
+		keys = append(keys, dm.ConversationKey)
+		switch dm.PeerKind {
+		case "user":
+			userPeerIDs = append(userPeerIDs, dm.PeerID)
+		case "agent":
+			agentPeerIDs = append(agentPeerIDs, dm.PeerID)
+		}
+	}
+
+	lastMessages := s.nativeDMLastMessages(ctx, keys)
+
+	// Peer enrichment is best effort, as it was per DM: a failed lookup
+	// leaves the peer fields empty rather than failing the list.
+	var peerUsers map[string]*store.User
+	if len(userPeerIDs) > 0 {
+		var err error
+		if peerUsers, err = s.store.GetUsersByIDs(ctx, userPeerIDs); err != nil {
+			slog.Warn("chat dms: batched peer-user read failed",
+				"users", len(userPeerIDs), "error", err)
+		}
+	}
+	var peerAgents map[string]*store.Agent
+	if len(agentPeerIDs) > 0 {
+		var err error
+		// Including soft-deleted agents, as GetAgent does: a DM with a
+		// deleted agent keeps showing that agent's name.
+		if peerAgents, err = s.store.GetAgentsByIDsIncludingDeleted(ctx, agentPeerIDs); err != nil {
+			slog.Warn("chat dms: batched peer-agent read failed",
+				"agents", len(agentPeerIDs), "error", err)
+		}
+	}
+
+	// Read state for the unread indicator and muted flag.
+	readStates := make(map[string]WebChatReadState, len(keys))
+	if len(keys) > 0 {
+		states, err := wcs.GetReadStates(ctx, user.ID(), keys)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch DM read state", nil)
+			return
+		}
+		for _, rs := range states {
+			readStates[rs.ConversationKey] = rs
+		}
+	}
+
 	entries := make([]chatDMEntry, 0, len(dms))
 	for _, dm := range dms {
 		entry := chatDMEntry{
@@ -3622,38 +3862,27 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 			PeerKind:        dm.PeerKind,
 			LastActivityAt:  dm.LastActivityAt,
 		}
-		lastMessage, err := s.nativeDMLastMessage(ctx, dm.ConversationKey)
-		if err != nil {
-			slog.Warn("failed to fetch DM last message", "key", dm.ConversationKey, "error", err)
-			// Continue without last message enrichment for this DM
-		} else if lastMessage != nil {
+		if lastMessage := lastMessages[dm.ConversationKey]; lastMessage != nil {
 			entry.LastMessageID = lastMessage.ID
 			entry.LastMessagePreview = truncatePreview(lastMessage.Msg, 120)
 			entry.LastMessageSender = lastMessage.Sender
 		}
 
-		// Enrich with peer info.
 		switch dm.PeerKind {
 		case "user":
-			if peerUser, err := s.store.GetUser(ctx, dm.PeerID); err == nil {
+			if peerUser := peerUsers[dm.PeerID]; peerUser != nil {
 				entry.PeerName = peerUser.DisplayName
 				entry.PeerEmail = peerUser.Email
 				entry.PeerAvatar = peerUser.AvatarURL
 			}
 		case "agent":
-			if peerAgent, err := s.store.GetAgent(ctx, dm.PeerID); err == nil {
+			if peerAgent := peerAgents[dm.PeerID]; peerAgent != nil {
 				entry.PeerName = peerAgent.Name
 				entry.PeerSlug = peerAgent.Slug
 			}
 		}
 
-		// Get read state for unread indicator.
-		rs, err := wcs.GetReadState(ctx, user.ID(), dm.ConversationKey)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch DM read state", nil)
-			return
-		}
-		if rs != nil {
+		if rs, ok := readStates[dm.ConversationKey]; ok {
 			entry.LastReadMessageID = rs.LastReadMessageID
 			entry.Muted = rs.Muted
 		}
@@ -3772,6 +4001,12 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		slog.Warn("chat members: agent list truncated at safety cap",
 			"project", project.ID, "cap", spaceMembersMaxAgents)
 	}
+	// The attach checks below are one read-only evaluation phase for one
+	// principal, so they share the request-local authorization input memo
+	// (as ComputeCapabilitiesBatch does): the caller's principals, bindings
+	// and access constraints load once instead of once per agent. Every
+	// decision still runs, and is audited, individually.
+	attachCtx := withAuthzInputMemo(ctx)
 	for _, a := range projectAgents {
 		// Each attach check reads the store and may write an audit record,
 		// so stop once the client has gone rather than finishing the list.
@@ -3793,7 +4028,7 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		// ActionAttach for a user identity, so ask the same question here
 		// rather than offering a control the server will refuse.
 		entry.CanAttach = s.authzService.CheckAccess(
-			ctx, user, agentResource(&a), ActionAttach).Allowed
+			attachCtx, user, agentResource(&a), ActionAttach).Allowed
 		if !a.LastSeen.IsZero() {
 			entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
 		}
@@ -4674,6 +4909,10 @@ type chatSpaceEntry struct {
 	Emoji       string `json:"emoji,omitempty"`
 	ThreadCount int    `json:"threadCount"`
 	UnreadCount int    `json:"unreadCount"`
+	// LastActivityAt is the newest lastActivityAt across the space's
+	// threads, in the same format as a thread's lastActivityAt. Omitted
+	// when the space has no threads or none of them has a message yet.
+	LastActivityAt *time.Time `json:"lastActivityAt,omitempty"`
 }
 
 type chatSpacePrefs struct {

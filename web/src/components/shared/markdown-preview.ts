@@ -46,7 +46,7 @@ export class ScionMarkdownPreview extends LitElement {
       padding: 1.5rem 2rem;
       background: var(--scion-surface, #ffffff);
       min-height: 200px;
-      max-height: calc(100vh - 16rem);
+      max-height: calc(var(--scion-app-height, 100dvh) - 16rem);
       overflow-y: auto;
       line-height: 1.7;
       color: var(--scion-text, #1e293b);

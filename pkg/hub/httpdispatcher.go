@@ -213,6 +213,11 @@ type HTTPAgentDispatcher struct {
 	// tier. A callback for the same reason as hubAgentDefaultsProvider. Nil
 	// provider = no default sent.
 	autoExposePortsDefaultProvider func() *bool
+
+	// dispatchExperimentsProvider returns the enabled hub experiments that
+	// change broker behaviour, read on every create, start and restart
+	// dispatch. Nil provider = none sent.
+	dispatchExperimentsProvider func() []string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -369,6 +374,21 @@ func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.A
 // so a settings change reaches an agent at its next start.
 func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool) {
 	d.autoExposePortsDefaultProvider = fn
+}
+
+// SetDispatchExperimentsProvider registers the accessor for the enabled
+// hub experiments sent to brokers with each create, start and restart
+// dispatch, so an admin toggle applies at the agent's next dispatch.
+func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string) {
+	d.dispatchExperimentsProvider = fn
+}
+
+// dispatchExperiments returns the enabled dispatch experiments, or nil.
+func (d *HTTPAgentDispatcher) dispatchExperiments() []string {
+	if d.dispatchExperimentsProvider == nil {
+		return nil
+	}
+	return d.dispatchExperimentsProvider()
 }
 
 // autoExposePortsDefault returns the hub auto-expose default, or nil when no
@@ -755,7 +775,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		if d.hubAgentDefaultsProvider != nil {
 			hubDefaults = d.hubAgentDefaultsProvider()
 		}
-		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault())
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault(), d.dispatchExperiments())
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -835,28 +855,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			}
 		}
 	}
-
-	// SCION_METADATA_MODE must be hub-authoritative, never sourced from
-	// storage: overwrite whatever the fill-absent merge above put there.
-	// req.Config.GCPIdentity (set above from agent.AppliedConfig.GCPIdentity)
-	// is what the broker primarily trusts, but that struct is nil when the
-	// agent has no GCP identity configured, and the broker then falls back to
-	// this env var. Without this authoritative overwrite, a stored env var of
-	// this name would decide the metadata mode on that fallback path.
-	gcpMetadataMode := store.GCPMetadataModeBlock
-	if req.Config != nil && req.Config.GCPIdentity != nil {
-		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
-	}
-	req.ResolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
-	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-	// Marks the mode above as this hub's own authoritative write, not a value
-	// that survived from a storage/secret merge. A broker that predates this
-	// marker ignores it (harmless); a broker that checks it only trusts an
-	// elevated (non-block) mode from resolvedEnv when this is present, which
-	// is what closes the fallback path for a broker talking to an older hub
-	// that never sends this marker at all.
-	req.ResolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
-	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 
 	// Include template secrets declarations for broker env-gather
 	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
@@ -978,6 +976,18 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			req.AvailableAsNeededKeys = asNeededKeys
 		}
 	}
+
+	// The GCP identity mode is hub-authoritative: set after every fill-absent
+	// merge above (config env, storage env, environment-type secrets), so no
+	// stored value of these names can decide it. req.Config.GCPIdentity (set
+	// above from agent.AppliedConfig.GCPIdentity) is what the broker trusts
+	// first; this env carries the same decision for the case where that
+	// struct is nil. See applyHubGCPMetadataModeEnv.
+	gcpMetadataMode := ""
+	if req.Config != nil && req.Config.GCPIdentity != nil {
+		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
+	}
+	applyHubGCPMetadataModeEnv(req.ResolvedEnv, &req.EnvClassifications, gcpMetadataMode)
 
 	// GitHub App token minting: if the project has a GitHub App installation,
 	// always mint an installation token. GitHub App tokens take priority over
@@ -1105,10 +1115,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			req.ResolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			if req.ResolvedEnv == nil {
+				req.ResolvedEnv = make(map[string]string)
 			}
+			req.ResolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&req.EnvClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 
@@ -1173,6 +1189,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
+	// The global project also sends its slug alongside a provider path.
 	if agent.ProjectID == "" {
 		return projectDispatchInfo{}, nil
 	}
@@ -1212,6 +1229,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// back to the global project.
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
+	} else if isGlobalHubProject(project.Slug) {
+		// The global project's slug travels with its provider path so the
+		// broker can tell the global project apart from another project
+		// whose path points at the broker's global directory. The broker
+		// keeps resolving the project from the path.
+		info.projectSlug = globalProjectSlug
 	}
 	return info, nil
 }
@@ -1246,11 +1269,44 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 			agent.RuntimeState = "container:" + resp.Agent.ID
 		}
 		applyBrokerAgentConfig(agent, resp.Agent)
+		d.recordWorkspacePlacement(ctx, agent, resp.Agent.WorkspacePlacement)
 	} else if d.debug {
 		d.log.Debug("applyBrokerResponse: broker response has nil Agent",
 			"agentName", agent.Name,
 		)
 	}
+}
+
+// recordWorkspacePlacement persists the workspace placement a broker reported
+// for a start (see store.Agent.WorkspacePlacement) with the narrow
+// SetAgentWorkspacePlacement write, and mirrors it on the in-memory agent.
+// Every start that resolves the workspace reports it, so a re-provision
+// overwrites the previous value. An empty or malformed value (a response
+// from no start, or an older broker) records nothing. Best effort: a failed
+// write leaves the previous value, which a move refuses unless it is export.
+func (d *HTTPAgentDispatcher) recordWorkspacePlacement(ctx context.Context, agent *store.Agent, placement string) {
+	if !validWorkspacePlacementReport(placement) {
+		return
+	}
+	agent.WorkspacePlacement = placement
+	if d.store == nil || agent.ID == "" {
+		return
+	}
+	if err := d.store.SetAgentWorkspacePlacement(ctx, agent.ID, placement); err != nil && !errors.Is(err, store.ErrNotFound) {
+		d.log.Warn("Failed to record the agent's workspace placement",
+			"agent_id", agent.ID, "placement", placement, "error", err)
+	}
+}
+
+// maxWorkspacePlacementBytes bounds a reported workspace placement.
+const maxWorkspacePlacementBytes = 64
+
+// validWorkspacePlacementReport reports whether a broker-reported workspace
+// placement should be recorded: non-empty, bounded and free of control
+// characters. Values the hub does not recognise are recorded as reported
+// and read as "not on the export" (isWorkspacePlacementOnExport).
+func validWorkspacePlacementReport(placement string) bool {
+	return placement != "" && len(placement) <= maxWorkspacePlacementBytes && !hasControlCharacter(placement)
 }
 
 // applyBrokerAgentConfig copies the non-status fields of a broker's agent
@@ -1332,10 +1388,11 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 // fail-open for real rows: any other store error, for an agent that does
 // have a row, still fails the dispatch.
 //
-// It returns the minted ID and the value the row held immediately before
+// It returns the minted ID, the value the row held immediately before
 // the write (read from the database, not from the caller's possibly stale
-// struct), for revertRun.
-func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, err error) {
+// struct), for revertRun, and whether the row recorded the run (false for
+// the no-row exception above), for settleLandedRun.
+func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, recorded bool, err error) {
 	previous = agent.RunID
 	runID = uuid.NewString()
 	if d.store != nil && agent.ID != "" {
@@ -1343,17 +1400,18 @@ func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) 
 		switch {
 		case err == nil:
 			previous = prior
+			recorded = true
 		case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
 			d.log.Warn("Dispatcher: agent has no row; run ID not recorded",
 				"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "error", err)
 		default:
-			return "", "", fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
+			return "", "", false, fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
 		}
 	}
 	agent.RunID = runID
 	d.log.Debug("Dispatcher: minted run ID",
 		"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "previous_run_id", previous)
-	return runID, previous, nil
+	return runID, previous, recorded, nil
 }
 
 // adoptBrokerRunID records the run ID the broker reports for the entry it
@@ -1532,7 +1590,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		}
 	}()
 
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -1559,7 +1617,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	}
 
 	d.applyBrokerResponse(ctx, agent, resp)
-	d.adoptBrokerRunID(ctx, agent, runID, resp)
+	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil, nil
 }
 
@@ -1793,7 +1851,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// The first pass creates the agent when no env is missing, so it
 	// carries a run ID like any create. A cross-node hand-off re-dispatches
 	// on the owning node, which mints its own.
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -1841,7 +1899,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	} else if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	}
 
 	// Second pass: if the broker reported needed keys, check whether any can
@@ -1965,7 +2023,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	// finalize_env is the pass that creates the agent after a gather, so it
 	// mints the run ID the new entry carries.
-	runID, _, err := d.beginRun(ctx, agent)
+	runID, _, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -2044,7 +2102,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			}
 			if resp2 != nil {
 				d.applyBrokerResponse(ctx, agent, resp2)
-				d.adoptBrokerRunID(ctx, agent, runID, resp2)
+				d.settleLandedRun(ctx, agent, runID, recorded, resp2)
 			}
 			return nil, nil
 		}
@@ -2053,7 +2111,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	}
 	return nil, nil
 }
@@ -2930,13 +2988,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// but the startAgent/restartAgent path doesn't carry that struct, so we
 	// surface the values through resolvedEnv instead.
 	//
-	// This write is unconditional and always the last word on
-	// SCION_METADATA_MODE (identity vars are set after the storage/secrets
-	// merge above, at "highest precedence" per the comment on SCION_AGENT_ID
-	// et al.): when the agent has no GCP identity configured at all, the mode
-	// still needs to be authoritatively set to the secure default rather than
-	// left for whatever a lower-precedence merge put in resolvedEnv.
-	gcpMetadataMode := store.GCPMetadataModeBlock
+	// These writes are the last word on the GCP identity env (identity vars
+	// are set after the storage/secrets merge above, at "highest precedence"
+	// per the comment on SCION_AGENT_ID et al.). When the agent has no GCP
+	// identity configured at all, gcpMetadataMode stays empty and
+	// applyHubGCPMetadataModeEnv removes any merged-in mode, so the broker
+	// applies its runtime default rather than a stored value.
+	gcpMetadataMode := ""
 	if agent.AppliedConfig != nil {
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			gcpMetadataMode = gcpID.MetadataMode
@@ -2964,11 +3022,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			}
 		}
 	}
-	resolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
-	classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-	// See buildCreateRequest for why this marker travels alongside the mode.
-	resolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
-	classifyEnv(&envClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
+	applyHubGCPMetadataModeEnv(resolvedEnv, &envClassifications, gcpMetadataMode)
 
 	// Generate a fresh agent token for Hub authentication. A mint error
 	// stops the start or restart before any broker request; nothing was
@@ -3004,10 +3058,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_AUDIENCE", api.EnvKindPlain)
 			resolvedEnv["SCION_TRANSPORT_TOKEN_EXPIRY"] = tExpiry.UTC().Format(time.RFC3339)
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_TOKEN_EXPIRY", api.EnvKindPlain)
-			if d.transportMode != "" {
-				resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
-				classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
-			}
+		}
+		// The mode is set even when the mint failed, so the agent knows a
+		// proxy guards the hub and can adopt a transport token delivered
+		// later by a token refresh or reset-auth.
+		if d.transportMode != "" {
+			resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
+			classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
 	}
 
@@ -3185,13 +3242,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
-	runID, previousRunID, err := d.beginRun(ctx, agent)
+	runID, previousRunID, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -3246,7 +3304,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
-		d.adoptBrokerRunID(ctx, agent, runID, resp)
+		d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	} else {
 		// The broker accepted the start without a parseable body; the
 		// recorded target is stale all the same.
@@ -3317,14 +3375,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
-		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		TemplateName:         agent.Template,
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
 	// A restart replaces the runtime entry, so the new one gets a new run.
-	runID, previousRunID, err := d.beginRun(ctx, agent)
+	runID, previousRunID, recorded, err := d.beginRun(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -3343,7 +3402,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	d.forgetRuntimeTarget(ctx, agent)
 	// A restart whose stop failed can find the entry still running and
 	// keep it, reporting that entry's (older) run ID.
-	d.adoptBrokerRunID(ctx, agent, runID, resp)
+	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil
 }
 
@@ -3431,50 +3490,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	return err
 }
 
-// ErrRawDispatchRefused is returned by DispatchAgentMessage when the
-// message being dispatched carries Raw == true. This is a documented
-// contract invariant every AgentDispatcher.DispatchAgentMessage
-// implementation must uphold (today exactly this one production
-// implementation exists, per contract §6.1(a)); nothing in the Go type
-// system enforces it on a future second implementation, so a reviewer
-// adding one must apply the same check at its own chokepoint.
-//
-// From task 2.3 onward (contract .design/agent-keys-contract.md §6.1 "(a)
-// Dispatch-layer backstop"), legacy raw keystroke delivery through the
-// message/broadcast/DM dispatch path is refused unconditionally at this
-// chokepoint -- zero broker calls, never mgr.MessageRaw -- regardless of
-// which call site reached it (direct dispatch, dispatchWithBrokerRetry, or
-// any broker-proxy-published message). A correctly operating Hub never
-// produces a Raw==true structuredMsg at this layer: the message-handler
-// bridge (task 2.3, agent_keys_message_bridge.go) and ptone/scion#2218's
-// (task 0.2's) ingress guards both intercept raw before persistence or
-// dispatch on every production ingress. Reaching this point therefore
-// signals an implementation defect in one of those layers, not a normal
-// caller error (contract's AK-55).
-//
-// This layer cannot undo a persisted store.Message row or an already-
-// published SSE/observer event: on every call site, those side effects (if
-// any) already happened before dispatch runs. Returning this error is
-// deliberately just an ordinary dispatch error to the caller -- every
-// existing caller already marks a persisted row failed through its own
-// existing failure path (e.g. ExecuteAgentDM's markFailed) and returns a
-// generic, non-keys-specific failure to any synchronous caller -- so this
-// chokepoint requires no new error-handling code path anywhere else.
-var ErrRawDispatchRefused = errors.New("agent dispatch: raw message delivery refused (post-2.3 backstop)")
-
 // DispatchAgentMessage sends a message to an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
-	// A nil agent has no broker to deliver to; reject it before the raw
-	// backstop log below dereferences agent.ID.
-	if agent == nil {
-		return requireRuntimeBrokerAssigned(agent)
-	}
-	if structuredMsg != nil && structuredMsg.Raw {
-		slog.Error("agent dispatch: raw message delivery refused at the backstop",
-			"agent_id", agent.ID, "defect", "raw_reached_dispatch_layer")
-		return ErrRawDispatchRefused
-	}
-
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -3779,18 +3796,21 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 		return nil, err
 	}
 	if result.State == store.DispatchStateFailed {
-		return nil, fmt.Errorf("dispatch %s failed: %s", op, result.Error)
+		return nil, dispatchFailureError(result)
 	}
 	return result, nil
 }
 
 // deferredLifecycle is the common flow for cross-node start/stop/restart:
-//  1. Subscribe to agent.<id>.status BEFORE writing intent (no missed events)
+//  1. Mint the dispatch ID, then subscribe to agent.<id>.status and
+//     broker.dispatch.<dispatchID>.done BEFORE writing intent, so no event
+//     for the row can be missed and the row cannot be terminal yet
 //  2. InsertBrokerDispatch with serialized resolved args
 //  3. Best-effort SignalBrokerCmd (the row is durable; reconnect-drain backstop)
-//  4. waitForAgentTransition with the op's terminal set
-//  5. Return nil on success-terminal, ErrDispatchFailed on timeout, wrapped
-//     error on error-terminal
+//  4. waitForLifecycleOutcome: nil on the op's success phase; the row's
+//     failure (the broker's typed error when recorded) once the row fails;
+//     ErrDispatchFailed on timeout; a generic error on an error phase with
+//     no failed row
 func (d *HTTPAgentDispatcher) deferredLifecycle(
 	ctx context.Context,
 	agent *store.Agent,
@@ -3802,8 +3822,10 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 		return fmt.Errorf("cross-node dispatch not available: events or command bus not configured")
 	}
 
+	dispatchID := uuid.NewString()
+
 	// 1. Subscribe BEFORE writing intent so we don't miss events.
-	eventCh, unsub := d.events.Subscribe("agent." + agent.ID + ".status")
+	eventCh, unsub := d.events.Subscribe("agent."+agent.ID+".status", "broker.dispatch."+dispatchID+".done")
 
 	// 2. Serialize args and insert the durable intent row.
 	argsJSON, err := MarshalDispatchArgs(args)
@@ -3813,7 +3835,7 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 	}
 
 	dispatch := &store.BrokerDispatch{
-		ID:        uuid.NewString(),
+		ID:        dispatchID,
 		BrokerID:  agent.RuntimeBrokerID,
 		AgentID:   agent.ID,
 		AgentSlug: agent.Slug,
@@ -3837,17 +3859,8 @@ func (d *HTTPAgentDispatcher) deferredLifecycle(
 			"op", op, "brokerID", agent.RuntimeBrokerID, "error", err)
 	}
 
-	// 4. Wait for terminal phase.
-	phase, err := waitForAgentTransition(ctx, eventCh, unsub, terminal)
-	if err != nil {
-		return err
-	}
-
-	// 5. Map terminal phase.
-	if phase == "error" {
-		return fmt.Errorf("agent entered error phase during %s", op)
-	}
-	return nil
+	// 4. Wait for the outcome.
+	return waitForLifecycleOutcome(ctx, eventCh, unsub, d.store, dispatchID, op, terminal)
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them
@@ -3973,6 +3986,52 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"asNeededKeys", asNeededKeys)
 	}
 	return result, asNeededKeys, nil
+}
+
+// applyHubGCPMetadataModeEnv writes the hub's authoritative GCP identity
+// mode into a dispatch env. Callers run it after every fill-absent merge
+// (config env, storage env, environment-type secrets), so a stored value of
+// these names never decides the mode.
+//
+// mode is the agent's AppliedConfig.GCPIdentity.MetadataMode, or empty when
+// the agent has no GCP identity configured at all. The two cases stay
+// distinct on the wire:
+//
+//   - An explicit mode (including an explicit "block" from the agent, a
+//     project default or a hub default) is written as SCION_METADATA_MODE.
+//   - No identity removes SCION_METADATA_MODE, so the broker applies its
+//     runtime default: "block" on every runtime except Kubernetes,
+//     "passthrough" on Kubernetes (ptone/scion#2980). Kubernetes refuses an
+//     explicit "block", so writing "block" here for "nothing configured"
+//     would refuse every unconfigured agent there. It also removes
+//     SCION_METADATA_REQUIRE_LOCAL_RUNTIME, which the broker reads from env
+//     when no GCPIdentity struct is present and which only a hub-default
+//     passthrough grant may set.
+//
+// SCION_METADATA_MODE_SOURCE=hub is written in both cases. It marks the env
+// as this hub's own decision: a broker that checks it only trusts an
+// elevated (non-block) mode from resolvedEnv when it is present, which keeps
+// a stray stored value from a hub that predates the marker from counting.
+func applyHubGCPMetadataModeEnv(env map[string]string, cls *map[string]api.EnvKind, mode string) {
+	if cls == nil {
+		// Callers always pass a classification map pointer today; a nil one
+		// gets a throwaway map so neither the delete nor classifyEnv below
+		// dereferences nil.
+		cls = new(map[string]api.EnvKind)
+	}
+	if mode == "" {
+		for _, k := range []string{"SCION_METADATA_MODE", "SCION_METADATA_REQUIRE_LOCAL_RUNTIME"} {
+			delete(env, k)
+			if *cls != nil {
+				delete(*cls, k)
+			}
+		}
+	} else {
+		env["SCION_METADATA_MODE"] = mode
+		classifyEnv(cls, "SCION_METADATA_MODE", api.EnvKindPlain)
+	}
+	env["SCION_METADATA_MODE_SOURCE"] = "hub"
+	classifyEnv(cls, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 }
 
 // classifyEnv sets the classification for an env key in the given map,

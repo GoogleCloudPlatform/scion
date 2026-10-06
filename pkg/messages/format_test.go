@@ -15,6 +15,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -115,20 +116,20 @@ func TestFormatForDelivery_EmptyMsg(t *testing.T) {
 	}
 }
 
-func TestFormatForDelivery_Raw(t *testing.T) {
-	msg := &StructuredMessage{
-		Version:   Version,
-		Timestamp: "2026-03-07T14:30:00Z",
-		Sender:    "user:alice",
-		Recipient: "agent:dev",
-		Msg:       "Escape",
-		Type:      TypeInstruction,
-		Raw:       true,
+// TestFormatForDelivery_IgnoresRetiredRawMember pins that a historical
+// row or payload still carrying "raw" decodes as a normal message: the field
+// no longer exists, so it cannot select bare-text delivery.
+func TestFormatForDelivery_IgnoresRetiredRawMember(t *testing.T) {
+	var msg StructuredMessage
+	if err := json.Unmarshal([]byte(`{"version":1,"sender":"user:alice","recipient":"agent:dev","msg":"Escape","type":"instruction","raw":true}`), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-
-	result := FormatForDelivery(msg)
-	if result != "Escape" {
-		t.Errorf("raw mode should return raw msg, got %q", result)
+	result := FormatForDelivery(&msg)
+	if result == "Escape" {
+		t.Fatalf("retired raw member must not select bare-text delivery, got %q", result)
+	}
+	if !strings.Contains(result, "---BEGIN SCION MESSAGE---") {
+		t.Errorf("expected the normal envelope, got %q", result)
 	}
 }
 

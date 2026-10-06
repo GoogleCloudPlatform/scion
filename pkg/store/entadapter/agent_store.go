@@ -139,12 +139,16 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
 		RunID:               a.RunID,
+		WorkspacePlacement:  a.WorkspacePlacement,
 		DeletionState:       a.DeletionState,
 		DeletionClaim:       a.DeletionClaim,
 		DeletionCode:        a.DeletionCode,
 		DeletionError:       a.DeletionError,
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
+	}
+	if a.SoftDeleteOpID != nil {
+		sa.SoftDeleteOpID = *a.SoftDeleteOpID
 	}
 	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
 	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
@@ -162,6 +166,18 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIntentAt
 		sa.RunIntentAt = &t
 	}
+	if a.StartClaimID != nil {
+		sa.StartClaimID = *a.StartClaimID
+	}
+	sa.StartClaimKind = store.StartClaimKind(a.StartClaimKind)
+	sa.StartClaimState = store.StartClaimState(a.StartClaimState)
+	sa.StartClaimOwner = a.StartClaimOwner
+	sa.StartClaimTarget = a.StartClaimTarget
+	sa.StartClaimAt = copyTimePtr(a.StartClaimAt)
+	sa.StartClaimLeaseUntil = copyTimePtr(a.StartClaimLeaseUntil)
+	sa.StartClaimUnconfirmedAt = copyTimePtr(a.StartClaimUnconfirmedAt)
+	sa.StartClaimHoldUntil = copyTimePtr(a.StartClaimHoldUntil)
+	sa.StartClaimLaunchID = a.StartClaimLaunchID
 	if a.ReincarnationUpdatedAt != nil {
 		t := *a.ReincarnationUpdatedAt
 		sa.ReincarnationUpdatedAt = &t
@@ -223,8 +239,9 @@ func validGCPMetadataMode(mode string) bool {
 // The mode check exists because an empty MetadataMode on a non-nil GCPIdentity
 // is worse than no GCPIdentity at all: it asserts that a GCP identity decision
 // was made while naming no decision, and there is no safe default to read from
-// it. Dropping just that field lets the agent fall back to the secure "block"
-// default the broker applies when no mode is supplied, while keeping the rest of
+// it. Dropping just that field lets the agent fall back to the runtime default
+// the broker applies when no mode is supplied ("block" on every runtime except
+// Kubernetes, "passthrough" on Kubernetes), while keeping the rest of
 // the applied config — image, template, harness — which is unrelated and
 // probably fine. Discarding the whole config over one bad field would turn a
 // metadata-mode problem into an agent-wide one.
@@ -238,7 +255,7 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 		cfg.GCPIdentity = nil
 		return &cfg, fmt.Errorf(
 			"applied_config has GCP metadata mode %q, which is not one of %q/%q/%q; "+
-				"dropping the GCP identity so the agent falls back to the secure default",
+				"dropping the GCP identity so the agent falls back to the runtime default",
 			bad, store.GCPMetadataModeAssign, store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough)
 	}
 	return &cfg, nil
@@ -419,6 +436,26 @@ func (s *AgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[stri
 	}
 
 	return result, nil
+}
+
+// SetAgentSoftDeleteOpID sets soft_delete_op_id, or clears it when opID is
+// empty. It is the column's only writer; it neither checks nor bumps
+// state_version.
+func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	update := s.client.Agent.UpdateOneID(uid)
+	if opID == "" {
+		update.ClearSoftDeleteOpID()
+	} else {
+		update.SetSoftDeleteOpID(opID)
+	}
+	if err := update.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
 }
 
 // UpdateAgent updates an existing agent using optimistic locking on
@@ -1354,6 +1391,10 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 
+	if su.IfPhase != "" && current.Phase != su.IfPhase {
+		return store.ErrPhaseMismatch
+	}
+
 	now := time.Now()
 
 	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
@@ -1370,6 +1411,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.Message = ""
 		su.ClearExit = false
 		su.ClearMessageIf = ""
+		su.ClearTerminalRemnants = false
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1415,7 +1457,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// being terminal so routine running→running heartbeats (which carry their own
 	// sticky-stalled rules in the broker handler) are left untouched. An explicit
 	// message in the same update (su.Message != "") wins and is set below.
-	if su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error") {
+	// ClearTerminalRemnants applies the same clear whatever the current phase
+	// (a lifecycle start's final write; see store.AgentStatusUpdate).
+	if su.ClearTerminalRemnants || (su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error")) {
 		if su.Message == "" {
 			upd.SetMessage("")
 		}
@@ -1490,6 +1534,25 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return mapError(err)
 	}
 	return tx.Commit()
+}
+
+// SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
+func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	affected, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid)).
+		SetWorkspacePlacement(placement).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // UpdateAgentExposedPorts applies a partial exposed-port update without using

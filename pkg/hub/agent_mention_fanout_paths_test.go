@@ -42,6 +42,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -580,8 +581,8 @@ func TestMentionFanout_UsesPreTranslationBodyForMentionExtraction(t *testing.T) 
 }
 
 // An agent sender's outbound message can carry a free-text thread_id that
-// was never resolved against an existing, caller-referenced conversation
-// (DEF-138 Rules 2/3 mint a new project-scoped group from it on the spot).
+// resolves to an existing project-scoped group conversation via DEF-138
+// Rules 2/3, without the caller asserting it.
 // A mention fanned out from a message like that must not carry that
 // thread_id, or any key derived from it, onto the mentioned agent's row:
 // fan-out falls back to its own fresh sender<->mentioned-agent DM, exactly
@@ -623,6 +624,13 @@ func TestMentionFanout_FreeTextThreadIDNeverCopiedOntoMentionRow(t *testing.T) {
 			require.NoError(t, err)
 
 			threadID := tc.threadID(sender, owner.ID)
+			if !strings.HasPrefix(threadID, "dm:") {
+				// ptone/scion#2026: a free-text thread_id must name an
+				// existing thread conversation, or the hub rejects the send
+				// before fan-out. Seed it so the send reaches fan-out; the
+				// assertion below is about the mention row, not the thread.
+				seedThreadConversation(t, s, project.ID, threadID)
+			}
 			body, _ := json.Marshal(OutboundMessageRequest{
 				Recipient: "user:" + owner.Email,
 				Msg:       "done — @" + mentionBystanderSlug + " please deploy",

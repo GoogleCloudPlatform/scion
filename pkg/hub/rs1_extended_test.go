@@ -1031,9 +1031,7 @@ func TestRS1_ConcurrentRemoveAndTransfer(t *testing.T) {
 		"RS1: concurrent transfer should complete cleanly (got %d)", transferCode)
 
 	// Verify no zero-owner state.
-	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.True(t, count >= 1, "RS1: after concurrent ops, at least one owner must remain (got %d)", count)
 }
 
@@ -1104,7 +1102,7 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 	}()
 	wg.Wait()
 
-	// R2-R1 fix: enforceLastOwnerTx now runs INSIDE the transaction, so
+	// R2-R1 fix: the last-owner check (enforceOwnerRemovalTx) runs INSIDE the transaction, so
 	// the owner count is read within the transactional snapshot. Under SQLite's
 	// serialized transactions, concurrent demotions execute sequentially and the
 	// second sees the post-demotion state. At most one should succeed.
@@ -1120,9 +1118,7 @@ func TestRS1_ConcurrentDemotions(t *testing.T) {
 		"RS1: at least one concurrent demotion should succeed when two owners exist")
 
 	// Verify at least one owner remains — the invariant MUST hold.
-	svc := srv.membershipService
-	count, err := svc.countActiveDirectOwnersFromStore(ctx, s, projectID)
-	require.NoError(t, err)
+	count := usableOwnerCount(t, s, projectID)
 	assert.True(t, count >= 1,
 		"RS1: after concurrent demotions, at least one owner must remain (got %d)", count)
 }

@@ -365,9 +365,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	baseSlug := req.Slug
 	if baseSlug == "" {
 		baseSlug = api.Slugify(req.Name)
+	} else if isReservedProjectSlug(baseSlug) {
+		ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+		return
 	}
 
-	slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+	slug, err := s.nextAvailableUnreservedSlug(ctx, baseSlug)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -591,7 +594,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 		ProjectID: project.ID,
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
-			systemProjectAgentsGroupAnnotation: "true",
+			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
@@ -690,22 +693,6 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 	return nil
 }
 
-const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
-
-// legacyProjectMembersGroupAnnotation is the project-members-group marker
-// written by the entadapter marker backfill
-// (BackfillProjectMembersGroupMarkers). It differs from
-// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
-// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
-// owner-clearing backfill matches either key.
-//
-// This literal duplicates the entadapter constant
-// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
-// fold the two together under ptone/scion#2556.
-const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
-
-const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
-
 func projectMembersGroupSlug(projectSlug string) string {
 	return "project:" + projectSlug + ":members"
 }
@@ -714,34 +701,32 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
-		group.Annotations[systemProjectMembersGroupAnnotation] == "true"
+		group.Annotations[store.AnnotationProjectMembersGroup] == "true"
 }
 
 // hasProjectMembersGroupMarker reports whether g carries either
 // project-members-group marker key and belongs to any project. It is used by
-// the owner-clearing backfill and the group PATCH guards.
+// the owner-clearing backfill, the group PATCH guards and the slug-rename
+// migration (isRenamableProjectMembersGroup).
 //
 // Its semantics differ from isSystemProjectMembersGroup on purpose:
-// isSystemProjectMembersGroup matches only the hub key
-// (systemProjectMembersGroupAnnotation) for one specific project, and
+// isSystemProjectMembersGroup matches only the canonical key
+// (store.AnnotationProjectMembersGroup) for one specific project, and
 // decides whether createProjectMembersGroup may adopt a group. This
-// predicate matches either key (see legacyProjectMembersGroupAnnotation)
-// for any project, so groups marked only by the entadapter backfill are
-// still protected. Fold the two together once the key mismatch is resolved
+// predicate also accepts the legacy key
+// (store.LegacyAnnotationProjectMembersGroup) for any project. The startup
+// migration rewrites the legacy key, but an older binary may still write it
+// during a rolling upgrade, so the guards keep protecting such a group
 // (ptone/scion#2556).
 func hasProjectMembersGroupMarker(g *store.Group) bool {
-	if g == nil || g.ProjectID == "" || g.Annotations == nil {
-		return false
-	}
-	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
-		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
+	return store.IsProjectMembersGroup(g)
 }
 
 // changesProjectMembersGroupMarker reports whether replacing the stored
 // annotations with patched would remove, add or change the value of either
 // project-members-group marker key.
 func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
-	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
 		sv, sok := stored[key]
 		pv, pok := patched[key]
 		if sok != pok || sv != pv {
@@ -757,7 +742,7 @@ func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
 // removal of a key, so a PATCH may still drop a stray non-marking value from
 // an unmarked group.
 func setsProjectMembersGroupMarkerKey(stored, patched map[string]string) bool {
-	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+	for _, key := range []string{store.AnnotationProjectMembersGroup, store.LegacyAnnotationProjectMembersGroup} {
 		pv, pok := patched[key]
 		if !pok {
 			continue
@@ -773,7 +758,7 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
-		group.Annotations[systemProjectAgentsGroupAnnotation] == "true"
+		group.Annotations[store.AnnotationProjectAgentsGroup] == "true"
 }
 
 // createProjectMembersGroup creates the project's collaboration
@@ -807,7 +792,7 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		// mutating this group through the group API is hub-admin-only.
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
-			systemProjectMembersGroupAnnotation: "true",
+			store.AnnotationProjectMembersGroup: "true",
 		},
 	}
 	createErr := s.store.CreateGroup(ctx, membersGroup)
@@ -899,53 +884,9 @@ func (s *Server) hubManagedProjectPath(slug string) (string, error) {
 		return nfsPath, nil
 	}
 
-	// --- Cloud Run volume backend ---
-	// Unlike the GKE branch below, this one does not require a non-empty
-	// volume name: guarding it would change where existing Cloud Run
-	// deployments look for content, which needs its own migration (#1073).
-	if wsCfg != nil && wsCfg.Backend == "cloudrun-volume" && wsCfg.CloudRunVolume != nil {
-		subPathRoot := wsCfg.CloudRunVolume.SubPathRoot
-		if subPathRoot == "" {
-			subPathRoot = "projects"
-		}
-		crPath := filepath.Join(volumeMountBase, wsCfg.CloudRunVolume.VolumeName, subPathRoot, "hub-projects", slug)
-		if hasWorkspaceContent(crPath) {
-			return crPath, nil
-		}
-		// Fallback: check legacy local path
-		if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-			return localPath, nil
-		}
-		return crPath, nil
-	}
-
-	// --- GKE shared volume backend ---
-	// The mount root comes from workspaceMountRoot, the same resolver
-	// checkWorkspaceStorageHealth probes for readiness, so the two cannot
-	// drift. An empty root means no volume name was configured: there is no
-	// mount point to build a path from, so the config is treated as unset and
-	// this falls through to the local path. A deployment in that state fails
-	// its readiness check and never serves.
-	if wsCfg != nil && wsCfg.Backend == "gke-shared-volume" && wsCfg.GKESharedVolume != nil {
-		if mountRoot := workspaceMountRoot(wsCfg); mountRoot != "" {
-			subPathRoot := wsCfg.GKESharedVolume.SubPathRoot
-			if subPathRoot == "" {
-				subPathRoot = "projects"
-			}
-			gkePath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
-			if hasWorkspaceContent(gkePath) {
-				return gkePath, nil
-			}
-			// Fallback: check legacy local path
-			if localPath, err := localProjectPath(slug); err == nil && hasWorkspaceContent(localPath) {
-				// Worth saying out loud: on GKE the local path is always pod
-				// ephemeral storage, so this content disappears on the next
-				// reschedule and the project silently moves to the volume.
-				s.warnEphemeralProjectPath(slug, localPath, gkePath)
-				return localPath, nil
-			}
-			return gkePath, nil
-		}
+	// --- Cloud Run volume and GKE shared volume backends ---
+	if volPath, ok := s.volumeBackedProjectPath(wsCfg, slug); ok {
+		return volPath, nil
 	}
 
 	// --- Default: local ephemeral path (existing behavior) ---
@@ -1393,6 +1334,26 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A provider path that is the broker's global directory is only valid
+	// for the global project. Checked before any project or provider write.
+	if req.Path != "" && (req.BrokerID != "" || req.Broker != nil) {
+		// A project created by this request is the global project only when
+		// it takes the reserved global slug, which only a register without a
+		// git remote can do (and only while no project holds it: the slug
+		// lookup above found none).
+		targetName, targetSlug := req.Name, ""
+		if normalizedRemote == "" {
+			targetSlug = api.Slugify(req.Name)
+		}
+		if project != nil {
+			targetName, targetSlug = project.Name, project.Slug
+		}
+		if err := validateProviderLocalPath(targetName, targetSlug, req.Path); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "path"})
+			return
+		}
+	}
+
 	// SECURITY-GATE: CheckAccess — resolve the deprecated embedded-broker
 	// path's target and decide authorization for it BEFORE any project
 	// mutation below. Only the lookup and the authorization decision happen
@@ -1489,8 +1450,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			projectID = api.NewUUID()
 		}
 
+		// Only a register without a git remote (the CLI global-project
+		// flow) may take the reserved global slug.
 		baseSlug := api.Slugify(req.Name)
-		slug, err := s.store.NextAvailableSlug(ctx, baseSlug)
+		nextSlug := s.store.NextAvailableSlug
+		if normalizedRemote != "" {
+			nextSlug = s.nextAvailableUnreservedSlug
+		}
+		slug, err := nextSlug(ctx, baseSlug)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -1630,15 +1597,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		broker = existingBroker
 
-		// Add as project provider. When the project already existed and the
-		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
-		localPath := req.Path
-		if !created {
-			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
-				localPath = existingProvider.LocalPath
-			}
-		}
+		// Add as project provider.
+		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
@@ -1656,7 +1616,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// directory structure so agents and templates directories exist.
 		if localPath != "" {
 			scionDir := filepath.Join(localPath, ".scion")
-			if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 				s.projectsLogger().Warn("failed to initialize .scion in linked project",
 					"project_id", project.ID, "localPath", localPath, "error", err.Error())
 			}
@@ -1732,15 +1692,8 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Add as project provider. When the project already existed and the
-		// broker is already a provider, preserve the existing localPath to
-		// avoid converting a hub-native git project into a linked project.
-		localPath := req.Path
-		if !created {
-			if existingProvider, err := s.store.GetProjectProvider(ctx, project.ID, broker.ID); err == nil {
-				localPath = existingProvider.LocalPath
-			}
-		}
+		// Add as project provider.
+		localPath := s.registerProviderLocalPath(ctx, project, broker.ID, req.Path, created)
 		provider := &store.ProjectProvider{
 			ProjectID:  project.ID,
 			BrokerID:   broker.ID,
@@ -2648,14 +2601,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 				"This action requires user or agent authentication", nil)
 			return
 		}
-		// --- Task 2.3 (ptone/scion#2197): message-raw bridge ---
-		// Classify raw before authorizeAgentMessage runs (contract §6.1's
-		// branch-point invariant), reusing the agent already resolved above
-		// (the same shared resolution block every other action on this route
-		// uses -- the bridge introduces no separate resolution step). A
-		// raw-selected request is handled here entirely; a non-raw request
-		// falls through completely unaffected, body restored byte-for-byte.
-		if s.tryAgentKeysMessageBridge(w, r, agent, agentID, "/api/v1/projects/"+projectID+"/agents/"+agent.ID+"/keys", true) {
+		// Raw keystroke delivery through /message has been removed; see
+		// the matching tombstone on the top-level route.
+		if s.rejectRetiredRawMessageBody(w, r, rawIngressProjectAgentMessage,
+			agentKeysAuditTarget{AgentID: agent.ID, ProjectID: agent.ProjectID},
+			rawInputRemovedProjectReplacement, rawTombstonePreAuthMaxBodyBytes, "structured_message") {
 			return
 		}
 
@@ -2807,6 +2757,10 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 			BadRequest(w, "Invalid slug: must contain at least one alphanumeric character")
 			return
 		}
+		if newSlug != oldSlug && isReservedProjectSlug(newSlug) {
+			ValidationError(w, reservedProjectSlugMessage, map[string]interface{}{"field": "slug"})
+			return
+		}
 		if newSlug != oldSlug {
 			existing, err := s.store.GetProjectBySlug(ctx, newSlug)
 			if err != nil && err != store.ErrNotFound {
@@ -2851,6 +2805,35 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, http.StatusOK, project)
 }
 
+// isRenamableProjectAgentsGroup reports whether group, found at the
+// project's old agents slug, is this project's system agents group and may be
+// re-slugged on rename: matching ProjectID and the agents GroupType. The
+// marker is deliberately not required. Only the system writes project_agents
+// groups with a ProjectID (POST /groups rejects that type and no group API
+// sets ProjectID or GroupType), so ProjectID + GroupType already identify the
+// genuine group. Requiring the marker stranded an unmarked genuine group (for
+// example after a PATCH replaced its annotations) at the old slug, and the
+// next createProjectGroup then created a second project_agents group for the
+// project, breaking every GroupType+ProjectID .Only() lookup.
+func isRenamableProjectAgentsGroup(group *store.Group, projectID string) bool {
+	return group != nil &&
+		group.ProjectID == projectID &&
+		group.GroupType == store.GroupTypeProjectAgents
+}
+
+// isRenamableProjectMembersGroup reports whether group, found at the
+// project's old members slug, is this project's members group and may be
+// re-slugged on rename. Unlike isSystemProjectMembersGroup it also accepts
+// the legacy marker key: a rename is not an adoption decision, and skipping
+// a legacy-marked group (e.g. if the startup marker migration has not run
+// yet) would strand it at the old slug and let createProjectMembersGroup
+// create a duplicate at the new one.
+func isRenamableProjectMembersGroup(group *store.Group, projectID string) bool {
+	return group != nil &&
+		group.ProjectID == projectID &&
+		hasProjectMembersGroupMarker(group)
+}
+
 // migrateProjectSlug updates group slugs and filesystem paths after a project slug change.
 // This is best-effort: failures are logged but don't roll back the rename.
 func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project, oldSlug string) {
@@ -2859,14 +2842,22 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// Migrate the project agents group slug.
 	oldAgentsSlug := "project:" + oldSlug + ":agents"
 	newAgentsSlug := "project:" + newSlug + ":agents"
-	if group, err := s.store.GetGroupBySlug(ctx, oldAgentsSlug); err == nil {
-		group.Slug = newAgentsSlug
-		group.Name = project.Name + " Agents"
-		if err := s.store.UpdateGroup(ctx, group); err != nil {
-			s.projectsLogger().Warn("failed to migrate project agents group slug",
-				"project_id", project.ID, "old_slug", oldAgentsSlug, "new_slug", newAgentsSlug, "error", err)
+	// The group is found by slug, so check it is this project's system
+	// agents group before re-slugging it (ptone/scion#2683).
+	if group, err := s.store.GetGroupBySlug(ctx, oldAgentsSlug); err == nil && group != nil {
+		if !isRenamableProjectAgentsGroup(group, project.ID) {
+			s.projectsLogger().Warn("skipping project agents group slug migration: group at old slug is not this project's system agents group",
+				"project_id", project.ID, "old_slug", oldAgentsSlug, "group_id", group.ID,
+				"group_project_id", group.ProjectID, "group_type", group.GroupType)
+		} else {
+			group.Slug = newAgentsSlug
+			group.Name = project.Name + " Agents"
+			if err := s.store.UpdateGroup(ctx, group); err != nil {
+				s.projectsLogger().Warn("failed to migrate project agents group slug",
+					"project_id", project.ID, "old_slug", oldAgentsSlug, "new_slug", newAgentsSlug, "error", err)
+			}
 		}
-	} else if err != store.ErrNotFound {
+	} else if !errors.Is(err, store.ErrNotFound) {
 		s.projectsLogger().Warn("failed to retrieve project agents group for migration",
 			"project_id", project.ID, "old_slug", oldAgentsSlug, "error", err)
 	}
@@ -2874,14 +2865,22 @@ func (s *Server) migrateProjectSlug(ctx context.Context, project *store.Project,
 	// Migrate the project members group slug.
 	oldMembersSlug := "project:" + oldSlug + ":members"
 	newMembersSlug := "project:" + newSlug + ":members"
-	if group, err := s.store.GetGroupBySlug(ctx, oldMembersSlug); err == nil {
-		group.Slug = newMembersSlug
-		group.Name = project.Name + " Members"
-		if err := s.store.UpdateGroup(ctx, group); err != nil {
-			s.projectsLogger().Warn("failed to migrate project members group slug",
-				"project_id", project.ID, "old_slug", oldMembersSlug, "new_slug", newMembersSlug, "error", err)
+	// The group is found by slug, so check it is this project's system
+	// members group before re-slugging it (ptone/scion#2683).
+	if group, err := s.store.GetGroupBySlug(ctx, oldMembersSlug); err == nil && group != nil {
+		if !isRenamableProjectMembersGroup(group, project.ID) {
+			s.projectsLogger().Warn("skipping project members group slug migration: group at old slug is not this project's system members group",
+				"project_id", project.ID, "old_slug", oldMembersSlug, "group_id", group.ID,
+				"group_project_id", group.ProjectID)
+		} else {
+			group.Slug = newMembersSlug
+			group.Name = project.Name + " Members"
+			if err := s.store.UpdateGroup(ctx, group); err != nil {
+				s.projectsLogger().Warn("failed to migrate project members group slug",
+					"project_id", project.ID, "old_slug", oldMembersSlug, "new_slug", newMembersSlug, "error", err)
+			}
 		}
-	} else if err != store.ErrNotFound {
+	} else if !errors.Is(err, store.ErrNotFound) {
 		s.projectsLogger().Warn("failed to retrieve project members group for migration",
 			"project_id", project.ID, "old_slug", oldMembersSlug, "error", err)
 	}

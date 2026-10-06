@@ -46,6 +46,20 @@ func deleteStopNoop(a *store.Agent) bool {
 	return deletionActive(a) || a.DeletionState == store.DeletionStateFinalizing
 }
 
+// deletedOrDeleteHeld reports whether an agent row that still exists is
+// soft-deleted or held by a delete (deleteStopNoop). With a row that is
+// gone, it is the "the agent is not live" rule shared by the created
+// publish (publishAgentCreatedIfLive), the message-broker subscription on
+// created (createdAgentLive) and the compensating delete of a landed run
+// (compensateLandedRun). A failed delete, or a deleting row whose lease
+// expired, does not count: that delete gave up.
+func deletedOrDeleteHeld(a *store.Agent) bool {
+	if a == nil {
+		return false
+	}
+	return !a.DeletedAt.IsZero() || deleteStopNoop(a)
+}
+
 // deleteBlocksStart is the start-block predicate (design §2.1):
 //
 //	deletionActive(a)
@@ -321,14 +335,17 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 //
 // Only the columns the in-tx guard and the clear can change are carried over
 // from the re-read; in-memory fields the dispatch set are kept. If the re-read
-// fails, a falls back to the requested phase (the pre-guard behaviour).
-func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) {
+// fails, a falls back to the requested phase (the pre-guard behaviour) and
+// reloaded is false.
+func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloaded bool) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
 	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
+		return false
 	}
+	return true
 }
 
 // reloadGuardedColumns re-reads a's row and copies the columns a concurrent
@@ -347,6 +364,7 @@ func (s *Server) reloadGuardedColumns(ctx context.Context, a *store.Agent) error
 	a.Message = fresh.Message
 	a.StateVersion = fresh.StateVersion
 	a.DeletedAt = fresh.DeletedAt
+	a.SoftDeleteOpID = fresh.SoftDeleteOpID
 	a.DeletionState = fresh.DeletionState
 	a.DeletionClaim = fresh.DeletionClaim
 	a.DeletionLeaseAt = fresh.DeletionLeaseAt

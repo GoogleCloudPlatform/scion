@@ -518,6 +518,37 @@ Internal endpoint for agents to report status updates.
 - Reporting events/logs for the specific agent
 - Cannot access other agents or Hub resources
 
+**Response:** `200 OK` with a JSON body:
+```json
+{
+  "applied": true,
+  "reason": "string"   // only when applied is false
+}
+```
+
+- `applied: true`: the update was written. If a guard dropped some fields
+  (see below), the fields it does not own (heartbeat, `toolName`,
+  `taskSummary`, limits, metadata, ...) were still written, and the response
+  is still `applied: true` (partial apply).
+- `applied: false`: the hub accepted the request but wrote nothing, because a
+  guard that owns the agent's status dropped every field in the report
+  (`phase`, `activity`, `message`, `exitCode`, `exitReason`) and nothing else
+  was left. `reason` is one of:
+  - `delete_in_progress`: a delete is in progress, or the agent is
+    soft-deleted.
+  - `reincarnation_in_flight`: a `scion reincarnate` migration owns the agent.
+
+`applied: false` is only returned for the two reasons above. Other guards (a
+suspended agent, a phase regression) drop `phase`/`activity` silently and
+still answer `applied: true`, so `applied: true` does not mean the reported
+phase was stored.
+
+`applied` reflects the agent as the hub read it before writing. A delete or
+reincarnation claimed between that read and the write can make
+`applied: true` inaccurate. The stored state is still correct for a delete,
+because the store re-checks it in the write transaction. sciontool currently
+ignores the body.
+
 ### 3.9 Sync Agent
 
 ```

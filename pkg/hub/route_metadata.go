@@ -393,6 +393,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
 		Classification: RouteAuthenticated,
 	},
+	// The agent's conduit session (WebSocket), behind hub.conduit. Agent
+	// tokens with agent:port:forward only; the handler reads the agent row.
+	"/api/v1/conduit": {
+		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
+		Classification: RouteAgentToken,
+	},
 
 	// -------------------------------------------------------------------------
 	// Policy: Skills

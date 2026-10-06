@@ -31,5 +31,12 @@ image:
   tag: ci
 
 # Permanently-invalid key: leading underscore is never a chart value.
+# PROBE VALUE. Present so that the unknown key below is the only thing the
+# schema rejects: auth.mode defaults to proxy, which requires an IAP audience.
+auth:
+  proxy:
+    iap:
+      audience: /projects/123456789012/locations/us-central1/services/probe-ci-schema-check
+
 _ciNegativeControl:
   mustBeRejected: true

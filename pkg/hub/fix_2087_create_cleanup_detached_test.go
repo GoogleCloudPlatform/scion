@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -340,9 +341,15 @@ func TestCleanupFailedCreate_CanceledCtx_EveryStepRunsDetached(t *testing.T) {
 	cancel()
 
 	var runtimeDelete ctxObservation
-	srv.cleanupFailedCreate(canceled, agent, agent.RuntimeBrokerID, cleanupSkipRevoke, func(cctx context.Context) error {
-		runtimeDelete = observeCtx(cctx)
-		return nil
+	srv.cleanupFailedCreate(canceled, createRollback{
+		Agent:           agent,
+		RuntimeBrokerID: agent.RuntimeBrokerID,
+		Stage:           createStageDispatch,
+		Cause:           errors.New("dispatch failed"),
+		DeleteRuntime: func(cctx context.Context) error {
+			runtimeDelete = observeCtx(cctx)
+			return nil
+		},
 	})
 
 	assertLiveBoundedCtx(t, runtimeDelete, "runtime delete", dispatchDeleteTimeout)
@@ -366,6 +373,38 @@ func (c *cancelAfterDeleteStore) DeleteAgent(ctx context.Context, id string) err
 	if err == nil && id == c.targetID {
 		c.deleted = true
 		c.cancelRequest()
+	}
+	return err
+}
+
+// WithTx cancels the request once a transaction that deleted targetID has
+// committed: the row is gone only at commit.
+func (c *cancelAfterDeleteStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	tx := &deleteRecordingTx{targetID: c.targetID}
+	if err := c.Store.WithTx(ctx, func(inner store.Store) error {
+		tx.Store = inner
+		return fn(tx)
+	}); err != nil {
+		return err
+	}
+	if tx.deleted {
+		c.deleted = true
+		c.cancelRequest()
+	}
+	return nil
+}
+
+// deleteRecordingTx records whether DeleteAgent of targetID succeeded.
+type deleteRecordingTx struct {
+	store.Store
+	targetID string
+	deleted  bool
+}
+
+func (d *deleteRecordingTx) DeleteAgent(ctx context.Context, id string) error {
+	err := d.Store.DeleteAgent(ctx, id)
+	if err == nil && id == d.targetID {
+		d.deleted = true
 	}
 	return err
 }
@@ -439,4 +478,11 @@ func TestCreateAgent_WorkspaceBootstrapNoStorage_CleansUp(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, 0, projectReservations,
 		"a failed workspace-bootstrap create must release the per-project reservation")
+
+	failed, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentCreateDispatchFailed})
+	require.NoError(t, err)
+	require.Len(t, failed, 1, "the rolled-back create is recorded once")
+	var sum compensationSummary
+	require.NoError(t, json.Unmarshal([]byte(failed[0].AfterSummary), &sum))
+	assert.Equal(t, createStageStorage, sum.Stage, "the record names the pre-dispatch stage that failed")
 }

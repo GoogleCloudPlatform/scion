@@ -146,9 +146,10 @@ export class ScionPageAgentCreate extends LitElement {
    * The GCP identity mode that applies when nothing has been explicitly
    * chosen, *before* any Kubernetes-only display substitution: this page's
    * own "block" placeholder, or the project's configured default. Set only
-   * in loadGCPServiceAccounts, in lockstep with the same assignments that
-   * seed gcpMetadataMode's initial value, so the two can never drift apart
-   * from each other even if other state changes mid-request.
+   * in loadGCPServiceAccounts, which always records the project default it
+   * found here; the current value (gcpMetadataMode) is seeded from it only
+   * when !gcpIdentityUserSet, so an explicit user pick made while the load
+   * was in flight is left in place (ptone/scion#2548).
    *
    * normalizeGcpModeForTarget derives the untouched display value fresh from
    * this field on every relevant change, rather than remembering "the
@@ -163,8 +164,9 @@ export class ScionPageAgentCreate extends LitElement {
   /**
    * The service account ID that goes with defaultGcpMetadataMode === 'assign'
    * (empty otherwise). Set only in loadGCPServiceAccounts, alongside
-   * defaultGcpMetadataMode and gcpServiceAccountId's own initial value, for
-   * the same reason: so normalizeGcpModeForTarget can restore the correct
+   * defaultGcpMetadataMode: it always records the project default, and
+   * gcpServiceAccountId is seeded from it only when !gcpIdentityUserSet. It
+   * exists so normalizeGcpModeForTarget can restore the correct
    * service account, not just the correct mode, if an explicit choice that
    * cleared gcpServiceAccountId is later undone by the Kubernetes Block
    * constraint (see normalizeGcpModeForTarget).
@@ -961,7 +963,22 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
+  /**
+   * Incremented at the start of every loadGCPServiceAccounts call. Each call
+   * captures its own value and, after every await, drops its results if a
+   * newer call has started since (ptone/scion#2548): project switches fire
+   * the load unawaited, so a slow response for the previous project must not
+   * overwrite the current project's accounts or default.
+   */
+  private gcpLoadSeq = 0;
+
   private async loadGCPServiceAccounts(): Promise<void> {
+    const seq = ++this.gcpLoadSeq;
+    const projectId = this.projectId;
+    // True when a newer load has started or the project changed under this
+    // one; a stale load must not touch any state after that point.
+    const isStale = (): boolean => seq !== this.gcpLoadSeq || this.projectId !== projectId;
+
     this.gcpServiceAccounts = [];
     this.gcpServiceAccountId = '';
     this.gcpMetadataMode = 'block';
@@ -970,48 +987,59 @@ export class ScionPageAgentCreate extends LitElement {
     // Recomputing defaults from scratch (initial load, or a project change):
     // whatever this method assigns below is a default, not a user choice,
     // and any suspended explicit Block pick belonged to the previous
-    // project's context, not this one.
+    // project's context, not this one. This reset runs synchronously, before
+    // any await, so it is always performed by the newest load.
     this.gcpIdentityUserSet = false;
     this.gcpUserBlockSuspended = false;
     this.projectGCPIdentityDefaultMode = '';
 
-    if (this.projectId) {
+    if (projectId) {
+      let accounts: GCPServiceAccount[] = [];
       try {
         const res = await apiFetch(
-          `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+          `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
         );
         if (res.ok) {
           const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-          this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
+          accounts = Array.isArray(data) ? data : data.items || [];
         }
       } catch {
         // Non-critical
       }
+      if (isStale()) return;
+      this.gcpServiceAccounts = accounts;
 
-      // Apply project default GCP identity if configured. gcpMetadataMode and
-      // defaultGcpMetadataMode are always assigned together here, so they can
-      // never drift apart — normalizeGcpModeForTarget relies on
-      // defaultGcpMetadataMode staying exactly in sync with whatever default
-      // this method applied, no matter what renders happen during the awaits
-      // above and below.
-      const settings = await this.fetchProjectSettings(this.projectId);
+      // Apply project default GCP identity if configured. defaultGcpMetadataMode
+      // (and defaultGcpServiceAccountId) always record the project default, so
+      // normalizeGcpModeForTarget stays in sync with whatever default this
+      // method found. The *current* value (gcpMetadataMode/gcpServiceAccountId)
+      // is only seeded from the default when the user has not already made an
+      // explicit pick while the fetches were in flight: an arriving default
+      // must never overwrite a user choice.
+      const settings = await this.fetchProjectSettings(projectId);
+      if (isStale()) return;
       if (settings?.defaultGCPIdentityMode) {
         this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
         const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
+        const applyToCurrent = !this.gcpIdentityUserSet;
         if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
           const verified = this.verifiedGCPServiceAccounts;
           const match = verified.find(
             (sa) => sa.id === settings.defaultGCPIdentityServiceAccountID
           );
           if (match) {
-            this.gcpMetadataMode = 'assign';
             this.defaultGcpMetadataMode = 'assign';
-            this.gcpServiceAccountId = match.id;
             this.defaultGcpServiceAccountId = match.id;
+            if (applyToCurrent) {
+              this.gcpMetadataMode = 'assign';
+              this.gcpServiceAccountId = match.id;
+            }
           }
         } else if (mode === 'passthrough' || mode === 'block') {
-          this.gcpMetadataMode = mode;
           this.defaultGcpMetadataMode = mode;
+          if (applyToCurrent) {
+            this.gcpMetadataMode = mode;
+          }
         }
       }
     }
