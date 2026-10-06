@@ -937,3 +937,58 @@ func TestReincarnateMove_AuthorityRefusedBeforeTargetResolution(t *testing.T) {
 	}
 	f.assertNoMoveSideEffects(t, count)
 }
+
+// A patch combines with a move: the patched config is what the agent is
+// provisioned with on the target, and the plan reports the patch.
+func TestReincarnateMove_PatchAppliedOnTarget(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate",
+		ReincarnateAgentRequest{TargetBroker: f.dst.ID, Image: "patched-image:v2"})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp.Plan.Patched, "image")
+	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.dst.ID, a.RuntimeBrokerID)
+	require.NotNil(t, a.AppliedConfig)
+	assert.Equal(t, "patched-image:v2", a.AppliedConfig.Image)
+}
+
+// Patch validation runs in the handler, before the move's first side
+// effect: an invalid patch on a move is refused with nothing stopped or
+// recorded.
+func TestReincarnateMove_InvalidPatchRefusedBeforeStop(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+	count := f.agentCount(t)
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate",
+		ReincarnateAgentRequest{TargetBroker: f.dst.ID, Role: "not-a-role"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	f.assertNoMoveSideEffects(t, count)
+	provisions, deletes, starts := f.disp.moveSnapshot()
+	assert.Empty(t, provisions)
+	assert.Empty(t, deletes)
+	assert.Empty(t, starts)
+}
+
+// A patched move that rolls back restores the pre-patch config on the
+// source.
+func TestReincarnateMove_PatchedMoveRollbackRestoresPrePatchConfig(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	prepareMoveWorkerFixture(t, f)
+	f.disp.moveProvisionErr = errors.New("broker returned 409")
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate",
+		ReincarnateAgentRequest{TargetBroker: f.dst.ID, Image: "patched-image:v2"})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, f.s, f.agent.ID)
+	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
+	require.NoError(t, err)
+	assertRolledBackToSource(t, f, r, a) // includes Image == old-image:v1
+}
