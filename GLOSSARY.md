@@ -81,7 +81,7 @@ _Avoid_: agent tunnel, port proxy, hub reverse tunnel, web access
 _See also_: sciontool
 
 **Runtime**:
-The container technology that executes an agent's container: Docker, Podman, Apple Container, or Kubernetes.
+The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, Cloud Run Instances, or Substrate (Agent Substrate actors on GKE).
 _Avoid_: backend, engine, executor, environment
 _See also_: Runtime Broker, Profile
 
@@ -248,7 +248,7 @@ _Avoid_: team, org, role
 _See also_: Message Group (different concept — message recipients, not users)
 
 **User Access Token (UAT)**:
-A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes).
+A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**.
 _Avoid_: personal access token (PAT), API key, secret token
 _See also_: Hub
 

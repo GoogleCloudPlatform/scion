@@ -11,7 +11,7 @@ While Scion manages the orchestration and execution of containers, the tools run
 Each agent has a dedicated "Home" directory that is mounted into the container. Harness-specific settings are typically found in a hidden subdirectory:
 - **Gemini**: `/home/gemini/.gemini/settings.json`
 - **Claude**: `/home/claude/.claude.json` (or similar)
-- **Opencode**: `/home/opencode/opencode.json`
+- **Opencode**: `/home/scion/.config/opencode/opencode.json` (opencode 1.x does not read the old `.opencode.json` name)
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
@@ -116,8 +116,11 @@ scion harness-config pull <name>          # download from the Hub to the global 
 scion harness-config pull <name> --to <path>
 ```
 
-`sync`/`push` upload only changed files (compared by content hash); `pull` verifies each file's
-hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
+`sync`/`push` upload only changed files (compared by content hash) and mirror local deletions: a
+file removed from the local directory is removed from the Hub, and the removed paths are printed.
+Backup and temp files (`*.bak.<timestamp>`, `.*.tmp-*`) are never uploaded, so any left on the Hub
+are removed the same way. A directory with no files left to sync is refused. `pull` verifies each
+file's hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
 default, or the global scope with `--global` (which needs hub admin rights). `--global` also reads
 the config from the global directory (`~/.scion/harness-configs`), so to publish a config globally
 it must live there. They create the config in that scope or update an existing one of the same name,
@@ -188,7 +191,9 @@ for the full chain.
 ### Thinking Level Map (`thinking`)
 
 Scion carries the thinking level as a harness-agnostic integer from 0 to 100 (`--thinking-level` on
-`scion start`, Hub agent defaults, templates). Inside the container it arrives as
+`scion start`, Hub agent defaults, templates). `--thinking-level` also accepts the shorthands
+`low` (25), `medium` (50), `high` (75) and `max` (100), case-insensitive; they are stored as those
+integers. Inside the container it arrives as
 `SCION_THINKING_LEVEL`. A harness that honours it declares a `thinking:` block in its
 `config.yaml`, next to `model_aliases`. The block maps level ranges to the harness's native tier
 strings:
@@ -221,15 +226,16 @@ resolves it with `scion_harness.resolve_thinking(ctx)`, which owns the only pars
 is stripped, signs are accepted (`-5`, `+7`), and the result is clamped to 0-100. A value that is
 not an integer (`abc`, `1.5`) logs a warning and is treated as unset. Writing the resolved value
 to the harness's native setting is up to each `provision.py`: for example, codex writes
-`model_reasoning_effort` in `~/.codex/config.toml`, and antigravity passes `agy --effort`.
+`model_reasoning_effort` in `~/.codex/config.toml`, antigravity passes `agy --effort`, and claude
+sets the `CLAUDE_CODE_EFFORT_LEVEL` environment variable.
 
-A harness with no `thinking:` block ignores the thinking level. Currently only `codex` and
-`antigravity` declare one; see [Supported Harnesses](/scion/supported-harnesses/) for their
-tables. If you maintain a customized `config.yaml` for one of these harnesses, copy the
+A harness with no `thinking:` block ignores the thinking level. Currently only `codex`,
+`antigravity` and `claude` declare one; see [Supported Harnesses](/scion/supported-harnesses/) for
+their tables. If you maintain a customized `config.yaml` for one of these harnesses, copy the
 `thinking:` block from the bundled file, or run `scion harness-config upgrade <name>`, which
 merges missing top-level keys such as `thinking:` without overwriting your values. Without the
 block, the provisioner writes no thinking setting, so the CLI's own default applies. codex logs
-a warning on every start; antigravity logs one when a thinking level was requested.
+a warning on every start; antigravity and claude log one when a thinking level was requested.
 
 ### Command Execution (`command`)
 

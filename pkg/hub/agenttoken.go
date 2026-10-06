@@ -84,6 +84,20 @@ const (
 	// do; being able to publish the template it spawns them from is the same
 	// authority expressed once instead of per-agent.
 	ScopeProjectTemplateWrite AgentTokenScope = "project:template:write"
+	// ScopeProjectArtifactRead allows the agent to use the artifact service
+	// to read artifacts (artifact.read). It is a ceiling-optional role scope
+	// (ceilingOptionalRoleScopes): readonly, baseline and full carry it, but
+	// a mint drops it when the source ceiling lacks artifact.read, so tokens
+	// issued under ceilings that predate artifacts do not gain it.
+	// The hub's artifacts.Host does not serve an agent whose token lacks it,
+	// whatever artifact grants exist.
+	ScopeProjectArtifactRead AgentTokenScope = "project:artifact:read"
+	// ScopeProjectArtifactWrite allows the agent to publish artifacts, and
+	// new versions of them, homed in its own project (artifact.create,
+	// artifact.update). Deliberately excludes deletion and grant
+	// management. Minted for the baseline and full agent roles
+	// (ScopesForRole).
+	ScopeProjectArtifactWrite AgentTokenScope = "project:artifact:write"
 	// ScopeAgentSetMessageMode allows the agent to change message mode
 	// for agents within the same project.
 	ScopeAgentSetMessageMode AgentTokenScope = "project:agent:set_message_mode"

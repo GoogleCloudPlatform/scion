@@ -105,6 +105,25 @@ var recordedProvenanceRequiredIDs = []string{
 
 var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 
+// legacyChainExcludedPermissions are the permissions covered by the
+// ceilingOptionalRoleScopes (the artifact permissions). A chain with no
+// recorded bound (an unrecorded ceiling or a migration-sentinel edge) never
+// held them, so it is not issued those scopes and is denied these
+// permissions at use. Principal chains are unaffected: their authority is
+// the live user.
+var legacyChainExcludedPermissions = toPermissionSet(agentScopeCoverage(sortedOptionalRoleScopes()))
+
+// sortedOptionalRoleScopes returns the keys of ceilingOptionalRoleScopes in
+// sorted order.
+func sortedOptionalRoleScopes() []AgentTokenScope {
+	out := make([]AgentTokenScope, 0, len(ceilingOptionalRoleScopes))
+	for s := range ceilingOptionalRoleScopes {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // hubDeliveryPermissionList is the fixed set of delivery permissions an
 // agent-created edge may carry through parentDeliverEligibility, in sorted
 // order. It is derived from hubDeliveryPermissionIDs
@@ -179,8 +198,9 @@ func hasDevLocalProvenance(edge *store.DelegationEdge) bool {
 // allow this permission". selfTarget is true when the resource is the bearer
 // agent itself.
 //   - principal: allows every permission;
-//   - unrecorded: denies every permission in recordedProvenanceRequired and
-//     applies the frozen legacy characterization to the rest;
+//   - unrecorded: denies every permission in recordedProvenanceRequired or
+//     legacyChainExcludedPermissions and applies the frozen legacy
+//     characterization to the rest;
 //   - bounded: FrozenPermissionCeiling.Allows under the recorded Version, or
 //     a self operation on the bearer itself;
 //   - any other kind: denies.
@@ -192,7 +212,7 @@ func EffectCeilingAllows(c store.EffectCeiling, permissionID string, selfTarget 
 	case store.EffectCeilingPrincipal:
 		return true
 	case store.EffectCeilingUnrecorded:
-		return !recordedProvenanceRequired[permissionID]
+		return !recordedProvenanceRequired[permissionID] && !legacyChainExcludedPermissions[permissionID]
 	case store.EffectCeilingBounded:
 		frozen, ok := c.Frozen()
 		if !ok {
@@ -241,16 +261,19 @@ func zeroCoverageMappedPermission(scope AgentTokenScope) (string, bool) {
 }
 
 // ceilingAllowsScope reports whether scope may be issued under c:
-//   - principal, unrecorded → true (unrecorded: frozen legacy
-//     characterization);
+//   - principal → true;
+//   - unrecorded → true except for the ceilingOptionalRoleScopes (frozen
+//     legacy characterization; see legacyChainExcludedPermissions);
 //   - bounded → with zero registry coverage, the scope needs a
 //     zeroCoverageScopeMapping entry whose permission c allows; otherwise
 //     every covered permission is allowed by c or is a self operation;
 //   - any other kind → false.
 func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 	switch c.Kind {
-	case store.EffectCeilingPrincipal, store.EffectCeilingUnrecorded:
+	case store.EffectCeilingPrincipal:
 		return true
+	case store.EffectCeilingUnrecorded:
+		return !ceilingOptionalRoleScopes[scope]
 	case store.EffectCeilingBounded:
 	default:
 		return false
@@ -272,10 +295,25 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 	return true
 }
 
-// roleFitsCeiling reports whether every scope of role passes
-// ceilingAllowsScope under c.
+// ceilingOptionalRoleScopes are role scopes that do not decide whether a
+// role fits a ceiling. A child whose ceiling does not allow one still gets
+// the role; the mint filter (ceilingAllowsScope at issue time) leaves the
+// scope out of its tokens. The artifact scopes joined the agent roles after
+// UAT selector sets were in use, so making them optional keeps every token
+// that fit a role before still fitting it, while a child only uses the
+// artifact service when its source could.
+var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
+	ScopeProjectArtifactRead:  true,
+	ScopeProjectArtifactWrite: true,
+}
+
+// roleFitsCeiling reports whether every scope of role, other than the
+// ceilingOptionalRoleScopes, passes ceilingAllowsScope under c.
 func roleFitsCeiling(c store.EffectCeiling, role AgentRole) bool {
 	for _, scope := range ScopesForRole(role) {
+		if ceilingOptionalRoleScopes[scope] {
+			continue
+		}
 		if !ceilingAllowsScope(c, scope) {
 			return false
 		}

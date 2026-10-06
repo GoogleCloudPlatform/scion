@@ -813,20 +813,16 @@ func TestProjectUAT_PTYTicketPathFailsClosed(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Session characterization: unchanged, documented only.
+// Session characterization (ptone/scion#2141).
 // ---------------------------------------------------------------------------
 
-// TestSessionOwnerAttach_CurrentBehaviourAfterProjectAccessRemoved documents
-// the CURRENT rule for interactive sessions: an owner/ancestor relationship
-// grant does not check current project membership, so a session user whose
-// project binding was removed still passes attach and port-access
-// authorization on their own agent. This behavior is unchanged here --
-// interactive sessions get this characterization test only, no behavior
-// change. Extending active-project-access enforcement to interactive
-// sessions is a separate, pending product decision tracked at
-// ptone/scion#2141; this test names today's rule and is not evidence of a
-// defect to fix here.
-func TestSessionOwnerAttach_CurrentBehaviourAfterProjectAccessRemoved(t *testing.T) {
+// TestSessionOwnerAttach_DeniedAfterProjectAccessRemoved pins the rule for
+// interactive sessions: an owner/ancestor relationship grant on a project
+// target requires the user's active project access at use time, so a
+// session user whose project binding was removed is denied attach and
+// port access on their own agent. The row-level coverage is in
+// authz_relationship_project_access_test.go.
+func TestSessionOwnerAttach_DeniedAfterProjectAccessRemoved(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := tid("uatp-session-project")
 	ownerID := tid("uatp-session-owner")
@@ -844,13 +840,16 @@ func TestSessionOwnerAttach_CurrentBehaviourAfterProjectAccessRemoved(t *testing
 
 	uatpDeleteProjectBinding(t, s, memberID, projectID)
 
+	// ptone/scion#2141: an interactive owner relationship on a project
+	// target requires active project access at use time (relationship
+	// stage 2c), the same as a project UAT.
 	rec = doRequestAsUser(t, srv, memberUser, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
-	assertAuthorizedPTY(t, rec,
-		"current rule (unchanged; ptone/scion#2141 pending): session owner attach survives project access removal: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"session owner attach requires active project access: %s", rec.Body.String())
 
 	rec = doRequestAsUser(t, srv, memberUser, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/7070/proxy/", nil)
-	assertAuthorizedPortProxy(t, rec,
-		"current rule (unchanged; ptone/scion#2141 pending): session owner port access survives project access removal: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"session owner port access requires active project access: %s", rec.Body.String())
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,10 +1017,11 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 // project-admin grant agent.port_access (opening a member's already-exposed
 // ports); project-member does not.
 func TestProjectRoles_AttachAndPortAccessLockIn(t *testing.T) {
+	// R6/R6/R5 added artifact.read and artifact.create.
 	revisions := map[string]int{
-		store.ProjectRoleOwner:  5,
-		store.ProjectRoleAdmin:  5,
-		store.ProjectRoleMember: 4,
+		store.ProjectRoleOwner:  6,
+		store.ProjectRoleAdmin:  6,
+		store.ProjectRoleMember: 5,
 	}
 	portAccess := map[string]bool{
 		store.ProjectRoleOwner: true,

@@ -249,10 +249,22 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Project scope warns about project-scoped accounts no Kubernetes broker
+	// profile of the project maps, the same as the nested route.
+	var warnings []string
+	if req.scope == store.ScopeProject {
+		saPtrs := make([]*store.GCPServiceAccount, len(sas))
+		for i := range sas {
+			saPtrs[i] = &sas[i]
+		}
+		warnings = s.projectSAMappingWarnings(ctx, req.scopeID, saPtrs...)
+	}
+
 	writeJSON(w, http.StatusOK, ListGCPServiceAccountsResponse{
 		Items:        items,
 		Capabilities: scopeCap,
 		MintQuota:    mintQuota,
+		Warnings:     warnings,
 	})
 }
 
@@ -534,7 +546,7 @@ func (s *Server) verifyGCPServiceAccountByID(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	s.runGCPServiceAccountVerification(w, r, sa)
+	s.runGCPServiceAccountVerification(w, r, sa, "")
 }
 
 // createGCPServiceAccountScoped registers a service account at an explicit
@@ -654,24 +666,19 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 	// Auto-verify impersonation after registration
 	resp := createGCPServiceAccountResponse{GCPServiceAccount: *sa}
 	if s.gcpTokenGenerator != nil {
-		if err := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email); err != nil {
-			sa.Verified = false
-			sa.VerificationStatus = store.GCPVerificationFailed
-			sa.VerificationError = err.Error()
+		verifyErr := s.gcpTokenGenerator.VerifyImpersonation(r.Context(), sa.Email)
+		if err := s.applyGCPVerificationResult(r.Context(), sa, verifyErr); err != nil {
+			writeGCPVerificationPersistError(w, sa.ID)
+			return
+		}
+		resp.GCPServiceAccount = *sa
+		if verifyErr != nil {
 			resp.VerificationFailed = true
 			resp.VerificationDetails = &verificationFailedDetails{
 				HubServiceAccountEmail: s.gcpTokenGenerator.ServiceAccountEmail(),
 				TargetEmail:            sa.Email,
 			}
-		} else {
-			sa.Verified = true
-			sa.VerifiedAt = time.Now()
-			sa.VerificationStatus = store.GCPVerificationVerified
 		}
-		if updateErr := s.store.UpdateGCPServiceAccount(r.Context(), sa); updateErr != nil {
-			slog.Error("failed to update SA verification status", "sa_id", sa.ID, "error", updateErr)
-		}
-		resp.GCPServiceAccount = *sa
 	}
 
 	writeJSON(w, http.StatusCreated, resp)

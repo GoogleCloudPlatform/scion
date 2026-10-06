@@ -210,7 +210,9 @@ func TestWalkUnrecordedEdgeSensitivePermissionDenied(t *testing.T) {
 
 // Permissions outside recordedProvenanceRequired are decided by the role
 // grant alone on an unrecorded hop (frozen legacy characterization): the walk
-// decides exactly as for a principal hop with the same delegator.
+// decides exactly as for a principal hop with the same delegator, except that
+// a permission in legacyChainExcludedPermissions the delegator holds is
+// denied with ceiling_unrecorded.
 func TestWalkUnrecordedEdgeLegacyCharacterization(t *testing.T) {
 	f := newCeilingFixture(t, "wlegacy")
 	unrec := f.agent(t, "wlegacy-u", AgentRoleFull)
@@ -219,6 +221,7 @@ func TestWalkUnrecordedEdgeLegacyCharacterization(t *testing.T) {
 	f.edge(t, store.DelegationPrincipalUser, f.userID, princ.ID, ceilPrincip, provSession)
 	authz := f.authz(f.store, false, false)
 
+	withheld := 0
 	for _, p := range permissions.Registry {
 		if recordedProvenanceRequired[p.ID] {
 			continue
@@ -226,9 +229,20 @@ func TestWalkUnrecordedEdgeLegacyCharacterization(t *testing.T) {
 		res := Resource{Type: p.Resource, ParentType: "project", ParentID: f.projectID}
 		wantAllowed, wantCause := f.walkHop(t, authz, princ.ID, p.ID, res, Action(p.Action))
 		gotAllowed, gotCause := f.walkHop(t, authz, unrec.ID, p.ID, res, Action(p.Action))
+		if legacyChainExcludedPermissions[p.ID] && wantAllowed {
+			// Permissions unrecorded chains never held (the artifact
+			// permissions) are withheld from them even where the delegator
+			// holds them. Where the delegator lacks one, the delegator
+			// check denies first, exactly as for the principal hop below.
+			assert.False(t, gotAllowed, p.ID)
+			assert.Equal(t, DenyCauseCeilingUnrecorded, gotCause, p.ID)
+			withheld++
+			continue
+		}
 		assert.Equal(t, wantAllowed, gotAllowed, p.ID)
 		assert.Equal(t, wantCause, gotCause, p.ID)
 	}
+	assert.Positive(t, withheld, "guard: the delegator holds at least one withheld permission, so the unrecorded-hop denial is exercised")
 	allowed, _ := f.walkHop(t, authz, unrec.ID, "agent.create",
 		Resource{Type: "agent", ParentType: "project", ParentID: f.projectID}, ActionCreate)
 	assert.True(t, allowed, "guard: the owner delegator holds agent.create")

@@ -25,13 +25,14 @@ import {
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
-import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from './terminal-palette-events.js';
 import type { PaletteCandidate } from './chat-palette-types.js';
 import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
 } from '../components/shared/palette/quick-palette-host.js';
 import '../components/shared/header.js';
+import { isMacPlatform } from '../utils/platform.js';
+import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import '../components/terminal/terminal-pane.js';
 
 interface RailEntry {
@@ -94,6 +95,7 @@ export class TerminalWorkspaceRoot {
   private readonly shell = document.createElement('div');
   private readonly rail = document.createElement('aside');
   private readonly railList = document.createElement('div');
+  private readonly railFooter = document.createElement('div');
   private readonly count = document.createElement('span');
   private readonly empty = document.createElement('div');
   private readonly layoutBar = document.createElement('div');
@@ -143,6 +145,18 @@ export class TerminalWorkspaceRoot {
   /** Whether the palette's close animation and Shoelace's own focus restore have both finished. */
   private paletteDialogSettled = false;
   /**
+   * The agent last selected in the open terminals rail (click, or Enter or
+   * Space on its button), whose terminal takes keyboard focus once its
+   * pane is visible — see {@link focusRailTarget}. Only a rail selection
+   * sets it, so reconnects, restores and other ways of opening a pane never
+   * move focus. Cleared once used, when focus lands somewhere other than
+   * the rail or that pane, when the palette opens, when the workspace is
+   * hidden, and when that agent's entry is removed (the rail close button
+   * removes it at once), so a pane that turns up much later cannot take
+   * focus.
+   */
+  private railFocusAgentId: string | null = null;
+  /**
    * Multi-pane placement for a palette-picked agent with no session yet:
    * set by {@link selectFromPalette} before it asks `main.ts` to open the
    * agent, and consumed by {@link create} for that agent only — see that
@@ -155,6 +169,12 @@ export class TerminalWorkspaceRoot {
   private currentPath = '/terminals';
   private refreshQueued = false;
   private narrowQuery: MediaQueryList | null = null;
+  /** {@link TOUCH_PRIMARY_QUERY}, kept live for the jump button's hints. */
+  private touchQuery: MediaQueryList | null = null;
+  private jumpButton: HTMLButtonElement | null = null;
+  private jumpShortcutLabel = '';
+  private jumpKeyShortcuts = '';
+  private readonly handleTouchQueryChange = (): void => this.syncJumpButtonHints();
   /** Monotonic counter for stable chronological rail ordering. */
   private entryCounter = 0;
   /** Current rail sort mode. */
@@ -219,7 +239,8 @@ export class TerminalWorkspaceRoot {
     this.railList.addEventListener('keydown', (event) => this.handleRailKeydown(event));
     this.empty.className = 'terminal-empty';
     this.empty.textContent = 'No terminals are open.';
-    this.rail.append(railHeader, this.railList);
+    this.buildRailFooter();
+    this.rail.append(railHeader, this.railList, this.railFooter);
 
     // Layout toolbar
     this.layoutBar.className = 'terminal-layout-bar';
@@ -251,8 +272,8 @@ export class TerminalWorkspaceRoot {
     });
 
     // "Jump to agent" palette: agents-only, no DMs/Threads/People. Created
-    // lazily on first open — see mountPalette().
-    this.element.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, () => this.openPalette());
+    // lazily on first open; opened by the rail footer button (see
+    // buildRailFooter) or the keyboard shortcut (handleGlobalKeydown).
     document.addEventListener('keydown', this.handleGlobalKeydown);
     document.addEventListener('focusin', this.handleGlobalFocusIn);
 
@@ -314,6 +335,74 @@ export class TerminalWorkspaceRoot {
       this.layoutManager.unzoom();
     });
     this.layoutBar.append(restoreBtn);
+  }
+
+  /**
+   * Builds the footer pinned below the rail list: a labelled "Jump to agent"
+   * button that opens the agents palette. The rail is a flex column whose
+   * list alone scrolls, so the footer stays visible however long the list
+   * grows. The shortcut hint is shown inline on pointer devices and hidden
+   * on touch-primary ones (CSS), where there is no keyboard to press it.
+   * The title and aria-keyshortcuts follow the same rule, see
+   * {@link syncJumpButtonHints}.
+   */
+  private buildRailFooter(): void {
+    this.railFooter.className = 'terminal-rail-footer';
+    const isMac = isMacPlatform();
+    const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'terminal-jump-btn';
+    btn.setAttribute('aria-haspopup', 'dialog');
+    this.jumpButton = btn;
+    this.jumpShortcutLabel = shortcutLabel;
+    this.jumpKeyShortcuts = isMac ? 'Meta+K' : 'Control+K';
+    this.touchQuery = window.matchMedia?.(TOUCH_PRIMARY_QUERY) ?? null;
+    this.touchQuery?.addEventListener?.('change', this.handleTouchQueryChange);
+    this.syncJumpButtonHints();
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', 'compass');
+    icon.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.className = 'terminal-jump-label';
+    label.textContent = 'Jump to agent';
+    const shortcut = document.createElement('kbd');
+    shortcut.className = 'terminal-jump-shortcut';
+    shortcut.setAttribute('aria-hidden', 'true');
+    shortcut.textContent = shortcutLabel;
+    btn.append(icon, label, shortcut);
+    btn.addEventListener('click', () => this.handleJumpButtonClick(btn));
+    this.railFooter.append(btn);
+  }
+
+  /**
+   * Sets the jump button's title and aria-keyshortcuts only when the
+   * primary pointer is not touch: a touch user cannot press the shortcut,
+   * and the visible label already gives the accessible name. Re-run on
+   * every change of {@link TOUCH_PRIMARY_QUERY}, like the CSS kbd hint.
+   */
+  private syncJumpButtonHints(): void {
+    const btn = this.jumpButton;
+    if (!btn) return;
+    if (this.touchQuery?.matches) {
+      btn.removeAttribute('title');
+      btn.removeAttribute('aria-keyshortcuts');
+    } else {
+      btn.title = `Jump to agent (${this.jumpShortcutLabel})`;
+      btn.setAttribute('aria-keyshortcuts', this.jumpKeyShortcuts);
+    }
+  }
+
+  /**
+   * iOS and macOS Safari do not focus a `<button>` on click, so the palette
+   * would otherwise restore focus on close to whatever was focused before
+   * (possibly a terminal pane). Focusing the button first makes it the
+   * palette's invoker. {@link handleGlobalFocusIn} has already recorded
+   * the last focused pane, so this does not lose the placement target.
+   */
+  private handleJumpButtonClick(btn: HTMLButtonElement): void {
+    btn.focus({ preventScroll: true });
+    this.openPalette();
   }
 
   /** Build the sort dropdown widget for the rail header. */
@@ -498,6 +587,7 @@ export class TerminalWorkspaceRoot {
   dispose(): void {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
   }
 
@@ -506,12 +596,12 @@ export class TerminalWorkspaceRoot {
    * moves, rather than reading it reactively at open or select time. Both
    * of those points are too late: opening the palette moves real focus into
    * its own query input (a correct focus trap, firing a real `focusout` on
-   * whatever pane was focused), and *opening the palette via the header
-   * button* moves it there even earlier — `handlePaletteButtonClick` in
-   * header.ts focuses the button itself, for its own invoker-tracking
-   * purposes, before ever dispatching the open-request event this host
-   * reacts to. By either point, a point-in-time "what pane has focus right
-   * now" read already sees nothing. Recording it continuously instead,
+   * whatever pane was focused), and *opening the palette via the rail
+   * footer button* moves it there even earlier —
+   * {@link handleJumpButtonClick} focuses the button itself, for its own
+   * invoker-tracking purposes, before ever opening the palette. By either
+   * point, a point-in-time "what pane has focus right now" read already
+   * sees nothing. Recording it continuously instead,
    * every time focus actually lands in a pane, sidesteps both races — it
    * holds whatever pane was *last* focused regardless of what (if anything)
    * has stolen focus since.
@@ -522,11 +612,22 @@ export class TerminalWorkspaceRoot {
    * land in the pane the palette was opened from, which is not a user move.
    */
   private readonly handleGlobalFocusIn = (e: FocusEvent): void => {
+    // One pass over the path: note whether focus is in the rail list or in
+    // a pane, and handle the pane it landed in.
+    let inRailOrPane = false;
     for (const node of e.composedPath()) {
+      if (node === this.railList) inRailOrPane = true;
       if (!(node instanceof Element) || node.tagName !== 'SCION-TERMINAL-PANE') continue;
+      inRailOrPane = true;
       for (const [key, pane] of this.panes) {
         if (pane === node) {
           this.lastFocusedPaneSessionKey = key;
+          if (
+            this.railFocusAgentId !== null &&
+            this.entries.get(key)?.state.agentId !== this.railFocusAgentId
+          ) {
+            this.railFocusAgentId = null;
+          }
           if (
             this.paletteDialogSettled &&
             this.paletteFocusAgentId !== null &&
@@ -538,6 +639,9 @@ export class TerminalWorkspaceRoot {
         }
       }
     }
+    // Focus moving anywhere outside the rail and the panes (another control,
+    // a dialog) means the user has moved on: drop a pending rail target.
+    if (!inRailOrPane) this.railFocusAgentId = null;
   };
 
   /**
@@ -549,6 +653,7 @@ export class TerminalWorkspaceRoot {
   private openPalette(): void {
     if (this.paletteHost.isOpen) return;
     this.paletteFocusAgentId = null;
+    this.railFocusAgentId = null;
     this.paletteHost.open();
   }
 
@@ -565,6 +670,25 @@ export class TerminalWorkspaceRoot {
     const pane = key ? this.panes.get(key) : undefined;
     if (!pane || pane.hidden) return;
     this.paletteFocusAgentId = null;
+    pane.focusTerminal();
+  }
+
+  /**
+   * Moves keyboard focus into the terminal of the agent selected in the
+   * rail once its pane is visible. Runs right after the rail selection (the
+   * pane may already be on screen, and navigating to the route it already
+   * shows changes nothing) and after every refresh, since a pane brought to
+   * the front, or created for the selection, becomes visible only then.
+   * `focusTerminal` focuses the xterm input, or the pane itself until the
+   * terminal mounts, which then takes focus on its own.
+   */
+  private focusRailTarget(): void {
+    const agentId = this.railFocusAgentId;
+    if (!agentId) return;
+    const key = this.findSessionKeyByAgentId(agentId);
+    const pane = key ? this.panes.get(key) : undefined;
+    if (!pane || pane.hidden || !this.layoutManager.getVisibleSlots().includes(key)) return;
+    this.railFocusAgentId = null;
     pane.focusTerminal();
   }
 
@@ -673,7 +797,10 @@ export class TerminalWorkspaceRoot {
   }
 
   show(visible: boolean): void {
-    if (!visible) this.paletteHost.hide();
+    if (!visible) {
+      this.paletteHost.hide();
+      this.railFocusAgentId = null;
+    }
     this.element.hidden = !visible;
     this.element.style.display = visible ? 'flex' : 'none';
     if (visible && !this._frameEntered) {
@@ -706,6 +833,9 @@ export class TerminalWorkspaceRoot {
       // Close in layout manager to clear all preset references
       this.layoutManager.close(key);
       if (this.lastFocusedPaneSessionKey === key) this.lastFocusedPaneSessionKey = null;
+      // Closed from the rail, or removed elsewhere: a pane opened later for
+      // the same agent must not take focus from this old selection.
+      if (this.railFocusAgentId === entry.state.agentId) this.railFocusAgentId = null;
     }
     for (const session of sessions) {
       if (this.entries.has(session.state.key)) continue;
@@ -889,6 +1019,7 @@ export class TerminalWorkspaceRoot {
     this.refreshPaneVisibility();
     this.publishCount();
     this.focusPaletteTarget();
+    this.focusRailTarget();
   }
 
   /** Update layout toolbar button highlighting. */
@@ -1195,8 +1326,15 @@ export class TerminalWorkspaceRoot {
     return item;
   }
 
+  /**
+   * Rail selection (a click, or Enter or Space on the rail button, which
+   * the browser turns into a click): navigates to the agent and moves
+   * keyboard focus into its terminal — see {@link focusRailTarget}.
+   */
   private openSessionRoute(entry: RailEntry): void {
+    this.railFocusAgentId = entry.state.agentId;
     this.dispatchNavigation(`/terminals/${entry.state.agentId}`);
+    this.focusRailTarget();
   }
 
   private dispatchNavigation(path: string): void {
@@ -1464,9 +1602,12 @@ export class TerminalWorkspaceRoot {
         min-height: 0;
         display: grid;
         grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
       }
       .terminal-rail {
         min-width: 0;
+        min-height: 0;
+        overflow: hidden;
         border-right: 1px solid var(--scion-border, #e2e8f0);
         background: var(--scion-surface, #fff);
         display: flex;
@@ -1505,6 +1646,68 @@ export class TerminalWorkspaceRoot {
         min-height: 0;
         overflow: auto;
         padding: 0.375rem;
+      }
+      /* Pinned below the list: only .terminal-rail-list scrolls. */
+      .terminal-rail-footer {
+        flex: 0 0 auto;
+        padding: 0.375rem;
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-surface, #fff);
+      }
+      .terminal-jump-btn {
+        width: 100%;
+        min-height: 2.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0 0.625rem;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--scion-text, #1e293b);
+        font: inherit;
+        font-size: 0.875rem;
+        font-weight: 550;
+        text-align: left;
+        cursor: pointer;
+      }
+      .terminal-jump-btn sl-icon {
+        flex: 0 0 auto;
+        font-size: 1.25rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-jump-label {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .terminal-jump-shortcut {
+        flex: 0 0 auto;
+        font-family: inherit;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-jump-btn:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
+      }
+      /* Hover only where it does not stick after a tap. */
+      @media (hover: hover) {
+        .terminal-jump-btn:hover {
+          background: var(--scion-bg-subtle, #f1f5f9);
+        }
+      }
+      /* Touch: a 44px tap target, and no keyboard-shortcut hint. */
+      @media ${TOUCH_PRIMARY_QUERY} {
+        .terminal-jump-btn {
+          min-height: 44px;
+        }
+        .terminal-jump-shortcut {
+          display: none;
+        }
       }
       .terminal-rail-item {
         display: grid;
@@ -1780,7 +1983,10 @@ export class TerminalWorkspaceRoot {
       @media (max-width: 760px) {
         .terminal-workspace-shell {
           grid-template-columns: 1fr;
-          grid-template-rows: minmax(9rem, 35vh) minmax(0, 1fr);
+          /* 11rem min keeps at least one list row visible between the
+             rail header and its pinned Jump to agent footer, capped at
+             45% of the shell so short landscape phones keep pane room. */
+          grid-template-rows: minmax(min(11rem, 45%), 35vh) minmax(0, 1fr);
         }
         .terminal-rail {
           border-right: 0;

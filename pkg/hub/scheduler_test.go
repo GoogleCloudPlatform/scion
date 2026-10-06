@@ -1284,8 +1284,8 @@ func TestMessageEventHandler_AgentNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.
@@ -1311,8 +1311,8 @@ func TestMessageEventHandler_AgentNotFoundByID(t *testing.T) {
 	if err == nil {
 		t.Fatal("handler should return error for deleted agents")
 	}
-	if !strings.Contains(err.Error(), "target agent deleted") {
-		t.Errorf("error should reference target agent deletion, got: %v", err)
+	if err.Error() != errScheduledMessageRefused.Error() {
+		t.Errorf("error should be the constant refusal, got: %v", err)
 	}
 	// Handler no longer owns status recording — production-wrapper tests
 	// (TestC1_FireEvent_*) verify the final persisted status.
@@ -2004,6 +2004,45 @@ func TestSchedulerMaxConcurrencyAcrossTicks(t *testing.T) {
 	}
 	if peak == 0 {
 		t.Error("no handlers ran")
+	}
+}
+
+// TestSchedulerTickCountConcurrentStatus is the race-detector regression for
+// ptone/scion#2042: the ticker goroutine advances tickCount while Status()
+// and the dispatched handlers read it. It needs no store, so it also runs in
+// the -tags no_sqlite race job; it reports a race only under -race, and here
+// just checks that ticks advance and Status() stays usable throughout.
+func TestSchedulerTickCountConcurrentStatus(t *testing.T) {
+	s := NewScheduler(nil, slog.Default(), WithMaxConcurrency(0))
+	s.tickInterval = time.Millisecond
+	s.MaxJitter = 0
+
+	var runs atomic.Int64
+	s.RegisterRecurring("tick-reader", 1, func(_ context.Context) { runs.Add(1) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.Start(ctx)
+
+	deadline := time.Now().Add(50 * time.Millisecond)
+	var last uint64
+	for time.Now().Before(deadline) {
+		st := s.Status()
+		if st.TickCount < last {
+			t.Fatalf("tickCount went backwards: %d after %d", st.TickCount, last)
+		}
+		last = st.TickCount
+		// Yield so the loop cannot spin-starve the ticker goroutine on a
+		// loaded CI runner.
+		time.Sleep(time.Millisecond)
+	}
+	s.Stop()
+
+	if last == 0 {
+		t.Error("tickCount never advanced; the ticker did not run concurrently with Status()")
+	}
+	if runs.Load() == 0 {
+		t.Error("recurring handler never ran")
 	}
 }
 

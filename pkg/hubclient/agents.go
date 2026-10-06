@@ -48,7 +48,8 @@ type AgentService interface {
 	// Delete removes an agent.
 	Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error
 
-	// Start starts a stopped agent.
+	// Start starts a stopped agent. It sends no request body, so it never
+	// asks for a force-resume; see agentService.Start.
 	Start(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Stop stops a running agent.
@@ -503,7 +504,17 @@ func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) stri
 	return path
 }
 
-// Start starts a stopped agent.
+// Start starts a stopped agent via the hub's /start lifecycle action. It
+// sends no request body.
+//
+// The hub's /start route also accepts an optional {"forceResume":true} body
+// (hub.AgentLifecycleStartRequest), which resumes the interrupted harness
+// session of an agent in phase=error. The client deliberately does not expose
+// it here: the scion CLI reaches force-resume through the create path
+// instead (`scion resume --force` sends CreateAgentRequest with Resume and
+// ForceResume set), which also covers an agent that is not yet provisioned
+// or no longer exists on the hub. No caller needs force-resume on Start
+// (ptone/scion#2864).
 func (s *agentService) Start(ctx context.Context, agentID string) (*LifecycleResponse, error) {
 	return s.lifecycle(ctx, agentID, "start")
 }
@@ -1010,10 +1021,11 @@ func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *Rei
 	return apiclient.DecodeResponse[ReincarnateAgentResponse](resp)
 }
 
-// ReincarnateAgentRequest is the request body for Reincarnate. Phase 1
-// supports only Handoff and DryRun; every override field is accepted on the
-// wire (so a hub that has adopted overrides can still parse an old client's
-// request), but a Phase-1 hub rejects any of them with a 400.
+// ReincarnateAgentRequest is the request body for Reincarnate. Besides
+// Handoff and DryRun it carries the patch fields of ptone/scion#3302. A hub
+// that predates them ignores ServiceAccount, Role and ThinkingLevel and
+// rejects the others with a 400; ReincarnationPlan.Patched tells a client
+// whether the hub applied them.
 type ReincarnateAgentRequest struct {
 	Handoff string `json:"handoff,omitempty"`
 	DryRun  bool   `json:"dryRun,omitempty"`
@@ -1021,11 +1033,17 @@ type ReincarnateAgentRequest struct {
 	// that broker, which must mount the same NFS export as its current one.
 	TargetBroker string `json:"targetBroker,omitempty"`
 
-	// Phase 3 overrides — not yet supported by a Phase 1 hub.
-	Image          string            `json:"image,omitempty"`
+	// Patch fields: each changes the next generation's setting, and later
+	// reincarnations keep it. Empty (nil for ThinkingLevel) is unchanged.
+	ServiceAccount string `json:"serviceAccount,omitempty"`
+	Role           string `json:"role,omitempty"`
+	Image          string `json:"image,omitempty"`
+	Model          string `json:"model,omitempty"`
+	ThinkingLevel  *int   `json:"thinkingLevel,omitempty"`
+	HarnessAuth    string `json:"harnessAuth,omitempty"`
+
+	// Overrides not yet supported by the hub.
 	HarnessConfig  string            `json:"harnessConfig,omitempty"`
-	HarnessAuth    string            `json:"harnessAuth,omitempty"`
-	Model          string            `json:"model,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TemplateHash   string            `json:"templateHash,omitempty"`
 	ResetOverrides bool              `json:"resetOverrides,omitempty"`
@@ -1098,4 +1116,13 @@ type ReincarnationPlan struct {
 	EnvKeys    KeyDiff     `json:"envKeys"`
 	Branch     string      `json:"branch"`
 	Warnings   []string    `json:"warnings,omitempty"`
+
+	// Patched lists the patch fields the hub applied, in display order.
+	Patched []string `json:"patched,omitempty"`
+	// Old and new values of patch fields not otherwise on the plan, set
+	// only when patched.
+	Role           *FieldChange `json:"role,omitempty"`
+	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
+	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
+	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
 }

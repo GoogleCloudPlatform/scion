@@ -27,6 +27,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { isChatNotificationStatus } from '../../client/chat-notifications.js';
+import { dispatchTrayCount } from '../../client/tray-count-events.js';
 import {
   canShowPushNotification,
   enablePushWithPermission,
@@ -37,6 +38,7 @@ import {
 } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
+import { navigateTo } from '../../client/navigation.js';
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
 
@@ -53,6 +55,8 @@ export class ScionNotificationTray extends LitElement {
   @state() private pushPermission: PushPermissionState = 'default';
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** The user id loading was started for; null when nothing is running. */
+  private activeUserId: string | null = null;
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
   private boundOnPushPreference = (): void => this.syncPushState();
@@ -62,6 +66,9 @@ export class ScionNotificationTray extends LitElement {
 
   /** Suppresses browser push for the initial fetch so existing notifications don't fire. */
   private initialFetchDone = false;
+
+  /** The user id that the list, seenIds and initialFetchDone belong to. */
+  private stateUserId: string | null = null;
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -73,34 +80,93 @@ export class ScionNotificationTray extends LitElement {
     // Keep in step with the profile settings page, which writes the same
     // preference. Two toggles disagreeing about one setting is worse than one.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
-    if (this.user) {
-      void this.fetchNotifications();
-      this.startPolling();
-      this.listenForNotifications();
-    }
+    this.syncUser();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
     this.stopListeningForNotifications();
+    // A reconnect starts afresh, as a first mount does.
+    this.activeUserId = null;
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    // Clear the previous user's state before this render, so no render pairs
+    // the new user with the previous user's list.
+    if (changed.has('user')) this.resetOnUserChange();
+    if (changed.has('notifications')) this.announceCount();
+  }
+
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('user')) {
-      if (this.user) {
-        void this.fetchNotifications();
-        this.startPolling();
-        this.listenForNotifications();
-      } else {
-        this.stopPolling();
-        this.stopListeningForNotifications();
-        this.notifications = [];
-      }
-    }
+    if (changed.has('user')) this.syncUser();
     this.detectTruncation();
+  }
+
+  /**
+   * Starts or stops loading for the signed-in user.
+   *
+   * Keyed on the user id, not the object: connectedCallback and the first
+   * updated() both see the same user on mount, and the header can hand over a
+   * new object for the same user (an auth refresh). Neither is a reason to
+   * fetch again or to restart polling.
+   */
+  private syncUser(): void {
+    const id = this.user?.id ?? null;
+    if (id) {
+      if (id === this.activeUserId) return;
+      // Loading stops on disconnect and restarts in connectedCallback.
+      if (!this.isConnected) return;
+      this.activeUserId = id;
+      void this.fetchNotifications();
+      this.startPolling();
+      this.listenForNotifications();
+    } else {
+      this.activeUserId = null;
+      this.stopPolling();
+      this.stopListeningForNotifications();
+      this.notifications = [];
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-user state
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resets per-user state when the signed-in user id changes, so the next
+   * user's first fetch behaves like a first load: it shows only that user's
+   * notifications, suppresses push for the ones that already exist, and does
+   * not treat the previous user's notifications as seen.
+   */
+  private resetOnUserChange(): void {
+    const id = this.user?.id ?? null;
+    if (id === this.stateUserId) return;
+    this.stateUserId = id;
+    this.notifications = [];
+    this.seenIds = new Set();
+    this.initialFetchDone = false;
+  }
+
+  /**
+   * Tells the header how many items the list now holds. Called for every
+   * change to the list, including a clear on a user change or sign-out; a
+   * dropped response for a previous user changes nothing, so it announces
+   * nothing.
+   */
+  private announceCount(): void {
+    dispatchTrayCount(this, 'notifications', this.notifications.length);
+  }
+
+  /**
+   * Whether a response to a request started while requestUserId was signed in
+   * may be applied. A response for a previous user, or one that arrives after
+   * sign-out, is dropped.
+   */
+  private isForCurrentUser(requestUserId: string | null): boolean {
+    return requestUserId !== null && requestUserId === (this.user?.id ?? null);
   }
 
   // ---------------------------------------------------------------------------
@@ -180,10 +246,12 @@ export class ScionNotificationTray extends LitElement {
   // ---------------------------------------------------------------------------
 
   private async fetchNotifications(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       const res = await apiFetch('/api/v1/notifications?acknowledged=false');
       if (!res.ok) return;
       const data = (await res.json()) as Notification[] | null;
+      if (!this.isForCurrentUser(requestUserId)) return;
       const incoming = data ?? [];
 
       // Detect new notifications (IDs not previously seen) and dispatch
@@ -244,8 +312,10 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private async ackOne(id: string): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch(`/api/v1/notifications/${id}/ack`, { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = this.notifications.filter((n) => n.id !== id);
     } catch {
       // Ignore
@@ -253,8 +323,10 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private async ackAll(): Promise<void> {
+    const requestUserId = this.user?.id ?? null;
     try {
       await apiFetch('/api/v1/notifications/ack-all', { method: 'POST' });
+      if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = [];
     } catch {
       // Ignore
@@ -719,8 +791,7 @@ export class ScionNotificationTray extends LitElement {
               e.preventDefault();
               this.open = false;
               document.removeEventListener('click', this.boundOnClickOutside, true);
-              window.history.pushState({}, '', '/projects');
-              window.dispatchEvent(new PopStateEvent('popstate'));
+              navigateTo('/projects');
             }}
             >Manage subscriptions</a
           >
@@ -810,8 +881,7 @@ export class ScionNotificationTray extends LitElement {
     e.preventDefault();
     this.open = false;
     document.removeEventListener('click', this.boundOnClickOutside, true);
-    window.history.pushState({}, '', `/agents/${agentId}`);
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    navigateTo(`/agents/${agentId}`);
   }
 }
 

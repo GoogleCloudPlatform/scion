@@ -30,6 +30,7 @@ import (
 
 	gouuid "github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -1267,6 +1268,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		req.PrincipalID = resolvedUser.ID
 	}
 
+	// principalIsMembersGroup records whether the group principal is a
+	// project members group. The refusal is applied below, after routing:
+	// built-in project roles are refused by the membership service once the
+	// actor is authorized; the remaining routes are already behind hub-level
+	// role_binding.create.
+	principalIsMembersGroup := false
+
 	// Verify group exists for group principals.
 	// Try UUID first, fall back to slug lookup (mirrors email→UUID for users).
 	if req.PrincipalType == store.RoleBindingPrincipalGroup {
@@ -1288,6 +1296,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			}
 		}
 		req.PrincipalID = g.ID
+		principalIsMembersGroup = store.IsProjectMembersGroup(g)
 	}
 
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
@@ -1382,12 +1391,12 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			if denial != nil && !denial.Allowed {
 				// Error contract: membership-service 403s surfaced through the
 				// role-binding endpoint include structured details.
-				var details map[string]interface{}
+				details := legacyMembershipDenialDetails(denial)
 				if denial.HTTPStatus == http.StatusForbidden {
-					details = map[string]interface{}{
+					details = withSessionOnlyDenialDetails(map[string]interface{}{
 						"resource_type": "role_binding",
 						"denied_action": "create",
-					}
+					}, denial.Details)
 				}
 				writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 				return
@@ -1396,6 +1405,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		// Custom project-scoped role — fall through to CanDelegate path.
+	}
+
+	// Project members groups cannot be granted roles, on any scope.
+	if principalIsMembersGroup {
+		writeError(w, http.StatusBadRequest, ErrCodePrincipalIneligible,
+			projectMembersGroupPrincipalMessage, projectMembersGroupPrincipalDetails(req.PrincipalID))
+		return
 	}
 
 	// CanDelegate check: security invariant — the actor must hold all
@@ -1496,10 +1512,10 @@ func (s *Server) deleteRoleBinding(w http.ResponseWriter, r *http.Request, id st
 			// details carry the resource context the UI needs.
 			var details map[string]interface{}
 			if denial.HTTPStatus == http.StatusForbidden {
-				details = map[string]interface{}{
+				details = withSessionOnlyDenialDetails(map[string]interface{}{
 					"resource_type": "role_binding",
 					"denied_action": "delete",
-				}
+				}, denial.Details)
 			}
 			writeError(w, denial.HTTPStatus, denial.DenialCode, denial.Reason, details)
 			return
@@ -1561,10 +1577,12 @@ func (s *Server) deleteSystemSuperAdminBinding(
 	// Credential boundary: super-admin binding mutations require interactive
 	// session or dev credentials. Reject broker, agent JWT, UAT, and
 	// federation tokens (R6 credential gate).
-	cred := GetCredentialContextFromContext(ctx)
-	if !allowedMutationCredentials[cred.Kind] {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed", cred.Kind), nil)
+	// Session-only with the GOV_PENDING reason (session_only_gate.go).
+	if !sessionCredentialAllowed(ctx) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("super-admin binding deletion requires an interactive session; credential kind %q is not allowed",
+				GetCredentialContextFromContext(ctx).Kind),
+			authzop.ReasonGovernancePending)
 		return
 	}
 

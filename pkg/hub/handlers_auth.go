@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -585,6 +586,32 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Apply the same user-record check as UnifiedAuthMiddleware: a token
+	// whose subject has no user record, or whose user is suspended, is not
+	// reported valid. A store failure is reported as 503 store_error, as the
+	// middleware does.
+	if s.store != nil {
+		u, uErr := s.store.GetUser(r.Context(), claims.UserID)
+		switch {
+		case errors.Is(uErr, store.ErrNotFound):
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		case uErr != nil:
+			slog.Error("Auth validate: user store lookup failed",
+				"user_id", claims.UserID, "error", uErr)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
+			return
+		case u == nil:
+			// No user record and no error: treated as not found.
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		case u.Status == store.UserStatusSuspended:
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		}
+	}
+
 	var expiresAt *time.Time
 	if claims.Expiry != nil {
 		t := claims.Expiry.Time()
@@ -722,23 +749,21 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 // credentials are all rejected even when they present a valid UserIdentity.
 // An empty or unknown credential kind is also rejected (fail closed).
 func requireSessionCredential(ctx context.Context) error {
-	credential := GetCredentialContextFromContext(ctx)
-	switch credential.Kind {
-	case CredentialKindInteractive, CredentialKindDev:
-		return nil
-	default:
-		// Fail closed: empty, unknown, UAT, agent_jwt, federation, broker.
+	// Fail closed: empty, unknown, UAT, agent_jwt, federation, broker.
+	if !sessionCredentialAllowed(ctx) {
 		return ErrUATCredentialDenied
 	}
+	return nil
 }
 
 // denyTokenManagement logs and writes the standard 403 for a token-management
 // request from a non-session credential — exactly the case where a UAT (or
 // other non-interactive credential) attempting to manage access tokens would
-// show up (plan §3.4, item 4).
+// show up (plan §3.4, item 4). Token management is session-only with the
+// CREDENTIAL_MANAGEMENT reason (session_only_gate.go).
 func denyTokenManagement(w http.ResponseWriter, r *http.Request, identity Identity, err error) {
 	logAuthzDenial(r, identity, Resource{Type: "user_access_token"}, ActionManage, err.Error())
-	writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+	writeSessionOnlyDenial(w, ErrCodeForbidden, err.Error(), authzop.ReasonCredentialManagement)
 }
 
 // handleTokens routes user access token requests.

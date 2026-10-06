@@ -120,6 +120,12 @@ type AgentLaunchReportInfo struct {
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
+	// RunID is the run the launched entry is labelled with
+	// (ptone/scion#3176), so the hub can settle exactly that run.
+	RunID string `json:"runId,omitempty"`
+	// WorkspacePlacement is where the launch's start placed the agent's
+	// workspace (api.WorkspacePlacementExport or WorkspacePlacementLocal).
+	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
 }
 
 // AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),
@@ -230,6 +236,41 @@ type BrokerHeartbeat struct {
 	// (backend, NFS export identity and share health) on every heartbeat.
 	// An older broker omits it and the hub keeps the stored value.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// ProfileAttach refreshes the attach capability of the broker's
+	// registered profiles (store.BrokerProfile.Attach) on every heartbeat,
+	// so a change is seen without re-registering. It lists only profiles
+	// whose attach support the broker knows; a profile it cannot answer
+	// for yet is left out, and the hub keeps that profile's stored value.
+	// An older broker omits the field and the hub keeps every stored
+	// value.
+	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
+	// ProfileSAMappings: see ProfileSAMappingsState.
+	ProfileSAMappings []ProfileSAMappingsState `json:"profileSAMappings,omitempty"`
+	// StartsInFlight lists the agent starts still running on the broker
+	// when this heartbeat was built, read before the agents were listed, so
+	// a start that finishes between the two reads is either listed here or
+	// its container is in Projects. Meaningful only when
+	// Capabilities.StartsInFlight is true; an older broker omits both.
+	StartsInFlight []StartInFlight `json:"startsInFlight,omitempty"`
+	// DefaultProfile refreshes the broker's default (active) profile name
+	// on every heartbeat. Nil (an older broker) keeps the stored value; a
+	// non-nil empty string reports that the broker has no active profile.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
+}
+
+// StartInFlight identifies one agent start running on a broker.
+type StartInFlight struct {
+	ProjectID string `json:"projectId"`
+	Slug      string `json:"slug"`
+}
+
+// ProfileAttachState is one profile's attach capability in a heartbeat.
+type ProfileAttachState struct {
+	// Name is the profile name, matching store.BrokerProfile.Name.
+	Name string `json:"name"`
+	// Attach reports whether the profile's runtime supports interactive
+	// attach.
+	Attach bool `json:"attach"`
 }
 
 // BrokerInventory describes which runtime targets a heartbeat's agent list
@@ -307,6 +348,9 @@ type JoinBrokerRequest struct {
 	// WorkspaceStorage is the broker's workspace storage descriptor at
 	// registration time. Share health is refreshed by heartbeats.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// DefaultProfile is the broker's default (active) profile name. Nil
+	// (an older broker) keeps the stored value.
+	DefaultProfile *string `json:"defaultProfile,omitempty"`
 }
 
 // JoinBrokerResponse is returned after completing broker registration.

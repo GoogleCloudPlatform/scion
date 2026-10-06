@@ -22,27 +22,6 @@
 nameOverride: ""
 fullnameOverride: ""
 
-# A TEMPORARY KEY, AND ITS REMOVAL IS DEFINED RATHER THAN LEFT TO JUDGEMENT.
-#
-# database.driver: postgres, or storage.provider gcs with auth.mode proxy, or
-# hub.extraEnv setting K_SERVICE, each make the hub's isHADeployment test true
-# (cmd/server_foreground.go:927). Its hosted HA preflight then runs, and several
-# of that preflight's thirteen gates have no source in this chart, so the hub
-# aborts before serving. The chart refuses those value combinations unless you
-# set this, and the refusal names every one of them and the phase that lands
-# each. WHICH gates is derived rather than written down: see hack/ha-gates.txt.
-#
-# Set it to true when you are rendering to inspect the output, or when you are
-# supplying the missing configuration yourself through config.existingSecret.
-#
-# REMOVAL PREDICATE: this key is deleted when the Cloud SQL values (the database
-# URL) and the ingress/IAP values (the proxy and transport blocks) have both
-# landed, because at that point the chart can satisfy the preflight and there is
-# nothing left to acknowledge. Whoever lands the second of those two deletes this
-# key, the assertHAUnlanded helper, and the flag from ci/values-settings.yaml and
-# ci/values-settings-oauth.yaml, in that change.
-acknowledgeHAUnlanded: false
-
 # Single replica by default. More than one replica breaks the web terminal,
 # exec, log tailing and port forwarding for roughly (N-1)/N of requests: the
 # agent control channel, presence and port tunnels are pod-local state, and
@@ -100,8 +79,9 @@ updateStrategy:
   # server.database.driver of postgres turns it on at one replica
   # (cmd/server_foreground.go:931). It is still not a data-safety question - the
   # preflight refuses to start, it does not corrupt anything - but "it does not
-  # run" was doing work here that it can no longer do. Whether it runs is
-  # governed by acknowledgeHAUnlanded at the top of this file.
+  # run" was doing work here that it can no longer do. When it runs, the
+  # chart supplies every gate it reads from settings.yaml (see database.driver
+  # and auth.proxy below), so it passes rather than aborting.
   type: ""
 
 image:
@@ -109,11 +89,11 @@ image:
   #
   # The hub image this chart needs is the one built from the root Dockerfile
   # with --target hub-gke: non-root, uid 1000, web UI embedded, no baked
-  # KUBECONFIG. That stage is added by the image-build change that accompanies
-  # this chart and is not in the root Dockerfile yet, so the build command above
-  # fails with an unknown-target error until it lands - which is a known
-  # sequencing gap and not a mistake in this file.
-  # No such image is published anywhere, so every possible default
+  # KUBECONFIG. image-build/cloudbuild-hub-gke.yaml builds it and pushes it as
+  # <registry>/scion-hub-gke:<git short sha> (see image-build/README.md).
+  # That image is linux/amd64 only; on a cluster with arm64 nodes, set
+  # hub.nodeSelector to {kubernetes.io/arch: amd64}.
+  # The chart has no canonical registry to point at, so every possible default
   # would point either at an empty registry path or at somebody else's
   # artifact - and a default that cannot be correct turns an install-time error
   # into a runtime mystery.
@@ -151,6 +131,17 @@ hub:
 
   # Display name for the hub. Cosmetic; unlike hubId nothing is scoped by it.
   name: Scion Hub
+
+  # Optional. Email addresses auto-promoted to the admin role at sign-in,
+  # rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig,
+  # pkg/config/settings_v1.go). The hub lower-cases and trims each entry
+  # (config.SanitizeEmailList). Empty leaves the key out, and the hub then
+  # promotes nobody from configuration.
+  #
+  #   adminEmails:
+  #     - alice@example.com
+  #
+  adminEmails: []
 
   # REQUIRED, and deliberately without a default. The external URL the hub is
   # reached at, scheme and host, no trailing path. Absence is not an error in
@@ -238,7 +229,8 @@ hub:
     # runAsUser and runAsGroup remain configurable because a later part of this
     # chart requires them to match the uid and gid of the workspace share it
     # mounts. Zero is rejected: it contradicts runAsNonRoot rather than
-    # overriding it.
+    # overriding it. The hub-gke image assumes 1000:1000; any other uid needs
+    # a writable HOME and a passwd entry for that uid, which ssh requires.
     runAsUser: 1000
     runAsGroup: 1000
 
@@ -335,9 +327,18 @@ runtime:
   listAllNamespaces: false
 
 agents:
-  # Optional. Registry prefix agent images are pulled from, rendered as the
-  # top-level image_registry key of settings.yaml. Empty leaves the key out and
-  # the hub uses its own default.
+  # REQUIRED when the chart renders settings.yaml. Registry prefix agent images
+  # are pulled from, rendered as the top-level image_registry key. The chart
+  # always runs an in-process runtime broker, and the hub refuses to start the
+  # broker without a registry (requireImageRegistryForBroker,
+  # cmd/server_foreground.go), so an empty value fails the render. The hub
+  # also accepts image_registry for the active profile through config.extra,
+  # or SCION_IMAGE_REGISTRY / SCION_MAINTENANCE_IMAGE_REGISTRY through
+  # hub.extraEnv; either satisfies the check instead. Not checked under
+  # config.existingSecret, where your file must carry it.
+  #
+  #   imageRegistry: us-docker.pkg.dev/my-project/scion
+  #
   imageRegistry: ""
 
 # The hub's own configuration - the contents of settings.yaml.
@@ -371,6 +372,7 @@ config:
   # right, or the hub uses its own default for it:
   #
   #   auth.mode                  ->  server.auth.mode
+  #   auth.mode                  ->  server.auth.proxy.provider
   #   database.connMaxIdleTime   ->  server.database.conn_max_idle_time
   #   database.connMaxLifetime   ->  server.database.conn_max_lifetime
   #   database.maxIdleConns      ->  server.database.max_idle_conns
@@ -392,12 +394,19 @@ config:
   # mutates every value in this file, renders, and requires each one that only
   # moves the settings document to appear here with the key it actually moved.
   # If you are reading this in a fork whose chart has drifted, run that script
-  # rather than trusting these ten lines. The same list is printed on install by
+  # rather than trusting these eleven lines. The same list is printed on install by
   # NOTES.txt, from a single definition in templates/_helpers.tpl.
   #
   # Not listed, because they refuse rather than go quiet: config.extra,
-  # storage.bucket and agents.imageRegistry fail the render when set together
-  # with this.
+  # storage.bucket, agents.imageRegistry, hub.adminEmails, a non-local
+  # secrets.backend and the secrets.gcpsm values, the database name, user and
+  # password, the OAuth web client credentials, auth.proxy.iap.audience and the
+  # three auth.transport values fail the render when set together with this
+  # (NOTES.txt prints the exact list). auth.proxy.provider is not on either
+  # list: its only legal value is its default, so there is nothing an operator
+  # could set that goes quiet. auth.mode carries it instead - under proxy mode
+  # the chart writes server.auth.proxy.provider: iap, so your file must carry
+  # that key as well as server.auth.mode.
   existingSecret: ""
 
   # Arbitrary additional settings.yaml content, deep-merged over what the chart
@@ -426,18 +435,16 @@ database:
   # hub's home directory, so replicas do not share it.
   #
   # postgres is what the hosted deployment runs, and selecting it turns on the
-  # hub's HA preflight (cmd/server_foreground.go:931). That preflight has
-  # THIRTEEN gates, and this release cannot satisfy all of them - the database
-  # URL, a durable session secret, and keys in the proxy and transport subtrees -
-  # so selecting postgres today means the hub aborts before serving unless you
-  # set acknowledgeHAUnlanded. Measured by walking the preflight gate by gate on
-  # the settings.yaml this chart renders (hack/ha-gates.txt); the unsatisfied
-  # gates are enumerated in the refusal itself.
-  #
-  # An earlier version of this comment listed four requirements - hub ID,
-  # database URL, GCS storage with a bucket, session secret. Those are four of
-  # the thirteen, and the chart already satisfies two of them. Naming a subset
-  # of a guard's conditions reads as naming all of them.
+  # hub's hosted HA preflight (cmd/server_foreground.go, func
+  # validateHostedHAPreflight). The chart now supplies every gate that preflight
+  # reads from settings.yaml: the hub ID, the driver, the database URL, gcs
+  # storage with a bucket and, under auth.mode proxy, the auth.proxy and
+  # auth.transport values below - which are REQUIRED on an HA shape and refused
+  # at render time when missing. The one remaining gate, the session secret,
+  # arrives by environment variable from auth.sessionSecret or
+  # auth.existingSecret, which the chart already requires. Measured by walking
+  # the preflight gate by gate on the settings.yaml this chart renders
+  # (hack/ha-gates.txt).
   #
   # The connection URL is not set here and cannot be. It is DERIVED, from
   # database.auth, database.user, database.name and the proxy's listen port -
@@ -645,6 +652,39 @@ storage:
   # moves that failure to helm template.
   bucket: ""
 
+# Where the hub keeps the secrets users and agents store through it, rendered
+# as server.secrets in settings.yaml (V1SecretsConfig,
+# pkg/config/settings_v1.go). Read once at startup by secret.NewBackend
+# (cmd/server_foreground.go).
+secrets:
+  # local (the default) keeps secrets in the hub database and renders nothing.
+  # gcpsm stores them in Google Cloud Secret Manager and renders
+  # server.secrets.backend: gcpsm.
+  #
+  # The chart grants no IAM. The hub authenticates to Secret Manager with
+  # Application Default Credentials - on GKE, the Workload Identity binding
+  # named by serviceAccount.gcpServiceAccount - and that service account's
+  # Secret Manager roles belong to whatever provisions the project (Terraform).
+  # server.secrets.gcp_credentials, an inline key or key path, is deliberately
+  # not modelled.
+  backend: local
+
+  gcpsm:
+    # REQUIRED when backend is gcpsm. The project the secrets are created in,
+    # rendered as server.secrets.gcp_project_id. The hub does not refuse to
+    # start without it: NewGCPBackend errors, the server logs a warning and
+    # runs with no secret backend. The chart refuses the render instead.
+    projectId: ""
+
+    # Optional. Non-empty switches Secret Manager from automatic (global) to
+    # user-managed regional replication in these locations; needed when the
+    # constraints/gcp.resourceLocations org policy forbids global resources.
+    # Rendered as server.secrets.gcp_replication_locations.
+    #
+    #   replicationLocations: [us-central1]
+    #
+    replicationLocations: []
+
 auth:
   # proxy is the hosted shape: an identity-aware proxy in front of the hub
   # authenticates the user and the hub trusts a signed header. oauth is the
@@ -654,13 +694,13 @@ auth:
   # Block-1 keys the preflight requires render identically in both modes.
   #
   # "AND NOTHING ELSE" WAS TOO STRONG AND THIS COMMENT USED TO SAY IT. The two
-  # modes reach DIFFERENT hosted-HA preflights, and since 1b3c9418 the gap is
-  # much wider than one gate: the hub's seven IAP gates sit inside
-  # `if cfg.Auth.Mode == "proxy"` in validateHostedHAPreflight, so oauth never
-  # reaches them. Measured by walking the real preflight on each rendered
-  # settings.yaml; both arms are recorded in hack/ha-gates.txt.
-  #
-  #     proxy   8 gates      oauth   2 gates
+  # modes reach DIFFERENT hosted-HA preflights: the hub's IAP and transport
+  # gates sit inside `if cfg.Auth.Mode == "proxy"` in validateHostedHAPreflight,
+  # so oauth never reaches them. Under proxy the chart renders those keys from
+  # auth.proxy and auth.transport below. Measured by walking the real preflight
+  # on each rendered settings.yaml; both arms are recorded in
+  # hack/ha-gates.txt, and both now stop at the session secret alone, which
+  # the chart delivers by environment variable rather than in settings.yaml.
   #
   # 🛑 [HISTORY 2026-08-17] THIS COMMENT PREVIOUSLY READ "auth.mode is itself a
   # preflight gate: cmd/server_foreground.go:980 requires proxy, so the oauth
@@ -675,6 +715,84 @@ auth:
   # The claim that survives unchanged is the narrow one about the Block-1
   # five, which is what the paired ci fixtures actually diff.
   mode: proxy
+
+  # PROXY AUTHENTICATION, read only when auth.mode is proxy and refused when
+  # set under oauth. Rendered into settings.yaml as server.auth.proxy.
+  #
+  # provider is an enum of the providers this chart models, and today that is
+  # iap alone. The hub also has a jwt provider (a generic signed-header proxy,
+  # JWTProxyAuthenticator), whose settings live under server.auth.proxy.jwt and
+  # which this chart does not model. It is refused rather than left reachable:
+  # config.extra cannot reach it either, because server.auth.proxy.provider is
+  # a key the chart writes and config.extra may not overwrite one. If you need
+  # it, supply the whole settings file through config.existingSecret.
+  #
+  # The hub's header provider is not offered: the web server this chart always
+  # enables (--enable-web) rejects it as unsupported at startup
+  # (cmd/server_foreground.go, func initWebServer).
+  #
+  # REQUIRED WITH provider iap: iap.audience. Not only on an HA shape. Both
+  # initHubServer and initWebServer in cmd/server_foreground.go refuse to start
+  # when auth.mode is proxy and provider is iap with no audience, and
+  # initWebServer refuses auth.mode proxy with no proxy block at all - so a
+  # proxy render without an audience is a hub that cannot boot, and the chart
+  # refuses it at render time instead.
+  #
+  # THE AUDIENCE IS THE IAP RESOURCE PATH, NOT AN OAUTH CLIENT ID. IAP signs
+  # its JWT with one of two audience shapes, and the hub accepts exactly these
+  # two (isSupportedIAPAudience, cmd/server_foreground.go):
+  #
+  #   GKE / GCLB   /projects/<project-number>/global/backendServices/<id>
+  #   Cloud Run    /projects/<project-number>/locations/<region>/services/<name>
+  #
+  # On GKE it is the first: the numeric ID of the backend service the Ingress
+  # or Gateway created, which exists only after the load balancer reconciles.
+  # values.schema.json checks the shape with the same rules the hub's HA
+  # preflight uses - each segment non-empty, surrounding whitespace and
+  # trailing slashes tolerated - and the chart renders the value trimmed the way
+  # the preflight trims it, because outside an HA shape the hub uses the value
+  # verbatim and a trailing slash would then fail every token check. The hub
+  # accepts a placeholder (project number or backend-service ID of all zeros)
+  # with a startup warning, for the first deploy before the ID exists; so does
+  # the chart. Every request is refused until the real ID is set.
+  proxy:
+    provider: iap
+    iap:
+      audience: ""
+
+  # TRANSPORT AUTHENTICATION: how dispatched agents get through the platform
+  # guard in front of the hub. Rendered into settings.yaml as
+  # server.auth.transport only when mode is set. NOT server.transport, which
+  # the hub's HA preflight names as the wrong key.
+  #
+  # mode       "" (not rendered), none, iap or cloudrun_invoker. REQUIRED as
+  #            iap on an HA shape under auth.mode proxy - the preflight
+  #            refuses anything else.
+  # oidcAudience
+  #            the audience minted into agent OIDC tokens. For iap this is the
+  #            IAP OAuth CLIENT ID, which is deliberately a different value
+  #            from auth.proxy.iap.audience (the hub's own comment in
+  #            validateHostedHAPreflight explains why the two differ). Required
+  #            whenever mode is iap; under cloudrun_invoker the hub falls back
+  #            to the public hub URL.
+  # platformAuthSa
+  #            the email of the service account the hub impersonates to mint
+  #            those tokens. Required whenever mode is iap or cloudrun_invoker.
+  #
+  # MIND THE SPELLING IF YOU GO THROUGH config.extra. settings.yaml binds
+  # oidc_audience and platform_auth_sa (V1TransportConfig,
+  # pkg/config/settings_v1.go); the hub's internal config and its SCION_SERVER_*
+  # environment mapper use oidcAudience and platformAuthSA. The camelCase
+  # spelling in a settings file binds nothing, silently, so the chart refuses it
+  # under server.auth.transport - the same trap as client_id under auth.oauth.
+  #
+  # Neither value is a credential: one is an OAuth client ID, which is public
+  # by design, and the other is a service account email. Both live in the
+  # settings Secret only because the whole document does.
+  transport:
+    mode: ""
+    oidcAudience: ""
+    platformAuthSa: ""
 
   # THE SESSION SECRET. One of the next two is REQUIRED - the render fails if
   # neither is set, and it fails if both are.

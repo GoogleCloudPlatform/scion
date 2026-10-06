@@ -343,9 +343,9 @@ func mapEmbedFileToHomePath(homeDir, configDir, fileName string) string {
 		return filepath.Join(homeDir, ".codex", "config.toml")
 	case "scion_notify.sh":
 		return filepath.Join(homeDir, ".codex", "scion_notify.sh")
-	case ".opencode.json":
+	case "opencode.json":
 		if configDir != "" {
-			return filepath.Join(homeDir, configDir, ".opencode.json")
+			return filepath.Join(homeDir, configDir, "opencode.json")
 		}
 		return ""
 	default:
@@ -367,6 +367,9 @@ func mapEmbedFileToHomePath(homeDir, configDir, fileName string) string {
 // match the manifest ContentHash recorded by the Hub's sync machinery; for
 // local-only or built-in seeded configs it provides a stable local
 // revision useful for audit.
+//
+// Backups and atomic-write temp files (see IsHarnessConfigTransientFile) are
+// not part of the config and do not count towards the revision.
 //
 // Returns "" when dirPath is empty or unreadable. Errors hashing individual
 // files are skipped so a transient FS error does not block agent creation;
@@ -390,10 +393,18 @@ func ComputeHarnessConfigRevision(dirPath string) string {
 		".gitkeep":        true,
 	}
 	walk := func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
+		if walkErr != nil {
 			return nil
 		}
-		if skipBasenames[d.Name()] {
+		if d.IsDir() {
+			// Prune transient directories like transfer.CollectFiles does,
+			// so sync and revision see the same file set.
+			if path != dirPath && IsHarnessConfigTransientFile(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if skipBasenames[d.Name()] || IsHarnessConfigTransientFile(d.Name()) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(dirPath, path)

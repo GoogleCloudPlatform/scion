@@ -107,14 +107,11 @@ func heldClaimError(row *ent.Agent) *store.ClaimHeldError {
 }
 
 // claimEligible reports whether row may take a claim apart from the
-// no-claim-held condition: not deleted, not being deleted, and no
-// reincarnation in flight.
+// no-claim-held condition and a delete holding the row (checked first, see
+// ClaimAgentStart): not deleted and no reincarnation in flight. A delete
+// whose lease expired (abandoned) does not hold the row.
 func claimEligible(row *ent.Agent) bool {
 	if row.DeletedAt != nil {
-		return false
-	}
-	switch row.DeletionState {
-	case store.DeletionStateDeleting, store.DeletionStateFinalizing:
 		return false
 	}
 	switch row.ReincarnationState {
@@ -178,8 +175,10 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 	}
 	var claim store.StartClaim
 	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
-		if row.DeletedAt != nil {
-			return false, store.ErrClaimPredicate
+		// A start on a row a delete holds, or a soft-deleted row, is
+		// refused exactly as the running-intent write refuses it.
+		if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, time.Now()) {
+			return false, store.ErrDeleteInProgress
 		}
 		if held := heldClaimError(row); held != nil {
 			return false, held
@@ -210,6 +209,7 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			SetStartClaimLaunchID("").
 			SetRunIntent(string(store.RunIntentRunning)).
 			SetRunIntentAt(intentAt).
+			SetRunIntentMarkedAt(intentAt).
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
@@ -400,6 +400,49 @@ func (s *AgentStore) DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, ex
 	return n, nil
 }
 
+// ConvertUnconfirmedToStop implements store.AgentStore.ConvertUnconfirmedToStop.
+func (s *AgentStore) ConvertUnconfirmedToStop(ctx context.Context, agentID, claimID, owner string, ttl time.Duration) (store.StartClaim, error) {
+	if ttl <= 0 || owner == "" {
+		return store.StartClaim{}, fmt.Errorf("%w: stop claim needs an owner and a positive lease", store.ErrInvalidInput)
+	}
+	var claim store.StartClaim
+	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
+		if !holdsClaim(row, claimID) || launchActive(row) ||
+			row.StartClaimState != string(store.StartClaimUnconfirmed) {
+			return false, store.ErrClaimPredicate
+		}
+		claim = store.StartClaim{
+			ID:         uuid.NewString(),
+			Kind:       store.StartClaimStop,
+			Owner:      owner,
+			Target:     row.StartClaimTarget,
+			At:         now,
+			LeaseUntil: now.Add(ttl),
+		}
+		if row.RunIntentAt != nil {
+			claim.RunIntentAt = *row.RunIntentAt
+		}
+		if _, err := claimUpdate(c, row).
+			SetStartClaimID(claim.ID).
+			SetStartClaimKind(string(store.StartClaimStop)).
+			SetStartClaimState(string(store.StartClaimLive)).
+			SetStartClaimOwner(owner).
+			SetStartClaimAt(claim.At).
+			SetStartClaimLeaseUntil(claim.LeaseUntil).
+			ClearStartClaimUnconfirmedAt().
+			ClearStartClaimHoldUntil().
+			SetStartClaimLaunchID("").
+			Save(ctx); err != nil {
+			return false, mapError(err)
+		}
+		return true, nil
+	})
+	if err != nil {
+		return store.StartClaim{}, err
+	}
+	return claim, nil
+}
+
 // ReleaseUnconfirmedStart implements store.AgentStore.ReleaseUnconfirmedStart.
 func (s *AgentStore) ReleaseUnconfirmedStart(ctx context.Context, agentID, claimID string) (bool, error) {
 	released := false
@@ -486,34 +529,43 @@ func (s *AgentStore) ListAgentsWithStartClaim(ctx context.Context) ([]*store.Age
 
 // ClaimAgentReincarnation implements store.AgentStore.ClaimAgentReincarnation.
 func (s *AgentStore) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
-	var newVersion int64
-	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
-		if row.StateVersion != expectedVersion {
-			return false, store.ErrVersionConflict
-		}
-		if held := heldClaimError(row); held != nil {
-			return false, held
-		}
-		switch row.ReincarnationState {
-		case store.ReincarnationStateNone, store.ReincarnationStateFailed:
-		default:
-			return false, store.ErrClaimPredicate
-		}
-		newVersion = row.StateVersion + 1
-		if _, err := claimUpdate(c, row).
-			SetReincarnationState(store.ReincarnationStatePending).
-			SetReincarnationUpdatedAt(at).
-			SetStateVersion(newVersion).
-			SetUpdated(now).
-			Save(ctx); err != nil {
-			return false, mapError(err)
-		}
-		return true, nil
-	})
+	uid, err := parseUUID(agentID)
 	if err != nil {
 		return 0, err
 	}
-	return newVersion, nil
+	// One conditional update, so the claim is atomic on its own and also
+	// inside a caller's transaction (it opens none of its own).
+	newVersion := expectedVersion + 1
+	n, err := s.client.Agent.Update().
+		Where(
+			agent.IDEQ(uid),
+			agent.StateVersionEQ(expectedVersion),
+			agent.StartClaimIDIsNil(),
+			agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
+		).
+		SetReincarnationState(store.ReincarnationStatePending).
+		SetReincarnationUpdatedAt(at).
+		SetStateVersion(newVersion).
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if n == 1 {
+		return newVersion, nil
+	}
+	row, err := s.client.Agent.Get(ctx, uid)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	switch {
+	case row.StateVersion != expectedVersion:
+		return 0, store.ErrVersionConflict
+	case heldClaimError(row) != nil:
+		return 0, heldClaimError(row)
+	default:
+		return 0, store.ErrClaimPredicate
+	}
 }
 
 // notFoundAsLost maps ErrNotFound to nil: for a holder or the reaper, a

@@ -167,7 +167,7 @@ func (s *capturingSigner) Sign(_ context.Context, req *http.Request, _ string) e
 func TestRecordedRuntime_ControlChannelSendsSignedParam(t *testing.T) {
 	calls := map[string]func(ctx context.Context, c *ControlChannelBrokerClient){
 		"stop": func(ctx context.Context, c *ControlChannelBrokerClient) {
-			_ = c.StopAgent(ctx, "b", "", "w", "p")
+			_ = c.StopAgent(ctx, "b", "", "w", "p", "")
 		},
 		"restart": func(ctx context.Context, c *ControlChannelBrokerClient) {
 			_, _ = c.RestartAgent(ctx, "b", "", "w", "p", nil, StartExtras{})
@@ -244,7 +244,7 @@ func TestRecordedRuntime_ControlChannelKeepsRetryAfter(t *testing.T) {
 	}
 	c := &ControlChannelBrokerClient{manager: tunnel}
 
-	err := c.StopAgent(context.Background(), "b", "", "w", "p")
+	err := c.StopAgent(context.Background(), "b", "", "w", "p", "")
 
 	var se *brokerStatusError
 	require.True(t, errors.As(err, &se), "error %v is not a brokerStatusError", err)

@@ -50,13 +50,18 @@ type SectionMetadata struct {
 }
 
 // ServerConfigDBResponse extends the file-mode response with metadata for the
-// postgres-mode GET endpoint. It embeds the original ServerConfigResponse and
-// adds section_metadata and env_overrides.
+// DB-backed GET endpoint (any driver). It embeds the original
+// ServerConfigResponse and adds section_metadata and env_overrides.
 type ServerConfigDBResponse struct {
 	ServerConfigResponse
 
 	// SectionMetadata maps section name to its provenance metadata.
 	SectionMeta map[string]SectionMetadata `json:"section_metadata,omitempty"`
+
+	// Layer0Editable is true on workstation hubs, where the PUT writes
+	// Layer-0, unclassified and file-only keys to settings.yaml; false on
+	// hosted hubs, where they are rejected (ptone/scion#1091 option C).
+	Layer0Editable bool `json:"layer0_editable"`
 
 	// SupersededKeys maps section name to bootstrap-material keys whose
 	// merged value differs from the DB value (managed sections only).
@@ -100,18 +105,45 @@ type ServerConfigUpdateDBRequest struct {
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
 }
 
-// handleGetServerConfigDB handles GET /api/v1/admin/server-config in postgres mode.
+// handleGetServerConfigDB handles GET /api/v1/admin/server-config
+// whenever OperationalSettings is wired (any DB driver).
 //
 // Layer-1 sections come from OperationalSettings.Snapshot(); Layer-0 comes from
 // the local GlobalConfig (settings.yaml). Section metadata shows provenance.
 func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
+	resp, err := s.buildServerConfigDBResponse(r.Context(), ops)
+	if err != nil {
+		var ue *serverConfigReadError
+		if errors.As(err, &ue) {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, ue.userMsg, nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// serverConfigReadError carries the client-facing message for a failure to
+// build the server-config GET view; the cause is logged where it happens.
+type serverConfigReadError struct {
+	userMsg string
+	err     error
+}
+
+func (e *serverConfigReadError) Error() string { return e.userMsg + ": " + e.err.Error() }
+func (e *serverConfigReadError) Unwrap() error { return e.err }
+
+// buildServerConfigDBResponse builds the GET /api/v1/admin/server-config body
+// (sensitive fields masked). The PUT handler also uses it as the reference
+// view for echo detection.
+func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *OperationalSettings) (*ServerConfigDBResponse, error) {
 	// Build the base response from the file (same as file mode) for Layer-0.
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		// N3: log the full error server-side for observability.
 		slog.Error("GET server-config: failed to resolve settings directory", "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
@@ -119,8 +151,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if err != nil && !os.IsNotExist(err) {
 		// N3: log the full error server-side for observability.
 		slog.Error("GET server-config: failed to read settings file", "path", settingsPath, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings file", nil)
-		return
+		return nil, &serverConfigReadError{"Failed to read settings file", err}
 	}
 
 	var vs config.VersionedSettings
@@ -128,8 +159,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if err := yamlv3.Unmarshal(data, &vs); err != nil {
 			// N3: log the full error server-side for observability.
 			slog.Error("GET server-config: failed to parse settings file", "path", settingsPath, "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse settings file", nil)
-			return
+			return nil, &serverConfigReadError{"Failed to parse settings file", err}
 		}
 	}
 
@@ -154,13 +184,17 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	resp.SettingsTier = "db"
+	resp.Layer0Editable = s.layer0Editable()
 
 	// Overlay Layer-1 fields from the operational settings snapshot.
 	snap := ops.Snapshot()
 	applySnapshotToResponse(&resp.ServerConfigResponse, snap)
+	// hub_name: the effective value (DB, else bootstrap), so a client that
+	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
+	resp.Server.Hub.HubName = effectiveHubName(ops)
 
 	// Build section metadata from the cache.
-	resp.SectionMeta = s.buildSectionMetadata(r.Context(), ops)
+	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
 
 	// Env overrides.
 	overrides := ops.EnvOverriddenKeys()
@@ -176,7 +210,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
 
-	writeJSON(w, http.StatusOK, resp)
+	return &resp, nil
 }
 
 // applySnapshotToResponse writes Layer-1 snapshot values into the
@@ -393,6 +427,11 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
 			dbVal, exists := dbMap[key]
+			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
+				// The DB row does not override this key; the bootstrap
+				// value stays in effect.
+				continue
+			}
 			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
 				koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key)
 				if koanfPath == "" {
@@ -414,6 +453,142 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		return nil
 	}
 	return result
+}
+
+// bootstrapAppliesWhenAbsent reports whether a section key keeps its
+// bootstrap value when a managed DB row omits it. That is the case for
+// endpoints hub_name: a managed endpoints row carries hub_name only after
+// an admin changes it, and Snapshot falls back to the bootstrap value.
+func bootstrapAppliesWhenAbsent(section, key string) bool {
+	return section == "endpoints" && key == "hub_name"
+}
+
+// effectiveHubName returns the configured hub_name: the DB value or, when
+// the endpoints row has none, the bootstrap value. "" means unset (each
+// replica then runs under its own startup default, which is deliberately
+// not returned: GET serves this value and clients echo it to any replica).
+// GET server-config returns this value.
+func effectiveHubName(ops *OperationalSettings) string {
+	return ops.Snapshot().HubName
+}
+
+// dropEchoedHubName removes server.hub.hub_name from keys when the request
+// sends the effective value back unchanged, and reports whether hub_name is
+// still a change to write. An echo is not written and not validated, so a
+// GET body echoed back never fails because of a bootstrap hub_name that
+// does not match the schema pattern.
+func dropEchoedHubName(keys []string, req *ServerConfigUpdateRequest, effective string) ([]string, bool) {
+	idx := -1
+	for i, k := range keys {
+		if k == "server.hub.hub_name" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return keys, false
+	}
+	sent := ""
+	if req.Server != nil && req.Server.Hub != nil {
+		sent = req.Server.Hub.HubName
+	}
+	if sent != effective {
+		return keys, true
+	}
+	if req.Server != nil && req.Server.Hub != nil {
+		req.Server.Hub.HubName = ""
+	}
+	return append(keys[:idx:idx], keys[idx+1:]...), false
+}
+
+// overlayEndpointsRequest applies the endpoints fields present in the
+// request onto d, presence-aware (N6):
+//   - public_url: non-empty sets it; an explicit "" clears it.
+//   - image_registry: set when present (an explicit "" clears it).
+//   - hub_name: set when hubNameChanged (see dropEchoedHubName, which drops
+//     an echo of the configured value); a change to "" clears it, so the
+//     bootstrap name, or with none each replica's startup default, applies.
+//
+// Omitted fields keep whatever d already holds.
+func overlayEndpointsRequest(d *opsettings.EndpointsSettings, req *ServerConfigUpdateRequest, fp *fieldPresence, hubNameChanged bool) {
+	hubFP := fp.nestedPresence("server").nestedPresence("hub")
+	if req.Server != nil && req.Server.Hub != nil {
+		if req.Server.Hub.PublicURL != "" {
+			d.PublicURL = req.Server.Hub.PublicURL
+		} else if hubFP.has("public_url") {
+			d.PublicURL = "" // explicitly cleared
+		}
+		if hubNameChanged {
+			d.HubName = req.Server.Hub.HubName
+		}
+	}
+	if req.ImageRegistry != nil {
+		d.ImageRegistry = *req.ImageRegistry
+	}
+}
+
+// buildEndpointsDocOnCurrent builds the endpoints section doc for a PUT on
+// top of the current row, so fields the request omits keep their value
+// (the same carry-forward as buildAccessDocOnCurrent, with the same env
+// guard for a non-managed base).
+//
+// hub_name is carried forward only from a managed row: a seeded row holds
+// the bootstrap hub_name, which applies without being written (Snapshot
+// falls back to it), and may not match the schema pattern. With no row,
+// the base is the effective public_url and image_registry.
+//
+// It returns the revision the base was read at (0 when no row exists) for
+// use as the CAS expected revision.
+func buildEndpointsDocOnCurrent(ctx context.Context, ops *OperationalSettings, req *ServerConfigUpdateRequest, rawBody []byte, hubNameChanged bool) (json.RawMessage, int64, error) {
+	fp, err := parseFieldPresence(rawBody)
+	if err != nil {
+		fp = nil // omitted-semantics; the typed decode already succeeded
+	}
+
+	base := &opsettings.EndpointsSettings{}
+	var baseRev int64
+	row, err := ops.store.GetHubSetting(ctx, "endpoints")
+	switch {
+	case err == nil:
+		if len(row.Value) > 0 {
+			if err := json.Unmarshal(row.Value, base); err != nil {
+				return nil, 0, fmt.Errorf("decoding current endpoints row: %w", err)
+			}
+		}
+		baseRev = row.Revision
+		if row.Origin != "managed" {
+			base.HubName = ""
+			dropEnvOverriddenEndpointsFields(base, ops.EnvOverriddenKeys())
+		}
+	case errors.Is(err, store.ErrNotFound):
+		snap := ops.Snapshot()
+		base.PublicURL = snap.PublicURL
+		base.ImageRegistry = snap.ImageRegistry
+		dropEnvOverriddenEndpointsFields(base, ops.EnvOverriddenKeys())
+	default:
+		return nil, 0, fmt.Errorf("reading current endpoints row: %w", err)
+	}
+
+	overlayEndpointsRequest(base, req, fp, hubNameChanged)
+	doc, err := json.Marshal(base)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshalling endpoints doc: %w", err)
+	}
+	return doc, baseRev, nil
+}
+
+// dropEnvOverriddenEndpointsFields clears endpoints fields overridden by a
+// node-local env var, so an env-derived value in a non-managed base is not
+// carried into the shared row (see buildAccessDocOnCurrent).
+func dropEnvOverriddenEndpointsFields(base *opsettings.EndpointsSettings, envKeys []string) {
+	for _, k := range envKeys {
+		switch k {
+		case "server.hub.public_url":
+			base.PublicURL = ""
+		case "image_registry":
+			base.ImageRegistry = ""
+		}
+	}
 }
 
 // detectKeySource determines which bootstrap layer provides a given section key.
@@ -464,7 +639,8 @@ func (s *Server) computeDeprecatedEnvKeys(ops *OperationalSettings) []Deprecated
 	return result
 }
 
-// handlePutServerConfigDB handles PUT /api/v1/admin/server-config in postgres mode.
+// handlePutServerConfigDB handles PUT /api/v1/admin/server-config
+// whenever OperationalSettings is wired (any DB driver).
 //
 // It partitions incoming fields via the opsettings registry:
 //   - Layer-1 fields → per-section docs → validate → OperationalSettings.Update
@@ -476,7 +652,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// then decode into the typed struct. This lets us distinguish
 	// OMITTED fields (keep current value) from EXPLICITLY-SENT empty
 	// values ("", [], null) which CLEAR the field in the section doc.
-	// File-mode behavior is untouched — this is postgres-path only.
 	rawBody, err := readRawBody(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -485,6 +660,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	if isEmptySettingsBody(rawBody) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "No settings provided", nil)
 		return
 	}
 	// The typed decode above silently drops a removed profiles.<name>.timezone
@@ -509,9 +688,62 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// clearing) by walking the raw request body.
 	koanfKeys := extractKoanfKeysFromRequest(&req.ServerConfigUpdateRequest)
 	koanfKeys = appendPresenceAwareKeys(koanfKeys, rawBody)
+	// A client that echoes the GET body sends hub_name back unchanged; that
+	// must neither write nor be validated (ptone/scion#2073).
+	koanfKeys, hubNameChanged := dropEchoedHubName(koanfKeys, &req.ServerConfigUpdateRequest, effectiveHubName(ops))
 
 	// Classify keys.
 	layer1BySec, layer0Keys, unclassifiedKeys := opsettings.ClassifyKeys(koanfKeys)
+
+	// Option C (ptone/scion#1091): a workstation hub writes Layer-0 and
+	// unclassified keys to settings.yaml instead of rejecting them; see
+	// admin_settings_workstation.go for the split and its failure semantics.
+	//
+	// The file-routed leaves come from raw-body presence, not from the
+	// non-zero typed values koanfKeys is built from, so an explicit false,
+	// "" or [] clears a value instead of being dropped.
+	workstation := s.layer0Editable()
+	var fileLeaves []bodyLeaf
+	if workstation {
+		fileLeaves = workstationFileLeaves(rawBody)
+		layer0Keys, unclassifiedKeys = nil, nil
+	}
+	fileKeys := leafKeys(fileLeaves)
+
+	// Hosted: the Layer-0 check also works on body presence, so an explicit
+	// zero (dev_mode:false over a stored true) is rejected instead of being
+	// dropped by the non-zero koanf-key extraction, and an unchanged echo of
+	// the GET view, zero-valued blocks included, is ignored.
+	// Unclassified leaves (schema_version, active_profile, workspace_path)
+	// follow the same echo rule, so a GET -> PUT round trip is a 200.
+	if !workstation {
+		l0, u, err := s.hostedBootstrapChanges(r.Context(), ops, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for Layer-0 check", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		layer0Keys, unclassifiedKeys = l0, u
+	}
+
+	// Workstation: server.broker.broker_id / broker_token are written by the
+	// hub itself (broker registration); the PUT may only echo them.
+	if workstation {
+		owned, err := s.hubOwnedBrokerChanges(r.Context(), ops, fileLeaves)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for broker identity check", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		if len(owned) > 0 {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"error":   "hub_owned_keys_rejected",
+				"message": "The broker ID and token are written by the hub itself and cannot be changed through the server config API.",
+				"keys":    owned,
+			})
+			return
+		}
+	}
 
 	// Reject if any Layer-0 keys are present — 422 before any write.
 	if len(layer0Keys) > 0 {
@@ -544,6 +776,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Keys that never became a koanf key (unknown to the request type, or
+	// mapped nowhere) would otherwise be dropped while the PUT reports
+	// "saved". Reject them unless they echo the GET view.
+	if _, done := s.rejectUnpersistedKeys(r.Context(), w, ops, rawBody, workstation); done {
+		return
+	}
+
 	// GET masks secrets and clients send the GET body back on save: restore
 	// every still-masked field from the stored config (the same view GET
 	// masked) before any section document is built. This runs after the 422
@@ -553,6 +792,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (the github_app section has no secret fields), so for them this check
 	// only validates the request; their handling is tracked in
 	// ptone/scion#2938.
+	// An unchanged masked Layer-0 secret is dropped first (see
+	// maskedLayer0Echoes), so a lone placeholder echo is not rejected for
+	// siblings the body leaves out.
+	if req.Server != nil {
+		echoes, err := s.maskedLayer0Echoes(r.Context(), ops, rawBody)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build GET view for masked echoes", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		root := reflect.ValueOf(&req).Elem()
+		for _, l := range echoes {
+			if fv, ok := fieldByIndexPath(root, l.index); ok && fv.Kind() == reflect.String && fv.CanSet() {
+				fv.SetString("")
+			}
+		}
+		fileLeaves = dropLeaves(fileLeaves, echoes)
+		fileKeys = leafKeys(fileLeaves)
+	}
 	if req.Server != nil {
 		stored, err := storedServerConfigDB(ops)
 		if err != nil {
@@ -592,10 +850,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		accessBaseRev = rev
 	}
 
-	// Lifecycle section: keep the start-claim keys a PUT leaves out (the
-	// admin form has no fields for them), and validate them.
+	// Endpoints section: like access, carry omitted fields forward from the
+	// current row so a PUT changes only the fields it carries.
+	endpointsBaseRev := int64(-1)
+	if _, ok := sectionDocs["endpoints"]; ok {
+		doc, rev, err := buildEndpointsDocOnCurrent(r.Context(), ops, &req.ServerConfigUpdateRequest, rawBody, hubNameChanged)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build endpoints document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["endpoints"] = doc
+		endpointsBaseRev = rev
+	}
+
+	// Lifecycle section: like access, carry omitted keys forward from the
+	// current row (ptone/scion#3464), and validate the start-claim keys.
+	lifecycleBaseRev := int64(-1)
 	if doc, ok := sectionDocs["lifecycle"]; ok {
-		merged, err := carryForwardStartClaimSettings(r.Context(), ops, doc)
+		merged, rev, err := carryForwardLifecycleSettings(r.Context(), ops, doc, rawBody)
 		if err != nil {
 			slog.Error("PUT server-config: failed to build lifecycle document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
@@ -609,6 +882,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		sectionDocs["lifecycle"] = merged
+		lifecycleBaseRev = rev
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -739,6 +1013,55 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Workstation: validate and prepare the settings.yaml part before any DB
+	// write, so a bad file-routed value or a file that cannot be edited
+	// writes nothing. The settings-file lock is held from here to the
+	// commit below (see admin_settings_workstation.go for the lock order).
+	var fileTxn *settingsFileTxn
+	if len(fileLeaves) > 0 {
+		if err := validateServerConfigFileKeys(&req.ServerConfigUpdateRequest, fileKeys, ops); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+		fileTxn, err = prepareSettingsFileTxn(s.config.ConfigPath, func(gc *config.GlobalConfig, typed *config.VersionedSettings) []config.SettingsPathEdit {
+			return workstationFileEdits(&req, fileLeaves, gc, typed)
+		})
+		if err != nil {
+			slog.Error("PUT server-config: failed to prepare settings.yaml edit", "error", err)
+			if errors.Is(err, errLegacyServerYAML) {
+				writeError(w, http.StatusConflict, "legacy_server_yaml",
+					"The server configuration is still read from the deprecated server.yaml. Move its contents under a top-level `server:` key in settings.yaml (see the Server Configuration reference, docs/reference/server-config), remove server.yaml, then save again.", nil)
+				return
+			}
+			if errors.Is(err, config.ErrSettingsPathEditUnsupported) {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+					"settings.yaml cannot be edited in place (it uses YAML anchors/aliases or is JSON); edit the file by hand", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+		defer fileTxn.abort() // no-op after commit
+		// A sent value the staged file does not carry (so it would not take
+		// effect) is rejected rather than reported as saved.
+		bad, err := unreflectedFileLeaves(&req, fileLeaves, fileTxn.staged.Result())
+		if err != nil {
+			fileTxn.abort()
+			slog.Error("PUT server-config: failed to check staged settings", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
+			return
+		}
+		if len(bad) > 0 {
+			fileTxn.abort()
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"error":   "unsaved_keys_rejected",
+				"message": "These settings would not take effect as sent; nothing was saved.",
+				"keys":    bad,
+			})
+			return
+		}
+	}
+
 	// Write sections in sorted order for deterministic partial-apply and CAS
 	// behavior: if a conflict occurs partway, exactly the alphabetically-first
 	// sections are applied, giving clients predictable retry semantics.
@@ -758,6 +1081,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = rev
 		} else if secName == "access" && accessBaseRev >= 0 {
 			expectedRev = accessBaseRev
+		} else if secName == "endpoints" && endpointsBaseRev >= 0 {
+			expectedRev = endpointsBaseRev
+		} else if secName == "lifecycle" && lifecycleBaseRev >= 0 {
+			expectedRev = lifecycleBaseRev
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
@@ -774,6 +1101,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				break
 			}
 			slog.Error("Failed to update section", "section", secName, "error", err)
+			fileTxn.abort()
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				fmt.Sprintf("Failed to update section %q", secName), nil)
 			return
@@ -782,6 +1110,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 
 	if len(conflicted) > 0 {
+		fileTxn.abort()
 		writeJSON(w, http.StatusConflict, map[string]interface{}{
 			"error":      "revision_conflict",
 			"message":    "One or more sections have been modified since the expected revision.",
@@ -791,19 +1120,44 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	slog.Info("Server config updated via admin API (postgres mode)",
+	slog.Info("Server config updated via admin API (DB-backed)",
 		"user", updatedBy,
 		"sections", mapKeys(applied),
 	)
 
 	appliedKeys := mapKeys(applied)
+	requiresRestart := []string{}
+
+	var fileChanged []string
+	if fileTxn != nil {
+		changed, err := fileTxn.commit()
+		if err != nil {
+			slog.Error("PUT server-config: failed to write settings.yaml after DB sections were written",
+				"error", err, "applied", appliedKeys)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Database settings were saved but settings.yaml could not be written",
+				map[string]interface{}{"applied": applied})
+			return
+		}
+		fileChanged = changed
+		if len(fileChanged) > 0 {
+			slog.Info("Server config written to settings.yaml via admin API (workstation)",
+				"user", updatedBy, "keys", fileChanged)
+		}
+		live, restart := s.applyServerConfigFileSideEffects(fileChanged)
+		appliedKeys = append(appliedKeys, live...)
+		requiresRestart = restart
+	}
 
 	resp := map[string]interface{}{
 		"status": "saved",
 		"reload": map[string]interface{}{
 			"applied":          appliedKeys,
-			"requires_restart": []string{},
+			"requires_restart": requiresRestart,
 		},
+	}
+	if len(fileChanged) > 0 {
+		resp["file_keys"] = fileChanged
 	}
 	if len(saveWarnings) > 0 {
 		resp["warnings"] = saveWarnings
@@ -862,7 +1216,7 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 		return false
 	}
 
-	if !sa.Verified {
+	if !gcpServiceAccountVerified(sa) {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 			"GCP service account is not verified; verify it before setting it as the hub default", nil)
 		return false
@@ -1034,6 +1388,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.PublicURL != "" {
 				keys = append(keys, "server.hub.public_url")
 			}
+			if hub.HubName != "" {
+				keys = append(keys, "server.hub.hub_name")
+			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
 			}
@@ -1200,7 +1557,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 //
 // Only the clearable Layer-1 fields are checked here:
 // admin_emails, user_access_mode, default_user_role, notification_channels,
-// public_url, runtimes, profiles, harness_configs.
+// public_url, the four lifecycle keys (auto_suspend_stalled,
+// stalled_threshold, soft_delete_retention, soft_delete_retain_files),
+// runtimes, profiles, harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -1242,6 +1601,19 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	// public_url: present in hub but empty → add the key.
 	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
 		keys = append(keys, "server.hub.public_url")
+	}
+	// Lifecycle keys: present in hub but empty or null → add the key, so a
+	// lone explicit clear builds the lifecycle doc and clears the key
+	// instead of being carried forward (ptone/scion#3464).
+	for _, k := range []string{"auto_suspend_stalled", "stalled_threshold", "soft_delete_retention", "soft_delete_retain_files"} {
+		if !keySet["server.hub."+k] && hubFP.has(k) {
+			keys = append(keys, "server.hub."+k)
+		}
+	}
+	// hub_name: present in hub but empty → add the key (clears a managed
+	// hub_name; handlePutServerConfigDB drops it when it is an echo).
+	if !keySet["server.hub.hub_name"] && hubFP.has("hub_name") {
+		keys = append(keys, "server.hub.hub_name")
 	}
 
 	// Map-of-objects sections: present as null or {} → add the key to clear.
@@ -1326,7 +1698,7 @@ func overlayAccessRequest(d *opsettings.AccessSettings, req *ServerConfigUpdateR
 	}
 }
 
-// buildAccessDocOnCurrent builds the access section doc for a Postgres-mode
+// buildAccessDocOnCurrent builds the access section doc for a DB-backed
 // PUT with carry-forward semantics (design §5.A item 3a): fields omitted from
 // the request keep their current value instead of being wiped by the
 // full-row replace in UpsertHubSetting.
@@ -1411,27 +1783,29 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 // buildSingleSectionDoc extracts the fields for a single section from the
 // update request and marshals them into a section document.
 //
-// N6/N7 presence-aware clearing (postgres-path only):
+// N6/N7 presence-aware clearing (DB-backed path only):
 //
 // The fp (fieldPresence) parameter carries the raw JSON structure so we can
 // distinguish OMITTED fields from EXPLICITLY-SENT empty values:
 //   - OMITTED → field not in raw JSON → do NOT include in section doc.
 //     The write replaces the whole row, so for most sections an omitted
-//     field is dropped from the DB. The access section is the exception:
-//     handlePutServerConfigDB rebuilds it on the current row
-//     (buildAccessDocOnCurrent), so omitted access fields are kept.
+//     field is dropped from the DB. The access, endpoints and lifecycle
+//     sections are the exception: handlePutServerConfigDB rebuilds them on
+//     the current row (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
+//     carryForwardLifecycleSettings), so their omitted fields are kept.
 //   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
 //     zero value in the section doc, which CLEARS it in the DB
 //
 // This applies to: admin_emails, user_access_mode, default_user_role,
-// notification_channels, public_url. File-mode behavior is untouched.
+// notification_channels, public_url. The file-mode handler (hub without
+// OperationalSettings) does not use this.
 func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *fieldPresence) (json.RawMessage, error) {
 	var doc interface{}
 
-	// N6/N7: Derive nested presence maps for the server and hub sub-objects.
-	// (The access section's auth presence is handled in overlayAccessRequest.)
+	// N6/N7: Derive the nested presence map for the server sub-object.
+	// (Access and endpoints presence is handled in overlayAccessRequest and
+	// overlayEndpointsRequest.)
 	serverFP := fp.nestedPresence("server")
-	hubFP := serverFP.nestedPresence("hub")
 
 	switch secName {
 	case "access":
@@ -1512,18 +1886,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		doc = d
 
 	case "endpoints":
+		// Standalone callers get replace semantics: exactly the request's
+		// endpoints fields. handlePutServerConfigDB rebuilds the doc on the
+		// current row (buildEndpointsDocOnCurrent) after dropping an echoed
+		// hub_name, so here any hub_name the request still carries counts
+		// as a change.
 		d := &opsettings.EndpointsSettings{}
-		if req.Server != nil && req.Server.Hub != nil {
-			// N6: presence-aware — explicit empty "" clears public_url.
-			if req.Server.Hub.PublicURL != "" {
-				d.PublicURL = req.Server.Hub.PublicURL
-			} else if hubFP.has("public_url") {
-				d.PublicURL = "" // explicitly cleared
-			}
-		}
-		if req.ImageRegistry != nil {
-			d.ImageRegistry = *req.ImageRegistry
-		}
+		overlayEndpointsRequest(d, req, fp, true)
 		doc = d
 
 	case "github_app":
@@ -1666,17 +2035,56 @@ func mapKeys(m map[string]int64) []string {
 	return keys
 }
 
-// handleGetMaintenanceDB handles GET /api/v1/admin/maintenance in postgres mode.
-// Reads maintenance state from the operational settings snapshot.
+// handleGetMaintenanceDB handles GET /api/v1/admin/maintenance
+// whenever OperationalSettings is wired (any DB driver).
+// Reports the maintenance row when one exists, else the live state.
 func (s *Server) handleGetMaintenanceDB(w http.ResponseWriter, ops *OperationalSettings) {
-	snap := ops.Snapshot()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"enabled": snap.AdminMode,
-		"message": maintenanceMessageOrDefault(snap.MaintenanceMessage),
-	})
+	enabled, message := s.maintenanceReported(ops)
+	resp := map[string]interface{}{
+		"enabled": enabled,
+		"message": maintenanceMessageOrDefault(message),
+	}
+	// break_glass: a workstation hub started in admin mode stays in
+	// maintenance whatever the DB row says.
+	if s.maintenanceBreakGlass() {
+		resp["break_glass"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
-// handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance in postgres mode.
+// maintenanceBaseline returns the maintenance state the DB-backed handlers
+// report and build a partial PUT on. With a maintenance row that is the row
+// (ApplyMaintenanceFromSnapshot has made it the live state too). With no row
+// (the section is never seeded) the live MaintenanceState is authoritative:
+// it was set at startup from SCION_SERVER_ADMIN_MODE or settings.yaml, and
+// the empty snapshot would wrongly report, and a message-only PUT would
+// wrongly write, admin_mode=false.
+//
+// The PUT baseline is the row even during a workstation break-glass, so a
+// message-only PUT does not copy the forced admin_mode=true into the row
+// (which would keep the hub in maintenance after a restart without the
+// break-glass). With no row, a message-only PUT does persist the live
+// admin_mode (documented in admin-settings.md).
+func (s *Server) maintenanceBaseline(ops *OperationalSettings) (enabled bool, message string) {
+	snap := ops.Snapshot()
+	if s.maintenance != nil && !snap.HasMaintenanceRow {
+		return s.maintenance.State()
+	}
+	return snap.AdminMode, snap.MaintenanceMessage
+}
+
+// maintenanceReported is the state GET reports: the live state during a
+// workstation break-glass (the hub is in maintenance whatever the row says),
+// else the PUT baseline.
+func (s *Server) maintenanceReported(ops *OperationalSettings) (enabled bool, message string) {
+	if s.maintenance != nil && s.maintenanceBreakGlass() {
+		return s.maintenance.State()
+	}
+	return s.maintenanceBaseline(ops)
+}
+
+// handlePutMaintenanceDB handles PUT /api/v1/admin/maintenance
+// whenever OperationalSettings is wired (any DB driver).
 // Writes the maintenance section via OperationalSettings.Update (durable +
 // propagated), then applies locally via ApplyMaintenanceFromSnapshot.
 func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, ops *OperationalSettings) {
@@ -1701,12 +2109,13 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 		updatedBy = caller.Email()
 	}
 
-	// Build the maintenance section doc. Start from the current snapshot values
-	// to preserve fields not being updated (partial update semantics).
-	snap := ops.Snapshot()
+	// Build the maintenance section doc. Start from the current state (the
+	// row, else the live state) to preserve fields not being updated
+	// (partial update semantics).
+	baseEnabled, baseMessage := s.maintenanceBaseline(ops)
 	ms := opsettings.MaintenanceSettings{
-		AdminMode:          snap.AdminMode,
-		MaintenanceMessage: snap.MaintenanceMessage,
+		AdminMode:          baseEnabled,
+		MaintenanceMessage: baseMessage,
 	}
 	if body.Enabled != nil {
 		ms.AdminMode = *body.Enabled
@@ -1742,11 +2151,16 @@ func (s *Server) handlePutMaintenanceDB(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// The Update call already self-applies via ApplySnapshot + ApplyMaintenanceFromSnapshot,
-	// but read the final state from the server's MaintenanceState to reflect env overrides.
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	// but read the final state from the server's MaintenanceState to reflect
+	// a workstation break-glass.
+	resp := map[string]interface{}{
 		"enabled": s.maintenance.IsEnabled(),
 		"message": s.maintenance.Message(),
-	})
+	}
+	if s.maintenanceBreakGlass() {
+		resp["break_glass"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleAdminServerConfigSchema handles GET /api/v1/admin/server-config/schema.
@@ -1793,7 +2207,7 @@ func readRawBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 //   - EXPLICITLY-SENT empty ("", [], null) → in the returned set → CLEAR the field
 //   - EXPLICITLY-SENT non-empty → in the returned set → normal update
 //
-// File-mode behavior is untouched — this is postgres-path only.
+// Used by the DB-backed handlers only; the file-mode handler does not use it.
 type fieldPresence struct {
 	raw map[string]json.RawMessage
 }

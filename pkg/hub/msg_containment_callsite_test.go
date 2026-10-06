@@ -89,13 +89,6 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "processMentions", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_agent_messaging.go:1852"},
 
-	// wake_dm.go: wakeAgentForDM — shared wake helper (#1691). Called from
-	// ExecuteAgentDM after all admission checks pass (rate limit, message
-	// length, authorization, attachment rejection). Also called inline from
-	// handleAgentMessage for user→agent messages (guarded by calling routers).
-	{file: "wake_dm.go", function: "wakeAgentForDM", symbol: "DispatchAgentStart",
-		class: "guarded", reason: "called after admission checks in ExecuteAgentDM (#1691 AC-2); or guarded by calling routers for user→agent"},
-
 	// handlers_broker_inbound.go: guarded at :164 (authorizeAgentMessage).
 	{file: "handlers_broker_inbound.go", function: "handleBrokerInbound", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_broker_inbound.go:164"},
@@ -155,14 +148,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "reconcile.go", function: "execDispatchCreate", symbol: "DispatchAgentCreateWithGather",
 		class: "exempt", reason: "durable-intent replay of previously authorized dispatch"},
 
-	// handlers_agent_create_helpers.go: DispatchAgentStart calls in
-	// handleExistingAgent (multiple start calls for existing agent reuse).
-	{file: "handlers_agent_create_helpers.go", function: "handleExistingAgent", symbol: "DispatchAgentStart",
-		class: "guarded", reason: "called after authorization in the agent-create flow"},
-
-	// handlers_agent_lifecycle.go: DispatchAgentStart in handleAgentLifecycle.
-	{file: "handlers_agent_lifecycle.go", function: "handleAgentLifecycle", symbol: "DispatchAgentStart",
-		class: "guarded", reason: "authorizeAgentLifecycle at handlers_agent_lifecycle.go"},
+	// start_claim.go: startAgentCore — the shared start path that runs a
+	// start under its start claim. Its callers authorize before calling it:
+	// handleAgentLifecycle and handleExistingAgent (guarded by their routers'
+	// authz), and wakeAgentForDM (called after admission checks in
+	// ExecuteAgentDM, #1691 AC-2, or guarded by the calling routers for
+	// user→agent).
+	{file: "start_claim.go", function: "startAgentCore", symbol: "DispatchAgentStart",
+		class: "guarded", reason: "every caller authorizes before calling: lifecycle and create-on-existing routers' authz; wake after DM admission checks"},
 
 	// reincarnate_worker.go: DispatchAgentStart in runReincarnationWorker —
 	// the detached background worker for `scion reincarnate` (design §3.1).

@@ -73,6 +73,8 @@ type Agent struct {
 	Runtime string `json:"runtime,omitempty"`
 	// RuntimeBrokerID holds the value of the "runtime_broker_id" field.
 	RuntimeBrokerID string `json:"runtime_broker_id,omitempty"`
+	// WorkspacePlacement holds the value of the "workspace_placement" field.
+	WorkspacePlacement string `json:"workspace_placement,omitempty"`
 	// WebPtyEnabled holds the value of the "web_pty_enabled" field.
 	WebPtyEnabled bool `json:"web_pty_enabled,omitempty"`
 	// ExposedPorts holds the value of the "exposed_ports" field.
@@ -113,6 +115,8 @@ type Agent struct {
 	LaunchID string `json:"launch_id,omitempty"`
 	// RunID holds the value of the "run_id" field.
 	RunID string `json:"run_id,omitempty"`
+	// PreviousRunIds holds the value of the "previous_run_ids" field.
+	PreviousRunIds []string `json:"previous_run_ids,omitempty"`
 	// LaunchState holds the value of the "launch_state" field.
 	LaunchState string `json:"launch_state,omitempty"`
 	// LaunchEndReason holds the value of the "launch_end_reason" field.
@@ -153,6 +157,8 @@ type Agent struct {
 	RunIntent *string `json:"run_intent,omitempty"`
 	// RunIntentAt holds the value of the "run_intent_at" field.
 	RunIntentAt *time.Time `json:"run_intent_at,omitempty"`
+	// RunIntentMarkedAt holds the value of the "run_intent_marked_at" field.
+	RunIntentMarkedAt *time.Time `json:"run_intent_marked_at,omitempty"`
 	// StartClaimID holds the value of the "start_claim_id" field.
 	StartClaimID *string `json:"start_claim_id,omitempty"`
 	// StartClaimKind holds the value of the "start_claim_kind" field.
@@ -173,6 +179,8 @@ type Agent struct {
 	StartClaimHoldUntil *time.Time `json:"start_claim_hold_until,omitempty"`
 	// StartClaimLaunchID holds the value of the "start_claim_launch_id" field.
 	StartClaimLaunchID string `json:"start_claim_launch_id,omitempty"`
+	// SoftDeleteOpID holds the value of the "soft_delete_op_id" field.
+	SoftDeleteOpID *string `json:"soft_delete_op_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AgentQuery when eager-loading is set.
 	Edges        AgentEdges `json:"edges"`
@@ -228,15 +236,15 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case agent.FieldCreatedBy, agent.FieldOwnerID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry:
+		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry, agent.FieldPreviousRunIds:
 			values[i] = new([]byte)
 		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldLaunchAsyncOptIn:
 			values[i] = new(sql.NullBool)
 		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq, agent.FieldDeletionClaim:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldWorkspacePlacement, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID, agent.FieldSoftDeleteOpID:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil:
+		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldRunIntentMarkedAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -424,6 +432,12 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.RuntimeBrokerID = value.String
 			}
+		case agent.FieldWorkspacePlacement:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field workspace_placement", values[i])
+			} else if value.Valid {
+				_m.WorkspacePlacement = value.String
+			}
 		case agent.FieldWebPtyEnabled:
 			if value, ok := values[i].(*sql.NullBool); !ok {
 				return fmt.Errorf("unexpected type %T for field web_pty_enabled", values[i])
@@ -553,6 +567,14 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.RunID = value.String
 			}
+		case agent.FieldPreviousRunIds:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field previous_run_ids", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.PreviousRunIds); err != nil {
+					return fmt.Errorf("unmarshal field previous_run_ids: %w", err)
+				}
+			}
 		case agent.FieldLaunchState:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field launch_state", values[i])
@@ -680,6 +702,13 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				_m.RunIntentAt = new(time.Time)
 				*_m.RunIntentAt = value.Time
 			}
+		case agent.FieldRunIntentMarkedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field run_intent_marked_at", values[i])
+			} else if value.Valid {
+				_m.RunIntentMarkedAt = new(time.Time)
+				*_m.RunIntentMarkedAt = value.Time
+			}
 		case agent.FieldStartClaimID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field start_claim_id", values[i])
@@ -744,6 +773,13 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field start_claim_launch_id", values[i])
 			} else if value.Valid {
 				_m.StartClaimLaunchID = value.String
+			}
+		case agent.FieldSoftDeleteOpID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field soft_delete_op_id", values[i])
+			} else if value.Valid {
+				_m.SoftDeleteOpID = new(string)
+				*_m.SoftDeleteOpID = value.String
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -880,6 +916,9 @@ func (_m *Agent) String() string {
 	builder.WriteString("runtime_broker_id=")
 	builder.WriteString(_m.RuntimeBrokerID)
 	builder.WriteString(", ")
+	builder.WriteString("workspace_placement=")
+	builder.WriteString(_m.WorkspacePlacement)
+	builder.WriteString(", ")
 	builder.WriteString("web_pty_enabled=")
 	builder.WriteString(fmt.Sprintf("%v", _m.WebPtyEnabled))
 	builder.WriteString(", ")
@@ -949,6 +988,9 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("run_id=")
 	builder.WriteString(_m.RunID)
+	builder.WriteString(", ")
+	builder.WriteString("previous_run_ids=")
+	builder.WriteString(fmt.Sprintf("%v", _m.PreviousRunIds))
 	builder.WriteString(", ")
 	builder.WriteString("launch_state=")
 	builder.WriteString(_m.LaunchState)
@@ -1024,6 +1066,11 @@ func (_m *Agent) String() string {
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")
+	if v := _m.RunIntentMarkedAt; v != nil {
+		builder.WriteString("run_intent_marked_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
 	if v := _m.StartClaimID; v != nil {
 		builder.WriteString("start_claim_id=")
 		builder.WriteString(*v)
@@ -1063,6 +1110,11 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("start_claim_launch_id=")
 	builder.WriteString(_m.StartClaimLaunchID)
+	builder.WriteString(", ")
+	if v := _m.SoftDeleteOpID; v != nil {
+		builder.WriteString("soft_delete_op_id=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

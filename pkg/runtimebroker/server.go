@@ -35,6 +35,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -54,6 +55,10 @@ import (
 
 // ServerConfig holds configuration for the Runtime Broker API server.
 type ServerConfig struct {
+	// DeleteClock, for tests only, replaces time.Now as the clock the delete
+	// notAfter check reads (see delete_not_after.go). nil means time.Now.
+	DeleteClock func() time.Time
+
 	// Port is the HTTP port to listen on.
 	Port int
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
@@ -140,7 +145,8 @@ type ServerConfig struct {
 
 	// Workspace sync settings
 	// StorageBucket is the GCS bucket name for workspace storage.
-	// Used when workspace sync requests don't specify a bucket.
+	// Used when workspace sync requests, or a create request carrying a
+	// workspace upload, don't specify a bucket.
 	StorageBucket string
 	// WorktreeBase is the base directory for agent worktrees.
 	// Used as a fallback when resolving workspace paths.
@@ -174,6 +180,12 @@ type ServerConfig struct {
 	// NFSConfig's first share, as the broker's workspace storage descriptor
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
+
+	// DefaultProfile is the broker's default (active) profile name from its
+	// settings (active_profile), reported to the hub on every heartbeat. A
+	// pointer to "" reports that the settings name no active profile; nil
+	// (settings failed to load) omits it, so the hub keeps its value.
+	DefaultProfile *string
 
 	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
 	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
@@ -252,6 +264,10 @@ type Server struct {
 	// launches (design t1-async-create-v11.md §3.8.1, §7 P1b-1). It is an
 	// optimisation only -- correctness comes from the Hub's answers.
 	launchRegistry *launchRegistry
+	// startsInFlight tracks the starts running on the start, restart and
+	// synchronous create handlers (start_tracker.go). The heartbeat reports
+	// them, stop waits for its agent's, and Shutdown waits for all.
+	startsInFlight *startTracker
 	// launchInstanceID identifies this broker process as a launch owner
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
@@ -284,6 +300,19 @@ type Server struct {
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
 
+	// loadSettings, when non-nil, replaces config.LoadEffectiveSettings in
+	// resolveManagerForOptsStrict (handlers.go). nil, the default, uses the
+	// real loader; tests set it per fixture to exercise each settings
+	// outcome.
+	loadSettings func(projectDir string) (*config.VersionedSettings, []string, error)
+
+	// agentOwnRuntimes memoises the runtime an existing agent's saved
+	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
+	// and profile; agentOwnRuntimeGroup collapses concurrent resolutions of
+	// one key into a single call. Failed resolutions are not stored.
+	agentOwnRuntimes     sync.Map
+	agentOwnRuntimeGroup singleflight.Group
+
 	// projectProvisionMu serializes worktree provisioning per project on this
 	// node. Without this, concurrent agent creations for the same project could
 	// race inside ProvisionShared (double-clone / corrupt .git state).
@@ -292,6 +321,9 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// exportIDs reads (or creates) the export identity marker reported in
+	// the workspace storage descriptor.
+	exportIDs exportIDProbe
 	// NFS reconcile loop state (all unused when nfsMountReconciler is nil).
 	// nfsStartupReconcileDone is closed once the loop's first pass has
 	// finished; nfsReconcileStopped is closed when the loop exits.
@@ -359,6 +391,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts).
 		resolveAuxiliaryRuntime: agent.ResolveRuntime,
 		launchRegistry:          newLaunchRegistry(),
+		startsInFlight:          newStartTracker(),
 		launchInstanceID:        uuid.NewString(),
 
 		// Subsystem loggers
@@ -1165,6 +1198,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		nfsCancel()
 	}
 
+	// Cancel every start still running on a start, restart or create
+	// handler and wait for Run's deferred cleanup, before the hub
+	// connections and the HTTP server drain, so no start outlives the
+	// starts this process last reported in flight.
+	// One deadline covers both this wait and the HTTP drain below.
+	ctx, cancel := context.WithTimeout(ctx, shutdownDeadline)
+	defer cancel()
+	if !s.startsInFlight.cancelAllAndWait(ctx) {
+		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
+	}
+
 	// Stop all hub connections
 	s.hubMu.RLock()
 	for _, conn := range s.hubConnections {
@@ -1177,9 +1221,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	slog.Info("Runtime Broker API server shutting down...")
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	return srv.Shutdown(ctx)
 }
@@ -1568,6 +1609,16 @@ type agentMatch struct {
 // path reads them from the same entry it acts on. Resolution order and
 // errors are exactly lookupAgentTarget's.
 func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
+	return s.lookupAgentMatchForRun(ctx, slug, projectID, "")
+}
+
+// lookupAgentMatchForRun is lookupAgentMatch for a run-scoped operation:
+// among the entries the runtime lists for slug, those of run runID are
+// preferred (see preferRunEntries) before the match must be unique, so a
+// pod of the requested run is found even when a same-named pod of another
+// run is listed beside it (for example in another namespace). With an
+// empty runID it is exactly lookupAgentMatch.
+func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, runID string) (agentMatch, error) {
 	if s.manager == nil {
 		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
@@ -1575,6 +1626,17 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	slug = strings.ToLower(slug)
 
 	filter := scopedNameFilter(slug, projectID)
+
+	// The agent's own runtime, when known (ensureAgentOwnRuntime), is the
+	// only one searched; a failed List there is ErrAgentListUnavailable.
+	if own := s.ownRuntimeFor(ctx); own != nil {
+		agents, err := listInOwnRuntime(ctx, own, slug, projectID)
+		if err != nil {
+			return agentMatch{}, err
+		}
+		return runAgentMatchFrom(slug, runID, agents, own.mgr, own.rt)
+	}
+
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
 	// runtime; auxListAgentsSorted applies the same restriction.
 	useDefault := s.defaultRuntimeAllowed(ctx)
@@ -1627,6 +1689,107 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		}
 	}
 
+	return runAgentMatchFrom(slug, runID, agents, matchManager, matchRuntime)
+}
+
+// allOtherRuns reports whether every entry is labelled with a run other
+// than runID (none is the requested run's, and none is a legacy entry).
+func allOtherRuns(agents []api.AgentInfo, runID string) bool {
+	for _, a := range agents {
+		if a.RunID == "" || a.RunID == runID {
+			return false
+		}
+	}
+	return true
+}
+
+// otherRunsHoldNameError is a run-scoped lookup's result when every entry
+// listed for the slug is labelled with a run other than the requested one
+// and more than one distinct entry is listed (for example same-named pods
+// of two other runs in two namespaces). Nothing of the requested run
+// exists, so this is a run mismatch, as for a run-scoped delete
+// (filterDeleteCandidatesByRun), not an ambiguity. currentRunID is the run
+// holding the name when all those entries share one, else empty.
+type otherRunsHoldNameError struct {
+	slug         string
+	currentRunID string
+}
+
+func (e *otherRunsHoldNameError) Error() string {
+	return fmt.Sprintf("agent '%s': every listed entry belongs to another run", e.slug)
+}
+
+// runAgentMatchFrom is agentMatchFrom for a lookup naming run runID (empty:
+// exactly agentMatchFrom): the entries are narrowed by preferRunEntries,
+// and when only distinct entries of other runs remain, the result is an
+// otherRunsHoldNameError rather than an ambiguity error.
+func runAgentMatchFrom(slug, runID string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
+	agents = preferRunEntries(agents, runID)
+	if runID != "" && len(dedupeAgentEntries(agents)) > 1 && allOtherRuns(agents, runID) {
+		current := agents[0].RunID
+		for _, a := range agents[1:] {
+			if a.RunID != current {
+				current = ""
+				break
+			}
+		}
+		return agentMatch{}, &otherRunsHoldNameError{slug: slug, currentRunID: current}
+	}
+	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+}
+
+// preferRunEntries narrows the entries listed for a run-scoped lookup with
+// the rule a run-scoped delete applies (filterDeleteCandidatesByRun):
+// entries labelled runID win; without one, legacy entries carrying no run
+// label match by name. When neither exists, every entry is kept, so the
+// caller still sees another run holding the name (and refuses with the
+// run-mismatch 404, or fails closed when that is ambiguous). An empty runID
+// keeps agents unchanged.
+func preferRunEntries(agents []api.AgentInfo, runID string) []api.AgentInfo {
+	if runID == "" || len(agents) < 2 {
+		return agents
+	}
+	var exact, legacy []api.AgentInfo
+	for _, a := range agents {
+		switch a.RunID {
+		case runID:
+			exact = append(exact, a)
+		case "":
+			legacy = append(legacy, a)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	if len(legacy) > 0 {
+		return legacy
+	}
+	return agents
+}
+
+// listInOwnRuntime lists agent slug in the agent's own runtime with the
+// project scoping lookupAgentMatch and LookupAgent use: entries labelled for
+// projectID, else (with a projectID) entries carrying no project label. A
+// failed List wraps ErrAgentListUnavailable.
+func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
+	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	}
+	agents = agentsForProject(agents, projectID)
+	if len(agents) == 0 && projectID != "" {
+		agents, err = own.mgr.List(ctx, map[string]string{"scion.name": slug})
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsWithoutProjectLabel(agents)
+	}
+	return agents, nil
+}
+
+// agentMatchFrom builds lookupAgentMatch's result from the entries the
+// runtime behind matchManager/matchRuntime listed for slug.
+func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
 	if len(agents) == 0 {
 		return agentMatch{}, &agentNotFoundError{slug: slug}
 	}
@@ -1719,15 +1882,37 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	slug = strings.ToLower(slug)
 	filter := scopedNameFilter(slug, projectID)
 
-	// Try default manager first
-	agents, err := s.manager.List(ctx, filter)
-	if err != nil {
-		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	// The PTY attach paths reach here without handleAgentByID, so the
+	// agent's own runtime is resolved here (see ensureAgentOwnRuntime),
+	// with the hub's projectPath hint when the caller attached one
+	// (withProjectPathHint). When known, it is the only runtime searched.
+	if agentOwnRuntimeFrom(ctx) == nil {
+		ctx = s.ensureAgentOwnRuntime(ctx, slug, projectID, projectPathHintFrom(ctx))
 	}
-	agents = agentsForProject(agents, projectID)
+	own := s.ownRuntimeFor(ctx)
+
+	var agents []api.AgentInfo
+	var err error
+	if own != nil {
+		agents, err = listInOwnRuntime(ctx, own, slug, projectID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Try default manager first
+		agents, err = s.manager.List(ctx, filter)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsForProject(agents, projectID)
+	}
 
 	runtimeName := s.runtime.Name()
 	var matchedRuntime scionrt.Runtime
+	if own != nil {
+		runtimeName = own.rt.Name()
+		matchedRuntime = own.rt
+	}
 
 	// listUnavailable tracks whether any consulted runtime's List call itself
 	// failed (as opposed to succeeding with zero matches). A failure here must
@@ -1741,7 +1926,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// pathological overlap cases (e.g. two Kubernetes namespace-scoped
 	// entries plus one with ListAllNamespaces) more than one could plausibly
 	// answer for the same slug.
-	if len(agents) == 0 {
+	if len(agents) == 0 && own == nil {
 		for _, aux := range s.sortedAuxiliaryRuntimes() {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
 			if auxErr != nil {
@@ -1767,7 +1952,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// containers that lack a project label (pre-existing agents or solo/CLI
 	// mode). A container labeled for a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
-	if len(agents) == 0 && projectID != "" {
+	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err != nil {
@@ -1930,7 +2115,11 @@ func uniqueAgentEntry(slug string, agents []api.AgentInfo) (api.AgentInfo, error
 
 // dedupeAgentEntries collapses entries that refer to the same backing
 // container (the same container can be reported more than once, e.g. by a
-// runtime that is registered both as default and auxiliary).
+// runtime that is registered both as default and auxiliary). Entries are
+// keyed by operation ID (scionrt.AgentOperationID), so same-named
+// Kubernetes pods in two namespaces stay distinct (and a lookup matching
+// both is ambiguous) rather than collapsing to whichever was listed first;
+// for other runtimes that is the container ID.
 func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	if len(agents) < 2 {
 		return agents
@@ -1938,7 +2127,7 @@ func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	seen := make(map[string]bool, len(agents))
 	out := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		key := a.ContainerID
+		key := scionrt.AgentOperationID(a)
 		if key == "" {
 			key = a.ID
 		}
