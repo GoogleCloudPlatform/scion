@@ -59,6 +59,9 @@ jobs:
       - name: Helm lint (cluster RBAC values)
         run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-cluster-rbac.yaml
 
+      - name: Helm lint (Terraform hub-gke values)
+        run: helm lint --strict deploy/helm/scion-hub -f deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml
+
   helm-template:
     name: Helm Template (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -72,6 +75,12 @@ jobs:
           - name: cluster-rbac
             values-file: ci/values-cluster-rbac.yaml
             release-name: ci-cluster-rbac
+          # The values deploy/terraform/modules/hub-gke generates (its
+          # chart_values), with placeholders. That module's terraform test
+          # keeps this file equal to chart_values.
+          - name: terraform-hub-gke
+            values-file: ci/values-terraform-hub-gke.yaml
+            release-name: tfha-gke-h3
           - name: long-release-name
             values-file: ci/values-minimal.yaml
             # 53 characters (Helm max): fullname = 53 + "-" + "scion-hub" = 63,
