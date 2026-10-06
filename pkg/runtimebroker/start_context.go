@@ -437,9 +437,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		gcpIdentityProfile = in.Config.Profile
 	}
 	profileMode := profileLenient
-	// A flat instance never reads or classifies a saved profile: it serves
-	// exactly one runtime target (resolveManagerForOptsStrict bypasses
-	// profile resolution for it), so profileMode stays lenient.
+	// A flat instance does no profile-based runtime classification here: it
+	// serves exactly one runtime target (resolveManagerForOptsStrict bypasses
+	// profile resolution for it), so profileMode stays lenient. The start and
+	// restart handlers' image-provenance integrity read
+	// (runtimeSelectionOpts) still runs for it.
 	if gcpIdentityProfile == "" && in.Operation != opCreate && !s.isFlat() {
 		profile, provisioned, err := classificationProfile(in)
 		if err != nil {
