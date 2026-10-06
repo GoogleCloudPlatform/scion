@@ -290,6 +290,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
+		// Artifact service: read and create are cataloged (P1); update,
+		// delete and manage have no handler behaviour yet.
+		"artifact.update": "Artifact service: new versions land with the two-step publish (ptone/scion#3215)",
+		"artifact.delete": "Artifact service: deletion lands with grants and retention (ptone/scion#3231)",
+		"artifact.manage": "Artifact service: grants and share links land in ptone/scion#3231",
+
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
 		"secret.deliver":          "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
@@ -297,6 +303,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
 		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
+
+		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
+		// their operations are catalogued by the batches that admit them.
+		"inbox.read":                  "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
+		"inbox.write":                 "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
+		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
 	var unconsumed []string
@@ -519,6 +531,7 @@ func TestProofDuplicateEntryPointRejected(t *testing.T) {
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestProofDuplicateEntryPointRejected"}},
+		Bearer:           SessionOnly(ReasonInteractiveState),
 	}
 
 	if err := proofSpec.Validate(); err != nil {
@@ -1243,6 +1256,7 @@ var domainResourceCompatibility = map[string][]string{
 	"schedule":           {"ResourceScheduledEvent"},
 	"chat":               {"ResourceProject"},
 	"env":                {"ResourceProject"},
+	"artifact":           {"ResourceArtifact"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's
@@ -1486,6 +1500,10 @@ func TestCIGateCoversAllAF1Tests(t *testing.T) {
 		"TestProofNonexistentTestRefDetected",
 		"TestProofPermissionSemanticMismatchDetected",
 		"TestProofUnmappedDomainDetected",
+		// Bearer dispositions
+		"TestBearerDisposition_EveryOperationDeclaresOne",
+		"TestBearerDisposition_RuleRejectsInvalidDispositions",
+		"TestBearerDisposition_CredentialsMatchDisposition",
 	}
 
 	repoRoot := findRepoRoot(t)

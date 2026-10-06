@@ -24,7 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -484,9 +483,11 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 					"agent_id", agent.ID, "project_id", project.ID, "files", len(req.Manifest.Files))
 			}
 			agent.AppliedConfig.WorkspaceStoragePath = ""
+			agent.AppliedConfig.WorkspaceStorageBucket = ""
 		} else {
 			// Store workspace storage path on agent record for broker download
 			agent.AppliedConfig.WorkspaceStoragePath = storagePath
+			agent.AppliedConfig.WorkspaceStorageBucket = workspaceDownloadBucket(stor)
 		}
 		if err := s.store.UpdateAgent(ctx, agent); err != nil {
 			RuntimeError(w, "Failed to update agent config: "+err.Error())
@@ -499,13 +500,23 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeRunIntentError(w, err, agent.ID)
-			return
-		}
-		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
+		// From here the launch no longer follows the client
+		// (ptone/scion#1961). The create-and-start runs under a start claim,
+		// which records run intent running; its dispatch is bounded by
+		// syncDispatch, derived from the claim's context.
+		ctx = detachLaunchFromClient(ctx)
+		created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+			err = syncDispatch(ctx, func(dctx context.Context) error {
+				out, err = dispatcher.DispatchAgentCreate(dctx, agent)
+				return err
+			})
+			return out, err
+		})
 		if errors.Is(err, ErrLaunchInvalidPhase) {
 			writeLaunchInvalidPhase(w, err, agent.ID)
+			return
+		}
+		if s.writeStartClaimError(ctx, w, err, agent.ID) {
 			return
 		}
 		if err != nil {
@@ -520,6 +531,9 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 				return
 			}
 			if relaySkillResolutionError(w, err) {
+				return
+			}
+			if relayWorkspaceStorageUnconfigured(w, err) {
 				return
 			}
 			RuntimeError(w, "Failed to dispatch agent: "+err.Error())
@@ -771,11 +785,23 @@ func (s *Server) syncHubManagedWorkspaceBack(ctx context.Context, agent *store.A
 
 	// Use the project-level storage path for hub-managed projects
 	projectStoragePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), projectStoragePath+"/files", workspacePath); err != nil {
 		s.workspaceLog.Warn("syncHubManagedWorkspaceBack: GCS download failed",
 			"project_id", project.ID, "storagePath", projectStoragePath, "error", err)
 	} else {
 		s.workspaceLog.Info("syncHubManagedWorkspaceBack: workspace synced to Hub filesystem",
 			"project_id", project.ID, "path", workspacePath)
 	}
+}
+
+// workspaceDownloadBucket returns the bucket a broker should download a
+// workspace upload in stor from, or "" when stor is not GCS: a broker
+// cannot read the hub's local storage, so it is then left to the broker's
+// own bucket setting and its explicit refusal when it has none
+// (ptone/scion#3422).
+func workspaceDownloadBucket(stor storage.Storage) string {
+	if stor == nil || stor.Provider() != storage.ProviderGCS {
+		return ""
+	}
+	return stor.Bucket()
 }

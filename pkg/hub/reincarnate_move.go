@@ -114,6 +114,8 @@ type moveProbes struct {
 	// CanUseAsProvider reports whether dst already serves the agent's
 	// project, or the caller may link it as a provider (project update).
 	CanUseAsProvider func(dst *store.RuntimeBroker) bool
+	// ServesProject reports whether dst already serves the agent's project.
+	ServesProject func(dst *store.RuntimeBroker) bool
 	// Passthrough re-runs the GCP passthrough gate against dst. Nil when
 	// the agent does not use passthrough. A non-empty message is a denial.
 	Passthrough func(dst *store.RuntimeBroker) string
@@ -136,7 +138,9 @@ type moveEligibilityInput struct {
 	// Profile is the profile the agent asks for (explicit, else the
 	// project's active profile); "" falls back to the target's default.
 	Profile string
-	Probes  moveProbes
+	// SelfMove is true when the caller is the agent being moved.
+	SelfMove bool
+	Probes   moveProbes
 }
 
 // evaluateMoveEligibility runs the move eligibility checks in order and
@@ -178,8 +182,23 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 	pass()
 
 	// 3. Both brokers mount the same NFS export.
+	// The configured export alone is not proof (the same address can be
+	// two servers, and a PV decides what is mounted): both brokers must also
+	// report the same export identity marker, read through their own mounts.
 	if !api.SameWorkspaceExport(src.WorkspaceStorage, dst.WorkspaceStorage) {
 		return fail(http.StatusConflict, ErrCodeConflict, sameExportMessage(src, dst))
+	}
+	for _, b := range []*store.RuntimeBroker{src, dst} {
+		if b.WorkspaceStorage.NFS.ExportID == "" {
+			return fail(http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, fmt.Sprintf(
+				"broker %s has not reported the export identity marker (%s/%s on its NFS export); upgrade it, or check that its export mount is healthy and writable",
+				brokerDisplayName(b), b.WorkspaceStorage.NFS.SubPathRoot, api.ExportIDMarkerName))
+		}
+	}
+	if srcID, dstID := src.WorkspaceStorage.NFS.ExportID, dst.WorkspaceStorage.NFS.ExportID; srcID != dstID {
+		return fail(http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
+			"brokers %s and %s configure the same NFS export but see different export identity markers (%s and %s), so they do not mount the same directory. --broker requires both brokers to mount the same NFS export",
+			srcName, dstName, srcID, dstID))
 	}
 	pass()
 
@@ -192,6 +211,9 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 		return fail(http.StatusConflict, ErrCodeConflict,
 			"agent workspace is a GCS-synced copy, not on the NFS export; --broker requires the workspace on a shared NFS export")
 	}
+	if msg := workspacePlacementRefusal(in.Agent.WorkspacePlacement, srcName); msg != "" {
+		return fail(http.StatusConflict, ErrCodeConflict, msg)
+	}
 	if in.CloneMode && !isKubernetesRuntimeType(in.Agent.Runtime) {
 		runtime := in.Agent.Runtime
 		if runtime == "" {
@@ -201,6 +223,7 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 			"clone-per-agent workspaces are on the NFS export only on Kubernetes; the agent runs on runtime %q on broker %s",
 			runtime, srcName))
 	}
+	v.Checks[idx].Message = "the source broker recorded the workspace on the shared NFS export; the target confirms the workspace directory through its own mount at move time"
 	pass()
 
 	// 5. The target has the profile the agent would run under, available,
@@ -236,20 +259,35 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 	}
 	pass()
 
-	// 7. The caller may dispatch to the target (and link it to the project
-	// if it is not a provider yet), and passes the passthrough gate there.
-	if !in.Probes.CanDispatch(dst) {
-		return fail(http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("you don't have permission to run agents on broker %s", dstName))
-	}
-	if !in.Probes.CanUseAsProvider(dst) {
-		return fail(http.StatusForbidden, ErrCodeForbidden, fmt.Sprintf(
-			"broker %s is not a provider for this project and you don't have permission to add it", dstName))
-	}
-	if in.Probes.Passthrough != nil {
-		if msg := in.Probes.Passthrough(dst); msg != "" {
+	// 7. An agent moving itself may only move to a broker that already
+	// serves its project (a self-move never links a provider), and never
+	// with a passthrough identity. Any other caller may dispatch to the
+	// target (and link it to the project if it is not a provider yet), and
+	// passes the passthrough gate there.
+	if in.SelfMove {
+		// Probes.Passthrough is set exactly when the agent uses passthrough.
+		if in.Probes.Passthrough != nil {
 			return fail(http.StatusForbidden, ErrCodeForbidden,
-				fmt.Sprintf("GCP passthrough identity is not allowed on broker %s: %s", dstName, msg))
+				"this agent cannot move itself; ask a user to move you")
+		}
+		if !in.Probes.ServesProject(dst) {
+			return fail(http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
+				"target broker %s does not serve this project; an agent can only move itself to a broker that already serves its project", dstName))
+		}
+	} else {
+		if !in.Probes.CanDispatch(dst) {
+			return fail(http.StatusForbidden, ErrCodeForbidden,
+				fmt.Sprintf("you don't have permission to run agents on broker %s", dstName))
+		}
+		if !in.Probes.CanUseAsProvider(dst) {
+			return fail(http.StatusForbidden, ErrCodeForbidden, fmt.Sprintf(
+				"broker %s is not a provider for this project and you don't have permission to add it", dstName))
+		}
+		if in.Probes.Passthrough != nil {
+			if msg := in.Probes.Passthrough(dst); msg != "" {
+				return fail(http.StatusForbidden, ErrCodeForbidden,
+					fmt.Sprintf("GCP passthrough identity is not allowed on broker %s: %s", dstName, msg))
+			}
 		}
 	}
 	pass()
@@ -276,6 +314,33 @@ func evaluateMoveEligibility(in moveEligibilityInput) (MoveVerdict, *moveRefusal
 
 	v.Eligible = true
 	return v, nil
+}
+
+// reprovisionPlacementHint tells the operator how to record a workspace
+// placement the hub does not know.
+const reprovisionPlacementHint = "re-provision the agent once (scion reincarnate without --broker) to record its workspace placement"
+
+// isWorkspacePlacementOnExport reports whether a recorded workspace
+// placement puts the workspace on the shared NFS export. Unknown ("") and
+// unrecognised values are not on the export.
+func isWorkspacePlacementOnExport(placement string) bool {
+	return placement == api.WorkspacePlacementExport
+}
+
+// workspacePlacementRefusal returns why an agent with the recorded workspace
+// placement cannot move, or "" when its workspace is on the export.
+func workspacePlacementRefusal(placement, srcName string) string {
+	switch {
+	case isWorkspacePlacementOnExport(placement):
+		return ""
+	case placement == "":
+		return "the agent's workspace placement is unknown (it has not started since placements were recorded); " + reprovisionPlacementHint
+	case placement == api.WorkspacePlacementLocal:
+		return fmt.Sprintf("the agent's workspace is not on the shared NFS export on broker %s (placement %q); if the broker has since moved workspaces to the export, %s",
+			srcName, placement, reprovisionPlacementHint)
+	default:
+		return fmt.Sprintf("the agent's workspace placement %q is not recognised as the shared NFS export; %s", placement, reprovisionPlacementHint)
+	}
 }
 
 func brokerDisplayName(b *store.RuntimeBroker) string {
@@ -437,6 +502,9 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 		Reachable: s.brokerRecordReachable,
 		CanDispatch: func(dst *store.RuntimeBroker) bool {
 			return s.canDispatchToBroker(ctx, dst)
+		},
+		ServesProject: func(dst *store.RuntimeBroker) bool {
+			return s.brokerServesProject(ctx, dst.ID, project.ID)
 		},
 		CanUseAsProvider: func(dst *store.RuntimeBroker) bool {
 			if s.brokerServesProject(ctx, dst.ID, project.ID) {

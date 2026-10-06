@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -43,6 +44,12 @@ func (s *Server) ReconcileBroker(ctx context.Context, brokerID string) {
 // runs on the accepting node; the command bus filters by ownsLocally), since the
 // op executors deliver over the local tunnel.
 func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
+	s.drainBrokerDispatch(ctx, brokerID, nil)
+}
+
+// drainBrokerDispatch is reconcileBroker's dispatch drain, limited to the
+// ops only accepts when only is non-nil.
+func (s *Server) drainBrokerDispatch(ctx context.Context, brokerID string, only func(op string) bool) {
 	if s == nil || s.store == nil || brokerID == "" {
 		return
 	}
@@ -60,6 +67,9 @@ func (s *Server) reconcileBroker(ctx context.Context, brokerID string) {
 	}
 	for i := range dispatches {
 		d := dispatches[i]
+		if only != nil && !only(d.Op) {
+			continue
+		}
 		claimed, err := s.store.ClaimBrokerDispatch(ctx, d.ID, s.instanceID)
 		if err != nil {
 			s.agentLifecycleLog.Error("reconcile: claim dispatch failed", "id", d.ID, "error", err)
@@ -192,32 +202,73 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 // not applied because a newer start or stop superseded it.
 const stopSupersededResult = `{"superseded":true}`
 
+// claimQueuedStop takes the stop-kind claim a queued stop recorded at
+// intentAt is applied under. superseded reports a stop that must not be
+// applied: the intent changed, or a start holds the agent's claim. A claim
+// the stop itself superseded (supersedes, recorded when it was queued) does
+// not block it: the stop is applied without a claim and then releases that
+// claim. release releases the stop claim.
+func (s *Server) claimQueuedStop(ctx context.Context, agent *store.Agent, intentAt time.Time, supersedes string) (release func(), superseded bool) {
+	noop := func() {}
+	claim, err := s.store.ClaimAgentStop(ctx, agent.ID, s.instanceID, intentAt, s.startClaimSettings().LeaseTTL)
+	var held *store.ClaimHeldError
+	switch {
+	case err == nil:
+		return func() {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimReleaseTimeout)
+			defer cancel()
+			if _, err := s.store.ReleaseAgentStart(rctx, agent.ID, claim.ID, s.instanceID); err != nil {
+				s.agentLifecycleLog.Warn("reconcile: releasing the queued stop's claim failed; the reaper will settle it", "agent_id", agent.ID, "error", err)
+			}
+		}, false
+	case errors.As(err, &held) && supersedes != "" && held.ClaimID == supersedes && agent.RunIntentMatches(store.RunIntentStopped, intentAt):
+		return noop, false
+	case errors.Is(err, store.ErrClaimPredicate), errors.As(err, &held):
+		return noop, true
+	default:
+		// The claim could not be read or written: fall back to the intent
+		// check alone.
+		s.agentLifecycleLog.Warn("reconcile: queued stop claim failed; applying on the intent check", "agent_id", agent.ID, "error", err)
+		return noop, !agent.RunIntentMatches(store.RunIntentStopped, intentAt)
+	}
+}
+
 func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (string, error) {
 	agent, err := s.resolveDispatchAgent(ctx, d)
 	if err != nil {
 		return "", err
 	}
 	var intentAt *time.Time
+	var supersedes string
 	if d.Args != "" {
 		args, err := UnmarshalStopArgs(d.Args)
 		if err != nil {
 			return "", fmt.Errorf("unmarshal stop args: %w", err)
 		}
 		intentAt = args.IntentAt
+		supersedes = args.SupersedesClaim
+		if args.RunID != "" {
+			// Stop the run the intent was queued for, not whatever run the
+			// row names now (ptone/scion#2550). agent is this call's own
+			// copy, loaded by resolveDispatchAgent above.
+			agent.RunID = args.RunID
+		}
 	}
 	// A stop queued while the broker was offline applies only while the
 	// stop intent it was queued for is still the current one; a start or
-	// stop recorded since then supersedes it.
-	//
-	// This is a check, not a lock: a start recorded after this check but
-	// before the broker applies the stop below can still be overtaken by
-	// the stop, which leaves the agent stopped with intent running. The
-	// check only narrows that window to the stop dispatch itself; nothing
-	// in this change acts on a running intent whose agent is stopped.
-	if intentAt != nil && !agent.RunIntentMatches(store.RunIntentStopped, *intentAt) {
-		s.agentLifecycleLog.Info("reconcile: queued stop superseded by a newer run intent; not applied",
-			"id", d.ID, "agent_id", agent.ID, "run_intent", agent.RunIntent)
-		return stopSupersededResult, nil
+	// stop recorded since then supersedes it. The check and the stop
+	// dispatch run under a stop-kind start claim pinned to that intent: a
+	// start cannot claim the agent until the stop is applied, and a start
+	// claimed first wrote a newer intent, so the claim is refused and the
+	// stop is not applied.
+	if intentAt != nil {
+		release, superseded := s.claimQueuedStop(ctx, agent, *intentAt, supersedes)
+		if superseded {
+			s.agentLifecycleLog.Info("reconcile: queued stop superseded by a newer run intent or start; not applied",
+				"id", d.ID, "agent_id", agent.ID, "run_intent", agent.RunIntent)
+			return stopSupersededResult, nil
+		}
+		defer release()
 	}
 	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
@@ -225,22 +276,38 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
+		s.logStopRunMismatch(agent, "queued stop", err)
 		return "", fmt.Errorf("dispatch stop: %w", err)
 	}
 	if intentAt != nil {
 		// The queued stop has now been applied: release the per-broker
 		// reservation as a direct stop does, and replace the stop_queued
 		// container status and the queued-stop notice the offline stop set.
-		s.releaseBrokerQuota(ctx, agent)
+		// Both only while the row still holds the run the stop was queued
+		// for (agent.RunID, the intent's run): a newer run keeps its state
+		// and reservation (ptone/scion#2550).
 		if agent.ContainerStatus == containerStatusStopQueued {
-			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			recorded, err := s.recordStopStatus(ctx, agent.ID, agent.RunID, "queued stop", store.AgentStatusUpdate{
 				ContainerStatus: "stopped",
 				ClearMessageIf:  offlineStopMessage,
-			}); err != nil {
+			})
+			if err != nil {
 				s.agentLifecycleLog.Warn("reconcile: failed to update container status after queued stop",
 					"id", d.ID, "agent_id", agent.ID, "error", err)
 			}
+			if recorded {
+				s.releaseBrokerQuota(ctx, agent)
+			}
+		} else if s.stopRunStillCurrent(ctx, agent.ID, agent.RunID, "queued stop") {
+			// A check, not a lock: a run minted between this read and the
+			// release loses its reservation until the backfill restores it.
+			s.releaseBrokerQuota(ctx, agent)
 		}
+		// The start claim held when the stop was recorded is superseded
+		// (compare-and-set on the stop's intent time, whatever the run). It
+		// is released last: released before the status write and the quota
+		// release, a new start could take it and then lose both to them.
+		s.releaseSupersededClaim(ctx, agent.ID, supersedes, *intentAt)
 	}
 	return "", nil
 }
@@ -272,6 +339,7 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 	}
 	var deleteFiles, removeBranch, softDelete bool
 	var deletedAt time.Time
+	var claim int64
 	if d.Args != "" {
 		args, err := UnmarshalDeleteArgs(d.Args)
 		if err != nil {
@@ -281,8 +349,40 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		removeBranch = args.RemoveBranch
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
+		claim = args.Claim
+		if len(args.PreviousRunIDs) > 0 {
+			agent.PreviousRunIDs = args.PreviousRunIDs
+		}
+	}
+	// A delete engine's intent applies only while the claim it was created
+	// under is still the row's current claim, live or failed in_doubt (see
+	// deferredDeleteDeadline): the engine may have died, its lease lapsed
+	// and the user started the agent again since (ptone/scion#2906). A
+	// stale intent is dropped without dispatching; failing it (rather than
+	// completing it) keeps a waiting engine from reading it as a teardown
+	// that ran. The deadline sent to the broker is computed now, not when
+	// the intent was written.
+	//
+	// An intent records no run ID of its own until ptone/scion#2550 P5; the
+	// broker gets the re-read row's run ID. The intent's previous runs
+	// (ptone/scion#3097) are deleted by the same DispatchAgentDelete call
+	// under this fence, so each previous-run delete carries the same
+	// notAfter and a stale intent deletes none of them.
+	if claim != 0 {
+		notAfter, ok := deferredDeleteDeadline(ctx, agent, claim, deleteClock())
+		if !ok {
+			s.agentLifecycleLog.Info("reconcile: deferred delete intent's claim is no longer current; dropped",
+				"id", d.ID, "agent_id", agent.ID, "intent_claim", claim, "row_claim", agent.DeletionClaim,
+				"deletion_state", agent.DeletionState, "deletion_code", agent.DeletionCode)
+			return "", fmt.Errorf("%w (intent claim %d, row claim %d)", errStaleDeleteDispatch, claim, agent.DeletionClaim)
+		}
+		ctx = withDeleteDispatchFence(ctx, deleteDispatchFence{claim: claim, notAfter: notAfter})
 	}
 	if err := dispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt); err != nil {
+		if isStaleDeleteDispatch(err) && !errors.Is(err, errStaleDeleteDispatch) {
+			// Keep the marker in the row's error text for the originating node.
+			return "", fmt.Errorf("dispatch delete: %w: %w", errStaleDeleteDispatch, err)
+		}
 		return "", fmt.Errorf("dispatch delete: %w", err)
 	}
 	return "", nil

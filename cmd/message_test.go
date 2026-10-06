@@ -2370,16 +2370,14 @@ func TestSendGroupMessageViaHub_A257_O1_JSONOutputIncludesDeferredStatus(t *test
 	_ = r.Close()
 	output := string(buf[:n])
 
-	var got []struct {
-		Recipient string `json:"recipient"`
-		Status    string `json:"status"`
-		Error     string `json:"error,omitempty"`
-	}
+	var got groupSendResult
 	require.NoError(t, json.Unmarshal([]byte(output), &got), "output must be valid JSON; got: %s", output)
-	require.Len(t, got, 2)
+	require.Len(t, got.Results, 2)
+	assert.Equal(t, 1, got.Deferred)
+	assert.Equal(t, 1, got.Delivered)
 
 	byRecipient := map[string]string{}
-	for _, r := range got {
+	for _, r := range got.Results {
 		byRecipient[r.Recipient] = r.Status
 	}
 	assert.Equal(t, "deferred", byRecipient["agent:agent-migrating"], "JSON output must carry status:\"deferred\"; got: %s", output)
@@ -3016,6 +3014,7 @@ func newCountingHubServer(t *testing.T) (*httptest.Server, *int32) {
 // and credentials).
 func setHermeticHubEnv(t *testing.T, server *httptest.Server) {
 	t.Helper()
+	restoreAllSilenceUsage(t)
 	clearHubContextEnv(t)
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())

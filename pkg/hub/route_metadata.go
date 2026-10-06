@@ -14,7 +14,11 @@
 
 package hub
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+)
 
 // RouteClassification categorizes routes by their authentication/authorization model.
 type RouteClassification string
@@ -53,6 +57,21 @@ type RouteMetadata struct {
 	// Action is the action from the permission registry (e.g., "read", "create", "update").
 	// Only meaningful when Classification == RoutePolicy.
 	Action string
+
+	// BearerTarget selects the hub-level target the RouteHubAdmin guard
+	// checks for a route that declares a Permission (routeGuardTarget):
+	// "" checks {Type: Resource, ID: "hub"}; "hub_instance" checks
+	// hubScopedResource(Resource, "hub"); "hub_collection" checks a
+	// collection-level request with hubCollectionEvidence(Permission).
+	// It is set only on a route whose catalog operations admit a user
+	// access token on the hub boundary, and never on a "hub" resource
+	// route, whose target already resolves to the hub scope.
+	BearerTarget string
+	// SessionOnly, when set, is the catalog's session-only reason for the
+	// route: the RouteHubAdmin guard refuses any credential other than an
+	// interactive session or dev credential with a session-only refusal
+	// (session_only_gate.go), before the permission decision.
+	SessionOnly authzop.SessionOnlyReason
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -393,6 +412,32 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
 		Classification: RouteAuthenticated,
 	},
+	// The agent's conduit session (WebSocket), behind hub.conduit. Agent
+	// tokens with agent:port:forward only; the handler reads the agent row.
+	"/api/v1/conduit": {
+		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
+		Classification: RouteAgentToken,
+	},
+
+	// -------------------------------------------------------------------------
+	// Policy: Artifacts (pkg/artifacts, behind the hub.artifacts experiment).
+	// The service performs the fine-grained checks through artifacts.Host;
+	// the share-link route authenticates by link token only.
+	// -------------------------------------------------------------------------
+	"/api/v1/artifacts": {
+		Pattern: "/api/v1/artifacts", RouteID: "artifacts.list",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/": {
+		Pattern: "/api/v1/artifacts/", RouteID: "artifacts.byId",
+		Classification: RoutePolicy,
+		Permission:     "artifact.read", Resource: "artifact", Action: "read",
+	},
+	"/api/v1/artifacts/shared/": {
+		Pattern: "/api/v1/artifacts/shared/", RouteID: "artifacts.shared",
+		Classification: RoutePublic,
+	},
 
 	// -------------------------------------------------------------------------
 	// Policy: Skills
@@ -703,6 +748,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/experiments", RouteID: "admin.experiments",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
+	},
+	// Conduit grant key rotation, behind hub.conduit. Returns kids and
+	// timestamps only.
+	"/api/v1/admin/conduit/grant-keys/rotate": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
 	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
@@ -1147,15 +1200,30 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}
+				target, evidence, targetOK := routeGuardTarget(meta)
+				if !targetOK {
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+						"route misconfigured: unknown bearer target", nil)
+					return
+				}
+				// Session-only: a route-level refusal of every non-session
+				// credential, before the permission decision. Decide still
+				// runs for a session.
+				if meta.SessionOnly != "" && !sessionCredentialAllowed(r.Context()) {
+					logAuthzDenial(r, identity, target, Action(meta.Action), "session-only operation")
+					writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
+					return
+				}
 				decision := s.authzService.Decide(r.Context(), AuthzRequest{
-					Principal:  principalContextForIdentity(user),
-					Credential: credentialContextForIdentity(user),
-					Resource:   Resource{Type: meta.Resource, ID: "hub"},
-					Action:     Action(meta.Action),
-					Permission: meta.Permission,
+					Principal:      principalContextForIdentity(user),
+					Credential:     credentialContextForIdentity(user),
+					Resource:       target,
+					Action:         Action(meta.Action),
+					Permission:     meta.Permission,
+					TargetEvidence: evidence,
 				})
 				if !decision.Allowed {
-					logAuthzDenial(r, identity, Resource{Type: meta.Resource, ID: "hub"}, Action(meta.Action), decision.Reason)
+					logAuthzDenial(r, identity, target, Action(meta.Action), decision.Reason)
 					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
 					return
 				}

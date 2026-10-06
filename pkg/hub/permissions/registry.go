@@ -48,6 +48,16 @@ const (
 	ResourceSecret         = "secret"
 	ResourceEnvVar         = "env_var"
 	ResourceSkillInjection = "skill_injection"
+	// ResourceArtifact is the artifact service's resource type
+	// (pkg/artifacts). Artifact permissions are checked in the hub's
+	// artifacts.Host adapter against the artifact's home project.
+	ResourceArtifact = "artifact"
+
+	// ResourceInbox and ResourceUserSkillInjection are self-scoped resource
+	// types: their records belong to one user and carry no project or hub
+	// target that a role binding could authorize. See TargetClassKindSelf.
+	ResourceInbox              = "inbox"
+	ResourceUserSkillInjection = "user_skill_injection"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -80,6 +90,9 @@ const (
 	// action.
 	ActionDeliver = "deliver"
 	ActionUse     = "use"
+	// ActionWrite covers creating, changing and removing the holder's own
+	// self-scoped records.
+	ActionWrite = "write"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -168,6 +181,12 @@ var Registry = []Permission{
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
 
+	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", AgentScopes: []string{"project:artifact:write"}, Description: "Publish new versions of artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize"}},
+
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.read", Resource: ResourceSkill, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "skill:read", AgentScopes: []string{"project:read"}, Description: "Read skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
@@ -251,6 +270,7 @@ var Registry = []Permission{
 	{ID: "hub.project_defaults.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update project defaults", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.messaging.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update messaging switches", Enforcement: []string{"pkg/hub/route_metadata.go:admin.messaging", "pkg/hub/admin_messaging.go:handleAdminMessaging"}},
 	{ID: "hub.experiments.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Read and update hub-wide experiment overrides", Enforcement: []string{"pkg/hub/route_metadata.go:admin.experiments", "pkg/hub/admin_experiments.go:handleAdminExperiments"}},
+	{ID: "hub.conduit_grant_keys.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Rotate the conduit grant signing key", Enforcement: []string{"pkg/hub/route_metadata.go:admin.conduit.grantKeys.rotate", "pkg/hub/conduit_grants.go:handleAdminConduitGrantKeyRotate"}},
 	{ID: "hub.auth_reset.execute", Resource: ResourceHub, Action: ActionExecute, CapabilityKind: CapabilityScope, Description: "Reset all auth", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
 	{ID: "hub.scheduler.update", Resource: ResourceHub, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update scheduler", NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
@@ -327,6 +347,14 @@ var Registry = []Permission{
 	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "secret.use", Resource: ResourceSecret, Action: ActionUse, AgentScopes: []string{"project:secret:read"}, Description: "Retrieve a secret value at runtime by key", Enforcement: []string{"pkg/hub/material_runtime.go"}},
 	{ID: "gcp_service_account.use", Resource: ResourceGCPServiceAccount, Action: ActionUse, Description: "Mint a token as an assigned GCP service account", NonRouteUse: []string{"GCP token mint request"}},
+
+	// Self-scoped permissions act only on the holder's own records. A user
+	// access token needs the exact selector, and the target checks in
+	// Server.authorizeSelfScoped apply. Mint eligibility is "the issuer is
+	// an active user"; see permissions.IsSelfPermission.
+	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
+	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
+	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
 }
 
 // ResourceActions returns item-level capability actions keyed by resource type.

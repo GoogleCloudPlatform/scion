@@ -505,17 +505,26 @@ func TestCloudrunInstancesHubEndpoint_NoKService(t *testing.T) {
 }
 
 func TestRedactEnvValueForLog(t *testing.T) {
-	if got := redactEnvValueForLog("SCION_AUTH_TOKEN", "secret-token"); got != redactedEnvValue {
-		t.Fatalf("SCION_AUTH_TOKEN should be redacted, got %q", got)
-	}
-	if got := redactEnvValueForLog("SCION_BROKER_ID", "broker-1"); got != "broker-1" {
-		t.Fatalf("SCION_BROKER_ID should remain visible, got %q", got)
-	}
-	if got := redactEnvValueForLog("SCION_HUB_ENDPOINT", "https://hub.example.com"); got != "https://hub.example.com" {
-		t.Fatalf("SCION_HUB_ENDPOINT should remain visible, got %q", got)
-	}
-	if got := redactEnvValueForLog("SCION_HUB_URL", "https://hub.example.com"); got != "https://hub.example.com" {
-		t.Fatalf("SCION_HUB_URL should remain visible, got %q", got)
+	for _, tt := range []struct {
+		key, value string
+		visible    bool
+	}{
+		{key: "SCION_AUTH_TOKEN", value: "secret-token"},
+		{key: "SCION_BROKER_ID", value: "broker-1", visible: true},
+		{key: "SCION_HUB_ENDPOINT", value: "https://hub.example.com", visible: true},
+		{key: "SCION_HUB_URL", value: "https://hub.example.com", visible: true},
+		{key: "SCION_HUB_EXPERIMENTS", value: "hub.conduit", visible: true},
+		{key: "SCION_HUB_CONDUIT", value: "true"}, // retired; no longer listed
+	} {
+		t.Run(tt.key, func(t *testing.T) {
+			want := redactedEnvValue
+			if tt.visible {
+				want = tt.value
+			}
+			if got := redactEnvValueForLog(tt.key, tt.value); got != want {
+				t.Fatalf("redactEnvValueForLog(%s) = %q, want %q", tt.key, got, want)
+			}
+		})
 	}
 }
 

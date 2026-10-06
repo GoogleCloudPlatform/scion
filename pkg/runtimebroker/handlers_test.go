@@ -55,24 +55,26 @@ import (
 // access from outside this file is the bug this comment exists to prevent
 // from coming back.
 type mockManager struct {
-	mu                    sync.Mutex
-	agents                []api.AgentInfo
-	startCalls            int
-	stopCalls             int
-	deleteCalls           int
-	startErr              error
-	provisionErr          error
-	stopErr               error
-	listErr               error
-	deleteTargetErr       error
-	messageErr            error
-	lastStartOpts         api.StartOptions
-	lastDeleteProjectPath string
-	lastDeleteAgentID     string
-	lastDeleteContainerID string
-	lastDeleteRunID       string
-	lastDeleteFiles       bool
-	lastStopAgentID       string
+	mu                     sync.Mutex
+	agents                 []api.AgentInfo
+	startCalls             int
+	stopCalls              int
+	deleteCalls            int
+	startErr               error
+	provisionErr           error
+	stopErr                error
+	listErr                error
+	deleteTargetErr        error
+	messageErr             error
+	lastStartOpts          api.StartOptions
+	lastDeleteProjectPath  string
+	lastDeleteAgentID      string
+	lastDeleteContainerID  string
+	lastDeleteRunID        string
+	lastDeleteFiles        bool
+	lastDeleteRemoveBranch bool
+	lastStopAgentID        string
+	lastStopRunID          string
 	// lastStartCtx captures the context passed to Start, so tests can assert
 	// on what was attached to it (e.g. a skill resolver, #1960) without a
 	// real container runtime or ProvisionAgent call.
@@ -143,11 +145,23 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 	return agent, nil
 }
 
-func (m *mockManager) Stop(ctx context.Context, agentID string, projectPath string) error {
+func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
 	m.lastStopAgentID = agentID
+	m.lastStopRunID = runID
+	return m.stopErr
+}
+
+// StopTarget records the resolved entry the broker stops; it counts as a
+// stop call, like Stop, so existing stop assertions hold either way.
+func (m *mockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopCalls++
+	m.lastStopAgentID = ref.ID
+	m.lastStopRunID = ref.RunID
 	return m.stopErr
 }
 
@@ -168,6 +182,7 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName string, ref ru
 	m.lastDeleteContainerID = ref.ID
 	m.lastDeleteRunID = ref.RunID
 	m.lastDeleteFiles = deleteFiles
+	m.lastDeleteRemoveBranch = removeBranch
 	m.deleteCalls++
 	if m.deleteTargetErr != nil {
 		return false, m.deleteTargetErr
@@ -874,7 +889,8 @@ func TestCreateAgentRejectsWorkspaceDirOutsideRootViaSymlink(t *testing.T) {
 func TestCreateAgentFullStart_HarnessConfigNotFound(t *testing.T) {
 	srv := newTestServer(t)
 	mgr := srv.manager.(*mockManager)
-	mgr.startErr = fmt.Errorf("failed to find harness-config %q: %w", "antigravity", config.ErrHarnessConfigNotFound)
+	mgr.startErr = fmt.Errorf("failed to find harness-config %q: %w", "antigravity",
+		&config.HarnessConfigNotFoundError{Name: "antigravity", Searched: []string{"/srv/broker/harness-configs/antigravity"}})
 
 	body := `{"name": "new-agent", "config": {"template": "claude", "harness": "antigravity"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -920,7 +936,7 @@ func TestCreateAgentProvisionOnly_TemplateNotFound(t *testing.T) {
 	srv := newTestServer(t)
 	mgr := srv.manager.(*mockManager)
 	mgr.provisionErr = fmt.Errorf("failed to load template: %w",
-		fmt.Errorf("template %s not found: %w", "missing-template", config.ErrTemplateNotFound))
+		config.NewTemplateNotFoundError("missing-template", "template missing-template not found"))
 
 	body := `{"name": "new-agent", "provisionOnly": true, "config": {"template": "missing-template"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1479,12 +1495,14 @@ runtimes:
 type envCapturingManager struct {
 	mockManager
 	lastEnv           map[string]string
+	lastRunID         string
 	lastTemplateName  string
 	lastHarnessConfig string
 }
 
 func (m *envCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.lastEnv = opts.Env
+	m.lastRunID = opts.RunID
 	m.lastTemplateName = opts.TemplateName
 	m.lastHarnessConfig = opts.HarnessConfig
 	return m.mockManager.Start(ctx, opts)
@@ -1503,6 +1521,36 @@ func newTestServerWithEnvCapture() (*Server, *envCapturingManager) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 
 	return New(cfg, mgr, rt), mgr
+}
+
+// TestCreateAgentLaunchIDFromRunID pins SCION_LAUNCH_ID as broker-owned:
+// the create request's run ID reaches Manager.Start (which sets the
+// variable from it), and a resolved-env value is dropped.
+func TestCreateAgentLaunchIDFromRunID(t *testing.T) {
+	srv, mgr := newTestServerWithEnvCapture()
+
+	body := `{
+		"name": "test-agent",
+		"id": "agent-uuid-123",
+		"runId": "run-uuid-789",
+		"resolvedEnv": {"SCION_LAUNCH_ID": "forged"},
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if mgr.lastRunID != "run-uuid-789" {
+		t.Errorf("RunID = %q, want %q", mgr.lastRunID, "run-uuid-789")
+	}
+	if got, ok := mgr.lastEnv["SCION_LAUNCH_ID"]; ok {
+		t.Errorf("SCION_LAUNCH_ID = %q passed through, want it left to Manager.Start", got)
+	}
 }
 
 // TestCreateAgentWithHubCredentials tests that Hub authentication env vars are passed to agent.
@@ -3281,6 +3329,10 @@ type gitCloneCapturingManager struct {
 	lastProjectPath    string
 	lastBranch         string
 	lastFreshProvision bool
+	// lastSharedWorkspace and lastSharedWorkspaceClone capture the shared
+	// workspace inputs (shared_workspace_clone_test.go).
+	lastSharedWorkspace      bool
+	lastSharedWorkspaceClone *api.GitCloneConfig
 }
 
 func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
@@ -3290,6 +3342,8 @@ func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOpti
 	m.lastProjectPath = opts.ProjectPath
 	m.lastBranch = opts.Branch
 	m.lastFreshProvision = opts.FreshProvision
+	m.lastSharedWorkspace = opts.SharedWorkspace
+	m.lastSharedWorkspaceClone = opts.SharedWorkspaceClone
 	return m.mockManager.Start(ctx, opts)
 }
 
@@ -5795,5 +5849,139 @@ profiles:
 	}
 	if fallbackProfiles[0].Type != "cloudrun-sandbox" {
 		t.Errorf("FALLBACK: expected type 'cloudrun-sandbox', got %q", fallbackProfiles[0].Type)
+	}
+}
+
+// newErrorRuntimeTestServer returns a test server whose default runtime is
+// the degraded *runtime.ErrorRuntime the broker falls back to when runtime
+// resolution fails at startup (ptone/scion#2766).
+func newErrorRuntimeTestServer(t *testing.T) *Server {
+	t.Helper()
+	srv := newTestServer(t)
+	srv.runtime = &runtime.ErrorRuntime{Err: errors.New("failed to build kubernetes client")}
+	return srv
+}
+
+func TestHealthInfoHealthyRuntime(t *testing.T) {
+	srv := newTestServer(t)
+
+	health := srv.GetHealthInfo(context.Background())
+	if health.Status != "healthy" {
+		t.Errorf("status = %q, want healthy", health.Status)
+	}
+	if got := health.Checks["mock"]; got != "available" {
+		t.Errorf("checks[mock] = %q, want available", got)
+	}
+	if _, ok := health.Checks["runtime"]; ok {
+		t.Errorf("checks[runtime] present for a healthy runtime: %v", health.Checks)
+	}
+}
+
+func TestHealthInfoErrorRuntimeDegraded(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	health := srv.GetHealthInfo(context.Background())
+	if health.Status != "degraded" {
+		t.Errorf("status = %q, want degraded", health.Status)
+	}
+	if got := health.Checks["runtime"]; got != "unavailable" {
+		t.Errorf("checks[runtime] = %q, want unavailable", got)
+	}
+	if _, ok := health.Checks["error"]; ok {
+		t.Errorf("checks[error] must not be reported: %v", health.Checks)
+	}
+}
+
+func TestHealthzErrorRuntimeStatusCode(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	// /healthz is a liveness signal: it stays 200 and reports degraded in
+	// the body, so a restart loop does not hide a persistent runtime fault.
+	if w.Code != http.StatusOK {
+		t.Errorf("healthz code = %d, want %d", w.Code, http.StatusOK)
+	}
+	var resp HealthResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "degraded" {
+		t.Errorf("healthz status = %q, want degraded", resp.Status)
+	}
+	if got := resp.Checks["runtime"]; got != "unavailable" {
+		t.Errorf("healthz checks[runtime] = %q, want unavailable", got)
+	}
+}
+
+func TestReadyzErrorRuntimeNotReady(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("readyz code = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "not_ready" {
+		t.Errorf("readyz status = %q, want not_ready", body["status"])
+	}
+}
+
+// TestHealthEndpointsConcurrentSwapRuntime runs /healthz and /readyz while
+// SwapRuntime flips the default runtime between a usable and a degraded
+// one. Under -race it checks that the health paths read s.runtime under
+// s.mu; each response must match one of the two runtimes.
+func TestHealthEndpointsConcurrentSwapRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	good := &runtime.MockRuntime{}
+	bad := &runtime.ErrorRuntime{Err: errors.New("failed to build kubernetes client")}
+	handler := srv.Handler()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	defer wg.Wait()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if i%2 == 0 {
+				srv.SwapRuntime(bad)
+			} else {
+				srv.SwapRuntime(good)
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		health := srv.GetHealthInfo(context.Background())
+		switch health.Status {
+		case "healthy":
+			if health.Checks["runtime"] != "" {
+				t.Fatalf("healthy with checks[runtime]: %v", health.Checks)
+			}
+		case "degraded":
+			if health.Checks["runtime"] != "unavailable" {
+				t.Fatalf("degraded without checks[runtime]: %v", health.Checks)
+			}
+		default:
+			t.Fatalf("unexpected status %q", health.Status)
+		}
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("readyz code = %d", w.Code)
+		}
+
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("info code = %d", w.Code)
+		}
 	}
 }

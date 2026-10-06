@@ -11,7 +11,7 @@ While Scion manages the orchestration and execution of containers, the tools run
 Each agent has a dedicated "Home" directory that is mounted into the container. Harness-specific settings are typically found in a hidden subdirectory:
 - **Gemini**: `/home/gemini/.gemini/settings.json`
 - **Claude**: `/home/claude/.claude.json` (or similar)
-- **Opencode**: `/home/opencode/opencode.json`
+- **Opencode**: `/home/scion/.config/opencode/opencode.json` (opencode 1.x does not read the old `.opencode.json` name)
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
@@ -116,8 +116,11 @@ scion harness-config pull <name>          # download from the Hub to the global 
 scion harness-config pull <name> --to <path>
 ```
 
-`sync`/`push` upload only changed files (compared by content hash); `pull` verifies each file's
-hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
+`sync`/`push` upload only changed files (compared by content hash) and mirror local deletions: a
+file removed from the local directory is removed from the Hub, and the removed paths are printed.
+Backup and temp files (`*.bak.<timestamp>`, `.*.tmp-*`) are never uploaded, so any left on the Hub
+are removed the same way. A directory with no files left to sync is refused. `pull` verifies each
+file's hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
 default, or the global scope with `--global` (which needs hub admin rights). `--global` also reads
 the config from the global directory (`~/.scion/harness-configs`), so to publish a config globally
 it must live there. They create the config in that scope or update an existing one of the same name,
@@ -181,14 +184,19 @@ The `config.yaml` file at the root of a harness-config bundle defines its runtim
 `Never`) can also be set — and, since ptone/scion#2156, overridden by an operator — via Hub
 settings `harness_configs.<name>.image` / `.image_pull_policy`, without editing the bundle. An
 explicit `image` or `kubernetes.imagePullPolicy` in a template or agent config still outranks the
-Hub setting, which in turn outranks this file's own default. See [Settings
+Hub setting, which in turn outranks this file's own default. An *explicitly set*
+`profiles.<p>.harness_overrides.<name>.image` (and that override's `image_pull_policy`) is the exception:
+since ptone/scion#1799 it outranks a template or inline value too, and only the user's explicit
+`--image` (or explicit pull policy) ranks above it. See [Settings
 Precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
 for the full chain.
 
 ### Thinking Level Map (`thinking`)
 
 Scion carries the thinking level as a harness-agnostic integer from 0 to 100 (`--thinking-level` on
-`scion start`, Hub agent defaults, templates). Inside the container it arrives as
+`scion start`, Hub agent defaults, templates). `--thinking-level` also accepts the shorthands
+`low` (25), `medium` (50), `high` (75) and `max` (100), case-insensitive; they are stored as those
+integers. Inside the container it arrives as
 `SCION_THINKING_LEVEL`. A harness that honours it declares a `thinking:` block in its
 `config.yaml`, next to `model_aliases`. The block maps level ranges to the harness's native tier
 strings:

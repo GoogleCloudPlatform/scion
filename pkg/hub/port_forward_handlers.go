@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -114,6 +116,13 @@ func (m *PortTunnelManager) Do(ctx context.Context, agentID string, req portforw
 		return nil, errNoPortTunnel
 	}
 	return s.do(ctx, req)
+}
+
+// has reports whether agentID holds a port-forward tunnel.
+func (m *PortTunnelManager) has(agentID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessions[agentID] != nil
 }
 
 type PortTunnelSession struct {
@@ -391,7 +400,29 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		}
 		return
 	}
+	// Conduit first (hub.conduit on and this node runs the relay): an agent
+	// with a conduit session is proxied over it. An agent without one may
+	// be an older sciontool on the port-forward tunnel below. Every loopback
+	// form (127.0.0.0/8, ::1, ::ffff:127.0.0.1, localhost) qualifies and is
+	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
+	// inside the agent.
+	conduitOn := s.conduitServing()
+	if conduitOn && isLoopbackHost(exposed.Host) {
+		conn, err := s.openConduitPort(r.Context(), GetIdentityFromContext(r.Context()), agent, exposed.Port)
+		switch {
+		case err == nil:
+			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn)
+			return
+		case !errors.Is(err, router.ErrNoSession):
+			writeConduitProxyError(w, r, agent.ID, err)
+			return
+		}
+	}
 	if isWebSocketUpgrade(r) {
+		if conduitOn && !s.portTunnels.has(agent.ID) {
+			writeAgentOffline(w, r)
+			return
+		}
 		writeError(w, http.StatusNotImplemented, ErrCodeInvalidRequest, "WebSocket port forwarding is not supported in this revision", nil)
 		return
 	}
@@ -415,6 +446,10 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	})
 	if err != nil {
 		if errors.Is(err, errNoPortTunnel) {
+			if conduitOn {
+				writeAgentOffline(w, r)
+				return
+			}
 			if isBrowserRequest(r) {
 				writeProxyErrorHTML(w, http.StatusServiceUnavailable, "Service Unavailable",
 					"No active port-forward tunnel for this agent. The agent may not be running or the tunnel has not been established yet.")
@@ -527,7 +562,8 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 	// for a UAT also requires live project access).
 	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
 		if _, scoped := userIdent.(*ScopedUserIdentity); scoped {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", nil)
+			// Session-only with the GOV_PENDING reason (session_only_gate.go).
+			writeSessionOnlyDenial(w, ErrCodeForbidden, "Scoped access tokens cannot manage exposed ports", authzop.ReasonGovernancePending)
 			return nil, false
 		}
 	}

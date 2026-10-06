@@ -35,6 +35,8 @@ import { performLogout } from '../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
+import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { ARTIFACTS_FLAG } from '../client/artifacts.js';
 
 /**
  * Page title configuration
@@ -105,9 +107,11 @@ export class ScionApp extends LitElement {
       top: 0;
       height: var(--scion-app-height, 100dvh);
       /* Landscape on a notched phone (the page uses viewport-fit=cover):
-         the nav moves clear of the notch, and the sidebar paints the nav's
-         surface under the gap. 0 elsewhere. */
+         the nav moves clear of the notch and the home indicator, and the
+         sidebar paints the nav's surface under the gaps. 0 elsewhere. */
+      box-sizing: border-box;
       padding-left: env(safe-area-inset-left, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
       background: var(--scion-surface, #ffffff);
     }
 
@@ -355,6 +359,12 @@ export class ScionApp extends LitElement {
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/metrics$/)) {
       return 'Project Metrics';
+    }
+    if (
+      this.currentPath.match(/^\/projects\/[^/]+\/artifacts\/[^/]+$/) &&
+      isFeatureEnabled(ARTIFACTS_FLAG)
+    ) {
+      return 'Artifact';
     }
     if (this.currentPath.match(/^\/projects\/[^/]+\/templates\/[^/]+$/)) {
       return 'Template';

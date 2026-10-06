@@ -21,7 +21,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -125,6 +124,9 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 	// Perform the cache refresh
 	resp, err := s.refreshProjectCacheFromBroker(ctx, project, brokerID, stor)
 	if err != nil {
+		if writeWorkspaceStorageUnavailable(w, err) {
+			return
+		}
 		RuntimeError(w, "Cache refresh failed: "+err.Error())
 		return
 	}
@@ -145,7 +147,9 @@ func (s *Server) handleProjectCacheStatus(w http.ResponseWriter, r *http.Request
 	// Check if a cache exists on disk
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		InternalError(w)
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
 		return
 	}
 
@@ -198,7 +202,9 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	// Download the latest workspace from GCS to local cache
 	cachePath, err := s.hubManagedProjectPath(project.Slug)
 	if err != nil {
-		InternalError(w)
+		if !writeWorkspaceStorageUnavailable(w, err) {
+			InternalError(w)
+		}
 		return
 	}
 
@@ -209,7 +215,7 @@ func (s *Server) handleProjectCacheNotify(w http.ResponseWriter, r *http.Request
 	}
 
 	storagePath := storage.ProjectWorkspaceStoragePath(s.HubID(), project.ID)
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
 		RuntimeError(w, "Failed to download workspace from GCS: "+err.Error())
 		return
 	}
@@ -294,7 +300,7 @@ func (s *Server) refreshProjectCacheFromBroker(ctx context.Context, project *sto
 		return nil, fmt.Errorf("failed to create cache directory: %w", err)
 	}
 
-	if err := gcp.SyncFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
+	if err := s.syncHubWorkspaceFromGCS(ctx, stor.Bucket(), storagePath+"/files", cachePath); err != nil {
 		return nil, fmt.Errorf("GCS download failed: %w", err)
 	}
 

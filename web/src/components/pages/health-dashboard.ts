@@ -44,6 +44,10 @@ interface HealthSummary {
     connected_brokers: number;
     active_agents: number;
     projects: number;
+    /** The hub's /healthz check map. */
+    checks?: Record<string, string>;
+    /** Non-healthy checks as "key: value" — the cause of a degraded/unhealthy hub. */
+    unhealthy_checks?: string[];
   };
   database: {
     status: string;
@@ -60,7 +64,8 @@ interface HealthSummary {
     runtime_available: boolean;
     agent_count: number;
     agent_healthy: number;
-    last_heartbeat: string;
+    /** Null or the Go zero time (`0001-01-01T00:00:00Z`) when never reported. */
+    last_heartbeat: string | null;
   }>;
   agents: {
     total: number;
@@ -77,6 +82,60 @@ interface HealthSummary {
     threshold_seconds: number;
     auto_suspend: boolean;
   };
+}
+
+/** The parts of the GET /api/v1/admin/server-config response the stall editor reads. */
+export interface ServerConfigSnapshot {
+  server?: {
+    hub?: {
+      stalled_threshold?: string;
+      soft_delete_retention?: string;
+      soft_delete_retain_files?: boolean;
+    };
+  };
+  /** Present on a DB-backed hub only; absent in file mode. */
+  section_metadata?: Record<string, { source?: string; revision?: number }>;
+}
+
+/**
+ * Builds the PUT /api/v1/admin/server-config body that sets
+ * server.hub.auto_suspend_stalled.
+ *
+ * The hub decodes a nested object; a flat dotted key such as
+ * "server.hub.auto_suspend_stalled" is silently dropped and the PUT still
+ * returns 200 (ptone/scion#3059). A DB-backed hub also replaces the whole
+ * lifecycle row, keeping only the start-claim keys a PUT omits, so the other
+ * lifecycle keys are carried over from `current`.
+ *
+ * On a DB-backed hub (section_metadata present) the write is a CAS: when the
+ * lifecycle row exists its revision is sent, otherwise revision 0, which the
+ * store treats as create-only. Either way a concurrent edit gets a 409
+ * instead of being overwritten. A file-backed hub sends no metadata and gets
+ * no expected_revisions.
+ */
+export function buildStallConfigUpdate(
+  current: ServerConfigSnapshot,
+  autoSuspend: boolean
+): Record<string, unknown> {
+  const curHub = current.server?.hub ?? {};
+  const hub: Record<string, unknown> = { auto_suspend_stalled: autoSuspend };
+  if (curHub.stalled_threshold) hub.stalled_threshold = curHub.stalled_threshold;
+  if (curHub.soft_delete_retention) hub.soft_delete_retention = curHub.soft_delete_retention;
+  if (typeof curHub.soft_delete_retain_files === 'boolean') {
+    hub.soft_delete_retain_files = curHub.soft_delete_retain_files;
+  }
+  const body: Record<string, unknown> = { server: { hub } };
+  const meta = current.section_metadata;
+  if (meta) {
+    const lifecycle = meta.lifecycle;
+    const rev = lifecycle?.revision;
+    if (lifecycle?.source === 'db' && typeof rev === 'number' && rev > 0) {
+      body.expected_revisions = { lifecycle: rev };
+    } else if (lifecycle) {
+      body.expected_revisions = { lifecycle: 0 };
+    }
+  }
+  return body;
 }
 
 @customElement('scion-page-health-dashboard')
@@ -199,13 +258,23 @@ export class ScionPageHealthDashboard extends LitElement {
   private async saveStallConfig(): Promise<void> {
     this.savingStall = true;
     try {
-      const settings: Record<string, unknown> = {
-        'server.hub.auto_suspend_stalled': this.stallAutoSuspend,
-      };
+      // Read the current lifecycle settings first: a DB-backed hub replaces
+      // the whole lifecycle row on PUT, so the keys this form does not edit
+      // must be sent back or they are dropped (ptone/scion#3059).
+      const cur = await apiFetch('/api/v1/admin/server-config');
+      if (!cur.ok) {
+        const msg = await extractApiError(cur, 'Failed to load current stall settings');
+        showToast(msg, 'danger');
+        return;
+      }
+      const body = buildStallConfigUpdate(
+        (await cur.json()) as ServerConfigSnapshot,
+        this.stallAutoSuspend
+      );
       const res = await apiFetch('/api/v1/admin/server-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const msg = await extractApiError(res, 'Failed to save stall settings');
@@ -325,6 +394,12 @@ export class ScionPageHealthDashboard extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .check-problem {
+      font-size: 0.8125rem;
+      padding: 0.125rem 0 0.25rem;
+      word-break: break-word;
+    }
+
     .broker-grid {
       display: flex;
       flex-wrap: wrap;
@@ -332,7 +407,8 @@ export class ScionPageHealthDashboard extends LitElement {
     }
 
     .broker-card {
-      background: var(--scion-surface-alt, #f8fafc);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.5rem;
       padding: 1rem;
@@ -342,6 +418,7 @@ export class ScionPageHealthDashboard extends LitElement {
 
     .broker-name {
       font-weight: 600;
+      color: var(--scion-text, #1e293b);
       margin-bottom: 0.5rem;
     }
 
@@ -595,6 +672,12 @@ export class ScionPageHealthDashboard extends LitElement {
           >
           ${d.hub.status}
         </div>
+        ${(d.hub.unhealthy_checks ?? []).map(
+          (c) =>
+            html`<div class="check-problem" style="color: ${this.statusColor(d.hub.status)}">
+              ${c}
+            </div>`
+        )}
         <div class="stat-row"><span class="label">Uptime</span><span>${d.hub.uptime}</span></div>
         <div class="stat-row"><span class="label">Version</span><span>${d.hub.version}</span></div>
         <div class="stat-row">
@@ -675,11 +758,7 @@ export class ScionPageHealthDashboard extends LitElement {
                   <div class="broker-stat" style="color:var(--scion-text-muted,#64748b)">
                     NFS: not reported
                   </div>
-                  ${b.last_heartbeat
-                    ? html`<div class="broker-stat">
-                        Heartbeat: ${this.timeAgo(b.last_heartbeat)}
-                      </div>`
-                    : nothing}
+                  <div class="broker-stat">Heartbeat: ${formatHeartbeatAge(b.last_heartbeat)}</div>
                 </div>
               `
             )}
@@ -840,13 +919,21 @@ export class ScionPageHealthDashboard extends LitElement {
       </div>
     `;
   }
+}
 
-  private timeAgo(isoDate: string): string {
-    if (!isoDate) return 'never';
-    const ms = new Date(isoDate).getTime();
-    if (Number.isNaN(ms)) return 'unknown';
-    // A future instant is clock skew between hub and browser.
-    if (ms > Date.now()) return 'just now';
-    return formatRelative(isoDate, { style: 'narrow' });
-  }
+/**
+ * Formats a broker heartbeat as a relative age. A null, undefined or
+ * empty value, the Go zero time (`0001-01-01T00:00:00Z`), or any other
+ * non-positive instant (the Unix epoch itself or any earlier time) means
+ * the heartbeat was never reported and renders as "never". An unparsable
+ * value renders as "unknown" and a future instant as "just now".
+ */
+export function formatHeartbeatAge(isoDate: string | null | undefined): string {
+  if (!isoDate) return 'never';
+  const ms = new Date(isoDate).getTime();
+  if (Number.isNaN(ms)) return 'unknown';
+  if (ms <= 0) return 'never';
+  // A future instant is clock skew between hub and browser.
+  if (ms > Date.now()) return 'just now';
+  return formatRelative(isoDate, { style: 'narrow' });
 }

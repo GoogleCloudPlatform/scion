@@ -352,6 +352,20 @@ func (_c *AgentCreate) SetNillableRuntimeBrokerID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (_c *AgentCreate) SetWorkspacePlacement(v string) *AgentCreate {
+	_c.mutation.SetWorkspacePlacement(v)
+	return _c
+}
+
+// SetNillableWorkspacePlacement sets the "workspace_placement" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableWorkspacePlacement(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetWorkspacePlacement(*v)
+	}
+	return _c
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (_c *AgentCreate) SetWebPtyEnabled(v bool) *AgentCreate {
 	_c.mutation.SetWebPtyEnabled(v)
@@ -613,6 +627,12 @@ func (_c *AgentCreate) SetNillableRunID(v *string) *AgentCreate {
 	if v != nil {
 		_c.SetRunID(*v)
 	}
+	return _c
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_c *AgentCreate) SetPreviousRunIds(v []string) *AgentCreate {
+	_c.mutation.SetPreviousRunIds(v)
 	return _c
 }
 
@@ -896,6 +916,20 @@ func (_c *AgentCreate) SetNillableRunIntentAt(v *time.Time) *AgentCreate {
 	return _c
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_c *AgentCreate) SetRunIntentMarkedAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunIntentMarkedAt(v)
+	return _c
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIntentMarkedAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunIntentMarkedAt(*v)
+	}
+	return _c
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (_c *AgentCreate) SetStartClaimID(v string) *AgentCreate {
 	_c.mutation.SetStartClaimID(v)
@@ -1036,6 +1070,20 @@ func (_c *AgentCreate) SetNillableStartClaimLaunchID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (_c *AgentCreate) SetSoftDeleteOpID(v string) *AgentCreate {
+	_c.mutation.SetSoftDeleteOpID(v)
+	return _c
+}
+
+// SetNillableSoftDeleteOpID sets the "soft_delete_op_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSoftDeleteOpID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSoftDeleteOpID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -1143,6 +1191,10 @@ func (_c *AgentCreate) defaults() {
 	if _, ok := _c.mutation.Detached(); !ok {
 		v := agent.DefaultDetached
 		_c.mutation.SetDetached(v)
+	}
+	if _, ok := _c.mutation.WorkspacePlacement(); !ok {
+		v := agent.DefaultWorkspacePlacement
+		_c.mutation.SetWorkspacePlacement(v)
 	}
 	if _, ok := _c.mutation.WebPtyEnabled(); !ok {
 		v := agent.DefaultWebPtyEnabled
@@ -1470,6 +1522,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRuntimeBrokerID, field.TypeString, value)
 		_node.RuntimeBrokerID = value
 	}
+	if value, ok := _c.mutation.WorkspacePlacement(); ok {
+		_spec.SetField(agent.FieldWorkspacePlacement, field.TypeString, value)
+		_node.WorkspacePlacement = value
+	}
 	if value, ok := _c.mutation.WebPtyEnabled(); ok {
 		_spec.SetField(agent.FieldWebPtyEnabled, field.TypeBool, value)
 		_node.WebPtyEnabled = value
@@ -1549,6 +1605,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RunID(); ok {
 		_spec.SetField(agent.FieldRunID, field.TypeString, value)
 		_node.RunID = value
+	}
+	if value, ok := _c.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+		_node.PreviousRunIds = value
 	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
@@ -1630,6 +1690,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
 		_node.RunIntentAt = &value
 	}
+	if value, ok := _c.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+		_node.RunIntentMarkedAt = &value
+	}
 	if value, ok := _c.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
 		_node.StartClaimID = &value
@@ -1669,6 +1733,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.StartClaimLaunchID(); ok {
 		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
 		_node.StartClaimLaunchID = value
+	}
+	if value, ok := _c.mutation.SoftDeleteOpID(); ok {
+		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
+		_node.SoftDeleteOpID = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -2203,6 +2271,24 @@ func (u *AgentUpsert) ClearRuntimeBrokerID() *AgentUpsert {
 	return u
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsert) SetWorkspacePlacement(v string) *AgentUpsert {
+	u.Set(agent.FieldWorkspacePlacement, v)
+	return u
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateWorkspacePlacement() *AgentUpsert {
+	u.SetExcluded(agent.FieldWorkspacePlacement)
+	return u
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsert) ClearWorkspacePlacement() *AgentUpsert {
+	u.SetNull(agent.FieldWorkspacePlacement)
+	return u
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (u *AgentUpsert) SetWebPtyEnabled(v bool) *AgentUpsert {
 	u.Set(agent.FieldWebPtyEnabled, v)
@@ -2524,6 +2610,24 @@ func (u *AgentUpsert) UpdateRunID() *AgentUpsert {
 // ClearRunID clears the value of the "run_id" field.
 func (u *AgentUpsert) ClearRunID() *AgentUpsert {
 	u.SetNull(agent.FieldRunID)
+	return u
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsert) SetPreviousRunIds(v []string) *AgentUpsert {
+	u.Set(agent.FieldPreviousRunIds, v)
+	return u
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsert) UpdatePreviousRunIds() *AgentUpsert {
+	u.SetExcluded(agent.FieldPreviousRunIds)
+	return u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsert) ClearPreviousRunIds() *AgentUpsert {
+	u.SetNull(agent.FieldPreviousRunIds)
 	return u
 }
 
@@ -2887,6 +2991,24 @@ func (u *AgentUpsert) ClearRunIntentAt() *AgentUpsert {
 	return u
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsert) SetRunIntentMarkedAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunIntentMarkedAt, v)
+	return u
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIntentMarkedAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIntentMarkedAt)
+	return u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsert) ClearRunIntentMarkedAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunIntentMarkedAt)
+	return u
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (u *AgentUpsert) SetStartClaimID(v string) *AgentUpsert {
 	u.Set(agent.FieldStartClaimID, v)
@@ -3064,6 +3186,24 @@ func (u *AgentUpsert) UpdateStartClaimLaunchID() *AgentUpsert {
 // ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
 func (u *AgentUpsert) ClearStartClaimLaunchID() *AgentUpsert {
 	u.SetNull(agent.FieldStartClaimLaunchID)
+	return u
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsert) SetSoftDeleteOpID(v string) *AgentUpsert {
+	u.Set(agent.FieldSoftDeleteOpID, v)
+	return u
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSoftDeleteOpID() *AgentUpsert {
+	u.SetExcluded(agent.FieldSoftDeleteOpID)
+	return u
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsert) ClearSoftDeleteOpID() *AgentUpsert {
+	u.SetNull(agent.FieldSoftDeleteOpID)
 	return u
 }
 
@@ -3622,6 +3762,27 @@ func (u *AgentUpsertOne) ClearRuntimeBrokerID() *AgentUpsertOne {
 	})
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertOne) SetWorkspacePlacement(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertOne) ClearWorkspacePlacement() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
+	})
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (u *AgentUpsertOne) SetWebPtyEnabled(v bool) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -3997,6 +4158,27 @@ func (u *AgentUpsertOne) UpdateRunID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearRunID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunID()
+	})
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertOne) SetPreviousRunIds(v []string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdatePreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertOne) ClearPreviousRunIds() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
 	})
 }
 
@@ -4420,6 +4602,27 @@ func (u *AgentUpsertOne) ClearRunIntentAt() *AgentUpsertOne {
 	})
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsertOne) SetRunIntentMarkedAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentMarkedAt(v)
+	})
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIntentMarkedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentMarkedAt()
+	})
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsertOne) ClearRunIntentMarkedAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentMarkedAt()
+	})
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (u *AgentUpsertOne) SetStartClaimID(v string) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -4627,6 +4830,27 @@ func (u *AgentUpsertOne) UpdateStartClaimLaunchID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearStartClaimLaunchID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearStartClaimLaunchID()
+	})
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) SetSoftDeleteOpID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertOne) ClearSoftDeleteOpID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
 	})
 }
 
@@ -5352,6 +5576,27 @@ func (u *AgentUpsertBulk) ClearRuntimeBrokerID() *AgentUpsertBulk {
 	})
 }
 
+// SetWorkspacePlacement sets the "workspace_placement" field.
+func (u *AgentUpsertBulk) SetWorkspacePlacement(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetWorkspacePlacement(v)
+	})
+}
+
+// UpdateWorkspacePlacement sets the "workspace_placement" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateWorkspacePlacement()
+	})
+}
+
+// ClearWorkspacePlacement clears the value of the "workspace_placement" field.
+func (u *AgentUpsertBulk) ClearWorkspacePlacement() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearWorkspacePlacement()
+	})
+}
+
 // SetWebPtyEnabled sets the "web_pty_enabled" field.
 func (u *AgentUpsertBulk) SetWebPtyEnabled(v bool) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -5727,6 +5972,27 @@ func (u *AgentUpsertBulk) UpdateRunID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearRunID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearRunID()
+	})
+}
+
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (u *AgentUpsertBulk) SetPreviousRunIds(v []string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetPreviousRunIds(v)
+	})
+}
+
+// UpdatePreviousRunIds sets the "previous_run_ids" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdatePreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdatePreviousRunIds()
+	})
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (u *AgentUpsertBulk) ClearPreviousRunIds() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearPreviousRunIds()
 	})
 }
 
@@ -6150,6 +6416,27 @@ func (u *AgentUpsertBulk) ClearRunIntentAt() *AgentUpsertBulk {
 	})
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (u *AgentUpsertBulk) SetRunIntentMarkedAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentMarkedAt(v)
+	})
+}
+
+// UpdateRunIntentMarkedAt sets the "run_intent_marked_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIntentMarkedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentMarkedAt()
+	})
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (u *AgentUpsertBulk) ClearRunIntentMarkedAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentMarkedAt()
+	})
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (u *AgentUpsertBulk) SetStartClaimID(v string) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -6357,6 +6644,27 @@ func (u *AgentUpsertBulk) UpdateStartClaimLaunchID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearStartClaimLaunchID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearStartClaimLaunchID()
+	})
+}
+
+// SetSoftDeleteOpID sets the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) SetSoftDeleteOpID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSoftDeleteOpID(v)
+	})
+}
+
+// UpdateSoftDeleteOpID sets the "soft_delete_op_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSoftDeleteOpID()
+	})
+}
+
+// ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
+func (u *AgentUpsertBulk) ClearSoftDeleteOpID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSoftDeleteOpID()
 	})
 }
 
