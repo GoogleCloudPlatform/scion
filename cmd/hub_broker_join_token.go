@@ -51,10 +51,14 @@ var hubBrokersJoinTokenCreateCmd = &cobra.Command{
 	Long: `Create a join token for the named broker.
 
 If no broker with this name exists, the broker is created and you become its
-owner. If you already own a broker with this name, a new token is issued for
-it and any earlier unused token for that broker stops working. The broker's
-settings (auto-provide, labels, GCP host identity) are never changed, and the
-broker is not added to any project.
+owner. If a broker with this name exists, its owner or a super-admin can issue
+a new token for it; anyone else is refused. A new token makes any earlier
+unused token for that broker stop working. The broker's settings
+(auto-provide, labels, GCP host identity) are never changed, and the broker is
+not added to any project.
+
+Redeeming a token replaces the broker's credentials. If a host has already
+joined as this broker, it is disconnected once the new token is used.
 
 The token is single use. Run 'scion runtime-broker join' on the broker host
 with the token in SCION_BROKER_JOIN_TOKEN to finish the connection.

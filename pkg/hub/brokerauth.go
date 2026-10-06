@@ -235,6 +235,9 @@ type CreateBrokerRegistrationResponse struct {
 	// Reissued is true when an earlier join token for this broker was
 	// replaced by this one. The earlier token no longer works.
 	Reissued bool `json:"reissued,omitempty"`
+	// JoinTokenTTL is the lifetime the token was issued with. It is
+	// recorded in the audit log and not sent to the client.
+	JoinTokenTTL time.Duration `json:"-"`
 }
 
 // BrokerJoinRequest is the request body for POST /api/v1/brokers/join.
@@ -516,6 +519,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		ExpiresAt:    expiresAt,
 		Reregistered: reregistered,
 		Reissued:     reissued,
+		JoinTokenTTL: ttl,
 	}, nil
 }
 
@@ -623,8 +627,10 @@ func (s *BrokerAuthService) classifyUnconsumedJoinToken(ctx context.Context, tok
 		return ErrJoinTokenBrokerMismatch
 	}
 	if !joinToken.ExpiresAt.After(now) {
-		// Best effort: the cleanup job removes it otherwise.
-		_ = s.store.DeleteJoinToken(ctx, joinToken.BrokerID)
+		// Best effort, and only this token while it is still expired: a
+		// token re-issued for the broker in the meantime has another hash
+		// and is kept. The cleanup job removes it otherwise.
+		_ = s.store.DeleteExpiredJoinToken(ctx, tokenHash, now)
 		return ErrJoinTokenExpired
 	}
 	// The token exists and is valid now, so another join consumed a token

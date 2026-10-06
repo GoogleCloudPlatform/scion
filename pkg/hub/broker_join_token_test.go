@@ -144,6 +144,8 @@ func TestBrokerJoinToken_MintThenJoinWithoutUserAuth(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	minter := newHubMemberUser(t, s, "jt-e2e-minter")
+	audit := &mockAuditLogger{}
+	srv.SetAuditLogger(audit)
 
 	rec := mintJoinToken(t, srv, minter, "jt-e2e-broker", 600)
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
@@ -162,6 +164,27 @@ func TestBrokerJoinToken_MintThenJoinWithoutUserAuth(t *testing.T) {
 	assert.Equal(t, minter.ID, broker.CreatedBy, "the minter owns the broker")
 	assert.False(t, broker.AutoProvide, "a minted broker never auto-provides")
 	assert.Equal(t, store.BrokerStatusOnline, broker.Status)
+
+	// The register audit event records the minter and the token's expiry,
+	// lifetime and reissue state, never the token or its hash.
+	var registerEvent *BrokerAuthEvent
+	for _, e := range audit.brokerEvents {
+		if e.EventType == BrokerAuthEventRegister {
+			registerEvent = e
+		}
+		for k, v := range e.Details {
+			assert.NotContains(t, v, minted.JoinToken, "audit detail %s carries the token", k)
+			assert.NotContains(t, v, sha256Hash(minted.JoinToken), "audit detail %s carries the token hash", k)
+		}
+	}
+	require.NotNil(t, registerEvent, "a register audit event is recorded")
+	assert.Equal(t, minter.ID, registerEvent.ActorID)
+	assert.Equal(t, minted.BrokerID, registerEvent.BrokerID)
+	assert.Equal(t, map[string]string{
+		"join_token_expires_at": minted.ExpiresAt.UTC().Format(time.RFC3339),
+		"join_token_ttl":        "10m0s",
+		"reissued":              "false",
+	}, registerEvent.Details)
 
 	// The token is single use.
 	again := joinWithToken(t, srv, minted.BrokerID, minted.JoinToken)
@@ -318,11 +341,12 @@ func TestBrokerJoinToken_ConcurrentJoins(t *testing.T) {
 	assert.Equal(t, winner, base64.StdEncoding.EncodeToString(active[0].SecretKey), "the stored secret is the one returned to the winner")
 }
 
-// seedJoinToken stores a join token for brokerID directly and returns the
-// plaintext token.
-func seedJoinToken(t *testing.T, s store.Store, brokerID string, expiresAt time.Time) string {
+// seedJoinToken stores a join token for brokerID directly, replacing any
+// earlier one, and returns the plaintext token. suffix makes the token
+// distinct from others seeded for the same broker.
+func seedJoinToken(t *testing.T, s store.Store, brokerID, suffix string, expiresAt time.Time) string {
 	t.Helper()
-	token := JoinTokenPrefix + "seeded-" + brokerID
+	token := JoinTokenPrefix + "seeded-" + suffix + "-" + brokerID
 	_, err := s.UpsertJoinToken(context.Background(), &store.BrokerJoinToken{
 		BrokerID:  brokerID,
 		TokenHash: sha256Hash(token),
@@ -338,7 +362,7 @@ func TestBrokerJoinToken_ExpiredToken(t *testing.T) {
 	ctx := context.Background()
 	owner := newHubMemberUser(t, s, "jt-expired-owner")
 	broker := createReregistrationTestBroker(t, s, "jt-expired-broker", owner.ID)
-	token := seedJoinToken(t, s, broker.ID, time.Now().Add(-time.Minute))
+	token := seedJoinToken(t, s, broker.ID, "expired", time.Now().Add(-time.Minute))
 
 	rec := joinWithToken(t, srv, broker.ID, token)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
@@ -357,7 +381,7 @@ func TestBrokerJoinToken_WrongBrokerAndUnknownToken(t *testing.T) {
 	owner := newHubMemberUser(t, s, "jt-mismatch-owner")
 	broker := createReregistrationTestBroker(t, s, "jt-mismatch-broker", owner.ID)
 	other := createReregistrationTestBroker(t, s, "jt-mismatch-other", owner.ID)
-	token := seedJoinToken(t, s, broker.ID, time.Now().Add(time.Hour))
+	token := seedJoinToken(t, s, broker.ID, "valid", time.Now().Add(time.Hour))
 
 	rec := joinWithToken(t, srv, other.ID, token)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
@@ -437,13 +461,119 @@ func TestCompleteBrokerJoin_SentinelErrors(t *testing.T) {
 	assert.ErrorIs(t, err, ErrJoinTokenInvalid)
 	assert.EqualError(t, err, "invalid join token")
 
-	token := seedJoinToken(t, s, broker.ID, time.Now().Add(time.Hour))
+	token := seedJoinToken(t, s, broker.ID, "valid", time.Now().Add(time.Hour))
 	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{BrokerID: tid("jt-sentinel-other"), JoinToken: token}, "")
 	assert.ErrorIs(t, err, ErrJoinTokenBrokerMismatch)
 	assert.EqualError(t, err, "join token does not match broker")
 
-	expired := seedJoinToken(t, s, broker.ID, time.Now().Add(-time.Second))
+	expired := seedJoinToken(t, s, broker.ID, "expired", time.Now().Add(-time.Second))
+	require.NotEqual(t, token, expired)
 	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{BrokerID: broker.ID, JoinToken: expired}, "")
 	assert.ErrorIs(t, err, ErrJoinTokenExpired)
 	assert.EqualError(t, err, "join token has expired")
+
+	// The expired token replaced the valid one (one token per broker).
+	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{BrokerID: broker.ID, JoinToken: token}, "")
+	assert.ErrorIs(t, err, ErrJoinTokenInvalid)
+}
+
+func TestBrokerJoinToken_RemintAuditRecordsReissue(t *testing.T) {
+	srv, s := testServer(t)
+	minter := newHubMemberUser(t, s, "jt-audit-remint-minter")
+	audit := &mockAuditLogger{}
+	srv.SetAuditLogger(audit)
+
+	require.Equal(t, http.StatusCreated, mintJoinToken(t, srv, minter, "jt-audit-remint-broker", 0).Code)
+	require.Equal(t, http.StatusCreated, mintJoinToken(t, srv, minter, "jt-audit-remint-broker", 0).Code)
+
+	var reissued []string
+	for _, e := range audit.brokerEvents {
+		if e.EventType == BrokerAuthEventRegister {
+			reissued = append(reissued, e.Details["reissued"])
+			assert.Equal(t, "1h0m0s", e.Details["join_token_ttl"], "the default lifetime is recorded")
+		}
+	}
+	assert.Equal(t, []string{"false", "true"}, reissued)
+}
+
+// TestBrokerJoinToken_CleanupHandlerRemovesExpiredOnly runs the scheduled
+// cleanup handler directly.
+func TestBrokerJoinToken_CleanupHandlerRemovesExpiredOnly(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newPlainUser(t, s, "jt-cleanup-owner")
+	expiredBroker := createReregistrationTestBroker(t, s, "jt-cleanup-expired", owner.ID)
+	validBroker := createReregistrationTestBroker(t, s, "jt-cleanup-valid", owner.ID)
+	seedJoinToken(t, s, expiredBroker.ID, "expired", time.Now().Add(-time.Minute))
+	seedJoinToken(t, s, validBroker.ID, "valid", time.Now().Add(time.Hour))
+
+	srv.brokerJoinTokenCleanupHandler()(ctx)
+
+	_, err := s.GetJoinTokenByBrokerID(ctx, expiredBroker.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the expired token is removed")
+	_, err = s.GetJoinTokenByBrokerID(ctx, validBroker.ID)
+	assert.NoError(t, err, "the valid token is kept")
+}
+
+// TestBrokerJoinToken_MintForAnotherUsersBrokerDenied: a mint-shaped
+// request naming a broker someone else owns is refused, and the broker and
+// its token are left alone.
+func TestBrokerJoinToken_MintForAnotherUsersBrokerDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "jt-other-owner")
+	intruder := newHubMemberUser(t, s, "jt-other-intruder")
+
+	rec := mintJoinToken(t, srv, owner, "jt-other-broker", 0)
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	minted := decodeRegistration(t, rec)
+
+	rec = mintJoinToken(t, srv, intruder, "jt-other-broker", 0)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "joinToken")
+
+	stored, err := s.GetJoinTokenByBrokerID(ctx, minted.BrokerID)
+	require.NoError(t, err)
+	assert.Equal(t, sha256Hash(minted.JoinToken), stored.TokenHash, "the owner's token is unchanged")
+	assert.Equal(t, http.StatusOK, joinWithToken(t, srv, minted.BrokerID, minted.JoinToken).Code)
+}
+
+// TestBrokerJoinToken_MintRequiresBrokerCreate: a mint-shaped request
+// (preserveSettings and joinTokenTtlSeconds) goes through the broker.create
+// check like any other registration: a user without broker.create is
+// refused, and so is a user access token, whatever its scopes, even for a
+// user who holds broker.create in a session.
+func TestBrokerJoinToken_MintRequiresBrokerCreate(t *testing.T) {
+	t.Run("user without broker.create", func(t *testing.T) {
+		srv, s := testServer(t)
+		plain := newPlainUser(t, s, "jt-nogrant-user")
+		rec := mintJoinToken(t, srv, plain, "jt-nogrant-broker", 600)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		_, err := s.GetRuntimeBrokerByName(context.Background(), "jt-nogrant-broker")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("user access token", func(t *testing.T) {
+		srv, s := testServer(t)
+		projectID := tid("jt-uat-proj")
+		ownerID := tid("jt-uat-owner")
+		createRS1Project(t, s, projectID, ownerID)
+		ensureHubMembership(context.Background(), s, ownerID)
+
+		// The same user can mint with a session.
+		owner, err := s.GetUser(context.Background(), ownerID)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, mintJoinToken(t, srv, owner, "jt-uat-session-broker", 600).Code)
+
+		uat := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read", "agent:create", "project:read"})
+		rec := doRequestWithToken(t, srv, uat, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+			Name:                "jt-uat-broker",
+			JoinTokenTTLSeconds: 600,
+			PreserveSettings:    true,
+		})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "joinToken")
+		_, err = s.GetRuntimeBrokerByName(context.Background(), "jt-uat-broker")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
 }

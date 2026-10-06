@@ -42,7 +42,9 @@ const (
 )
 
 var (
-	brokerJoinBrokerID string
+	brokerJoinBrokerID  string
+	brokerJoinTokenFile string
+	brokerJoinForce     bool
 )
 
 var brokerJoinCmd = &cobra.Command{
@@ -55,8 +57,13 @@ machine with 'scion hub brokers join-token create <broker-name>'. This command
 then runs on the broker host. It needs no Hub user credential: the join token
 is the only credential it sends.
 
-The join token is read from the SCION_BROKER_JOIN_TOKEN environment variable.
-There is no command-line flag for the token.
+The join token is read from the file named by --token-file ('-' reads it from
+stdin), or else from the SCION_BROKER_JOIN_TOKEN environment variable. There is
+no command-line flag that takes the token itself.
+
+The command refuses to run if this host already has credentials for the hub
+connection, or if its settings already name a different broker ID, unless
+--force is given. With --force those credentials and settings are replaced.
 
 The Hub endpoint is resolved as for 'register': SCION_HUB_ENDPOINT, hub.endpoint
 in settings, or --hub.
@@ -71,9 +78,14 @@ It does not add the broker to any project. Use 'scion runtime-broker provide'
 for that.
 
 Examples:
+  # Token in the environment
   SCION_HUB_ENDPOINT=https://hub.example.com \
   SCION_BROKER_JOIN_TOKEN=<token> \
-  scion runtime-broker join --broker-id <broker-id>`,
+  scion runtime-broker join --broker-id <broker-id>
+
+  # Token in a file, or on stdin
+  scion runtime-broker join --broker-id <broker-id> --token-file /run/secrets/scion-join
+  get-secret scion-join | scion runtime-broker join --broker-id <broker-id> --token-file -`,
 	RunE: runBrokerJoin,
 }
 
@@ -85,20 +97,62 @@ func init() {
 	brokerJoinCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
 	brokerJoinCmd.Flags().StringVar(&brokerTransportAudience, "transport-audience", "", "Transport auth OIDC audience (overrides SCION_TRANSPORT_AUDIENCE)")
 	brokerJoinCmd.Flags().IntVar(&brokerPort, "port", 0, brokerPortFlagUsage)
+	brokerJoinCmd.Flags().StringVar(&brokerJoinTokenFile, "token-file", "", "Read the join token from this file ('-' for stdin) instead of SCION_BROKER_JOIN_TOKEN")
+	brokerJoinCmd.Flags().BoolVar(&brokerJoinForce, "force", false, "Replace existing credentials for this hub connection and a different broker ID in settings")
 }
 
-// resolveBrokerJoinToken returns the join token from SCION_BROKER_JOIN_TOKEN,
-// trimmed of surrounding whitespace. A value without the scion_join_ prefix
-// is rejected here, before any request is sent.
-func resolveBrokerJoinToken() (string, error) {
-	token := strings.TrimSpace(os.Getenv(envBrokerJoinToken))
+// resolveBrokerJoinToken returns the join token, trimmed of surrounding
+// whitespace. It is read from tokenFile when set ('-' reads stdin), and
+// otherwise from SCION_BROKER_JOIN_TOKEN. A value without the scion_join_
+// prefix is rejected here, before any request is sent.
+func resolveBrokerJoinToken(tokenFile string, stdin io.Reader) (string, error) {
+	var token, source string
+	switch tokenFile {
+	case "":
+		source = envBrokerJoinToken
+		token = os.Getenv(envBrokerJoinToken)
+		if strings.TrimSpace(token) == "" {
+			return "", fmt.Errorf("no join token: set %s or pass --token-file", envBrokerJoinToken)
+		}
+	case "-":
+		source = "stdin"
+		data, err := io.ReadAll(io.LimitReader(stdin, 64*1024))
+		if err != nil {
+			return "", fmt.Errorf("failed to read the join token from stdin: %w", err)
+		}
+		token = string(data)
+	default:
+		source = tokenFile
+		data, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to read the join token file: %w", err)
+		}
+		token = string(data)
+	}
+	token = strings.TrimSpace(token)
 	if token == "" {
-		return "", fmt.Errorf("no join token: set %s", envBrokerJoinToken)
+		return "", fmt.Errorf("no join token in %s", source)
 	}
 	if !strings.HasPrefix(token, brokerJoinTokenPrefix) {
-		return "", fmt.Errorf("the value in %s is not a join token (expected the %s prefix)", envBrokerJoinToken, brokerJoinTokenPrefix)
+		return "", fmt.Errorf("the value in %s is not a join token (expected the %s prefix)", source, brokerJoinTokenPrefix)
 	}
 	return token, nil
+}
+
+// checkBrokerJoinTarget refuses a join that would replace this host's
+// existing broker identity: saved credentials for the hub connection, or a
+// different broker ID in global settings. force skips both checks.
+func checkBrokerJoinTarget(credStore *brokercredentials.MultiStore, globalDir, hubName, brokerID string, force bool) error {
+	if force {
+		return nil
+	}
+	if creds, err := credStore.Load(hubName); err == nil && creds != nil && creds.BrokerID != "" {
+		return fmt.Errorf("this host already has credentials for hub connection '%s' (broker %s); pass --force to replace them", hubName, creds.BrokerID)
+	}
+	if gs, err := config.LoadSettings(globalDir); err == nil && gs.Hub != nil && gs.Hub.BrokerID != "" && gs.Hub.BrokerID != brokerID {
+		return fmt.Errorf("this host's settings already name broker %s; pass --force to join as %s instead", gs.Hub.BrokerID, brokerID)
+	}
+	return nil
 }
 
 // resolveBrokerJoinBrokerID returns the broker ID from --broker-id, else
@@ -135,7 +189,7 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := resolveBrokerJoinToken()
+	token, err := resolveBrokerJoinToken(brokerJoinTokenFile, cmd.InOrStdin())
 	if err != nil {
 		return err
 	}
@@ -185,6 +239,10 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return fmt.Errorf("failed to get global directory: %w", err)
+	}
+
+	if err := checkBrokerJoinTarget(multiStore, globalDir, hubName, brokerID, brokerJoinForce); err != nil {
+		return err
 	}
 
 	client, err := newUnauthenticatedHubClient(endpoint, brokerTransportMode, brokerTransportAudience)

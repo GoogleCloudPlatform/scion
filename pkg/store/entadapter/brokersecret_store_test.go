@@ -215,9 +215,11 @@ func TestJoinToken_CleanExpired(t *testing.T) {
 	require.NoError(t, bs.CreateJoinToken(ctx, expired))
 	require.NoError(t, bs.CreateJoinToken(ctx, valid))
 
-	require.NoError(t, bs.CleanExpiredJoinTokens(ctx))
+	removed, err := bs.CleanExpiredJoinTokens(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
 
-	_, err := bs.GetJoinTokenByBrokerID(ctx, expired.BrokerID)
+	_, err = bs.GetJoinTokenByBrokerID(ctx, expired.BrokerID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "expired token should be cleaned")
 	_, err = bs.GetJoinTokenByBrokerID(ctx, valid.BrokerID)
 	assert.NoError(t, err, "valid token should remain")
@@ -343,4 +345,35 @@ func TestJoinToken_ConsumeConcurrent(t *testing.T) {
 		}
 		require.Equal(t, 1, succeeded, "iteration %d: exactly one consumer succeeds", iter)
 	}
+}
+
+func TestJoinToken_DeleteExpired(t *testing.T) {
+	bs := newTestBrokerSecretStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	brokerID := uuid.NewString()
+	_, err := bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "old-hash", ExpiresAt: now.Add(-time.Minute), CreatedBy: "u"})
+	require.NoError(t, err)
+
+	// A token that has not expired at the given time is kept.
+	assert.ErrorIs(t, bs.DeleteExpiredJoinToken(ctx, "old-hash", now.Add(-time.Hour)), store.ErrNotFound)
+	_, err = bs.GetJoinToken(ctx, "old-hash")
+	require.NoError(t, err)
+
+	// A re-mint replaces the hash on the same broker row; deleting the old
+	// hash must not remove the new token.
+	_, err = bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: brokerID, TokenHash: "new-hash", ExpiresAt: now.Add(time.Hour), CreatedBy: "u"})
+	require.NoError(t, err)
+	assert.ErrorIs(t, bs.DeleteExpiredJoinToken(ctx, "old-hash", now), store.ErrNotFound)
+	_, err = bs.GetJoinToken(ctx, "new-hash")
+	require.NoError(t, err, "the re-minted token survives")
+
+	// An expired token with the given hash is deleted.
+	other := uuid.NewString()
+	_, err = bs.UpsertJoinToken(ctx, &store.BrokerJoinToken{BrokerID: other, TokenHash: "expired-hash", ExpiresAt: now.Add(-time.Second), CreatedBy: "u"})
+	require.NoError(t, err)
+	require.NoError(t, bs.DeleteExpiredJoinToken(ctx, "expired-hash", now))
+	_, err = bs.GetJoinToken(ctx, "expired-hash")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.ErrorIs(t, bs.DeleteExpiredJoinToken(ctx, "", now), store.ErrNotFound)
 }

@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,9 +150,20 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	}
 
 	// Log audit event
-	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r))
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r), joinTokenAuditDetails(resp))
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// joinTokenAuditDetails describes an issued join token for the register
+// audit event: when it expires, the lifetime it was issued with, and whether
+// it replaced an earlier token. The token itself is never included.
+func joinTokenAuditDetails(resp *CreateBrokerRegistrationResponse) map[string]string {
+	return map[string]string{
+		"join_token_expires_at": resp.ExpiresAt.UTC().Format(time.RFC3339),
+		"join_token_ttl":        resp.JoinTokenTTL.String(),
+		"reissued":              strconv.FormatBool(resp.Reissued),
+	}
 }
 
 // writeBrokerRegistrationError maps an error from

@@ -318,6 +318,27 @@ func (s *BrokerSecretStore) ConsumeJoinToken(ctx context.Context, tokenHash, bro
 	return nil
 }
 
+// DeleteExpiredJoinToken deletes the join token with tokenHash if it has
+// expired at now, in one DELETE statement.
+func (s *BrokerSecretStore) DeleteExpiredJoinToken(ctx context.Context, tokenHash string, now time.Time) error {
+	if tokenHash == "" {
+		return store.ErrNotFound
+	}
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(
+			brokerjointoken.TokenHashEQ(tokenHash),
+			brokerjointoken.ExpiresAtLTE(now),
+		).
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // GetJoinToken retrieves a join token by token hash.
 func (s *BrokerSecretStore) GetJoinToken(ctx context.Context, tokenHash string) (*store.BrokerJoinToken, error) {
 	t, err := s.client.BrokerJoinToken.Query().
@@ -354,10 +375,14 @@ func (s *BrokerSecretStore) DeleteJoinToken(ctx context.Context, brokerID string
 	return nil
 }
 
-// CleanExpiredJoinTokens removes all expired join tokens.
-func (s *BrokerSecretStore) CleanExpiredJoinTokens(ctx context.Context) error {
-	_, err := s.client.BrokerJoinToken.Delete().
-		Where(brokerjointoken.ExpiresAtLT(time.Now())).
+// CleanExpiredJoinTokens removes all expired join tokens and returns how
+// many were removed.
+func (s *BrokerSecretStore) CleanExpiredJoinTokens(ctx context.Context) (int, error) {
+	n, err := s.client.BrokerJoinToken.Delete().
+		Where(brokerjointoken.ExpiresAtLTE(time.Now())).
 		Exec(ctx)
-	return err
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
 }

@@ -23,12 +23,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
@@ -53,14 +56,18 @@ func isolateJoinEnv(t *testing.T) {
 	}
 	savedProjectPath, savedGlobal, savedHubEndpoint := projectPath, globalMode, hubEndpoint
 	savedBrokerID, savedHubName := brokerJoinBrokerID, brokerHubName
+	savedTokenFile, savedForce := brokerJoinTokenFile, brokerJoinForce
 	savedTTL, savedJSON := hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON
 	t.Cleanup(func() {
 		projectPath, globalMode, hubEndpoint = savedProjectPath, savedGlobal, savedHubEndpoint
 		brokerJoinBrokerID, brokerHubName = savedBrokerID, savedHubName
+		brokerJoinTokenFile, brokerJoinForce = savedTokenFile, savedForce
+		brokerJoinCmd.SetIn(nil)
 		hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = savedTTL, savedJSON
 	})
 	globalMode, hubEndpoint = false, ""
 	brokerJoinBrokerID, brokerHubName = "", ""
+	brokerJoinTokenFile, brokerJoinForce = "", false
 	hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = 0, false
 }
 
@@ -312,7 +319,7 @@ func TestHubBrokersJoinTokenCreate_TTLRange(t *testing.T) {
 // End to end: mint on one machine, join on another, against a real hub.
 // ---------------------------------------------------------------------------
 
-func newJoinTestHub(t *testing.T) *httptest.Server {
+func newJoinTestHub(t *testing.T, joinAuth *headerLog) *httptest.Server {
 	t.Helper()
 	cfg := hub.DefaultServerConfig()
 	cfg.DevAuthToken = joinTestDevToken
@@ -321,14 +328,38 @@ func newJoinTestHub(t *testing.T) *httptest.Server {
 	srv, err := hub.New(cfg, newTestStore(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-	ts := httptest.NewServer(srv.Handler())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/brokers/join" {
+			joinAuth.record(r.Header.Get("Authorization"))
+		}
+		srv.Handler().ServeHTTP(w, r)
+	}))
 	t.Cleanup(ts.Close)
 	return ts
 }
 
+// headerLog records header values seen by the end-to-end hub.
+type headerLog struct {
+	mu     sync.Mutex
+	values []string
+}
+
+func (h *headerLog) record(v string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.values = append(h.values, v)
+}
+
+func (h *headerLog) all() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.values...)
+}
+
 func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	isolateJoinEnv(t)
-	ts := newJoinTestHub(t)
+	joinAuth := &headerLog{}
+	ts := newJoinTestHub(t, joinAuth)
 
 	// Machine A: a user with a hub session mints the token.
 	homeA, _ := brokerTestHome(t)
@@ -358,6 +389,7 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 		require.NoError(t, runBrokerJoin(brokerJoinCmd, nil))
 	})
 	assert.Contains(t, joinOut, "Broker "+minted.BrokerID+" joined hub")
+	assert.Equal(t, []string{""}, joinAuth.all(), "the join request carries no Authorization header")
 
 	creds, err := brokercredentials.NewMultiStore("").Load(brokercredentials.DeriveHubName(ts.URL))
 	require.NoError(t, err)
@@ -377,7 +409,18 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	defer cancel()
 	require.NoError(t, brokerClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"}))
 
+	// A wrong key does not authenticate, so the heartbeat above passed
+	// because of the saved secret.
+	wrongKey := append([]byte(nil), key...)
+	wrongKey[0] ^= 0xFF
+	wrongClient, err := hubclient.New(ts.URL, hubclient.WithHMACAuth(creds.BrokerID, wrongKey))
+	require.NoError(t, err)
+	err = wrongClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"})
+	require.Error(t, err)
+	assert.True(t, apiclient.IsUnauthorizedError(err), "a wrong key gets 401; got %v", err)
+
 	// The token was single use.
+	brokerJoinForce = true
 	err = runBrokerJoin(brokerJoinCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid join token")
@@ -426,4 +469,148 @@ func TestBrokerJoinTokenCommands_ModeAvailability(t *testing.T) {
 		assert.Equal(t, mode.want, find(root, "hub", "brokers", "join-token", "create") != nil)
 		assert.Equal(t, mode.want, find(root, "runtime-broker", "join") != nil)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Token sources and --force
+// ---------------------------------------------------------------------------
+
+func TestResolveBrokerJoinToken_Sources(t *testing.T) {
+	isolateJoinEnv(t)
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte(content), 0600))
+		return p
+	}
+
+	t.Run("file wins over env", func(t *testing.T) {
+		t.Setenv(envBrokerJoinToken, "scion_join_from_env")
+		got, err := resolveBrokerJoinToken(write("tok", "scion_join_from_file\n"), nil)
+		require.NoError(t, err)
+		assert.Equal(t, "scion_join_from_file", got)
+	})
+	t.Run("stdin", func(t *testing.T) {
+		got, err := resolveBrokerJoinToken("-", strings.NewReader("  scion_join_from_stdin\r\n"))
+		require.NoError(t, err)
+		assert.Equal(t, "scion_join_from_stdin", got)
+	})
+	t.Run("env", func(t *testing.T) {
+		t.Setenv(envBrokerJoinToken, "scion_join_from_env")
+		got, err := resolveBrokerJoinToken("", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "scion_join_from_env", got)
+	})
+	for _, tc := range []struct {
+		name, file, stdin, wantErr string
+	}{
+		{"empty file", write("empty", "\n"), "", "no join token in"},
+		{"missing file", filepath.Join(dir, "absent"), "", "failed to read the join token file"},
+		{"wrong prefix in file", write("bad", "scion_dev_x"), "", "is not a join token"},
+		{"empty stdin", "-", "", "no join token in stdin"},
+		{"wrong prefix on stdin", "-", "hello", "not a join token"},
+		{"no source", "", "", "no join token: set SCION_BROKER_JOIN_TOKEN or pass --token-file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolveBrokerJoinToken(tc.file, strings.NewReader(tc.stdin))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.NotContains(t, err.Error(), "scion_dev_x")
+			assert.NotContains(t, err.Error(), "hello")
+		})
+	}
+}
+
+func TestBrokerJoin_TokenFromFileAndStdin(t *testing.T) {
+	for _, viaStdin := range []bool{false, true} {
+		t.Run(map[bool]string{false: "file", true: "stdin"}[viaStdin], func(t *testing.T) {
+			isolateJoinEnv(t)
+			home, _ := brokerTestHome(t)
+			fake := newRecordingHub(t)
+			projectPath = setupSecretProject(t, home, fake.URL)
+			t.Setenv("SCION_HUB_ENDPOINT", fake.URL)
+			setBrokerFlagForTest(t, brokerJoinCmd, "port", strconv.Itoa(unusedPort(t)))
+			t.Setenv(envBrokerJoinToken, "scion_join_env_should_not_be_used")
+			brokerJoinBrokerID = "33333333-2222-3333-4444-555555555555"
+			if viaStdin {
+				brokerJoinTokenFile = "-"
+				brokerJoinCmd.SetIn(strings.NewReader("scion_join_from_source\n"))
+			} else {
+				brokerJoinTokenFile = filepath.Join(home, "join-token")
+				require.NoError(t, os.WriteFile(brokerJoinTokenFile, []byte("scion_join_from_source\n"), 0600))
+			}
+
+			captureStdoutStderr(t, func() {
+				require.NoError(t, runBrokerJoin(brokerJoinCmd, nil))
+			})
+			reqs := fake.recorded()
+			require.Len(t, reqs, 1)
+			assert.Equal(t, "scion_join_from_source", reqs[0].Body["joinToken"])
+		})
+	}
+}
+
+func TestBrokerJoin_RefusesExistingIdentityWithoutForce(t *testing.T) {
+	const brokerID = "44444444-2222-3333-4444-555555555555"
+	setup := func(t *testing.T) (fake *recordingHub, globalDir string) {
+		t.Helper()
+		isolateJoinEnv(t)
+		home, gd := brokerTestHome(t)
+		fake = newRecordingHub(t)
+		projectPath = setupSecretProject(t, home, fake.URL)
+		t.Setenv("SCION_HUB_ENDPOINT", fake.URL)
+		setBrokerFlagForTest(t, brokerJoinCmd, "port", strconv.Itoa(unusedPort(t)))
+		t.Setenv(envBrokerJoinToken, "scion_join_x")
+		brokerJoinBrokerID = brokerID
+		return fake, gd
+	}
+
+	t.Run("existing credentials", func(t *testing.T) {
+		fake, _ := setup(t)
+		require.NoError(t, brokercredentials.NewMultiStore("").Save(&brokercredentials.BrokerCredentials{
+			Name: brokercredentials.DeriveHubName(fake.URL), BrokerID: "old-broker", SecretKey: "c2VjcmV0", HubEndpoint: fake.URL,
+			AuthMode: brokercredentials.AuthModeHMAC,
+		}))
+		err := runBrokerJoin(brokerJoinCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already has credentials")
+		assert.Contains(t, err.Error(), "--force")
+		assert.Empty(t, fake.recorded(), "nothing is sent")
+
+		brokerJoinForce = true
+		captureStdoutStderr(t, func() { require.NoError(t, runBrokerJoin(brokerJoinCmd, nil)) })
+		creds, err := brokercredentials.NewMultiStore("").Load(brokercredentials.DeriveHubName(fake.URL))
+		require.NoError(t, err)
+		assert.Equal(t, brokerID, creds.BrokerID, "--force replaces the credentials")
+	})
+
+	t.Run("different broker ID in settings", func(t *testing.T) {
+		fake, globalDir := setup(t)
+		require.NoError(t, config.UpdateSetting(globalDir, "hub.brokerId", "99999999-2222-3333-4444-555555555555", true))
+		err := runBrokerJoin(brokerJoinCmd, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already name broker 99999999-2222-3333-4444-555555555555")
+		assert.Empty(t, fake.recorded())
+
+		brokerJoinForce = true
+		captureStdoutStderr(t, func() { require.NoError(t, runBrokerJoin(brokerJoinCmd, nil)) })
+		gs, err := config.LoadSettings(globalDir)
+		require.NoError(t, err)
+		assert.Equal(t, brokerID, gs.Hub.BrokerID)
+	})
+
+	t.Run("same broker ID in settings is allowed", func(t *testing.T) {
+		fake, globalDir := setup(t)
+		require.NoError(t, config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true))
+		captureStdoutStderr(t, func() { require.NoError(t, runBrokerJoin(brokerJoinCmd, nil)) })
+		assert.Len(t, fake.recorded(), 1)
+	})
+}
+
+// TestBrokerJoinTokenConstantsMatchHub pins the CLI's copies of the hub's
+// join token constants.
+func TestBrokerJoinTokenConstantsMatchHub(t *testing.T) {
+	assert.Equal(t, hub.JoinTokenPrefix, brokerJoinTokenPrefix)
+	assert.Equal(t, time.Duration(hub.MinJoinTokenTTLSeconds)*time.Second, minBrokerJoinTokenTTL)
+	assert.Equal(t, time.Duration(hub.MaxJoinTokenTTLSeconds)*time.Second, maxBrokerJoinTokenTTL)
 }
