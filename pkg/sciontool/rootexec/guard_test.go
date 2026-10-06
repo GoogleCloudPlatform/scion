@@ -47,7 +47,10 @@ var guardedDirs = []string{
 //     "Recv.name" for a method (pointer receivers drop the "*"). A call
 //     inside a closure is attributed to the top-level function containing
 //     the closure; a call in a package-level var initializer uses the var's
-//     name.
+//     name. The two names Go lets a file repeat, func init and blank _
+//     vars, carry their ordinal among same-named declarations in file
+//     order ("init#1", "init#2", "_#1"; see enclosingDeclName), so moving
+//     a call from one init into another is also a change of Func.
 //   - Call is the call expression's normalized text (see
 //     normalizeCallText): the Go tokens of the call, with comments, layout
 //     and optional trailing commas/semicolons stripped, one space after each
@@ -244,10 +247,11 @@ var execSiteAllowlist = map[execSite]string{
 	}: reasonDropOrFailClosed,
 
 	// services' (*managedService).start (services/manager.go):
-	// svc.spec.Command[0] comes from a workload-supplied services.yaml. start() itself requires uid/gid>0 (or fails
-	// closed with services.ErrPrivilegeDropRequired under
-	// requirePrivilegeDrop) before any service is started — the identical
-	// Go-level drop-before-exec model as supervisor.Run.
+	// svc.spec.Command[0] comes from a workload-supplied services.yaml.
+	// start() itself requires uid/gid>0 (or fails closed with
+	// services.ErrPrivilegeDropRequired under requirePrivilegeDrop) before
+	// any service is started — the identical Go-level drop-before-exec
+	// model as supervisor.Run.
 	{
 		File: "pkg/sciontool/services/manager.go",
 		Func: "managedService.start",
@@ -400,23 +404,48 @@ func staleAllowlistEntries(allowlist map[execSite]string, seen map[execSite]bool
 // "name" for a function, "Recv.name" for a method (with any "*" and type
 // parameters dropped from the receiver), the first declared name for a
 // package-level var/const initializer, or "<file>" if pos is in none.
+//
+// func init and the blank identifier _ are the only top-level names Go
+// allows to repeat within one file, so for those two the name carries its
+// 1-based ordinal among same-named declarations in file order: "init#1",
+// "init#2", "_#1". The ordinal counts declarations, not lines, so it is
+// stable across line shifts and reflows, yet moving a call from one init
+// (or _ var) into another changes its key. Adding or removing an earlier
+// declaration of the same name renumbers the later ones, which errs on the
+// strict side (stale entry plus violation) and is rare.
 func enclosingDeclName(f *ast.File, pos token.Pos) string {
-	for _, decl := range f.Decls {
-		if pos < decl.Pos() || pos > decl.End() {
-			continue
+	repeats := map[string]int{} // ordinal so far per repeatable name
+	ordinal := func(name string) string {
+		if name != "init" && name != "_" {
+			return name
 		}
+		repeats[name]++
+		return fmt.Sprintf("%s#%d", name, repeats[name])
+	}
+	for _, decl := range f.Decls {
+		contains := pos >= decl.Pos() && pos <= decl.End()
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			if d.Recv != nil && len(d.Recv.List) > 0 {
+				if !contains {
+					continue
+				}
 				if recv := receiverTypeName(d.Recv.List[0].Type); recv != "" {
 					return recv + "." + d.Name.Name
 				}
+				return d.Name.Name
 			}
-			return d.Name.Name
+			if name := ordinal(d.Name.Name); contains {
+				return name
+			}
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
-				if vs, ok := spec.(*ast.ValueSpec); ok && pos >= vs.Pos() && pos <= vs.End() && len(vs.Names) > 0 {
-					return vs.Names[0].Name
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) == 0 {
+					continue
+				}
+				if name := ordinal(vs.Names[0].Name); contains && pos >= vs.Pos() && pos <= vs.End() {
+					return name
 				}
 			}
 		}
@@ -872,6 +901,17 @@ func runSyntheticGuard(t *testing.T, src string, allowlist map[execSite]string) 
 	return violations, staleAllowlistEntries(allowlist, seen)
 }
 
+// syntheticInits has two init funcs and two blank vars, one of each holding
+// an unprovable exec call; syntheticInitsAllowlist lists both calls.
+const syntheticInits = "package synthetic\n\nimport (\n\t\"os\"\n\t\"os/exec\"\n)\n\n" +
+	"func init() {\n\t_ = exec.Command(os.Args[1])\n}\n\nfunc init() {}\n\n" +
+	"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n"
+
+var syntheticInitsAllowlist = map[execSite]string{
+	{File: "synthetic.go", Func: "init#1", Call: `exec.Command(os.Args[1])`}: "synthetic",
+	{File: "synthetic.go", Func: "_#1", Call: `exec.Command(os.Args[2])`}:    "synthetic",
+}
+
 // syntheticAllowlist is a one-entry allowlist for syntheticBase's single
 // unprovable exec call (its command name is a parameter).
 var syntheticAllowlist = map[execSite]string{
@@ -908,6 +948,20 @@ func TestExecSiteAllowlist_KeyIgnoresLineShiftsAndFormatting(t *testing.T) {
 		"call reflowed by hand": strings.Replace(syntheticBase,
 			`_ = exec.Command(name, "-x", arg)`,
 			"_ = exec.Command(\n\t\tname, // the command\n\t\t\"-x\",\n\t\targ,\n\t)", 1),
+	}
+	initVariants := map[string]string{
+		"repeated init/_ decls unchanged": syntheticInits,
+		"repeated init/_ decls shifted and reflowed": strings.Replace(strings.Replace(syntheticInits,
+			"func init() {}", "// A doc comment.\n\n\nfunc init() {\n}", 1),
+			"_ = exec.Command(os.Args[1])", "_ = exec.Command(\n\t\tos.Args[1], // why\n\t)", 1),
+	}
+	for name, src := range initVariants {
+		t.Run(name, func(t *testing.T) {
+			violations, stale := runSyntheticGuard(t, src, syntheticInitsAllowlist)
+			if len(violations) != 0 || len(stale) != 0 {
+				t.Errorf("want listed sites to still match; violations=%v stale=%v", violations, stale)
+			}
+		})
 	}
 	for name, src := range variants {
 		t.Run(name, func(t *testing.T) {
@@ -959,6 +1013,16 @@ func TestExecSiteAllowlist_EnclosingFuncAttribution(t *testing.T) {
 				{Func: "a", Call: `exec.Command(os.Args[2])`},
 			},
 		},
+		{
+			name:  "repeated init funcs are keyed by ordinal",
+			decls: "func init() {}\n\nfunc helper() {}\n\nfunc init() {\n\t_ = exec.Command(os.Args[1])\n}\n",
+			sites: []execSite{{Func: "init#2", Call: `exec.Command(os.Args[1])`}},
+		},
+		{
+			name:  "repeated blank vars are keyed by ordinal",
+			decls: "var _ = 1\n\nvar (\n\tother = 2\n\t_     = exec.Command(os.Args[1])\n)\n",
+			sites: []execSite{{Func: "_#2", Call: `exec.Command(os.Args[1])`}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -983,7 +1047,8 @@ func TestExecSiteAllowlist_UnlistedSitesStillFail(t *testing.T) {
 	tests := []struct {
 		name      string
 		src       string
-		wantStale bool // the original entry no longer matches anything
+		allowlist map[execSite]string // nil means syntheticAllowlist
+		wantStale bool                // the original entry no longer matches anything
 	}{
 		{
 			name: "new exec call added",
@@ -1006,6 +1071,22 @@ func TestExecSiteAllowlist_UnlistedSitesStillFail(t *testing.T) {
 			wantStale: true,
 		},
 		{
+			name: "listed call moved between two init funcs",
+			src: strings.Replace(syntheticInits,
+				"func init() {\n\t_ = exec.Command(os.Args[1])\n}\n\nfunc init() {}\n",
+				"func init() {}\n\nfunc init() {\n\t_ = exec.Command(os.Args[1])\n}\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
+			name: "listed call moved between two blank vars",
+			src: strings.Replace(syntheticInits,
+				"var _ = exec.Command(os.Args[2])\n\nvar _ = 0\n",
+				"var _ = 0\n\nvar _ = exec.Command(os.Args[2])\n", 1),
+			allowlist: syntheticInitsAllowlist,
+			wantStale: true,
+		},
+		{
 			name: "identical duplicate of listed call in the same function",
 			src: strings.Replace(syntheticBase,
 				"\t_ = exec.Command(name, \"-x\", arg)\n",
@@ -1014,7 +1095,11 @@ func TestExecSiteAllowlist_UnlistedSitesStillFail(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			violations, stale := runSyntheticGuard(t, tc.src, syntheticAllowlist)
+			allowlist := tc.allowlist
+			if allowlist == nil {
+				allowlist = syntheticAllowlist
+			}
+			violations, stale := runSyntheticGuard(t, tc.src, allowlist)
 			if len(violations) != 1 {
 				t.Errorf("want exactly 1 violation, got %d: %v", len(violations), violations)
 			}
