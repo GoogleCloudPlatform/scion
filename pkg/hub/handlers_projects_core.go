@@ -3135,8 +3135,7 @@ func (s *Server) removeEmbeddedBrokerProjectDir(projectID, slug, removedPath str
 		return
 	}
 	if err := util.RemoveAllSafe(localPath); err != nil {
-		s.projectsLogger().Warn("failed to remove embedded broker project directory",
-			"project_id", projectID, "slug", slug, "path", localPath, "error", err)
+		s.projectsLogger().Warn("embedded broker project directory removal did not complete")
 	}
 }
 
