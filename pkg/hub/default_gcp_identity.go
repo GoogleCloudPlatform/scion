@@ -24,8 +24,8 @@ import (
 )
 
 // Default-tier labels for the agent-creation GCP identity ladder (explicit
-// request -> project default -> hub default -> unset, the broker applies its
-// runtime default). They name the tier in log lines and in the user-facing
+// request -> per-profile default -> project default -> hub default -> unset,
+// the broker applies its runtime default). They name the tier in log lines and in the user-facing
 // error text, so an operator can tell which setting to fix.
 //
 // A defaultTier is a struct rather than a string so the per-profile rung can

@@ -317,6 +317,10 @@ func TestProjectSettings_ProfileDefaultSA_Rejections(t *testing.T) {
 		Email: "unverified-profile@proj.iam.gserviceaccount.com", ProjectID: "gcp-proj",
 	}
 	require.NoError(t, s.CreateGCPServiceAccount(t.Context(), unverified))
+	// Verified flag set but persisted status failed: the store normalizes
+	// this away on write, so reads of this SA are rewritten instead.
+	failedStatus := newSettingsTestSA(t, s, project.ID, "sa-failed-status")
+	srv.store = failedStatusStore{Store: srv.store, saID: failedStatus.ID}
 	other := &store.Project{ID: tid("other-profile-project"), Name: "Other", Slug: "other-profile-project"}
 	require.NoError(t, s.CreateProject(t.Context(), other))
 	otherSA := newSettingsTestSA(t, s, other.ID, "sa-other")
@@ -329,6 +333,7 @@ func TestProjectSettings_ProfileDefaultSA_Rejections(t *testing.T) {
 		{"unknown SA", map[string]string{"k8s": "no-such-sa"}, msgSANotAvailableInProject},
 		{"other project's SA", map[string]string{"k8s": otherSA.ID}, msgSANotAvailableInProject},
 		{"unverified SA", map[string]string{"k8s": unverified.ID}, `as the default for profile \"k8s\"`},
+		{"verified flag with failed status", map[string]string{"k8s": failedStatus.ID}, `as the default for profile \"k8s\"`},
 		{"empty SA ID", map[string]string{"k8s": ""}, "a service account ID is required"},
 		{"empty profile", map[string]string{"": good.ID}, "is invalid"},
 		{"padded profile", map[string]string{" k8s": good.ID}, "is invalid"},
@@ -546,4 +551,63 @@ func TestProjectProfileDefaultSA_BrokerResolution(t *testing.T) {
 		assert.Empty(t, profile)
 		assert.Empty(t, saID)
 	})
+}
+
+// The stricter verified check (flag and persisted status) applies at
+// create time too: an entry whose status went to failed fails the create.
+func TestProfileDefaultSA_FailedVerificationStatusFailsCreate(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "remote")
+	failed := bypassAgentsCreateSA(t, pf.bypassAgentsFixture, pf.proj.ID, true)
+	pf.srv.store = failedStatusStore{Store: pf.srv.store, saID: failed.ID}
+	pf.setProjectDefaultAssignBroad(t)
+	pf.setProfileDefaults(t, map[string]string{"remote": failed.ID})
+
+	rec := createAgentAsOwner(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "profile-default-failed-status"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `project default for profile \"remote\" GCP service account is not verified`)
+}
+
+// The per-profile default wins over a project-wide passthrough default.
+func TestProfileDefaultSA_WinsOverProjectPassthrough(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "remote")
+	pf.setAnnotations(t, map[string]string{projectSettingDefaultGCPIdentityMode: store.GCPMetadataModePassthrough})
+	pf.setProfileDefaults(t, map[string]string{"remote": pf.k8s.ID})
+
+	agent := createdAgentRecord(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "profile-over-project-passthrough"})
+	assertAssigned(t, agent, pf.k8s, "the per-profile default must win over a project passthrough default")
+}
+
+// The per-profile default wins over a hub-default passthrough that the
+// embedded broker's docker profile would otherwise be granted.
+func TestProfileDefaultSA_WinsOverHubDefaultPassthrough(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "local")
+	markBrokerEmbedded(t, pf.bypassAgentsFixture)
+	setHubAgentDefaults(pf.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode: store.GCPMetadataModePassthrough,
+	})
+	pf.setProfileDefaults(t, map[string]string{"local": pf.k8s.ID})
+
+	agent := createdAgentRecord(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "profile-over-hub-passthrough"})
+	assertAssigned(t, agent, pf.k8s, "the per-profile default must win over a hub passthrough default")
+	assert.False(t, agent.AppliedConfig.GCPIdentity.RequireLocalRuntime, "no hub-default passthrough grant was applied")
+}
+
+// failedStatusStore returns the service account saID with Verified set but
+// VerificationStatus failed, a row the store's write normalization never
+// produces, to pin that the stricter gcpServiceAccountVerified check (flag
+// and status) is the one applied.
+type failedStatusStore struct {
+	store.Store
+	saID string
+}
+
+func (f failedStatusStore) GetGCPServiceAccount(ctx context.Context, id string) (*store.GCPServiceAccount, error) {
+	sa, err := f.Store.GetGCPServiceAccount(ctx, id)
+	if err == nil && sa != nil && id == f.saID {
+		cp := *sa
+		cp.Verified = true
+		cp.VerificationStatus = store.GCPVerificationFailed
+		return &cp, nil
+	}
+	return sa, err
 }

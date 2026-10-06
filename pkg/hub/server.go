@@ -4193,7 +4193,8 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, createdBy string)
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
 // project-default/hub-default GCP identity ladder in createAgentInProject
 // (handlers_agents_core.go). A scheduled dispatch carries no explicit
-// gcp_identity, so the ladder here starts one rung down: project default,
+// gcp_identity, so the ladder here starts one rung down: the per-profile
+// default for the profile the agent runs under, then the project default,
 // then — when the project has no default at all — the hub default, then
 // block (#1927). The same checks run in the same order at each assign rung
 // (SA reachable from the project, SA verified, then the full
