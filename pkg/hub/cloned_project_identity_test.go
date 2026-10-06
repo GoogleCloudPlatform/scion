@@ -870,6 +870,9 @@ func TestSyncHubWorkspaceFromGCS_KeepsIdentityFormWhenDownloadChangesIt(t *testi
 }
 
 func TestSyncHubWorkspaceFromGCS_ReportsIdentityNotKept(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("a read-only directory does not stop removal when running as root")
+	}
 	identityTestHome(t)
 	srv, _ := testServer(t)
 	workspacePath := t.TempDir()

@@ -618,11 +618,7 @@ func (w *savedWorkspaceIdentity) restore() error {
 		return os.RemoveAll(w.scionPath)
 
 	case identityEntryMarker:
-		if exists && !info.Mode().IsRegular() {
-			if err := os.RemoveAll(w.scionPath); err != nil {
-				return err
-			}
-		}
+		// writeIfDifferent replaces an entry of another form.
 		return writeIfDifferent(w.scionPath, w.content)
 
 	case identityEntryDir:
@@ -635,17 +631,11 @@ func (w *savedWorkspaceIdentity) restore() error {
 			return err
 		}
 		if !w.hasProjectID {
-			return removeIfExists(w.projectIDPath())
+			return os.RemoveAll(w.projectIDPath())
 		}
 		return writeIfDifferent(w.projectIDPath(), w.content)
 	}
 	return nil
-}
-
-// removeIfExists removes the entry at path, whatever its type; an absent
-// entry is not an error.
-func removeIfExists(path string) error {
-	return os.RemoveAll(path)
 }
 
 // writeIfDifferent makes path a regular file holding content. An entry of
