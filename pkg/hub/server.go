@@ -4018,7 +4018,13 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				endLifecycleOp()
 				continue
 			}
-			s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+		}
+		// The superseded start claim is released last on each path below,
+		// after the status write and the quota release (see suspendAgent).
+		releaseClaim := func() {
+			if agent.RuntimeBrokerID != "" {
+				s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
+			}
 		}
 
 		statusUpdate := store.AgentStatusUpdate{
@@ -4033,9 +4039,11 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			releaseClaim()
 			continue
 		}
 		if !recorded {
+			releaseClaim()
 			continue
 		}
 
@@ -4046,6 +4054,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 		// max_agents_per_broker reservation (ptone/scion#1963), mirroring
 		// suspendAgent's HTTP-path behavior.
 		s.releaseBrokerQuota(ctx, agent)
+		releaseClaim()
 		s.events.PublishAgentStatus(ctx, agent)
 		suspended++
 	}

@@ -845,3 +845,95 @@ func TestStartClaimWiring_WakeReadinessWaitBoundedByCallerDeadline(t *testing.T)
 	require.NotNil(t, dmErr, "the agent never became ready")
 	assert.Less(t, time.Since(started), 5*time.Second, "the wait ended at the caller's deadline, not after %s", wakeReadyTimeout)
 }
+
+// A queued stop carries the run it was queued for and the start claim it
+// superseded. Drained for an older run, it releases that claim but leaves
+// the newer run's status and reservation; drained for the current run, it
+// records the stop and releases the reservation.
+func TestStartClaimWiring_QueuedStopDrainForAnOlderRun(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	claim, err := f.s.ClaimAgentStart(ctx, a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+	require.NoError(t, err)
+	_, err = f.srv.checkAndReserveBrokerQuota(ctx, getAgent(t, f.s, a.ID))
+	require.NoError(t, err)
+	at, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ContainerStatus: containerStatusStopQueued, Message: offlineStopMessage}))
+	_, err = f.s.SetAgentRunID(ctx, a.ID, "run-new")
+	require.NoError(t, err)
+
+	drain := func(runID string) {
+		t.Helper()
+		args, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at, SupersedesClaim: claim.ID, RunID: runID})
+		require.NoError(t, err)
+		_, err = f.srv.execDispatchStop(ctx, store.BrokerDispatch{
+			ID: tid("qs-run-" + runID), BrokerID: f.brokerID, AgentID: a.ID, AgentSlug: a.Slug, ProjectID: f.projectID, Op: "stop", Args: args,
+		})
+		require.NoError(t, err)
+	}
+
+	drain("run-old")
+	got := getAgent(t, f.s, a.ID)
+	assert.Empty(t, got.StartClaimID, "the superseded claim is released")
+	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "the newer run's status is kept")
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the newer run's reservation is kept")
+
+	drain("run-new")
+	got = getAgent(t, f.s, a.ID)
+	assert.Equal(t, "stopped", got.ContainerStatus)
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID))
+}
+
+// startDuringStopStatusStore tries to take a start claim and reserve, as a
+// new start would, inside the run-scoped stopped-status write.
+type startDuringStopStatusStore struct {
+	store.Store
+	srv      *Server
+	fired    *atomic.Bool
+	claimErr *error
+}
+
+func (s startDuringStopStatusStore) UpdateAgentStatus(ctx context.Context, id string, upd store.AgentStatusUpdate) error {
+	if upd.IfRunID != "" && s.fired.CompareAndSwap(false, true) {
+		_, err := s.Store.ClaimAgentStart(ctx, id, "new-start-hub", store.StartClaimUser, "", time.Minute)
+		*s.claimErr = err
+		if err == nil {
+			if cur, gerr := s.Store.GetAgent(ctx, id); gerr == nil {
+				_, _ = s.srv.checkAndReserveBrokerQuota(ctx, cur)
+			}
+		}
+	}
+	return s.Store.UpdateAgentStatus(ctx, id, upd)
+}
+
+// A stop releases the start claim it superseded only after its stopped
+// status write and quota release: a start cannot take the agent in between
+// and then lose its reservation to them.
+func TestStartClaimWiring_StopReleasesTheClaimAfterItsStatusAndQuota(t *testing.T) {
+	f, _, a := newClaimFixture(t)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 5)
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	_, err := f.s.SetAgentRunID(ctx, a.ID, "run-1")
+	require.NoError(t, err)
+	_, err = f.srv.checkAndReserveBrokerQuota(ctx, getAgent(t, f.s, a.ID))
+	require.NoError(t, err)
+	_, err = f.s.ClaimAgentStart(ctx, a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+	require.NoError(t, err)
+
+	var fired atomic.Bool
+	var claimErr error
+	f.srv.store = startDuringStopStatusStore{Store: f.s, srv: f.srv, fired: &fired, claimErr: &claimErr}
+	code, body := lifecycle(t, f, a.ID, "stop")
+	require.Equal(t, http.StatusOK, code, body)
+	require.True(t, fired.Load(), "the stop wrote its run-scoped status")
+	if claimErr == nil {
+		assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "a start that took the agent keeps its reservation")
+	} else {
+		var held *store.ClaimHeldError
+		assert.ErrorAs(t, claimErr, &held, "the superseded claim is still held during the status write")
+	}
+	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the superseded claim is released after the stop")
+}
