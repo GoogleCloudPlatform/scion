@@ -1304,6 +1304,11 @@ func TestExplicitReplyBecomesTaskResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("taskEventToTaskResult: %v", err)
 	}
+	// A plain reply carries no artifact State; the blocking result must
+	// fall back to working rather than return an empty status.state.
+	if result.Status.State != TaskStateWorking {
+		t.Errorf("result state = %q, want %q for a plain reply", result.Status.State, TaskStateWorking)
+	}
 	if len(result.Artifacts) != 1 {
 		t.Fatalf("result artifacts = %d, want 1 from the explicit reply", len(result.Artifacts))
 	}
