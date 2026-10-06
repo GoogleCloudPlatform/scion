@@ -257,22 +257,32 @@ export async function apiFetchAllPages<T>(
  */
 export async function extractApiError(res: Response, fallback: string): Promise<string> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data = (await res.json()) as any;
-    if (typeof data.error === 'object' && data.error?.message) {
-      let msg: string = data.error.message;
-      // Append guidance hint when available (e.g. clone/pull error details)
-      if (data.error?.details?.guidance) {
-        msg += ` — ${data.error.details.guidance}`;
-      }
-      return msg;
-    }
-    if (typeof data.message === 'string') return data.message;
-    if (typeof data.error === 'string') return data.error;
+    return apiErrorMessageFromBody(await res.json()) ?? fallback;
   } catch {
     // Response wasn't JSON
+    return fallback;
   }
-  return fallback;
+}
+
+/**
+ * The human-readable message in a parsed API error body, or undefined when
+ * it has none. Accepts the shapes the hub sends: `{error: {message}}` (with
+ * `error.details.guidance` appended when present, e.g. clone/pull errors),
+ * `{message}` and `{error: "..."}`.
+ */
+export function apiErrorMessageFromBody(data: unknown): string | undefined {
+  if (data === null || typeof data !== 'object') return undefined;
+  const body = data as { error?: unknown; message?: unknown };
+  if (body.error && typeof body.error === 'object') {
+    const error = body.error as { message?: unknown; details?: { guidance?: unknown } };
+    if (typeof error.message === 'string' && error.message) {
+      const guidance = error.details?.guidance;
+      return guidance ? `${error.message} — ${String(guidance)}` : error.message;
+    }
+  }
+  if (typeof body.message === 'string') return body.message;
+  if (typeof body.error === 'string') return body.error;
+  return undefined;
 }
 
 /** Structured API error info returned by {@link parseApiError}. */

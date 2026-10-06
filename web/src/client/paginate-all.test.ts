@@ -503,11 +503,35 @@ describe('paginateAll failed-response body (ptone/scion#2949)', () => {
     );
   });
 
-  it('keeps a non-JSON body as text and uses it as the message', async () => {
+  it('keeps a non-JSON body as capped text but takes no hub message from it', async () => {
     const err = await failWith(new Response('upstream unavailable', { status: 502 }));
     expect(err.status).toBe(502);
     expect(err.body).toBe('upstream unavailable');
-    expect(err.hubMessage).toBe('upstream unavailable');
+    expect(err.hubMessage).toBeUndefined();
+  });
+
+  it('does not show a proxy HTML error page, and caps the text it keeps', async () => {
+    const html = `<html><body><h1>502 Bad Gateway</h1>${'x'.repeat(2000)}</body></html>`;
+    const err = await failWith(
+      new Response(html, { status: 502, headers: { 'Content-Type': 'text/html' } })
+    );
+    expect(err.hubMessage).toBeUndefined();
+    expect(typeof err.body).toBe('string');
+    expect((err.body as string).length).toBe(501);
+    expect((err.body as string).endsWith('…')).toBe(true);
+  });
+
+  it('caps a long hub message and appends error.details.guidance', async () => {
+    const long = await failWith(jsonResponse({ error: { message: 'm'.repeat(800) } }, 400));
+    expect(long.hubMessage).toBe(`${'m'.repeat(500)}…`);
+
+    const guided = await failWith(
+      jsonResponse(
+        { error: { message: 'clone failed', details: { guidance: 'check the URL' } } },
+        400
+      )
+    );
+    expect(guided.hubMessage).toBe('clone failed — check the URL');
   });
 
   it('has no body or hub message for an empty body or a body without a message', async () => {

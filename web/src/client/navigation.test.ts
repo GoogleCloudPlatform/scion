@@ -17,7 +17,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { browserPath, navigateTo, pushUrl, replaceSearch } from './navigation.js';
+import { browserPath, navigateTo, pushUrl, replaceSearch, stripBasePath } from './navigation.js';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -33,6 +33,26 @@ describe('browserPath', () => {
   it('prefixes the base path, without doubling the slash', () => {
     vi.stubEnv('BASE_URL', '/scion/');
     expect(browserPath('/projects/p1')).toBe('/scion/projects/p1');
+  });
+});
+
+describe('stripBasePath', () => {
+  it('is a no-op when served at the root', () => {
+    vi.stubEnv('BASE_URL', '/');
+    expect(stripBasePath('/projects/p1')).toBe('/projects/p1');
+  });
+
+  it('strips the base path, mapping the bare base to /', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    expect(stripBasePath('/scion/projects/p1')).toBe('/projects/p1');
+    expect(stripBasePath('/scion')).toBe('/');
+    expect(stripBasePath('/scion/')).toBe('/');
+    expect(stripBasePath('/other/x')).toBe('/other/x');
+  });
+
+  it('round-trips with browserPath', () => {
+    vi.stubEnv('BASE_URL', '/scion/');
+    expect(stripBasePath(browserPath('/skills/s1'))).toBe('/skills/s1');
   });
 });
 
