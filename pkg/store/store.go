@@ -339,8 +339,10 @@ type AgentStore interface {
 	// with the rows ordered by ascending ID, so two transactions locking
 	// overlapping sets always acquire the shared rows in the same order.
 	// On SQLite it is a plain read (writes are already serialized). IDs
-	// with no agent row are skipped. Must be called inside WithTx; returns
-	// ErrInvalidInput for an ID that is not a valid UUID.
+	// with no agent row are skipped. Must be called on the store passed to
+	// a WithTx callback: outside a transaction it returns ErrInvalidInput
+	// on every backend and locks nothing. Returns ErrInvalidInput for an ID
+	// that is not a valid UUID.
 	LockAgentRows(ctx context.Context, ids []string) error
 
 	// ListAgents returns agents matching the filter criteria. With
@@ -2821,17 +2823,29 @@ type DelegationEdgeStore interface {
 	// ListDelegationDescendants returns the agents reachable from the root
 	// principal (q.RootType, q.RootID) inside q.ProjectID, breadth-first.
 	// It follows delegation edges with delegate type agent and scope
-	// (project, q.ProjectID) that are active, or, with
-	// q.IncludeSoftDeleted, inactive with cause
-	// EdgeDeactivationAgentSoftDelete. With q.LegacyLinks it also follows,
-	// within the project, owner_id, created_by (when owner_id is empty) and,
-	// from the root, ancestry. Every agent is expanded at most once, so
-	// cycles terminate. With q.SkipHeldForRoot, agents that already have an
-	// active hold for q.RootID are expanded but not returned or counted.
+	// (project, q.ProjectID) that are active, or inactive with cause
+	// EdgeDeactivationAgentSoftDelete or EdgeDeactivationAgentHardDelete.
+	// With q.LegacyLinks it also follows, within the project, owner_id,
+	// created_by (when owner_id is empty) and, from the root, ancestry
+	// (when owner_id is empty). Every reached agent is expanded exactly
+	// once, so cycles terminate and the walk continues below deleted
+	// agents.
+	//
+	// Only reached agents whose agent row exists in q.ProjectID are
+	// returned and counted, and, unless q.IncludeSoftDeleted, only those
+	// that are not soft-deleted. With q.SkipHeldForRoot, agents that
+	// already have an active hold for q.RootID are expanded but not
+	// returned or counted. Every returned ref can therefore be held.
+	//
+	// q.RootID and q.ProjectID must be UUIDs (ErrInvalidInput otherwise);
+	// IDs are compared and returned in canonical form, so a braced or
+	// upper-case RootID gives the same result as its canonical form.
 	//
 	// The walk never truncates silently: when MaxDepth or MaxNodes is
 	// reached with unvisited descendants remaining, it returns the
-	// descendants found so far together with ErrDescendantLimit.
+	// descendants found so far together with ErrDescendantLimit. A non-nil
+	// error of any kind means the returned set is incomplete: callers must
+	// refuse to act on it as the full set of descendants.
 	//
 	// The default depth bound (DefaultDescendantMaxDepth, 32) is deliberately
 	// deeper than the delegation ceiling's chain bound: the ceiling refuses
@@ -2855,9 +2869,16 @@ type AgentHoldStore interface {
 	// RootPrincipalID) already has an active hold, and returns the number
 	// inserted. Repeating the call, or racing it from another hub
 	// instance, inserts nothing more. Empty ID and zero CreatedAt are
-	// filled in; ClearedAt and the cleared-by fields must be empty. Returns
-	// ErrInvalidInput for an unknown cause or trigger or a missing
-	// agent, project or root principal.
+	// filled in; ClearedAt and the cleared-by fields must be empty.
+	// RootPrincipalType must be AgentHoldRootUser and RootPrincipalID a
+	// UUID, stored in canonical form. Returns ErrInvalidInput for an
+	// unknown cause or trigger, a missing agent or project, or an invalid
+	// root principal.
+	//
+	// The call writes an ID into every hold it is given, but that ID only
+	// names a stored row for holds this call inserted: holds skipped as
+	// already active, and holds of a call that returned an error, have no
+	// row with that ID.
 	CreateAgentHolds(ctx context.Context, holds []*AgentHold) (inserted int, err error)
 
 	// HasActiveAgentHold reports whether the agent has at least one active
@@ -2875,8 +2896,9 @@ type AgentHoldStore interface {
 
 	// ClearAgentHolds clears every active hold of the agent, recording by
 	// and reason, and returns the number cleared. by.Kind must be
-	// ClearActorUser with a non-empty ID; any other actor returns
-	// ErrInvalidActor and clears nothing.
+	// ClearActorUser and by.ID a UUID; any other actor returns
+	// ErrInvalidActor and clears nothing. reason is stored cut to at most
+	// 2000 bytes.
 	ClearAgentHolds(ctx context.Context, agentID string, by ClearActor, reason string) (int, error)
 }
 
@@ -2889,8 +2911,10 @@ type AgentHoldStore interface {
 // change, claimed with a lease and deleted on completion.
 type MembershipLossCheckStore interface {
 	// EnqueueMembershipLossCheck inserts check. Empty ID and zero
-	// CreatedAt are filled in. Returns ErrInvalidInput for a missing user
-	// or an unknown trigger.
+	// CreatedAt are filled in. UserID and a non-empty ProjectID must be
+	// UUIDs and are stored (and written back to check) in canonical form.
+	// Returns ErrInvalidInput for a missing or invalid user, an invalid
+	// project or an unknown trigger.
 	EnqueueMembershipLossCheck(ctx context.Context, check *MembershipLossCheck) error
 
 	// ClaimMembershipLossChecks claims up to limit claimable checks
@@ -2898,17 +2922,23 @@ type MembershipLossCheckStore interface {
 	// LeaseUntil = now + lease and Attempts incremented, and the claimed
 	// rows are returned. On PostgreSQL the selection uses FOR UPDATE SKIP
 	// LOCKED, so concurrent claimers receive disjoint rows without
-	// waiting on each other.
+	// waiting on each other. The returned Attempts value is the claim
+	// token that CompleteMembershipLossCheck and FailMembershipLossCheck
+	// take.
 	ClaimMembershipLossChecks(ctx context.Context, limit int, lease time.Duration) ([]*MembershipLossCheck, error)
 
-	// CompleteMembershipLossCheck deletes the check. Completing a check
-	// that no longer exists is not an error.
-	CompleteMembershipLossCheck(ctx context.Context, id string) error
+	// CompleteMembershipLossCheck deletes the check if it is still held by
+	// the claim identified by claim (the claimed row's Attempts). If the
+	// check was claimed again since, or no longer exists, it returns
+	// ErrClaimLost and changes nothing.
+	CompleteMembershipLossCheck(ctx context.Context, id string, claim int) error
 
-	// FailMembershipLossCheck records errText as the check's last error.
-	// The lease is kept, so the check becomes claimable again when it
-	// expires. Returns ErrNotFound if the check does not exist.
-	FailMembershipLossCheck(ctx context.Context, id string, errText string) error
+	// FailMembershipLossCheck records errText as the check's last error if
+	// the check is still held by the claim identified by claim. The lease
+	// is kept, so the check becomes claimable again when it expires. If
+	// the check was claimed again since, or no longer exists, it returns
+	// ErrClaimLost and changes nothing.
+	FailMembershipLossCheck(ctx context.Context, id string, claim int, errText string) error
 }
 
 // =============================================================================

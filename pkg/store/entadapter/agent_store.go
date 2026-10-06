@@ -62,6 +62,7 @@ const (
 //     listings via an Ent predicate.
 type AgentStore struct {
 	client *ent.Client
+	inTx   bool // true when client wraps an ambient WithTx transaction
 
 	// dialect is detected lazily on first use of a lock-taking path and
 	// memoized. SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite
@@ -868,6 +869,9 @@ const lockAgentRowsBatch = 1000
 // them, so every caller acquires shared rows in the same order. On SQLite the
 // same SELECT runs without the locking clause.
 func (s *AgentStore) LockAgentRows(ctx context.Context, ids []string) error {
+	if !s.inTx {
+		return fmt.Errorf("%w: LockAgentRows must be called inside WithTx", store.ErrInvalidInput)
+	}
 	uids, err := sortedUniqueUUIDs(ids)
 	if err != nil {
 		return err

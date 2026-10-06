@@ -254,12 +254,12 @@ var (
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[79], AgentsColumns[6]},
+				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[6]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[79], AgentsColumns[5]},
+				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[5]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -1582,9 +1582,9 @@ var (
 		PrimaryKey: []*schema.Column{MembershipLossChecksColumns[0]},
 		Indexes: []*schema.Index{
 			{
-				Name:    "membershiplosscheck_lease_until_created_at",
+				Name:    "membershiplosscheck_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{MembershipLossChecksColumns[10], MembershipLossChecksColumns[7]},
+				Columns: []*schema.Column{MembershipLossChecksColumns[7]},
 			},
 			{
 				Name:    "membershiplosscheck_user_id",

@@ -30,6 +30,10 @@ import (
 // agentHoldInsertBatch bounds the rows sent in one INSERT.
 const agentHoldInsertBatch = 500
 
+// maxAgentHoldClearReasonLen bounds the stored clear_reason text, like
+// last_error on membership loss checks.
+const maxAgentHoldClearReasonLen = maxMembershipLossCheckErrorLen
+
 // Page bounds of ListActiveAgentHoldsByProject.
 const (
 	defaultAgentHoldListLimit = 100
@@ -74,7 +78,8 @@ func entAgentHoldToStore(h *ent.AgentHold) *store.AgentHold {
 }
 
 // agentHoldCreate validates h and builds its insert. It fills in an empty ID
-// and a zero CreatedAt on h.
+// and a zero CreatedAt on h, and stores the root principal ID in canonical
+// form.
 func (s *AgentHoldStore) agentHoldCreate(h *store.AgentHold) (*ent.AgentHoldCreate, uuid.UUID, error) {
 	if h == nil {
 		return nil, uuid.Nil, fmt.Errorf("%w: nil agent hold", store.ErrInvalidInput)
@@ -85,8 +90,12 @@ func (s *AgentHoldStore) agentHoldCreate(h *store.AgentHold) (*ent.AgentHoldCrea
 	if !store.ValidMembershipLossTrigger(h.Trigger) {
 		return nil, uuid.Nil, fmt.Errorf("%w: unknown agent hold trigger %q", store.ErrInvalidInput, h.Trigger)
 	}
-	if h.RootPrincipalType == "" || h.RootPrincipalID == "" {
-		return nil, uuid.Nil, fmt.Errorf("%w: agent hold requires a root principal", store.ErrInvalidInput)
+	if h.RootPrincipalType != store.AgentHoldRootUser {
+		return nil, uuid.Nil, fmt.Errorf("%w: agent hold root principal type must be %q", store.ErrInvalidInput, store.AgentHoldRootUser)
+	}
+	rootID, err := parseUUID(h.RootPrincipalID)
+	if err != nil {
+		return nil, uuid.Nil, fmt.Errorf("%w: agent hold requires a root principal UUID", store.ErrInvalidInput)
 	}
 	if h.ClearedAt != nil || h.ClearedByKind != "" || h.ClearedByID != "" || h.ClearReason != "" {
 		return nil, uuid.Nil, fmt.Errorf("%w: a new agent hold cannot be cleared", store.ErrInvalidInput)
@@ -114,7 +123,7 @@ func (s *AgentHoldStore) agentHoldCreate(h *store.AgentHold) (*ent.AgentHoldCrea
 		SetProjectID(projectID).
 		SetCause(agenthold.Cause(h.Cause)).
 		SetRootPrincipalType(h.RootPrincipalType).
-		SetRootPrincipalID(h.RootPrincipalID).
+		SetRootPrincipalID(rootID.String()).
 		SetTrigger(agenthold.Trigger(h.Trigger)).
 		SetActorKind(h.ActorKind).
 		SetActorID(h.ActorID).
@@ -251,18 +260,23 @@ func (s *AgentHoldStore) ListActiveAgentHoldsByProject(ctx context.Context, proj
 // clear holds; any other actor is refused here, independently of the
 // caller's own checks.
 func (s *AgentHoldStore) ClearAgentHolds(ctx context.Context, agentID string, by store.ClearActor, reason string) (int, error) {
-	if by.Kind != store.ClearActorUser || by.ID == "" {
+	if by.Kind != store.ClearActorUser {
+		return 0, store.ErrInvalidActor
+	}
+	actorID, err := uuid.Parse(by.ID)
+	if err != nil {
 		return 0, store.ErrInvalidActor
 	}
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return 0, err
 	}
+	reason = truncateUTF8(reason, maxAgentHoldClearReasonLen)
 	n, err := s.client.AgentHold.Update().
 		Where(agenthold.AgentIDEQ(uid), agenthold.ClearedAtIsNil()).
 		SetClearedAt(time.Now()).
 		SetClearedByKind(by.Kind).
-		SetClearedByID(by.ID).
+		SetClearedByID(actorID.String()).
 		SetClearReason(reason).
 		Save(ctx)
 	if err != nil {

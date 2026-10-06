@@ -80,8 +80,10 @@ func (MembershipLossCheck) Fields() []ent.Field {
 // Indexes of the MembershipLossCheck.
 func (MembershipLossCheck) Indexes() []ent.Index {
 	return []ent.Index{
-		// Claim scan: oldest claimable rows first.
-		index.Fields("lease_until", "created_at"),
+		// Claim scan: rows in created_at order; the lease condition is
+		// checked on the scanned rows. Checks are deleted on completion,
+		// so the table is expected to stay small.
+		index.Fields("created_at"),
 		index.Fields("user_id"),
 	}
 }

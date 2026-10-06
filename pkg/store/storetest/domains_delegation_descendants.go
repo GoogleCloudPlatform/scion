@@ -17,6 +17,7 @@ package storetest
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -177,7 +178,11 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			f := newDescFixture(t, ctx, s)
 			owned := f.agent(t, ctx, f.project, func(ag *store.Agent) { ag.OwnerID = f.user })
 			otherOwner := uuid.NewString()
+			// Ancestry applies only to agents without an owner.
 			seeded := f.agent(t, ctx, f.project, func(ag *store.Agent) {
+				ag.Ancestry = []string{f.user}
+			})
+			f.agent(t, ctx, f.project, func(ag *store.Agent) {
 				ag.OwnerID = otherOwner
 				ag.Ancestry = []string{f.user}
 			})
@@ -206,6 +211,7 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			now := time.Now()
 			f.edge(t, ctx, store.DelegationPrincipalAgent, live, gone, f.project, store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: uuid.NewString()})
 			f.edge(t, ctx, store.DelegationPrincipalAgent, live, hard, f.project, store.Deactivation{Cause: store.EdgeDeactivationAgentHardDelete, At: &now, OpID: uuid.NewString()})
+			require.NoError(t, s.DeleteAgent(ctx, hard))
 			ag, err := s.GetAgent(ctx, gone)
 			require.NoError(t, err)
 			ag.DeletedAt = now
@@ -227,12 +233,209 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			res, err = listDescendants(t, s, q)
 			require.NoError(t, err)
 			got := refsByID(res.Agents)
-			require.Len(t, got, 3, "the agent_hard_delete edge is not followed")
+			require.Len(t, got, 3, "a hard-deleted agent is never returned")
 			assert.Equal(t, store.DescendantRef{
 				AgentID: gone, ViaID: live, Depth: 2, Link: store.DescendantLinkEdge,
 				EdgeActive: false, EdgeDeactivationCause: store.EdgeDeactivationAgentSoftDelete,
 			}, got[gone])
 			assert.Equal(t, store.DescendantLinkOwner, got[legacyGone].Link)
+		})
+
+		t.Run("the walk continues below deleted agents", func(t *testing.T) {
+			s := factory(t)
+			f := newDescFixture(t, ctx, s)
+			now := time.Now()
+			// user -> softChild (soft-deleted) -> softGrand, and
+			// user -> hardChild (hard-deleted) -> hardGrand; no ancestry.
+			softChild := f.agent(t, ctx, f.project, nil)
+			hardChild := f.agent(t, ctx, f.project, nil)
+			softGrand := f.agent(t, ctx, f.project, nil)
+			hardGrand := f.agent(t, ctx, f.project, nil)
+			ownedGrand := f.agent(t, ctx, f.project, func(ag *store.Agent) { ag.OwnerID = softChild })
+			f.edge(t, ctx, store.DelegationPrincipalUser, f.user, softChild, f.project, store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: uuid.NewString()})
+			f.edge(t, ctx, store.DelegationPrincipalUser, f.user, hardChild, f.project, store.Deactivation{Cause: store.EdgeDeactivationAgentHardDelete, At: &now, OpID: uuid.NewString()})
+			f.agentEdge(t, ctx, softChild, softGrand)
+			f.agentEdge(t, ctx, hardChild, hardGrand)
+			ag, err := s.GetAgent(ctx, softChild)
+			require.NoError(t, err)
+			ag.DeletedAt = now
+			require.NoError(t, s.UpdateAgent(ctx, ag))
+			require.NoError(t, s.DeleteAgent(ctx, hardChild))
+
+			for _, includeSoftDeleted := range []bool{false, true} {
+				q := f.query()
+				q.IncludeSoftDeleted = includeSoftDeleted
+				res, err := listDescendants(t, s, q)
+				require.NoError(t, err)
+				got := refsByID(res.Agents)
+				assert.Equal(t, store.DescendantRef{AgentID: softGrand, ViaID: softChild, Depth: 2, Link: store.DescendantLinkEdge, EdgeActive: true}, got[softGrand], "includeSoftDeleted=%v", includeSoftDeleted)
+				assert.Equal(t, store.DescendantRef{AgentID: hardGrand, ViaID: hardChild, Depth: 2, Link: store.DescendantLinkEdge, EdgeActive: true}, got[hardGrand], "includeSoftDeleted=%v", includeSoftDeleted)
+				assert.NotContains(t, got, hardChild, "a hard-deleted agent is never returned")
+				_, softReturned := got[softChild]
+				assert.Equal(t, includeSoftDeleted, softReturned, "a soft-deleted agent is returned only with IncludeSoftDeleted")
+
+				q.LegacyLinks = true
+				res, err = listDescendants(t, s, q)
+				require.NoError(t, err)
+				got = refsByID(res.Agents)
+				assert.Equal(t, store.DescendantRef{AgentID: ownedGrand, ViaID: softChild, Depth: 2, Link: store.DescendantLinkOwner}, got[ownedGrand], "includeSoftDeleted=%v", includeSoftDeleted)
+				assert.Contains(t, got, softGrand)
+				assert.Contains(t, got, hardGrand)
+			}
+		})
+
+		t.Run("purged agents are expanded but never returned", func(t *testing.T) {
+			s := factory(t)
+			f := newDescFixture(t, ctx, s)
+			deletedAt := time.Now().Add(-time.Hour)
+			purged := f.agent(t, ctx, f.project, nil)
+			grand := f.agent(t, ctx, f.project, nil)
+			f.edge(t, ctx, store.DelegationPrincipalUser, f.user, purged, f.project, store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &deletedAt, OpID: uuid.NewString()})
+			f.agentEdge(t, ctx, purged, grand)
+			ag, err := s.GetAgent(ctx, purged)
+			require.NoError(t, err)
+			ag.DeletedAt = deletedAt
+			require.NoError(t, s.UpdateAgent(ctx, ag))
+			n, err := s.PurgeDeletedAgents(ctx, time.Now())
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, n, 1)
+			_, err = s.GetAgent(ctx, purged)
+			require.ErrorIs(t, err, store.ErrNotFound)
+
+			q := f.query()
+			q.IncludeSoftDeleted = true
+			q.SkipHeldForRoot = true
+			res, err := listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.Equal(t, []string{grand}, refIDs(res.Agents), "the purged agent is not returned; the agent below it is")
+
+			var holds []*store.AgentHold
+			for _, r := range res.Agents {
+				holds = append(holds, newHold(f.project, r.AgentID, f.user))
+			}
+			n, err = s.CreateAgentHolds(ctx, holds)
+			require.NoError(t, err, "every returned agent can be held")
+			assert.Equal(t, len(holds), n)
+
+			res, err = listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.Empty(t, res.Agents)
+		})
+
+		t.Run("a soft-deleted agent with an active edge is filtered on its row", func(t *testing.T) {
+			s := factory(t)
+			f := newDescFixture(t, ctx, s)
+			x := f.agent(t, ctx, f.project, nil)
+			child := f.agent(t, ctx, f.project, nil)
+			f.userEdge(t, ctx, x)
+			f.agentEdge(t, ctx, x, child)
+			ag, err := s.GetAgent(ctx, x)
+			require.NoError(t, err)
+			ag.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(ctx, ag))
+
+			res, err := listDescendants(t, s, f.query())
+			require.NoError(t, err)
+			assert.Equal(t, []string{child}, refIDs(res.Agents))
+
+			q := f.query()
+			q.IncludeSoftDeleted = true
+			res, err = listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.Equal(t, []string{x, child}, refIDs(res.Agents))
+			assert.True(t, res.Agents[0].EdgeActive)
+		})
+
+		t.Run("edge links keep their state with ancestry as the create path writes it", func(t *testing.T) {
+			s := factory(t)
+			f := newDescFixture(t, ctx, s)
+			// The create path sets owner_id and created_by to the creator
+			// and ancestry to the creator chain.
+			created := func(creator string, ancestry []string) string {
+				return f.agent(t, ctx, f.project, func(ag *store.Agent) {
+					ag.OwnerID = creator
+					ag.CreatedBy = creator
+					ag.Ancestry = ancestry
+				})
+			}
+			a := created(f.user, []string{f.user})
+			f.userEdge(t, ctx, a)
+			b := created(a, []string{f.user, a})
+			f.agentEdge(t, ctx, a, b)
+			c := created(b, []string{f.user, a, b})
+			f.agentEdge(t, ctx, b, c)
+			// moved was created by a, then its ownership moved to another
+			// user, with a new edge from that user.
+			newOwner := uuid.NewString()
+			moved := created(a, []string{f.user, a})
+			mv, err := s.GetAgent(ctx, moved)
+			require.NoError(t, err)
+			mv.OwnerID = newOwner
+			require.NoError(t, s.UpdateAgent(ctx, mv))
+			f.edge(t, ctx, store.DelegationPrincipalUser, newOwner, moved, f.project, store.Deactivation{})
+
+			q := f.query()
+			q.LegacyLinks = true
+			res, err := listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.Equal(t, []store.DescendantRef{
+				{AgentID: a, Depth: 1, Link: store.DescendantLinkEdge, EdgeActive: true},
+				{AgentID: b, ViaID: a, Depth: 2, Link: store.DescendantLinkEdge, EdgeActive: true},
+				{AgentID: c, ViaID: b, Depth: 3, Link: store.DescendantLinkEdge, EdgeActive: true},
+			}, res.Agents, "the moved agent is not reached from the old root")
+		})
+
+		t.Run("IDs are compared in canonical form", func(t *testing.T) {
+			s := factory(t)
+			f := newDescFixture(t, ctx, s)
+			byEdge := f.agent(t, ctx, f.project, nil)
+			f.userEdge(t, ctx, byEdge)
+			owned := f.agent(t, ctx, f.project, func(ag *store.Agent) { ag.OwnerID = f.user })
+			seeded := f.agent(t, ctx, f.project, func(ag *store.Agent) { ag.Ancestry = []string{f.user} })
+			// An agent reached by an edge written with an upper-case
+			// delegate ID and by its owner link is returned once.
+			both := f.agent(t, ctx, f.project, func(ag *store.Agent) { ag.OwnerID = byEdge })
+			f.edge(t, ctx, store.DelegationPrincipalAgent, byEdge, strings.ToUpper(both), f.project, store.Deactivation{})
+
+			q := f.query()
+			q.LegacyLinks = true
+			want, err := listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{byEdge, owned, seeded, both}, refIDs(want.Agents))
+			got := refsByID(want.Agents)
+			assert.Equal(t, store.DescendantRef{AgentID: both, ViaID: byEdge, Depth: 2, Link: store.DescendantLinkEdge, EdgeActive: true}, got[both])
+
+			for _, root := range []string{"{" + f.user + "}", strings.ToUpper(f.user), "urn:uuid:" + f.user} {
+				q := f.query()
+				q.LegacyLinks = true
+				q.RootID = root
+				q.ProjectID = strings.ToUpper(f.project)
+				res, err := listDescendants(t, s, q)
+				require.NoError(t, err, root)
+				assert.Equal(t, want.Agents, res.Agents, "root %s", root)
+			}
+		})
+
+		t.Run("a hold for the root ID skips the agent whatever the root type", func(t *testing.T) {
+			s := factory(t)
+			f := newDescFixture(t, ctx, s)
+			root := f.agent(t, ctx, f.project, nil)
+			held := f.agent(t, ctx, f.project, nil)
+			below := f.agent(t, ctx, f.project, nil)
+			f.agentEdge(t, ctx, root, held)
+			f.agentEdge(t, ctx, held, below)
+			// Holds always record a user root; the walk matches holds on
+			// the root ID, the same key the hold insert uses.
+			n, err := s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(f.project, held, root)})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			q := f.query()
+			q.RootType, q.RootID = store.DelegationPrincipalAgent, root
+			q.SkipHeldForRoot = true
+			res, err := listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.Equal(t, []string{below}, refIDs(res.Agents))
 		})
 
 		t.Run("other-project edges and agents are excluded", func(t *testing.T) {
@@ -403,9 +606,14 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			for name, mutate := range map[string]func(*store.DescendantQuery){
 				"root type": func(q *store.DescendantQuery) { q.RootType = "group" },
 				"root id":   func(q *store.DescendantQuery) { q.RootID = "" },
-				"project":   func(q *store.DescendantQuery) { q.ProjectID = "not-a-uuid" },
-				"neg depth": func(q *store.DescendantQuery) { q.MaxDepth = -1 },
-				"neg nodes": func(q *store.DescendantQuery) { q.MaxNodes = -1 },
+				"root uuid": func(q *store.DescendantQuery) { q.RootID = "not-a-uuid" },
+				"agent root uuid": func(q *store.DescendantQuery) {
+					q.RootType, q.RootID = store.DelegationPrincipalAgent, "agent-1"
+				},
+				"project":    func(q *store.DescendantQuery) { q.ProjectID = "not-a-uuid" },
+				"no project": func(q *store.DescendantQuery) { q.ProjectID = "" },
+				"neg depth":  func(q *store.DescendantQuery) { q.MaxDepth = -1 },
+				"neg nodes":  func(q *store.DescendantQuery) { q.MaxNodes = -1 },
 			} {
 				q := f.query()
 				mutate(&q)

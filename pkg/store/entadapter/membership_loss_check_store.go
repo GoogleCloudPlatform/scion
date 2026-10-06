@@ -32,6 +32,19 @@ import (
 // maxMembershipLossCheckErrorLen bounds the stored last_error text.
 const maxMembershipLossCheckErrorLen = 2000
 
+// truncateUTF8 returns s cut to at most n bytes on a rune boundary
+// (PostgreSQL rejects invalid UTF-8).
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 // MembershipLossCheckStore implements store.MembershipLossCheckStore using
 // Ent ORM.
 type MembershipLossCheckStore struct {
@@ -76,9 +89,21 @@ func (s *MembershipLossCheckStore) EnqueueMembershipLossCheck(ctx context.Contex
 	if !store.ValidMembershipLossTrigger(check.Trigger) {
 		return fmt.Errorf("%w: unknown membership loss trigger %q", store.ErrInvalidInput, check.Trigger)
 	}
+	userID, err := parseUUID(check.UserID)
+	if err != nil {
+		return err
+	}
+	var projectID *string
+	if check.ProjectID != "" {
+		pid, err := parseUUID(check.ProjectID)
+		if err != nil {
+			return err
+		}
+		canonical := pid.String()
+		projectID = &canonical
+	}
 	id := uuid.New()
 	if check.ID != "" {
-		var err error
 		if id, err = parseUUID(check.ID); err != nil {
 			return err
 		}
@@ -86,10 +111,10 @@ func (s *MembershipLossCheckStore) EnqueueMembershipLossCheck(ctx context.Contex
 	if check.CreatedAt.IsZero() {
 		check.CreatedAt = time.Now()
 	}
-	_, err := s.client.MembershipLossCheck.Create().
+	_, err = s.client.MembershipLossCheck.Create().
 		SetID(id).
-		SetUserID(check.UserID).
-		SetNillableProjectID(nullableString(check.ProjectID)).
+		SetUserID(userID.String()).
+		SetNillableProjectID(projectID).
 		SetTrigger(membershiplosscheck.Trigger(check.Trigger)).
 		SetActorKind(check.ActorKind).
 		SetActorID(check.ActorID).
@@ -100,6 +125,10 @@ func (s *MembershipLossCheckStore) EnqueueMembershipLossCheck(ctx context.Contex
 		return mapError(err)
 	}
 	check.ID = id.String()
+	check.UserID = userID.String()
+	if projectID != nil {
+		check.ProjectID = *projectID
+	}
 	return nil
 }
 
@@ -170,43 +199,42 @@ func claimMembershipLossChecks(ctx context.Context, c *ent.Client, limit int, le
 	return out, nil
 }
 
-// CompleteMembershipLossCheck deletes the check.
-func (s *MembershipLossCheckStore) CompleteMembershipLossCheck(ctx context.Context, id string) error {
+// CompleteMembershipLossCheck deletes the check if it is still held by the
+// claim whose Attempts value is claim.
+func (s *MembershipLossCheckStore) CompleteMembershipLossCheck(ctx context.Context, id string, claim int) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	if _, err := s.client.MembershipLossCheck.Delete().
-		Where(membershiplosscheck.IDEQ(uid)).
-		Exec(ctx); err != nil {
+	n, err := s.client.MembershipLossCheck.Delete().
+		Where(membershiplosscheck.IDEQ(uid), membershiplosscheck.AttemptsEQ(claim)).
+		Exec(ctx)
+	if err != nil {
 		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrClaimLost
 	}
 	return nil
 }
 
-// FailMembershipLossCheck records errText on the check and keeps its lease.
-func (s *MembershipLossCheckStore) FailMembershipLossCheck(ctx context.Context, id string, errText string) error {
+// FailMembershipLossCheck records errText on the check and keeps its lease,
+// if the check is still held by the claim whose Attempts value is claim.
+func (s *MembershipLossCheckStore) FailMembershipLossCheck(ctx context.Context, id string, claim int, errText string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	if len(errText) > maxMembershipLossCheckErrorLen {
-		// Cut on a rune boundary: PostgreSQL rejects invalid UTF-8.
-		cut := maxMembershipLossCheckErrorLen
-		for cut > 0 && !utf8.RuneStart(errText[cut]) {
-			cut--
-		}
-		errText = errText[:cut]
-	}
+	errText = truncateUTF8(errText, maxMembershipLossCheckErrorLen)
 	n, err := s.client.MembershipLossCheck.Update().
-		Where(membershiplosscheck.IDEQ(uid)).
+		Where(membershiplosscheck.IDEQ(uid), membershiplosscheck.AttemptsEQ(claim)).
 		SetLastError(errText).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
 	}
 	if n == 0 {
-		return store.ErrNotFound
+		return store.ErrClaimLost
 	}
 	return nil
 }

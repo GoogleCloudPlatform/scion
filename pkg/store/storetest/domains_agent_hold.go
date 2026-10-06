@@ -17,7 +17,9 @@ package storetest
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -71,7 +73,7 @@ func newHold(projectID, agentID, rootID string) *store.AgentHold {
 		AgentID:           agentID,
 		ProjectID:         projectID,
 		Cause:             store.AgentHoldCauseOwnerAccessEnded,
-		RootPrincipalType: store.DelegationPrincipalUser,
+		RootPrincipalType: store.AgentHoldRootUser,
 		RootPrincipalID:   rootID,
 		Trigger:           store.MembershipLossTriggerMemberRemove,
 		ActorKind:         "user",
@@ -156,6 +158,9 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 				"unknown cause":   func(h *store.AgentHold) { h.Cause = "other" },
 				"unknown trigger": func(h *store.AgentHold) { h.Trigger = "other" },
 				"no root":         func(h *store.AgentHold) { h.RootPrincipalID = "" },
+				"root not a UUID": func(h *store.AgentHold) { h.RootPrincipalID = "not-a-uuid" },
+				"agent root":      func(h *store.AgentHold) { h.RootPrincipalType = store.DelegationPrincipalAgent },
+				"no root type":    func(h *store.AgentHold) { h.RootPrincipalType = "" },
 				"already cleared": func(h *store.AgentHold) { h.ClearReason = "x" },
 				"missing agent":   func(h *store.AgentHold) { h.AgentID = uuid.NewString() },
 			} {
@@ -167,6 +172,24 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 			held, err := s.HasActiveAgentHold(ctx, f.agents[0])
 			require.NoError(t, err)
 			assert.False(t, held)
+		})
+
+		t.Run("root principal ID is stored in canonical form", func(t *testing.T) {
+			s := factory(t)
+			f := seedHoldFixture(t, ctx, s, 1)
+			a := f.agents[0]
+			root := uuid.New()
+			n, err := s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(f.projectID, a, "{"+strings.ToUpper(root.String())+"}")})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+			// The canonical form names the same active hold.
+			n, err = s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(f.projectID, a, root.String())})
+			require.NoError(t, err)
+			assert.Equal(t, 0, n)
+			holds, err := s.ListActiveAgentHolds(ctx, a)
+			require.NoError(t, err)
+			require.Len(t, holds, 1)
+			assert.Equal(t, root.String(), holds[0].RootPrincipalID)
 		})
 
 		t.Run("clear by a user ends the hold and keeps history", func(t *testing.T) {
@@ -221,6 +244,7 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 				{Kind: "system", ID: "system"},
 				{Kind: "", ID: uuid.NewString()},
 				{Kind: store.ClearActorUser, ID: ""},
+				{Kind: store.ClearActorUser, ID: "not-a-uuid"},
 			} {
 				n, err := s.ClearAgentHolds(ctx, a, by, "resumed")
 				assert.ErrorIs(t, err, store.ErrInvalidActor, "actor %+v", by)
@@ -251,6 +275,27 @@ func AgentHoldConformance(t *testing.T, factory Factory) {
 		})
 
 		t.Run("soft delete keeps holds", func(t *testing.T) {
+			s := factory(t)
+			f := seedHoldFixture(t, ctx, s, 1)
+			a := f.agents[0]
+			_, err := s.CreateAgentHolds(ctx, []*store.AgentHold{newHold(f.projectID, a, uuid.NewString())})
+			require.NoError(t, err)
+			ag, err := s.GetAgent(ctx, a)
+			require.NoError(t, err)
+			ag.DeletedAt = time.Now()
+			require.NoError(t, s.UpdateAgent(ctx, ag))
+			ag, err = s.GetAgent(ctx, a)
+			require.NoError(t, err)
+			require.False(t, ag.DeletedAt.IsZero(), "the agent must be soft-deleted")
+			held, err := s.HasActiveAgentHold(ctx, a)
+			require.NoError(t, err)
+			assert.True(t, held)
+			holds, err := s.ListActiveAgentHolds(ctx, a)
+			require.NoError(t, err)
+			assert.Len(t, holds, 1)
+		})
+
+		t.Run("phase change keeps holds", func(t *testing.T) {
 			s := factory(t)
 			f := seedHoldFixture(t, ctx, s, 1)
 			a := f.agents[0]

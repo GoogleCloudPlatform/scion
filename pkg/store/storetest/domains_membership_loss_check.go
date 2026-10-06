@@ -52,10 +52,29 @@ func MembershipLossCheckConformance(t *testing.T, factory Factory) {
 			c := newMembershipLossCheck(uuid.NewString(), "")
 			c.Trigger = "other"
 			assert.ErrorIs(t, s.EnqueueMembershipLossCheck(ctx, c), store.ErrInvalidInput)
+			assert.ErrorIs(t, s.EnqueueMembershipLossCheck(ctx, newMembershipLossCheck("not-a-uuid", "")), store.ErrInvalidInput)
+			assert.ErrorIs(t, s.EnqueueMembershipLossCheck(ctx, newMembershipLossCheck(uuid.NewString(), "not-a-uuid")), store.ErrInvalidInput)
+			none, err := s.ClaimMembershipLossChecks(ctx, 10, time.Hour)
+			require.NoError(t, err)
+			assert.Empty(t, none, "a refused enqueue stores nothing")
 			_, err = s.ClaimMembershipLossChecks(ctx, 0, time.Minute)
 			assert.ErrorIs(t, err, store.ErrInvalidInput)
 			_, err = s.ClaimMembershipLossChecks(ctx, 1, 0)
 			assert.ErrorIs(t, err, store.ErrInvalidInput)
+		})
+
+		t.Run("enqueue stores canonical IDs", func(t *testing.T) {
+			s := factory(t)
+			user, project := uuid.New(), uuid.New()
+			c := newMembershipLossCheck("{"+strings.ToUpper(user.String())+"}", strings.ToUpper(project.String()))
+			require.NoError(t, s.EnqueueMembershipLossCheck(ctx, c))
+			assert.Equal(t, user.String(), c.UserID)
+			assert.Equal(t, project.String(), c.ProjectID)
+			claimed, err := s.ClaimMembershipLossChecks(ctx, 10, time.Hour)
+			require.NoError(t, err)
+			require.Len(t, claimed, 1)
+			assert.Equal(t, user.String(), claimed[0].UserID)
+			assert.Equal(t, project.String(), claimed[0].ProjectID)
 		})
 
 		t.Run("claim leases oldest rows and skips leased ones", func(t *testing.T) {
@@ -111,14 +130,19 @@ func MembershipLossCheckConformance(t *testing.T, factory Factory) {
 			require.NoError(t, s.EnqueueMembershipLossCheck(ctx, done))
 			require.NoError(t, s.EnqueueMembershipLossCheck(ctx, failed))
 
-			claimed, err := s.ClaimMembershipLossChecks(ctx, 10, 200*time.Millisecond)
+			const lease = 2 * time.Second
+			claimed, err := s.ClaimMembershipLossChecks(ctx, 10, lease)
 			require.NoError(t, err)
 			require.Len(t, claimed, 2)
+			require.Equal(t, done.ID, claimed[0].ID)
+			require.Equal(t, failed.ID, claimed[1].ID)
+			claim := claimed[0].Attempts
+			require.Equal(t, 1, claim)
 
-			require.NoError(t, s.CompleteMembershipLossCheck(ctx, done.ID))
-			require.NoError(t, s.CompleteMembershipLossCheck(ctx, done.ID), "completing twice is not an error")
-			require.NoError(t, s.FailMembershipLossCheck(ctx, failed.ID, "store unavailable"))
-			assert.ErrorIs(t, s.FailMembershipLossCheck(ctx, done.ID, "x"), store.ErrNotFound)
+			require.NoError(t, s.CompleteMembershipLossCheck(ctx, done.ID, claim))
+			assert.ErrorIs(t, s.CompleteMembershipLossCheck(ctx, done.ID, claim), store.ErrClaimLost, "a completed check is gone")
+			require.NoError(t, s.FailMembershipLossCheck(ctx, failed.ID, claimed[1].Attempts, "store unavailable"))
+			assert.ErrorIs(t, s.FailMembershipLossCheck(ctx, done.ID, claim, "x"), store.ErrClaimLost)
 
 			// Still leased: nothing to claim.
 			none, err := s.ClaimMembershipLossChecks(ctx, 10, time.Hour)
@@ -126,7 +150,7 @@ func MembershipLossCheckConformance(t *testing.T, factory Factory) {
 			assert.Empty(t, none)
 
 			// After the lease expires the failed check is claimable again.
-			time.Sleep(300 * time.Millisecond)
+			time.Sleep(lease + 500*time.Millisecond)
 			again, err := s.ClaimMembershipLossChecks(ctx, 10, time.Hour)
 			require.NoError(t, err)
 			require.Len(t, again, 1)
@@ -135,13 +159,42 @@ func MembershipLossCheckConformance(t *testing.T, factory Factory) {
 			assert.Equal(t, "store unavailable", again[0].LastError)
 		})
 
+		t.Run("a stale claim cannot complete or fail the check", func(t *testing.T) {
+			s := factory(t)
+			c := newMembershipLossCheck(uuid.NewString(), uuid.NewString())
+			require.NoError(t, s.EnqueueMembershipLossCheck(ctx, c))
+			first, err := s.ClaimMembershipLossChecks(ctx, 1, 50*time.Millisecond)
+			require.NoError(t, err)
+			require.Len(t, first, 1)
+			time.Sleep(100 * time.Millisecond)
+			second, err := s.ClaimMembershipLossChecks(ctx, 1, 300*time.Millisecond)
+			require.NoError(t, err)
+			require.Len(t, second, 1, "the expired claim is claimed again")
+			require.Equal(t, c.ID, second[0].ID)
+			require.Equal(t, first[0].Attempts+1, second[0].Attempts)
+
+			require.NoError(t, s.FailMembershipLossCheck(ctx, c.ID, second[0].Attempts, "current claim"))
+			assert.ErrorIs(t, s.FailMembershipLossCheck(ctx, c.ID, first[0].Attempts, "stale claim"), store.ErrClaimLost)
+			assert.ErrorIs(t, s.CompleteMembershipLossCheck(ctx, c.ID, first[0].Attempts), store.ErrClaimLost)
+
+			// The row is still there, with the current claim's error.
+			time.Sleep(400 * time.Millisecond)
+			third, err := s.ClaimMembershipLossChecks(ctx, 1, time.Hour)
+			require.NoError(t, err)
+			require.Len(t, third, 1, "a stale complete must leave the check in place")
+			assert.Equal(t, c.ID, third[0].ID)
+			assert.Equal(t, "current claim", third[0].LastError, "a stale fail must not overwrite the error")
+			require.NoError(t, s.CompleteMembershipLossCheck(ctx, c.ID, third[0].Attempts))
+		})
+
 		t.Run("long error text is cut to a valid prefix", func(t *testing.T) {
 			s := factory(t)
 			c := newMembershipLossCheck(uuid.NewString(), uuid.NewString())
 			require.NoError(t, s.EnqueueMembershipLossCheck(ctx, c))
-			_, err := s.ClaimMembershipLossChecks(ctx, 1, time.Millisecond)
+			claimed, err := s.ClaimMembershipLossChecks(ctx, 1, time.Millisecond)
 			require.NoError(t, err)
-			require.NoError(t, s.FailMembershipLossCheck(ctx, c.ID, strings.Repeat("é", 3000)))
+			require.Len(t, claimed, 1)
+			require.NoError(t, s.FailMembershipLossCheck(ctx, c.ID, claimed[0].Attempts, strings.Repeat("é", 3000)))
 			time.Sleep(20 * time.Millisecond)
 			again, err := s.ClaimMembershipLossChecks(ctx, 1, time.Hour)
 			require.NoError(t, err)

@@ -3299,7 +3299,9 @@ const (
 
 // ErrDescendantLimit is returned by ListDelegationDescendants, together with
 // the descendants found so far, when the walk reaches DescendantQuery.MaxDepth
-// or DescendantQuery.MaxNodes with descendants still unvisited.
+// or DescendantQuery.MaxNodes with descendants still unvisited. The returned
+// set is then incomplete: callers must refuse to treat it as the full set of
+// descendants.
 var ErrDescendantLimit = errors.New("delegation descendant limit reached")
 
 // DescendantLink is how a descendant was reached from its walk parent.
@@ -3313,8 +3315,8 @@ const (
 	// DescendantLinkCreatedBy: the agent has no owner_id and its
 	// created_by is the parent.
 	DescendantLinkCreatedBy DescendantLink = "created_by"
-	// DescendantLinkAncestry: the agent's ancestry contains the root
-	// principal (direct children of the root only).
+	// DescendantLinkAncestry: the agent has no owner_id and its ancestry
+	// contains the root principal (direct children of the root only).
 	DescendantLinkAncestry DescendantLink = "ancestry"
 )
 
@@ -3322,21 +3324,20 @@ const (
 // one project.
 type DescendantQuery struct {
 	// RootType and RootID name the root principal (DelegationPrincipalUser
-	// or DelegationPrincipalAgent).
+	// or DelegationPrincipalAgent). RootID must be a UUID.
 	RootType string
 	RootID   string
 	// ProjectID restricts the walk to edges with scope (project, ProjectID)
 	// and, for legacy links, to agents whose project_id is ProjectID.
 	ProjectID string
-	// IncludeSoftDeleted also follows inactive edges whose deactivation
-	// cause is EdgeDeactivationAgentSoftDelete, and lets legacy links reach
-	// soft-deleted agents.
+	// IncludeSoftDeleted also returns soft-deleted agents. The walk expands
+	// soft-deleted agents (and agents without a row) either way.
 	IncludeSoftDeleted bool
 	// LegacyLinks adds the owner_id / created_by / ancestry links to the
 	// delegation edges (see DescendantLink).
 	LegacyLinks bool
 	// SkipHeldForRoot leaves out agents that already have an active
-	// AgentHold whose root principal is RootID: they are still expanded
+	// AgentHold whose root principal ID is RootID: they are still expanded
 	// (their descendants are still reached) but are not returned and do not
 	// count toward MaxNodes. A caller that holds the returned agents and
 	// calls again therefore continues further into the tree.
@@ -3446,6 +3447,9 @@ type AgentHold struct {
 	ClearReason       string                `json:"clearReason,omitempty"`
 }
 
+// AgentHoldRootUser is the only AgentHold.RootPrincipalType accepted.
+const AgentHoldRootUser = "user"
+
 // ClearActorUser is the only ClearActor kind ClearAgentHolds accepts.
 const ClearActorUser = "user"
 
@@ -3462,6 +3466,12 @@ var ErrInvalidActor = fmt.Errorf("%w: agent holds can only be cleared by a user 
 // =============================================================================
 // Membership Loss Checks (durable re-evaluation work items)
 // =============================================================================
+
+// ErrClaimLost is returned by CompleteMembershipLossCheck and
+// FailMembershipLossCheck when the check is no longer held by the caller's
+// claim: it was claimed again after the lease expired, or it no longer
+// exists.
+var ErrClaimLost = errors.New("membership loss check claim lost")
 
 // MembershipLossCheck asks the hub to re-evaluate UserID's access to
 // ProjectID (every project where the user roots agents when ProjectID is

@@ -20,13 +20,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/membershiplosscheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -89,26 +92,89 @@ func TestLockAgentRows_InTx(t *testing.T) {
 
 	err := cs.WithTx(ctx, func(tx store.Store) error {
 		// Existing, missing and duplicate IDs are accepted.
-		return tx.LockAgentRows(ctx, []string{a.ID, uuid.NewString(), a.ID})
+		require.NoError(t, tx.LockAgentRows(ctx, []string{a.ID, uuid.NewString(), a.ID}))
+		require.NoError(t, tx.LockAgentRows(ctx, nil))
+		assert.ErrorIs(t, tx.LockAgentRows(ctx, []string{"not-a-uuid"}), store.ErrInvalidInput)
+		return nil
 	})
 	require.NoError(t, err)
-	require.NoError(t, cs.LockAgentRows(ctx, nil))
-	assert.ErrorIs(t, cs.LockAgentRows(ctx, []string{"not-a-uuid"}), store.ErrInvalidInput)
 }
 
-// waitForLockWaiter waits until some backend is waiting on a row lock.
-func waitForLockWaiter(t *testing.T, db *sql.DB) {
+func TestLockAgentRows_RequiresTx(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+	projectID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projectID, Name: "lock", Slug: "lock-" + projectID[:8]}))
+	a := makeAgent(projectID, "lock-a")
+	require.NoError(t, cs.CreateAgent(ctx, a))
+
+	// Outside a transaction no lock would outlive the statement, so the
+	// call is refused on every backend.
+	assert.ErrorIs(t, cs.LockAgentRows(ctx, []string{a.ID}), store.ErrInvalidInput)
+	assert.ErrorIs(t, cs.LockAgentRows(ctx, nil), store.ErrInvalidInput)
+}
+
+// TestAgentHold_ClearReasonIsCapped: the stored clear reason is cut to a
+// valid UTF-8 prefix of at most 2000 bytes.
+func TestAgentHold_ClearReasonIsCapped(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	projectID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projectID, Name: "hold", Slug: "hold-" + projectID[:8]}))
+	a := makeAgent(projectID, "hold-a")
+	require.NoError(t, cs.CreateAgent(ctx, a))
+	_, err := cs.CreateAgentHolds(ctx, []*store.AgentHold{{
+		AgentID:           a.ID,
+		ProjectID:         projectID,
+		Cause:             store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser,
+		RootPrincipalID:   uuid.NewString(),
+		Trigger:           store.MembershipLossTriggerMemberRemove,
+	}})
+	require.NoError(t, err)
+
+	reason := strings.Repeat("é", 3000)
+	actor := uuid.New()
+	n, err := cs.ClearAgentHolds(ctx, a.ID, store.ClearActor{Kind: store.ClearActorUser, ID: "{" + strings.ToUpper(actor.String()) + "}"}, reason)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	h, err := client.AgentHold.Query().Where(agenthold.AgentIDEQ(uuid.MustParse(a.ID))).Only(ctx)
+	require.NoError(t, err)
+	assert.NotEmpty(t, h.ClearReason)
+	assert.LessOrEqual(t, len(h.ClearReason), 2000)
+	assert.True(t, strings.HasPrefix(reason, h.ClearReason))
+	assert.Equal(t, actor.String(), h.ClearedByID)
+}
+
+// lockTestBackendPID returns the PostgreSQL backend PID of txStore's
+// transaction.
+func lockTestBackendPID(t *testing.T, ctx context.Context, txStore *CompositeStore) int {
+	t.Helper()
+	rows := &entsql.Rows{}
+	require.NoError(t, txStore.client.Driver().Query(ctx, "SELECT pg_backend_pid()", []any{}, rows))
+	defer func() { _ = rows.Close() }()
+	require.True(t, rows.Next(), "no backend PID returned")
+	var pid int
+	require.NoError(t, rows.Scan(&pid))
+	require.NoError(t, rows.Err())
+	return pid
+}
+
+// waitForBackendBlocked waits until the backend pid is blocked on a lock.
+func waitForBackendBlocked(t *testing.T, db *sql.DB, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		var waiting int
-		require.NoError(t, db.QueryRow("SELECT count(*) FROM pg_locks WHERE NOT granted").Scan(&waiting))
-		if waiting > 0 {
+		var blockers int
+		require.NoError(t, db.QueryRow("SELECT cardinality(pg_blocking_pids($1))", pid).Scan(&blockers))
+		if blockers > 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("no transaction started waiting on a lock")
+	t.Fatalf("backend %d did not start waiting on a lock", pid)
 }
 
 // TestLockAgentRows_AscendingOrder_Postgres: tx1 holds a; tx2 asks for
@@ -135,9 +201,10 @@ func TestLockAgentRows_AscendingOrder_Postgres(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = tx2.Rollback() }()
 	s2 := newTxCompositeStore(tx2)
+	pid2 := lockTestBackendPID(t, ctx, s2)
 	done := make(chan error, 1)
 	go func() { done <- s2.LockAgentRows(ctx, []string{b, a}) }()
-	waitForLockWaiter(t, cs.DB())
+	waitForBackendBlocked(t, cs.DB(), pid2)
 
 	lockCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
