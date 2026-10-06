@@ -32,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -185,7 +184,7 @@ type HTTPAgentDispatcher struct {
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
-	harnessConfigRepairer func(ctx context.Context, name string) error
+	harnessConfigRepairer func(ctx context.Context, ref HarnessConfigRepairRef) error
 	templateRepairer      func(ctx context.Context, ref string) error
 	skillPreResolver      func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
 
@@ -384,7 +383,7 @@ func (d *HTTPAgentDispatcher) SetDispatchMetrics(rec dispatchmetrics.Recorder) {
 
 // SetHarnessConfigRepairer registers a callback that syncs a harness-config's
 // DB manifest from storage when a hash mismatch is detected during dispatch.
-func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Context, name string) error) {
+func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Context, ref HarnessConfigRepairRef) error) {
 	d.harnessConfigRepairer = fn
 }
 
@@ -492,18 +491,26 @@ func (d *HTTPAgentDispatcher) repairHashMismatch(ctx context.Context, agent *sto
 }
 
 func (d *HTTPAgentDispatcher) repairHarnessConfig(ctx context.Context, agent *store.Agent) error {
-	if d.harnessConfigRepairer == nil || agent.AppliedConfig == nil || agent.AppliedConfig.HarnessConfig == "" {
+	if d.harnessConfigRepairer == nil || agent.AppliedConfig == nil ||
+		(agent.AppliedConfig.HarnessConfig == "" && agent.AppliedConfig.HarnessConfigID == "") {
 		return fmt.Errorf("no repairer or harness config")
 	}
 	name := agent.AppliedConfig.HarnessConfig
+	// Prefer the stamped record ID; the name is only a fallback, resolved in
+	// the agent's project then global scope (ptone/scion#2898).
+	ref := HarnessConfigRepairRef{
+		ID:        agent.AppliedConfig.HarnessConfigID,
+		Name:      name,
+		ProjectID: agent.ProjectID,
+	}
 	d.log.Warn("hash mismatch detected, attempting harness-config DB→storage repair",
-		"agent", agent.Slug, "harnessConfig", name)
-	if err := d.harnessConfigRepairer(ctx, name); err != nil {
-		d.log.Warn("harness-config repair failed", "harnessConfig", name, "error", err)
+		"agent", agent.Slug, "harnessConfig", name, "harnessConfigId", ref.ID)
+	if err := d.harnessConfigRepairer(ctx, ref); err != nil {
+		d.log.Warn("harness-config repair failed", "harnessConfig", name, "harnessConfigId", ref.ID, "error", err)
 		return err
 	}
 	d.log.Info("harness-config repair succeeded, retrying dispatch",
-		"agent", agent.Slug, "harnessConfig", name)
+		"agent", agent.Slug, "harnessConfig", name, "harnessConfigId", ref.ID)
 	return nil
 }
 
@@ -771,10 +778,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 				RequireLocalRuntime: gcpID.RequireLocalRuntime,
 			}
 		}
-		image := agent.AppliedConfig.Image
-		if image != "" && d.imageRegistry != "" {
-			image = config.RewriteImageRegistry(image, d.imageRegistry)
-		}
+		// Only the user's explicit image travels as Config.Image (the
+		// broker's top tier); a template-derived AppliedConfig.Image does
+		// not — see explicitDispatchImage (ptone/scion#1799).
+		image := d.dispatchImageForBroker(agent.AppliedConfig)
 		req.Config = &RemoteAgentConfig{
 			Template:                  agent.Template,
 			Image:                     image,
@@ -825,7 +832,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		if d.debug {
 			d.log.Debug("buildCreateRequest: config sent to broker",
 				"template", agent.Template,
-				"image", agent.AppliedConfig.Image,
+				"image", image,
+				"appliedImage", agent.AppliedConfig.Image,
 				"harnessConfig", agent.AppliedConfig.HarnessConfig,
 				"profile", agent.AppliedConfig.Profile,
 				"templateID", agent.AppliedConfig.TemplateID,
@@ -1367,6 +1375,17 @@ func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
 		if info.HarnessAuth != "" {
 			agent.AppliedConfig.HarnessAuth = info.HarnessAuth
 		}
+		// Empty only from an older broker (a current broker reports
+		// "unresolved" when no harness-config dir resolved), so keep the
+		// recorded value in that case.
+		if info.HarnessConfigSource != "" {
+			agent.AppliedConfig.HarnessConfigSource = info.HarnessConfigSource
+		}
+		// AppliedConfig.Image records what the broker actually resolved,
+		// for display. It never feeds a later dispatch's top-tier image
+		// (explicitDispatchImage reads the explicit inputs instead), so
+		// recording it here no longer freezes the image across restarts
+		// (ptone/scion#1799).
 		if info.Image != "" {
 			agent.AppliedConfig.Image = info.Image
 		}
@@ -3333,6 +3352,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
 		TemplateName:         agent.Template,
 	}
 	// A flat Runtime Broker receives the agent's valid pinned target.
@@ -3480,6 +3500,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments()),
+		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
+		SharedWorkspace:      startEnv.projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,
 	}
 	// A flat Runtime Broker receives the agent's valid pinned target.

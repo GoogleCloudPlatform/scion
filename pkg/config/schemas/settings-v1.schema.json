@@ -1549,8 +1549,8 @@
         "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
         "mount_options": { "type": "string", "default": "vers=3,hard,nconnect=4,_netdev" },
         "auto_mount": { "type": "boolean", "default": false, "description": "When true, a Runtime Broker mounts each share itself at startup and before NFS-backed dispatches (requires root). When false, the mounts are provided externally and the broker only checks them read-only.", "x-since": "1" },
-        "uid": { "type": "integer", "default": 1000 },
-        "gid": { "type": "integer", "default": 1000 },
+        "uid": { "type": "integer", "minimum": 0, "maximum": 4294967294, "default": 1000 },
+        "gid": { "type": "integer", "minimum": 0, "maximum": 4294967294, "default": 1000 },
         "storage_class": { "type": "string" },
         "subpath_root": { "type": "string", "default": "projects" },
         "shares": {

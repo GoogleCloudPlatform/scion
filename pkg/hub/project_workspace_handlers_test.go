@@ -93,23 +93,27 @@ func createTestHubManagedProject(t *testing.T, srv *Server, name string) (*store
 			// Go up past "agents" and ".scion" to remove the <slug>__<uuid> parent dir
 			_ = os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
 		}
+		// Remove the project-configs directory named by the project record.
+		_ = os.RemoveAll(filepath.Dir(filepath.Dir(resolveTestSharedDirPath(t, &project, "x"))))
 		_ = os.RemoveAll(workspacePath)
 	})
 
 	return &project, workspacePath
 }
 
-// resolveTestSharedDirPath resolves the project-configs shared dir path for a test
-// hub-managed project. This matches the path that resolveHubProjectSharedDirPath uses
-// in production: it reads the .scion marker to find the project-configs directory.
-func resolveTestSharedDirPath(t *testing.T, workspacePath, dirName string) string {
+// resolveTestSharedDirPath returns the shared dir path for a test hub-managed
+// project, computed from the project record (slug and ID) alone:
+// ~/.scion/project-configs/<slug>__<first 8 hex chars of ID>/shared-dirs/<dirName>.
+func resolveTestSharedDirPath(t *testing.T, project *store.Project, dirName string) string {
 	t.Helper()
-	scionPath := filepath.Join(workspacePath, config.DotScion)
-	projectDir, _, err := config.ResolveProjectPath(scionPath)
-	require.NoError(t, err, "failed to resolve project path from marker at %s", scionPath)
-	sdPath, err := config.GetSharedDirPath(projectDir, dirName)
+	home, err := os.UserHomeDir()
 	require.NoError(t, err)
-	return sdPath
+	shortID := strings.ReplaceAll(project.ID, "-", "")
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	return filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir,
+		project.Slug+"__"+shortID, config.SharedDirsSubdir, dirName)
 }
 
 // createTestGitProject creates a git-backed project via the API.
@@ -1063,7 +1067,7 @@ func TestSharedDirFiles_NFSBackend_LocalBackendExplicit_Unchanged(t *testing.T) 
 		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: local\n"), 0644))
 
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "Local Backend Explicit Test")
+	project, _ := createTestHubManagedProject(t, srv, "Local Backend Explicit Test")
 	addSharedDirToProject(t, srv, project.ID, "build-cache")
 
 	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/build-cache/files", project.ID)
@@ -1076,7 +1080,7 @@ func TestSharedDirFiles_NFSBackend_LocalBackendExplicit_Unchanged(t *testing.T) 
 
 	// A GET must not bring the directory into existence: browsing is not a
 	// provisioning operation (see TestSymlink_ReadDoesNotCreateSharedDir).
-	sdPath := resolveTestSharedDirPath(t, workspacePath, "build-cache")
+	sdPath := resolveTestSharedDirPath(t, project, "build-cache")
 	_, err := os.Stat(sdPath)
 	assert.True(t, os.IsNotExist(err), "a read must not create the shared dir")
 
@@ -1538,7 +1542,7 @@ server:
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
 
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "Empty Backend With NFS Block")
+	project, _ := createTestHubManagedProject(t, srv, "Empty Backend With NFS Block")
 	addSharedDirToProject(t, srv, project.ID, "artifacts")
 
 	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID)
@@ -1553,7 +1557,7 @@ server:
 	// A read must not create the local shared dir either; a write, which
 	// does create it on first use, confirms this resolved via the local
 	// layout the whole time.
-	sdPath := resolveTestSharedDirPath(t, workspacePath, "artifacts")
+	sdPath := resolveTestSharedDirPath(t, project, "artifacts")
 	_, err := os.Stat(sdPath)
 	assert.True(t, os.IsNotExist(err), "a read must not create the shared dir")
 
@@ -1620,7 +1624,7 @@ func TestSharedDirConfigDelete_UnreadableSettings_LogsAndSkipsCleanup_NoLocalTou
 	require.NoError(t, os.MkdirAll(g, 0o755))
 
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "Delete Broken Settings")
+	project, _ := createTestHubManagedProject(t, srv, "Delete Broken Settings")
 	addSharedDirToProject(t, srv, project.ID, "artifacts")
 
 	// Populate the local shared dir while settings are still unset (local
@@ -1628,7 +1632,7 @@ func TestSharedDirConfigDelete_UnreadableSettings_LogsAndSkipsCleanup_NoLocalTou
 	filesURL := fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts/files", project.ID)
 	rec := doRequest(t, srv, http.MethodPut, filesURL+"/note.txt", ProjectWorkspaceWriteRequest{Content: "hello"})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	sdPath := resolveTestSharedDirPath(t, workspacePath, "artifacts")
+	sdPath := resolveTestSharedDirPath(t, project, "artifacts")
 	localFile := filepath.Join(sdPath, "note.txt")
 	_, err := os.Stat(localFile)
 	require.NoError(t, err, "sanity: the local file must exist before settings break")
@@ -1805,7 +1809,7 @@ func TestSharedDirFiles_ListEmpty(t *testing.T) {
 
 func TestSharedDirFiles_UploadAndList(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "SD Upload List")
+	project, _ := createTestHubManagedProject(t, srv, "SD Upload List")
 
 	addSharedDirToProject(t, srv, project.ID, "artifacts")
 
@@ -1817,7 +1821,7 @@ func TestSharedDirFiles_UploadAndList(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
 	// Verify file on disk — shared dirs live under project-configs, not the workspace
-	sdPath := resolveTestSharedDirPath(t, workspacePath, "artifacts")
+	sdPath := resolveTestSharedDirPath(t, project, "artifacts")
 	content, err := os.ReadFile(filepath.Join(sdPath, "output.log"))
 	require.NoError(t, err)
 	assert.Equal(t, "build log content", string(content))
@@ -1834,12 +1838,12 @@ func TestSharedDirFiles_UploadAndList(t *testing.T) {
 
 func TestSharedDirFiles_Download(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "SD Download")
+	project, _ := createTestHubManagedProject(t, srv, "SD Download")
 
 	addSharedDirToProject(t, srv, project.ID, "data")
 
 	// Create a file directly at the project-configs shared dir path
-	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "data")
+	sharedDirPath := resolveTestSharedDirPath(t, project, "data")
 	require.NoError(t, os.MkdirAll(sharedDirPath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDirPath, "result.txt"), []byte("result data"), 0644))
 
@@ -1850,12 +1854,12 @@ func TestSharedDirFiles_Download(t *testing.T) {
 
 func TestSharedDirFiles_Delete(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "SD Delete")
+	project, _ := createTestHubManagedProject(t, srv, "SD Delete")
 
 	addSharedDirToProject(t, srv, project.ID, "temp")
 
 	// Create a file at the project-configs shared dir path
-	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "temp")
+	sharedDirPath := resolveTestSharedDirPath(t, project, "temp")
 	require.NoError(t, os.MkdirAll(sharedDirPath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDirPath, "old.txt"), []byte("old"), 0644))
 
@@ -1911,16 +1915,18 @@ func TestSharedDirFiles_GitProjectWithEmbeddedBroker(t *testing.T) {
 		ProjectID:  project.ID,
 		BrokerID:   broker.ID,
 		BrokerName: broker.Name,
-		// LocalPath intentionally empty — fallback resolves via hub workspace marker
+		// LocalPath intentionally empty — fallback resolves from the project record
 	}
 	require.NoError(t, s.AddProjectProvider(ctx, provider))
 
-	// Initialize a hub workspace so the .scion marker exists for path resolution.
-	// This simulates a shared-workspace project that was cloned by the hub.
+	// Initialize a hub workspace whose .scion marker records the project's own
+	// identity. This simulates a shared-workspace project that was cloned by
+	// the hub.
 	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
-	require.NoError(t, config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}))
+	require.NoError(t, os.MkdirAll(workspacePath, 0o755))
+	require.NoError(t, config.WriteWorkspaceMarker(workspacePath, project.ID, project.Slug, project.Slug))
 
 	t.Cleanup(func() {
 		// Clean up the external project-config directory via marker resolution
@@ -1931,7 +1937,7 @@ func TestSharedDirFiles_GitProjectWithEmbeddedBroker(t *testing.T) {
 		_ = os.RemoveAll(workspacePath)
 	})
 
-	// Should now work via marker-based path resolution
+	// Should now work via the project-record path resolution
 	rec := doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/build-cache/files", project.ID), nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
@@ -1977,11 +1983,13 @@ func TestSharedDirFiles_GitProjectMultipleProviders(t *testing.T) {
 		ProjectID: project.ID, BrokerID: remoteBroker.ID, BrokerName: remoteBroker.Name,
 	}))
 
-	// Initialize a hub workspace so the .scion marker exists for path resolution
+	// Initialize a hub workspace whose .scion marker records the project's own
+	// identity.
 	workspacePath, err := hubManagedProjectPath(project.Slug)
 	require.NoError(t, err)
 	scionDir := filepath.Join(workspacePath, config.DotScion)
-	require.NoError(t, config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}))
+	require.NoError(t, os.MkdirAll(workspacePath, 0o755))
+	require.NoError(t, config.WriteWorkspaceMarker(workspacePath, project.ID, project.Slug, project.Slug))
 
 	t.Cleanup(func() {
 		if resolved, rErr := config.ResolveProjectMarker(scionDir); rErr == nil {
@@ -2044,6 +2052,8 @@ func createTestSharedWorkspaceProject(t *testing.T, srv *Server, name, remote st
 		if extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
 			_ = os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
 		}
+		// Remove the project-configs directory named by the project record.
+		_ = os.RemoveAll(filepath.Dir(filepath.Dir(resolveTestSharedDirPath(t, &project, "x"))))
 		_ = os.RemoveAll(workspacePath)
 	})
 
@@ -2356,10 +2366,10 @@ func TestProjectWorkspaceList_HasMoreFalseWhenFewFiles(t *testing.T) {
 
 func TestSharedDirFiles_SearchQuery(t *testing.T) {
 	srv, _ := testServer(t)
-	project, workspacePath := createTestHubManagedProject(t, srv, "SD Search Query")
+	project, _ := createTestHubManagedProject(t, srv, "SD Search Query")
 	addSharedDirToProject(t, srv, project.ID, "cache")
 
-	sharedDirPath := resolveTestSharedDirPath(t, workspacePath, "cache")
+	sharedDirPath := resolveTestSharedDirPath(t, project, "cache")
 	require.NoError(t, os.MkdirAll(sharedDirPath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDirPath, "build.log"), []byte("log"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDirPath, "data.bin"), []byte("bin"), 0644))

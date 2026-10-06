@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -1769,8 +1770,16 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 	}
 }
 
+// Full settings keys for the NFS owner ids, used in error messages so a
+// broker warning or a failed agent start names the exact setting.
+const (
+	NFSUIDKey = "server.workspace_storage.nfs.uid"
+	NFSGIDKey = "server.workspace_storage.nfs.gid"
+)
+
 // ValidateNFS returns an error if Backend is "nfs" but the NFS block is
-// misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
+// misconfigured: no shares defined, or a uid or gid outside
+// [0, fsutil.MaxOwnerID]. Call after ApplyNFSDefaults.
 func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return nil
@@ -1778,6 +1787,13 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	// An unset (0) uid/gid has become the default 1000 in ApplyNFSDefaults.
+	if err := fsutil.ValidateOwnerID(NFSUIDKey, ws.NFS.UID); err != nil {
+		return err
+	}
+	if err := fsutil.ValidateOwnerID(NFSGIDKey, ws.NFS.GID); err != nil {
+		return err
 	}
 	return nil
 }
@@ -5279,9 +5295,18 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
+// Top-level keys the legacy Settings struct does not decode (v1-only keys such
+// as server and image_registry, or any unknown key) are carried into the
+// migrated file unchanged; see legacyCarriedTopLevelKeys.
 // If dryRun is true, no files are written.
 // Returns MigrationResult describing what was (or would be) done.
 func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
+	// Held from the first read to the final write, so the read, backup
+	// rename and write are one step for in-process writers (see
+	// LockSettingsFile). Nothing below takes the lock again.
+	unlock := LockSettingsFile()
+	defer unlock()
+
 	result := &MigrationResult{}
 
 	// 1. Find settings file
@@ -5330,6 +5355,14 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	vs, warnings := AdaptLegacySettings(&legacy)
 	result.Warnings = warnings
 
+	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
+	// such as server and image_registry) are carried through unchanged
+	// (ptone/scion#3497).
+	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse settings: %w", err)
+	}
+
 	// 4b. Check for server.yaml and merge if present
 	serverPath := GetServerConfigPath(dir)
 	if serverPath != "" {
@@ -5364,19 +5397,11 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		}
 	}
 
-	// 5. Handle hub.lastSyncedAt: migrate to state.yaml
+	// 5. Handle hub.lastSyncedAt: migrate to state.yaml (written in step 7b,
+	// once the output has passed every check, so a failed migration leaves
+	// nothing changed).
 	if legacy.Hub != nil && legacy.Hub.LastSyncedAt != "" {
 		result.StateMigrated = true
-		if !dryRun {
-			state, err := LoadProjectState(dir)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load project state: %w", err)
-			}
-			state.LastSyncedAt = legacy.Hub.LastSyncedAt
-			if err := SaveProjectState(dir, state); err != nil {
-				return nil, fmt.Errorf("failed to save project state: %w", err)
-			}
-		}
 	}
 
 	// 6. Validate the output
@@ -5397,9 +5422,48 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		return nil, fmt.Errorf("migrated settings failed validation: %s", strings.Join(errMsgs, "; "))
 	}
 
+	// 6b. Merge the carried keys into the output. They are the file's own
+	// data, so a value the loaders cannot decode (a wrong type, such as
+	// "server: hello") fails the migration with the file untouched, while
+	// any other schema mismatch (such as an unknown key) is a warning:
+	// dropping such a key is the data loss this step prevents.
+	if len(carried) > 0 {
+		var dropped []string
+		if outputData, dropped, err = marshalMigratedSettings(vs, carried); err != nil {
+			return nil, fmt.Errorf("failed to marshal converted settings: %w", err)
+		}
+		for _, p := range dropped {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting %s dropped: it conflicts with the value converted from the legacy settings, which is used instead", p))
+		}
+		if err := checkCarriedSettingsDecode(vs, carried, outputData); err != nil {
+			return nil, fmt.Errorf("cannot migrate %s (left unchanged): %w; fix or remove the key and retry", settingsPath, err)
+		}
+		carriedErrors, err := ValidateSettings(outputData, "1")
+		if err != nil {
+			return nil, fmt.Errorf("validation error: %w", err)
+		}
+		for _, ve := range carriedErrors {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting does not match the v1 schema: %s", ve.Error()))
+		}
+	}
+
 	// 7. If dryRun, return result without writing
 	if dryRun {
 		return result, nil
+	}
+
+	// 7b. Write hub.lastSyncedAt to state.yaml (see step 5).
+	if result.StateMigrated {
+		state, err := LoadProjectState(dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load project state: %w", err)
+		}
+		state.LastSyncedAt = legacy.Hub.LastSyncedAt
+		if err := SaveProjectState(dir, state); err != nil {
+			return nil, fmt.Errorf("failed to save project state: %w", err)
+		}
 	}
 
 	// 8. Back up the original settings file
@@ -5422,7 +5486,7 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	}
 
 	// 9. Write versioned settings
-	if err := SaveVersionedSettings(dir, vs); err != nil {
+	if err := saveVersionedSettingsData(dir, outputData); err != nil {
 		// Attempt to restore backups on failure
 		_ = os.Rename(backupPath, settingsPath)
 		if result.ServerBackupPath != "" {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -111,10 +112,13 @@ func TestFlatLifecycle_RefusalSettlesMessage(t *testing.T) {
 			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 			a := f.pinnedAgent(t, "settle-"+action, string(state.PhaseStopped))
 			f.client.returnErr = brokerMismatchErr(http.StatusConflict, f.flat.ID)
+			// A flat Runtime Broker refuses the start leg; its stop succeeds
+			// (a restart whose stop fails is not performed at all).
+			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.s, &stopSucceedsClient{f.client}, false, slog.Default()))
 			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/"+action, nil)
 			d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetMismatch)
 			requireNoStartMarkers(t, d)
-			assert.True(t, f.client.startCalled, "the refusal came from the start dispatch")
+			assert.True(t, f.client.startCalled || f.client.restartCalled, "the refusal came from the start dispatch")
 			got, err := f.s.GetAgent(context.Background(), a.ID)
 			require.NoError(t, err)
 			assert.Equal(t, "refused by the Runtime Broker", got.Message)
@@ -165,4 +169,13 @@ func TestFlatRestart_StartLegPlacementRefusalReleasesClaim(t *testing.T) {
 	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
 	assert.NotContains(t, rec.Body.String(), "start_in_progress", "a following start is not held off by a leaked claim")
 	assert.Less(t, rec.Code, 300, rec.Body.String())
+}
+
+// stopSucceedsClient is a mockRuntimeBrokerClient whose stop always
+// succeeds, so only the start leg returns the mock's error.
+type stopSucceedsClient struct{ *mockRuntimeBrokerClient }
+
+func (c *stopSucceedsClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
+	c.stopCalled = true
+	return nil
 }

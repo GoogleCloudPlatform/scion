@@ -230,7 +230,11 @@ type Server struct {
 	mux        *http.ServeMux
 	mu         sync.RWMutex
 	startTime  time.Time
-	version    string
+
+	// workspaceDownload replaces syncWorkspaceFromGCS for the GCS workspace
+	// bootstrap when set (see SetWorkspaceDownloader).
+	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
+	version           string
 
 	// Hub connections (replaces single hubClient, heartbeat, controlChannel, etc.)
 	hubConnections map[string]*HubConnection // keyed by connection name
@@ -961,6 +965,25 @@ func (s *Server) validateBrokerAuthStartup() error {
 	}
 
 	return nil
+}
+
+// SetWorkspaceDownloader replaces the GCS download used to bootstrap an
+// agent workspace from a hub workspace upload. nil restores the default.
+// This is useful for testing.
+func (s *Server) SetWorkspaceDownloader(fn func(ctx context.Context, bucket, prefix, localPath string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workspaceDownload = fn
+}
+
+// workspaceDownloader returns the GCS workspace bootstrap download.
+func (s *Server) workspaceDownloader() func(ctx context.Context, bucket, prefix, localPath string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.workspaceDownload != nil {
+		return s.workspaceDownload
+	}
+	return syncWorkspaceFromGCS
 }
 
 // SetRequestLogger sets the dedicated request logger.
