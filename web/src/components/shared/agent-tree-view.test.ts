@@ -1558,6 +1558,36 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
     }
   });
 
+  // ptone/scion#2941: only the primary button starts a pan.
+  it('does not start a pan on a right or middle button press', () => {
+    for (const button of [1, 2]) {
+      const ev = new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        pointerId: 1,
+        button,
+      });
+      canvas().dispatchEvent(ev);
+      expect(canvas().classList.contains('dragging')).toBe(false);
+      expect(ev.defaultPrevented).toBe(false);
+      expect(selectStartPrevented(document.body)).toBe(false);
+      pointer('pointerup');
+    }
+    // The primary button still pans.
+    canvas().dispatchEvent(
+      new PointerEvent('pointerdown', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        pointerId: 1,
+        button: 0,
+      })
+    );
+    expect(canvas().classList.contains('dragging')).toBe(true);
+    pointer('pointerup');
+  });
+
   it('ends the pan and stops suppressing selection when pointer capture is lost', () => {
     pointer('pointerdown');
     expect(selectStartPrevented(document.body)).toBe(true);
