@@ -42,9 +42,10 @@ const hubPreStartHookBasePath = "/api/v1/pre-start-hooks/"
 //     access token is admitted only on the hub boundary with the
 //     hub_lifecycle_hooks:update selector and live hub authority. See
 //     requireHubAdmin.
-//   - Script bodies in read responses: only a session or dev credential with
-//     hub.lifecycle_hooks.read sees them; every user access token gets the
-//     redacted form. See isHubAdminIdentity.
+//   - Script bodies in read responses: only an interactive session or dev
+//     credential with hub.lifecycle_hooks.read sees them; every other
+//     credential, a user access token included, gets the redacted form. See
+//     isHubAdminIdentity.
 //
 // Request/response shapes are shared with the project-scoped handlers
 // (CreateProjectPreStartHookRequest, UpdateProjectPreStartHookRequest,
@@ -89,8 +90,10 @@ func (s *Server) requireHubHookReader(w http.ResponseWriter, r *http.Request) (U
 }
 
 // isHubAdminIdentity reports whether the identity may see hub hook script
-// bodies in read responses: a session or dev credential whose holder has
-// hub.lifecycle_hooks.read. A user access token never sees script bodies.
+// bodies in read responses: an interactive session or dev credential
+// (sessionCredentialAllowed) whose holder has hub.lifecycle_hooks.read.
+// Every other credential, a user access token or an unknown or missing
+// kind included, gets the redacted form.
 func (s *Server) isHubAdminIdentity(ctx context.Context, identity UserIdentity) bool {
 	if !sessionCredentialAllowed(ctx) {
 		return false

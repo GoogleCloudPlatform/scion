@@ -2264,14 +2264,16 @@ func maintenanceMessageOrDefault(msg string) string {
 //
 // The server-config and project-defaults writes admit a user access token
 // that carries the operation's selector, but only for keys classified as
-// configuration below. A key is refused for every token when writing it
-// confers authority (who is an administrator, who may sign in, which
-// external issuers are trusted), decides the origin users and agents reach
-// the hub on, or selects the code, images, runtimes or credentials agents
-// run with. A refused key is refused whenever it is present in the body,
-// including a value equal to the stored one or an explicit clear. A key the
-// tables do not classify is refused too, so a new settings key reaches
-// tokens only after it is classified here.
+// configuration below. A key is refused for every credential other than an
+// interactive session or a dev credential (a user access token, or an
+// unknown or missing credential kind) when writing it confers authority
+// (who is an administrator, who may sign in, which external issuers are
+// trusted), decides the origin users and agents reach the hub on, or
+// selects the code, images, runtimes or credentials agents run with. A
+// refused key is refused whenever it is present in the body, including a
+// value equal to the stored one or an explicit clear. A key the tables do
+// not classify is refused too, so a new settings key reaches tokens only
+// after it is classified here.
 
 // settingsTokenClass classifies a settings section or key for writes by a
 // user access token.
@@ -2433,11 +2435,12 @@ func sortedSettingsKeys(m map[string]bool) []string {
 	return out
 }
 
-// writeTokenRefusedSettingsKeys refuses a token's settings write that
-// carries refused keys: 403 with the session-only details (reason
-// GOV_PENDING) and details.keys listing the refused keys. It writes nothing
-// and returns false when the credential is a session or dev credential, or
-// when keys is empty.
+// writeTokenRefusedSettingsKeys refuses a settings write that carries
+// refused keys from any credential other than an interactive session or a
+// dev credential (sessionCredentialAllowed): 403 with the session-only
+// details (reason GOV_PENDING) and details.keys listing the refused keys.
+// An unknown or missing credential kind is refused too. It writes nothing
+// and returns false for a session or dev credential, or when keys is empty.
 func writeTokenRefusedSettingsKeys(w http.ResponseWriter, ctx context.Context, keys []string) bool {
 	if sessionCredentialAllowed(ctx) || len(keys) == 0 {
 		return false

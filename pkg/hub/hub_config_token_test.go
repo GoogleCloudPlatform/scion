@@ -353,3 +353,28 @@ func TestHubPreStartHookRead_TokenGetsRedactedScript(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "echo hct")
 }
+
+// TestHubConfig_MissingCredentialKindRefusedAndRedacted requires the
+// settings key rule and the hub hook script redaction to treat a request
+// with no credential context like a token: a refused key is refused, and a
+// hub pre-start hook script is redacted, even for an admin identity.
+func TestHubConfig_MissingCredentialKindRefusedAndRedacted(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	admin := NewAuthenticatedUser("hct-nocred", "hct-nocred@example.com", "Admin", "admin", "cli")
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config", strings.NewReader(`{"server":{"hub":{"admin_emails":["x@example.com"]}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rec := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rec, req, srv.GetOperationalSettings())
+	requireTokenRefusedKeys(t, rec, "server.hub.admin_emails")
+
+	hook, err := s.CreateHubPreStartHook(context.Background(), &store.ProjectPreStartHook{
+		Scope: store.PreStartHookScopeHub, Name: "hct-nocred-hook", Slug: "hct-nocred-hook", Script: "#!/bin/sh\necho nocred\n",
+		CreatedBy: "hct-nocred@example.com", UpdatedBy: "hct-nocred@example.com",
+	})
+	require.NoError(t, err)
+	rec = doHubPSHRequestAsIdentity(t, srv, admin, http.MethodGet, hubPSHPath+"/"+hook.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "echo nocred")
+}
