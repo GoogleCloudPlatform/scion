@@ -549,7 +549,7 @@ func TestCleanupStalePod_WaitsForConfirmedTermination(t *testing.T) {
 	}
 	rt.execReadyClock = fc.clock()
 
-	if err := rt.cleanupStalePod(context.Background(), "default", "a", &HomeStorageRealization{TerminationWaitSeconds: 15}); err != nil {
+	if err := rt.cleanupStalePod(context.Background(), "default", "a", true, &HomeStorageRealization{TerminationWaitSeconds: 15}); err != nil {
 		t.Fatalf("cleanupStalePod: %v", err)
 	}
 	if len(*deletes) != 1 || (*deletes)[0].GracePeriodSeconds != nil {
@@ -569,7 +569,7 @@ func TestCleanupStalePod_RefusesWhenUnconfirmed(t *testing.T) {
 	start := time.Unix(1000, 0)
 	fc := &fakeTerminationClock{now: start}
 	rt.execReadyClock = fc.clock()
-	err := rt.cleanupStalePod(context.Background(), "default", "a", &HomeStorageRealization{TerminationWaitSeconds: 15})
+	err := rt.cleanupStalePod(context.Background(), "default", "a", true, &HomeStorageRealization{TerminationWaitSeconds: 15})
 	if !errors.Is(err, errPreviousPodUnconfirmed) {
 		t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
 	}
@@ -591,7 +591,7 @@ func TestCleanupStalePod_NodeLostRefusedAtOnce(t *testing.T) {
 	keepPodsOnDelete(cs)
 	fc := &fakeTerminationClock{now: time.Unix(1000, 0)}
 	rt.execReadyClock = fc.clock()
-	err := rt.cleanupStalePod(context.Background(), "default", "a", nil)
+	err := rt.cleanupStalePod(context.Background(), "default", "a", true, nil)
 	if !errors.Is(err, errPreviousPodUnconfirmed) || fc.sleeps != 0 {
 		t.Errorf("err = %v after %d sleeps, want an immediate refusal", err, fc.sleeps)
 	}
@@ -607,13 +607,13 @@ func TestCleanupStalePod_PlainPodUnchanged(t *testing.T) {
 	deletes := keepPodsOnDelete(cs)
 	fc := &fakeTerminationClock{now: time.Unix(1000, 0)}
 	rt.execReadyClock = fc.clock()
-	if err := rt.cleanupStalePod(context.Background(), "default", "a", nil); err != nil {
+	if err := rt.cleanupStalePod(context.Background(), "default", "a", false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(*deletes) != 1 || (*deletes)[0].GracePeriodSeconds == nil || *(*deletes)[0].GracePeriodSeconds != 0 || fc.sleeps != 0 {
 		t.Errorf("plain pod: deletes %+v, sleeps %d; want one immediate delete and no wait", *deletes, fc.sleeps)
 	}
-	if err := rt.cleanupStalePod(context.Background(), "default", "missing", nil); err != nil {
+	if err := rt.cleanupStalePod(context.Background(), "default", "missing", false, nil); err != nil {
 		t.Errorf("missing pod: %v", err)
 	}
 }
@@ -637,7 +637,7 @@ func TestDelete_GracefulForNFSHomePods(t *testing.T) {
 			}
 			deletes := keepPodsOnDelete(cs)
 			done := make(chan error, 1)
-			go func() { done <- rt.Stop(context.Background(), "default/a") }()
+			go func() { done <- rt.Stop(context.Background(), RunRef{ID: "default/a"}) }()
 			select {
 			case err := <-done:
 				if err != nil {
@@ -971,7 +971,7 @@ func TestCleanupStalePod_UnreadablePodRefused(t *testing.T) {
 	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, errors.New("connection reset")
 	})
-	err := rt.cleanupStalePod(context.Background(), "default", "a", &HomeStorageRealization{})
+	err := rt.cleanupStalePod(context.Background(), "default", "a", true, &HomeStorageRealization{})
 	if !errors.Is(err, errPreviousPodUnconfirmed) || !strings.Contains(err.Error(), "connection reset") {
 		t.Errorf("err = %v, want previous_pod_unconfirmed wrapping the read error", err)
 	}
@@ -1287,5 +1287,194 @@ func TestRun_NFSHomeSecretDeleteBetweenConfirmAndCreate(t *testing.T) {
 	}
 	if secretDelete < 0 || lastPodGet >= secretDelete || secretDelete >= podCreate {
 		t.Errorf("order: last pod read %d, secret delete %d, pod create %d", lastPodGet, secretDelete, podCreate)
+	}
+}
+
+// podHandle is the launch resource handle of pod p.
+func podHandle(p *corev1.Pod) api.ResourceHandle {
+	return api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: p.Namespace, Name: p.Name, UID: string(p.UID)}
+}
+
+// wantUIDPrecondition fails unless opts carry a UID precondition for uid.
+func wantUIDPrecondition(t *testing.T, opts metav1.DeleteOptions, uid string) {
+	t.Helper()
+	if opts.Preconditions == nil || opts.Preconditions.UID == nil || string(*opts.Preconditions.UID) != uid {
+		t.Errorf("delete preconditions = %+v, want UID %q", opts.Preconditions, uid)
+	}
+}
+
+// Cleanup of a cancelled launch deletes an NFS-home pod with its grace
+// period and a UID precondition, never with grace 0, so the pod is still
+// there while it shuts down and the agent's next start waits for it.
+func TestK8sDeleteResource_NFSHomePodGraceful(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	p := runningNFSHomePod("a")
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), p, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deletes := keepPodsOnDelete(cs)
+
+	// A handle with a stale UID (the name now belongs to another pod)
+	// leaves the pod alone: any delete issued must carry the stale UID as
+	// its precondition, which the API server rejects, and never grace 0.
+	stale := podHandle(p)
+	stale.UID = "uid-stale"
+	if err := rt.DeleteResource(context.Background(), stale); err != nil {
+		t.Fatalf("stale DeleteResource: %v", err)
+	}
+	for i, d := range *deletes {
+		wantUIDPrecondition(t, d, "uid-stale")
+		if d.GracePeriodSeconds != nil && *d.GracePeriodSeconds == 0 {
+			t.Errorf("stale delete %d used grace 0: %+v", i, d)
+		}
+	}
+	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), "a", metav1.GetOptions{}); err != nil {
+		t.Fatalf("pod removed by a stale handle: %v", err)
+	}
+	*deletes = nil
+
+	if err := rt.DeleteResource(context.Background(), podHandle(p)); err != nil {
+		t.Fatalf("DeleteResource: %v", err)
+	}
+	if len(*deletes) != 1 {
+		t.Fatalf("deletes = %+v, want exactly one", *deletes)
+	}
+	if g := (*deletes)[0].GracePeriodSeconds; g != nil {
+		t.Errorf("grace period = %d, want the pod's own (unset)", *g)
+	}
+	wantUIDPrecondition(t, (*deletes)[0], "uid-1")
+
+	// The next start finds the pod still shutting down and waits until its
+	// container is confirmed stopped.
+	start := time.Unix(1000, 0)
+	fc := &fakeTerminationClock{now: start}
+	fc.onTick = func(now time.Time) {
+		if now.Sub(start) >= 20*time.Second {
+			p, _ := cs.CoreV1().Pods("default").Get(context.Background(), "a", metav1.GetOptions{})
+			if p != nil && p.Status.ContainerStatuses[0].State.Terminated == nil {
+				p.Status.ContainerStatuses[0].State = stTerminated
+				_, _ = cs.CoreV1().Pods("default").UpdateStatus(context.Background(), p, metav1.UpdateOptions{})
+			}
+		}
+	}
+	rt.execReadyClock = fc.clock()
+	if err := rt.cleanupStalePod(context.Background(), "default", "a", true, &HomeStorageRealization{TerminationWaitSeconds: 15}); err != nil {
+		t.Fatalf("cleanupStalePod: %v", err)
+	}
+	if waited := fc.now.Sub(start); waited < 20*time.Second {
+		t.Errorf("next start waited %s, want it to wait for the pod to stop", waited)
+	}
+	for i, d := range *deletes {
+		if d.GracePeriodSeconds != nil && *d.GracePeriodSeconds == 0 {
+			t.Errorf("delete %d used grace 0: %+v", i, d)
+		}
+	}
+}
+
+// A pod without an NFS home is still deleted immediately, with the UID
+// precondition.
+func TestK8sDeleteResource_PlainPodImmediate(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	p := runningNFSHomePod("a")
+	p.Annotations = nil
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), p, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []metav1.DeleteOptions
+	cs.PrependReactor("delete", "pods", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		seen = append(seen, a.(k8stesting.DeleteActionImpl).DeleteOptions)
+		return false, nil, nil
+	})
+	if err := rt.DeleteResource(context.Background(), podHandle(p)); err != nil {
+		t.Fatalf("DeleteResource: %v", err)
+	}
+	if len(seen) != 1 || seen[0].GracePeriodSeconds == nil || *seen[0].GracePeriodSeconds != 0 {
+		t.Fatalf("deletes = %+v, want one delete with grace 0", seen)
+	}
+	wantUIDPrecondition(t, seen[0], "uid-1")
+	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), "a", metav1.GetOptions{}); err == nil {
+		t.Error("pod still present")
+	}
+}
+
+// A pod that cannot be read is deleted gracefully, with the UID
+// precondition, never with grace 0.
+func TestK8sDeleteResource_PodReadErrorGraceful(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	p := runningNFSHomePod("a")
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), p, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deletes := keepPodsOnDelete(cs)
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("connection reset")
+	})
+	if err := rt.DeleteResource(context.Background(), podHandle(p)); err != nil {
+		t.Fatalf("DeleteResource: %v", err)
+	}
+	if len(*deletes) != 1 || (*deletes)[0].GracePeriodSeconds != nil {
+		t.Fatalf("deletes = %+v, want one graceful delete", *deletes)
+	}
+	wantUIDPrecondition(t, (*deletes)[0], "uid-1")
+}
+
+// An NFS-home start refuses on an unreadable previous pod even when no home
+// storage realization is set; a start without an NFS home still deletes
+// the pod immediately by name.
+func TestCleanupStalePod_UnreadablePodRefusedForNFSStart(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		nfsHome bool
+	}{{"nfs home start", true}, {"plain start", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, cs, _ := newTestK8sRuntime()
+			if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			deletes := keepPodsOnDelete(cs)
+			cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				return true, nil, errors.New("connection reset")
+			})
+			err := rt.cleanupStalePod(context.Background(), "default", "a", tc.nfsHome, nil)
+			if tc.nfsHome {
+				if !errors.Is(err, errPreviousPodUnconfirmed) {
+					t.Errorf("err = %v, want previous_pod_unconfirmed", err)
+				}
+				if len(*deletes) != 0 {
+					t.Errorf("deletes = %+v, want none", *deletes)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+			if len(*deletes) != 1 || (*deletes)[0].GracePeriodSeconds == nil || *(*deletes)[0].GracePeriodSeconds != 0 {
+				t.Errorf("deletes = %+v, want one delete with grace 0", *deletes)
+			}
+		})
+	}
+}
+
+// Run passes the start's home storage backend to the previous-pod cleanup:
+// an NFS-home start without a home storage realization refuses on an
+// unreadable previous pod instead of force-deleting it by name.
+func TestRun_NFSHomeStartUnreadablePodRefusedWithoutRealization(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	cfg := nfsHomeTestConfig(true)
+	cfg.Name = "a"
+	cfg.HomeStorage = nil
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deletes := keepPodsOnDelete(cs)
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("connection reset")
+	})
+	_, err := rt.Run(context.Background(), cfg)
+	if !errors.Is(err, errPreviousPodUnconfirmed) {
+		t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
+	}
+	if len(*deletes) != 0 {
+		t.Errorf("deletes = %+v, want none", *deletes)
 	}
 }

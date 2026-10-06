@@ -34,6 +34,8 @@ import (
 // inject failures and hooks into the members endpoint's store reads.
 type spaceMembersStore struct {
 	store.Store
+	// fault gates every override below; nil means always active.
+	fault           *storeFaultSwitch
 	listAgentsCalls int
 	// failListAgentsOnCall makes the Nth ListAgents call (1-based) fail.
 	failListAgentsOnCall int
@@ -47,7 +49,16 @@ type spaceMembersStore struct {
 	onEffectiveGroups func()
 }
 
+// newSpaceMembersStore is the installStoreFault wrap func for
+// spaceMembersStore. Set its knobs and hooks before arming.
+func newSpaceMembersStore(inner store.Store, fault *storeFaultSwitch) *spaceMembersStore {
+	return &spaceMembersStore{Store: inner, fault: fault}
+}
+
 func (s *spaceMembersStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	if !s.fault.Active() {
+		return s.Store.ListAgents(ctx, filter, opts)
+	}
 	s.listAgentsCalls++
 	if s.failListAgentsOnCall == s.listAgentsCalls {
 		return nil, errors.New("injected list agents failure")
@@ -60,14 +71,14 @@ func (s *spaceMembersStore) ListAgents(ctx context.Context, filter store.AgentFi
 }
 
 func (s *spaceMembersStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
-	if s.onEffectiveGroups != nil {
+	if s.onEffectiveGroups != nil && s.fault.Active() {
 		s.onEffectiveGroups()
 	}
 	return s.Store.GetEffectiveGroups(ctx, userID)
 }
 
 func (s *spaceMembersStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
-	if s.failProjectMembers {
+	if s.failProjectMembers && s.fault.Active() {
 		return nil, errors.New("injected list project members failure")
 	}
 	return s.Store.ListProjectMembers(ctx, projectID)

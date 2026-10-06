@@ -42,17 +42,16 @@ func TestMigrateSQLiteToPostgres(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 
 	require.NoError(t, src.SaveGroupLink(ctx, &GroupLink{
-		ChatID:             -100,
-		ChatTitle:          "Group A",
-		ProjectID:          "proj-1",
-		ProjectSlug:        "my-project",
-		DefaultAgent:       "coder",
-		LinkedBy:           "user-1",
-		LinkedAt:           now,
-		Active:             true,
-		ShowAgentToAgent:   true,
-		NotifyInGroup:      false,
-		ShowAssistantReply: true,
+		ChatID:           -100,
+		ChatTitle:        "Group A",
+		ProjectID:        "proj-1",
+		ProjectSlug:      "my-project",
+		DefaultAgent:     "coder",
+		LinkedBy:         "user-1",
+		LinkedAt:         now,
+		Active:           true,
+		ShowAgentToAgent: true,
+		NotifyInGroup:    false,
 	}))
 	require.NoError(t, src.SaveGroupLink(ctx, &GroupLink{
 		ChatID:    -200,

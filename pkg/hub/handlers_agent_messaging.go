@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -1084,6 +1085,15 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		req.Type = "input-needed"
 	}
 
+	// The end-of-turn assistant-reply mirror is retired: sciontool no
+	// longer sends it, but agents running an older sciontool still do on
+	// every turn. Accept and discard it so those agents see success, and
+	// nothing is persisted, routed to a channel, or shown in chat.
+	if req.Type == messages.TypeAssistantReply {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "dropped"})
+		return
+	}
+
 	if req.Msg == "" {
 		ValidationError(w, "msg is required", nil)
 		return
@@ -1206,7 +1216,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// ── Non-agent-DM paths: rate limit, then build and dispatch ─────────
 	// Rate limiting for user delivery paths (agent DMs are rate limited
 	// inside ExecuteAgentDM above).
-	if !s.allowChatSend(w, agentIdent.ID(), chatSenderClassForMessageType(req.Type)) {
+	if !s.allowChatSend(w, agentIdent.ID(), chatSenderAgent) {
 		return
 	}
 
@@ -1322,9 +1332,28 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
-			if err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg); err != nil {
+			// Ensure the persisting user-message subscription first, as the
+			// notification path does: it is otherwise only created on agent
+			// lifecycle events.
+			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
+			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
+			if err != nil && persisting && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
+				// The inprocess spoke queued the persisting deliverToUser, so
+				// the message is stored; only channel spoke delivery failed (a
+				// non-observer spoke returned an error, or no spoke is
+				// registered for the channel). Reporting failure would make
+				// the sender retry and duplicate the row and the plugin card
+				// (ptone/scion#2757). Without the persisting subscription
+				// nothing was stored, so the error is still returned.
+				s.messageLog.Warn("Outbound message stored; channel spoke delivery failed",
+					"agent_id", agent.ID, "recipient_id", result.RecipientID,
+					"project_id", agent.ProjectID, "error", err)
+				err = nil
+			}
+			if err != nil {
 				s.messageLog.Error("Failed to dispatch outbound message through broker",
-					"agent_id", agent.ID, "recipient_id", result.RecipientID, "error", err)
+					"agent_id", agent.ID, "recipient_id", result.RecipientID,
+					"project_id", agent.ProjectID, "persisting", persisting, "error", err)
 				if errors.Is(err, eventbus.ErrSubscriberBufferFull) {
 					// The in-process bus could not queue this delivery for at
 					// least one matching subscriber, normally the per-project
@@ -1566,35 +1595,56 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	agent.DeletedAt = time.Time{}
-	agent.Updated = time.Now()
-
 	// Identity-key rows persist through soft-delete (only a hard delete or
 	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
 	// PurgeDeletedAgents), so restoring an agent should normally find its own
 	// keys already reserved and in place. But an agent soft-deleted before
 	// this invariant existed, or before a backfill of it, may have no key
 	// rows at all, leaving a window where another agent could since have
-	// taken its slug or display-name key. Re-asserting the keys in the same
-	// transaction as the restore turns that window into a defensive
-	// revalidation: a genuine collision surfaces as the same
+	// taken its slug or display-name key. restoreAgentTx re-asserts the keys
+	// in the same transaction as the restore, turning that window into a
+	// defensive revalidation: a genuine collision surfaces as the same
 	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
 	// than silently restoring an agent whose key now belongs to someone else.
-	// api.IdentityKeysFor is also what the backfill migration uses, so a
-	// legacy row's empty-display-name-key tolerance is handled identically
-	// by both.
-	keys := api.IdentityKeysFor(agent.Slug, agent.Name)
-	if err := s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.UpdateAgent(ctx, agent); err != nil {
-			return err
+	// The same transaction checks that every delegator of the edges the soft
+	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
+	// fails), reactivates those edges (a conflicting active edge is a 409)
+	// and writes the agent_restore audit record. It also refuses an agent
+	// whose guard user (its owner, ancestry root or schedule creator) no
+	// longer exists, normally a deleted user but possibly a purged legacy
+	// root agent (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// lockAgentGuardUserTx).
+	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
+		if errors.Is(err, errAgentNotSoftDeleted) {
+			BadRequest(w, "Agent is not in deleted state")
+			return
 		}
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
-	}); err != nil {
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
+			return
+		}
+		if errors.Is(err, errRestoreEdgeConflict) {
+			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorNotLive) {
+			Conflict(w, "A principal that delegated to this agent is not active, so its delegation cannot be restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorLookup) {
+			slog.Error("restore: delegator lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's delegators; retry the restore", nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	s.events.PublishAgentCreated(ctx, agent)
+	// Marked as a restore so web clients that tombstoned the ID on deleted
+	// bring it back (ptone/scion#2951). restoreAgentTx stamps the restored
+	// row's Updated with the restore time, so that is the marker.
+	s.events.PublishAgentRestored(ctx, agent, agent.Updated)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
 	// restored agent carries its deletion view (null) and project/broker
@@ -1650,6 +1700,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	messaging.RecordStep(ctx, "request_parsed")
+
+	// The retired end-of-turn assistant-reply type is dropped here too, as
+	// in handleAgentOutboundMessage: accepted with 200 so a caller sees
+	// success, but never persisted, dispatched or published.
+	if req.StructuredMessage != nil && req.StructuredMessage.Type == messages.TypeAssistantReply {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "dropped"})
+		return
+	}
 
 	// Determine the message content and structured message to forward
 	var plainMessage string
@@ -1786,6 +1844,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				})
 				return
 			}
+		}
+	}
+
+	// Resuming a suspended agent to deliver a message requires the
+	// lifecycle permission that starting the agent requires. The check runs
+	// before conversation resolution, persistence and dispatch, so a refused
+	// request resumes nothing and stores nothing. A migrating recipient is
+	// never resumed (see the migration gate below), so the rule does not
+	// apply to it.
+	if req.Wake && !reincarnationInFlight(agent) {
+		if denial := s.wakeResumeDenial(ctx, GetIdentityFromContext(ctx), agent); denial != nil {
+			WriteAgentDMError(w, denial)
+			return
 		}
 	}
 
@@ -1954,20 +2025,27 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// waking it nor rejecting the sender with an ordinary 409 is correct.
 	// The message is still persisted below and the deferred short-circuit
 	// right before dispatch takes over.
-	reincarnating := reincarnationInFlight(agent)
+	// deferDelivery keeps the message without dispatching it: set for a
+	// migrating recipient, or when a wake finds another start in progress.
+	deferDelivery := reincarnationInFlight(agent)
 
-	if req.Wake && !senderIsAgent && !reincarnating {
+	if req.Wake && !senderIsAgent && !deferDelivery {
 		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
 			return
 		}
-		_ = wakeResult // Phase mutation applied in-place on the agent record.
+		// Phase mutation is applied in place on the agent record. When
+		// another start is already in progress, the message is kept,
+		// deferred, exactly as for a migrating recipient.
+		if wakeResult != nil && wakeResult.Outcome == WakeDeferred {
+			deferDelivery = true
+		}
 	}
 
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
-	if !req.Wake && !senderIsAgent && !reincarnating {
+	if !req.Wake && !senderIsAgent && !deferDelivery {
 		switch state.Phase(agent.Phase) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
@@ -2066,7 +2144,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// "deferred" and short-circuits before dispatch below, instead of
 		// the pre-existing optimistic "dispatched" value.
 		humanMsgDispatchState := store.MessageDispatchDispatched
-		if reincarnating {
+		if deferDelivery {
 			humanMsgDispatchState = store.MessageDispatchDeferred
 		}
 		storeMsg := &store.Message{
@@ -2457,7 +2535,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			case AgentDMDeferred:
 				deliveryStatus = "deferred"
 				httpStatus = http.StatusAccepted
-				deferredNote = "agent is reincarnating"
+				deferredNote = deferredReason(agent)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatus)
@@ -2545,7 +2623,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// persistence itself failed above — the message is neither saved nor
 	// dispatched, so the sender must NOT be told it is safe on catch-up.
 	// This must be checked before any dispatch attempt below.
-	if reincarnating && persistedMsgID == "" {
+	if deferDelivery && persistedMsgID == "" {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to persist message; agent is reincarnating, retry", nil)
 		return
@@ -2565,7 +2643,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// notify subscription is independent of whether this specific message
 	// reached the migrating primary. Gating them here silently dropped both
 	// with no way for the sender to tell.
-	if !reincarnating {
+	if !deferDelivery {
 		// Managed agent path: deliver message directly via backend, bypass broker.
 		if isManagedAgentRuntime(agent.Runtime) {
 			if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
@@ -2705,7 +2783,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// group. Skipped when deferred (R1, p2a-r1 review, accepted as-is):
 	// registerGroupPrimary's semantics are "participant = dispatched", and
 	// a deferred message was never dispatched to this primary.
-	if !reincarnating {
+	if !deferDelivery {
 		s.registerGroupPrimary(ctx, groupConversationID, agent)
 	}
 
@@ -2719,7 +2797,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		mentionResults = s.processMentions(ctx, req.Mentions, agent, structuredMsg, mentionParticipantGroupID, groupConversationThreadKey)
 	}
 
-	if reincarnating {
+	if deferDelivery {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
@@ -2728,7 +2806,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Agent:          agent.Slug,
 			AgentPhase:     agent.Phase,
 			MentionResults: mentionResults,
-			Deferred:       "agent is reincarnating",
+			Deferred:       deferredReason(agent),
 		})
 		return
 	}

@@ -127,7 +127,7 @@ Examples:
 		case "none", "members", "any":
 			// valid
 		default:
-			return fmt.Errorf("invalid policy %q: must be none, members, or any", projectMessagingSetPolicy)
+			return newUsageError("invalid policy %q: must be none, members, or any", projectMessagingSetPolicy)
 		}
 
 		rev := projectMessagingSetRevision

@@ -89,10 +89,10 @@ func agentRouteCases() []agentRouteCase {
 		byID(post, "/exec", AgentRouteActionExec, opAgentExec, none),
 		byID(post, "/restore", AgentRouteActionRestore, opAgentLifecycleRestore, none),
 		byID(post, "/env", AgentRouteActionEnv, opAgentEnv, none),
-		byID(post, "/token/refresh", AgentRouteActionTokenRefresh, "", none),
-		byID(post, "/refresh-token", AgentRouteActionRefreshToken, "", none),
-		byID(post, "/outbound-message", AgentRouteActionOutbound, "", none),
-		byID(post, "/metrics", AgentRouteActionMetrics, "", none),
+		byID(post, "/token/refresh", AgentRouteActionTokenRefresh, opAgentTokenRefresh, none),
+		byID(post, "/refresh-token", AgentRouteActionRefreshToken, opAgentTokenRefresh, none),
+		byID(post, "/outbound-message", AgentRouteActionOutbound, opAgentOutboundMessage, none),
+		byID(post, "/metrics", AgentRouteActionMetrics, opAgentMetricsReport, none),
 		byID(post, "/set_message_mode", AgentRouteActionMessageMode, opAgentSetMessageMode, none),
 		byID(get, "/set_message_mode", AgentRouteActionMessageMode, "", none),
 		byID(http.MethodPut, "/set_message_mode", AgentRouteActionMessageMode, "", none),
@@ -119,7 +119,7 @@ func agentRouteCases() []agentRouteCase {
 		proj(post, "/exec", ProjectAgentRouteActionExec, opAgentExec),
 		proj(post, "/restore", ProjectAgentRouteActionRestore, opAgentLifecycleRestore),
 		proj(post, "/env", ProjectAgentRouteActionEnv, opAgentEnv),
-		proj(post, "/outbound-message", ProjectAgentRouteActionOutbound, ""),
+		proj(post, "/outbound-message", ProjectAgentRouteActionOutbound, opAgentOutboundMessage),
 		proj(post, "/set_message_mode", ProjectAgentRouteActionMessageMode, opAgentSetMessageMode),
 		proj(get, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
 		proj(http.MethodPut, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
@@ -376,6 +376,7 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 		opAgentRead, opAgentUpdate, opAgentDelete, opAgentAttach, opAgentPortAccess, opAgentStopAll,
 		opAgentLifecycleControl, opAgentLifecycleRestore, opAgentExec, opAgentEnv,
 		opAgentResetAuth, opAgentReincarnate, opAgentSetMessageMode,
+		opAgentTokenRefresh, opAgentOutboundMessage, opAgentMetricsReport,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
 	}

@@ -282,6 +282,13 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := validateUploadFilePaths(req.Files); err != nil {
+		if !writeInvalidFilePathError(w, err) {
+			ValidationError(w, "files are invalid", nil)
+		}
+		return
+	}
+
 	slug := req.Slug
 	if slug == "" {
 		slug = api.Slugify(req.Name)
@@ -547,6 +554,12 @@ func extractHarnessConfigEntryFromStorage(ctx context.Context, stor storage.Stor
 func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, existing *store.HarnessConfig) {
 	ctx := r.Context()
 
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return
+	}
+
 	var hc store.HarnessConfig
 	if err := readJSON(r, &hc); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -563,6 +576,17 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	hc.StoragePath = existing.StoragePath
 	hc.StorageURI = existing.StorageURI
 	hc.StorageBucket = existing.StorageBucket
+	// Content state is computed by the server during upload/finalize and
+	// is carried over from the existing record.
+	hc.ContentHash = existing.ContentHash
+	hc.Files = existing.Files
+	// Lifecycle and image-check state are managed by the server and are
+	// carried over from the existing record.
+	hc.Status = existing.Status
+	hc.ImageStatus = existing.ImageStatus
+	hc.ImageStatusCheckedAt = existing.ImageStatusCheckedAt
+	// The updater is the authenticated caller.
+	hc.UpdatedBy = identity.ID()
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
@@ -654,7 +678,7 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, existing.StoragePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
 		}
 	}
 
@@ -699,6 +723,9 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 
 	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, hc.StoragePath, req.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		RuntimeError(w, "Failed to generate upload URLs: "+err.Error())
 		return
 	}
@@ -743,10 +770,14 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	contentHash, err := verifyAndFinalizeFiles(ctx, stor, hc.StoragePath, req.Manifest.Files)
 	if err != nil {
+		if writeInvalidFilePathError(w, err) {
+			return
+		}
 		ValidationError(w, err.Error(), nil)
 		return
 	}
 
+	previousFiles := hc.Files
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
@@ -766,7 +797,51 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The manifest is the complete file list, so files the previous record
+	// listed but the manifest does not (deleted locally before a sync) are
+	// removed from storage. Brokers with local storage hydrate the whole
+	// storage directory, so a stale object would otherwise still reach agents.
+	s.deleteRemovedHarnessConfigFiles(ctx, stor, hc, previousFiles)
+
 	writeJSON(w, http.StatusOK, hc)
+}
+
+// deleteRemovedHarnessConfigFiles deletes the storage objects of files listed
+// in previousFiles but no longer in hc.Files. Only those exact paths are
+// deleted, never a prefix sweep: other harness-configs (clones, or a config
+// whose slug was renamed) can live under hc.StoragePath. Failures are logged
+// and do not fail the request, because the record is already updated.
+func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, previousFiles []store.TemplateFile) {
+	if hc.StoragePath == "" {
+		return
+	}
+	current := make(map[string]struct{}, len(hc.Files))
+	for _, f := range hc.Files {
+		current[f.Path] = struct{}{}
+	}
+	var failed, skipped []string
+	for _, f := range previousFiles {
+		if _, ok := current[f.Path]; ok {
+			continue
+		}
+		// Records written before manifest paths were validated may hold
+		// paths that resolve outside this config or alias a kept file.
+		if !isCanonicalResourceFilePath(f.Path) {
+			skipped = append(skipped, f.Path)
+			continue
+		}
+		if err := stor.Delete(ctx, hc.StoragePath+"/"+f.Path); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			failed = append(failed, f.Path)
+		}
+	}
+	if len(skipped) > 0 {
+		s.resourceLog.Warn("harness-config finalize: skipped deleting removed files with invalid paths",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", skipped)
+	}
+	if len(failed) > 0 {
+		s.resourceLog.Warn("harness-config finalize: failed to delete removed files from storage",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", failed)
+	}
 }
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.
@@ -898,6 +973,12 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("harness-config %q: %s — run 'scion harness-config validate %s' to diagnose", hc.Name, err, hc.Name))
 		return
+	}
+
+	// For local storage, rewrite file:// URLs to HTTP proxy URLs: a file://
+	// URL names a hub-host path a remote broker cannot read.
+	if stor.Provider() == storage.ProviderLocal {
+		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, requestBaseURL(r), "harness-configs", hc.ID)
 	}
 
 	writeJSON(w, http.StatusOK, DownloadResponse{
@@ -1071,7 +1152,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			srcPath := source.StoragePath + "/" + file.Path
 			dstPath := storagePath + "/" + file.Path
 			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storagePath)
+				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 				RuntimeError(w, "Failed to copy files: "+err.Error())
 				return
 			}
@@ -1083,7 +1164,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 
 	if err := s.store.CreateHarnessConfig(ctx, clone); err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storagePath)
+			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)

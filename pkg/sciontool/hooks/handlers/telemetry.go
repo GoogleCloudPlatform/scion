@@ -511,7 +511,7 @@ func usageHookRecordingEnabled() bool {
 	// typo (e.g. "HOOKS" or a trailing space) rather than a deliberate choice.
 	// The safe D10 default (no usage) still applies either way; this only
 	// makes an unrecognized value visible for debugging.
-	if v != "" && v != "native" {
+	if v != "" && v != telemetry.UsageSourceNative {
 		log.Debug("SCION_USAGE_SOURCE=%q is not a recognized usage source (want \"hooks\" or \"native\"); hook usage stays suppressed", v)
 	}
 	return false

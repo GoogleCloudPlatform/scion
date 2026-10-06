@@ -699,12 +699,21 @@ func TestBrokerAuthz_GetBrokerProjects_AdminSeesAll(t *testing.T) {
 // fails, without needing a real deleted-row or connection-failure fixture.
 type getProjectErrStore struct {
 	store.Store
+	fault     *storeFaultSwitch // nil: always active
 	projectID string
 	err       error
 }
 
+// getProjectErrWrap returns an installStoreFault wrap func for a
+// getProjectErrStore failing with err; set projectID before arming.
+func getProjectErrWrap(err error) func(store.Store, *storeFaultSwitch) *getProjectErrStore {
+	return func(inner store.Store, fault *storeFaultSwitch) *getProjectErrStore {
+		return &getProjectErrStore{Store: inner, fault: fault, err: err}
+	}
+}
+
 func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
-	if id == g.projectID {
+	if g.fault.Active() && id == g.projectID {
 		return nil, g.err
 	}
 	return g.Store.GetProject(ctx, id)
@@ -718,7 +727,10 @@ func (g *getProjectErrStore) GetProject(ctx context.Context, id string) (*store.
 // returned (to a caller who can read it) with no name or git remote, since
 // only the enrichment step — not the entry — is skipped.
 func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
-	srv, s := testServer(t)
+	// The wrapper is installed before autoProvideBrokerWithProject, whose
+	// project registration emits a mutation audit that reads srv.store
+	// from a goroutine (ptone/scion#3184).
+	srv, s, failing, fault := testServerWithStoreFault(t, getProjectErrWrap(store.ErrNotFound))
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -735,8 +747,8 @@ func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
 		"notfound-project-broker", "StaleProj", "https://github.com/acme/stale-repo.git")
 
-	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: store.ErrNotFound}
-	defer func() { srv.store = s }()
+	failing.projectID = project.ID
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
@@ -769,7 +781,8 @@ func TestBrokerAuthz_GetBrokerProjects_ToleratesNotFoundProject(t *testing.T) {
 // error rather than silently treated the same as a not-found and dropped
 // from the list.
 func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T) {
-	srv, s := testServer(t)
+	// Installed before the audited registration; see the previous test.
+	srv, s, failing, fault := testServerWithStoreFault(t, getProjectErrWrap(errors.New("connection reset by peer")))
 	ctx := context.Background()
 
 	owner := &store.User{
@@ -786,8 +799,8 @@ func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T
 	brokerID, project := autoProvideBrokerWithProject(t, srv, owner,
 		"getproject-error-broker", "ErrProj", "https://github.com/acme/err-repo.git")
 
-	srv.store = &getProjectErrStore{Store: s, projectID: project.ID, err: errors.New("connection reset by peer")}
-	defer func() { srv.store = s }()
+	failing.projectID = project.ID
+	fault.Arm()
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodGet,
 		"/api/v1/runtime-brokers/"+brokerID+"/projects", nil)
@@ -1089,11 +1102,20 @@ func TestBrokerHeartbeat_RuntimeNotOverwrittenWhenProfileFirstBackfilledSamePass
 // (non-nil but unreliable) value in the same breath as an error. This proves
 // a caller actually gates on the error rather than trusting whatever value
 // came back whenever one happens to be present.
+//
+// updateRuntimeBrokerCalls counts broker row writes, so a test can prove the
+// heartbeat handler writes the row only when the refreshed state changed.
 type countingBrokerLoadStore struct {
 	store.Store
 	getRuntimeBrokerCalls     int
 	getRuntimeBrokerErr       error
 	getRuntimeBrokerErrBroker *store.RuntimeBroker
+	updateRuntimeBrokerCalls  int
+}
+
+func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broker *store.RuntimeBroker) error {
+	s.updateRuntimeBrokerCalls++
+	return s.Store.UpdateRuntimeBroker(ctx, broker)
 }
 
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {

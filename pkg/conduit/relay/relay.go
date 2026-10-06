@@ -160,6 +160,12 @@ type Config struct {
 	// planned closes: the window the dialer draws its redial delay from
 	// (default DefaultReconnectWindow; negative: 0).
 	ReconnectWindow time.Duration
+	// Revalidate, when set, runs once a session is admitted and
+	// registered locally (so a concurrent CloseSessionsOf either sees the
+	// session or happened before this check). A non-nil error closes the
+	// session with CloseUnauthenticated. It covers a principal removed
+	// between the caller's pre-admission check and registration.
+	Revalidate func(ctx context.Context, p Principal) error
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -185,8 +191,8 @@ type Relay struct {
 	endpoint string // registered internal endpoint ("" if unaddressable)
 	sessions map[string]*entry
 	// pending holds admitted sessions whose Welcome may already be out but
-	// that Serve has not registered yet (r2-F1): Local waits for them
-	// instead of reporting them unknown.
+	// that Serve has not registered yet (r2-F1): Local and GoAway wait for
+	// them instead of reporting them unknown.
 	pending map[string]*entry
 	hbTimer clock.Timer
 	killed  bool
@@ -213,8 +219,8 @@ type Relay struct {
 	// testHookBeforeReady runs in Serve after Accept returned and before
 	// the session is marked ready (the pipelined-StreamOpen race seam).
 	testHookBeforeReady func()
-	// testHookPendingWait runs in Local when it starts waiting for a
-	// pending session (r2-F1 seam).
+	// testHookPendingWait runs in Local and GoAway when they start
+	// waiting for a pending session (r2-F1 seam).
 	testHookPendingWait func()
 }
 
@@ -496,6 +502,8 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	case state != stateServing:
 		// Drain or supersede began while this session was admitted.
 		r.goAway(e, conduit.GoAwayOptions{Reason: ReasonDraining, ReconnectAfter: r.reconnectAfter()})
+	default:
+		r.revalidate(ctx, e)
 	}
 
 	<-ls.Done()
@@ -510,6 +518,21 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		r.deleteRow(context.Background(), rec.SessionID, rec.RelayGeneration)
 	}
 	return ls.Err()
+}
+
+// revalidate runs Config.Revalidate for a newly registered session and
+// closes it with CloseUnauthenticated when the check fails.
+func (r *Relay) revalidate(ctx context.Context, e *entry) {
+	if r.cfg.Revalidate == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, r.cfg.RPCTimeout)
+	defer cancel()
+	if err := r.cfg.Revalidate(rctx, e.principal); err != nil {
+		r.log.Info("conduit relay: session closed after admission: principal no longer valid",
+			"session_id", e.rec.SessionID, "principal_kind", e.principal.Kind, "principal_id", e.principal.ID, "error", err)
+		_ = e.sess.CloseWithCode(conduit.CloseUnauthenticated, ReasonUnauthenticated)
+	}
 }
 
 // trackServe registers a Serve call with serves unless the relay has
@@ -538,7 +561,7 @@ func (r *Relay) addPending(sessionID string, e *entry) {
 
 // failPending resolves a pending entry whose session will not start
 // (refused after the insert, Welcome discarded, Accept failed). Waiters in
-// Local then see the session as unknown. A no-op once the entry is
+// Local and GoAway then see the session as unknown. A no-op once the entry is
 // registered.
 func (r *Relay) failPending(e *entry) {
 	if e == nil {
@@ -678,13 +701,15 @@ func (r *Relay) deleteRow(parent context.Context, sessionID string, gen int64) {
 }
 
 // GoAway starts a planned drain of one local session: the row is marked
-// draining first (so routing stops choosing it), then GoAway is sent.
-func (r *Relay) GoAway(sessionID string, opts conduit.GoAwayOptions) error {
-	r.mu.Lock()
-	e := r.sessions[sessionID]
-	r.mu.Unlock()
-	if e == nil {
-		return registry.ErrSessionNotFound
+// draining first (so routing stops choosing it), then GoAway is sent. A
+// session that was admitted but is not registered yet is waited for, as in
+// Local, bounded by ctx and the handshake timeout. It returns
+// registry.ErrSessionNotFound for a session this relay does not hold, and
+// ctx.Err() when ctx ends first.
+func (r *Relay) GoAway(ctx context.Context, sessionID string, opts conduit.GoAwayOptions) error {
+	e, err := r.registered(ctx, sessionID)
+	if err != nil {
+		return err
 	}
 	r.goAway(e, opts)
 	return nil
@@ -714,19 +739,40 @@ func (r *Relay) markSessionDraining(ctx context.Context, e *entry) error {
 // so the registry already routes to it) is waited for, bounded by ctx and
 // the handshake timeout, instead of being reported unknown.
 func (r *Relay) Local(ctx context.Context, sessionID string) (conduit.LocalSession, registry.SessionRecord, bool) {
-	r.mu.Lock()
-	if r.killed {
-		r.mu.Unlock()
+	if r.isKilled() {
 		return nil, registry.SessionRecord{}, false
 	}
+	e, err := r.registered(ctx, sessionID)
+	if err != nil || r.isKilled() {
+		return nil, registry.SessionRecord{}, false
+	}
+	return e.sess, e.rec, true
+}
+
+func (r *Relay) isKilled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.killed
+}
+
+// registered returns the registered entry for sessionID. A pending
+// (admitted, not yet registered) session is waited for until Serve
+// registers it or its admission fails, bounded by ctx and the handshake
+// timeout. The wait holds no lock: Serve and failPending take r.mu to move
+// the entry and only then close readyCh, so after readyCh the session
+// table is rechecked under r.mu. It returns registry.ErrSessionNotFound
+// for an unknown session, one whose admission failed or that did not
+// register within the handshake timeout, and ctx.Err() when ctx ends first.
+func (r *Relay) registered(ctx context.Context, sessionID string) (*entry, error) {
+	r.mu.Lock()
 	if e := r.sessions[sessionID]; e != nil {
 		r.mu.Unlock()
-		return e.sess, e.rec, true
+		return e, nil
 	}
 	e := r.pending[sessionID]
 	r.mu.Unlock()
 	if e == nil {
-		return nil, registry.SessionRecord{}, false
+		return nil, registry.ErrSessionNotFound
 	}
 	wait := r.cfg.Session.HandshakeTimeout
 	if wait <= 0 {
@@ -740,16 +786,16 @@ func (r *Relay) Local(ctx context.Context, sessionID string) (conduit.LocalSessi
 	select {
 	case <-e.readyCh:
 	case <-ctx.Done():
-		return nil, registry.SessionRecord{}, false
+		return nil, ctx.Err()
 	case <-timeout:
-		return nil, registry.SessionRecord{}, false
+		return nil, registry.ErrSessionNotFound
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.killed || r.sessions[sessionID] != e {
-		return nil, registry.SessionRecord{}, false
+	if r.sessions[sessionID] != e {
+		return nil, registry.ErrSessionNotFound
 	}
-	return e.sess, e.rec, true
+	return e, nil
 }
 
 // CloseSessionsOf closes every local session of the principal (agent

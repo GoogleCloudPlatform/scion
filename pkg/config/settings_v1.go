@@ -15,8 +15,12 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,10 +30,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -300,6 +306,52 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	return out, source
 }
 
+// ResolveSharedDirStorageBackend returns the backend ("local" or "nfs")
+// that applies to the shared dir dirName for agents using profileName,
+// the settings key it came from, and whether that key is a per-dir
+// shared_dir_storage_backends entry. The nearest level wins: the
+// profile's shared_dir_storage_backends entry for dirName, else the
+// profile's shared_dir_storage_backend, else the same two keys on the
+// profile's runtime entry, else server.shared_dir_storage.backend. A
+// profile's single value therefore wins over a runtime entry's per-dir
+// entry; to keep one dir on another backend, name it in the profile's
+// own shared_dir_storage_backends. If profileName is empty,
+// vs.ActiveProfile is used. backend is "" and source is "" when nothing
+// is configured (the local layout). The value is returned as written;
+// callers validate it.
+//
+// For a dir no per-dir entry names, the result matches the backend of
+// ResolveSharedDirStorage. Call this only on global settings, as for
+// ResolveSharedDirStorage.
+func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
+	if vs == nil {
+		return "", "", false
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profile, ok := vs.Profiles[profileName]; ok {
+		if v := profile.SharedDirStorageBackends[dirName]; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backends." + dirName, true
+		}
+		if v := profile.SharedDirStorageBackend; v != "" {
+			return v, "profiles." + profileName + ".shared_dir_storage_backend", false
+		}
+		if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+			if v := rt.SharedDirStorageBackends[dirName]; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backends." + dirName, true
+			}
+			if v := rt.SharedDirStorageBackend; v != "" {
+				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backend", false
+			}
+		}
+	}
+	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
+		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
+	}
+	return "", "", false
+}
+
 // SharedDirStorageNFSAnywhere reports whether the global backend or any
 // runtime or profile override selects nfs, and returns the nfs-backed
 // config to use for project-wide operations such as cleanup. It is nil
@@ -318,12 +370,12 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	}
 	found := false
 	for _, rt := range vs.Runtimes {
-		if rt.SharedDirStorageBackend == "nfs" {
+		if rt.SharedDirStorageBackend == "nfs" || mapSelectsNFS(rt.SharedDirStorageBackends) {
 			found = true
 		}
 	}
 	for _, p := range vs.Profiles {
-		if p.SharedDirStorageBackend == "nfs" {
+		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
 			found = true
 		}
 	}
@@ -337,19 +389,72 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	return out, true
 }
 
-// ValidateSharedDirStorageBackends checks shared_dir_storage_backend on
-// every runtime and profile entry: the value must be empty, "local" or
-// "nfs", and "nfs" needs a complete server.shared_dir_storage.nfs block
-// (global may be nil). This checks configuration only; it never looks at
-// the filesystem. Each error's Path names the settings key. Results are
-// sorted by path.
+// SharedDirNamePattern is the shared dir name rule of api.ValidateSharedDirs
+// as a regular expression, for the settings schemas.
+const SharedDirNamePattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+
+// ValidateSharedDirStorageBackendValues checks the parts of
+// shared_dir_storage_backend and shared_dir_storage_backends that do not
+// depend on server.shared_dir_storage: each single value is empty, "local"
+// or "nfs", and each per-dir entry is keyed by a valid shared dir name and
+// is "local" or "nfs". ValidateSharedDirStorageBackends checks these and
+// the nfs block. Results are sorted by path.
+func ValidateSharedDirStorageBackendValues(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, nil, false)
+}
+
+// mapSelectsNFS reports whether any entry of a shared_dir_storage_backends
+// map selects nfs.
+func mapSelectsNFS(m map[string]string) bool {
+	for _, v := range m {
+		if v == "nfs" {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateSharedDirStorageBackends checks shared_dir_storage_backend and
+// shared_dir_storage_backends on every runtime and profile entry: a single
+// value must be empty, "local" or "nfs"; a per-dir entry must be keyed by a
+// valid shared dir name and be "local" or "nfs". "nfs" needs a complete
+// server.shared_dir_storage.nfs block (global may be nil). A per-dir entry
+// for a dir that a project does not have is valid: settings are global,
+// shared dirs are per project, and agent start ignores such an entry. This
+// checks configuration only; it never looks at the filesystem. Each
+// error's Path names the settings key. Results are sorted by path.
 func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
+	return validateSharedDirStorageBackends(runtimes, profiles, global, true)
+}
+
+// validateSharedDirStorageBackends implements
+// ValidateSharedDirStorageBackends, and ValidateSharedDirStorageBackendValues
+// when checkNFSBlock is false.
+func validateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig, checkNFSBlock bool) []ValidationError {
 	var errs []ValidationError
-	check := func(path, backend string) {
+	var check func(path, backend string)
+	checkDirs := func(prefix string, dirs map[string]string) {
+		for name, backend := range dirs {
+			path := prefix + ".shared_dir_storage_backends." + name
+			if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
+				errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("invalid shared dir name %q (must be lowercase alphanumeric with hyphens, e.g. \"build-cache\")", name)})
+				continue
+			}
+			if backend == "" {
+				errs = append(errs, ValidationError{Path: path, Message: "must be \"local\" or \"nfs\" (got \"\")"})
+				continue
+			}
+			check(path, backend)
+		}
+	}
+	check = func(path, backend string) {
 		switch backend {
 		case "", "local":
 			return
 		case "nfs":
+			if !checkNFSBlock {
+				return
+			}
 			cfg := &V1SharedDirStorageConfig{Backend: "nfs"}
 			if global != nil {
 				cfg.NFS = global.NFS
@@ -363,9 +468,11 @@ func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profi
 	}
 	for name, rt := range runtimes {
 		check("runtimes."+name+".shared_dir_storage_backend", rt.SharedDirStorageBackend)
+		checkDirs("runtimes."+name, rt.SharedDirStorageBackends)
 	}
 	for name, p := range profiles {
 		check("profiles."+name+".shared_dir_storage_backend", p.SharedDirStorageBackend)
+		checkDirs("profiles."+name, p.SharedDirStorageBackends)
 	}
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
 	return errs
@@ -473,6 +580,82 @@ func (vs *VersionedSettings) ResolveKubernetesServiceAccountMappingForSelection(
 		}
 	}
 	return "", false
+}
+
+// KubernetesServiceAccountMappingGSAs returns, sorted, every GSA email that
+// ResolveKubernetesServiceAccountMappingForSelection(profileName,
+// runtimeEntryName, gsa) resolves to a KSA: the union of the profile-level
+// and runtime-entry-level kubernetes_service_account_mappings keys with a
+// non-empty value. Keys that are not lowercase are left out, since the
+// resolver lowercases the GSA before the lookup and so never matches them.
+// The result is nil when nothing is mapped.
+//
+// A broker reports this set per profile to the Hub (BrokerProfile
+// ServiceAccountMappings), which uses it to warn about registered GSAs no
+// profile maps (ptone/scion#3329 phase 2).
+func (vs *VersionedSettings) KubernetesServiceAccountMappingGSAs(profileName, runtimeEntryName string) []string {
+	if vs == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	add := func(m map[string]string) {
+		for gsa, ksa := range m {
+			if ksa != "" && gsa == strings.ToLower(gsa) {
+				seen[gsa] = true
+			}
+		}
+	}
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok {
+			add(profile.KubernetesServiceAccountMappings)
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok {
+			add(rtConfig.KubernetesServiceAccountMappings)
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for gsa := range seen {
+		out = append(out, gsa)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ProfileKubernetesSAMappings describes profileName for the GSA-mapping
+// early warning (ptone/scion#3329 phase 2): the GSAs it maps to a KSA
+// (KubernetesServiceAccountMappingGSAs over the profile and the runtime
+// entry it selects), and whether its runtime is Kubernetes. The runtime type
+// is the entry's Type, or the entry key when Type is unset, so a custom key
+// such as "gke" with type kubernetes counts. known is false when the
+// profile is not in these settings (for example a broker's synthetic
+// "default" profile) or names no runtime entry, and the other results are
+// then empty.
+func (vs *VersionedSettings) ProfileKubernetesSAMappings(profileName string) (gsas []string, isKubernetes, known bool) {
+	if vs == nil {
+		return nil, false, false
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok || profile.Runtime == "" {
+		// A profile without a runtime entry cannot be resolved here; the
+		// caller treats it as unknown.
+		return nil, false, false
+	}
+	runtimeType := profile.Runtime
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.Type != "" {
+		runtimeType = rt.Type
+	}
+	switch runtimeType {
+	// The same names the Hub treats as Kubernetes (isKubernetesRuntimeType).
+	case "kubernetes", "k8s", "remote":
+		return vs.KubernetesServiceAccountMappingGSAs(profileName, profile.Runtime), true, true
+	default:
+		return nil, false, true
+	}
 }
 
 // ResolveKubernetesNamespace returns the namespace configured on the
@@ -1259,6 +1442,49 @@ type V1ServerHubConfig struct {
 	// It is sent to the broker with each asynchronous create and sets the
 	// reaper's staleness window (8x this value).
 	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
+	// Conduit holds the conduit relay and grant settings (hub.conduit
+	// experiment). Read at startup; changes need a restart.
+	Conduit *V1ServerHubConduitConfig `json:"conduit,omitempty" yaml:"conduit,omitempty" koanf:"conduit"`
+}
+
+// V1ServerHubConduitConfig holds the conduit settings of the hub server
+// (design v2.4 §3.9, §3.10). All values are validated at startup
+// (HubConduitConfig.Validate); an invalid value is a startup error.
+type V1ServerHubConduitConfig struct {
+	// GrantKeyActivation is the publish-before-sign delay of a new grant
+	// key (e.g. "15m"; minimum "1m").
+	GrantKeyActivation string `json:"grant_key_activation,omitempty" yaml:"grant_key_activation,omitempty" koanf:"grant_key_activation"`
+	// TCPAllowedPorts lists additional agent-local ports a TCP stream
+	// grant may target besides the agent's exposed ports. The reserved
+	// ports (9810, 18380) are always refused. Empty: exposed ports only.
+	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
+	// InternalListen is the host:port of the internal relay API listener.
+	// It must be reachable only inside the cluster/VPC. TLS on the
+	// internal hop is recommended (a service mesh or TLS-terminating proxy,
+	// advertised as https://); plain http:// is accepted.
+	InternalListen string `json:"internal_listen,omitempty" yaml:"internal_listen,omitempty" koanf:"internal_listen"`
+	// InternalAdvertise is the base URL other hub nodes use to reach this
+	// node's internal listener (default: derived from POD_IP or the listen
+	// host).
+	InternalAdvertise string `json:"internal_advertise,omitempty" yaml:"internal_advertise,omitempty" koanf:"internal_advertise"`
+	// PeerAuth selects relay-peer authentication. Requests are always
+	// HMAC-signed with a key derived from the hub signing secret; "oidc"
+	// also requires an OIDC ID token, "auto" (default) adds it on GCP, and
+	// "hmac" uses the signature alone.
+	PeerAuth string `json:"peer_auth,omitempty" yaml:"peer_auth,omitempty" koanf:"peer_auth"`
+	// PeerServiceAccounts is the OIDC allow-list of caller service-account
+	// emails (default: this node's own service account).
+	PeerServiceAccounts []string `json:"peer_service_accounts,omitempty" yaml:"peer_service_accounts,omitempty" koanf:"peer_service_accounts"`
+	// PeerAudience is the OIDC ID token audience (default
+	// "scion-conduit-relay-peer"); it must be identical on every node.
+	PeerAudience string `json:"peer_audience,omitempty" yaml:"peer_audience,omitempty" koanf:"peer_audience"`
+	// ReconnectWindow is the jitter window a planned close (GoAway) gives
+	// targets to redial in (e.g. "5s"; default "5s", 0s-5m).
+	ReconnectWindow string `json:"reconnect_window,omitempty" yaml:"reconnect_window,omitempty" koanf:"reconnect_window"`
+	// InstanceID is this node's relay instance id; it must be unique among
+	// live hub processes (default: POD_NAME, else the host name plus a
+	// random per-process suffix).
+	InstanceID string `json:"instance_id,omitempty" yaml:"instance_id,omitempty" koanf:"instance_id"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -1516,8 +1742,16 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 	}
 }
 
+// Full settings keys for the NFS owner ids, used in error messages so a
+// broker warning or a failed agent start names the exact setting.
+const (
+	NFSUIDKey = "server.workspace_storage.nfs.uid"
+	NFSGIDKey = "server.workspace_storage.nfs.gid"
+)
+
 // ValidateNFS returns an error if Backend is "nfs" but the NFS block is
-// misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
+// misconfigured: no shares defined, or a uid or gid outside
+// [0, fsutil.MaxOwnerID]. Call after ApplyNFSDefaults.
 func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return nil
@@ -1525,6 +1759,13 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	// An unset (0) uid/gid has become the default 1000 in ApplyNFSDefaults.
+	if err := fsutil.ValidateOwnerID(NFSUIDKey, ws.NFS.UID); err != nil {
+		return err
+	}
+	if err := fsutil.ValidateOwnerID(NFSGIDKey, ws.NFS.GID); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1652,9 +1893,11 @@ func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
 // C1/T1/S-F2). A project's settings must not be able to redirect Docker
 // bind-mount sources to an operator-unapproved host path.
 //
-// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
-// StorageClass) are not used by shared_dir_storage. Warning about them being
-// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+// The workspace-storage-only fields on V1NFSConfig (UID, MountOptions,
+// StorageClass, AutoMount) are not used by shared_dir_storage; see
+// IgnoredNFSFields. GID is used: when non-zero it is the only leaf group id
+// an agent may be given as a supplemental group (ptone/scion#3155, see
+// pkg/agent.sharedDirLeafGroups).
 type V1SharedDirStorageConfig struct {
 	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
 	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
@@ -1764,14 +2007,13 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	set  func(nfs *V1NFSConfig) bool
 }{
 	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
-	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
 	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
+// fields (uid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -1922,13 +2164,13 @@ type V1TelemetrySamplingConfig struct {
 
 // CloudRunConfig holds Cloud Run runtime settings.
 type CloudRunConfig struct {
-	ProjectID      string `json:"project_id,omitempty" koanf:"project_id"`
-	Location       string `json:"location,omitempty" koanf:"location"`
-	ServiceAccount string `json:"service_account,omitempty" koanf:"service_account"`
-	Network        string `json:"network,omitempty" koanf:"network"`
-	Subnetwork     string `json:"subnetwork,omitempty" koanf:"subnetwork"`
-	NFSServer      string `json:"nfs_server,omitempty" koanf:"nfs_server"`
-	NFSExport      string `json:"nfs_export,omitempty" koanf:"nfs_export"`
+	ProjectID      string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	Location       string `json:"location,omitempty" yaml:"location,omitempty" koanf:"location"`
+	ServiceAccount string `json:"service_account,omitempty" yaml:"service_account,omitempty" koanf:"service_account"`
+	Network        string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork     string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	NFSServer      string `json:"nfs_server,omitempty" yaml:"nfs_server,omitempty" koanf:"nfs_server"`
+	NFSExport      string `json:"nfs_export,omitempty" yaml:"nfs_export,omitempty" koanf:"nfs_export"`
 }
 
 // V1CloudRunInstancesConfig holds Cloud Run Instances runtime settings.
@@ -2090,6 +2332,12 @@ type V1RuntimeConfig struct {
 	// server.shared_dir_storage.nfs. Read from global settings only; see
 	// ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents whose
+	// profile uses this runtime entry. A dir it does not name uses
+	// SharedDirStorageBackend. The profile's own settings win over this
+	// entry. See ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	// HomeStorageBackend overrides server.home_storage.backend ("local" or
 	// "nfs") for agents whose profile uses this runtime entry. A profile's
 	// own value wins over it. Read from global settings only; see
@@ -2333,6 +2581,12 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
+	// named shared dirs, keyed by shared dir name, for agents using this
+	// profile. A dir it does not name uses SharedDirStorageBackend. Both
+	// win over the profile's runtime entry. See
+	// ResolveSharedDirStorageBackend.
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	// HomeStorageBackend overrides server.home_storage.backend ("local" or
 	// "nfs") for agents using this profile. It wins over the same key on
 	// the profile's runtime entry. Read from global settings only; see
@@ -2438,6 +2692,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 		return versionedEnvKeyMapper(key), value
 	}), nil)
+	splitKoanfListKeys(k, conduitV1EnvListKeys)
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
@@ -2488,9 +2743,16 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // Both the versioned and legacy env key mappers drop them via this list so
 // that koanf's Unmarshal never fails just because one of them is present in
 // the process environment.
+//
+// SCION_HUB is the exception to "consumed by another subsystem": nothing in
+// scion reads a bare SCION_HUB, but left mapped it lands on the top-level
+// key "hub" as a string and collides with the struct-typed hub settings.
+// Hub settings come from the SCION_HUB_* variables (e.g.
+// SCION_HUB_ENDPOINT), which are unaffected.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
+	"SCION_HUB",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -2510,6 +2772,7 @@ func versionedEnvKeyMapper(s string) string {
 		return mapped
 	}
 	if isSettingsExcludedEnv(s) {
+		// See settingsExcludedEnvVars for every excluded name and the reason.
 		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
 		// consumed directly by sciontool's auto-expose scanner
 		// (pkg/sciontool/autoexpose), not read as settings overrides. Left
@@ -2559,6 +2822,13 @@ func versionedEnvKeyMapper(s string) string {
 	return key
 }
 
+// conduitV1EnvListKeys are the v1 keys of the conduit list settings whose
+// env vars hold comma-separated lists.
+var conduitV1EnvListKeys = []string{
+	"server.hub.conduit.peer_service_accounts",
+	"server.hub.conduit.tcp_allowed_ports",
+}
+
 // knownCompoundFields lists multi-word snake_case field names used in server config.
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
@@ -2569,9 +2839,18 @@ var knownCompoundFields = []string{
 	"start_unconfirmed_hold",
 	"start_claim_lease_ttl",
 	"soft_delete_retention",
+	"peer_service_accounts",
+	"grant_key_activation",
 	"missing_agent_grace",
+	"internal_advertise",
 	"start_max_duration",
+	"tcp_allowed_ports",
 	"stalled_threshold",
+	"reconnect_window",
+	"internal_listen",
+	"peer_audience",
+	"instance_id",
+	"peer_auth",
 	"authorized_domains",
 	"platform_auth_sa",
 	"interval_seconds",
@@ -2902,6 +3181,19 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.DisableLegacyStorageFallback != nil {
 			gc.Hub.DisableLegacyStorageFallback = *v1.Hub.DisableLegacyStorageFallback
 		}
+		if c := v1.Hub.Conduit; c != nil {
+			gc.Hub.Conduit = HubConduitConfig{
+				GrantKeyActivation:  c.GrantKeyActivation,
+				TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:      c.InternalListen,
+				InternalAdvertise:   c.InternalAdvertise,
+				PeerAuth:            c.PeerAuth,
+				PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:        c.PeerAudience,
+				ReconnectWindow:     c.ReconnectWindow,
+				InstanceID:          c.InstanceID,
+			}
+		}
 	}
 
 	// Broker config
@@ -3223,6 +3515,19 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if gc.Hub.MissingAgentGrace > 0 {
 		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
+	if c := gc.Hub.Conduit; !c.IsZero() {
+		v1Hub.Conduit = &V1ServerHubConduitConfig{
+			GrantKeyActivation:  c.GrantKeyActivation,
+			TCPAllowedPorts:     append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:      c.InternalListen,
+			InternalAdvertise:   c.InternalAdvertise,
+			PeerAuth:            c.PeerAuth,
+			PeerServiceAccounts: append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:        c.PeerAudience,
+			ReconnectWindow:     c.ReconnectWindow,
+			InstanceID:          c.InstanceID,
+		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
@@ -4083,9 +4388,384 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 }
 
 // UpdateVersionedSetting updates a specific setting key in a v1 versioned settings file.
-// It loads only the single file at dir (not merged settings), maps legacy key names to
-// their v1 equivalents, updates the appropriate field, and saves via SaveVersionedSettings.
+// It edits only the single file at dir (not merged settings) and maps legacy key names
+// to their v1 equivalents (hub.brokerId -> server.broker.broker_id, project_id ->
+// hub.project_id, ...).
+//
+// A YAML file is edited in place: only the target key changes, so comments, key order,
+// unknown keys and formatting elsewhere in the file survive. The file is not rewritten
+// when the value is already set, and is otherwise replaced atomically. A JSON file goes
+// through the struct round-trip in updateVersionedSettingStruct, which saves back to the
+// same file name.
+//
+// Fallback cliff: if a node on the edited YAML path is an alias, carries an anchor, or
+// is a mapping with a key the edit cannot match by name (a merge key, an alias key, a
+// non-scalar key or a key that decodes to other text; see hasYAMLOpaqueKey), an
+// in-place edit could change other keys or miss the decoded ones. The whole file is
+// then rewritten from the struct instead, which loses comments and unknown keys and
+// reorders keys (logged at debug level).
 func UpdateVersionedSetting(dir string, key string, value string) error {
+	// Held from the first read to the rename (see LockSettingsFile).
+	unlock := LockSettingsFile()
+	defer unlock()
+
+	settingsPath := GetSettingsPath(dir)
+	if filepath.Ext(settingsPath) == ".json" {
+		return updateVersionedSettingStruct(dir, key, value)
+	}
+	edit, err := versionedSettingEditFor(key, value)
+	if err != nil {
+		return err
+	}
+	if edit.noop {
+		// Keys with no v1 equivalent are accepted and ignored. Loading still
+		// runs the legacy-key migration and surfaces a malformed file, as
+		// before.
+		_, err := LoadSingleFileVersioned(dir)
+		return err
+	}
+	err = updateVersionedSettingYAML(dir, settingsPath, edit)
+	if errors.Is(err, errYAMLEditThroughAlias) {
+		slog.Debug("settings: alias, anchor or key the edit cannot match by name on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
+			"path", settingsPath, "key", key)
+		return updateVersionedSettingStruct(dir, key, value)
+	}
+	return err
+}
+
+// versionedSettingEdit is the v1 YAML edit that UpdateVersionedSetting makes
+// for one key: set path to value, or delete path when value is nil (an empty
+// string for an omitempty field). noop marks keys with no v1 equivalent.
+type versionedSettingEdit struct {
+	path  []string
+	value *yamlv3.Node
+	noop  bool
+}
+
+// versionedSettingKey describes where a settable key lives in the v1 file.
+type versionedSettingKey struct {
+	path   []string
+	isBool bool
+}
+
+// versionedSettingKeys maps every key UpdateVersionedSetting accepts (other
+// than the project ID aliases and the ignored keys) to its v1 path. It must
+// stay in step with the switch in updateVersionedSettingStruct; the
+// TestUpdateVersionedSetting_MatchesStructPath table test enforces that.
+var versionedSettingKeys = map[string]versionedSettingKey{
+	"active_profile":           {path: []string{"active_profile"}},
+	"default_template":         {path: []string{"default_template"}},
+	"default_harness_config":   {path: []string{"default_harness_config"}},
+	"workspace_path":           {path: []string{"workspace_path"}},
+	"image_registry":           {path: []string{"image_registry"}},
+	"cli.autohelp":             {path: []string{"cli", "autohelp"}, isBool: true},
+	"hub.enabled":              {path: []string{"hub", "enabled"}, isBool: true},
+	"hub.linked":               {path: []string{"hub", "linked"}, isBool: true},
+	"hub.endpoint":             {path: []string{"hub", "endpoint"}},
+	"hub.local_only":           {path: []string{"hub", "local_only"}, isBool: true},
+	"hub.brokerId":             {path: []string{"server", "broker", "broker_id"}},
+	"hub.brokerToken":          {path: []string{"server", "broker", "broker_token"}},
+	"hub.brokerNickname":       {path: []string{"server", "broker", "broker_nickname"}},
+	"server.auth.display_name": {path: []string{"server", "auth", "display_name"}},
+	"server.auth.email":        {path: []string{"server", "auth", "email"}},
+	"server.auth.username":     {path: []string{"server", "auth", "username"}},
+}
+
+// versionedSettingEditFor returns the edit UpdateVersionedSetting makes for
+// key=value. Typing matches the struct path: booleans are true only for the
+// exact string "true", and every string field is omitempty, so an empty
+// string removes the key.
+func versionedSettingEditFor(key, value string) (versionedSettingEdit, error) {
+	var k versionedSettingKey
+	switch {
+	case projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key):
+		k = versionedSettingKey{path: []string{"hub", "project_id"}}
+	case key == "hub.token", key == "hub.apiKey", key == "hub.lastSyncedAt",
+		key == "bucket.provider", key == "bucket.name", key == "bucket.prefix",
+		strings.HasPrefix(key, "hub_connections."):
+		// Deprecated or unsupported in v1: accepted and ignored.
+		return versionedSettingEdit{noop: true}, nil
+	default:
+		var ok bool
+		if k, ok = versionedSettingKeys[key]; !ok {
+			return versionedSettingEdit{}, fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
+		}
+	}
+	edit := versionedSettingEdit{path: k.path}
+	switch {
+	case k.isBool:
+		edit.value = newYAMLBoolScalar(value == "true")
+	case value != "":
+		edit.value = newYAMLStringScalar(value)
+	}
+	return edit, nil
+}
+
+// updateVersionedSettingYAML applies edit to the YAML settings file at
+// settingsPath (or creates dir/settings.yaml when settingsPath is empty).
+func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingEdit) error {
+	targetPath := settingsPath
+	var orig []byte
+	var override string
+	if targetPath == "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+		targetPath = newSettingsFilePath(dir)
+	} else {
+		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs.
+		_, override = migrateProjectSettingsFile(targetPath)
+		var err error
+		if orig, err = os.ReadFile(targetPath); err != nil {
+			return fmt.Errorf("failed to read %s: %w", targetPath, err)
+		}
+	}
+
+	doc, err := parseYAMLMappingDocument(orig)
+	if err != nil {
+		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
+	}
+	// Refuse to edit a file the struct loader would reject, as before.
+	var vs VersionedSettings
+	if err := doc.Decode(&vs); err != nil {
+		return fmt.Errorf("failed to parse YAML settings at %s: %w", targetPath, err)
+	}
+	root := doc.Content[0]
+	indent := detectYAMLIndent(root)
+
+	// fullEncode marks edits beyond the single key, which the byte-level
+	// splice does not cover.
+	fullEncode := len(orig) == 0
+	if _, sv := findMapKey(root, "schema_version"); sv == nil || isYAMLNull(sv) || (sv.Kind == yamlv3.ScalarNode && sv.Value == "") {
+		if sv != nil {
+			deleteMapKey(root, "schema_version")
+		}
+		svKey := newYAMLStringScalar("schema_version")
+		if len(root.Content) > 0 {
+			// Keep a file's leading comment at the top of the file.
+			svKey.HeadComment, root.Content[0].HeadComment = root.Content[0].HeadComment, ""
+		}
+		root.Content = append([]*yamlv3.Node{svKey, newYAMLStringScalar("1")}, root.Content...)
+		fullEncode = true
+	}
+	if override != "" && (vs.Hub == nil || vs.Hub.ProjectID == "") {
+		if _, err := setYAMLPath(root, []string{"hub", "project_id"}, newYAMLStringScalar(override)); err != nil {
+			return err
+		}
+		fullEncode = true
+	}
+
+	var changed bool
+	if edit.value == nil {
+		changed, err = deleteYAMLPath(root, edit.path)
+	} else {
+		changed, err = setYAMLPath(root, edit.path, edit.value)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to update %s: %w", targetPath, err)
+	}
+	if !changed && !fullEncode {
+		return nil
+	}
+
+	// Both candidate outputs must decode to exactly the edited tree's data.
+	// Only the first YAML document is parsed, compared and re-encoded, so a
+	// full re-encode drops any later documents, as the struct path always
+	// did; loaders ignore them. A splice keeps them.
+	var want interface{}
+	if err := doc.Decode(&want); err != nil {
+		return fmt.Errorf("failed to decode edited settings: %w", err)
+	}
+	out, err := encodeSettingsYAML(doc, indent)
+	if err != nil {
+		return fmt.Errorf("failed to marshal versioned settings: %w", err)
+	}
+	if !fullEncode {
+		if spliced, ok := spliceVersionedSettingEdit(orig, edit, indent); ok && yamlDecodesTo(spliced, want) && decodeVersionedSettingsYAML(spliced) == nil {
+			out = spliced
+		}
+	}
+	if !yamlDecodesTo(out, want) {
+		return fmt.Errorf("refusing to write %s: the re-encoded settings do not round-trip; set %s by editing the file", targetPath, strings.Join(edit.path, "."))
+	}
+	// Generic data equality is weaker than loadability (an alias key can
+	// duplicate a struct field without a duplicate map key), so the output
+	// must also decode into VersionedSettings without error, as the input did.
+	if err := decodeVersionedSettingsYAML(out); err != nil {
+		return fmt.Errorf("refusing to write %s: the updated settings would not load: %w; set %s by editing the file", targetPath, err, strings.Join(edit.path, "."))
+	}
+	if bytes.Equal(out, orig) {
+		return nil
+	}
+	return writeSettingsFileAtomic(targetPath, out)
+}
+
+// decodeVersionedSettingsYAML reports whether data decodes into a
+// VersionedSettings, as LoadSingleFileVersioned decodes a YAML file.
+func decodeVersionedSettingsYAML(data []byte) error {
+	var vs VersionedSettings
+	return yamlv3.Unmarshal(data, &vs)
+}
+
+// encodeSettingsYAML is encodeYAMLDocument. It is a variable so tests can
+// reach the round-trip refusal in updateVersionedSettingYAML.
+var encodeSettingsYAML = encodeYAMLDocument
+
+// newSettingsFilePath returns the YAML file a settings write in dir targets
+// when there is no readable settings file to write back to: settings.yaml if
+// anything exists at that name (a file, or a link, possibly dangling, which
+// the write follows), else a dangling settings.yml link whose target
+// resolves (no loop, see resolveSettingsWriteTarget) into an existing
+// directory the current user may write to (written through, keeping the
+// link), else settings.yaml. Any other dangling .yml link is skipped, as
+// the loaders skip it, and settings.yaml is written as before.
+func newSettingsFilePath(dir string) string {
+	yamlPath := filepath.Join(dir, "settings.yaml")
+	if _, err := os.Lstat(yamlPath); err == nil {
+		return yamlPath
+	}
+	ymlPath := filepath.Join(dir, "settings.yml")
+	if fi, err := os.Lstat(ymlPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if _, err := os.Stat(ymlPath); err != nil {
+			if target, err := resolveSettingsWriteTarget(ymlPath); err == nil && dirWritable(filepath.Dir(target)) {
+				return ymlPath
+			}
+		}
+	}
+	return yamlPath
+}
+
+// spliceVersionedSettingEdit applies edit to orig as a byte-level splice.
+func spliceVersionedSettingEdit(orig []byte, edit versionedSettingEdit, indent int) ([]byte, bool) {
+	var doc yamlv3.Node
+	if err := yamlv3.Unmarshal(orig, &doc); err != nil || doc.Kind != yamlv3.DocumentNode || len(doc.Content) == 0 {
+		return nil, false
+	}
+	if edit.value == nil {
+		return spliceDeleteYAMLPath(orig, doc.Content[0], edit.path)
+	}
+	return spliceSetYAMLPath(orig, doc.Content[0], edit.path, edit.value, indent)
+}
+
+// writeSettingsFileAtomic atomically replaces the settings file at path.
+// A symlinked settings file is followed (see resolveSettingsWriteTarget) so
+// the link itself survives. If the directory refuses new files (no write
+// permission, read-only mount) the file is written in place instead, as a
+// plain os.WriteFile always did, so a writable file in a read-only
+// directory can still be updated.
+func writeSettingsFileAtomic(path string, data []byte) error {
+	target, err := resolveSettingsWriteTarget(path)
+	if err != nil {
+		return err
+	}
+	err = writeFileAtomic(target, data)
+	if errors.Is(err, errAtomicTempCreate) && (errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS)) {
+		if werr := os.WriteFile(target, data, 0644); werr != nil {
+			return fmt.Errorf("%w; in-place write also failed: %w", err, werr)
+		}
+		return nil
+	}
+	return err
+}
+
+// resolveSettingsWriteTarget returns the file a write to path should
+// replace, following symlinks the way the kernel does so the write lands in
+// the file that reads see. An existing target is resolved with
+// filepath.EvalSymlinks. A dangling link is walked by hand to its final
+// (missing) target, resolving each hop's parent directory physically before
+// applying a relative link, so `..` in a link under a symlinked directory
+// means what it means to the kernel. The write then creates that target and
+// keeps the link, as os.WriteFile would. It is an error if the dangling
+// target's directory does not exist.
+func resolveSettingsWriteTarget(path string) (string, error) {
+	if _, err := os.Stat(path); err == nil {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve settings file %s: %w", path, err)
+		}
+		return resolved, nil
+	}
+	p := path
+	for hops := 0; hops < 40; hops++ {
+		fi, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			if p == path {
+				return p, nil
+			}
+			physical, derr := physicalParentPath(p)
+			if derr != nil {
+				return "", fmt.Errorf("settings file %s is a dangling symlink to %s, which cannot be created: %w", path, p, derr)
+			}
+			return physical, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("failed to inspect settings file %s: %w", p, err)
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return p, nil
+		}
+		link, err := os.Readlink(p)
+		if err != nil {
+			return "", fmt.Errorf("failed to read symlink %s: %w", p, err)
+		}
+		if !filepath.IsAbs(link) {
+			dir, _ := splitLastPathElem(p)
+			parent, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve the directory of symlink %s: %w", p, err)
+			}
+			// Not filepath.Join: that would clean `..` in link lexically.
+			// Lstat lets the kernel resolve it, and the next hop resolves
+			// the parent with EvalSymlinks.
+			link = parent + string(filepath.Separator) + link
+		}
+		p = link
+	}
+	return "", fmt.Errorf("settings file %s: too many levels of symbolic links", path)
+}
+
+// splitLastPathElem splits p at its last separator without cleaning it
+// (filepath.Dir would collapse `..` lexically).
+func splitLastPathElem(p string) (dir, base string) {
+	i := strings.LastIndex(p, string(filepath.Separator))
+	if i < 0 {
+		return ".", p
+	}
+	dir, base = p[:i], p[i+1:]
+	if dir == "" {
+		dir = string(filepath.Separator)
+	}
+	return dir, base
+}
+
+// physicalParentPath resolves the directory part of p (which may contain
+// unresolved `..` after a symlink) with filepath.EvalSymlinks, which
+// applies `..` to the resolved path, and rejoins the last element.
+func physicalParentPath(p string) (string, error) {
+	dir, base := splitLastPathElem(p)
+	if base == "" || base == "." || base == ".." {
+		return "", fmt.Errorf("%s does not name a file", p)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	if st, err := os.Stat(resolved); err != nil {
+		return "", err
+	} else if !st.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", resolved)
+	}
+	return filepath.Join(resolved, base), nil
+}
+
+// updateVersionedSettingStruct is the struct round-trip form of
+// UpdateVersionedSetting: it loads the single file at dir into a
+// VersionedSettings, sets the field and saves via saveVersionedSettingsInPlace.
+// That drops comments and unknown keys, so it is only used for JSON files
+// and YAML that cannot be edited in place (an alias, an anchor, or a key the
+// edit cannot match by name; see hasYAMLOpaqueKey). A YAML file is
+// saved back to the same path (settings.yml stays settings.yml).
+func updateVersionedSettingStruct(dir string, key string, value string) error {
 	vs, err := LoadSingleFileVersioned(dir)
 	if err != nil {
 		return err
@@ -4096,7 +4776,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 			vs.Hub = &V1HubClientConfig{}
 		}
 		vs.Hub.ProjectID = value
-		return SaveVersionedSettings(dir, vs)
+		return saveVersionedSettingsInPlace(dir, vs)
 	}
 
 	switch key {
@@ -4213,7 +4893,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		return fmt.Errorf("unknown or complex setting key: %s (manual edit recommended for registries)", key)
 	}
 
-	return SaveVersionedSettings(dir, vs)
+	return saveVersionedSettingsInPlace(dir, vs)
 }
 
 // GetVersionedSettingValue retrieves a specific setting value from a VersionedSettings struct.
@@ -4539,8 +5219,34 @@ func scalarValueString(v reflect.Value) (s string, ok bool) {
 	}
 }
 
-// SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir.
+// SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir
+// (or through a dangling settings.yml link when settings.yaml is absent; see
+// newSettingsFilePath). The file is replaced atomically, and left untouched when its
+// bytes would not change.
+//
+// It takes the settings-file lock for the write (see LockSettingsFile). A
+// caller that loaded vs from the file and wants the read-modify-write cycle
+// protected must not hold the lock itself; the lock covers the write only.
 func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
+	unlock := LockSettingsFile()
+	defer unlock()
+	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
+}
+
+// saveVersionedSettingsInPlace saves vs back to the YAML settings file in
+// dir it was loaded from (settings.yaml or settings.yml; the mode is kept).
+// A JSON or missing file is saved like SaveVersionedSettings, to
+// newSettingsFilePath(dir).
+func saveVersionedSettingsInPlace(dir string, vs *VersionedSettings) error {
+	if p := GetSettingsPath(dir); p != "" && filepath.Ext(p) != ".json" {
+		return writeVersionedSettingsFile(dir, p, vs)
+	}
+	// Not SaveVersionedSettings: callers already hold the settings-file lock.
+	return writeVersionedSettingsFile(dir, newSettingsFilePath(dir), vs)
+}
+
+// writeVersionedSettingsFile marshals vs to targetPath in dir.
+func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
@@ -4550,16 +5256,27 @@ func SaveVersionedSettings(dir string, vs *VersionedSettings) error {
 		return fmt.Errorf("failed to marshal versioned settings: %w", err)
 	}
 
-	targetPath := filepath.Join(dir, "settings.yaml")
-	return os.WriteFile(targetPath, data, 0644)
+	if existing, err := os.ReadFile(targetPath); err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	return writeSettingsFileAtomic(targetPath, data)
 }
 
 // MigrateSettingsFile migrates a single legacy settings file in dir to versioned format.
 // If a server.yaml exists in the same directory, it is also merged into the settings
 // under the "server" key and backed up.
+// Top-level keys the legacy Settings struct does not decode (v1-only keys such
+// as server and image_registry, or any unknown key) are carried into the
+// migrated file unchanged; see legacyCarriedTopLevelKeys.
 // If dryRun is true, no files are written.
 // Returns MigrationResult describing what was (or would be) done.
 func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
+	// Held from the first read to the final write, so the read, backup
+	// rename and write are one step for in-process writers (see
+	// LockSettingsFile). Nothing below takes the lock again.
+	unlock := LockSettingsFile()
+	defer unlock()
+
 	result := &MigrationResult{}
 
 	// 1. Find settings file
@@ -4608,6 +5325,14 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	vs, warnings := AdaptLegacySettings(&legacy)
 	result.Warnings = warnings
 
+	// 4a. Top-level keys the legacy struct does not decode (v1-only keys
+	// such as server and image_registry) are carried through unchanged
+	// (ptone/scion#3497).
+	carried, err := legacyCarriedTopLevelKeys(data, result.WasJSON)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse settings: %w", err)
+	}
+
 	// 4b. Check for server.yaml and merge if present
 	serverPath := GetServerConfigPath(dir)
 	if serverPath != "" {
@@ -4642,19 +5367,11 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		}
 	}
 
-	// 5. Handle hub.lastSyncedAt: migrate to state.yaml
+	// 5. Handle hub.lastSyncedAt: migrate to state.yaml (written in step 7b,
+	// once the output has passed every check, so a failed migration leaves
+	// nothing changed).
 	if legacy.Hub != nil && legacy.Hub.LastSyncedAt != "" {
 		result.StateMigrated = true
-		if !dryRun {
-			state, err := LoadProjectState(dir)
-			if err != nil {
-				return nil, fmt.Errorf("failed to load project state: %w", err)
-			}
-			state.LastSyncedAt = legacy.Hub.LastSyncedAt
-			if err := SaveProjectState(dir, state); err != nil {
-				return nil, fmt.Errorf("failed to save project state: %w", err)
-			}
-		}
 	}
 
 	// 6. Validate the output
@@ -4675,9 +5392,48 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 		return nil, fmt.Errorf("migrated settings failed validation: %s", strings.Join(errMsgs, "; "))
 	}
 
+	// 6b. Merge the carried keys into the output. They are the file's own
+	// data, so a value the loaders cannot decode (a wrong type, such as
+	// "server: hello") fails the migration with the file untouched, while
+	// any other schema mismatch (such as an unknown key) is a warning:
+	// dropping such a key is the data loss this step prevents.
+	if len(carried) > 0 {
+		var dropped []string
+		if outputData, dropped, err = marshalMigratedSettings(vs, carried); err != nil {
+			return nil, fmt.Errorf("failed to marshal converted settings: %w", err)
+		}
+		for _, p := range dropped {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting %s dropped: it conflicts with the value converted from the legacy settings, which is used instead", p))
+		}
+		if err := checkCarriedSettingsDecode(vs, carried, outputData); err != nil {
+			return nil, fmt.Errorf("cannot migrate %s (left unchanged): %w; fix or remove the key and retry", settingsPath, err)
+		}
+		carriedErrors, err := ValidateSettings(outputData, "1")
+		if err != nil {
+			return nil, fmt.Errorf("validation error: %w", err)
+		}
+		for _, ve := range carriedErrors {
+			result.Warnings = append(result.Warnings,
+				fmt.Sprintf("kept setting does not match the v1 schema: %s", ve.Error()))
+		}
+	}
+
 	// 7. If dryRun, return result without writing
 	if dryRun {
 		return result, nil
+	}
+
+	// 7b. Write hub.lastSyncedAt to state.yaml (see step 5).
+	if result.StateMigrated {
+		state, err := LoadProjectState(dir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load project state: %w", err)
+		}
+		state.LastSyncedAt = legacy.Hub.LastSyncedAt
+		if err := SaveProjectState(dir, state); err != nil {
+			return nil, fmt.Errorf("failed to save project state: %w", err)
+		}
 	}
 
 	// 8. Back up the original settings file
@@ -4700,7 +5456,7 @@ func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
 	}
 
 	// 9. Write versioned settings
-	if err := SaveVersionedSettings(dir, vs); err != nil {
+	if err := saveVersionedSettingsData(dir, outputData); err != nil {
 		// Attempt to restore backups on failure
 		_ = os.Rename(backupPath, settingsPath)
 		if result.ServerBackupPath != "" {

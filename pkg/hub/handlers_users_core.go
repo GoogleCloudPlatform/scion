@@ -24,6 +24,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -167,7 +168,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 // revokeUserSessions increments the user's session generation, invalidating
 // all existing cookie-based sessions for that user.
 func (s *Server) revokeUserSessions(w http.ResponseWriter, r *http.Request, id string) {
-	admin, ok := s.requireAdmin(w, r)
+	admin, ok := s.requireAdminFor(w, r, authzop.ReasonSessionRecovery)
 	if !ok {
 		return
 	}
@@ -230,7 +231,8 @@ func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabili
 //
 // User mutation endpoints (PATCH, DELETE) require an interactive session JWT
 // or dev credential. Broker, agent, UAT, and federation credentials are
-// rejected at the boundary.
+// rejected at the boundary by requireSessionCredentialFor
+// (session_only_gate.go), which reports the session-only reason.
 // ---------------------------------------------------------------------------
 
 // allowedMutationCredentials is the closed set of credential kinds permitted
@@ -240,38 +242,15 @@ var allowedMutationCredentials = map[CredentialKind]bool{
 	CredentialKindDev:         true,
 }
 
-// requireSessionCredential verifies the request uses an interactive session
-// JWT or dev credential. Returns the actor UserIdentity on success, writes
-// an HTTP error and returns nil on failure.
-func (s *Server) requireSessionCredential(w http.ResponseWriter, ctx context.Context) (UserIdentity, bool) {
-	if s.authzService == nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"authorization service unavailable", nil)
-		return nil, false
+// updateUserSessionOnlyReason is the session-only reason of PATCH
+// /api/v1/users/{id}: INTERACTIVE_STATE when the path names the caller's
+// own record, GOV_PENDING for any other record. It depends only on the
+// path, so the credential check still runs before the body is read.
+func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.SessionOnlyReason {
+	if identity := GetIdentityFromContext(ctx); identity != nil && identity.ID() == id {
+		return authzop.ReasonInteractiveState
 	}
-
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return nil, false
-	}
-
-	actor, ok := identity.(UserIdentity)
-	if !ok {
-		Forbidden(w)
-		return nil, false
-	}
-
-	// Enforce credential boundary: only interactive session JWTs and dev
-	// tokens are allowed for user mutations.
-	cred := GetCredentialContextFromContext(ctx)
-	if !allowedMutationCredentials[cred.Kind] {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			fmt.Sprintf("user mutations require an interactive session; credential kind %q is not allowed", cred.Kind), nil)
-		return nil, false
-	}
-
-	return actor, true
+	return authzop.ReasonGovernancePending
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +324,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredential(w, ctx)
+	actor, ok := s.requireSessionCredentialFor(w, ctx, updateUserSessionOnlyReason(ctx, id))
 	if !ok {
 		return
 	}
@@ -1114,13 +1093,16 @@ func (s *Server) checkLastSuperAdminTx(
 // Guards: self-deletion and last-active-super-admin are prevented based on
 // bindings (not User.Role). All operations — last-admin check, skill cleanup,
 // user deletion, and audit — execute in a single atomic transaction (R4-C2).
+// A user who still owns agents is refused with 409 (ptone/scion#2769). The
+// user's user-scope secrets and env vars are removed after commit, best
+// effort.
 // ---------------------------------------------------------------------------
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredential(w, ctx)
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		return
 	}
@@ -1174,6 +1156,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return err
 		}
 
+		// Refuse while the user owns agents (ptone/scion#2769).
+		if err := checkUserOwnsNoAgentsTx(ctx, tx, user.ID); err != nil {
+			return err
+		}
+
 		// Last-project-owner guard plus role-binding cascade
 		// (ptone/scion#2598). Runs before the user row is deleted, in the
 		// same transaction; a concurrent grant or role change to the
@@ -1187,6 +1174,20 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		// Clean up user-scoped skill injections.
 		if _, err := tx.DeleteSkillInjectionsByScope(ctx, store.SkillInjectionScopeUser, id); err != nil {
 			return fmt.Errorf("delete skill injections: %w", err)
+		}
+
+		// Remove the user's group memberships before the user row: the
+		// FK is ON DELETE SET NULL, so afterwards they would be orphans
+		// that still count toward group roles (ptone/scion#2769). Residual
+		// race on PostgreSQL: a concurrent AddGroupMember for this user can
+		// insert a row this delete does not see, which the FK then nulls.
+		// It is harmless: orphaned rows are excluded from counts and
+		// listings, and the startup sweep removes them. On PostgreSQL the
+		// call first locks the groups this user owns, so the transaction
+		// takes owned group rows before membership rows, like a concurrent
+		// project delete's group cascade (no 40P01 between the two).
+		if _, err := tx.DeleteGroupMembershipsForUser(ctx, id); err != nil {
+			return fmt.Errorf("delete group memberships: %w", err)
 		}
 
 		// Delete the user record.
@@ -1212,11 +1213,14 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	if err != nil {
 		var lastOwnerErr *lastProjectOwnerDeleteError
+		var ownsAgentsErr *userOwnsAgentsDeleteError
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
 		} else if errors.As(err, &lastOwnerErr) {
 			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		} else if errors.As(err, &ownsAgentsErr) {
+			writeUserOwnsAgentsDeleteError(w, ownsAgentsErr)
 		} else if errors.Is(err, errUserRoleBindingsChanged) {
 			writeUserRoleBindingsChangedError(w)
 		} else {
@@ -1225,6 +1229,10 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		return
 	}
+
+	// Best effort, after commit: remove the user's user-scope secrets and
+	// env vars (ptone/scion#2769). Failures are logged, not returned.
+	s.removeUserScopedData(ctx, id)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1248,7 +1256,7 @@ func (e *lastProjectOwnerDeleteError) Error() string {
 	return lastProjectOwnerDeleteMessage
 }
 
-const lastProjectOwnerDeleteMessage = "cannot delete the last owner of a project — transfer ownership or add another active direct user owner first"
+const lastProjectOwnerDeleteMessage = "cannot delete the last owner of a project — transfer ownership or add another usable (active, existing) owner first"
 
 // writeLastProjectOwnerDeleteError writes the 409 last_owner response for a
 // denied user deletion. The code and status match the members API last-owner
@@ -1266,10 +1274,11 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 // For each project where userID holds a project-owner binding — including an
 // expired or not-yet-active one, since deleting it could otherwise take the
 // project to zero owner bindings and let the startup backfill re-grant the
-// creator — the deletion is denied unless at least one OTHER active direct
-// user owner remains. Each such project is locked with
-// LockProjectForMembership (in ID order) before counting, which serializes
-// against concurrent members-API mutations on those projects.
+// creator — the deletion is denied when it would remove the project's last
+// usable (active, existing) owner, or its last owner binding of any kind
+// (userDeleteOrphansProjectTx, ptone/scion#2769). Each such project is
+// locked with LockProjectForMembership (in ID order) before the check, which
+// serializes against concurrent members-API mutations on those projects.
 //
 // The binding list is read before any lock, so a binding granted to userID
 // concurrently (for example a new owner binding on a project that was never
@@ -1294,11 +1303,16 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 // delete; if its role definition, principal or scope no longer matches the
 // listed one (an in-place change under the same ID), the function returns
 // errUserRoleBindingsChanged instead of deleting a binding the guard never
-// checked; the validity window (NotBefore/ExpiresAt) is deliberately not
-// compared: it does not affect the guard, since the target's own bindings are
-// never counted and are all deleted. On PostgreSQL an in-place change that commits between that re-read
-// and the delete is still not detected, so the immutability invariant remains
-// the primary guarantee.
+// checked. The validity window (NotBefore/ExpiresAt) is not compared, although
+// it does feed the guard: whether the target's own owner binding is usable
+// (removedUsable in userDeleteOrphansProjectTx) depends on its window, read
+// from the pre-lock list. That is safe only because bindings are immutable: a
+// window change is a delete plus a create with a new ID, which the by-ID
+// re-read catches (the listed ID is gone, and the predicate delete below then
+// finds the new ID and aborts with errUserRoleBindingsChanged). On
+// PostgreSQL an in-place change that commits between that re-read and the
+// delete is still not detected, so the immutability invariant remains the
+// primary guarantee.
 //
 // The by-ID pass deletes in binding ID order. On PostgreSQL a concurrent
 // change that deletes several of the user's bindings (for example
@@ -1323,8 +1337,9 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 	}
 
 	var ownerProjectIDs []string
+	var ownerRD *store.RoleDefinition
 	if len(bindings) > 0 {
-		ownerRD, err := tx.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		ownerRD, err = tx.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 		if err != nil {
 			return fmt.Errorf("resolve project-owner role definition: %w", err)
 		}
@@ -1352,11 +1367,11 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 			}
 			return fmt.Errorf("lock project %s: %w", projectID, err)
 		}
-		others, err := countActiveDirectProjectOwners(ctx, tx, projectID, now, userID)
+		denied, err := userDeleteOrphansProjectTx(ctx, tx, projectID, ownerRD.ID, bindings, userID, now)
 		if err != nil {
-			return fmt.Errorf("count owners of project %s: %w", projectID, err)
+			return err
 		}
-		if others > 0 {
+		if !denied {
 			continue
 		}
 		ref := lastOwnerProjectRef{ID: projectID}
@@ -1410,6 +1425,57 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 		return fmt.Errorf("%w: %d unlisted binding(s) found", errUserRoleBindingsChanged, n)
 	}
 	return nil
+}
+
+// userDeleteOrphansProjectTx applies the last-owner rule of
+// ptone/scion#2769 to the deletion of userID, for one project it owns,
+// inside the delete transaction and after LockProjectForMembership on that
+// project. userBindings are userID's role bindings; ownerRDID is the
+// project-owner role definition. The deletion orphans the project, and is
+// denied, when:
+//
+//   - one of userID's owner bindings on the project is usable (active window,
+//     user exists and is active) and no other usable owner remains (I1), or
+//   - no other owner binding of any kind remains (I2, the ptone/scion#2554
+//     floor: zero owner bindings re-arms the startup creator backfill).
+//
+// So deleting a suspended co-owner is allowed while another owner binding
+// remains, even when the project has no usable owner left. Lookup errors
+// are returned (500, nothing changed).
+func userDeleteOrphansProjectTx(ctx context.Context, tx store.Store, projectID, ownerRDID string, userBindings []*store.RoleBinding, userID string, now time.Time) (bool, error) {
+	var own []*store.RoleBinding
+	for _, b := range userBindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == projectID && b.RoleDefinitionID == ownerRDID {
+			own = append(own, b)
+		}
+	}
+	// ownerRDID is passed through, so the role definition is not resolved
+	// again for every owned project.
+	removedUsable := false
+	for _, b := range own {
+		ok, err := bindingIsUsableOwner(ctx, tx, b, ownerRDID, now)
+		if err != nil {
+			return false, fmt.Errorf("check owner bindings of project %s: %w", projectID, err)
+		}
+		if ok {
+			removedUsable = true
+			break
+		}
+	}
+	if removedUsable {
+		ok, err := projectHasUsableOwner(ctx, tx, projectID, now, userID)
+		if err != nil {
+			return false, fmt.Errorf("check usable owners of project %s: %w", projectID, err)
+		}
+		// A usable other owner is itself another owner binding, so I2
+		// holds too and the binding count is not needed.
+		return !ok, nil
+	}
+	others, err := projectOwnerBindingCount(ctx, tx, projectID, userID)
+	if err != nil {
+		return false, fmt.Errorf("count owner bindings of project %s: %w", projectID, err)
+	}
+	return others == 0, nil
 }
 
 // errUserRoleBindingsChanged is returned by guardAndCascadeUserRoleBindingsTx

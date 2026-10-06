@@ -19,13 +19,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
 )
@@ -37,6 +41,28 @@ import (
 // unresolvable name as a client-facing 4xx naming the resource, instead of
 // folding it into a generic 5xx (ptone/scion#1316 fault 3).
 var ErrTemplateNotFound = errors.New("template not found")
+
+// TemplateNotFoundError is the typed form of ErrTemplateNotFound
+// (errors.Is(err, ErrTemplateNotFound) still matches). Error() keeps the
+// full diagnostic text, which can name broker filesystem paths; Name is the
+// display-safe template name for client-facing messages (ptone/scion#3113).
+type TemplateNotFoundError struct {
+	// Name is FriendlyTemplateName of the reference that did not resolve:
+	// a plain name, an absolute path's base name, or "" when the only
+	// identifier is a content hash.
+	Name string
+	msg  string
+}
+
+// NewTemplateNotFoundError returns a TemplateNotFoundError for ref whose
+// Error() is msg (the caller's full diagnostic text, without the
+// sentinel's own text, which Error() appends).
+func NewTemplateNotFoundError(ref, msg string) *TemplateNotFoundError {
+	return &TemplateNotFoundError{Name: FriendlyTemplateName(ref), msg: msg}
+}
+
+func (e *TemplateNotFoundError) Error() string { return e.msg + ": " + ErrTemplateNotFound.Error() }
+func (e *TemplateNotFoundError) Unwrap() error { return ErrTemplateNotFound }
 
 type Template struct {
 	Name  string
@@ -218,7 +244,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
+			return &Template{Name: templateNameFromDir(name), Path: name}, nil
 		}
 		return nil, fmt.Errorf("template path %s not found or not a directory", name)
 	}
@@ -276,9 +302,39 @@ func FindTemplateInScope(name, scope string) *Template {
 	return nil
 }
 
+// templateNameFromDir derives a template name from a template directory path.
+// A content-addressed cache directory is named after the template's content
+// hash, which is not a template name, so it yields "".
+func templateNameFromDir(dir string) string {
+	base := filepath.Base(dir)
+	if isTemplateHashName(base) {
+		return ""
+	}
+	return base
+}
+
+// templateHashPattern matches a content hash in any letter case, with or
+// without the "sha256:" prefix. transfer.IsContentHash only accepts the
+// lowercase, prefixed form the cache writes today; this broader match is
+// local to display-name derivation so an unprefixed or uppercase digest (a
+// legacy or externally produced hash) is never shown as a template name
+// either (ptone/scion#3113).
+var templateHashPattern = regexp.MustCompile(`(?i)^(sha256:)?[0-9a-f]{64}$`)
+
+// isTemplateHashName reports whether s is a content hash rather than a
+// template name: the prefixed form cache directories use today, or any
+// other letter case or the bare 64-hex digest (templateHashPattern).
+// transfer.IsContentHash is a strict subset of templateHashPattern; it is
+// kept on purpose, only to tie this check to the cache's canonical hash
+// form, so a change to that form is reflected here too.
+func isTemplateHashName(s string) bool {
+	return transfer.IsContentHash(s) || templateHashPattern.MatchString(s)
+}
+
 // FriendlyTemplateName converts a raw template reference (cache path, URI, or
 // simple name) to a human-friendly short name suitable for display.
-// Simple names pass through unchanged; absolute paths return filepath.Base;
+// Simple names pass through unchanged; absolute paths return filepath.Base,
+// except that a content-hash cache directory or a bare content hash yields "";
 // remote URIs are handled by DeriveTemplateName.
 func FriendlyTemplateName(ref string) string {
 	if ref == "" {
@@ -288,7 +344,10 @@ func FriendlyTemplateName(ref string) string {
 		return DeriveTemplateName(ref)
 	}
 	if filepath.IsAbs(ref) {
-		return filepath.Base(ref)
+		return templateNameFromDir(ref)
+	}
+	if isTemplateHashName(ref) {
+		return ""
 	}
 	return ref
 }
@@ -307,16 +366,33 @@ func DeriveTemplateName(uri string) string {
 		return parts.Repo
 	}
 
-	// For archive URLs, extract filename without extension
-	if isArchiveURL(uri) {
-		base := filepath.Base(uri)
-		// Remove common extensions
-		for _, ext := range []string{".tar.gz", ".tgz", ".zip"} {
-			if len(base) > len(ext) && base[len(base)-len(ext):] == ext {
-				return base[:len(base)-len(ext)]
-			}
+	// For HTTP(S) URLs, use the last element of the URL path only: the
+	// query (e.g. a signed-URL token) and any userinfo never become part of
+	// the name, since it is shown to users (ptone/scion#3113).
+	if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+		u, err := url.Parse(uri)
+		if err != nil {
+			return "remote"
 		}
-		return base
+		if u.Path == "" {
+			if host := u.Hostname(); host != "" {
+				return host
+			}
+			return "remote"
+		}
+		// EscapedPath, not Path: the name keeps the reference's own
+		// percent-encoding, so an encoded "/" or control character
+		// (a%2Fb, a%0Ab) is never decoded into the displayed name.
+		base := path.Base(u.EscapedPath())
+		if base == "/" || base == "." || base == ".." {
+			return "remote"
+		}
+		return trimArchiveExt(base)
+	}
+
+	// For archive paths, extract filename without extension
+	if isArchiveURL(uri) {
+		return trimArchiveExt(filepath.Base(uri))
 	}
 
 	// For rclone paths, use the last path component
@@ -334,6 +410,16 @@ func DeriveTemplateName(uri string) string {
 
 	// Fallback: use "remote"
 	return "remote"
+}
+
+// trimArchiveExt removes a .tar.gz, .tgz or .zip extension from base.
+func trimArchiveExt(base string) string {
+	for _, ext := range []string{".tar.gz", ".tgz", ".zip"} {
+		if len(base) > len(ext) && base[len(base)-len(ext):] == ext {
+			return base[:len(base)-len(ext)]
+		}
+	}
+	return base
 }
 
 // GetTemplateChain returns a list of templates in inheritance order (base first).
@@ -377,9 +463,9 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	}
 	if filepath.IsAbs(name) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
+			return &Template{Name: templateNameFromDir(name), Path: name}, nil
 		}
-		return nil, fmt.Errorf("template path %s not found or not a directory: %w", name, ErrTemplateNotFound)
+		return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template path %s not found or not a directory", name))
 	}
 
 	// Check project-specific templates directory (in-repo .scion/templates/ for git projects)
@@ -398,7 +484,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("template %s not found: %w", name, ErrTemplateNotFound)
+	return nil, NewTemplateNotFoundError(name, fmt.Sprintf("template %s not found", name))
 }
 
 // findOrHydrateDefaultTemplate resolves the default template, seeding it from the

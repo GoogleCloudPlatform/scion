@@ -54,6 +54,17 @@ func (p *createdRecordingPublisher) PublishAgentCreated(ctx context.Context, a *
 	p.deleteRecordingPublisher.PublishAgentCreated(ctx, a)
 }
 
+// PublishAgentRestored is the other created publisher (see EventPublisher).
+func (p *createdRecordingPublisher) PublishAgentRestored(ctx context.Context, a *store.Agent, restoredAt time.Time) {
+	p.mu.Lock()
+	p.events = append(p.events, recordedAgentEvent{
+		kind: "created", phase: a.Phase, activity: a.Activity,
+		deletion: store.ComputeAgentDeletion(a, time.Now()),
+	})
+	p.mu.Unlock()
+	p.deleteRecordingPublisher.PublishAgentRestored(ctx, a, restoredAt)
+}
+
 func recordCreatedEvents(t *testing.T, srv *Server) *createdRecordingPublisher {
 	t.Helper()
 	bus := NewChannelEventPublisher()
@@ -338,6 +349,12 @@ func TestCreateAgentPublish_SyncDispatchRacesDelete(t *testing.T) {
 				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
 				require.NotEmpty(t, race.agentID, "the hook ran: %d %s", rec.Code, rec.Body.String())
 				assert.Zero(t, pub.count("created"), "no created after the delete claimed: %v", pub.kinds())
+				if site.name == "dispatch" || site.name == "env-gather" {
+					// A synchronous broker create that lost to the
+					// delete answers 409, also when the broker asked
+					// for env (ptone/scion#3099).
+					requireDeletedDuringCreate(t, rec, race.agentID)
+				}
 
 				race.finish()
 				assert.Zero(t, pub.count("created"), "no created at all: %v", pub.kinds())
@@ -407,6 +424,9 @@ func TestCreateAgentPublish_AsyncLaunchRacesDelete(t *testing.T) {
 			})
 			require.NotNil(t, sent, "dispatch ran: %s", rec.Body.String())
 			assert.Zero(t, pub.count("created"), "no created after the delete claimed: %v", pub.kinds())
+			// The accepted launch is unaffected by ptone/scion#3099: it
+			// still answers 201; the launch report settles the delete.
+			assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 			if tc.mode == deleteClaimed {
 				close(release)
@@ -469,11 +489,12 @@ func TestCreateAgentPublish_NoDeletePublishesOnce(t *testing.T) {
 // claimed row suppresses the publish; a failed or lapsed delete does not.
 func TestPublishAgentCreatedIfLive_DeletionStates(t *testing.T) {
 	cases := []struct {
-		name    string
-		seed    *deleteSeed
-		soft    bool
-		gone    bool
-		publish bool
+		name      string
+		seed      *deleteSeed
+		soft      bool
+		gone      bool
+		readFails bool
+		publish   bool
 	}{
 		{name: "no marker", publish: true},
 		{name: "failed", seed: &deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}, publish: true},
@@ -483,6 +504,10 @@ func TestPublishAgentCreatedIfLive_DeletionStates(t *testing.T) {
 		{name: "finalizing lease expired", seed: &deleteSeed{state: store.DeletionStateFinalizing, leaseIn: -time.Minute}},
 		{name: "soft-deleted", soft: true},
 		{name: "gone", gone: true},
+		// A failed re-read cannot tell: it publishes the in-memory agent
+		// and counts as live, so a synchronous create answers 201
+		// (ptone/scion#3099).
+		{name: "re-read fails", readFails: true, publish: true},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -503,7 +528,12 @@ func TestPublishAgentCreatedIfLive_DeletionStates(t *testing.T) {
 				require.NoError(t, s.DeleteAgent(ctx, agent.ID))
 			}
 
-			srv.publishAgentCreatedIfLive(ctx, agent)
+			if tc.readFails {
+				srv.store = &failingGetStore{Store: s, fail: true}
+			}
+
+			live := srv.publishAgentCreatedIfLive(ctx, agent)
+			assert.Equal(t, tc.publish, live, "the helper reports live exactly when it publishes")
 			if tc.publish {
 				assert.Equal(t, []string{"created"}, pub.kinds())
 			} else {
