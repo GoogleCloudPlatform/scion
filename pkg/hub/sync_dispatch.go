@@ -19,16 +19,28 @@ import (
 	"time"
 )
 
-// syncDispatchTimeout bounds one synchronous launch dispatch (create, start,
-// and each leg of a restart) once it no longer follows the client's request
-// (ptone/scion#1961). It equals the hub-to-broker request limit: the control
-// channel's RequestTimeout (server.go, controlchannel.go) and the broker HTTP
-// transport's client timeout (broker_http_transport.go). When it fires, the
-// dispatch ctx is done, and the control channel sends the broker a cancel
-// frame (BrokerConnection.TunnelRequest), so the broker stops its launch before
-// the hub's failure cleanup removes the agent row. A variable so tests can
-// shorten it.
+// syncDispatchTimeout bounds one dispatcher call of a synchronous launch
+// (create, provision, env finalize, workspace-bootstrap create, start, and
+// each leg of a restart) once the launch no longer follows the client's
+// request (ptone/scion#1961). One call is one launch attempt, which may make
+// several broker requests (a hash-mismatch retry, a second-pass finalize, or
+// a cross-node deferred wait); the bound covers them all together.
+//
+// It equals the hub-to-broker request limit: the control channel's
+// RequestTimeout (server.go:1849, default in controlchannel.go:59) and the
+// broker HTTP transport's client timeout (broker_http_transport.go). When it
+// fires, the dispatch ctx is done, and what the broker sees depends on the
+// transport: on the control channel, BrokerConnection.TunnelRequest sends a
+// cancel frame; on direct HTTP, the request is aborted; on a cross-node
+// deferred dispatch, nothing is sent, and the owning node runs the durable
+// intent to its end. A variable so tests can shorten it.
 var syncDispatchTimeout = 120 * time.Second
+
+// hubWorkspaceUploadTimeout bounds the create-time upload of a hub-managed
+// project workspace to storage, which runs detached from the client
+// (ptone/scion#1961). Generous: a large workspace can take minutes. A
+// variable so tests can shorten it.
+var hubWorkspaceUploadTimeout = 10 * time.Minute
 
 // detachLaunchFromClient returns a context for the rest of a synchronous
 // launch: it keeps ctx's values (identity, trace, dispatch warnings) but not
@@ -42,9 +54,9 @@ func detachLaunchFromClient(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-// syncDispatch runs one synchronous broker dispatch under
+// syncDispatch runs one synchronous dispatcher call under
 // syncDispatchTimeout, derived from ctx (normally a detachLaunchFromClient
-// context).
+// context). fn must use the ctx it is given, not the caller's.
 func syncDispatch(ctx context.Context, fn func(context.Context) error) error {
 	dctx, cancel := context.WithTimeout(ctx, syncDispatchTimeout)
 	defer cancel()

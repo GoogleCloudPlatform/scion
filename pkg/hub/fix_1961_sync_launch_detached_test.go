@@ -23,11 +23,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,11 +72,19 @@ type launchProbeDispatcher struct {
 	ctxErrs []error
 	// hadDeadline records, per dispatch, whether its ctx carried a deadline.
 	hadDeadline []bool
+	// deadlineIn records, per dispatch, how far away its deadline was when
+	// the dispatch began (0 without one).
+	deadlineIn []time.Duration
 }
 
 func (d *launchProbeDispatcher) probe(ctx context.Context) error {
-	_, ok := ctx.Deadline()
+	deadline, ok := ctx.Deadline()
 	d.hadDeadline = append(d.hadDeadline, ok)
+	var in time.Duration
+	if ok {
+		in = time.Until(deadline)
+	}
+	d.deadlineIn = append(d.deadlineIn, in)
 	switch d.mode {
 	case probeBlock:
 		if !awaitCanceled(ctx) {
@@ -99,9 +109,33 @@ func (d *launchProbeDispatcher) DispatchAgentCreateWithGather(ctx context.Contex
 	if err := d.probe(ctx); err != nil {
 		return nil, err
 	}
+	if d.envReqs != nil {
+		// The broker asks for env (the gather-env 202 branch).
+		return envReqsResult(d.envReqs), nil
+	}
 	agent.Phase = string(state.PhaseRunning)
 	agent.ContainerStatus = "running"
 	return envReqsResult(nil), nil
+}
+
+func (d *launchProbeDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	d.createCalls++
+	d.capturedAgent = agent
+	if err := d.probe(ctx); err != nil {
+		return nil, err
+	}
+	agent.Phase = string(state.PhaseRunning)
+	agent.ContainerStatus = "running"
+	return nil, nil
+}
+
+func (d *launchProbeDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	d.capturedAgent = agent
+	if err := d.probe(ctx); err != nil {
+		return nil, err
+	}
+	agent.ContainerStatus = "running"
+	return nil, nil
 }
 
 func (d *launchProbeDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
@@ -172,8 +206,19 @@ func requireAllLive(t *testing.T, disp *launchProbeDispatcher, wantCalls int) {
 	require.Len(t, disp.ctxErrs, wantCalls, "dispatch count")
 	for i, err := range disp.ctxErrs {
 		assert.NoError(t, err, "dispatch %d must not follow the canceled request", i)
-		assert.True(t, disp.hadDeadline[i], "dispatch %d must run under syncDispatchTimeout", i)
+		assertSyncDispatchDeadline(t, disp, i)
 	}
+}
+
+// assertSyncDispatchDeadline asserts dispatch i ran under a deadline no
+// later than syncDispatchTimeout from its start: a site that passes the
+// launch ctx instead of the syncDispatch ctx has no deadline, or a later one.
+func assertSyncDispatchDeadline(t *testing.T, disp *launchProbeDispatcher, i int) {
+	t.Helper()
+	require.Greater(t, len(disp.hadDeadline), i)
+	assert.True(t, disp.hadDeadline[i], "dispatch %d must run under syncDispatchTimeout", i)
+	assert.LessOrEqual(t, disp.deadlineIn[i], syncDispatchTimeout, "dispatch %d deadline is later than syncDispatchTimeout", i)
+	assert.Greater(t, disp.deadlineIn[i], syncDispatchTimeout-5*time.Second, "dispatch %d deadline is much earlier than syncDispatchTimeout", i)
 }
 
 func TestSyncLaunch_Create_ClientCancelDuringDispatch_AgentSurvives(t *testing.T) {
@@ -375,4 +420,217 @@ func TestSyncDispatch_DetachedAndBounded(t *testing.T) {
 	})
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorIs(t, dctxErr, context.DeadlineExceeded)
+}
+
+// The gather-env 202 branch: the broker asks for env after the client gave
+// up; the row stays provisioning for the env submit.
+func TestSyncLaunch_Create_GatherEnv202_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	disp.envReqs = &RemoteEnvRequirementsResponse{Needs: []string{"SOME_REQUIRED_KEY"}}
+	srv, s, project := setupCreateAgentServer(t, disp)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "sync-cancel-gather-202", ProjectID: project.ID, Task: "work", GatherEnv: true,
+	})
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	require.NotNil(t, disp.capturedAgent)
+	requireAllLive(t, disp, 1)
+	assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.Zero(t, countCreateCompensations(t, s))
+	got, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseProvisioning), got.Phase)
+}
+
+// The env submit (POST .../env) is where a CLI create (always GatherEnv)
+// often launches: it follows the same rule.
+func TestSyncLaunch_SubmitEnv_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	agent := createSiteAgent(t, s, project, "sync-cancel-env", state.PhaseProvisioning, store.RunIntentRunning)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/env", SubmitEnvRequest{
+		Env: map[string]string{"SOME_REQUIRED_KEY": "v"},
+	})
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	requireAllLive(t, disp, 1)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the post-dispatch write must land despite the cancel")
+}
+
+// The workspace-bootstrap finalize (POST .../workspace/sync-to/finalize on
+// a provisioning agent) dispatches the create: same rule.
+func TestSyncLaunch_WorkspaceBootstrapFinalize_ClientCancelDuringDispatch(t *testing.T) {
+	disp := &launchProbeDispatcher{mode: probeCancelRequest}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetStorage(newContentMockStorage("test-bucket"))
+	agent := createSiteAgent(t, s, project, "sync-cancel-bootstrap", state.PhaseProvisioning, store.RunIntentRunning)
+
+	cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-to/finalize", SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0"},
+	})
+	disp.cancelRequest = cancel
+	rec := serve()
+
+	assert.Equal(t, 1, disp.createCalls)
+	requireAllLive(t, disp, 1)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the post-dispatch write must land despite the cancel")
+}
+
+// Own-deadline cases for the remaining sites: each dispatch ctx is done at
+// syncDispatchTimeout.
+func TestSyncLaunch_OwnDeadline_RemainingSites(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup returns the request to send.
+		setup     func(t *testing.T, s store.Store, project *store.Project) (method, path string, body any)
+		wantCalls int
+		// check runs extra assertions on the outcome.
+		check func(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder)
+	}{
+		{
+			name: "restart-both-legs",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-restart", state.PhaseRunning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/restart", nil
+			},
+			wantCalls: 2,
+			check: func(t *testing.T, _ store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+				assert.Equal(t, 1, disp.stopCalls)
+				assert.Equal(t, 1, disp.startCalls)
+				assert.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+			},
+		},
+		{
+			name: "existing-suspended-resume",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				createSiteAgent(t, s, project, "own-deadline-suspended", state.PhaseSuspended, store.RunIntentStopped)
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-suspended", ProjectID: project.ID, Task: "work"}
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "existing-stopped-resume",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				createSiteAgent(t, s, project, "own-deadline-stopped", state.PhaseStopped, store.RunIntentStopped)
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-stopped", ProjectID: project.ID, Task: "work", Resume: true}
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "existing-provisioning-start",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				createSiteAgent(t, s, project, "own-deadline-provisioning", state.PhaseProvisioning, store.RunIntentStopped)
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-provisioning", ProjectID: project.ID, Task: "work"}
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "provision-only-keeps-row",
+			setup: func(t *testing.T, _ store.Store, project *store.Project) (string, string, any) {
+				return http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: "own-deadline-provision", ProjectID: project.ID, ProvisionOnly: true}
+			},
+			wantCalls: 1,
+			check: func(t *testing.T, s store.Store, disp *launchProbeDispatcher, rec *httptest.ResponseRecorder) {
+				assert.Less(t, rec.Code, 300, rec.Body.String())
+				require.NotNil(t, disp.capturedAgent)
+				_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+				assert.NoError(t, err, "a provision that timed out keeps the row (a warning, as before)")
+			},
+		},
+		{
+			name: "submit-env",
+			setup: func(t *testing.T, s store.Store, project *store.Project) (string, string, any) {
+				a := createSiteAgent(t, s, project, "own-deadline-env", state.PhaseProvisioning, store.RunIntentRunning)
+				return http.MethodPost, "/api/v1/agents/" + a.ID + "/env", SubmitEnvRequest{Env: map[string]string{"K": "v"}}
+			},
+			wantCalls: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shortenSyncDispatchTimeout(t, 50*time.Millisecond)
+			disp := &launchProbeDispatcher{mode: probeBlock}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			method, path, body := tc.setup(t, s, project)
+			rec := doRequest(t, srv, method, path, body)
+
+			require.Len(t, disp.ctxErrs, tc.wantCalls, rec.Body.String())
+			for i, err := range disp.ctxErrs {
+				assert.ErrorIs(t, err, context.DeadlineExceeded, "dispatch %d ctx must be done at its deadline", i)
+			}
+			if tc.check != nil {
+				tc.check(t, s, disp, rec)
+			}
+		})
+	}
+}
+
+// The hub-managed workspace upload runs detached from the client under its
+// own budget: a client that gives up mid-upload does not leave the launch
+// to go ahead with the unswapped hub-local workspace. A failing upload is
+// still only logged, as before, and the create goes ahead.
+func TestSyncLaunch_HubManagedWorkspaceUpload_ClientCancel(t *testing.T) {
+	for _, uploadFails := range []bool{false, true} {
+		name := "upload-succeeds"
+		if uploadFails {
+			name = "upload-fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			disp := &launchProbeDispatcher{mode: probeCancelRequest}
+			srv, s, project := setupCreateAgentServer(t, disp) // hub-managed: no GitRemote.
+			srv.SetStorage(newContentMockStorage("test-bucket"))
+			t.Cleanup(func() {
+				if p, err := hubManagedProjectPath(project.Slug); err == nil {
+					_ = os.RemoveAll(p)
+				}
+			})
+
+			cancel, serve := newCancelableRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "sync-cancel-upload-" + name, ProjectID: project.ID, Task: "work",
+			})
+			var upload ctxObservation
+			prev := syncToGCSForWorkspaceUpload
+			syncToGCSForWorkspaceUpload = func(uctx context.Context, _, _, _ string) error {
+				cancel()
+				upload = observeCtx(uctx)
+				if uploadFails {
+					return errors.New("simulated upload failure")
+				}
+				return nil
+			}
+			t.Cleanup(func() { syncToGCSForWorkspaceUpload = prev })
+			// The probe dispatcher must not cancel again; the upload did.
+			disp.cancelRequest = nil
+			rec := serve()
+
+			require.True(t, upload.called, "fixture check: the upload branch must be reached")
+			assert.NoError(t, upload.err, "the upload must not follow the canceled request")
+			assert.True(t, upload.hasDeadline, "the upload runs under its own budget")
+			assert.Greater(t, upload.budget, time.Minute, "the upload budget is generous")
+
+			require.NotNil(t, disp.capturedAgent, "the launch goes ahead")
+			requireAllLive(t, disp, 1)
+			assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			got, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.AppliedConfig)
+			if uploadFails {
+				assert.Empty(t, got.AppliedConfig.WorkspaceStoragePath, "a failed upload leaves the workspace unswapped, as before")
+			} else {
+				assert.NotEmpty(t, got.AppliedConfig.WorkspaceStoragePath, "the swap write must land despite the cancel")
+				assert.NotEmpty(t, disp.capturedAgent.AppliedConfig.WorkspaceStoragePath, "the launch uses the uploaded workspace")
+			}
+		})
+	}
 }
