@@ -163,13 +163,13 @@ brokers must mount the same NFS export, the agent's workspace must be on
 that export, and both brokers must support agent move and be online. The
 workspace stays where it is; the agent home is regenerated on the target,
 and the handoff carries continuity. The CLI runs a dry run first: an
-ineligible move is refused before anything changes, with the failing check
-named (404 for a broker you cannot see, 409 for a different export, 412 for
-a broker without agent move). Add --dry-run to see every check. Targeting a
-broker that does not serve the project yet needs broker read, dispatch and
-project update permissions; an agent can move itself only to a broker that
+ineligible move is refused before anything changes, and the CLI prints the
+failing check (a broker you cannot see is reported as not found). Add
+--dry-run to see every check. Targeting a broker that does not serve the
+project yet needs broker read and project update, and dispatch unless the
+broker auto-provides; an agent can move itself only to a broker that
 already serves its project. Patch flags combine with --broker. See "Moving
-an agent to another broker" in the multi-broker docs.`,
+an Agent to Another Runtime Broker" in the multi-broker docs.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")

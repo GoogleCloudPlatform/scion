@@ -136,13 +136,15 @@ func TestPlatformSkillsFS_ScionAgentManageLifecycleDescribesMove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading embedded scion-agent-manage lifecycle reference: %v", err)
 	}
-	content := string(data)
+	// Compare with whitespace collapsed, so a reflow does not break the pins.
+	content := strings.Join(strings.Fields(string(data)), " ")
 	for _, want := range []string{
 		"### Moving to another Runtime Broker",
 		"scion reincarnate <agent> --broker <name|id>",
 		"**same NFS export**",
 		"already serves your project",
-		"The CLI does not set\n  your status",
+		"The CLI does not set your status",
+		"An agent never links a new broker",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("embedded scion-agent-manage/references/agent-lifecycle.md does not contain %q", want)

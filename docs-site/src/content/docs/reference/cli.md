@@ -570,9 +570,13 @@ stops there, before anything changes. With `--dry-run` the CLI only prints the v
 When the checks pass, the Hub accepts the move with `202 Accepted` and runs it in the background. It
 stops the agent on the source, moves its quota to the target, provisions it on the target (which first
 confirms through its own mount that the workspace is there), starts the new generation with the
-preamble and handoff, and then removes the agent's local state from the source. A failure before the
-new generation is running on the target rolls the move back: the agent is left on the source, not
-running, with its previous configuration and workspace, and you can start it again or retry.
+preamble and handoff, and then removes the agent's local state from the source. A failure in these
+steps does not come back to the CLI, which already has its `202`: the agent goes to the `error`
+phase, and its status message gives the reason. A failure after the agent is assigned to the target
+and before the new generation is running rolls the move back: the agent is left stopped on the
+source, in the `error` phase, with its previous configuration and workspace, and you can start it
+again or retry. If the target's start fails in a way that may have left a container, the agent stays
+on the target in the `error` phase instead.
 
 A target you cannot see is reported as not found (`404 runtime_broker_not_found`), and a name that
 matches more than one Runtime Broker returns `409 runtime_broker_ambiguous` (use the ID). A target that
@@ -580,7 +584,7 @@ is the agent's current Runtime Broker is a plain reincarnation. If the CLI says 
 support `--broker`, upgrade the Hub.
 
 A self-migration with `--broker` follows the same contract as any self-migration: the CLI prints that
-the container will be stopped shortly, and does not change the agent's status. An agent can move itself
+the container will be stopped shortly, and does not set a status such as `blocked`. An agent can move itself
 only to a Runtime Broker that already serves its project.
 
 ## Configuration & Workspace

@@ -29,12 +29,21 @@ keeping its identity and its workspace (uncommitted work included). Check first 
   (`403`: ask a user). Follow the five-line contract in `--help`. The CLI does not set
   your status; it only prints that the container will be stopped shortly, so do nothing
   after the call.
-- **Moving another agent:** a broker you cannot see returns `404`. A broker that does
-  not serve the project yet needs a signed-in user with broker read, broker dispatch
-  (unless the broker auto-provides) and project update; a user access token can only
-  move to a broker that already serves the project and auto-provides.
-- **Failure:** a move that fails before the new generation runs rolls back; the agent is
-  left on the source, not running, with its workspace intact. Start it or retry.
+- **Moving another agent (as an agent):** for example, a coordinator moving its child.
+  You need lifecycle permission on that agent. The target must already serve the
+  project, and must auto-provide unless your scopes include `project:agent:create`.
+  An agent never links a new broker to the project; a broker you cannot see returns
+  `404`.
+- **Moving another agent (as a user):** reaching a broker that does not serve the
+  project yet needs a signed-in user with broker read, project update, and broker
+  dispatch unless the broker auto-provides. A user access token can only reach brokers
+  that auto-provide.
+- **Failure:** the move runs in the background after the request is accepted, so a
+  failure shows as the agent in the `error` phase with the reason in its status
+  message. A failure after the agent is assigned to the target and before the new
+  generation runs rolls back: the agent is left stopped on the source, with its
+  workspace intact. Start it or retry. If the target's start may have left a container,
+  the agent stays on the target in the `error` phase instead.
 
 ## Default: delete when done
 
