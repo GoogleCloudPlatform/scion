@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -679,7 +681,8 @@ var templatesSyncCmd = &cobra.Command{
 	Use:   "sync [template]",
 	Short: "Create or update a template in the Hub (Hub only)",
 	Long: `Sync a local template to the Hub. Creates the template if it doesn't exist,
-or updates it with any changed files if it does.
+or updates it with any changed files if it does. Syncing an existing template
+mirrors the local directory: files deleted locally are removed from the Hub copy.
 
 The harness type is automatically detected from the template's configuration file.
 Use the root --global flag to sync to global scope instead of project scope.
@@ -1003,14 +1006,16 @@ func pullTemplateFromHubMatch(hubCtx *HubContext, match *TemplateMatch, toPath s
 }
 
 // isTemplateNoFilesError reports whether err is the Hub's download-URL
-// rejection for a template record that has no files. The Hub embeds the
-// template name and ID in the message ("template NAME (ID) has no files ..."),
-// so only the fixed suffix is matched.
+// rejection for a template record that has no files: a validation_error API
+// error whose message contains "has no files". The Hub embeds the template
+// name and ID in the message ("template NAME (ID) has no files ..."), so
+// only the fixed part is matched.
 func isTemplateNoFilesError(err error) bool {
-	if err == nil {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
 		return false
 	}
-	return strings.Contains(err.Error(), "has no files")
+	return apiErr.Code == apiclient.ErrCodeValidationError && strings.Contains(apiErr.Message, "has no files")
 }
 
 // syncTemplateToHub creates or updates a template in the Hub.

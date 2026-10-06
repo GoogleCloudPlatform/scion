@@ -2625,34 +2625,57 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 		return
 	}
 
-	// Show discovered templates
-	fmt.Printf("\nFound %d project template(s) not yet synced to Hub:\n", len(projectTemplates))
-	for _, t := range projectTemplates {
-		fmt.Printf("  - %s\n", t.Name)
-	}
-
-	if !hubsync.ConfirmAction("Sync these templates to the Hub?", true, autoConfirm) {
-		fmt.Println("Skipping template sync.")
-		fmt.Println("Run 'scion templates sync --all' to upload project templates later.")
-		return
-	}
-
 	hubCtx, err := templateSyncHubContext(projectPath, endpoint, projectID, isGlobal)
 	if err != nil {
 		fmt.Printf("Warning: %v\n", err)
 		return
 	}
 
+	// Offer only templates the Hub does not have yet. Syncing one that
+	// already exists mirrors the local directory, which also removes files
+	// added on the Hub, so that is left to an explicit templates sync.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	missing, existing, err := splitTemplatesByHubPresence(ctx, hubCtx, projectTemplates)
+	cancel()
+	if err != nil {
+		fmt.Printf("Warning: skipping template sync: %v\n", err)
+		fmt.Println("Run 'scion templates sync <name>' to upload project templates.")
+		return
+	}
+
+	if len(existing) > 0 {
+		fmt.Printf("\nSkipping %d project template(s) already on the Hub:\n", len(existing))
+		for _, t := range existing {
+			fmt.Printf("  - %s\n", t.Name)
+		}
+		fmt.Println("Run 'scion templates sync <name>' to mirror one to the Hub, including removing files deleted locally.")
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	fmt.Printf("\nFound %d project template(s) not yet on the Hub:\n", len(missing))
+	for _, t := range missing {
+		fmt.Printf("  - %s\n", t.Name)
+	}
+
+	if !hubsync.ConfirmAction("Upload these templates to the Hub?", true, autoConfirm) {
+		fmt.Println("Skipping template sync.")
+		fmt.Println("Run 'scion templates sync <name>' to upload project templates later.")
+		return
+	}
+
 	fmt.Println("\nSyncing project templates to Hub...")
 	var synced int
-	for _, tpl := range projectTemplates {
+	for _, tpl := range missing {
 		harnessType, err := detectHarnessType(tpl)
 		if err != nil {
 			fmt.Printf("  %s: skipped (failed to detect harness: %v)\n", tpl.Name, err)
 			continue
 		}
 
-		// Use force=false — don't overwrite existing Hub templates
+		// Only templates not yet on the Hub are synced here, so this
+		// creates them and never overwrites an existing Hub template.
 		err = syncTemplateToHub(hubCtx, tpl.Name, tpl.Path, "project", harnessType)
 		if err != nil {
 			fmt.Printf("  %s: failed: %v\n", tpl.Name, err)

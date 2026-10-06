@@ -30,8 +30,8 @@ import (
 
 // TestResolveProvidePath_Remote covers ptone/scion#3157: for a remote broker
 // an explicit --path names a directory on the broker's host, so it is sent
-// unchanged without consulting this host's filesystem, and only a
-// non-absolute path is refused.
+// as given without consulting this host's filesystem, and a non-absolute
+// path is refused.
 func TestResolveProvidePath_Remote(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -217,5 +217,41 @@ func TestRunBrokerProvide_RemoteExplicitPathSentUnchanged(t *testing.T) {
 				t.Errorf("registered path %q, want %q", *gotPath, want)
 			}
 		})
+	}
+}
+
+// TestProvidePathSummary checks that provide reports the path it sent as
+// requested, and labels a remote broker's path with that broker rather than
+// calling it local.
+func TestProvidePathSummary(t *testing.T) {
+	if got, want := providePathSummary("/srv/p", "remote-host", true), "Requested project path on remote-host: /srv/p"; got != want {
+		t.Errorf("remote summary = %q, want %q", got, want)
+	}
+	if got, want := providePathSummary("/home/u/p/.scion", "local-host", false), "Requested local project path: /home/u/p/.scion"; got != want {
+		t.Errorf("local summary = %q, want %q", got, want)
+	}
+}
+
+// TestResolveProvidePath_RemoteCleansAndRefusesDotScion checks that a remote
+// path is cleaned, and that a path naming a .scion directory is refused with
+// a hint to pass the project root that contains it.
+func TestResolveProvidePath_RemoteCleansAndRefusesDotScion(t *testing.T) {
+	got, err := resolveProvidePath("/srv/a/../proj/", "proj", "proj", true)
+	if err != nil {
+		t.Fatalf("resolveProvidePath: %v", err)
+	}
+	if got != "/srv/proj" {
+		t.Errorf("got %q, want the cleaned /srv/proj", got)
+	}
+
+	for _, p := range []string{"/srv/proj/.scion", "/srv/proj/.scion/", "/srv/proj/./.scion"} {
+		_, err := resolveProvidePath(p, "proj", "proj", true)
+		if err == nil {
+			t.Errorf("%q: expected a .scion refusal", p)
+			continue
+		}
+		if !strings.Contains(err.Error(), "project root") || !strings.Contains(err.Error(), "/srv/proj") {
+			t.Errorf("%q: error %q should point at the project root /srv/proj", p, err)
+		}
 	}
 }

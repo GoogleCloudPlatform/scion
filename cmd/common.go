@@ -678,7 +678,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 		inlineCfg.Model = normalizedModel
 	}
-	if thinkingLevelFlag != "" {
+	// An explicitly set --thinking-level is always parsed, so an empty
+	// value fails instead of being treated as unset.
+	if thinkingLevelFlag != "" || (cmd != nil && cmd.Flags().Changed("thinking-level")) {
 		val, err := parseThinkingLevel(thinkingLevelFlag)
 		if err != nil {
 			return err
