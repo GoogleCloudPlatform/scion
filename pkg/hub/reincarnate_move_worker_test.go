@@ -992,3 +992,79 @@ func TestReincarnateMove_PatchedMoveRollbackRestoresPrePatchConfig(t *testing.T)
 	require.NoError(t, err)
 	assertRolledBackToSource(t, f, r, a) // includes Image == old-image:v1
 }
+
+// makePassthroughAgent gives the fixture agent a GCP passthrough identity.
+func makePassthroughAgent(t *testing.T, f *moveFixture) {
+	t.Helper()
+	ctx := context.Background()
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	a.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough}
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	f.agent = a
+}
+
+// Patch-merge Nit 1: the move's access checks judge the patched config. A
+// passthrough agent refused at the target's passthrough gate passes once
+// the same request patches in a service account (assign mode).
+func TestReincarnateMove_ServiceAccountPatchReplacesPassthroughForMoveChecks(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	makePassthroughAgent(t, f)
+	sa := patchTestSA(t, f.s, f.project.ID, true, "someone")
+
+	rec := reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusForbidden, rec.Code, "precondition: the passthrough gate refuses the move: %s", rec.Body.String())
+	_, _, v := decodeMoveRefusal(t, rec)
+	assertVerdictFailedAt(t, v, moveCheckAccess)
+
+	rec = reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID, ServiceAccount: sa.ID})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.MoveVerdict)
+	assert.True(t, resp.MoveVerdict.Eligible)
+	assert.Contains(t, resp.Plan.Patched, "serviceAccount")
+}
+
+// Patch-merge Nit 2: the patch gates run on moves too, before anything is
+// stopped or recorded, dry run or not: --role above the project maximum
+// and a --service-account the project cannot use are refused.
+func TestReincarnateMove_PatchGatesRunOnMoves(t *testing.T) {
+	cases := []struct {
+		name     string
+		setup    func(t *testing.T, f *moveFixture) ReincarnateAgentRequest
+		status   int
+		contains string
+	}{
+		{name: "role above the project maximum", setup: func(t *testing.T, f *moveFixture) ReincarnateAgentRequest {
+			p, err := f.s.GetProject(context.Background(), f.project.ID)
+			require.NoError(t, err)
+			p.Annotations = map[string]string{projectSettingMaxAgentRole: string(AgentRoleBaseline)}
+			require.NoError(t, f.s.UpdateProject(context.Background(), p))
+			return ReincarnateAgentRequest{Role: "full"}
+		}, status: http.StatusForbidden, contains: "project maximum"},
+		{name: "another project's service account", setup: func(t *testing.T, f *moveFixture) ReincarnateAgentRequest {
+			return ReincarnateAgentRequest{ServiceAccount: patchTestSA(t, f.s, tid("some-other-project"), true, "someone").ID}
+		}, status: http.StatusBadRequest, contains: msgSANotAvailableInProject},
+	}
+	for _, tc := range cases {
+		for _, dryRun := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s dryRun=%t", tc.name, dryRun), func(t *testing.T) {
+				f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+				prepareMoveWorkerFixture(t, f)
+				body := tc.setup(t, f)
+				body.TargetBroker, body.DryRun = f.dst.ID, dryRun
+				count := f.agentCount(t)
+
+				rec := reincarnateAsDev(t, f.srv, f.agent.ID, body)
+				require.Equal(t, tc.status, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), tc.contains)
+				f.assertNoMoveSideEffects(t, count)
+				provisions, deletes, starts := f.disp.moveSnapshot()
+				assert.Empty(t, provisions)
+				assert.Empty(t, deletes)
+				assert.Empty(t, starts)
+			})
+		}
+	}
+}
