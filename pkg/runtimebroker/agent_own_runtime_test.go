@@ -1251,11 +1251,24 @@ func TestStopAgent_SameNamedPodsInTwoNamespaces(t *testing.T) {
 			}
 		})
 	}
-	t.Run("run-scoped stop of a third run is refused", func(t *testing.T) {
+	t.Run("run-scoped stop of a third run is the run-mismatch 404", func(t *testing.T) {
+		// Every listed pod belongs to another run: a mismatch, as for a
+		// run-scoped delete, not an ambiguity. The two pods hold different
+		// runs, so no single current run is reported.
 		f := newFixture(t)
 		w := f.do(t, http.MethodPost, stopPath+"&runId=run-3")
-		if w.Code < 400 {
-			t.Fatalf("stop: status = %d, body %s; want a refusal", w.Code, w.Body.String())
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("stop: status = %d, body %s; want 404", w.Code, w.Body.String())
+		}
+		var body ErrorResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if body.Error.Code != api.BrokerErrorCodeRunMismatch {
+			t.Errorf("code = %q, want %q", body.Error.Code, api.BrokerErrorCodeRunMismatch)
+		}
+		if got, ok := body.Error.Details[api.BrokerErrorDetailCurrentRunID]; ok {
+			t.Errorf("details currentRunId = %v, want it omitted (two runs)", got)
 		}
 		if !f.podExistsIn(t, ownRTProfileNS) || !f.podExistsIn(t, nsB) {
 			t.Fatal("a stop of another run removed a pod")

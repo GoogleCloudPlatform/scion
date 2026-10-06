@@ -215,3 +215,33 @@ func TestDedupeByContainerID_OperationID(t *testing.T) {
 		})
 	}
 }
+
+// A run-scoped Manager.Stop of a legacy entry with no run label sends the
+// requested run to the runtime (as the broker's run-scoped stop and delete
+// do), so a run-checking runtime still refuses a pod another run recreated;
+// a labelled entry keeps its own run.
+func TestManagerStop_RunScoped_LegacyEntryCarriesRequestedRun(t *testing.T) {
+	for _, tc := range []struct{ name, entryRun, want string }{
+		{"legacy entry", "", "run-req"},
+		{"labelled entry", "run-req", "run-req"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []runtime.RunRef
+			rt := &runtime.MockRuntime{
+				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{{Name: "dev", ContainerID: "cid-1", RunID: tc.entryRun}}, nil
+				},
+				StopFunc: func(_ context.Context, ref runtime.RunRef) error {
+					got = append(got, ref)
+					return nil
+				},
+			}
+			if err := NewManager(rt).Stop(context.Background(), "dev", "", "run-req"); err != nil {
+				t.Fatalf("stop: %v", err)
+			}
+			if len(got) != 1 || got[0] != (runtime.RunRef{ID: "cid-1", RunID: tc.want}) {
+				t.Errorf("runtime Stop refs = %+v, want one {cid-1 %s}", got, tc.want)
+			}
+		})
+	}
+}

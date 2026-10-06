@@ -401,7 +401,7 @@ func TestRunID_E2E_StaleStopDoesNotMarkRowStopped(t *testing.T) {
 	}
 }
 
-// B1 (review round 1): the producers of queued stop intents write the run.
+// The producers of queued stop intents write the run.
 // An offline-broker stop queues a dispatch row whose args carry the row's
 // run ID.
 func TestQueueOfflineStop_IntentCarriesRunID(t *testing.T) {

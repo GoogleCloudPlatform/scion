@@ -372,7 +372,7 @@ func TestStartTracker_RunSelection(t *testing.T) {
 	}
 }
 
-// Review round (merge) F1: a stale start of run-a (its hub cancel lost)
+// A stale start of run-a (its hub cancel lost)
 // and the current run-b start are both tracked. A stop for run-b with no
 // container yet cancels run-b's start and is accepted; run-a's start, of
 // another run, is left alone. Never a 404 that would lose the stop.
@@ -437,7 +437,7 @@ func TestStopAgent_OwnStartTrackedWhileOtherRunHoldsName(t *testing.T) {
 	}
 }
 
-// Review round 3, B2: a stop for run-b whose only in-flight work is its
+// A stop for run-b whose only in-flight work is its
 // registered async launch, with run-a's container holding the name, wakes
 // that launch; waking it counts as cancelling its own run, so the stop is
 // accepted (202), and run-a's container is not stopped.
@@ -461,7 +461,7 @@ func TestStopAgent_OwnLaunchWokenWhileOtherRunHoldsName(t *testing.T) {
 	}
 }
 
-// N2: a launch with no run recorded never suppresses the refusal of a stale
+// A launch with no run recorded never suppresses the refusal of a stale
 // stop: with run-b's container holding the name, a stop for run-a gets the
 // 404 before any cancel, the run-less launch is not woken, and nothing is
 // stopped.
@@ -510,7 +510,7 @@ func newHookListServer(t *testing.T) (*Server, *hookListManager) {
 	return New(cfg, m, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}), m
 }
 
-// N1: run-b's start finishes, creating c-b, between the stop's first lookup
+// Run-b's start finishes, creating c-b, between the stop's first lookup
 // and its cancel. The run-scoped stop always resolves again after the
 // cancel step, so it stops c-b instead of answering "not found".
 func TestStopAgent_OwnStartFinishesBetweenLookupAndCancel(t *testing.T) {
@@ -573,7 +573,7 @@ func TestStopAgent_OwnLaunchRegisteredWithOtherRunsStartTracked(t *testing.T) {
 	assertStartNotCancelled(t, srv, relA, doneA)
 }
 
-// F3: a stale run-a stop that matches run-b's container while a start with
+// A stale run-a stop that matches run-b's container while a start with
 // no run recorded is in flight gets the 404 before any cancel: the run-less
 // start is not cancelled, and nothing is stopped.
 func TestStopAgent_StaleRunIDMismatchBeforeCancellingRunlessStart(t *testing.T) {
@@ -591,7 +591,7 @@ func TestStopAgent_StaleRunIDMismatchBeforeCancellingRunlessStart(t *testing.T) 
 	assertStartNotCancelled(t, srv, release, done)
 }
 
-// F4: a legacy stop (no runId) cancels and waits for the in-flight start
+// A legacy stop (no runId) cancels and waits for the in-flight start
 // before it looks the agent up, so it sees, and stops, the container the
 // start's cleanup left behind (GoogleCloudPlatform/scion#2482's order).
 func TestStopAgent_LegacyLooksUpAfterCancelAndWait(t *testing.T) {
@@ -610,7 +610,7 @@ func TestStopAgent_LegacyLooksUpAfterCancelAndWait(t *testing.T) {
 	}
 }
 
-// F2: the runId query parameter is recorded when the start is tracked, so a
+// The runId query parameter is recorded when the start is tracked, so a
 // stale stop that arrives while the start is still reading its body gets
 // the 404 and cancels nothing.
 func TestStopAgent_StaleStopDuringStartBodyRead(t *testing.T) {
@@ -653,7 +653,7 @@ func TestStopAgent_StaleStopDuringStartBodyRead(t *testing.T) {
 	}
 }
 
-// F2: when the runId query parameter and the body differ, the body's run is
+// When the runId query parameter and the body differ, the body's run is
 // the one recorded on the tracked start (it is the run StartOptions carries;
 // see TestRunID_ThreadedIntoStartOptions); an empty query parameter behaves
 // as an absent one.

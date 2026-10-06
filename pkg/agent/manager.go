@@ -377,7 +377,15 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		if !found {
 			return fmt.Errorf("agent '%s' (run %s): %w", agentID, runID, ErrStopRunNotFound)
 		}
-		return m.Runtime.Stop(ctx, runtime.RunRef{ID: runtime.AgentOperationID(target), RunID: target.RunID})
+		// A legacy entry with no run label (admitted by filterAgentsByRun)
+		// carries the requested run, as the broker's run-scoped stop and
+		// delete do, so a run-checking runtime still refuses a pod another
+		// run recreated rather than stopping it by name.
+		ref := runtime.RunRef{ID: runtime.AgentOperationID(target), RunID: target.RunID}
+		if ref.RunID == "" {
+			ref.RunID = runID
+		}
+		return m.Runtime.Stop(ctx, ref)
 	}
 	if err == nil {
 		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))

@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -334,7 +335,7 @@ func TestLaunchRegistry_InFlightOtherRun(t *testing.T) {
 
 // The mismatch 404 carries api.BrokerErrorCodeRunMismatch and names both
 // the requested run and the run holding the name, whether that is a runtime
-// entry or an in-flight launch (review N3, nit 1).
+// entry or an in-flight launch.
 func TestStopAgent_RunMismatch404Details(t *testing.T) {
 	check := func(t *testing.T, rec *httptest.ResponseRecorder, wantCurrent string) {
 		t.Helper()
@@ -463,7 +464,7 @@ func TestStopAgent_RuntimeRunMismatch_AfterOwnCancel202(t *testing.T) {
 }
 
 // A project-blind run-scoped stop with nothing of the requested run never
-// passes the bare slug to the runtime (review N1): it takes the not-found
+// passes the bare slug to the runtime: it takes the not-found
 // path. Without a runId the legacy bare-slug pass-through is unchanged.
 func TestStopAgent_RunIDWithoutProjectNeverStopsBareSlug(t *testing.T) {
 	f := newStopRunFixture(t, "")
@@ -486,7 +487,7 @@ func TestStopAgent_RunIDWithoutProjectNeverStopsBareSlug(t *testing.T) {
 }
 
 // Restart's stop leg stops the entry it resolved, with that entry's run on
-// the ref (review round 2, NB1), not the new run the restart starts and
+// the ref, not the new run the restart starts and
 // not an empty run.
 func TestRestartAgent_StopLegCarriesEntryRun(t *testing.T) {
 	f := newStopRunFixture(t, "")
@@ -621,5 +622,55 @@ func TestPreferRunEntries(t *testing.T) {
 				t.Errorf("preferRunEntries(%q) = %s, want %s", tc.run, got, tc.want)
 			}
 		})
+	}
+}
+
+// runAgentMatchFrom: with a run, only distinct entries of other runs give
+// otherRunsHoldNameError (the run-mismatch answer), naming the run when
+// they share one; an own-run or legacy entry is matched; without a run an
+// ambiguity stays an ambiguity.
+func TestRunAgentMatchFrom(t *testing.T) {
+	pod := func(ns, run string) api.AgentInfo {
+		return api.AgentInfo{Name: "dev", ContainerID: "dev", RunID: run,
+			Kubernetes: &api.AgentK8sMetadata{Namespace: ns, PodName: "dev"}}
+	}
+	for _, tc := range []struct {
+		name        string
+		agents      []api.AgentInfo
+		run         string
+		wantOther   bool
+		wantCurrent string
+		wantMatch   string
+	}{
+		{"two other runs", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-2")}, "run-3", true, "", ""},
+		{"one other run in two namespaces", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-1")}, "run-3", true, "run-1", ""},
+		{"own run beside another", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-2")}, "run-2", false, "", "run-2"},
+		{"legacy beside another run", []api.AgentInfo{pod("a", "run-1"), pod("b", "")}, "run-3", false, "", ""},
+		{"single other-run entry is a match (entry check refuses it)", []api.AgentInfo{pod("a", "run-1")}, "run-3", false, "", "run-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := runAgentMatchFrom("dev", tc.run, tc.agents, nil, nil)
+			var other *otherRunsHoldNameError
+			if got := errors.As(err, &other); got != tc.wantOther {
+				t.Fatalf("otherRunsHoldNameError = %v (err %v), want %v", got, err, tc.wantOther)
+			}
+			if tc.wantOther {
+				if other.currentRunID != tc.wantCurrent {
+					t.Errorf("currentRunID = %q, want %q", other.currentRunID, tc.wantCurrent)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if m.entry.RunID != tc.wantMatch {
+				t.Errorf("matched run = %q, want %q", m.entry.RunID, tc.wantMatch)
+			}
+		})
+	}
+	_, err := runAgentMatchFrom("dev", "", []api.AgentInfo{pod("a", "run-1"), pod("b", "run-2")}, nil, nil)
+	var other *otherRunsHoldNameError
+	if err == nil || errors.As(err, &other) || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("no run: err = %v, want the ambiguity error", err)
 	}
 }

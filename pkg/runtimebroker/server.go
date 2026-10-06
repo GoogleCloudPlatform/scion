@@ -1623,7 +1623,7 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 		if err != nil {
 			return agentMatch{}, err
 		}
-		return agentMatchFrom(slug, preferRunEntries(agents, runID), own.mgr, own.rt)
+		return runAgentMatchFrom(slug, runID, agents, own.mgr, own.rt)
 	}
 
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
@@ -1678,7 +1678,53 @@ func (s *Server) lookupAgentMatchForRun(ctx context.Context, slug, projectID, ru
 		}
 	}
 
-	return agentMatchFrom(slug, preferRunEntries(agents, runID), matchManager, matchRuntime)
+	return runAgentMatchFrom(slug, runID, agents, matchManager, matchRuntime)
+}
+
+// allOtherRuns reports whether every entry is labelled with a run other
+// than runID (none is the requested run's, and none is a legacy entry).
+func allOtherRuns(agents []api.AgentInfo, runID string) bool {
+	for _, a := range agents {
+		if a.RunID == "" || a.RunID == runID {
+			return false
+		}
+	}
+	return true
+}
+
+// otherRunsHoldNameError is a run-scoped lookup's result when every entry
+// listed for the slug is labelled with a run other than the requested one
+// and more than one distinct entry is listed (for example same-named pods
+// of two other runs in two namespaces). Nothing of the requested run
+// exists, so this is a run mismatch, as for a run-scoped delete
+// (filterDeleteCandidatesByRun), not an ambiguity. currentRunID is the run
+// holding the name when all those entries share one, else empty.
+type otherRunsHoldNameError struct {
+	slug         string
+	currentRunID string
+}
+
+func (e *otherRunsHoldNameError) Error() string {
+	return fmt.Sprintf("agent '%s': every listed entry belongs to another run", e.slug)
+}
+
+// runAgentMatchFrom is agentMatchFrom for a lookup naming run runID (empty:
+// exactly agentMatchFrom): the entries are narrowed by preferRunEntries,
+// and when only distinct entries of other runs remain, the result is an
+// otherRunsHoldNameError rather than an ambiguity error.
+func runAgentMatchFrom(slug, runID string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
+	agents = preferRunEntries(agents, runID)
+	if runID != "" && len(dedupeAgentEntries(agents)) > 1 && allOtherRuns(agents, runID) {
+		current := agents[0].RunID
+		for _, a := range agents[1:] {
+			if a.RunID != current {
+				current = ""
+				break
+			}
+		}
+		return agentMatch{}, &otherRunsHoldNameError{slug: slug, currentRunID: current}
+	}
+	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
 }
 
 // preferRunEntries narrows the entries listed for a run-scoped lookup with

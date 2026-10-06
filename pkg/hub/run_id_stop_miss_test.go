@@ -31,8 +31,8 @@ import (
 
 // Every caller that records a stop leaves a row that moved to a newer run
 // untouched: no status write, the reservation held, nothing published
-// (ptone/scion#2550, review round 4 N1). The restart and suspend cases
-// assert final row and credential state (B1-R, N3).
+// (ptone/scion#2550). The restart and suspend cases
+// assert final row and credential state.
 
 // runSwapStopDispatcher answers a stop with success after moving the row to
 // run-new, running, as when a newer run is minted while the stop for the
@@ -198,7 +198,7 @@ func restartQuotaAgent(t *testing.T, name string) (*Server, store.Store, *store.
 	return srv, s, agent
 }
 
-// B1-R: a restart whose stop leg succeeds and whose start leg fails while
+// A restart whose stop leg succeeds and whose start leg fails while
 // keeping the run it minted (the broker attempted the start, or a transport
 // error) records the agent stopped under that run and releases its
 // reservation.
@@ -240,7 +240,7 @@ func TestRestartStartLegFailureKeepingMintedRunRecordsStopped(t *testing.T) {
 	}
 }
 
-// B1-R variant: another caller's run lands on the row during the failed
+// Variant: another caller's run lands on the row during the failed
 // start leg. The restart records nothing for it and keeps the reservation.
 func TestRestartStartLegFailureWithOtherRunLandedRecordsNothing(t *testing.T) {
 	srv, s, agent := restartQuotaAgent(t, "restart-other-run")
@@ -284,7 +284,7 @@ func (f *failSuspendWriteStore) UpdateAgentStatus(ctx context.Context, id string
 	return f.Store.UpdateAgentStatus(ctx, id, upd)
 }
 
-// N3: when the suspended status write fails, the stopped container's
+// When the suspended status write fails, the stopped container's
 // credentials are still revoked while the row holds the stopped run, and
 // left alone when the row moved to a newer run.
 func TestSuspendWriteFailureRevokesOnlyForTheStoppedRun(t *testing.T) {

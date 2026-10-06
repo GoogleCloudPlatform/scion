@@ -2875,7 +2875,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			// the name was left running. Kubernetes reports this in two
 			// ways: the pod read already belonged to another run (nothing
 			// deleted), or the pod was replaced between its read and its
-			// delete, in which case the requested run's own Secrets and
+			// delete, in which case the resolved entry's own Secrets and
 			// SecretProviderClass were already removed. Nothing of another
 			// run is touched either way. The runtime's error names the run
 			// now holding the name; the 404 leaves currentRunId out, since
@@ -2968,9 +2968,13 @@ const (
 // that start rather than lose it. A start of another run overlapping it
 // (for example one whose hub cancel was lost) does not change that.
 //
+// A run-scoped lookup that listed only distinct entries of other runs
+// (otherRunsHoldNameError) is a mismatch too, with either check: nothing
+// of the requested run exists, as for a run-scoped delete.
+//
 // A legacy entry or launch with no run label matches by name, as a
-// run-scoped delete does. A lookup error is never a mismatch here; the
-// caller reports it as before. current is the run that holds the name
+// run-scoped delete does. Any other lookup error is never a mismatch here;
+// the caller reports it as before. current is the run that holds the name
 // (the entry's, or the in-flight launch's), reported to the hub.
 func (s *Server) stopRunMismatch(key launchKey, runID string, m agentMatch, lookupErr error, check stopRunCheck) (current string, mismatch bool) {
 	if check == stopCheckWithInFlight && (s.startsInFlight.hasRun(key, runID) || s.launchRegistry.runInFlight(key, runID)) {
@@ -2978,6 +2982,10 @@ func (s *Server) stopRunMismatch(key launchKey, runID string, m agentMatch, look
 	}
 	if m.matched {
 		return m.entry.RunID, m.entry.RunID != "" && m.entry.RunID != runID
+	}
+	var otherRuns *otherRunsHoldNameError
+	if errors.As(lookupErr, &otherRuns) {
+		return otherRuns.currentRunID, true
 	}
 	if check == stopCheckEntryOnly {
 		return "", false
@@ -3037,9 +3045,10 @@ func (s *Server) trackedStartRunID(id, projectID, queryRunID, bodyRunID string) 
 // run-scoped delete. A run-scoped stop therefore acts on an unlabelled pod
 // exactly as a run-scoped delete does: the pod matches by name (a legacy
 // pod predates run IDs), and the runtime's run-checked path still applies,
-// so a pod recreated by another run between the lookup and the stop (now
-// labelled with that run, or under a new UID) is left alone with
-// ErrRunMismatch rather than stopped by name.
+// so a pod recreated by another run after the lookup is left alone with
+// ErrRunMismatch rather than stopped by name: by its run label when it was
+// replaced before the runtime read it, or by the UID precondition when it
+// was replaced between the runtime's read and delete.
 func resolvedStopRef(target string, m agentMatch, requestRunID string) scionrt.RunRef {
 	ref := scionrt.RunRef{ID: target}
 	if m.containerID == target {
