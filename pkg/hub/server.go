@@ -621,6 +621,17 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// Image is the user's explicit image (explicitDispatchImage), already
+	// registry-rewritten; empty when the user chose none. The broker applies
+	// it as the top-tier image (opts.Image), the same as create's
+	// Config.Image, so a start or restart ranks the image exactly as the
+	// create did (ptone/scion#1799). A template-derived image is never sent.
+	Image string
+	// SharedWorkspace is set on a restart (the start request already
+	// carries it as its own field) so the broker reads and writes a
+	// shared-workspace agent's state under the same broker-side agents root
+	// as its start (ptone/scion#1799).
+	SharedWorkspace bool
 	// TemplateName is the agent's template slug. The broker uses it for
 	// naming only (the scion.template label, SCION_TEMPLATE_NAME and
 	// agent-info.json), never to locate or load a template. A content hash
@@ -663,6 +674,12 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.Image != "" {
+		payload["image"] = extras.Image
+	}
+	if extras.SharedWorkspace {
+		payload["sharedWorkspace"] = true
 	}
 	if extras.TemplateName != "" && !transfer.IsContentHash(extras.TemplateName) {
 		payload["templateName"] = extras.TemplateName
@@ -1254,6 +1271,11 @@ type RemoteAgentInfo struct {
 	// the runtime entry the broker created or found (ptone/scion#2550).
 	// Older brokers omit it.
 	RunID string `json:"runId,omitempty"`
+	// HarnessConfigSource mirrors runtimebroker.AgentResponse.HarnessConfigSource:
+	// which resolution branch supplied the harness-config (hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
+	// (ptone/scion#620). Older brokers omit it.
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	// WorkspacePlacement mirrors runtimebroker.AgentResponse.WorkspacePlacement:
 	// where the start this answers placed the agent's workspace. Empty
 	// when no start resolved it (provision-only, older brokers).

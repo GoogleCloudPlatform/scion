@@ -50,6 +50,35 @@ type ContainerScriptHarness struct {
 	// agentHome is captured during Provision() so that GetCommand() can read
 	// the staged system prompt file without changing the Harness interface.
 	agentHome string
+
+	// recordedSecrets names the secret files the control plane restored into
+	// .scion/harness/secrets/ from its broker-side record before
+	// ApplyAuthSettings (SetRecordedSecrets). Only these are carried into
+	// auth-candidates.json besides the secrets staged from the current
+	// resolution.
+	recordedSecrets map[string]bool
+
+	// stagedSecretNames lists the secret files under
+	// .scion/harness/secrets/ that the last ApplyAuthSettings referenced
+	// (staged from the resolution or carried from the record), for the
+	// control plane to record (StagedSecretNames).
+	stagedSecretNames []string
+}
+
+// SetRecordedSecrets tells ApplyAuthSettings which secret files the control
+// plane restored into the staged secrets directory from its record. Any other
+// file there is ignored.
+func (c *ContainerScriptHarness) SetRecordedSecrets(names []string) {
+	c.recordedSecrets = make(map[string]bool, len(names))
+	for _, n := range names {
+		c.recordedSecrets[n] = true
+	}
+}
+
+// StagedSecretNames returns the secret files under .scion/harness/secrets/
+// that the last ApplyAuthSettings referenced in auth-candidates.json, sorted.
+func (c *ContainerScriptHarness) StagedSecretNames() []string {
+	return append([]string(nil), c.stagedSecretNames...)
 }
 
 // NewContainerScriptHarness constructs a ContainerScriptHarness from a resolved
@@ -553,13 +582,13 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 		return err
 	}
 
-	// Discover existing secrets on disk to preserve them across restarts.
-	// File-type secrets (CODEX_AUTH, CLAUDE_AUTH) are always merged when not
-	// already overridden by the new resolution, because they may not be
-	// re-resolved on restart. Env-type secrets are only merged when the new
-	// resolution produced none, to prevent stale credentials from leaking
-	// during credential rotation. See issue #723.
-	existingEnvSecrets, existingFileSecrets := c.discoverExistingSecretFiles(agentHome)
+	// Carry the secret files the control plane restored from its record
+	// (SetRecordedSecrets); no other file in the secrets directory is
+	// considered. Recorded file-type secrets (names matching the harness
+	// config's required_files) are merged when not overridden by the new
+	// resolution; recorded env-type secrets are merged only when the new
+	// resolution produced none, so a rotated credential is not shadowed.
+	existingEnvSecrets, existingFileSecrets := c.recordedSecretFiles(agentHome)
 	if len(envSecretFiles) == 0 {
 		for k, v := range existingEnvSecrets {
 			envSecretFiles[k] = v
@@ -570,6 +599,18 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 			fileSecretFiles[k] = v
 		}
 	}
+
+	// Record which staged secret files auth-candidates.json references, for
+	// the control plane's record.
+	c.stagedSecretNames = c.stagedSecretNames[:0]
+	for _, m := range []map[string]string{envSecretFiles, fileSecretFiles} {
+		for name, p := range m {
+			if p == "$HOME/.scion/harness/secrets/"+name {
+				c.stagedSecretNames = append(c.stagedSecretNames, name)
+			}
+		}
+	}
+	sort.Strings(c.stagedSecretNames)
 
 	// Remove staged-as-secret FileMappings from resolved so the runtime does
 	// not also bind-mount them (which would create a read-only overlay that
@@ -792,31 +833,20 @@ func isSafeEnvName(name string) bool {
 	return true
 }
 
-// discoverExistingSecretFiles scans the secrets directory for files left by a
-// previous successful ApplyAuthSettings call. It returns two maps of secret
-// name to container-relative path: one for env-type secrets and one for
-// file-type secrets (distinguished via isRequiredFileSecret). This enables
-// auth-candidates.json to reference existing secrets when the current auth
-// resolution produced empty env vars (e.g. on restart).
-func (c *ContainerScriptHarness) discoverExistingSecretFiles(agentHome string) (map[string]string, map[string]string) {
-	dir := filepath.Join(agentHome, ".scion", "harness", "secrets")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, nil
-	}
+// recordedSecretFiles returns the recorded secret files (SetRecordedSecrets)
+// present in the staged secrets directory as non-empty regular files, split
+// into env-type and file-type (isRequiredFileSecret) maps of name to
+// container path. Files that are not recorded are never returned.
+func (c *ContainerScriptHarness) recordedSecretFiles(agentHome string) (map[string]string, map[string]string) {
 	envSecrets := map[string]string{}
 	fileSecrets := map[string]string{}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
+	dir := filepath.Join(agentHome, ".scion", "harness", "secrets")
+	for name := range c.recordedSecrets {
 		if !isSafeEnvName(name) {
 			continue
 		}
-		// Verify the file has non-empty content
-		info, err := e.Info()
-		if err != nil || info.Size() == 0 {
+		info, err := os.Lstat(filepath.Join(dir, name))
+		if err != nil || info.Mode()&os.ModeType != 0 || info.Size() == 0 {
 			continue
 		}
 		path := "$HOME/.scion/harness/secrets/" + name
@@ -983,6 +1013,42 @@ func parseLibVersion(src string) string {
 // already imports pkg/sciontool/hooks, so the reverse import would be a
 // cycle — see that package's own copy of this name for the full reasoning.
 const HarnessProvisionHookFilename = "20-harness-provision"
+
+// HarnessProvisionHookPath is where a container-script harness stages its
+// provisioner wrapper in an agent home.
+func HarnessProvisionHookPath(agentHome string) string {
+	return filepath.Join(agentHome, ".scion", "hooks", "pre-start.d", HarnessProvisionHookFilename)
+}
+
+// HarnessProvisionHookStaged reports whether agentHome holds a staged
+// provisioner wrapper.
+func HarnessProvisionHookStaged(agentHome string) bool {
+	_, err := os.Lstat(HarnessProvisionHookPath(agentHome))
+	return err == nil
+}
+
+// ClearStagedProvisioning removes, as one unit, the staged provisioning state
+// in agentHome: the provisioner wrapper
+// (.scion/hooks/pre-start.d/20-harness-provision) and the whole staged bundle
+// (.scion/harness: manifest.json, the provisioner's env overlay and other
+// outputs, config.yaml, provision.py, inputs, secrets). Callers run it
+// before staging every harness, as WriteProjectPreStartHook clears
+// 30-project-custom when no project hook applies; a container-script harness
+// then restages its own bundle and wrapper, and the control plane restages
+// its inputs and secrets. Without a manifest, sciontool init does not treat
+// a launch as a container-script provision. Nothing staged is not an error.
+func ClearStagedProvisioning(agentHome string) error {
+	if agentHome == "" {
+		return nil
+	}
+	if err := os.Remove(HarnessProvisionHookPath(agentHome)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale harness provisioner hook: %w", err)
+	}
+	if err := os.RemoveAll(filepath.Join(agentHome, ".scion", "harness")); err != nil {
+		return fmt.Errorf("remove stale harness bundle: %w", err)
+	}
+	return nil
+}
 
 func writeHookWrapper(agentHome, bundleContainerPath string) error {
 	dir := filepath.Join(agentHome, ".scion", "hooks", "pre-start.d")

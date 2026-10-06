@@ -135,23 +135,56 @@ func (s *Server) syncResourceFromStorage(
 	return updated, contentHash, true, nil
 }
 
-// syncHarnessConfigFromStorage syncs a single harness-config's DB manifest
-// from actual GCS content. Concurrent calls for the same config are
-// deduplicated via singleflight.
-func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, hcName string) error {
-	_, err, _ := repairFlight.Do("hc:"+hcName, func() (interface{}, error) {
-		return nil, s.syncHarnessConfigFromStorageInner(context.WithoutCancel(ctx), hcName)
-	})
-	return err
+// HarnessConfigRepairRef identifies the harness-config record a repair
+// should target. ID is authoritative when set (an agent's
+// AppliedConfig.HarnessConfigID, or the record already in hand during
+// sync-all); a stale ID is "not found", never re-targeted by name.
+// Name/ProjectID are used only for agents dispatched without a stamped ID:
+// the name is resolved project-scope first (ProjectID), then global — the
+// same rule resolveDerivedConfig uses when it stamps the ID — never "newest
+// record with that name anywhere" (ptone/scion#2898).
+type HarnessConfigRepairRef struct {
+	ID        string
+	Name      string
+	ProjectID string
 }
 
-func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, hcName string) error {
-	hc, err := s.findHarnessConfigByName(ctx, hcName)
+func (r HarnessConfigRepairRef) String() string {
+	if r.ID != "" {
+		return r.ID
+	}
+	return r.Name
+}
+
+// syncHarnessConfigFromStorage syncs a single harness-config's DB manifest
+// from actual GCS content. The target record is resolved first, and
+// concurrent calls for the same record are deduplicated via singleflight
+// keyed by record ID, so same-named configs in different scopes never share
+// (or block) each other's repair.
+func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, ref HarnessConfigRepairRef) error {
+	hc, err := s.resolveHarnessConfigForRepair(ctx, ref)
 	if err != nil {
 		return err
 	}
 	if hc == nil {
-		return fmt.Errorf("harness-config %q not found", hcName)
+		return fmt.Errorf("harness-config %q not found", ref.String())
+	}
+	id := hc.ID
+	_, err, _ = repairFlight.Do("hc:"+id, func() (interface{}, error) {
+		return nil, s.syncHarnessConfigFromStorageInner(context.WithoutCancel(ctx), id)
+	})
+	return err
+}
+
+func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id string) error {
+	// Re-read inside the flight so the update is applied to the current row,
+	// not to a copy read by whichever caller happened to win the flight.
+	hc, err := s.store.GetHarnessConfig(ctx, id)
+	if err != nil {
+		return fmt.Errorf("lookup harness-config %q: %w", id, err)
+	}
+	if hc == nil {
+		return fmt.Errorf("harness-config %q not found", id)
 	}
 
 	updated, contentHash, changed, err := s.syncResourceFromStorage(
@@ -170,7 +203,8 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, hcName s
 		return fmt.Errorf("harness-config repair: update DB: %w", err)
 	}
 	s.resourceLog.Info("harness-config repair: synced DB manifest from storage",
-		"config", hc.Name, "contentHash", contentHash)
+		"config", hc.Name, "id", hc.ID, "scope", hc.Scope, "scopeId", hc.ScopeID,
+		"contentHash", contentHash)
 	return nil
 }
 
@@ -322,7 +356,12 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 					var syncErr error
 					switch kind {
 					case storage.ResourceKindHarnessConfig:
-						syncErr = s.syncHarnessConfigFromStorage(gctx, e.name)
+						// ID only: the record is in hand, and if it was
+						// deleted since the list a name fallback could
+						// resolve a different (e.g. global) record.
+						syncErr = s.syncHarnessConfigFromStorage(gctx, HarnessConfigRepairRef{
+							ID: e.rec.ID,
+						})
 					case storage.ResourceKindTemplate:
 						syncErr = s.syncTemplateFromStorage(gctx, e.name)
 					}
@@ -339,19 +378,49 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 	_ = g.Wait()
 }
 
-// findHarnessConfigByName looks up an active harness-config by its display name.
-func (s *Server) findHarnessConfigByName(ctx context.Context, name string) (*store.HarnessConfig, error) {
-	result, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{
-		Name:   name,
-		Status: store.HarnessConfigStatusActive,
-	}, store.ListOptions{Limit: 1})
-	if err != nil {
-		return nil, fmt.Errorf("lookup harness-config %q: %w", name, err)
+// resolveHarnessConfigForRepair finds the harness-config record a repair
+// should act on. When an ID is given it is authoritative: a missing record
+// is "not found", with no name fallback — the dispatch retry still carries
+// the stale ID and hash, so repairing some other same-named row could not
+// make it succeed and would only touch an unrelated record. The name is
+// used only when no ID was stamped, looked up by slug in the agent's project
+// scope, then global scope. Returns (nil, nil) when nothing matches.
+//
+// There is deliberately no Status filter (the old name lookup required
+// "active"): resolveDerivedConfig stamps the ID via the same unfiltered
+// GetHarnessConfigBySlug lookup, so repair targets exactly the record
+// dispatch uses. Do not "restore" the filter without changing both.
+func (s *Server) resolveHarnessConfigForRepair(ctx context.Context, ref HarnessConfigRepairRef) (*store.HarnessConfig, error) {
+	if ref.ID != "" {
+		hc, err := s.store.GetHarnessConfig(ctx, ref.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("lookup harness-config %q: %w", ref.ID, err)
+		}
+		return hc, nil
 	}
-	if result == nil || len(result.Items) == 0 {
+	if ref.Name == "" {
 		return nil, nil
 	}
-	return &result.Items[0], nil
+	if ref.ProjectID != "" {
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, ref.Name, store.HarnessConfigScopeProject, ref.ProjectID)
+		if err == nil && hc != nil {
+			return hc, nil
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("lookup project harness-config %q: %w", ref.Name, err)
+		}
+	}
+	hc, err := s.store.GetHarnessConfigBySlug(ctx, ref.Name, store.HarnessConfigScopeGlobal, "")
+	if err == nil && hc != nil {
+		return hc, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("lookup global harness-config %q: %w", ref.Name, err)
+	}
+	return nil, nil
 }
 
 // findTemplateByRef looks up an active template by ID or name.
