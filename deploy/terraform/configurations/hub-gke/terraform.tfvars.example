@@ -1,0 +1,36 @@
+# Copy to <hub_name>.tfvars (e.g. tfha-gke-h3.tfvars) and fill in. tfvars
+# files are gitignored; never commit a filled-in copy. See README.md in this
+# directory for the apply sequence, the DNS step and the IAP client ID step.
+
+project_id    = "my-project"
+region        = "us-central1"
+zone          = "us-central1-a"
+shared_prefix = "tfha"
+
+hub_name     = "tfha-gke-h3"
+state_prefix = "tfha/hubs/tfha-gke-h3"
+
+# DNS is external. After the apply, create the A record from the dns_record
+# output; the managed certificate stays PROVISIONING until it resolves.
+hostname = "tfha-gke-h3.test.scion-ai.dev"
+
+# The hub-gke image in the shared Artifact Registry repo, pinned by digest
+# (no tag, never latest). The variable defaults to the current build; set
+# it here to roll a different one.
+# hub_image_digest = "sha256:REPLACE_ME_WITH_64_HEX_CHARS"
+
+# Leave unset (null) for a first install in a project with no known client
+# ID: the first apply then builds everything except the hub itself
+# (hub_installed = false). Discover the ID (README, "First install"), set it
+# here and apply again. If you already know the project's IAP client ID (for
+# example from an existing hub's tfvars), setting it on the first apply may
+# install the hub in one go.
+# iap_oauth_client_id = "REPLACE_ME.apps.googleusercontent.com"
+
+# Optional. Set only to rotate this hub's DB password, then keep it here
+# permanently (see configurations/hub's README, "Rotating a hub's DB
+# password"; the same rules apply).
+# db_password_rotation = "REPLACE_ME_WITH_ROTATION_MARKER"
+
+iap_members  = ["group:REPLACE_ME@example.com"]
+admin_emails = ["REPLACE_ME@example.com"]

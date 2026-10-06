@@ -135,9 +135,6 @@ run "client_id_null_skips_the_release" {
     iap_oauth_client_id = null
   }
 
-  # The copied check block warns; it does not fail the plan.
-  expect_failures = [check.transport_audience_configured]
-
   assert {
     condition     = length(helm_release.hub) == 0 && !output.hub_installed
     error_message = "with no client ID, no Helm release may be planned and hub_installed must be false."

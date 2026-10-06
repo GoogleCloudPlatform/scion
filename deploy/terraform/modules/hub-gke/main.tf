@@ -252,14 +252,10 @@ resource "terraform_data" "boot_prerequisites" {
 
 # The chart refuses to render without auth.transport.oidcAudience on this
 # shape, so with no client ID there is no release at all, rather than a
-# release that fails to render. hub_installed reports which case a plan is in.
-check "transport_audience_configured" {
-  assert {
-    condition     = var.iap_oauth_client_id != null
-    error_message = "the hub is NOT installed (helm_release skipped) until iap_oauth_client_id is set — see the hub-gke README's \"First install\" section to discover the Google-managed client ID and re-apply."
-  }
-}
-
+# release that fails to render. hub_installed reports which case a plan is
+# in. The warning-level check for it (transport_audience_configured) lives in
+# the calling configuration, where the operator sets the variable: a check
+# inside a child module cannot be named in a root test's expect_failures.
 resource "helm_release" "hub" {
   count = local.hub_installed ? 1 : 0
 

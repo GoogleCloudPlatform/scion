@@ -80,6 +80,12 @@ jobs:
           terraform init -backend=false -input=false
           terraform validate
 
+      - name: terraform init + validate (hub-gke root)
+        working-directory: deploy/terraform/configurations/hub-gke
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
       - name: terraform init + validate (every module)
         run: |
           set -euo pipefail
@@ -96,7 +102,7 @@ jobs:
             exit 1
           fi
 
-      # Both roots' tests use mock_provider (google, google-beta, kubernetes,
+      # The roots' tests use mock_provider (google, google-beta, kubernetes,
       # tls, random, time) -- see the header comments in
       # configurations/*/tests/*.tftest.hcl for exactly what this does and
       # does not prove. No credentials, no network access to GCP.
@@ -107,6 +113,29 @@ jobs:
       - name: terraform test (hub root)
         working-directory: deploy/terraform/configurations/hub
         run: terraform test
+
+      # Mock providers (google, kubernetes, helm, random) only, as above.
+      - name: terraform test (hub-gke root)
+        working-directory: deploy/terraform/configurations/hub-gke
+        run: terraform test
+
+      # Modules that carry their own tests/ directory. The validate step
+      # above already ran init in each module directory.
+      - name: terraform test (every module with tests)
+        run: |
+          set -euo pipefail
+          tested=0
+          while IFS= read -r moddir; do
+            tested=$((tested + 1))
+            echo "::group::test $moddir"
+            (cd "$moddir" && terraform test)
+            echo "::endgroup::"
+          done < <(find deploy/terraform/modules -mindepth 2 -maxdepth 2 -type d -name tests -exec dirname {} \; | sort)
+          echo "tested $tested module(s)"
+          if [ "$tested" -eq 0 ]; then
+            echo "::error::no module tests found under deploy/terraform/modules -- the discovery loop is broken"
+            exit 1
+          fi
 
   tflint:
     name: tflint
@@ -138,6 +167,7 @@ jobs:
             {
               echo deploy/terraform/configurations/shared-infra
               echo deploy/terraform/configurations/hub
+              echo deploy/terraform/configurations/hub-gke
               find deploy/terraform/modules -mindepth 1 -maxdepth 1 -type d
             } | sort
           )
