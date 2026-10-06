@@ -101,7 +101,10 @@ var tracer = otel.Tracer("scion-hub")
 // still observable and is pinned by assertDeniedByAuthzNotByScope in
 // handlers_agents_gcp_hubscope_test.go. Only scope-versus-nonexistence went
 // dark, and it went dark on purpose.
-const msgSANotAvailableInProject = "GCP service account not available in this project"
+//
+// The wording names both causes without saying which one applies, so the
+// caller knows to check registration and their own access (ptone/scion#3335).
+const msgSANotAvailableInProject = "GCP service account is not available; it is not registered in this project or you are not authorized to use it"
 
 // parseLabelFilters parses label=key=value query parameters into a map and
 // validates the resulting labels against constraint rules.
@@ -167,13 +170,20 @@ type ListAgentsResponse struct {
 	Agents     []AgentWithCapabilities `json:"agents"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
 	TotalCount int                     `json:"totalCount"`
+	// TotalCountApproximate marks TotalCount as a lower bound rather than an
+	// exact count: the agent-list rule's count pass stopped at
+	// authorizedListMaxCandidates candidates (see listReadableAgents).
+	TotalCountApproximate bool `json:"totalCountApproximate,omitempty"`
 	// Sort and Dir echo the request's sort mode. Both are omitted unless
 	// the request supplied "sort": legacy-mode responses never set these.
 	Sort string `json:"sort,omitempty"`
 	Dir  string `json:"dir,omitempty"`
 	// Complete is set only when the request supplied "fit" (sorted mode): true
 	// iff the unphased candidate set had at most fit members, in which case
-	// Agents is its whole readable subset. A pointer
+	// Agents is its whole readable subset. On the project user path it is
+	// also false when the complete response would exceed the per-request
+	// decision budget for the caller (completeBranchMaxCandidates); the
+	// response is then an ordinary paged one. A pointer
 	// so "fit not sent" (nil, omitted) is distinguishable from "fit sent,
 	// complete: false".
 	Complete *bool `json:"complete,omitempty"`
@@ -188,23 +198,30 @@ type ListAgentsResponse struct {
 
 // ListAgentsStats is the sorted-mode "stats" response block.
 type ListAgentsStats struct {
-	// Total is the exact readable, label(k=v)-filtered count, phase NOT
-	// applied.
+	// Total is the readable, label(k=v)-filtered count, phase NOT
+	// applied. It is exact unless TotalApproximate is set. For a user
+	// caller on the global endpoint it is capped at 2,000: only the first
+	// authorizedListMaxCandidates candidates are read.
 	Total int `json:"total"`
 	// Running is the count of phase == "running" among the same population,
 	// always present regardless of the request's own phase filter.
 	Running int `json:"running"`
-	// Agents is exactly the counted population as [id, phase] pairs, EXCEPT
-	// on the global endpoint when Total exceeds 2,000, where it is nil and
-	// so omitted from the response entirely. The project
-	// endpoint is already bounded by the 2,000 candidate ceiling,
-	// so it is never omitted there.
+	// TotalApproximate marks Total and Running as lower bounds: the
+	// global endpoint read only the first authorizedListMaxCandidates
+	// candidates (see buildGlobalAgentStats).
+	TotalApproximate bool `json:"totalApproximate,omitempty"`
+	// Agents is exactly the counted population as [id, phase] pairs. On
+	// the global endpoint it is nil, and so omitted from the response,
+	// when TotalApproximate is set (a user caller with more than 2,000
+	// candidates), and for an agent caller when Total exceeds 2,000. The
+	// project endpoint is already bounded by the 2,000 candidate
+	// ceiling, so it is never omitted there.
 	//
 	// A *slice, not a slice: encoding/json's omitempty on a plain slice
 	// can't distinguish "intentionally empty" (Total == 0, an empty but
-	// present array) from "omitted" (Total > 2000) — both have len 0.
-	// omitempty on a pointer checks only nilness, which is exactly the
-	// distinction this field needs.
+	// present array) from "omitted" — both have len 0. omitempty on a
+	// pointer checks only nilness, which is exactly the distinction this
+	// field needs.
 	Agents *[][2]string `json:"agents,omitempty"`
 }
 
@@ -472,13 +489,13 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if sorted {
-		// Sorted mode: pure SQL, race-free,
-		// no per-item read filter -- the SQL scope predicate already baked
-		// into filter above (AuthorizedProjectIDs, classification, etc.) is
-		// the authorization, exactly as the legacy branch below relies on.
-		// Dispatched after every gate and filter-building step above, so
-		// caps/messageability for returned rows run through the same
-		// identity and filter the legacy branch uses.
+		// Sorted mode: the SQL scope predicate baked into filter above
+		// (AuthorizedProjectIDs, classification, etc.) narrows the
+		// candidates, and listAgentsSorted applies the same per-agent read
+		// rule as the legacy branch below. Dispatched after every gate and
+		// filter-building step above, so caps/messageability for returned
+		// rows run through the same identity and filter the legacy branch
+		// uses.
 		// sort and dir were already validated above; only the remaining
 		// parameters are parsed here, at the same point in the request as
 		// before, so the order of 400s is unchanged.
@@ -503,21 +520,27 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{Limit: limit, Cursor: cursor, CursorBinding: cursorBinding})
+	// Agent-list rule (ptone/scion#3346): for a user caller, an agent appears
+	// in an agent list, its pages and its totalCount only if the caller can
+	// read that agent. listAgents and listProjectAgents both apply it, so the
+	// two endpoints return the same set for the same project. The SQL scope
+	// predicate above narrows the candidates; listAgentsLegacyPage then
+	// keeps only the readable ones.
+	result, err := s.listAgentsLegacyPage(ctx, identity, filter, cursor, cursorBinding, limit)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	items, nextCursor, totalCount := result.Items, result.NextCursor, result.TotalCount
 
-	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, items)
+	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, result.Items)
 
 	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
-		Agents:       agents,
-		NextCursor:   nextCursor,
-		TotalCount:   totalCount,
-		ServerTime:   time.Now().UTC(),
-		Capabilities: scopeCap,
+		Agents:                agents,
+		NextCursor:            result.NextCursor,
+		TotalCount:            result.TotalCount,
+		TotalCountApproximate: result.TotalCountApproximate,
+		ServerTime:            time.Now().UTC(),
+		Capabilities:          scopeCap,
 	})
 }
 
@@ -1149,11 +1172,21 @@ var errInvalidDisplayName = errors.New("invalid display name")
 // errors.Is before falling through to the transaction's own errors, which
 // include store.ErrIdentityKeyConflict and, separately, store.ErrInvalidInput
 // for reasons unrelated to the display name itself.
+//
+// Before the write it takes a shared lock on the row of the user the user
+// delete guard would count for the agent and re-checks that the user exists
+// (lockAgentGuardUserTx, ptone/scion#2769). For a scheduled dispatch that is
+// the schedule's creator (CreatedBy, the agent has no owner) when the
+// creator is a user; a creator that no longer exists fails the create with
+// errAgentOwnerUserMissing.
 func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Agent, slug string) error {
 	if _, err := api.ValidateDisplayName(slug); err != nil {
 		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
 	}
 	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := lockAgentGuardUserTx(ctx, tx, agent); err != nil {
+			return err
+		}
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
 		}
@@ -2099,6 +2132,11 @@ func (s *Server) createAgentInProject(
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
 			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot create the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {

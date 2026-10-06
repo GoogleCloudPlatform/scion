@@ -14,7 +14,11 @@
 
 package hub
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+)
 
 // RouteClassification categorizes routes by their authentication/authorization model.
 type RouteClassification string
@@ -63,6 +67,11 @@ type RouteMetadata struct {
 	// access token on the hub boundary, and never on a "hub" resource
 	// route, whose target already resolves to the hub scope.
 	BearerTarget string
+	// SessionOnly, when set, is the catalog's session-only reason for the
+	// route: the RouteHubAdmin guard refuses any credential other than an
+	// interactive session or dev credential with a session-only refusal
+	// (session_only_gate.go), before the permission decision.
+	SessionOnly authzop.SessionOnlyReason
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -740,6 +749,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
 	},
+	// Conduit grant key rotation, behind hub.conduit. Returns kids and
+	// timestamps only.
+	"/api/v1/admin/conduit/grant-keys/rotate": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
 		Classification: RouteHubAdmin,
@@ -1187,6 +1204,14 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				if !targetOK {
 					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 						"route misconfigured: unknown bearer target", nil)
+					return
+				}
+				// Session-only: a route-level refusal of every non-session
+				// credential, before the permission decision. Decide still
+				// runs for a session.
+				if meta.SessionOnly != "" && !sessionCredentialAllowed(r.Context()) {
+					logAuthzDenial(r, identity, target, Action(meta.Action), "session-only operation")
+					writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
 					return
 				}
 				decision := s.authzService.Decide(r.Context(), AuthzRequest{

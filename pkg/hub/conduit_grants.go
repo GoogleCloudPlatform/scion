@@ -75,6 +75,16 @@ import (
 // must also be at least conduitGrantKeyRefresh, the interval at which nodes
 // reload the ring. Rotation is a compare-and-swap on the stored row, retried
 // a bounded number of times, so concurrent rotations never lose a key.
+// Operators rotate with POST /api/v1/admin/conduit/grant-keys/rotate
+// (handleAdminConduitGrantKeyRotate), which is limited to hub admins.
+//
+// Retention. Rotation sets not_after on every outgoing key, so a grant signed
+// with an old kid verifies until its own exp or the key's not_after,
+// whichever comes first. Each rotation first prunes keys whose not_after has
+// passed. The ring therefore holds the newest key plus every key still
+// within its overlap window; there is no fixed count, since it depends on
+// how often rotation runs. A retired key that has not been pruned yet is
+// neither published nor used to sign.
 const (
 	conduitExperiment = "hub.conduit"
 
@@ -335,47 +345,73 @@ func (k *conduitGrantKeys) publicKeys(ctx context.Context) ([]grant.PublicKey, e
 	return ring.PublicKeys(k.now()), nil
 }
 
-// rotate adds a new key and returns its kid. Each attempt rereads the stored
+// ConduitGrantKeyRotation describes a completed rotation: kids and
+// timestamps only, never key material.
+type ConduitGrantKeyRotation struct {
+	// KeyID is the kid of the key rotated in.
+	KeyID string `json:"kid"`
+	// ActivateAt is when the new key starts signing.
+	ActivateAt time.Time `json:"activate_at"`
+	// Retiring lists the outgoing keys and when each is retired.
+	Retiring []ConduitGrantKeyRetirement `json:"retiring"`
+}
+
+// ConduitGrantKeyRetirement is one outgoing key in a rotation.
+type ConduitGrantKeyRetirement struct {
+	KeyID    string    `json:"kid"`
+	NotAfter time.Time `json:"not_after"`
+}
+
+// rotate adds a new key and reports its kid, activation time and the
+// retirement time of every outgoing key. Each attempt rereads the stored
 // ring and writes it back with a compare-and-swap on its revision, so a
 // concurrent rotation (on this or another node) is never overwritten; after
 // conduitGrantKeyRotateAttempts lost races it gives up with an error.
-func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap time.Duration) (string, error) {
+func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap time.Duration) (ConduitGrantKeyRotation, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if activateAfter < conduitGrantKeyRefresh {
-		return "", fmt.Errorf("activation delay %s must be at least the ring refresh interval %s", activateAfter, conduitGrantKeyRefresh)
+		return ConduitGrantKeyRotation{}, fmt.Errorf("activation delay %s must be at least the ring refresh interval %s", activateAfter, conduitGrantKeyRefresh)
 	}
 	// Make sure a ring exists (bootstrapping it if needed).
 	k.ring = nil
 	if _, err := k.currentLocked(ctx); err != nil {
-		return "", err
+		return ConduitGrantKeyRotation{}, err
 	}
 	now := k.now()
 	key, err := grant.NewRingKey(now, now)
 	if err != nil {
-		return "", err
+		return ConduitGrantKeyRotation{}, err
 	}
 	for range conduitGrantKeyRotateAttempts {
 		ring, rev, err := k.store.Load(ctx)
 		if err != nil {
-			return "", fmt.Errorf("load conduit grant key ring: %w", err)
+			return ConduitGrantKeyRotation{}, fmt.Errorf("load conduit grant key ring: %w", err)
 		}
 		next := cloneKeyRing(ring)
 		next.Prune(now)
 		if err := next.Rotate(now, key, activateAfter, overlap); err != nil {
-			return "", err
+			return ConduitGrantKeyRotation{}, err
 		}
 		applied, err := k.store.CompareAndSwap(ctx, next, rev)
 		if err != nil {
-			return "", fmt.Errorf("store rotated conduit grant key ring: %w", err)
+			return ConduitGrantKeyRotation{}, fmt.Errorf("store rotated conduit grant key ring: %w", err)
 		}
 		if applied {
 			k.ring, k.loadedAt = next, now
-			slog.Info("Conduit grant key rotated", "kid", key.KeyID, "activate_at", now.Add(activateAfter))
-			return key.KeyID, nil
+			out := ConduitGrantKeyRotation{KeyID: key.KeyID, Retiring: []ConduitGrantKeyRetirement{}}
+			for _, rk := range next.Keys {
+				if rk.KeyID == key.KeyID {
+					out.ActivateAt = rk.ActivateAt
+					continue
+				}
+				out.Retiring = append(out.Retiring, ConduitGrantKeyRetirement{KeyID: rk.KeyID, NotAfter: rk.NotAfter})
+			}
+			slog.Info("Conduit grant key rotated", "kid", key.KeyID, "activate_at", out.ActivateAt, "retiring", len(out.Retiring))
+			return out, nil
 		}
 	}
-	return "", fmt.Errorf("conduit grant key rotation: ring changed concurrently %d times; retry", conduitGrantKeyRotateAttempts)
+	return ConduitGrantKeyRotation{}, fmt.Errorf("conduit grant key rotation: ring changed concurrently %d times; retry", conduitGrantKeyRotateAttempts)
 }
 
 // conduitGrantKeySet returns this node's ring cache, creating it on first
@@ -429,11 +465,12 @@ func (s *Server) ConduitGrantPublicKeys(ctx context.Context) ([]grant.PublicKey,
 }
 
 // RotateConduitGrantKey adds a new grant signing key, activating after
-// ServerConfig.ConduitGrantKeyActivation, and returns its kid. It is the hook for an operator rotation
-// surface; none is wired in Phase 1.
-func (s *Server) RotateConduitGrantKey(ctx context.Context) (string, error) {
+// ServerConfig.ConduitGrantKeyActivation, and retires every older key one
+// conduitGrantKeyDefaultOverlap after that. POST
+// /api/v1/admin/conduit/grant-keys/rotate calls it.
+func (s *Server) RotateConduitGrantKey(ctx context.Context) (ConduitGrantKeyRotation, error) {
 	if !s.experimentEnabled(conduitExperiment) {
-		return "", errConduitDisabled
+		return ConduitGrantKeyRotation{}, errConduitDisabled
 	}
 	return s.conduitGrantKeySet().rotate(ctx, s.conduitGrantKeyActivation(), conduitGrantKeyDefaultOverlap)
 }
@@ -467,4 +504,33 @@ func (s *Server) handleConduitGrantKeys(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, conduitGrantKeysResponse{Keys: grant.ToWire(keys)})
+}
+
+// handleAdminConduitGrantKeyRotate serves POST
+// /api/v1/admin/conduit/grant-keys/rotate. Route metadata (RouteHubAdmin,
+// permission hub.conduit_grant_keys.execute) authorizes the caller before the
+// handler runs. The response carries kids and timestamps only; key material
+// is never returned. The experiment is checked per request (404 when off),
+// as in handleConduitGrantKeys.
+func (s *Server) handleAdminConduitGrantKeyRotate(w http.ResponseWriter, r *http.Request) {
+	if !s.experimentEnabled(conduitExperiment) {
+		NotFound(w, "route")
+		return
+	}
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	out, err := s.RotateConduitGrantKey(r.Context())
+	if err != nil {
+		slog.Error("conduit grant key rotation failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "grant key rotation failed", nil)
+		return
+	}
+	actor := ""
+	if id := GetIdentityFromContext(r.Context()); id != nil {
+		actor = id.ID()
+	}
+	slog.Info("Conduit grant key rotation requested", "actor_id", actor, "kid", out.KeyID)
+	writeJSON(w, http.StatusOK, out)
 }

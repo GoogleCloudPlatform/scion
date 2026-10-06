@@ -889,7 +889,8 @@ func TestCreateAgentRejectsWorkspaceDirOutsideRootViaSymlink(t *testing.T) {
 func TestCreateAgentFullStart_HarnessConfigNotFound(t *testing.T) {
 	srv := newTestServer(t)
 	mgr := srv.manager.(*mockManager)
-	mgr.startErr = fmt.Errorf("failed to find harness-config %q: %w", "antigravity", config.ErrHarnessConfigNotFound)
+	mgr.startErr = fmt.Errorf("failed to find harness-config %q: %w", "antigravity",
+		&config.HarnessConfigNotFoundError{Name: "antigravity", Searched: []string{"/srv/broker/harness-configs/antigravity"}})
 
 	body := `{"name": "new-agent", "config": {"template": "claude", "harness": "antigravity"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -935,7 +936,7 @@ func TestCreateAgentProvisionOnly_TemplateNotFound(t *testing.T) {
 	srv := newTestServer(t)
 	mgr := srv.manager.(*mockManager)
 	mgr.provisionErr = fmt.Errorf("failed to load template: %w",
-		fmt.Errorf("template %s not found: %w", "missing-template", config.ErrTemplateNotFound))
+		config.NewTemplateNotFoundError("missing-template", "template missing-template not found"))
 
 	body := `{"name": "new-agent", "provisionOnly": true, "config": {"template": "missing-template"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

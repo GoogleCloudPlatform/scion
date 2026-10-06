@@ -696,6 +696,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
 		return
 	}
+
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
