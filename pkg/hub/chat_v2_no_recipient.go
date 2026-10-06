@@ -16,10 +16,7 @@ package hub
 
 import (
 	"context"
-	"errors"
 	"strings"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // mentionMatchesMember reports whether an @mention name refers to a
@@ -106,26 +103,35 @@ func (s *Server) mentionsProjectHuman(ctx context.Context, projectID string, men
 }
 
 // projectHumanMembersStrict is resolveProjectHumanMembers without its
-// best-effort error handling: a failed member listing, or a failed user
-// lookup other than not-found, is returned instead of being skipped.
+// best-effort error handling: a failed member listing or user lookup is
+// returned instead of being skipped. Users are fetched in one batch; a
+// member whose user record no longer exists is skipped.
 func (s *Server) projectHumanMembersStrict(ctx context.Context, projectID string) ([]chatMemberEntry, error) {
 	projectMembers, err := s.store.ListProjectMembers(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	var humans []chatMemberEntry
-	seen := make(map[string]bool)
+	userIDs := make([]string, 0, len(projectMembers))
+	seen := make(map[string]bool, len(projectMembers))
 	for _, m := range projectMembers {
-		if seen[m.UserID] {
+		if m == nil || seen[m.UserID] {
 			continue
 		}
 		seen[m.UserID] = true
-		u, err := s.store.GetUser(ctx, m.UserID)
-		if errors.Is(err, store.ErrNotFound) {
+		userIDs = append(userIDs, m.UserID)
+	}
+	if len(userIDs) == 0 {
+		return nil, nil
+	}
+	users, err := s.store.GetUsersByIDs(ctx, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	humans := make([]chatMemberEntry, 0, len(userIDs))
+	for _, id := range userIDs {
+		u := users[id]
+		if u == nil {
 			continue
-		}
-		if err != nil {
-			return nil, err
 		}
 		humans = append(humans, chatMemberEntry{
 			ID:          u.ID,

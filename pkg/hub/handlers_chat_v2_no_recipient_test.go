@@ -385,7 +385,8 @@ func TestNoRecipient_ReplyLookupErrorKeepsPreviousState(t *testing.T) {
 	requireDispatchedNotNoRecipient(t, "reply lookup error", resp, m)
 }
 
-// errMembersStore fails project member listing, or GetUser for one user.
+// errMembersStore fails project member listing, fails the batch user
+// lookup when it includes one user, or omits another user as not found.
 type errMembersStore struct {
 	store.Store
 	failList     bool
@@ -400,14 +401,18 @@ func (e *errMembersStore) ListProjectMembers(ctx context.Context, projectID stri
 	return e.Store.ListProjectMembers(ctx, projectID)
 }
 
-func (e *errMembersStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if id == e.failGetUser {
-		return nil, errors.New("get user: connection reset by peer")
+func (e *errMembersStore) GetUsersByIDs(ctx context.Context, ids []string) (map[string]*store.User, error) {
+	for _, id := range ids {
+		if id == e.failGetUser {
+			return nil, errors.New("get users: connection reset by peer")
+		}
 	}
-	if id == e.notFoundUser {
-		return nil, store.ErrNotFound
+	users, err := e.Store.GetUsersByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
 	}
-	return e.Store.GetUser(ctx, id)
+	delete(users, e.notFoundUser)
+	return users, nil
 }
 
 // A failed member lookup means a mention of a real member cannot be ruled
