@@ -292,9 +292,10 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 			t.Fatalf("read %s: %v", absDir, err)
 		}
 
-		// Pass 1: collect this package's own exec.Command/exec.CommandContext
-		// aliases (e.g. "var execCommandContext = exec.CommandContext"),
-		// across every non-test file in the directory.
+		// Pass 1: collect this package's own package-level
+		// exec.Command/exec.CommandContext aliases (e.g. "var
+		// execCommandContext = exec.CommandContext"), across every non-test
+		// file in the directory.
 		aliases := map[string]aliasKind{}
 		files := map[string]*ast.File{}
 		for _, e := range entries {
@@ -307,7 +308,15 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 				t.Fatalf("parse %s: %v", path, err)
 			}
 			files[path] = f
-			collectExecAliases(f, aliases)
+		}
+		// Repeat until no new alias appears, so an alias of an alias
+		// declared in another file of the package is found regardless of
+		// file order.
+		for n := -1; n != len(aliases); {
+			n = len(aliases)
+			for _, f := range files {
+				collectExecAliases(f, aliases)
+			}
 		}
 
 		// Pass 2: find every exec.Command/exec.CommandContext (direct or
@@ -346,9 +355,15 @@ func TestNoRootContextExecUsesABareUnresolvedCommandName(t *testing.T) {
 // checkFileExecSites runs the guard over one parsed file: every (possibly
 // aliased) exec.Command/exec.CommandContext call whose command argument is
 // not provably safe must match an allowlist entry, or it is reported as a
-// violation. It returns the violations and the allowlist entries matched.
+// violation. A renamed or dot import of os/exec, and any use of an exec
+// constructor as a value the guard cannot follow (see execValueEscapes),
+// are violations too, and cannot be allowlisted. It returns the violations
+// and the allowlist entries matched.
 func checkFileExecSites(fset *token.FileSet, relPath string, f *ast.File, aliases map[string]aliasKind, allowlist map[execSite]string) (violations []string, seen []execSite) {
 	funcLikes := collectFuncLikes(f)
+	resolver := newExecResolver(f, aliases)
+	violations = append(violations, execImportViolations(fset, relPath, f)...)
+	violations = append(violations, execValueEscapes(fset, relPath, f, resolver)...)
 	occurrences := map[execSite]int{}
 
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -356,7 +371,7 @@ func checkFileExecSites(fset *token.FileSet, relPath string, f *ast.File, aliase
 		if !ok {
 			return true
 		}
-		argIndex, isExecCall := classifyExecCall(call, aliases)
+		argIndex, isExecCall := classifyExecCall(call, resolver)
 		if !isExecCall {
 			return true
 		}
@@ -597,64 +612,331 @@ func scansApart(a, b scannedToken) bool {
 	return len(got) == 2 && got[0] == a && got[1] == b
 }
 
-// collectExecAliases scans f for top-level "var X = exec.Command" or
-// "var X = exec.CommandContext" declarations and records them in aliases.
-func collectExecAliases(f *ast.File, aliases map[string]aliasKind) {
-	for _, decl := range f.Decls {
-		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.VAR {
+// execImportNames returns the local names under which f imports "os/exec"
+// (a renamed import adds its name) and whether f dot-imports it. The
+// canonical name "exec" is always included, so a file is matched exactly as
+// before even when its import is plain or absent (as in a synthetic
+// fixture).
+func execImportNames(f *ast.File) (names map[string]bool, dot bool) {
+	names = map[string]bool{"exec": true}
+	for _, imp := range f.Imports {
+		if !isExecImport(imp) || imp.Name == nil {
 			continue
 		}
-		for _, spec := range gd.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok || len(vs.Names) != len(vs.Values) {
+		switch imp.Name.Name {
+		case ".":
+			dot = true
+		case "_":
+		default:
+			names[imp.Name.Name] = true
+		}
+	}
+	return names, dot
+}
+
+func isExecImport(imp *ast.ImportSpec) bool {
+	return strings.Trim(imp.Path.Value, "`\"") == "os/exec"
+}
+
+// execImportViolations rejects renamed and dot imports of "os/exec" in a
+// guarded file. The guard still resolves calls made through either form
+// (see execResolver), so such a call is classified too; rejecting the
+// import itself keeps every exec call greppable as exec.Command or
+// exec.CommandContext and keeps the syntactic resolver's job small.
+func execImportViolations(fset *token.FileSet, relPath string, f *ast.File) []string {
+	var out []string
+	for _, imp := range f.Imports {
+		if !isExecImport(imp) || imp.Name == nil {
+			continue
+		}
+		line := fset.Position(imp.Pos()).Line
+		switch imp.Name.Name {
+		case "exec", "_":
+		case ".":
+			out = append(out, fmt.Sprintf(
+				"%s (line %d): dot import of os/exec; guarded files must import it as plain \"os/exec\"",
+				relPath, line))
+		default:
+			out = append(out, fmt.Sprintf(
+				"%s (line %d): os/exec imported under the name %q; guarded files must import it as plain \"os/exec\"",
+				relPath, line, imp.Name.Name))
+		}
+	}
+	return out
+}
+
+// execFuncKind reports whether expr (parentheses stripped) names
+// exec.Command or exec.CommandContext through the file's own import of
+// os/exec, whether plain, renamed (pkgNames) or dot-imported (dot). It does
+// not consult aliases; see execResolver.funcRef for that.
+func execFuncKind(expr ast.Expr, pkgNames map[string]bool, dot bool) (aliasKind, bool) {
+	var name string
+	switch e := ast.Unparen(expr).(type) {
+	case *ast.SelectorExpr:
+		pkgIdent, ok := e.X.(*ast.Ident)
+		if !ok || !pkgNames[pkgIdent.Name] {
+			return aliasKind{}, false
+		}
+		name = e.Sel.Name
+	case *ast.Ident:
+		if !dot {
+			return aliasKind{}, false
+		}
+		name = e.Name
+	default:
+		return aliasKind{}, false
+	}
+	switch name {
+	case "Command":
+		return aliasKind{argIndex: 0}, true
+	case "CommandContext":
+		return aliasKind{argIndex: 1}, true
+	}
+	return aliasKind{}, false
+}
+
+// collectExecAliases scans f for top-level var declarations whose value is
+// an exec constructor ("var X = exec.Command", "var X = x.CommandContext"
+// through a renamed import, "var X = Command" through a dot import) or an
+// alias already recorded ("var Y = X"), and records them in aliases. These
+// are package-wide, so the caller runs it over every file of a package
+// until aliases stops growing, to follow chains that cross files.
+func collectExecAliases(f *ast.File, aliases map[string]aliasKind) {
+	pkgNames, dot := execImportNames(f)
+	for changed := true; changed; {
+		changed = false
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
 				continue
 			}
-			for i, val := range vs.Values {
-				sel, ok := val.(*ast.SelectorExpr)
-				if !ok {
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) != len(vs.Values) {
 					continue
 				}
-				pkgIdent, ok := sel.X.(*ast.Ident)
-				if !ok || pkgIdent.Name != "exec" {
-					continue
-				}
-				switch sel.Sel.Name {
-				case "Command":
-					aliases[vs.Names[i].Name] = aliasKind{argIndex: 0}
-				case "CommandContext":
-					aliases[vs.Names[i].Name] = aliasKind{argIndex: 1}
+				for i, val := range vs.Values {
+					name := vs.Names[i].Name
+					if _, done := aliases[name]; done || name == "_" {
+						continue
+					}
+					k, ok := execFuncKind(val, pkgNames, dot)
+					if !ok {
+						if id, isIdent := ast.Unparen(val).(*ast.Ident); isIdent {
+							k, ok = aliases[id.Name]
+						}
+					}
+					if ok {
+						aliases[name] = k
+						changed = true
+					}
 				}
 			}
 		}
 	}
 }
 
-// classifyExecCall reports whether call is a (possibly aliased)
-// exec.Command/exec.CommandContext invocation, and if so, which argument
-// index carries the command name.
-func classifyExecCall(call *ast.CallExpr, aliases map[string]aliasKind) (argIndex int, ok bool) {
-	switch fun := call.Fun.(type) {
-	case *ast.SelectorExpr:
-		pkgIdent, ok := fun.X.(*ast.Ident)
-		if !ok || pkgIdent.Name != "exec" {
-			return 0, false
-		}
-		switch fun.Sel.Name {
-		case "Command":
-			return 0, true
-		case "CommandContext":
-			return 1, true
-		}
-		return 0, false
-	case *ast.Ident:
-		if k, ok := aliases[fun.Name]; ok {
-			return k.argIndex, true
-		}
-		return 0, false
-	default:
-		return 0, false
+// localAlias is a variable declared or assigned inside a function body
+// whose value is an exec constructor (e.g. "cmd := exec.Command" or
+// "var f = exec.CommandContext"). It is visible from pos to end, the
+// smallest enclosing function or closure body.
+type localAlias struct {
+	name     string
+	kind     aliasKind
+	pos, end token.Pos
+}
+
+// execResolver resolves, syntactically, which expressions in one file name
+// exec.Command or exec.CommandContext: directly through the file's plain,
+// renamed or dot import of os/exec, through a package-level alias, or
+// through a local alias. It does no real scoping (a local alias is visible
+// in its whole enclosing function body), which errs on the side of
+// classifying more calls as exec calls, never fewer.
+type execResolver struct {
+	pkgNames   map[string]bool
+	dot        bool
+	pkgAliases map[string]aliasKind
+	local      []localAlias
+	// aliasValues holds the (unparenthesized) value expressions consumed
+	// by a recognized alias definition, which are therefore not escapes.
+	aliasValues map[ast.Expr]bool
+}
+
+func newExecResolver(f *ast.File, pkgAliases map[string]aliasKind) *execResolver {
+	pkgNames, dot := execImportNames(f)
+	r := &execResolver{
+		pkgNames:    pkgNames,
+		dot:         dot,
+		pkgAliases:  pkgAliases,
+		aliasValues: map[ast.Expr]bool{},
 	}
+	funcLikes := collectFuncLikes(f)
+	// Iterate to a fixed point so a chain ("f := exec.Command; g := f")
+	// resolves regardless of the order the definitions are visited in.
+	for changed := true; changed; {
+		changed = false
+		ast.Inspect(f, func(n ast.Node) bool {
+			var names []*ast.Ident
+			var values []ast.Expr
+			switch s := n.(type) {
+			case *ast.AssignStmt:
+				if len(s.Lhs) != len(s.Rhs) {
+					return true
+				}
+				for i, lhs := range s.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok {
+						names = append(names, id)
+						values = append(values, s.Rhs[i])
+					}
+				}
+			case *ast.ValueSpec:
+				if len(s.Names) != len(s.Values) {
+					return true
+				}
+				names, values = s.Names, s.Values
+			default:
+				return true
+			}
+			for i, id := range names {
+				val := ast.Unparen(values[i])
+				if r.aliasValues[val] {
+					continue
+				}
+				fl := enclosingFunc(funcLikes, id.Pos())
+				if fl == nil {
+					// Package level: collectExecAliases already
+					// recorded it; just mark the value as consumed.
+					if _, ok := pkgAliases[id.Name]; ok {
+						if _, isRef := r.funcRef(val, val.Pos()); isRef {
+							r.aliasValues[val] = true
+						}
+					}
+					continue
+				}
+				k, ok := r.funcRef(val, val.Pos())
+				if !ok {
+					continue
+				}
+				r.aliasValues[val] = true
+				changed = true
+				if id.Name != "_" {
+					r.local = append(r.local, localAlias{name: id.Name, kind: k, pos: fl.pos, end: fl.end})
+				}
+			}
+			return true
+		})
+	}
+	return r
+}
+
+// funcRef reports whether expr, appearing at pos, names exec.Command or
+// exec.CommandContext directly or through an alias, and if so which kind.
+func (r *execResolver) funcRef(expr ast.Expr, pos token.Pos) (aliasKind, bool) {
+	if k, ok := execFuncKind(expr, r.pkgNames, r.dot); ok {
+		return k, true
+	}
+	id, ok := ast.Unparen(expr).(*ast.Ident)
+	if !ok {
+		return aliasKind{}, false
+	}
+	var best *localAlias
+	for i := range r.local {
+		la := &r.local[i]
+		if la.name == id.Name && la.pos <= pos && pos <= la.end {
+			if best == nil || la.end-la.pos < best.end-best.pos {
+				best = la
+			}
+		}
+	}
+	if best != nil {
+		return best.kind, true
+	}
+	k, ok := r.pkgAliases[id.Name]
+	return k, ok
+}
+
+// classifyExecCall reports whether call is an exec.Command/
+// exec.CommandContext invocation (direct, through a renamed or dot import,
+// or through a package-level or local alias), and if so, which argument
+// index carries the command name.
+func classifyExecCall(call *ast.CallExpr, r *execResolver) (argIndex int, ok bool) {
+	k, ok := r.funcRef(call.Fun, call.Pos())
+	return k.argIndex, ok
+}
+
+// execValueEscapes reports every use of an exec constructor as a value
+// that the guard cannot follow: anything other than calling it or binding
+// it to a plain variable (a recognized alias). Passing exec.Command as an
+// argument, returning it, storing it in a struct field, map or slice, or
+// binding it through a multi-value assignment would let a later call
+// through that value bypass the call-site check entirely.
+func execValueEscapes(fset *token.FileSet, relPath string, f *ast.File, r *execResolver) []string {
+	callees := map[ast.Expr]bool{}
+	// Identifiers that are declarations, selectors' field names, or
+	// assignment targets: never a read of an exec constructor.
+	notReads := map[*ast.Ident]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.CallExpr:
+			callees[ast.Unparen(e.Fun)] = true
+		case *ast.SelectorExpr:
+			notReads[e.Sel] = true
+		case *ast.AssignStmt:
+			for _, lhs := range e.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					notReads[id] = true
+				}
+			}
+		case *ast.ValueSpec:
+			for _, id := range e.Names {
+				notReads[id] = true
+			}
+		case *ast.ImportSpec:
+			if e.Name != nil {
+				notReads[e.Name] = true
+			}
+		case *ast.FuncDecl:
+			notReads[e.Name] = true
+		case *ast.Field:
+			for _, id := range e.Names {
+				notReads[id] = true
+			}
+		case *ast.TypeSpec:
+			notReads[e.Name] = true
+		}
+		return true
+	})
+
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch e := n.(type) {
+		case *ast.SelectorExpr, *ast.Ident:
+			expr := e.(ast.Expr)
+			if id, ok := expr.(*ast.Ident); ok && notReads[id] {
+				return true
+			}
+			if callees[expr] || r.aliasValues[expr] {
+				return false
+			}
+			if _, ok := r.funcRef(expr, expr.Pos()); ok {
+				out = append(out, fmt.Sprintf(
+					"%s (line %d): exec constructor %s used as a value the guard cannot follow; call it directly or bind it to a plain variable",
+					relPath, fset.Position(expr.Pos()).Line, exprString(fset, expr)))
+				return false
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// exprString prints expr for a violation message.
+func exprString(fset *token.FileSet, expr ast.Expr) string {
+	var b bytes.Buffer
+	if err := printer.Fprint(&b, fset, expr); err != nil {
+		return fmt.Sprintf("<unprintable: %v>", err)
+	}
+	return b.String()
 }
 
 // funcLike is either a *ast.FuncDecl or a *ast.FuncLit, treated uniformly
@@ -877,6 +1159,7 @@ func run() {
 			aliases := map[string]aliasKind{}
 			collectExecAliases(f, aliases)
 			funcLikes := collectFuncLikes(f)
+			resolver := newExecResolver(f, aliases)
 
 			var found bool
 			ast.Inspect(f, func(n ast.Node) bool {
@@ -884,7 +1167,7 @@ func run() {
 				if !ok {
 					return true
 				}
-				argIndex, isExecCall := classifyExecCall(call, aliases)
+				argIndex, isExecCall := classifyExecCall(call, resolver)
 				if !isExecCall {
 					return true
 				}
@@ -1178,6 +1461,200 @@ func TestExecSiteAllowlist_UnlistedSitesStillFail(t *testing.T) {
 			}
 			if gotStale := len(stale) > 0; gotStale != tc.wantStale {
 				t.Errorf("stale = %v, want stale=%v", stale, tc.wantStale)
+			}
+		})
+	}
+}
+
+// TestGuard_ExecCallFormsAreResolved proves the guard sees exec calls
+// written through a renamed import, a dot import, or a local or
+// package-level alias of an exec constructor (ptone/scion#3469), rejects
+// renamed and dot imports outright, and rejects uses of an exec
+// constructor as a value it cannot follow.
+func TestGuard_ExecCallFormsAreResolved(t *testing.T) {
+	const (
+		callViolation = "not provably routed through rootexec.Resolve"
+		renamedImport = "os/exec imported under the name"
+		dotImport     = "dot import of os/exec"
+		escape        = "used as a value the guard cannot follow"
+	)
+	tests := []struct {
+		name string
+		src  string
+		// want lists, in sorted violation order, a substring each
+		// violation must contain; the violation count must match.
+		want []string
+	}{
+		{
+			name: "renamed import",
+			src: "package synthetic\n\nimport x \"os/exec\"\n\n" +
+				"func run(name string) {\n\t_ = x.Command(name)\n}\n",
+			want: []string{renamedImport, "synthetic.go: run: x.Command(name)"},
+		},
+		{
+			name: "renamed import, CommandContext",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\tx \"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\t_ = x.CommandContext(ctx, name)\n}\n",
+			want: []string{renamedImport, "x.CommandContext(ctx, name)"},
+		},
+		{
+			name: "dot import",
+			src: "package synthetic\n\nimport . \"os/exec\"\n\n" +
+				"func run(name string) {\n\t_ = Command(name)\n}\n",
+			want: []string{dotImport, "synthetic.go: run: Command(name)"},
+		},
+		{
+			name: "dot import, CommandContext",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t. \"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\t_ = CommandContext(ctx, name)\n}\n",
+			want: []string{dotImport, "CommandContext(ctx, name)"},
+		},
+		{
+			name: "local alias via :=",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tcmd := exec.Command\n\t_ = cmd(name)\n}\n",
+			want: []string{"synthetic.go: run: cmd(name)"},
+		},
+		{
+			name: "local alias via var, CommandContext",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n)\n\n" +
+				"func run(ctx context.Context, name string) {\n\tvar f = exec.CommandContext\n\t_ = f(ctx, name)\n}\n",
+			want: []string{"f(ctx, name)"},
+		},
+		{
+			name: "local alias via =, inside a closure",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tfunc() {\n\t\tvar f func(string, ...string) *exec.Cmd\n\t\tf = exec.Command\n\t\t_ = f(name)\n\t}()\n}\n",
+			want: []string{"synthetic.go: run: f(name)"},
+		},
+		{
+			name: "alias of a local alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tf := exec.Command\n\tg := f\n\t_ = g(name)\n}\n",
+			want: []string{"g(name)"},
+		},
+		{
+			name: "package-level alias through a renamed import",
+			src: "package synthetic\n\nimport x \"os/exec\"\n\nvar c = x.Command\n\n" +
+				"func run(name string) {\n\t_ = c(name)\n}\n",
+			want: []string{renamedImport, "synthetic.go: run: c(name)"},
+		},
+		{
+			name: "parenthesized callee",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\t_ = (exec.Command)(name)\n}\n",
+			want: []string{"(exec.Command)(name)"},
+		},
+		{
+			name: "exec constructor passed as an argument",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func use(f func(string, ...string) *exec.Cmd) {}\n\n" +
+				"func run() {\n\tuse(exec.Command)\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "local alias returned",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func get() func(string, ...string) *exec.Cmd {\n\tf := exec.Command\n\treturn f\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "exec constructor stored in a struct field",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"type s struct{ f func(string, ...string) *exec.Cmd }\n\n" +
+				"func run(v *s) {\n\tv.f = exec.Command\n}\n",
+			want: []string{escape},
+		},
+		{
+			name: "exec constructor in a composite literal",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"var table = map[string]func(string, ...string) *exec.Cmd{\"run\": exec.Command}\n",
+			want: []string{escape},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			violations, _ := runSyntheticGuard(t, tc.src, nil)
+			sort.Strings(violations)
+			if len(violations) != len(tc.want) {
+				t.Fatalf("got %d violation(s), want %d:\n%s", len(violations), len(tc.want), strings.Join(violations, "\n"))
+			}
+			// Each wanted substring must be matched by a distinct violation.
+			used := make([]bool, len(violations))
+			for _, w := range tc.want {
+				matched := false
+				for i, v := range violations {
+					if !used[i] && strings.Contains(v, w) {
+						used[i], matched = true, true
+						break
+					}
+				}
+				if !matched {
+					t.Errorf("no violation contains %q:\n%s", w, strings.Join(violations, "\n"))
+				}
+			}
+		})
+	}
+}
+
+// TestGuard_ExecCallFormsNegative proves the stricter resolution does not
+// flag sites the guard already accepts: plain, explicitly named and blank
+// imports, allowlisted calls (direct or through an alias), and alias calls
+// whose command argument is proven safe at the alias's own argument index.
+func TestGuard_ExecCallFormsNegative(t *testing.T) {
+	tests := []struct {
+		name      string
+		src       string
+		allowlist map[execSite]string
+	}{
+		{
+			name:      "plain import, allowlisted call",
+			src:       syntheticBase,
+			allowlist: syntheticAllowlist,
+		},
+		{
+			name: "import explicitly named exec",
+			src: strings.Replace(syntheticBase,
+				"import \"os/exec\"", "import exec \"os/exec\"", 1),
+			allowlist: syntheticAllowlist,
+		},
+		{
+			name: "blank import",
+			src:  "package synthetic\n\nimport _ \"os/exec\"\n",
+		},
+		{
+			name: "allowlisted call through a local alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tcmd := exec.Command\n\t_ = cmd(name)\n}\n",
+			allowlist: map[execSite]string{
+				{File: "synthetic.go", Func: "run", Call: "cmd(name)"}: "synthetic",
+			},
+		},
+		{
+			name: "local alias with resolved and absolute commands",
+			src: "package synthetic\n\nimport (\n\t\"context\"\n\t\"os/exec\"\n\n\t\"rootexec\"\n)\n\n" +
+				"func run(ctx context.Context) {\n\tf := exec.CommandContext\n" +
+				"\tp, _ := rootexec.Resolve(\"git\")\n\t_ = f(ctx, p)\n\t_ = f(ctx, \"/bin/sh\")\n}\n",
+		},
+		{
+			name: "package-level alias, called with an absolute path",
+			src: "package synthetic\n\nimport \"os/exec\"\n\nvar execCommand = exec.Command\n\n" +
+				"func run() {\n\t_ = execCommand(\"/bin/true\")\n}\n",
+		},
+		{
+			name: "unrelated local function value named like an alias",
+			src: "package synthetic\n\nimport \"os/exec\"\n\n" +
+				"func run(name string) {\n\tcmd := func(string) {}\n\tcmd(name)\n\t_ = exec.Command(\"/bin/true\")\n}\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			violations, stale := runSyntheticGuard(t, tc.src, tc.allowlist)
+			if len(violations) != 0 {
+				t.Errorf("want no violations, got:\n%s", strings.Join(violations, "\n"))
+			}
+			if len(stale) != 0 {
+				t.Errorf("want no stale entries, got %v", stale)
 			}
 		})
 	}
