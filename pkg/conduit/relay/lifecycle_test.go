@@ -261,18 +261,91 @@ func TestGoAwayPendingSession(t *testing.T) {
 		})
 	}
 
+	t.Run("admission fails while pending", func(t *testing.T) {
+		// The Welcome write fails after admission recorded the session as
+		// pending: the waiting GoAway wakes with session not found.
+		pendingID := make(chan string, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(unblock)
+		w := relaytest.NewWorld(t)
+		n := w.StartNode("relay-a", func(c *relay.Config) {
+			c.Session.Interceptor = func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+				if dir != conduit.Outbound || conduit.FrameType(f) != "welcome" {
+					return []*conduitv1.Frame{f}
+				}
+				pendingID <- f.GetWelcome().GetSessionId()
+				<-release
+				// Invalid UTF-8 in a proto3 string: the Welcome cannot be
+				// encoded, so the write fails.
+				return []*conduitv1.Frame{{Body: &conduitv1.Frame_Welcome{Welcome: &conduitv1.Welcome{SessionId: "\xff"}}}}
+			}
+		})
+		w.SetPrincipal("a", agentPrincipal("L1", 1))
+		dialed := make(chan error, 1)
+		go func() {
+			dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer dcancel()
+			_, _, err := n.Dial(dctx, "a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+			dialed <- err
+		}()
+		id := relaytest.Wait(t, pendingID, "the Welcome write")
+		var waits atomic.Int32
+		n.Relay.SetPendingWaitHookForTest(func() { waits.Add(1); unblock() })
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := n.Relay.GoAway(ctx, id, conduit.GoAwayOptions{Reason: "test"}); !errors.Is(err, registry.ErrSessionNotFound) {
+			t.Fatalf("GoAway = %v, want session not found", err)
+		}
+		if got := waits.Load(); got != 1 {
+			t.Fatalf("GoAway waited %d times, want 1", got)
+		}
+		if err := relaytest.Wait(t, dialed, "the dial to fail"); err == nil {
+			t.Fatal("the dial succeeded without a Welcome")
+		}
+	})
+
+	t.Run("handshake timeout while pending", func(t *testing.T) {
+		const handshake = time.Second
+		w := relaytest.NewWorld(t)
+		n := w.StartNode("relay-a", func(c *relay.Config) { c.Session.HandshakeTimeout = handshake })
+		w.SetPrincipal("a", agentPrincipal("L1", 1))
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		t.Cleanup(unblock)
+		n.Relay.SetBeforeReadyHookForTest(func() { <-release })
+		var waits atomic.Int32
+		n.Relay.SetPendingWaitHookForTest(func() {
+			waits.Add(1)
+			n.Clock.Advance(handshake)
+		})
+		_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := n.Relay.GoAway(ctx, wel.GetSessionId(), conduit.GoAwayOptions{Reason: "test"}); !errors.Is(err, registry.ErrSessionNotFound) {
+			t.Fatalf("GoAway = %v, want session not found", err)
+		}
+		if got := waits.Load(); got != 1 {
+			t.Fatalf("GoAway waited %d times, want 1", got)
+		}
+	})
+
 	t.Run("unknown session fails fast", func(t *testing.T) {
 		w := relaytest.NewWorld(t)
 		n := w.StartNode("relay-a", nil)
 		var waits atomic.Int32
 		n.Relay.SetPendingWaitHookForTest(func() { waits.Add(1) })
+		// An already-cancelled ctx: session not found (not Canceled)
+		// shows GoAway answered before any wait.
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		cancel()
 		if err := n.Relay.GoAway(ctx, "no-such-session", conduit.GoAwayOptions{}); !errors.Is(err, registry.ErrSessionNotFound) {
 			t.Fatalf("GoAway(unknown) = %v, want session not found", err)
 		}
-		if ctx.Err() != nil || waits.Load() != 0 {
-			t.Fatalf("GoAway(unknown) waited (ctx err %v, waits %d)", ctx.Err(), waits.Load())
+		if got := waits.Load(); got != 0 {
+			t.Fatalf("GoAway(unknown) waited %d times, want 0", got)
 		}
 	})
 }
