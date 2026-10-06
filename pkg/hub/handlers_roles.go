@@ -1248,6 +1248,13 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		BadRequest(w, "principalId is required")
 		return
 	}
+	// Same principal-address check as members PUT: a user must be an email
+	// or a well-formed user ID, an agent a well-formed agent ID
+	// (ptone/scion#3478). The canonical spelling is stored.
+	var ok bool
+	if req.PrincipalID, ok = validateMemberPrincipalAddress(w, req.PrincipalType, req.PrincipalID); !ok {
+		return
+	}
 
 	// Resolve email to UUID for user principals (mirrors addGroupMember pattern).
 	if req.PrincipalType == store.RoleBindingPrincipalUser && strings.Contains(req.PrincipalID, "@") {

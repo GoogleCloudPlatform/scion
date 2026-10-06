@@ -376,6 +376,12 @@ func (s *Server) addProjectMember(w http.ResponseWriter, r *http.Request, projec
 		BadRequest(w, "principalId is required")
 		return
 	}
+	// Same principal-address check as members PUT (ptone/scion#3478).
+	principalID, ok := validateMemberPrincipalAddress(w, req.PrincipalType, req.PrincipalID)
+	if !ok {
+		return
+	}
+	req.PrincipalID = principalID
 
 	// Resolve a user email or group slug to its canonical ID (extracted as
 	// resolveMemberPrincipal so the PUT/DELETE principal endpoints share
