@@ -16,6 +16,7 @@ package util
 
 import (
 	"errors"
+	"net"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -45,10 +46,7 @@ func NormalizeCloneURL(cloneURL string) string {
 		return cloneURL
 	}
 
-	if scheme, rest, ok := splitScheme(cloneURL); ok && (scheme == "git+ssh" || scheme == "ssh+git") {
-		cloneURL = "ssh://" + rest
-	}
-	cloneURL = SanitizeGitSourceURL(cloneURL)
+	cloneURL = SanitizeGitSourceURL(canonicalSSHScheme(cloneURL))
 	if cloneURL == "" {
 		return ""
 	}
@@ -67,12 +65,13 @@ func NormalizeCloneURL(cloneURL string) string {
 
 // HTTPSCloneURL returns the HTTPS clone URL for a user-entered git remote, or
 // "" when SanitizeGitSourceURL cannot sanitize it unambiguously. The remote is
-// sanitized first (userinfo, query and fragment dropped). An scp-style remote
+// sanitized first (userinfo, query and fragment dropped; git+ssh:// and
+// ssh+git:// are treated as ssh://). An scp-style remote
 // with any login ("deploy@host:org/repo") maps to host/org/repo, and an
 // ssh:// URL drops its login and port (the port is the ssh daemon's, not the
 // HTTPS server's). Everything else goes through ToHTTPSCloneURL.
 func HTTPSCloneURL(remote string) string {
-	src := SanitizeGitSourceURL(remote)
+	src := SanitizeGitSourceURL(canonicalSSHScheme(trimSpaceEdges(remote)))
 	if src == "" {
 		return ""
 	}
@@ -100,6 +99,26 @@ func ResolveCloneURL(override, gitRemote string) string {
 		return override
 	}
 	return NormalizeCloneURL(gitRemote)
+}
+
+// canonicalSSHScheme rewrites a git+ssh:// or ssh+git:// URL to ssh:// so it
+// is handled like ssh:// (the login is kept as transport). Other values are
+// returned unchanged.
+func canonicalSSHScheme(value string) string {
+	if scheme, rest, ok := splitScheme(value); ok && (scheme == "git+ssh" || scheme == "ssh+git") {
+		return "ssh://" + rest
+	}
+	return value
+}
+
+// isBracketedIPv6 reports whether s is an IPv6 literal in brackets with no
+// port ("[::1]"), as used for a URL or scp host.
+func isBracketedIPv6(s string) bool {
+	if len(s) < 3 || s[0] != '[' || s[len(s)-1] != ']' {
+		return false
+	}
+	ip := net.ParseIP(s[1 : len(s)-1])
+	return ip != nil && strings.Contains(s, ":")
 }
 
 // StripQueryAndFragment drops everything from the first '?' or '#'. Git
@@ -166,7 +185,8 @@ var scpLogin = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // splitSCP splits an scp-style remote "login@host:path" (no scheme) at its
 // first '@' and the first ':' after it. ok is false unless the login matches
-// scpLogin and the host is non-empty with no '/' or '@'. The path is returned
+// scpLogin and the host is non-empty with no '/' or '@' (or a bracketed IPv6
+// literal, login@[::1]:path). The path is returned
 // as is and may itself contain '@'; callers treat that as ambiguous.
 //
 // Note: the login is not a secret in this form, so a value such as
@@ -181,6 +201,14 @@ func splitSCP(value string) (login, host, path string, ok bool) {
 	login, rest, found := strings.Cut(value, "@")
 	if !found || !scpLogin.MatchString(login) {
 		return "", "", "", false
+	}
+	if strings.HasPrefix(rest, "[") {
+		// Bracketed IPv6 host: login@[::1]:path.
+		end := strings.Index(rest, "]")
+		if end < 0 || !strings.HasPrefix(rest[end+1:], ":") || !isBracketedIPv6(rest[:end+1]) {
+			return "", "", "", false
+		}
+		return login, rest[:end+1], rest[end+2:], true
 	}
 	host, path, found = strings.Cut(rest, ":")
 	if !found || host == "" || strings.ContainsAny(host, "/@") {
@@ -289,10 +317,11 @@ func SanitizeGitSourceURL(value string) string {
 	if at := strings.LastIndex(authority, "@"); at >= 0 {
 		authority = authority[at+1:]
 	}
-	// A ':' left in the authority must be a port; anything else
+	// A ':' left in the authority must be a port or part of a bracketed IPv6
+	// host; anything else
 	// (git@PW@host:org/repo) is an scp form with extra '@' and is ambiguous.
 	if authority == "" || strings.Contains(path, "@") ||
-		(strings.Contains(authority, ":") && !isHostAndPort(authority)) {
+		(strings.Contains(authority, ":") && !isHostAndPort(authority) && !isBracketedIPv6(authority)) {
 		return ""
 	}
 	if hasPath {

@@ -320,7 +320,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	sanitizeSourceURLLabel(req.Labels)
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	// Drop the query and fragment first (as the clone path does): git remotes
+	// never need them and they can carry tokens.
+	normalizedRemote := util.NormalizeGitRemote(util.StripQueryAndFragment(req.GitRemote))
 	if msg := validateNormalizedGitRemote(normalizedRemote); msg != "" {
 		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
 		return
@@ -1238,7 +1240,9 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	sanitizeSourceURLLabel(req.Labels)
 
-	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+	// Drop the query and fragment first (as the clone path does): git remotes
+	// never need them and they can carry tokens.
+	normalizedRemote := util.NormalizeGitRemote(util.StripQueryAndFragment(req.GitRemote))
 	if msg := validateNormalizedGitRemote(normalizedRemote); msg != "" {
 		ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
 		return

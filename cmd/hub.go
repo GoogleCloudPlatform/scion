@@ -1559,7 +1559,9 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 		return runHubProjectCreateHubManaged()
 	}
 
-	gitURL := args[0]
+	// Git remotes never need a query or fragment, and either can carry a
+	// token; drop them before the URL is used, sent or stored.
+	gitURL := util.StripQueryAndFragment(args[0])
 
 	// Validate URL format
 	if !util.IsGitURL(gitURL) {
@@ -1567,6 +1569,12 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	normalized := util.NormalizeGitRemote(gitURL)
+	if strings.Contains(normalized, "@") {
+		// NormalizeGitRemote drops ordinary userinfo; an '@' left over means a
+		// password or an extra '@' in scp form. The hub refuses it too, so do
+		// not send it (and do not echo the URL).
+		return fmt.Errorf("invalid git URL: remove the username, password or token from the URL ('@' is allowed only in an ssh or scp-style login)")
+	}
 
 	// Display name
 	org, repo := util.ExtractOrgRepo(gitURL)

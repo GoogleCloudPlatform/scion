@@ -58,6 +58,7 @@ func TestNormalizeCloneURL(t *testing.T) {
 		{"scp custom login to https", "deploy@host:org/repo", "https://host/org/repo.git"},
 		{"scp custom login with .git to https", "deploy@internal.host:team/project.git", "https://internal.host/team/project.git"},
 		{"scp git login kept", "git@github.com:org/repo", "git@github.com:org/repo"},
+		{"scp ipv6 custom login to https", "deploy@[::1]:org/repo", "https://[::1]/org/repo.git"},
 		{"scp extra at in host dropped", "git@PW@host:org/repo", ""},
 		{"scp path at dropped", "git@user:PW@host:org/repo", ""},
 		{"network-path reference userinfo dropped", "//user:PW@host/repo", ""},
@@ -125,6 +126,8 @@ func TestValidateCloneURLLabel(t *testing.T) {
 		{"scp path with at sign", "git@host:repo@v1", ErrCloneURLUserinfo},
 		{"scp extra at in host", "git@PW@host:org/repo", ErrCloneURLUserinfo},
 		{"scp many at signs", "git@a@b@host:x", ErrCloneURLUserinfo},
+		{"scp ipv6 host", "deploy@[::1]:org/repo", nil},
+		{"schemeless ipv6 userinfo", "user:PW@[::1]/org/repo", ErrCloneURLUserinfo},
 		{"scp userinfo in path", "git@user:PW@host:org/repo", ErrCloneURLUserinfo},
 		{"network-path reference userinfo", "//user:PW@host/repo", ErrCloneURLUserinfo},
 		{"scp token login is ambiguous and accepted", "TOKEN@github.com:org/repo", nil},
@@ -198,6 +201,11 @@ func TestSanitizeGitSourceURL(t *testing.T) {
 		{"ssh second at sign dropped", "ssh://git@host/org/repo@v1", ""},
 		{"schemeless port kept", "user:pw@host:8443/org/repo", "host:8443/org/repo"},
 		{"schemeless empty host dropped", "user@/org/repo", ""},
+		{"schemeless ipv6 host userinfo stripped", "user:PW@[::1]/org/repo", "[::1]/org/repo"},
+		{"schemeless ipv6 host with port userinfo stripped", "user:PW@[::1]:8443/org/repo", "[::1]:8443/org/repo"},
+		{"schemeless bad bracket host dropped", "user:PW@[zz:yy]/org/repo", ""},
+		{"scp ipv6 host kept", "deploy@[::1]:org/repo", "deploy@[::1]:org/repo"},
+		{"scp ipv6 host path at dropped", "deploy@[::1]:org/repo@v1", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -243,6 +251,10 @@ func TestHTTPSCloneURL(t *testing.T) {
 		{"https port kept", "https://host:8443/org/repo", "https://host:8443/org/repo.git"},
 		{"https userinfo and query", "https://user:PW@github.com/org/repo?x=1", "https://github.com/org/repo.git"},
 		{"scp userinfo in path", "git@user:PW@host:org/repo", ""},
+		{"git+ssh like ssh", "git+ssh://git@host/x", "https://host/x.git"},
+		{"ssh+git like ssh with port", "ssh+git://git@host:2222/org/repo", "https://host/org/repo.git"},
+		{"scp ipv6 host", "deploy@[::1]:org/repo", "https://[::1]/org/repo.git"},
+		{"ssh ipv6 host with port", "ssh://git@[::1]:22/org/repo", "https://[::1]/org/repo.git"},
 		{"empty", "", ""},
 	}
 	for _, tt := range tests {

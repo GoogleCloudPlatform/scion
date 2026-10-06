@@ -442,13 +442,16 @@ func TestProjectClone_GitRemoteOverrideSourceURLNoCredentials(t *testing.T) {
 }
 
 // gitRemoteGuardCases: remotes whose normalized form keeps '@' are refused
-// with the clone-url refusal message; ordinary remotes are unaffected.
+// with the clone-url refusal message; other remotes are stored cleaned (no
+// credential, query or fragment), and ordinary remotes are unaffected.
 var gitRemoteGuardCases = []struct {
 	name, remote string
 	refused      bool
 }{
 	{"scp userinfo in path", "git@user:" + cloneURLLabelSentinel + "@host:org/repo", true},
-	{"scp extra at in host", "git@" + cloneURLLabelSentinel + "@host:org/repo", true},
+	{"scp extra at in host stripped by normalization", "git@" + cloneURLLabelSentinel + "@host:org/guard-scp-extra-at", false},
+	{"query token stripped", "https://github.com/org/guard-query?access_token=" + cloneURLLabelSentinel, false},
+	{"fragment token stripped", "https://github.com/org/guard-fragment#" + cloneURLLabelSentinel, false},
 	{"https", "https://github.com/org/guard-https", false},
 	{"https userinfo stripped by normalization", "https://user:" + cloneURLLabelSentinel + "@github.com/org/guard-userinfo", false},
 	{"ssh login", "ssh://git@github.com/org/guard-ssh.git", false},

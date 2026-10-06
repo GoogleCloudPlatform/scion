@@ -502,3 +502,45 @@ func TestHubProjectGitSourceLabels_NoCredentials(t *testing.T) {
 		})
 	}
 }
+
+// TestRunHubProjectCreate_CredentialedURLNotSent drives `hub project create`
+// with credential-bearing URLs and checks that neither the git remote nor the
+// clone-url/source-url labels sent to the hub keep the credential.
+func TestRunHubProjectCreate_CredentialedURLNotSent(t *testing.T) {
+	const pw = "FAKE-KEY-SENTINEL-not-a-real-credential"
+	for _, tc := range []struct {
+		name, url   string
+		checkRemote bool // false: the CLI refuses the URL before sending anything
+	}{
+		{"https userinfo", "https://user:" + pw + "@github.com/acme/widgets.git", true},
+		{"query token", "https://github.com/acme/widgets.git?access_token=" + pw, true},
+		{"fragment token", "https://github.com/acme/widgets.git#" + pw, true},
+		{"scp userinfo in path", "git@user:" + pw + "@host:acme/widgets", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := setupProjectCreateTest(t)
+			hubProjectCreateName = "widgets"
+			hubProjectCreateBranch = "main" // skip git ls-remote
+
+			err := runHubProjectCreate(hubProjectCreateCmd, []string{tc.url})
+			if !tc.checkRemote {
+				require.Error(t, err)
+				assert.NotContains(t, strings.ToLower(err.Error()), strings.ToLower(pw), "the error must not echo the credential")
+				mock.mu.Lock()
+				defer mock.mu.Unlock()
+				assert.Empty(t, mock.creates, "nothing may be sent to the hub")
+				return
+			}
+			require.NoError(t, err)
+
+			body := mock.lastCreate(t)
+			labels, _ := body["labels"].(map[string]interface{})
+			for k, v := range labels {
+				s, _ := v.(string)
+				assert.NotContains(t, strings.ToLower(s), strings.ToLower(pw), "credential sent in label %s", k)
+			}
+			remote, _ := body["gitRemote"].(string)
+			assert.NotContains(t, strings.ToLower(remote), strings.ToLower(pw), "credential sent in gitRemote")
+		})
+	}
+}
