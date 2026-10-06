@@ -45,6 +45,8 @@ type multiDeleteHub struct {
 	// release reports whether name's delete is done. It runs under mu.
 	release     func(h *multiDeleteHub, name string) bool
 	polls       map[string]int
+	deletes     map[string]int // DELETE requests per agent
+	firstPolls  []string       // agents in the order of their first poll
 	released    map[string]bool
 	releaseSeq  []string
 	inFlight    int
@@ -61,6 +63,7 @@ func (h *multiDeleteHub) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/healthz":
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, agentPath):
+		h.deletes[rest]++
 		if st, ok := h.deleteStatus[rest]; ok && st != http.StatusAccepted {
 			w.WriteHeader(st)
 			if st >= 400 {
@@ -77,6 +80,7 @@ func (h *multiDeleteHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if h.polls[name] == 0 {
+			h.firstPolls = append(h.firstPolls, name)
 			h.inFlight++
 			h.maxInFlight = max(h.maxInFlight, h.inFlight)
 		}
@@ -148,7 +152,7 @@ func setupMultiDelete(t *testing.T, limit int, release func(h *multiDeleteHub, n
 		dirs[n] = createAgentDir(t, projectDir, n)
 		hubsync.AddSyncedAgent(projectDir, n)
 	}
-	hub := &multiDeleteHub{projectID: "project-multi", dirs: dirs, release: release, polls: map[string]int{}, released: map[string]bool{}}
+	hub := &multiDeleteHub{projectID: "project-multi", dirs: dirs, release: release, polls: map[string]int{}, deletes: map[string]int{}, released: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(hub.serve))
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
@@ -209,6 +213,14 @@ func TestDeleteAgentsViaHub_202PollsConcurrentlyInOrder(t *testing.T) {
 			_, err := os.Stat(env.dirs[n])
 			assert.True(t, os.IsNotExist(err), "worktree of %s removed once confirmed", n)
 		}
+		// The others were cleaned up while the head agent was still being
+		// polled, and said so at once, before the head agent's result.
+		for _, n := range names[1:] {
+			i := strings.Index(stderr, "Cleaned up locally: "+n+"\n")
+			require.GreaterOrEqual(t, i, 0, "missing cleanup progress for %s in:\n%s", n, stderr)
+			assert.Less(t, i, strings.Index(stderr, "Agent 'agent-a' deleted via Hub."))
+		}
+		assert.Contains(t, stderr, "Cleaned up locally: agent-a\n")
 		// Every DELETE is sent (and its progress line printed) before any
 		// result, since results wait on the polls.
 		assert.Less(t, strings.Index(stderr, "Deleting agent 'agent-c'..."), strings.Index(stderr, "Agent 'agent-a' deleted via Hub."))
@@ -329,5 +341,59 @@ func TestDeleteAgentsViaHub_202MixedOutcomes(t *testing.T) {
 		assert.Contains(t, out.Results[2]["error"], "(runtime_error)")
 		assert.Equal(t, true, out.Results[4]["worktreeKept"])
 		checkDirs(t, env)
+	})
+}
+
+// ptone/scion#2895: with more accepted deletes than poll slots, slots are
+// handed out in input order, so the agent the results wait on first is
+// polled first. This pins the observable order (it catches, say, LIFO or
+// map-order hand-out). It cannot tell the feeder apart from one goroutine
+// per poll blocking on the semaphore: DELETEs are sent one by one and Go
+// queues channel waiters FIFO, so that also yields input order in practice.
+func TestDeleteAgentsViaHub_202PollSlotsInInputOrder(t *testing.T) {
+	names := []string{"agent-a", "agent-b", "agent-c"}
+	release := func(h *multiDeleteHub, name string) bool { return h.polls[name] >= 3 }
+	env := setupMultiDelete(t, 1, release, names...)
+
+	_, _ = captureStdIO(t, func() {
+		require.NoError(t, deleteAgentsViaHub(env.hubCtx, names))
+	})
+	assert.Equal(t, names, env.hub.firstPolls, "polls start in input order")
+	assert.Equal(t, 1, env.hub.maxInFlight)
+}
+
+// ptone/scion#2895: a name given twice is deleted, cleaned up and reported
+// once, at its first position.
+func TestDeleteAgentsViaHub_DuplicateNamesDeletedOnce(t *testing.T) {
+	release := func(h *multiDeleteHub, name string) bool { return h.polls[name] >= 2 }
+	input := []string{"agent-a", "agent-b", "agent-a"}
+
+	t.Run("text", func(t *testing.T) {
+		env := setupMultiDelete(t, 4, release, "agent-a", "agent-b")
+		_, stderr := captureStdIO(t, func() {
+			require.NoError(t, deleteAgentsViaHub(env.hubCtx, input))
+		})
+		assert.Equal(t, map[string]int{"agent-a": 1, "agent-b": 1}, env.hub.deletes)
+		assert.Equal(t, 1, strings.Count(stderr, "Deleting agent 'agent-a'..."))
+		assert.Equal(t, 1, strings.Count(stderr, "Agent 'agent-a' deleted via Hub."))
+		assert.Less(t, strings.Index(stderr, "Agent 'agent-a' deleted via Hub."), strings.Index(stderr, "Agent 'agent-b' deleted via Hub."))
+		assert.True(t, dirGone(env.dirs["agent-a"]))
+		assert.True(t, dirGone(env.dirs["agent-b"]))
+	})
+	t.Run("json", func(t *testing.T) {
+		env := setupMultiDelete(t, 4, release, "agent-a", "agent-b")
+		setJSONOutput(t)
+		stdout, stderr := captureStdIO(t, func() {
+			require.NoError(t, deleteAgentsViaHub(env.hubCtx, input))
+		})
+		assert.NotContains(t, stderr, "Cleaned up locally", "no progress lines in JSON mode")
+		var out struct {
+			Status  string                   `json:"status"`
+			Results []map[string]interface{} `json:"results"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
+		require.Len(t, out.Results, 2)
+		assert.Equal(t, "agent-a", out.Results[0]["agent"])
+		assert.Equal(t, "agent-b", out.Results[1]["agent"])
 	})
 }

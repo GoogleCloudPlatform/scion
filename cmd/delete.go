@@ -254,7 +254,15 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 	// still running leaves those agents (whose deletes the Hub may still
 	// finish) with their local worktree and sync entry; clean them up with
 	// 'scion --no-hub delete <name>'. Agents already confirmed by then have
-	// been cleaned up.
+	// been cleaned up, and in text mode each one printed a "Cleaned up
+	// locally: <name>" progress line when that happened. Running
+	// 'scion --no-hub delete' on an agent that was already cleaned up is
+	// harmless: it only reports that the agent was not found.
+	// A name given twice is deleted once (first occurrence kept). Without
+	// this, both DELETEs would be in flight together and the agent could be
+	// polled, cleaned up and reported twice.
+	agentNames = dedupeNames(agentNames)
+
 	agentSvc := hubCtx.Client.ProjectAgents(hubCtx.ProjectID)
 	jobs := make([]*hubDeleteJob, len(agentNames))
 	pollQueue := make(chan *hubDeleteJob, len(agentNames))
@@ -340,10 +348,25 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 	return nil
 }
 
+// dedupeNames returns names without repeats, keeping the first occurrence
+// of each and the original order.
+func dedupeNames(names []string) []string {
+	seen := make(map[string]bool, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // finishHubDelete turns one agent's DELETE/poll outcome into its result
 // and, if the delete is confirmed, removes the local agent files and sync
-// entry. It records output on job instead of printing, so the caller can
-// print results in input order. Calls must not overlap.
+// entry. It records the result output on job instead of printing it, so the
+// caller can print results in input order; only the "Cleaned up locally"
+// progress line is printed directly. Calls must not overlap.
 func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	agentName, outcome, err := job.name, job.outcome, job.err
 	if err != nil {
@@ -399,6 +422,11 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	if hubCtx != nil && hubCtx.ProjectPath != "" {
 		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
 		hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
+	}
+	if err == nil {
+		// Progress, printed now rather than in input order, so that after
+		// an interrupt the user can see which agents need no local cleanup.
+		statusf("Cleaned up locally: %s\n", agentName)
 	}
 	if branchDeleted {
 		job.lines = append(job.lines, fmt.Sprintf("Git branch associated with agent '%s' deleted.", agentName))
