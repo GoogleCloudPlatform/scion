@@ -37,7 +37,6 @@ configuration from the web UI, registration, and your first message.
 Each linked group can be configured via `/settings`:
 
 - **Observer mode (`a2a`):** Show agent-to-agent messages in the group, so you can watch how agents coordinate.
-- **Commentary:** Show agent reply messages (responses to other agents) in the group.
 - **Group notifications (`grp`):** Post agent state change notifications (completed, error, waiting for input) in the group chat.
 
 For a guided Workstation walkthrough, see [Setting Up Telegram](/scion/getting-started/telegram/). For advanced deployment (webhook mode, HA/standalone, `settings.yaml` reference), see [extras/scion-telegram/README.md](https://github.com/GoogleCloudPlatform/scion/tree/main/extras/scion-telegram).

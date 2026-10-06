@@ -58,7 +58,7 @@ async function listMocks(page: Page): Promise<void> {
 }
 
 /** Elements allowed to clip and scroll their own content sideways. */
-const SIDE_SCROLLERS = ['.scope-toggle', '[part~="tabs"]', '[part~="nav"]'];
+const SIDE_SCROLLERS = ['[part~="tabs"]', '[part~="nav"]'];
 
 async function assertRouteFits(page: Page): Promise<void> {
   const result = await page.evaluate((sideScrollers) => {
@@ -146,17 +146,63 @@ test.describe('app-shell routes fit a phone', () => {
     await assertRouteFits(page);
   });
 
-  test('every agent status filter is reachable', async ({ page }) => {
+  test('every agent status filter is on screen', async ({ page }) => {
     await openChatRail(page, listMocks);
     await page.goto('/agents', { waitUntil: 'domcontentloaded' });
     const group = page.locator('.filter-bar .scope-toggle');
     await expect(group).toBeVisible({ timeout: 10_000 });
-    // Either every button fits, or the user can scroll the group to them
-    // (a hidden overflow would clip the last ones out of reach).
-    const state = await group.evaluate((el) => ({
-      fits: el.scrollWidth <= el.clientWidth,
-      overflowX: getComputedStyle(el).overflowX,
-    }));
-    if (!state.fits) expect(['auto', 'scroll']).toContain(state.overflowX);
+    // Every button is wholly visible: inside the group's box (which clips
+    // its corners) and the screen, with nothing hidden behind a scroll.
+    const state = await group.evaluate((el) => {
+      const box = el.getBoundingClientRect();
+      return {
+        scrolls: el.scrollWidth > el.clientWidth,
+        innerWidth: window.innerWidth,
+        box: { left: box.left, right: box.right, top: box.top, bottom: box.bottom },
+        buttons: [...el.querySelectorAll('button')].map((b) => {
+          const r = b.getBoundingClientRect();
+          return {
+            label: b.textContent?.trim() ?? '',
+            left: r.left,
+            right: r.right,
+            top: r.top,
+            bottom: r.bottom,
+          };
+        }),
+      };
+    });
+    expect(state.scrolls, 'nothing hidden behind a sideways scroll').toBe(false);
+    expect(state.buttons.map((b) => b.label)).toEqual([
+      'All',
+      'Running',
+      'Stopping',
+      'Stopped',
+      'Suspended',
+      'Error',
+    ]);
+    for (const b of state.buttons) {
+      expect(b.right, `${b.label} inside the group`).toBeLessThanOrEqual(state.box.right + 0.5);
+      expect(b.bottom, `${b.label} inside the group`).toBeLessThanOrEqual(state.box.bottom + 0.5);
+      expect(b.left, `${b.label} inside the group`).toBeGreaterThanOrEqual(state.box.left - 0.5);
+      expect(b.right, `${b.label} inside the screen`).toBeLessThanOrEqual(state.innerWidth);
+    }
+  });
+});
+
+test.describe('app-shell routes on a notched phone in landscape (844x390)', () => {
+  test.use({ viewport: { width: 844, height: 390 }, isMobile: true, hasTouch: true });
+
+  const INSETS = { top: 0, right: 47, bottom: 21, left: 47 };
+
+  test('the sidebar collapse toggle clears the home indicator', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium-390', 'the viewport is fixed by this test');
+    await openChatRail(page, listMocks);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets: INSETS });
+    await page.goto('/agents', { waitUntil: 'domcontentloaded' });
+    const toggle = page.locator('aside.sidebar scion-nav .collapse-toggle');
+    await expect(toggle).toBeVisible({ timeout: 10_000 });
+    const box = (await toggle.boundingBox())!;
+    expect(box.y + box.height, 'above the bottom inset').toBeLessThanOrEqual(390 - INSETS.bottom);
   });
 });

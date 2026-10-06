@@ -17,6 +17,7 @@ package teams
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -477,6 +479,9 @@ func TestBroker_ParsePublishTopic(t *testing.T) {
 		agentSlug string
 	}{
 		{"myproject.agent1.event", "myproject", "agent1"},
+		{"scion.project.proj-1.agent.dev-1.messages", "proj-1", "dev-1"},
+		{"scion.project.proj-1.user.u-1.messages", "proj-1", ""},
+		{"scion.project.proj-1.broadcast", "proj-1", ""},
 		{"project.agent", "project", "agent"},
 		{"project", "project", ""},
 		{"", "", ""},
@@ -785,6 +790,12 @@ func TestBroker_HandleMessage_CanonicalTopic(t *testing.T) {
 		LinkedAt:       time.Now(),
 		Active:         true,
 	}))
+	require.NoError(t, broker.store.CreateUserMapping(ctx, &TeamsUserMapping{
+		TeamsUserID: "aad-1",
+		ScionUserID: "scion-aad-1",
+		ScionEmail:  "aad-1@example.com",
+		LinkedAt:    time.Now(),
+	}))
 
 	activity := &Activity{
 		Type: "message",
@@ -843,6 +854,12 @@ func TestBroker_HandleMessage_ThreadSuffix(t *testing.T) {
 		LinkedAt:       time.Now(),
 		Active:         true,
 	}))
+	require.NoError(t, broker.store.CreateUserMapping(ctx, &TeamsUserMapping{
+		TeamsUserID: "aad-2",
+		ScionUserID: "scion-aad-2",
+		ScionEmail:  "aad-2@example.com",
+		LinkedAt:    time.Now(),
+	}))
 
 	// Inbound activity with thread suffix on conversation ID.
 	activity := &Activity{
@@ -899,4 +916,440 @@ func TestBroker_HandleMessage_NoChannelLink(t *testing.T) {
 	_, err := broker.HandleActivity(context.Background(), activity)
 	require.NoError(t, err)
 	assert.False(t, hubCalled, "hub should not be called when no channel link exists")
+}
+
+// linkDefaultAgentChannel links testActivity's conversation to proj-1 with
+// dev-1 as the default agent.
+func linkDefaultAgentChannel(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+	require.NoError(t, broker.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "test-project",
+		DefaultAgent:   "dev-1",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	}))
+}
+
+func TestBroker_HandleMessage_DeliversAsLinkedUser(t *testing.T) {
+	var payload inboundPayload
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.WriteHeader(http.StatusOK)
+	})
+	linkTestUser(t, broker)
+	linkDefaultAgentChannel(t, broker)
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.NoError(t, err)
+
+	require.NotNil(t, payload.Message)
+	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
+	assert.Equal(t, "user:user@example.com", payload.Message.Sender)
+	assert.Equal(t, "aad-user-1", payload.Message.SenderID)
+	assert.Equal(t, "agent:dev-1", payload.Message.Recipient)
+	assert.Empty(t, ms.sent, "no reply expected on successful delivery")
+}
+
+func TestBroker_HandleMessage_UnlinkedUserGetsRegisterHint(t *testing.T) {
+	hubCalled := false
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	linkDefaultAgentChannel(t, broker)
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.NoError(t, err)
+
+	assert.False(t, hubCalled, "hub should not be called for an unlinked user")
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "`register`")
+}
+
+func TestBroker_HandleMessage_DeliveryFailureIsReported(t *testing.T) {
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":{"code":"internal_error","message":"boom"}}`))
+	})
+	linkTestUser(t, broker)
+	linkDefaultAgentChannel(t, broker)
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.Error(t, err)
+
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "could not be delivered")
+	assert.Contains(t, ms.sent[0].Text, "dev-1")
+}
+
+// mappingErrorStore fails every user mapping lookup.
+type mappingErrorStore struct {
+	Store
+}
+
+func (mappingErrorStore) GetUserMapping(context.Context, string) (*TeamsUserMapping, error) {
+	return nil, errors.New("database unavailable")
+}
+
+func TestBroker_HandleMessage_LinkLookupErrorRepliesGenerically(t *testing.T) {
+	hubCalled := false
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	linkDefaultAgentChannel(t, broker)
+	broker.store = mappingErrorStore{Store: broker.store}
+
+	err := broker.handleMessage(context.Background(), testActivity("Please take a look"))
+	require.NoError(t, err)
+
+	assert.False(t, hubCalled)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
+}
+
+func TestCommands_LinkLookupErrorRepliesGenerically(t *testing.T) {
+	hubCalled := false
+	broker, ms := testBrokerWithStore(t, func(w http.ResponseWriter, r *http.Request) {
+		hubCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	linkTestChannel(t, broker)
+	broker.store = mappingErrorStore{Store: broker.store}
+
+	handled, err := broker.commandHandler.Handle(context.Background(), testActivity("agents"))
+	assert.True(t, handled)
+	assert.NoError(t, err)
+	assert.False(t, hubCalled)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
+}
+
+// newAskUserBroker returns a broker with conv-1 linked to proj-1 and a
+// function returning the activities sent to Teams. wrap, when non-nil,
+// wraps the broker's store.
+func newAskUserBroker(t *testing.T, wrap func(Store) Store) (*TeamsBroker, func() []Activity) {
+	t.Helper()
+	var mu sync.Mutex
+	var sent []Activity
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var a Activity
+		if err := json.NewDecoder(r.Body).Decode(&a); err == nil {
+			mu.Lock()
+			sent = append(sent, a)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ActivityResponse{ID: "sent-1"})
+	}))
+	t.Cleanup(apiServer.Close)
+
+	broker := NewBroker(slog.Default())
+	configureBrokerWithAPI(t, broker, apiServer.URL)
+	ctx := context.Background()
+	require.NoError(t, broker.AddChannelLink(&ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "test-project",
+		Active:         true,
+		LinkedAt:       time.Now(),
+	}))
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+		ConversationID: "conv-1",
+		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
+	if wrap != nil {
+		broker.mu.Lock()
+		broker.store = wrap(broker.store)
+		broker.mu.Unlock()
+	}
+	return broker, func() []Activity {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]Activity(nil), sent...)
+	}
+}
+
+// publishAskUser publishes an ask-user message from agent dev-1 in proj-1
+// and waits until want activities have been sent in total.
+func publishAskUser(t *testing.T, broker *TeamsBroker, sent func() []Activity, msg *messages.StructuredMessage, want int) []Activity {
+	t.Helper()
+	require.NoError(t, broker.Publish(context.Background(), projectkeys.AgentTopic("proj-1", "dev-1"), msg))
+	require.Eventually(t, func() bool { return len(sent()) >= want }, 5*time.Second, 10*time.Millisecond)
+	return sent()
+}
+
+func askUserMessage(metadata map[string]string) *messages.StructuredMessage {
+	return &messages.StructuredMessage{
+		Version:  messages.Version,
+		Sender:   "agent:dev-1",
+		Msg:      "Deploy to production?",
+		Type:     messages.TypeInputNeeded,
+		Metadata: metadata,
+	}
+}
+
+// cardOf decodes the Adaptive Card attached to a.
+func cardOf(t *testing.T, a Activity) map[string]interface{} {
+	t.Helper()
+	require.Len(t, a.Attachments, 1)
+	raw, err := json.Marshal(a.Attachments[0].Content)
+	require.NoError(t, err)
+	var card map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &card))
+	return card
+}
+
+// publishAskUserCard publishes an ask-user message for agent dev-1 in
+// proj-1 to a linked conversation and returns the broker and the card sent.
+func publishAskUserCard(t *testing.T, metadata map[string]string) (*TeamsBroker, map[string]interface{}) {
+	t.Helper()
+	broker, sent := newAskUserBroker(t, nil)
+	activities := publishAskUser(t, broker, sent, askUserMessage(metadata), 1)
+	return broker, cardOf(t, activities[0])
+}
+
+func TestBroker_Publish_AskUserStoresPendingRequest(t *testing.T) {
+	broker, card := publishAskUserCard(t, map[string]string{
+		"request_id": "req-42",
+		"choices":    `["Yes","No"]`,
+	})
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-42")
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.Equal(t, "proj-1", pending.ProjectID)
+	assert.Equal(t, "dev-1", pending.AgentSlug)
+	assert.Equal(t, "conv-1", pending.ConversationID)
+	assert.Equal(t, []string{"Yes", "No"}, pending.Choices)
+	assert.False(t, pending.Responded)
+	assert.WithinDuration(t, time.Now().Add(askUserTTL), pending.ExpiresAt, time.Minute)
+
+	actions := card["actions"].([]interface{})
+	require.Len(t, actions, 3)
+	for _, a := range actions {
+		action := a.(map[string]interface{})
+		assert.Equal(t, "Action.Execute", action["type"])
+		assert.NotEmpty(t, action["verb"])
+		assert.Equal(t, "req-42", action["data"].(map[string]interface{})["request_id"])
+	}
+}
+
+func TestBroker_Publish_AskUserWithoutRequestIDGetsOne(t *testing.T) {
+	broker, card := publishAskUserCard(t, nil)
+
+	actions := card["actions"].([]interface{})
+	requestID, _ := actions[0].(map[string]interface{})["data"].(map[string]interface{})["request_id"].(string)
+	require.NotEmpty(t, requestID)
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), requestID)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.Equal(t, []string{"approve", "reject"}, pending.Choices)
+}
+
+func TestBroker_AskUserCardButtonDeliversAnswer(t *testing.T) {
+	broker, card := publishAskUserCard(t, map[string]string{"request_id": "req-42"})
+
+	var payload inboundPayload
+	hubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/broker/inbound", r.URL.Path)
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(hubServer.Close)
+	broker.hubClient = NewHubClient(hubServer.URL, "", "", slog.Default())
+	require.NoError(t, broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID: "aad-user-1",
+		ScionUserID: "scion-1",
+		ScionEmail:  "user@example.com",
+		LinkedAt:    time.Now(),
+	}))
+
+	// Build the invoke Teams sends for the first button, from the card JSON.
+	approve := card["actions"].([]interface{})[0].(map[string]interface{})
+	value, err := json.Marshal(map[string]interface{}{
+		"action": map[string]interface{}{
+			"type": approve["type"],
+			"verb": approve["verb"],
+			"data": approve["data"],
+		},
+		"trigger": "manual",
+	})
+	require.NoError(t, err)
+	invoke := &Activity{
+		Type:         "invoke",
+		Name:         "adaptiveCard/action",
+		ID:           "invoke-1",
+		From:         ChannelAccount{ID: "user-1", Name: "Test User", AadObjectID: "aad-user-1"},
+		Conversation: ConversationAccount{ID: "conv-1"},
+		ServiceURL:   "https://smba.trafficmanager.net/test/",
+		Value:        value,
+	}
+
+	resp, err := broker.HandleActivity(context.Background(), invoke)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	body, ok := resp.Body.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "application/vnd.microsoft.card.adaptive", body["type"])
+
+	require.NotNil(t, payload.Message, "expected the answer to be delivered to the hub")
+	assert.Equal(t, "scion.project.proj-1.agent.dev-1.messages", payload.Topic)
+	assert.Equal(t, "approve", payload.Message.Msg)
+	assert.Equal(t, "user:user@example.com", payload.Message.Sender)
+	assert.Equal(t, "req-42", payload.Message.Metadata["ask_request_id"])
+
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-42")
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	assert.True(t, pending.Responded)
+}
+
+func TestBroker_Publish_AskUserRepublishKeepsAnsweredRequest(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	ctx := context.Background()
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-42"}), 1)
+	claimed, err := broker.store.MarkAskUserResponded(ctx, "req-42")
+	require.NoError(t, err)
+	require.True(t, claimed)
+	before, err := broker.store.GetPendingAskUser(ctx, "req-42")
+	require.NoError(t, err)
+
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-42"}), 2)
+
+	after, err := broker.store.GetPendingAskUser(ctx, "req-42")
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	assert.True(t, after.Responded, "re-publishing must not reopen an answered request")
+	assert.True(t, before.ExpiresAt.Equal(after.ExpiresAt), "re-publishing must not extend the expiry")
+}
+
+// pendingAskCreateErrorStore fails every pending ask-user write.
+type pendingAskCreateErrorStore struct {
+	Store
+}
+
+func (pendingAskCreateErrorStore) CreatePendingAskUser(context.Context, *PendingAskUser) error {
+	return errors.New("database unavailable")
+}
+
+func TestBroker_Publish_AskUserStoreFailureSendsWithoutButtons(t *testing.T) {
+	broker, sent := newAskUserBroker(t, func(s Store) Store { return pendingAskCreateErrorStore{Store: s} })
+
+	activities := publishAskUser(t, broker, sent, askUserMessage(map[string]string{
+		"request_id": "req-42",
+		"choices":    `["Yes","No"]`,
+	}), 1)
+
+	require.Len(t, activities, 1)
+	a := activities[0]
+	assert.Empty(t, a.Attachments, "no buttons when the request could not be stored")
+	assert.Contains(t, a.Text, "[dev-1] Deploy to production?")
+	assert.Contains(t, a.Text, "Choices: Yes, No")
+	assert.Contains(t, a.Text, "_Buttons are unavailable for this question. To answer, @-mention dev-1 in a linked channel._")
+}
+
+func TestBroker_Publish_PlainAskUserIsNotStored(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	msg := askUserMessage(map[string]string{"request_id": "req-plain"})
+	msg.Plain = true
+
+	activities := publishAskUser(t, broker, sent, msg, 1)
+
+	assert.Empty(t, activities[0].Attachments)
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-plain")
+	require.NoError(t, err)
+	assert.Nil(t, pending, "plain-text questions have no buttons to answer")
+}
+
+func TestAskUserNoButtonsNote(t *testing.T) {
+	assert.Equal(t, "_Buttons are unavailable for this question. To answer, @-mention dev-1 in a linked channel._", askUserNoButtonsNote("dev-1"))
+	assert.Equal(t, "_Buttons are unavailable for this question. To answer, reply in a linked channel._", askUserNoButtonsNote(""))
+}
+
+func TestBroker_StorePendingAskUser_RequiresProjectAndAgent(t *testing.T) {
+	broker, _ := testBrokerWithStore(t, nil)
+	ctx := context.Background()
+	for _, tt := range []struct{ name, project, sender string }{
+		{"no project", "", "agent:dev-1"},
+		{"no agent", "proj-1", "user:someone@example.com"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := askUserMessage(map[string]string{"request_id": "req-" + tt.name})
+			msg.Sender = tt.sender
+			err := broker.storePendingAskUser(ctx, broker.store, msg, tt.project, "", "conv-1")
+			require.Error(t, err)
+			pending, err := broker.store.GetPendingAskUser(ctx, "req-"+tt.name)
+			require.NoError(t, err)
+			assert.Nil(t, pending)
+		})
+	}
+}
+
+func TestBroker_Publish_AskUserWithoutAgentSendsWithoutButtons(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	msg := askUserMessage(map[string]string{"request_id": "req-noagent"})
+	msg.Sender = ""
+
+	require.NoError(t, broker.Publish(context.Background(), projectkeys.BroadcastTopic("proj-1"), msg))
+	require.Eventually(t, func() bool { return len(sent()) >= 1 }, 5*time.Second, 10*time.Millisecond)
+
+	a := sent()[0]
+	assert.Empty(t, a.Attachments)
+	assert.Contains(t, a.Text, "To answer, reply in a linked channel.")
+	pending, err := broker.store.GetPendingAskUser(context.Background(), "req-noagent")
+	require.NoError(t, err)
+	assert.Nil(t, pending)
+}
+
+func TestBroker_Publish_AskUserDeletesExpiredRequestsAtMostHourly(t *testing.T) {
+	broker, sent := newAskUserBroker(t, nil)
+	ctx := context.Background()
+	expired := func(id string) {
+		require.NoError(t, broker.store.CreatePendingAskUser(ctx, &PendingAskUser{
+			RequestID: id, ProjectID: "proj-1", AgentSlug: "dev-1", ExpiresAt: time.Now().Add(-time.Hour),
+		}))
+	}
+
+	expired("old-1")
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-a"}), 1)
+	got, err := broker.store.GetPendingAskUser(ctx, "old-1")
+	require.NoError(t, err)
+	assert.Nil(t, got, "expired request is deleted when a question is posted")
+
+	// Within the interval, expired requests are not deleted again.
+	expired("old-2")
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-b"}), 2)
+	got, err = broker.store.GetPendingAskUser(ctx, "old-2")
+	require.NoError(t, err)
+	assert.NotNil(t, got)
+
+	// Once the interval has passed, they are deleted again.
+	broker.mu.Lock()
+	broker.lastAskCleanup = time.Now().Add(-askUserCleanupInterval)
+	broker.mu.Unlock()
+	publishAskUser(t, broker, sent, askUserMessage(map[string]string{"request_id": "req-c"}), 3)
+	got, err = broker.store.GetPendingAskUser(ctx, "old-2")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestLinkedUserByTeamsID_NilStoreIsLinkCheckFailure(t *testing.T) {
+	mapping, err := linkedUserByTeamsID(context.Background(), nil, "aad-user-1")
+	assert.Nil(t, mapping)
+	require.Error(t, err)
+	assert.Equal(t, linkCheckFailedText, linkProblem(mapping, err, registerHint))
+
+	broker, ms := testBrokerWithStore(t, nil)
+	broker.store = nil
+	handled, cmdErr := broker.commandHandler.Handle(context.Background(), testActivity("setup"))
+	assert.True(t, handled)
+	assert.NoError(t, cmdErr)
+	require.Len(t, ms.sent, 1)
+	assert.Equal(t, linkCheckFailedText, ms.sent[0].Text)
 }

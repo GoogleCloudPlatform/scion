@@ -153,8 +153,13 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 // The handler is only installed on the inprocess spoke; external spokes
 // receive the pattern with a nil handler so they can set up remote-side
 // filtering without invoking callbacks locally. This prevents double
-// delivery and nil-handler panics on external spokes.
+// delivery and nil-handler panics on external spokes. A nil handler is
+// rejected with ErrNilHandler, matching InProcessEventBus.
 func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscription, error) {
+	if handler == nil {
+		return nil, ErrNilHandler
+	}
+
 	f.mu.RLock()
 	buses := make([]NamedEventBus, len(f.buses))
 	copy(buses, f.buses)
@@ -167,8 +172,6 @@ func (f *FanOutEventBus) Subscribe(pattern string, handler EventHandler) (Subscr
 		h := handler
 		if nb.Name != InProcessBusName {
 			h = nil
-		} else if h == nil {
-			continue
 		}
 		sub, err := nb.Bus.Subscribe(pattern, h)
 		if err != nil {

@@ -1700,9 +1700,11 @@ func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
 // C1/T1/S-F2). A project's settings must not be able to redirect Docker
 // bind-mount sources to an operator-unapproved host path.
 //
-// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
-// StorageClass) are not used by shared_dir_storage. Warning about them being
-// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+// The workspace-storage-only fields on V1NFSConfig (UID, MountOptions,
+// StorageClass, AutoMount) are not used by shared_dir_storage; see
+// IgnoredNFSFields. GID is used: when non-zero it is the only leaf group id
+// an agent may be given as a supplemental group (ptone/scion#3155, see
+// pkg/agent.sharedDirLeafGroups).
 type V1SharedDirStorageConfig struct {
 	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
 	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
@@ -1812,14 +1814,13 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	set  func(nfs *V1NFSConfig) bool
 }{
 	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
-	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
 	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
+// fields (uid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —

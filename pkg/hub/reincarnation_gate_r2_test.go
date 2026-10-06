@@ -201,7 +201,7 @@ func TestSendAgentRouted_F2_MigratingSecondaryDeferred(t *testing.T) {
 	rr := httptest.NewRecorder()
 	mentionResults := []messages.MentionResult{{Slug: "f2-second", Status: "delivered"}}
 	srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello @f2-second", "Owner", []*store.Agent{primary, second}, []string{"f2-second"}, mentionResults, nil, time.Now(), "", nil, false)
+		"hello @f2-second", "Owner", []*store.Agent{primary, second}, []string{"f2-second"}, mentionResults, nil, time.Now(), "", nil, chatSendOptions{})
 
 	for _, d := range dispatcher.getMessages() {
 		assert.NotEqual(t, "f2-second", d.agentSlug, "a migrating secondary must not be dispatched to")
