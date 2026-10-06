@@ -449,6 +449,8 @@ var gitRemoteGuardCases = []struct {
 	refused      bool
 }{
 	{"scp userinfo in path", "git@user:" + cloneURLLabelSentinel + "@host:org/repo", true},
+	{"query char inside password", "https://user:" + cloneURLLabelSentinel + "?W@github.com/org/guard-q-pw", true},
+	{"fragment char inside password", "https://user:" + cloneURLLabelSentinel + "#W@github.com/org/guard-f-pw", true},
 	{"scp extra at in host stripped by normalization", "git@" + cloneURLLabelSentinel + "@host:org/guard-scp-extra-at", false},
 	{"query token stripped", "https://github.com/org/guard-query?access_token=" + cloneURLLabelSentinel, false},
 	{"fragment token stripped", "https://github.com/org/guard-fragment#" + cloneURLLabelSentinel, false},

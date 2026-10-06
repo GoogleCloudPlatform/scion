@@ -592,10 +592,15 @@ func NormalizeGitRemote(remote string) string {
 	remote = strings.TrimPrefix(remote, "ssh://")
 	remote = strings.TrimPrefix(remote, "git://")
 
-	// Handle SSH shorthand format (git@host:path → host/path)
+	// Handle SSH shorthand format (git@host:path → host/path). A bracketed
+	// IPv6 host (git@[::1]:path) is split after its closing ']'.
 	if strings.HasPrefix(remote, "git@") {
 		remote = strings.TrimPrefix(remote, "git@")
-		remote = strings.Replace(remote, ":", "/", 1)
+		if end := strings.Index(remote, "]:"); strings.HasPrefix(remote, "[") && end > 0 {
+			remote = remote[:end+1] + "/" + remote[end+2:]
+		} else {
+			remote = strings.Replace(remote, ":", "/", 1)
+		}
 	}
 
 	// Strip user info (user@, user:pass@) for scheme-based URLs.

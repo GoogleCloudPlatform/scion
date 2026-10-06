@@ -112,7 +112,9 @@ func canonicalSSHScheme(value string) string {
 }
 
 // isBracketedIPv6 reports whether s is an IPv6 literal in brackets with no
-// port ("[::1]"), as used for a URL or scp host.
+// port ("[::1]"), as used for a URL or scp host. A zone ID
+// ("[fe80::1%25eth0]") is not accepted: net.ParseIP rejects it, so such a
+// host is refused by validation and dropped by sanitizing (fail closed).
 func isBracketedIPv6(s string) bool {
 	if len(s) < 3 || s[0] != '[' || s[len(s)-1] != ']' {
 		return false
@@ -121,13 +123,32 @@ func isBracketedIPv6(s string) bool {
 	return ip != nil && strings.Contains(s, ":")
 }
 
-// StripQueryAndFragment drops everything from the first '?' or '#'. Git
-// remotes never need either, and both can carry tokens (?access_token=...).
-func StripQueryAndFragment(remote string) string {
-	if i := strings.IndexAny(remote, "?#"); i >= 0 {
-		return remote[:i]
+// isBracketedHost reports whether s is a bracketed IPv6 literal, optionally
+// followed by ":port" ("[::1]", "[::1]:8443"). Any other use of '[' or ']'
+// in an authority is malformed.
+func isBracketedHost(s string) bool {
+	if isBracketedIPv6(s) {
+		return true
 	}
-	return remote
+	end := strings.LastIndex(s, "]")
+	return end > 0 && isBracketedIPv6(s[:end+1]) && isHostAndPort(s)
+}
+
+// CutQueryAndFragment drops everything from the first '?' or '#'. Git
+// remotes never need either, and both can carry tokens (?access_token=...).
+// ok is false when the dropped text contains '@': the '?' or '#' may then
+// sit inside a password (https://user:P?W@host/repo), and cutting there would
+// keep the first part of it. Callers must refuse or drop such a value rather
+// than use the returned prefix.
+func CutQueryAndFragment(remote string) (rest string, ok bool) {
+	i := strings.IndexAny(remote, "?#")
+	if i < 0 {
+		return remote, true
+	}
+	if strings.Contains(remote[i:], "@") {
+		return "", false
+	}
+	return remote[:i], true
 }
 
 // IsPrintableASCII reports whether s contains only printable, non-space
@@ -286,7 +307,10 @@ func SanitizeGitSourceURL(value string) string {
 	if !IsPrintableASCII(value) {
 		return ""
 	}
-	value = StripQueryAndFragment(value)
+	value, ok := CutQueryAndFragment(value)
+	if !ok {
+		return ""
+	}
 	if !strings.Contains(value, "@") {
 		return value
 	}
@@ -321,7 +345,8 @@ func SanitizeGitSourceURL(value string) string {
 	// host; anything else
 	// (git@PW@host:org/repo) is an scp form with extra '@' and is ambiguous.
 	if authority == "" || strings.Contains(path, "@") ||
-		(strings.Contains(authority, ":") && !isHostAndPort(authority) && !isBracketedIPv6(authority)) {
+		(strings.Contains(authority, ":") && !isHostAndPort(authority) && !isBracketedIPv6(authority)) ||
+		(strings.ContainsAny(authority, "[]") && !isBracketedHost(authority)) {
 		return ""
 	}
 	if hasPath {

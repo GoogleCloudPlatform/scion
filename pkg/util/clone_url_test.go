@@ -127,6 +127,11 @@ func TestValidateCloneURLLabel(t *testing.T) {
 		{"scp extra at in host", "git@PW@host:org/repo", ErrCloneURLUserinfo},
 		{"scp many at signs", "git@a@b@host:x", ErrCloneURLUserinfo},
 		{"scp ipv6 host", "deploy@[::1]:org/repo", nil},
+		{"scp bracket missing close", "deploy@[::1:org/repo", ErrCloneURLUserinfo},
+		{"scp bracket with slash", "deploy@[a/b]:org/repo", ErrCloneURLUserinfo},
+		{"scp non-ipv6 bracket", "deploy@[notipv6]:org/repo", ErrCloneURLUserinfo},
+		{"scp ipv6 zone id", "deploy@[fe80::1%25eth0]:org/repo", ErrCloneURLUserinfo},
+		{"query inside password", "https://user:P?W@host/org/repo", ErrCloneURLQuery},
 		{"schemeless ipv6 userinfo", "user:PW@[::1]/org/repo", ErrCloneURLUserinfo},
 		{"scp userinfo in path", "git@user:PW@host:org/repo", ErrCloneURLUserinfo},
 		{"network-path reference userinfo", "//user:PW@host/repo", ErrCloneURLUserinfo},
@@ -206,6 +211,14 @@ func TestSanitizeGitSourceURL(t *testing.T) {
 		{"schemeless bad bracket host dropped", "user:PW@[zz:yy]/org/repo", ""},
 		{"scp ipv6 host kept", "deploy@[::1]:org/repo", "deploy@[::1]:org/repo"},
 		{"scp ipv6 host path at dropped", "deploy@[::1]:org/repo@v1", ""},
+		{"query inside password dropped", "https://user:P?W@host/org/repo", ""},
+		{"fragment inside password dropped", "https://user:P#W@host/org/repo", ""},
+		{"schemeless query inside password dropped", "user:P?W@host/org/repo", ""},
+		{"scp bracket missing close dropped", "deploy@[::1:org/repo", ""},
+		{"scp bracket with slash dropped", "deploy@[a/b]:org/repo", ""},
+		{"scp non-ipv6 bracket dropped", "deploy@[notipv6]:org/repo", ""},
+		{"schemeless non-ipv6 bracket with port dropped", "user:PW@[zz]:80/org/repo", ""},
+		{"ipv6 zone id dropped", "user:PW@[fe80::1%25eth0]/org/repo", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -255,6 +268,8 @@ func TestHTTPSCloneURL(t *testing.T) {
 		{"ssh+git like ssh with port", "ssh+git://git@host:2222/org/repo", "https://host/org/repo.git"},
 		{"scp ipv6 host", "deploy@[::1]:org/repo", "https://[::1]/org/repo.git"},
 		{"ssh ipv6 host with port", "ssh://git@[::1]:22/org/repo", "https://[::1]/org/repo.git"},
+		{"query inside password", "https://user:P?W@host/org/repo", ""},
+		{"fragment inside password", "https://user:P#W@host/org/repo", ""},
 		{"empty", "", ""},
 	}
 	for _, tt := range tests {
@@ -285,5 +300,55 @@ func TestNormalizeGitRemote_NoAtForLegitRemotes(t *testing.T) {
 	}
 	if got := NormalizeGitRemote("git@user:PW@host:org/repo"); !strings.Contains(got, "@") {
 		t.Errorf("NormalizeGitRemote(scp with password) = %q; the hub guard relies on the '@' remaining", got)
+	}
+}
+
+func TestCutQueryAndFragment(t *testing.T) {
+	tests := []struct {
+		in, want string
+		ok       bool
+	}{
+		{"https://host/org/repo", "https://host/org/repo", true},
+		{"https://host/org/repo?access_token=x", "https://host/org/repo", true},
+		{"https://host/org/repo#frag", "https://host/org/repo", true},
+		{"https://user:P?W@host/org/repo", "", false},
+		{"https://user:P#W@host/org/repo", "", false},
+		{"https://host/org/repo?x=a@b", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := CutQueryAndFragment(tt.in)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("CutQueryAndFragment(%q) = %q, %v; want %q, %v", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+// TestPasswordWithQueryOrFragmentCharNotKept checks that no part of a
+// password containing '?' or '#' survives sanitizing, normalizing or the
+// HTTPS clone URL.
+func TestPasswordWithQueryOrFragmentCharNotKept(t *testing.T) {
+	for _, in := range []string{
+		"https://user:PSECRET?WSECRET@host/org/repo",
+		"https://user:PSECRET#WSECRET@host/org/repo",
+		"user:PSECRET?WSECRET@host/org/repo",
+	} {
+		for name, got := range map[string]string{
+			"SanitizeGitSourceURL": SanitizeGitSourceURL(in),
+			"NormalizeCloneURL":    NormalizeCloneURL(in),
+			"HTTPSCloneURL":        HTTPSCloneURL(in),
+		} {
+			if strings.Contains(got, "SECRET") {
+				t.Errorf("%s(%q) = %q keeps part of the password", name, in, got)
+			}
+		}
+	}
+}
+
+func TestNormalizeGitRemote_IPv6SCP(t *testing.T) {
+	if got := NormalizeGitRemote("git@[::1]:org/repo.git"); got != "[::1]/org/repo" {
+		t.Fatalf("NormalizeGitRemote(git@[::1]:org/repo.git) = %q, want %q", got, "[::1]/org/repo")
+	}
+	if got := NormalizeGitRemote("git@github.com:org/repo.git"); got != "github.com/org/repo" {
+		t.Fatalf("NormalizeGitRemote(git@github.com:org/repo.git) = %q", got)
 	}
 }

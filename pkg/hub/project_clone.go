@@ -96,7 +96,13 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	// clone-url label by ToHTTPSCloneURL. The query string and fragment are
 	// dropped first: git remotes never need them and they can carry tokens
 	// (?access_token=…).
-	overrideRemote := util.StripQueryAndFragment(trimRemote(req.GitRemote))
+	overrideRemote, cutOK := util.CutQueryAndFragment(trimRemote(req.GitRemote))
+	if !cutOK {
+		// A '?' or '#' inside the userinfo: cutting there would keep part of
+		// the password.
+		ValidationError(w, errCloneRemoteInvalid, map[string]interface{}{"field": "gitRemote"})
+		return
+	}
 	if overrideRemote != "" {
 		if msg := validateCloneGitRemote(overrideRemote); msg != "" {
 			ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
@@ -1148,6 +1154,21 @@ func cloneURLRefusalMessage(err error) string {
 	}
 	return "Invalid " + store.LabelCloneURL + " label: " + problem +
 		". The label must be a plain repository URL; configure clone authentication with project secrets or the GitHub App instead"
+}
+
+// normalizeRequestGitRemote returns the normalized form of a git remote from a
+// create or register request, or a constant 400 message. The query and
+// fragment are dropped first (as the clone path does): git remotes never need
+// them and they can carry tokens. A remote whose dropped part contains '@'
+// (a '?' or '#' inside the password) or whose normalized form still contains
+// '@' is refused rather than repaired.
+func normalizeRequestGitRemote(raw string) (normalized, msg string) {
+	rest, ok := util.CutQueryAndFragment(raw)
+	if !ok {
+		return "", cloneURLRefusalMessage(util.ErrCloneURLUserinfo)
+	}
+	normalized = util.NormalizeGitRemote(rest)
+	return normalized, validateNormalizedGitRemote(normalized)
 }
 
 // validateNormalizedGitRemote refuses a git remote whose normalized form

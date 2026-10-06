@@ -516,6 +516,9 @@ func TestRunHubProjectCreate_CredentialedURLNotSent(t *testing.T) {
 		{"query token", "https://github.com/acme/widgets.git?access_token=" + pw, true},
 		{"fragment token", "https://github.com/acme/widgets.git#" + pw, true},
 		{"scp userinfo in path", "git@user:" + pw + "@host:acme/widgets", false},
+		{"query char inside password", "https://user:" + pw + "?W@github.com/acme/widgets.git", false},
+		{"fragment char inside password", "https://user:" + pw + "#W@github.com/acme/widgets.git", false},
+		{"invalid URL not echoed", "https://user:" + pw + "@host", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mock := setupProjectCreateTest(t)
