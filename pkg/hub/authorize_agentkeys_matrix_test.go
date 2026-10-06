@@ -110,7 +110,7 @@ func TestAuthorizeAgentKeys_IdentityKinds(t *testing.T) {
 			// stands in for a trusted local operator when no auth server is
 			// configured), so it is allowed here for the same reason
 			// authzHelperAdmin() is above -- this case exists to confirm
-			// "dev" reaches the same user-branch CheckAccess call as "user"
+			// "dev" reaches the same shared-evaluator path as "user"
 			// (contract: UAT identity stays human; "dev" is one of the two
 			// Type() values authorizeAgentKeys routes to that branch), not
 			// to claim dev identities are unprivileged.
@@ -615,4 +615,40 @@ func TestAgentAttachRegistry_EnforcementListsAuthorizeAgentKeys(t *testing.T) {
 		t.Fatalf("agent.attach Enforcement %v does not list authorizeAgentKeys", p.Enforcement)
 	}
 	t.Fatal("agent.attach permission not found in registry")
+}
+
+// TestAuthorizeAgentKeys_SharedEvaluatorPermissionMatchesAttach pins the
+// premise that keeps user and UAT results unchanged on the shared evaluator
+// (ptone/scion#3517): the explicit permission authorizeAgentTargetAction
+// passes for ActionAttach is the same one Decide resolves for an agent
+// resource and ActionAttach when no permission is named.
+func TestAuthorizeAgentKeys_SharedEvaluatorPermissionMatchesAttach(t *testing.T) {
+	resolved, err := resolveResourcePermission("agent", ActionAttach)
+	if err != nil {
+		t.Fatalf("resolveResourcePermission(agent, attach): %v", err)
+	}
+	if got := agentTargetPermission(ActionAttach); got != resolved {
+		t.Fatalf("agentTargetPermission(ActionAttach) = %q, want the resolved %q", got, resolved)
+	}
+	if resolved != "agent.attach" {
+		t.Fatalf("resolved permission = %q, want agent.attach", resolved)
+	}
+}
+
+// TestAuthorizeAgentKeys_AgentEmptyProjectIsKeysDenied pins the outcome for
+// a scoped agent caller whose project and the target's project are both
+// empty: the generic keys_denied, not the cross-project outcome, because
+// the IDs are equal and the shared evaluator requires non-empty projects.
+func TestAuthorizeAgentKeys_AgentEmptyProjectIsKeysDenied(t *testing.T) {
+	srv, _ := testServer(t)
+	target := &store.Agent{ID: "no-project-agent", Name: "no-project", Slug: "no-project", OwnerID: "someone-else"}
+	identity := authzHelperAgent("", ScopeAgentLifecycle)
+
+	got := srv.authorizeAgentKeys(authzKeysHelperRequest(identity), target)
+	if got.Allowed {
+		t.Fatal("expected an agent caller with no project to be denied")
+	}
+	if got.Outcome != agentkeys.OutcomeKeysDenied {
+		t.Errorf("Outcome = %q, want %q", got.Outcome, agentkeys.OutcomeKeysDenied)
+	}
 }

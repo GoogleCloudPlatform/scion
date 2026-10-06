@@ -53,69 +53,50 @@ type KeysAuthzDecision struct {
 }
 
 // authorizeAgentKeys is the single authorization gate for the agent-keys
-// operation (contract §3 "Authorization"). It maps decision 2's initial
-// policy — the route action is not a new independently granted permission —
-// onto the existing attach authority for every caller kind. User and dev
-// callers get attach decision parity through the same AK1 kernel evaluation
-// (Decide with ActionAttach) that the PTY endpoint uses; the resulting audit
-// record carries no explicit permission ID for this path, because keys
-// calls CheckAccess without one (see auditPermissionID). The agent-credential
-// branch below checks ScopeAgentLifecycle and same-project membership first,
-// then also calls Decide via authorizeAgentTargetAction for relationship
-// evaluation (ptone/scion#2460):
+// operation (contract §3 "Authorization"). The route action is not a new
+// independently granted permission: every caller kind is evaluated by the
+// shared relationship evaluator, authorizeAgentTargetAction with
+// ActionAttach (agent.attach), the same rule every other attach-gated
+// action on an existing agent uses (ptone/scion#3517). Results match the
+// earlier attach-based mapping for every caller kind:
 //
-//   - Human session / user access token: ActionAttach on the target agent,
-//     evaluated through the same AK1 kernel decision (Decide with
-//     ActionAttach) every other attach-gated route uses. This is where
-//     owner/privacy/cross-member restrictions, UAT credential/project-boundary
-//     caveats (contract "User access token" row), and any explicit deny
-//     already live — this function does not special-case any of them,
-//     the same way authorizeAgentLifecycle does not. There is deliberately no
-//     ancestry/owner/super-admin *piercing* path here of the kind
-//     authorizeAgentMessage's user branch has: self/parent/ancestor status
-//     alone must not bypass attach authority for keys (contract "no
+//   - Human session / user access token: agent.attach on the target through
+//     Decide. Owner/privacy/cross-member restrictions, UAT scope and
+//     project-boundary caveats (contract "User access token" row) and any
+//     explicit deny all live there; this function special-cases none of
+//     them. There is deliberately no ancestry/owner/super-admin shortcut of
+//     the kind authorizeAgentMessage's user branch has (contract "no
 //     self/parent/ancestor shortcut"; issue #2195 AC3).
-//   - Agent credential: must hold ScopeAgentLifecycle and share the target's
-//     current project exactly — no self/parent/ancestor shortcut. A mismatch
-//     is reported as agentkeys.OutcomeCrossProjectKeysUnsupported (422), a
-//     distinct outcome from every other denial's OutcomeKeysDenied (403).
-//     Same-project equality alone is not sufficient: once the credential,
-//     scope and project checks pass, the caller must also hold live attach
-//     authority on the target through authorizeAgentTargetAction(ctx,
-//     identity, target, ActionAttach) (ptone/scion#2460) — the same
-//     relationship evaluator every other attach-gated action uses,
-//     including the delegation ceiling of every live ancestor for an agent
-//     caller. There is no permissive fallback: an invalid/revoked
-//     delegation or an evaluator failure denies, it does not default-allow.
-//     A denial from that check is reported as the ordinary
-//     agentkeys.OutcomeKeysDenied (403), through the same denyAgentKeys path
-//     as every other keys_denied reason — never a new outcome, a different
-//     status, or any denial detail beyond the fixed message (contract §2.4a:
-//     KeysAuthzDecision.Reason is content-free, audit-only, and must never
-//     reach the HTTP response).
+//   - Agent credential: ScopeAgentLifecycle, the target's exact project,
+//     and agent.attach on the target through Decide, including the
+//     delegation ceiling of every live ancestor (ptone/scion#2460). The one
+//     keys-specific mapping lives here, ahead of the shared evaluator: a
+//     caller that holds the scope but is outside the target's project gets
+//     agentkeys.OutcomeCrossProjectKeysUnsupported (422). A caller without
+//     the scope gets keys_denied whatever its project, as before.
 //   - Broker credential and every other principal kind (including a
-//     cross-Hub federated agent identity): denied. A broker credential
-//     authenticates Hub-to-broker execution under the internal contract
-//     (§4), never direct public /keys authority.
+//     cross-Hub federated agent identity): denied by the shared evaluator.
+//     A broker credential authenticates Hub-to-broker execution under the
+//     internal contract (§4), never direct public /keys authority.
+//
+// Every denial from the shared evaluator becomes the ordinary
+// agentkeys.OutcomeKeysDenied (403) through denyAgentKeys, whatever status
+// or detail the evaluator attached: never a new outcome, a different
+// status, or any denial detail beyond the fixed message (contract §2.4a:
+// KeysAuthzDecision.Reason is content-free, audit-only, and must never
+// reach the HTTP response). There is no permissive fallback: an evaluator
+// failure denies.
 //
 // Message modes (open/closed/none/etc.) are never read here: contract
 // decision 5 and issue #2195 AC2 both require that message-plane
 // configuration neither grants nor denies keys, so this function has no
-// dependency on store.Agent.MessageMode at all — it is not merely untested,
-// it is structurally absent from the evaluation.
+// dependency on store.Agent.MessageMode at all.
 //
-// target must already be resolved: the caller (this file's own T/P
-// action-dispatch branches for now — see handlers_agents_core.go's
-// handleAgentAction and handlers_projects_core.go's handleProjectAgentAction
-// — and 2.2's ExecuteAgentKeys or 2.3's bridge once they replace that seam)
-// is responsible for resolving the specific agent before calling this
-// function, exactly as every other attach-gated action already does. The
-// project-scoped route's agent-credential cross-project refusal must be
-// decided *before* that resolution happens at all (contract §3.1 invariant
-// 4, AK-21c) — see authorizeAgentKeysCrossProject below, which
-// handleProjectAgentAction already calls ahead of resolution today; 2.2
-// must preserve that ordering when it replaces the seam, not merely
-// reproduce it as an option.
+// target must already be resolved by the caller (ExecuteAgentKeys, from
+// handleAgentAction and handleProjectAgentAction). The project-scoped
+// route's agent-credential cross-project refusal must be decided *before*
+// that resolution happens at all (contract §3.1 invariant 4, AK-21c): see
+// authorizeAgentKeysCrossProject below, which runs ahead of resolution.
 func (s *Server) authorizeAgentKeys(r *http.Request, target *store.Agent) KeysAuthzDecision {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
@@ -131,44 +112,31 @@ func (s *Server) authorizeAgentKeys(r *http.Request, target *store.Agent) KeysAu
 	}
 	resource := agentResource(target)
 
-	switch identity.Type() {
-	case "agent":
-		agentIdent, ok := identity.(AgentIdentity)
-		if !ok {
-			return s.denyAgentKeys(r, resource, "invalid agent identity")
-		}
-		if !agentIdent.HasScope(ScopeAgentLifecycle) {
-			return s.denyAgentKeys(r, resource, "missing scope "+string(ScopeAgentLifecycle))
-		}
-		if agentIdent.ProjectID() != target.ProjectID {
-			return s.denyAgentKeysCrossProject(r, resource, "agent project mismatch")
-		}
-		// Same-project is necessary, not sufficient: require attach
-		// authority via the shared evaluator; any denial is keys_denied
-		// (see doc comment above).
-		if denial := s.authorizeAgentTargetAction(r.Context(), identity, target, ActionAttach); denial != nil {
-			return s.denyAgentKeys(r, resource, "attach relationship denied: "+denial.reason)
-		}
-		return KeysAuthzDecision{Allowed: true, Reason: "agent credential, same project, lifecycle scope, attach relationship granted"}
-
-	case "user", "dev":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
-			return s.denyAgentKeys(r, resource, "invalid user identity")
-		}
-		decision := s.authzService.CheckAccess(r.Context(), userIdent, resource, ActionAttach)
-		if !decision.Allowed {
-			return s.denyAgentKeys(r, resource, "agent.attach permission denied: "+decision.Reason)
-		}
-		return KeysAuthzDecision{Allowed: true, Reason: "agent.attach permission granted"}
-
-	default:
-		// Broker credentials, federated agent identities, and any other
-		// principal kind: never direct public keys authority (contract §3
-		// "Broker credential" row; issue #2195 "unsupported principal kinds
-		// are rejected").
-		return s.denyAgentKeys(r, resource, "identity type "+identity.Type()+" may not call the keys operation")
+	// The one keys-specific outcome: a scoped agent caller outside the
+	// target's project gets cross_project_keys_unsupported instead of the
+	// generic keys_denied the shared evaluator's denial maps to below.
+	if keysAgentCrossProject(identity, target.ProjectID) {
+		return s.denyAgentKeysCrossProject(r, resource, "agent project mismatch")
 	}
+	if denial := s.authorizeAgentTargetAction(r.Context(), identity, target, ActionAttach); denial != nil {
+		return s.denyAgentKeys(r, resource, "attach denied: "+denial.reason)
+	}
+	return KeysAuthzDecision{Allowed: true, Reason: "attach granted"}
+}
+
+// keysAgentCrossProject reports whether identity is an agent credential
+// holding ScopeAgentLifecycle whose project differs from targetProjectID.
+// A caller without the scope is not reported here, so its denial stays the
+// generic keys_denied from the shared evaluator.
+func keysAgentCrossProject(identity Identity, targetProjectID string) bool {
+	if identity.Type() != "agent" {
+		return false
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	if !ok || !agentIdent.HasScope(ScopeAgentLifecycle) {
+		return false
+	}
+	return agentIdent.ProjectID() != targetProjectID
 }
 
 // authorizeAgentKeysCrossProject evaluates only the agent-credential
