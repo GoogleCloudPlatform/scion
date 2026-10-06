@@ -38,8 +38,11 @@ func agentListAppliesReadRule(ctx context.Context) bool {
 //
 // The total is the readable count from authorizedList's count pass, and
 // the page is filled from readable rows only, so paging and totalCount
-// agree with the items. A row whose read decision fails is denied by
-// AuthorizeReadBatch and is dropped. Past authorizedListMaxCandidates
+// agree with the items. Rows are decided by AuthorizeListReadBatch: on a
+// scoped token, agent:list (or project:read on a token bound to the
+// agent's project) satisfies the token-scope part of the read decision;
+// the rest of the decision runs for every row. A row whose read decision
+// fails is denied and dropped. Past authorizedListMaxCandidates
 // (2000) candidates, counted before any read decision, the total is a
 // lower bound and TotalCountApproximate is set; the page may then be short
 // with a resume cursor (see authorizedListResult).
@@ -62,7 +65,7 @@ func (s *Server) listReadableAgents(
 			}
 			return authorizedCandidatePage[store.Agent]{Items: page.Items, NextCursor: page.NextCursor}, nil
 		},
-		agentResource, cursorFor, s.authzService.AuthorizeReadBatch)
+		agentResource, cursorFor, s.authzService.AuthorizeListReadBatch)
 }
 
 // listAgentsLegacyPage returns one legacy-order (created DESC, id DESC)
@@ -128,7 +131,7 @@ func (s *Server) readableAgentRows(ctx context.Context, identity Identity, items
 	if !agentListAppliesReadRule(ctx) {
 		return items, nil
 	}
-	allowed, err := s.authzService.AuthorizeReadBatch(ctx, identity, agentResources(items))
+	allowed, err := s.authzService.AuthorizeListReadBatch(ctx, identity, agentResources(items))
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +153,7 @@ func (s *Server) readableAgentMembers(ctx context.Context, identity Identity, me
 	for i, m := range members {
 		resources[i] = memberResource(m)
 	}
-	allowed, err := s.authzService.AuthorizeReadBatch(ctx, identity, resources)
+	allowed, err := s.authzService.AuthorizeListReadBatch(ctx, identity, resources)
 	if err != nil {
 		return nil, err
 	}

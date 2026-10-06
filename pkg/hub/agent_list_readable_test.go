@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -265,4 +266,170 @@ func TestAgentListReadRule_DecisionErrorDropsTheRow(t *testing.T) {
 	assert.NotEqual(t, clean.Items[0].ID, result.Items[0].ID, "the first row's decision errored, so it is the one dropped")
 	assert.Equal(t, clean.Items[1].ID, result.Items[0].ID)
 	assert.Equal(t, clean.Items[2].ID, result.Items[1].ID)
+}
+
+// tokenWalk is walk for a user access token caller.
+func tokenWalk(t *testing.T, srv *Server, key string, path func(string) string, query string) ([]string, []AgentWithCapabilities) {
+	t.Helper()
+	var ids []string
+	var items []AgentWithCapabilities
+	cursor := ""
+	for page := 0; ; page++ {
+		require.Less(t, page, 100, "walk did not terminate")
+		q := query
+		if cursor != "" {
+			v, err := url.ParseQuery(query)
+			require.NoError(t, err)
+			v.Del("fit")
+			v.Set("cursor", cursor)
+			q = v.Encode()
+		}
+		rec := doRequestWithUAT(t, srv, key, http.MethodGet, path(q), nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", query, rec.Body.String())
+		resp := mustDecodeListAgentsResponse(t, rec.Body)
+		for _, a := range resp.Agents {
+			ids = append(ids, a.ID)
+		}
+		items = append(items, resp.Agents...)
+		if resp.NextCursor == "" {
+			return ids, items
+		}
+		cursor = resp.NextCursor
+	}
+}
+
+// TestAgentListReadRule_ListScopedTokenSeesRowsItsHolderCanRead pins the
+// token-scope part of the rule: a token holding agent:list but not
+// agent:read lists, on both endpoints and in every mode, exactly the
+// agents its holder can read. The holder's per-agent check still decides
+// every row, so the agents of other owners stay out. Each row's
+// capabilities are the token's real per-agent capabilities, so none
+// carries read.
+func TestAgentListReadRule_ListScopedTokenSeesRowsItsHolderCanRead(t *testing.T) {
+	f := readRuleSetup(t, 9, func(i int) bool { return i%3 == 0 })
+	keys := map[string]string{
+		"project-bound": mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list"}),
+	}
+	hubKey, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.caller.ID), CreateTokenParams{
+		UserID: f.caller.ID, Name: "rr-hub", Boundary: hubBoundary(), Scopes: []string{"agent:list"},
+	})
+	require.NoError(t, err)
+	keys["hub-bound"] = hubKey
+
+	for name, key := range keys {
+		for _, mode := range readRuleModes {
+			for ep, path := range map[string]func(string) string{"global": f.globalPath, "project": f.listPath} {
+				ids, items := tokenWalk(t, f.srv, key, path, mode)
+				assert.Equal(t, f.readable, sortedCopy(ids), "%s %s %s: the rows the holder can read", name, ep, mode)
+				for _, a := range items {
+					require.NotNil(t, a.Cap, "%s %s %s: row capabilities present", name, ep, mode)
+					assert.NotContains(t, a.Cap.Actions, string(ActionRead), "%s %s %s: no read capability without agent:read", name, ep, mode)
+				}
+			}
+		}
+	}
+
+	// The holder's full-access member token, for contrast, lists every
+	// agent and carries read on each row.
+	memberKey := mintScopedUAT(t, f.srv, f.member.ID, f.project.ID, []string{"agent:list", "agent:read"})
+	ids, items := tokenWalk(t, f.srv, memberKey, f.listPath, "sort=updated&limit=500")
+	assert.Equal(t, f.all, sortedCopy(ids))
+	for _, a := range items {
+		assert.Contains(t, a.Cap.Actions, string(ActionRead))
+	}
+}
+
+// TestAgentListReadRule_ProjectReadTokenListsItsProjectOnly pins the
+// project:read part of the rule on the global list: a token bound to one
+// project with project:read lists that project's agents its holder (a
+// project member) can read, and nothing from another project the holder
+// can also read.
+func TestAgentListReadRule_ProjectReadTokenListsItsProjectOnly(t *testing.T) {
+	f := readRuleSetup(t, 6, func(i int) bool { return i%2 == 0 })
+	ctx := context.Background()
+	other := &store.Project{
+		ID: tid("rr-other"), Name: "Other", Slug: "rr-other",
+		OwnerID: f.member.ID, CreatedBy: f.member.ID,
+	}
+	require.NoError(t, f.store.CreateProject(ctx, other))
+	createTestUserWithProjectRole(t, f.store, f.member.ID, f.member.Email, other.ID, store.ProjectRoleOwner)
+	otherAgent := &store.Agent{
+		ID: tid("rr-other-agent"), Slug: "rr-other-agent", Name: "rr-other-agent",
+		ProjectID: other.ID, Phase: string(state.PhaseStopped), CreatedBy: f.member.ID, OwnerID: f.member.ID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
+
+	key := mintScopedUAT(t, f.srv, f.member.ID, f.project.ID, []string{"project:read"})
+	all := func(q string) string { return "/api/v1/agents?" + q }
+	for _, mode := range readRuleModes {
+		ids, items := tokenWalk(t, f.srv, key, all, mode)
+		assert.Equal(t, f.all, sortedCopy(ids), "%s: the bound project's readable agents only", mode)
+		assert.NotContains(t, ids, otherAgent.ID, "%s: another project's agent stays out", mode)
+		for _, a := range items {
+			assert.NotContains(t, a.Cap.Actions, string(ActionRead), "%s: no read capability without agent:read", mode)
+		}
+	}
+}
+
+// TestAgentListReadRule_SingleAgentGetStillNeedsAgentRead pins that the
+// list rule does not reach the single-agent read: a token holding
+// agent:list but not agent:read lists an agent it cannot then fetch, on
+// either path.
+func TestAgentListReadRule_SingleAgentGetStillNeedsAgentRead(t *testing.T) {
+	f := readRuleSetup(t, 3, func(i int) bool { return i == 0 })
+	key := mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list"})
+	ids, _ := tokenWalk(t, f.srv, key, f.listPath, "limit=500")
+	require.Equal(t, f.readable, ids)
+
+	for _, path := range []string{
+		"/api/v1/agents/" + f.readable[0],
+		"/api/v1/projects/" + f.project.ID + "/agents/" + f.readable[0],
+	} {
+		rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, path, nil)
+		assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, "%s: %s", path, rec.Body.String())
+	}
+	// A token with agent:read fetches the same agent (the member can read
+	// every agent in the project).
+	readKey := mintScopedUAT(t, f.srv, f.member.ID, f.project.ID, []string{"agent:read"})
+	rec := doRequestWithUAT(t, f.srv, readKey, http.MethodGet, "/api/v1/agents/"+f.readable[0], nil)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestListRowReadCeiling covers the token-scope mapping directly: only an
+// agent-list row read of an agent, on a ceiling with agent.list (or
+// project.read on a token bound to the agent's project), gains agent.read.
+func TestListRowReadCeiling(t *testing.T) {
+	ceil := func(ids ...string) permissions.FrozenPermissionCeiling {
+		return permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: ids}
+	}
+	row := AuthzRequest{ListRow: true, Action: ActionRead, Resource: Resource{Type: "agent", ParentType: "project", ParentID: "p1"}}
+	bound := &TokenBoundary{Kind: BoundaryKindProject, ProjectID: "p1"}
+	otherBound := &TokenBoundary{Kind: BoundaryKindProject, ProjectID: "p2"}
+	hub := &TokenBoundary{Kind: BoundaryKindHub}
+	notRow := row
+	notRow.ListRow = false
+	project := row
+	project.Resource = Resource{Type: "project", ID: "p1"}
+
+	for _, c := range []struct {
+		name     string
+		request  AuthzRequest
+		perm     string
+		boundary *TokenBoundary
+		ceiling  permissions.FrozenPermissionCeiling
+		want     bool
+	}{
+		{"agent.list", row, "agent.read", hub, ceil("agent.list"), true},
+		{"project.read bound to the agent's project", row, "agent.read", bound, ceil("project.read"), true},
+		{"project.read bound elsewhere", row, "agent.read", otherBound, ceil("project.read"), false},
+		{"project.read on a hub token", row, "agent.read", hub, ceil("project.read"), false},
+		{"neither scope", row, "agent.read", bound, ceil("agent.message"), false},
+		{"not a list row", notRow, "agent.read", hub, ceil("agent.list"), false},
+		{"other permission", row, "agent.update", hub, ceil("agent.list"), false},
+		{"other resource", project, "agent.read", hub, ceil("agent.list"), false},
+		{"unknown ceiling version", row, "agent.read", hub, permissions.FrozenPermissionCeiling{Version: 99, PermissionIDs: []string{"agent.list"}}, false},
+	} {
+		got := listRowReadCeiling(c.request, c.perm, c.boundary, c.ceiling).Allows("agent.read")
+		assert.Equal(t, c.want, got, c.name)
+	}
 }

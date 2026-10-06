@@ -233,6 +233,32 @@ type AuthzRequest struct {
 	// body that only learns this partway through evaluation. It never
 	// changes the authorization result.
 	AlwaysAudit bool
+
+	// ListRow marks an agent read decided to choose the rows of an agent
+	// list (AuthorizeListReadBatch). It changes only the UAT ceiling check
+	// for agent.read (see listRowReadCeiling); every other stage of the
+	// decision runs unchanged.
+	ListRow bool
+}
+
+// listRowReadCeiling returns ceiling widened with agent.read when request
+// is an agent-list row read and the token's scopes allow listing that
+// agent: agent.list, or project.read on a token bound to the agent's
+// project (ptone/scion#3346). Otherwise it returns ceiling unchanged. Only
+// the token-scope part of the decision changes; bindings, relationships,
+// constraints and the project access check still decide every row.
+func listRowReadCeiling(request AuthzRequest, permissionID string, boundary *TokenBoundary, ceiling permissions.FrozenPermissionCeiling) permissions.FrozenPermissionCeiling {
+	if !request.ListRow || request.Action != ActionRead || request.Resource.Type != "agent" ||
+		permissionID != "agent.read" || ceiling.Allows("agent.read") {
+		return ceiling
+	}
+	projectBound := boundary != nil && boundary.Kind == BoundaryKindProject &&
+		boundary.ProjectID != "" && boundary.ProjectID == request.Resource.ParentID
+	if !ceiling.Allows("agent.list") && !(projectBound && ceiling.Allows("project.read")) {
+		return ceiling
+	}
+	ceiling.PermissionIDs = append(append([]string{}, ceiling.PermissionIDs...), "agent.read")
+	return ceiling
 }
 
 // DecisionActor identifies the initiator of an operation. Audit-only.
@@ -726,6 +752,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// boundary or a project the holder cannot currently access.
 	if credential.Kind == CredentialKindUAT {
 		if in, ok := bearerGateInputsFor(principal, credential); ok {
+			in.ceiling = listRowReadCeiling(request, permissionID, &in.boundary, in.ceiling)
 			if denied := a.evaluateBearerGate(ctx, principal, in, request.Resource, request.TargetEvidence, request.Action, permissionID, bearer.memoOrNil(), bearer.traceOrNil()); denied != nil {
 				return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
 			}
@@ -928,7 +955,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// permission IDs at all: an empty or malformed ceiling denies every
 	// permission rather than lifting the restriction.
 	if credential.Kind == CredentialKindUAT {
-		restrictions = append(restrictions, ceilingRestriction(credential.Ceiling))
+		restrictions = append(restrictions, ceilingRestriction(listRowReadCeiling(request, permissionID, credential.Boundary, credential.Ceiling)))
 	}
 
 	// 7b. Agent JWT scope restriction. A hub_delivery principal gets the
@@ -1119,6 +1146,17 @@ func (a *AuthzService) DecideFromContext(ctx context.Context, resource Resource,
 // authorization-store failures into denials. Capability projections retain
 // their best-effort behavior; list enforcement must fail closed instead.
 func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+	return a.authorizeReadBatch(ctx, identity, resources, false)
+}
+
+// AuthorizeListReadBatch is AuthorizeReadBatch for choosing the rows of an
+// agent list: each decision is marked ListRow (see listRowReadCeiling) and
+// still runs the full evaluation path, one decision per resource.
+func (a *AuthzService) AuthorizeListReadBatch(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+	return a.authorizeReadBatch(ctx, identity, resources, true)
+}
+
+func (a *AuthzService) authorizeReadBatch(ctx context.Context, identity Identity, resources []Resource, listRow bool) ([]bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -1133,8 +1171,9 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		decision := a.DecideFromContext(ctx, resources[i], ActionRead)
-		allowed[i] = decision.Allowed
+		request := AuthzRequestFromContext(ctx, resources[i], ActionRead)
+		request.ListRow = listRow
+		allowed[i] = a.Decide(ctx, request).Allowed
 	}
 	return allowed, nil
 }

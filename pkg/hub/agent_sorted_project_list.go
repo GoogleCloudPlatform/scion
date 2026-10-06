@@ -319,19 +319,34 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	}
 	n := len(members)
 
-	// The thin ActionRead-only read pass over every candidate.
+	// The thin ActionRead-only read pass over every candidate, decided as
+	// agent-list row reads (AuthorizeListReadBatch). Its result is also
+	// the row's read capability, except for a scoped token without
+	// agent:read, whose read capability is recomputed for the page rows
+	// below.
 	resources := make([]Resource, len(members))
 	for i, m := range members {
 		resources[i] = memberResource(m)
 	}
-	readCaps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
+	listed, err := s.authzService.AuthorizeListReadBatch(ctx, identity, resources)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	// Only a scoped token without agent.read in its ceiling can be listed
+	// a row it cannot read (listRowReadCeiling); for every other caller
+	// the list read is the plain read decision.
+	scopedToken := false
+	if scoped, ok := identity.(*ScopedUserIdentity); ok && scoped != nil {
+		scopedToken = !scoped.Ceiling().Allows("agent.read")
+	}
 
 	readable := make([]store.AgentMember, 0, len(members))
 	readableReadCaps := make([]*Capabilities, 0, len(members))
 	for i, m := range members {
-		if capabilityAllows(readCaps[i], ActionRead) {
+		if listed[i] {
 			readable = append(readable, m)
-			readableReadCaps = append(readableReadCaps, readCaps[i])
+			readableReadCaps = append(readableReadCaps, &Capabilities{Actions: []string{string(ActionRead)}})
 		}
 	}
 
@@ -410,6 +425,16 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	if scopedToken && len(page) > 0 {
+		// The row is listed, but its read capability is the plain read
+		// decision, which a token without agent:read does not pass.
+		pageResources := make([]Resource, len(page))
+		for i, m := range page {
+			pageResources[i] = memberResource(m)
+		}
+		pageReadCaps = s.authzService.ComputeCapabilitiesForActions(ctx, identity, pageResources, []Action{ActionRead})
+	}
+
 	allAgentActions := ResourceActions["agent"]
 	remainingActions := make([]Action, 0, len(allAgentActions))
 	for _, action := range allAgentActions {
@@ -446,7 +471,13 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 			// fail-closed.
 			redecided := s.authzService.ComputeCapabilitiesForActions(ctx, identity, []Resource{fullRes}, allAgentActions)[0]
 			if !capabilityAllows(redecided, ActionRead) {
-				continue // no longer readable
+				if !scopedToken {
+					continue // no longer readable
+				}
+				relisted, err := s.authzService.AuthorizeListReadBatch(ctx, identity, []Resource{fullRes})
+				if err != nil || !relisted[0] {
+					continue // no longer listed
+				}
 			}
 			finalCap = redecided
 		} else {
