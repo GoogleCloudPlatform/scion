@@ -262,3 +262,49 @@ func TestStart_ListFailureThenCreateRecordsNewRun(t *testing.T) {
 		})
 	}
 }
+
+// When the post-create record cannot be written, the start still succeeds
+// (the failure is only logged): the container is running and the hub keeps
+// the run. The recorded owner is then left as it was.
+func TestStart_ListFailureThenCreateRecordFailureIsNotFatal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only agent home")
+	}
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, agentDir)
+	home := filepath.Join(agentDir, "home")
+	t.Cleanup(func() { _ = os.Chmod(home, 0o755) })
+	lists := 0
+	rt := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			lists++
+			if lists == 1 {
+				return nil, errors.New("runtime unavailable")
+			}
+			return []api.AgentInfo{{
+				Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: "running",
+				Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
+			}}, nil
+		},
+		RunFunc: func(context.Context, runtime.RunConfig) (string, error) {
+			// Provisioning is done: make agent-info.json unwritable (it is
+			// replaced via a temp file in home/) before the post-create record.
+			if err := os.Chmod(home, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			return "cid-run-2", nil
+		},
+	}
+	info, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+	})
+	if err != nil {
+		t.Fatalf("Start failed on an unwritable agent-info.json: %v", err)
+	}
+	if info == nil || info.ContainerID != "cid-run-2" || info.Phase != "running" {
+		t.Fatalf("Start returned %+v, want the running cid-run-2", info)
+	}
+	if got := GetSavedRunID("tz-agent", projectScionDir); got != "run-1" {
+		t.Errorf("recorded run = %q, want run-1 (the post-create record should have failed)", got)
+	}
+}
