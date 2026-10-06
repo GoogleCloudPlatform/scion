@@ -91,11 +91,26 @@ describe('navigation lint rule matching', () => {
     expect(await lint(code)).toEqual(['no-restricted-imports']);
   });
 
+  it.each(["void import('../../client/main.js');", "const main = await import('../client/main');"])(
+    'flags dynamic import of client/main: %s',
+    async (code) => {
+      expect(await lint(code)).toEqual(['no-restricted-syntax']);
+    }
+  );
+
+  it('allows dynamic imports of other modules', async () => {
+    expect(await lint("void import('../../client/navigation.js');")).toEqual([]);
+  });
+
   it.each([
     "window.history.pushState({}, '', '/x');",
     "history.replaceState(null, '', '/y');",
     "window.history['pushState']({}, '', '/z');",
     'const push = window.history.pushState;',
+    'window.history[`pushState`]({}, "", "/t");',
+    'const { pushState } = window.history;',
+    'const { replaceState: replace } = history;',
+    "const { 'pushState': p } = history;",
   ])('flags raw history calls: %s', async (code) => {
     expect(await lint(code)).toEqual(['no-restricted-syntax']);
   });

@@ -129,15 +129,23 @@ module.exports = {
                         ],
                     },
                 ],
-                // Matches history.pushState, window.history.pushState,
-                // history['replaceState'], etc.
+                // Raw history writes in any form: history.pushState,
+                // window.history.pushState, history['pushState'],
+                // history[`pushState`], const { pushState } = history.
+                // Plus dynamic import() of client/main, which
+                // no-restricted-imports does not see.
                 'no-restricted-syntax': [
                     'error',
                     {
                         selector:
-                            'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/]',
+                            'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/], MemberExpression[property.type="TemplateLiteral"][property.quasis.0.value.cooked=/^(push|replace)State$/], ObjectPattern > Property[key.name=/^(push|replace)State$/], ObjectPattern > Property[key.value=/^(push|replace)State$/]',
                         message:
                             'Use navigateTo(), pushUrl() or replaceSearch() from client/navigation.js instead of raw history.pushState/replaceState.',
+                    },
+                    {
+                        selector: 'ImportExpression[source.value=/\\/client\\/main(\\.(js|ts))?$/]',
+                        message:
+                            'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
                     },
                 ],
             },
