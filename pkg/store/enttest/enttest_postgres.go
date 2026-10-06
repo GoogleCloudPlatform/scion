@@ -180,6 +180,39 @@ func Active() bool { return active }
 // It skips the calling test when the Postgres backend is inactive.
 func NewSchemaURL(t *testing.T) string {
 	t.Helper()
+	clientURL, schema := newEmptySchema(t)
+
+	// Migrate once so the schema is fully provisioned; callers open their own
+	// clients/pools against clientURL afterwards.
+	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
+	if err != nil {
+		t.Fatalf("enttest: opening migrate client for schema %s: %v", schema, err)
+	}
+	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+		_ = client.Close()
+		t.Fatalf("enttest: migrating schema %s: %v", schema, err)
+	}
+	_ = client.Close()
+	return clientURL
+}
+
+// NewEmptySchemaURL is NewSchemaURL without the migration: it creates a fresh,
+// isolated, EMPTY schema inside the per-package ephemeral database and returns
+// a connection URL whose search_path points at it. Tests that exercise the
+// migration itself (for example concurrent first-boot migration across
+// replicas) start from this. Cleanup drops the schema (CASCADE).
+//
+// It skips the calling test when the Postgres backend is inactive.
+func NewEmptySchemaURL(t *testing.T) string {
+	t.Helper()
+	clientURL, _ := newEmptySchema(t)
+	return clientURL
+}
+
+// newEmptySchema creates an empty schema, registers its cleanup, and returns
+// the search_path-scoped URL and the schema name.
+func newEmptySchema(t *testing.T) (string, string) {
+	t.Helper()
 	if !active {
 		t.Skip("enttest: SCION_TEST_POSTGRES_URL not set; skipping Postgres-only integration test")
 	}
@@ -198,19 +231,7 @@ func NewSchemaURL(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("enttest: building schema URL: %v", err)
 	}
-
-	// Migrate once so the schema is fully provisioned; callers open their own
-	// clients/pools against clientURL afterwards.
-	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
-	if err != nil {
-		t.Fatalf("enttest: opening migrate client for schema %s: %v", schema, err)
-	}
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
-		_ = client.Close()
-		t.Fatalf("enttest: migrating schema %s: %v", schema, err)
-	}
-	_ = client.Close()
-	return clientURL
+	return clientURL, schema
 }
 
 // hexID returns a 32-char lowercase hex identifier safe to embed in a Postgres
