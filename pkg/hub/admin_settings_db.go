@@ -1557,7 +1557,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 //
 // Only the clearable Layer-1 fields are checked here:
 // admin_emails, user_access_mode, default_user_role, notification_channels,
-// public_url, runtimes, profiles, harness_configs.
+// public_url, the four lifecycle keys (auto_suspend_stalled,
+// stalled_threshold, soft_delete_retention, soft_delete_retain_files),
+// runtimes, profiles, harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -1599,6 +1601,14 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	// public_url: present in hub but empty → add the key.
 	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
 		keys = append(keys, "server.hub.public_url")
+	}
+	// Lifecycle keys: present in hub but empty or null → add the key, so a
+	// lone explicit clear builds the lifecycle doc and clears the key
+	// instead of being carried forward (ptone/scion#3464).
+	for _, k := range []string{"auto_suspend_stalled", "stalled_threshold", "soft_delete_retention", "soft_delete_retain_files"} {
+		if !keySet["server.hub."+k] && hubFP.has(k) {
+			keys = append(keys, "server.hub."+k)
+		}
 	}
 	// hub_name: present in hub but empty → add the key (clears a managed
 	// hub_name; handlePutServerConfigDB drops it when it is an echo).

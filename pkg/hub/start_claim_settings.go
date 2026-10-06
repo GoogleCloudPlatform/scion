@@ -152,8 +152,10 @@ func (s *Server) setStartClaimSettings(c StartClaimSettings) bool {
 //
 //   - auto_suspend_stalled, stalled_threshold, soft_delete_retention and
 //     soft_delete_retain_files are presence-aware: a key the body omits
-//     keeps its current value; an explicitly sent key (including null or
-//     "", which clear it) takes the value in doc.
+//     keeps its current value; an explicitly sent key takes the value in
+//     doc. An explicit null or "" clears the key, even when it is the only
+//     key in the body (appendPresenceAwareKeys adds it, so the lifecycle
+//     doc is still built).
 //   - The start-claim keys (the admin form has no fields for them) keep
 //     their current value whenever doc leaves them empty.
 //
@@ -161,6 +163,7 @@ func (s *Server) setStartClaimSettings(c StartClaimSettings) bool {
 // bootstrap value, as before. For a non-managed (seeded) row, keys
 // overridden by a node-local env var are not carried forward, so one node's
 // env value is not pinned into the shared row (see buildAccessDocOnCurrent).
+// This applies to the start-claim keys too.
 //
 // It returns the revision the base was read at (0 when no row exists), for
 // use as the CAS expected revision, so a concurrent lifecycle write turns

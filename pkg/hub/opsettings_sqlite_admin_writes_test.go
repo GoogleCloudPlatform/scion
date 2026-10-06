@@ -455,7 +455,7 @@ func TestSQLite_PutServerConfig_EmptyBodyRejected(t *testing.T) {
 // which GET omits). A key neither the request nor the GET view knows is
 // never an echo, even at a zero value (ptone/scion#3463). The full GET body
 // is not a 200 echo on any driver: it carries schema_version, rejected as
-// unclassified (#938).
+// unclassified (ptone/scion#938).
 func TestSQLite_PutServerConfig_EchoAccepted(t *testing.T) {
 	tempSettingsHome(t)
 	srv, st, _ := newSQLiteOpsServer(t, nil, map[string]string{
