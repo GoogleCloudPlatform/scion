@@ -364,7 +364,7 @@ export class ScionPageBrokerDetail extends LitElement {
       }
 
       /* Full-width basis so the status badge always wraps to its own row. A
-         wide label like "Waiting_for_input" would otherwise crush the name to
+         wide label like "waiting on parent" would otherwise crush the name to
          a few characters — it is the badge's width that matters, not how many
          there are. */
       .agent-header > div {

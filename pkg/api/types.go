@@ -606,7 +606,12 @@ type AgentInfo struct {
 	// audit flows so operators can correlate an agent with the exact bundle
 	// it ran.
 	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
-	HarnessAuth           string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
+	// HarnessConfigSource records which resolution branch supplied the
+	// harness-config (config.HarnessConfigSource: hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only;
+	// Start always sets it, so empty means an older broker (ptone/scion#620).
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
+	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
 
 	// Project association
 	Project     string `json:"project"`               // Project name (standard field)
@@ -908,6 +913,26 @@ func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	return v
 }
 
+type hubProjectIDContextKey struct{}
+
+// ContextWithHubProjectID attaches the Hub-supplied project ID of a broker
+// dispatch. Agent-dir resolution uses it, not the project-id marker inside
+// the project directory, to locate a
+// shared-workspace project's broker-side external agents root.
+func ContextWithHubProjectID(ctx context.Context, projectID string) context.Context {
+	if projectID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, hubProjectIDContextKey{}, projectID)
+}
+
+// HubProjectIDFromContext returns the Hub-supplied project ID attached by
+// ContextWithHubProjectID, or "" (e.g. a local CLI start).
+func HubProjectIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(hubProjectIDContextKey{}).(string)
+	return v
+}
+
 type emptyPerAgentWorkspaceContextKey struct{}
 
 // ContextWithEmptyPerAgentWorkspace returns a new context marking the agent's
@@ -1185,6 +1210,7 @@ type StartOptions struct {
 	Profile           string
 	HarnessConfig     string
 	HarnessConfigPath string // Resolved local dir for the harness-config (set when hydrated from the Hub); bypasses on-disk FindHarnessConfigDir lookup
+	HarnessConfigID   string // Hub harness-config record ID of the hydrated HarnessConfigPath (set with it by the broker); empty otherwise
 	HarnessAuth       string // Late-binding override for auth_selected_type (api-key, oauth-token, auth-file, vertex-ai)
 	Image             string
 	ProjectPath       string
@@ -1215,6 +1241,11 @@ type StartOptions struct {
 	Workspace           string
 	GitClone            *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace     bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// HubProjectID is the Hub-supplied project ID of a broker dispatch (set
+	// by the broker from the request, never from agent or workspace state).
+	// It locates a shared-workspace project's broker-side external agents
+	// root; see config.AgentsRootForProject. Empty for local CLI starts.
+	HubProjectID string `json:"-"`
 	// SharedWorkspaceClone holds the clone settings of a shared-plain git
 	// project's workspace. Set only with SharedWorkspace and without
 	// GitClone. It does not change how the workspace is mounted or created:

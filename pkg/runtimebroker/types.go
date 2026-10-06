@@ -160,24 +160,29 @@ type AgentResponse struct {
 	// HarnessConfigRevision records the harness-config bundle revision (e.g.
 	// the Hub artifact ContentHash) used to provision this agent. Empty for
 	// built-in or local-only configs without a tracked revision.
-	HarnessConfigRevision string            `json:"harnessConfigRevision,omitempty"`
-	HarnessAuth           string            `json:"harnessAuth,omitempty"` // Resolved harness auth method
-	Image                 string            `json:"image,omitempty"`       // Resolved container image
-	RuntimeType           string            `json:"runtime,omitempty"`     // Runtime type (docker, kubernetes, apple)
-	Profile               string            `json:"profile,omitempty"`     // Settings profile used
-	ProjectID             string            `json:"projectId,omitempty"`
-	UserID                string            `json:"userId,omitempty"`
-	Status                string            `json:"status"`
-	Phase                 string            `json:"phase,omitempty"`
-	Activity              string            `json:"activity,omitempty"`
-	StatusReason          string            `json:"statusReason,omitempty"`
-	Ready                 bool              `json:"ready,omitempty"`
-	ContainerStatus       string            `json:"containerStatus,omitempty"`
-	Config                *AgentConfig      `json:"config,omitempty"`
-	Runtime               *AgentRuntime     `json:"runtimeInfo,omitempty"` // Renamed JSON tag to avoid conflict
-	Labels                map[string]string `json:"labels,omitempty"`
-	CreatedAt             time.Time         `json:"createdAt,omitempty"`
-	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
+	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
+	// HarnessConfigSource mirrors api.AgentInfo.HarnessConfigSource: which
+	// resolution branch supplied the harness-config (hub-hydrated,
+	// template-bundled, broker-local, builtin, unresolved). Provenance only
+	// (ptone/scion#620).
+	HarnessConfigSource string            `json:"harnessConfigSource,omitempty"`
+	HarnessAuth         string            `json:"harnessAuth,omitempty"` // Resolved harness auth method
+	Image               string            `json:"image,omitempty"`       // Resolved container image
+	RuntimeType         string            `json:"runtime,omitempty"`     // Runtime type (docker, kubernetes, apple)
+	Profile             string            `json:"profile,omitempty"`     // Settings profile used
+	ProjectID           string            `json:"projectId,omitempty"`
+	UserID              string            `json:"userId,omitempty"`
+	Status              string            `json:"status"`
+	Phase               string            `json:"phase,omitempty"`
+	Activity            string            `json:"activity,omitempty"`
+	StatusReason        string            `json:"statusReason,omitempty"`
+	Ready               bool              `json:"ready,omitempty"`
+	ContainerStatus     string            `json:"containerStatus,omitempty"`
+	Config              *AgentConfig      `json:"config,omitempty"`
+	Runtime             *AgentRuntime     `json:"runtimeInfo,omitempty"` // Renamed JSON tag to avoid conflict
+	Labels              map[string]string `json:"labels,omitempty"`
+	CreatedAt           time.Time         `json:"createdAt,omitempty"`
+	UpdatedAt           time.Time         `json:"updatedAt,omitempty"`
 	// Warnings carries only the hub-only env drop warnings (a broker-local
 	// TZ value ignored for a hub-dispatched agent), so the hub can relay
 	// them in its own create and start responses. Other broker-local start
@@ -225,6 +230,11 @@ type ListAgentsResponse struct {
 
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
+	// workspaceAbsentAtAdmission is set by createAgent when the hub-managed
+	// project path ~/.scion/projects/<slug> did not exist when the request
+	// arrived. It is never read from the wire.
+	workspaceAbsentAtAdmission bool
+
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
 	Slug        string             `json:"slug,omitempty"` // URL-safe identifier
@@ -651,6 +661,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Template:              info.Template,
 		HarnessConfig:         info.HarnessConfig,
 		HarnessConfigRevision: info.HarnessConfigRevision,
+		HarnessConfigSource:   info.HarnessConfigSource,
 		HarnessAuth:           info.HarnessAuth,
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
