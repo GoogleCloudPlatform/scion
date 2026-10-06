@@ -379,7 +379,7 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     expect(el.shadowRoot?.querySelector('.palette-option.active')).toBeNull();
   });
 
-  it('a group refresh that removes the manually-selected candidate falls back to the best match for a typed query', async () => {
+  it('a group refresh that removes the manually-selected candidate falls back to the best match for a typed query, which then follows the ranking', async () => {
     // The pick no longer exists in the refreshed ranked list (e.g. the agent
     // became non-viable), so the selection must fall through to the ranking
     // rather than leave `activeId` pointing at a candidate that no longer
@@ -405,6 +405,17 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
 
     active = el.shadowRoot?.querySelector('.palette-option.active');
     expect(active?.textContent).toContain('Coder Bot');
+
+    // The fallback is not a pick: a later refresh that ranks a new row first
+    // moves the selection to it.
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Coder Bot', activityMs: 100 },
+      { peerId: 'a3', label: 'Newest Bot', activityMs: 1000 },
+    ]);
+    await el.updateComplete;
+
+    active = el.shadowRoot?.querySelector('.palette-option.active');
+    expect(active?.textContent).toContain('Newest Bot');
   });
 
   it('a row arriving above a manually-selected candidate does not replace it', async () => {
