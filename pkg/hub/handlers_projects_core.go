@@ -3114,7 +3114,7 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	}
 	for _, tmpl := range templates {
 		if tmpl.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, tmpl.StoragePath); err != nil {
+			if err := stor.DeletePrefix(ctx, storage.DirPrefix(tmpl.StoragePath)); err != nil {
 				s.projectsLogger().Warn("failed to delete template storage files",
 					"project_id", projectID, "template", tmpl.ID, "path", tmpl.StoragePath, "error", err)
 			}
@@ -3122,7 +3122,7 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 	}
 	for _, hc := range harnesses {
 		if hc.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, hc.StoragePath); err != nil {
+			if err := stor.DeletePrefix(ctx, storage.DirPrefix(hc.StoragePath)); err != nil {
 				s.projectsLogger().Warn("failed to delete harness config storage files",
 					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
 			}

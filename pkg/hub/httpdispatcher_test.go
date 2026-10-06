@@ -2870,9 +2870,9 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 // workspaceSpecFor (GoogleCloudPlatform/scion#1931): workspaceSpecFor reads
 // exactly the same two AppliedConfig fields buildCreateRequest read directly
 // before, so the create payload is unaffected by that refactor. The golden
-// also reflects buildCreateRequest's unconditional SCION_METADATA_MODE and
-// SCION_METADATA_MODE_SOURCE write into ResolvedEnv/EnvClassifications
-// ("block" with no GCP identity, sourced from "hub"). RequestID is a fresh
+// also reflects buildCreateRequest's SCION_METADATA_MODE_SOURCE write into
+// ResolvedEnv/EnvClassifications; with no GCP identity, SCION_METADATA_MODE
+// itself is absent so the broker applies its runtime default. RequestID is a fresh
 // UUID per call and is normalized before comparison.
 func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
 	ctx := context.Background()
@@ -2954,11 +2954,9 @@ func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
     }
   },
   "resolvedEnv": {
-    "SCION_METADATA_MODE": "block",
     "SCION_METADATA_MODE_SOURCE": "hub"
   },
   "envClassifications": {
-    "SCION_METADATA_MODE": "plain",
     "SCION_METADATA_MODE_SOURCE": "plain"
   },
   "projectSlug": "golden-project",
@@ -4523,9 +4521,10 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 // TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetadataModeEnv
 // verifies that when an agent has no GCP identity configured at all (a real
 // case for e.g. scheduled-dispatch agents with no project or hub default),
-// the dispatch still sends an authoritative "block" mode to the broker even
-// when a plain, non-secret, user-scoped env var happens to already be stored
-// under the same control-plane name. The stored var here is seeded directly
+// the dispatch sends no SCION_METADATA_MODE (so the broker applies its
+// runtime default) plus the SCION_METADATA_MODE_SOURCE=hub marker, even when
+// a plain, non-secret, user-scoped env var happens to already be stored under
+// the same control-plane name. The stored var here is seeded directly
 // through the store, as a stand-in for a row that predates a create/patch
 // validation gate (or any other path that did not go through it) — the
 // dispatch layer is a separate, defense-in-depth choke point from that gate.
@@ -4597,8 +4596,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetada
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
 
-	if v := mockClient.lastResolvedEnv["SCION_METADATA_MODE"]; v != store.GCPMetadataModeBlock {
-		t.Errorf("expected SCION_METADATA_MODE=%q despite the stored env var, got %q", store.GCPMetadataModeBlock, v)
+	if v, ok := mockClient.lastResolvedEnv["SCION_METADATA_MODE"]; ok {
+		t.Errorf("expected SCION_METADATA_MODE absent despite the stored env var, got %q", v)
+	}
+	if v := mockClient.lastResolvedEnv["SCION_METADATA_MODE_SOURCE"]; v != "hub" {
+		t.Errorf("expected SCION_METADATA_MODE_SOURCE=hub, got %q", v)
 	}
 }
 
@@ -5744,7 +5746,7 @@ func TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
 
-	// AppliedConfig.GCPIdentity is nil, so the authoritative write is "block".
+	// AppliedConfig.GCPIdentity is nil, so the hub sends no mode at all.
 	agent := setupFinalizeEnvTest(t, ctx, memStore, nil)
 
 	var captured *RemoteCreateAgentRequest
@@ -5777,8 +5779,8 @@ func TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv(t *testing.T) {
 		t.Fatal("expected CreateAgentWithGather to be called")
 	}
 
-	if got := captured.ResolvedEnv["SCION_METADATA_MODE"]; got != "block" {
-		t.Errorf("expected SCION_METADATA_MODE=block despite caller-supplied env, got %q", got)
+	if got, ok := captured.ResolvedEnv["SCION_METADATA_MODE"]; ok {
+		t.Errorf("expected SCION_METADATA_MODE absent despite caller-supplied env, got %q", got)
 	}
 	if got := captured.ResolvedEnv["SCION_METADATA_MODE_SOURCE"]; got != "hub" {
 		t.Errorf("expected SCION_METADATA_MODE_SOURCE=hub (buildCreateRequest's own write), got %q", got)
@@ -5846,8 +5848,8 @@ func TestDispatchFinalizeEnv_DeferredReplayDropsReservedTarget(t *testing.T) {
 	if captured == nil {
 		t.Fatal("expected CreateAgentWithGather to be called via the deferred replay")
 	}
-	if got := captured.ResolvedEnv["SCION_METADATA_MODE"]; got != "block" {
-		t.Errorf("expected SCION_METADATA_MODE=block on deferred replay, got %q", got)
+	if got, ok := captured.ResolvedEnv["SCION_METADATA_MODE"]; ok {
+		t.Errorf("expected SCION_METADATA_MODE absent on deferred replay, got %q", got)
 	}
 }
 

@@ -309,7 +309,7 @@ func TestTwoReplicaUserLifecycle(t *testing.T) {
 	continued := callRPCAsync(h.bridgeB.URL(), h.userToken, "SendMessage",
 		newMessageParams("lifecycle-2", "continue on replica B", taskID, contextID))
 	stats = waitHubMessages(t, h, 2)
-	publishBrokerMessage(t, h.bridgeA, h.hubToken, stats.LastUserID, taskID, "lifecycle-reply-2", messages.TypeAssistantReply, "continued reply")
+	publishBrokerMessage(t, h.bridgeA, h.hubToken, stats.LastUserID, taskID, "lifecycle-reply-2", messages.TypeInstruction, "continued reply")
 	continuedResult := awaitRPC(t, continued)
 	continuedID, _, continuedState := taskIdentity(t, continuedResult.reply.Result)
 	if continuedID != taskID || continuedState != "TASK_STATE_COMPLETED" {
@@ -670,8 +670,8 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	// Publish the final reply, then redeliver it. The redelivery must carry the
 	// same timestamp as the original, as a real broker redelivery would.
 	finalAt := time.Now()
-	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once", finalAt)
-	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once", finalAt)
+	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeInstruction, "final once", finalAt)
+	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeInstruction, "final once", finalAt)
 	// The final publish plus its redelivery must yield exactly one
 	// artifact-update followed by the COMPLETED status-update. Anything else in
 	// this window (for example a replayed WORKING status) is a cursor
@@ -894,7 +894,7 @@ func TestCrashLeaseBoundary(t *testing.T) {
 	// fabricated for the possibly-completed pre-crash side effect.
 	retry := callRPCAsync(h.bridgeA.URL(), h.userToken, "SendMessage", newMessageParams("crash-manual-retry", "manual retry", "", ""))
 	stats = waitHubMessages(t, h, 2)
-	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, "", "crash-retry-final", messages.TypeAssistantReply, "manual retry complete")
+	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, "", "crash-retry-final", messages.TypeInstruction, "manual retry complete")
 	retryResult := awaitRPC(t, retry)
 	retryID, _, retryState := taskIdentity(t, retryResult.reply.Result)
 	if retryID == taskID || retryState != "TASK_STATE_COMPLETED" {

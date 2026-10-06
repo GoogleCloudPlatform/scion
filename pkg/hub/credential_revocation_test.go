@@ -35,6 +35,13 @@ import (
 func setupCredentialTestServer(t *testing.T) (*Server, store.Store, *store.User, *store.Project) {
 	t.Helper()
 	srv, s := testServer(t)
+	return setupCredentialTestServerOn(t, srv, s)
+}
+
+// setupCredentialTestServerOn seeds the credential-test user and project on
+// an already constructed test server and its (unwrapped) store.
+func setupCredentialTestServerOn(t *testing.T, srv *Server, s store.Store) (*Server, store.Store, *store.User, *store.Project) {
+	t.Helper()
 	ctx := context.Background()
 
 	user := &store.User{
