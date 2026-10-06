@@ -153,6 +153,20 @@ CREATE TABLE IF NOT EXISTS webchat_message_ext (
     edited_at TIMESTAMPTZ,
     deleted_at TIMESTAMPTZ
 );
+
+-- Per-recipient mention records: one row per (mentioned user, message).
+CREATE TABLE IF NOT EXISTS webchat_mention (
+    user_id          TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    message_id       TEXT NOT NULL,
+    PRIMARY KEY (user_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_user_conversation
+    ON webchat_mention (user_id, conversation_key);
+
+CREATE INDEX IF NOT EXISTS idx_webchat_mention_conversation
+    ON webchat_mention (conversation_key);
 `
 	_, err := s.db.Exec(ddl)
 	if err != nil {
@@ -649,6 +663,10 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 		topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM webchat_mention WHERE conversation_key = $1", topicID); err != nil {
+		return fmt.Errorf("webchat store: delete topic mentions: %w", err)
 	}
 
 	return tx.Commit()
@@ -1789,6 +1807,11 @@ DO UPDATE SET deleted_at = EXCLUDED.deleted_at
 	if err != nil {
 		return fmt.Errorf("webchat store: set message deleted: %w", err)
 	}
+	// A deleted message no longer mentions anyone.
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM webchat_mention WHERE message_id = $1`, messageID); err != nil {
+		return fmt.Errorf("webchat store: delete message mentions: %w", err)
+	}
 	return nil
 }
 
@@ -2022,4 +2045,73 @@ func (s *pgWebChatStore) addThreadIDIndex() error {
 		return fmt.Errorf("create thread_id index: %w", err)
 	}
 	return s.markMigrationCompleted("thread_id_index")
+}
+
+// RecordMentions stores one mention row per user for messageID.
+func (s *pgWebChatStore) RecordMentions(ctx context.Context, conversationKey, messageID string, userIDs []string) error {
+	if conversationKey == "" || messageID == "" || len(userIDs) == 0 {
+		return nil
+	}
+	const query = `
+INSERT INTO webchat_mention (user_id, conversation_key, message_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, message_id) DO NOTHING
+`
+	for _, userID := range userIDs {
+		if userID == "" {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
+			return fmt.Errorf("webchat store: record mention: %w", err)
+		}
+	}
+	return nil
+}
+
+// UnreadMentionKeys returns the conversations in conversationKeys where
+// userID has a recorded mention after its own read watermark, in one query.
+//
+// messages.id is a UUID column while the webchat tables hold text. The
+// mention's message_id is always a hub-minted UUID, so it is cast directly
+// and the join can use the messages primary key. The watermark is only cast
+// when it has the UUID shape: mark-unread may leave it empty, and an empty
+// or malformed watermark must read as "no watermark", not fail the query.
+func (s *pgWebChatStore) UnreadMentionKeys(ctx context.Context, userID string, conversationKeys []string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if userID == "" || len(conversationKeys) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, len(conversationKeys))
+	args := make([]interface{}, 0, len(conversationKeys)+1)
+	args = append(args, userID)
+	for i, key := range conversationKeys {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, key)
+	}
+	query := fmt.Sprintf(`
+SELECT DISTINCT wm.conversation_key
+  FROM webchat_mention wm
+  JOIN messages m ON m.id = wm.message_id::uuid
+  LEFT JOIN webchat_read_state rs
+         ON rs.user_id = wm.user_id AND rs.conversation_key = wm.conversation_key
+  LEFT JOIN messages lr ON lr.id = (CASE
+        WHEN rs.last_read_message_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        THEN rs.last_read_message_id::uuid END)
+ WHERE wm.user_id = $1 AND wm.conversation_key IN (%s)
+   AND (lr.id IS NULL OR m.created > lr.created
+        OR (m.created = lr.created AND m.id > lr.id))
+`, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: unread mentions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("webchat store: scan unread mention: %w", err)
+		}
+		out[key] = true
+	}
+	return out, rows.Err()
 }

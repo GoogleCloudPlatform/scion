@@ -1431,6 +1431,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			if senderName == "" {
 				senderName = agent.Slug
 			}
+			// Record per-recipient mention rows for the thread list's
+			// mention dot, reusing the member list resolved above. Only
+			// the direct path persists storeMsg under this ID; the broker
+			// path stores its own row.
+			if result.DeliveryPath == deliveryUserDirect {
+				s.recordHumanMentions(ctx, req.ThreadID, storeMsg.ID,
+					mentionedHumanIDs(humanMembers, names, ""))
+			}
 			go s.fireHumanMentionNotifications(context.Background(), names, agent.ProjectID,
 				req.ThreadID, "", senderName, req.Msg)
 		}
