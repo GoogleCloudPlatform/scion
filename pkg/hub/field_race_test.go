@@ -108,9 +108,8 @@ func TestChannelRegistryRace(t *testing.T) {
 	// Disable the per-sender rate limiter so high concurrency does not 429.
 	srv.chatSendLimiter = newChatSendLimiterWithRates(
 		map[chatSenderClass]float64{
-			chatSenderHuman:       1e9,
-			chatSenderAgent:       1e9,
-			chatSenderAgentMirror: 1e9,
+			chatSenderHuman: 1e9,
+			chatSenderAgent: 1e9,
 		}, time.Now)
 
 	const goroutines = 8
