@@ -51,7 +51,7 @@ func assertSingleLogLine(t *testing.T, logs *bytes.Buffer, message string, field
 	require.Len(t, lines, 1, "expected one %q line in:\n%s", message, logs.String())
 	line := lines[0]
 	for key, value := range fields {
-		assert.Contains(t, line, " "+key+"="+value+"", "line should carry %s=%s", key, value)
+		assert.Contains(t, line, " "+key+"="+value, "line should carry %s=%s", key, value)
 	}
 	for _, s := range absent {
 		require.NotEmpty(t, s, "absent strings must be non-empty to be meaningful")

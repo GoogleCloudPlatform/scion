@@ -572,7 +572,10 @@ func TestServerHubManagedProjectPath_GKESharedVolumeFallbackToLocal(t *testing.T
 		assert.Equal(t, otherLocalDir, otherPath)
 	}
 	assert.Equal(t, 2, countEphemeralWarnings(logs))
-	assert.NotContains(t, logs.String(), otherSlug)
+	for _, line := range logLinesWithMessage(logs, ephemeralWarnMessage) {
+		assert.NotContains(t, line, slug)
+		assert.NotContains(t, line, otherSlug)
+	}
 }
 
 // A gke-shared-volume config without a volume name has no mount point to build
