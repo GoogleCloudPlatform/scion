@@ -5850,3 +5850,137 @@ profiles:
 		t.Errorf("FALLBACK: expected type 'cloudrun-sandbox', got %q", fallbackProfiles[0].Type)
 	}
 }
+
+// newErrorRuntimeTestServer returns a test server whose default runtime is
+// the degraded *runtime.ErrorRuntime the broker falls back to when runtime
+// resolution fails at startup (ptone/scion#2766).
+func newErrorRuntimeTestServer(t *testing.T) *Server {
+	t.Helper()
+	srv := newTestServer(t)
+	srv.runtime = &runtime.ErrorRuntime{Err: errors.New("failed to build kubernetes client")}
+	return srv
+}
+
+func TestHealthInfoHealthyRuntime(t *testing.T) {
+	srv := newTestServer(t)
+
+	health := srv.GetHealthInfo(context.Background())
+	if health.Status != "healthy" {
+		t.Errorf("status = %q, want healthy", health.Status)
+	}
+	if got := health.Checks["mock"]; got != "available" {
+		t.Errorf("checks[mock] = %q, want available", got)
+	}
+	if _, ok := health.Checks["runtime"]; ok {
+		t.Errorf("checks[runtime] present for a healthy runtime: %v", health.Checks)
+	}
+}
+
+func TestHealthInfoErrorRuntimeDegraded(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	health := srv.GetHealthInfo(context.Background())
+	if health.Status != "degraded" {
+		t.Errorf("status = %q, want degraded", health.Status)
+	}
+	if got := health.Checks["runtime"]; got != "unavailable" {
+		t.Errorf("checks[runtime] = %q, want unavailable", got)
+	}
+	if _, ok := health.Checks["error"]; ok {
+		t.Errorf("checks[error] must not be reported: %v", health.Checks)
+	}
+}
+
+func TestHealthzErrorRuntimeStatusCode(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+
+	// /healthz is a liveness signal: it stays 200 and reports degraded in
+	// the body, so a restart loop does not hide a persistent runtime fault.
+	if w.Code != http.StatusOK {
+		t.Errorf("healthz code = %d, want %d", w.Code, http.StatusOK)
+	}
+	var resp HealthResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "degraded" {
+		t.Errorf("healthz status = %q, want degraded", resp.Status)
+	}
+	if got := resp.Checks["runtime"]; got != "unavailable" {
+		t.Errorf("healthz checks[runtime] = %q, want unavailable", got)
+	}
+}
+
+func TestReadyzErrorRuntimeNotReady(t *testing.T) {
+	srv := newErrorRuntimeTestServer(t)
+
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("readyz code = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["status"] != "not_ready" {
+		t.Errorf("readyz status = %q, want not_ready", body["status"])
+	}
+}
+
+// TestHealthEndpointsConcurrentSwapRuntime runs /healthz and /readyz while
+// SwapRuntime flips the default runtime between a usable and a degraded
+// one. Under -race it checks that the health paths read s.runtime under
+// s.mu; each response must match one of the two runtimes.
+func TestHealthEndpointsConcurrentSwapRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	good := &runtime.MockRuntime{}
+	bad := &runtime.ErrorRuntime{Err: errors.New("failed to build kubernetes client")}
+	handler := srv.Handler()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	defer wg.Wait()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if i%2 == 0 {
+				srv.SwapRuntime(bad)
+			} else {
+				srv.SwapRuntime(good)
+			}
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		health := srv.GetHealthInfo(context.Background())
+		switch health.Status {
+		case "healthy":
+			if health.Checks["runtime"] != "" {
+				t.Fatalf("healthy with checks[runtime]: %v", health.Checks)
+			}
+		case "degraded":
+			if health.Checks["runtime"] != "unavailable" {
+				t.Fatalf("degraded without checks[runtime]: %v", health.Checks)
+			}
+		default:
+			t.Fatalf("unexpected status %q", health.Status)
+		}
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("readyz code = %d", w.Code)
+		}
+
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("info code = %d", w.Code)
+		}
+	}
+}
