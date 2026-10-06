@@ -149,6 +149,7 @@ func TestReincarnateAgent_PatchedGCPSAReplacesInadmissibleKeptSA(t *testing.T) {
 
 			calls, configs := disp.reprovisionSnapshot()
 			require.GreaterOrEqual(t, calls, 1)
+			require.NotEmpty(t, configs)
 			require.NotNil(t, configs[0].GCPIdentity)
 			assert.Equal(t, replacement.ID, configs[0].GCPIdentity.ServiceAccountID)
 		})
