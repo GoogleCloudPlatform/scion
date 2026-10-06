@@ -663,3 +663,25 @@ func TestFailedMessageRetention_PurgesOrphanMentions(t *testing.T) {
 		t.Fatalf("mention rows = %v; want only %s", got, kept)
 	}
 }
+
+// RecordMentions writes the batch in one transaction: empty IDs are
+// skipped, duplicates collapse on (message_id, user_id), and a repeat call
+// is a no-op.
+func TestRecordMentions_BatchSkipsEmptyAndDuplicates(t *testing.T) {
+	_, _, wcs, _, db := setupMentionDotTest(t)
+	ctx := context.Background()
+	a, b := tid("md-batch-a"), tid("md-batch-b")
+	for i := 0; i < 2; i++ {
+		if err := wcs.RecordMentions(ctx, "batch-key", "batch-msg", []string{a, "", b, a}); err != nil {
+			t.Fatalf("RecordMentions call %d: %v", i, err)
+		}
+	}
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM webchat_mention WHERE message_id = 'batch-msg'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("mention rows = %d; want 2", n)
+	}
+}

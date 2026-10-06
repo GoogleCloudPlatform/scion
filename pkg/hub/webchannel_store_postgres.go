@@ -2065,13 +2065,23 @@ INSERT INTO webchat_mention (user_id, conversation_key, message_id)
 VALUES ($1, $2, $3)
 ON CONFLICT (message_id, user_id) DO NOTHING
 `
+	// One transaction for the whole batch: a single commit instead of an
+	// implicit one per row, and the batch lands atomically.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: record mentions begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
 	for _, userID := range userIDs {
 		if userID == "" {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
+		if _, err := tx.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
 			return fmt.Errorf("webchat store: record mention: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: record mentions commit: %w", err)
 	}
 	return nil
 }
@@ -2125,12 +2135,17 @@ SELECT DISTINCT wm.conversation_key
 }
 
 // PurgeOrphanMentions deletes mention rows whose message row is gone.
-// message_id is always a hub-minted UUID, so the cast lets the lookup use
-// the messages primary key.
+// message_id is a hub-minted UUID, so the cast lets the lookup use the
+// messages primary key. The cast sits inside a CASE so it only runs on
+// UUID-shaped values (Postgres does not promise OR evaluation order). A
+// non-UUID message_id maps to NULL, matches no message, and is deleted as
+// an orphan instead of failing the whole sweep.
 func (s *pgWebChatStore) PurgeOrphanMentions(ctx context.Context) (int, error) {
 	res, err := s.db.ExecContext(ctx, `
 DELETE FROM webchat_mention wm
- WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = wm.message_id::uuid)
+ WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = (CASE
+        WHEN wm.message_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        THEN wm.message_id::uuid END))
 `)
 	if err != nil {
 		return 0, fmt.Errorf("webchat store: purge orphan mentions: %w", err)

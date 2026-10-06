@@ -2649,13 +2649,23 @@ INSERT INTO webchat_mention (user_id, conversation_key, message_id)
 VALUES (?, ?, ?)
 ON CONFLICT (message_id, user_id) DO NOTHING
 `
+	// One transaction for the whole batch: a single commit instead of an
+	// implicit one per row, and the batch lands atomically.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: record mentions begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
 	for _, userID := range userIDs {
 		if userID == "" {
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
+		if _, err := tx.ExecContext(ctx, query, userID, conversationKey, messageID); err != nil {
 			return fmt.Errorf("webchat store: record mention: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: record mentions commit: %w", err)
 	}
 	return nil
 }
