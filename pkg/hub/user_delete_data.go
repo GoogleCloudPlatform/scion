@@ -75,19 +75,21 @@ var ownedAgentsPageSize = 100
 // agents exist: agents with OwnerID == userID, agents started by those
 // agents (the user is the root of their ancestry), and agents the scheduler
 // dispatched for the user's schedules (OwnerID empty, CreatedBy == userID).
-// It runs inside the delete transaction.
+// An agent the scheduler dispatched for a schedule an agent created records
+// no ancestry, so it is not counted (recording ancestry on that path belongs
+// to the scheduler rework). It runs inside the delete transaction.
 //
 // It first locks the user row exclusively (SELECT ... FOR UPDATE on
 // PostgreSQL; see store.UserStore.LockUserRow). Agent create (including the
 // scheduler's) and restore take a shared lock on that user's row in their
-// own transactions and re-check that the user exists (lockAgentGuardUserTx,
-// checkRestoreOwnerTx), so an agent this check would count either commits
+// own transactions and re-check that the user exists (lockAgentGuardUserTx),
+// so an agent this check would count either commits
 // before it runs (and is listed) or waits for the delete and then fails. It
 // returns store.ErrNotFound if the user no longer exists.
 //
 // Soft-deleted agents do not count: the agent list hides them by default
 // (AgentFilter.IncludeDeleted is false), and they are purged later; restore
-// refuses an agent whose owner user no longer exists. Every other agent
+// refuses an agent whose guard user (lockAgentGuardUserTx) no longer exists. Every other agent
 // counts whatever its phase, including a stopped agent or one whose deletion
 // is still in progress, since all of those still appear in the agent list.
 func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string) error {
@@ -138,9 +140,11 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 	return &userOwnsAgentsDeleteError{agents: owned}
 }
 
-// errAgentOwnerUserMissing is returned when the user who owns (or is about
-// to own) an agent no longer exists (see lockUserPrincipalTx).
-var errAgentOwnerUserMissing = errors.New("the agent's owner no longer exists")
+// errAgentOwnerUserMissing is returned when the user an agent belongs to
+// (the user the delete guard counts it for: its owner, its ancestry root or
+// the creator of its schedule, see lockAgentGuardUserTx) no longer exists
+// (see lockUserPrincipalTx).
+var errAgentOwnerUserMissing = errors.New("the user this agent belongs to no longer exists")
 
 // lockUserPrincipalTx takes a shared lock on the row of principalID when it
 // names a user, and reports whether it did (ptone/scion#2769). It runs
@@ -187,16 +191,24 @@ func lockUserPrincipalTx(ctx context.Context, tx store.Store, principalID string
 //   - a.CreatedBy when a.OwnerID is empty (an agent the scheduler
 //     dispatched for a user's schedule, which records the user only there).
 //
-// It runs in the create transaction before the agent row is written, so a
-// create racing that user's delete either commits first (and the delete
-// sees the agent and is refused) or waits for the delete and then fails with
-// errAgentOwnerUserMissing. A candidate that names an existing agent is
-// skipped; one that is neither a user nor an agent fails the create closed
-// with errAgentOwnerUserMissing (lockUserPrincipalTx).
+// When the ancestry is non-empty and its root differs from a.OwnerID, the
+// owner is the parent agent (only the root can be a user), so a.OwnerID is
+// not a candidate: a descendant's guard user is its root user. That keeps a
+// restore of a descendant whose parent agent row is gone (purged after its
+// soft delete) from being refused while its root user exists. A legacy
+// child whose parent had an empty ancestry ([parent]) and a legacy agent
+// with an empty ancestry still check a.OwnerID, by existence.
+//
+// It runs in the create and restore transactions before the agent row is
+// written, so a create or restore racing that user's delete either commits
+// first (and the delete sees the agent and is refused) or waits for the
+// delete and then fails with errAgentOwnerUserMissing. A candidate that
+// names an existing agent is skipped; one that is neither a user nor an
+// agent fails closed with errAgentOwnerUserMissing (lockUserPrincipalTx).
 func lockAgentGuardUserTx(ctx context.Context, tx store.Store, a *store.Agent) error {
 	candidates := []string{a.OwnerID}
 	if len(a.Ancestry) > 0 && a.Ancestry[0] != a.OwnerID {
-		candidates = append(candidates, a.Ancestry[0])
+		candidates = []string{a.Ancestry[0]}
 	}
 	if a.OwnerID == "" {
 		candidates = append(candidates, a.CreatedBy)
@@ -208,29 +220,6 @@ func lockAgentGuardUserTx(ctx context.Context, tx store.Store, a *store.Agent) e
 		}
 	}
 	return nil
-}
-
-// agentOwnerUserID returns the agent's OwnerID when the owner may be a
-// user, or "" when it is another principal (an agent). OwnerID is a
-// polymorphic principal reference. An agent a user created records that user
-// as both its owner and the root of its ancestry ([userID]); an agent another
-// agent created records the parent agent as its owner and the parent at the
-// end of its ancestry, after the root user. So the owner may be a user when
-// it is the ancestry root. Two cases cannot be told from the row alone and
-// are returned for the caller (checkRestoreOwnerTx) to resolve against the
-// store: a legacy parent agent with an empty ancestry of its own (its child
-// records the parent as both owner and ancestry root), and a legacy agent
-// with an empty ancestry (recorded before ancestry was). The caller treats
-// the owner as a missing user only when it is neither a user nor an agent,
-// the existence rule relationshipSourceActive uses.
-func agentOwnerUserID(a *store.Agent) string {
-	if a.OwnerID == "" {
-		return ""
-	}
-	if len(a.Ancestry) == 0 || a.Ancestry[0] == a.OwnerID {
-		return a.OwnerID
-	}
-	return ""
 }
 
 // userScopedDataCleanupTimeout bounds the post-delete cleanup of one user's

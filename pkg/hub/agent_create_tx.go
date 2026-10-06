@@ -72,8 +72,9 @@ type agentCreateWrite struct {
 //
 // The transaction first takes a shared lock on the row of the user the
 // user delete guard would count for the agent (its owner when that is a
-// user, else its ancestry root when that is a user) and re-checks that the
-// user exists (lockAgentGuardUserTx, ptone/scion#2769). A create racing that
+// user, else its ancestry root when that is a user, else its creator when
+// the agent has no owner) and re-checks that the user exists
+// (lockAgentGuardUserTx, ptone/scion#2769). A create racing that
 // user's delete then either commits first, so the delete sees the agent and
 // is refused, or fails with errAgentOwnerUserMissing and writes nothing.
 func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) error {

@@ -1591,8 +1591,9 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
 	// fails), reactivates those edges (a conflicting active edge is a 409)
 	// and writes the agent_restore audit record. It also refuses an agent
-	// whose owner is a user that no longer exists (ptone/scion#2769;
-	// errAgentOwnerUserMissing, see checkRestoreOwnerTx).
+	// whose guard user (its owner, ancestry root or schedule creator) no
+	// longer exists (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
@@ -1600,7 +1601,7 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		}
 		if errors.Is(err, errAgentOwnerUserMissing) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
-				"cannot restore the agent: its owner no longer exists", nil)
+				"cannot restore the agent: the user it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errRestoreEdgeConflict) {
@@ -1629,21 +1630,6 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// restored agent carries its deletion view (null) and project/broker
 	// names like every other agent response.
 	s.writeAgentGetResponse(w, r, agent)
-}
-
-// checkRestoreOwnerTx refuses the restore, with errAgentOwnerUserMissing,
-// when ownerUserID (agentOwnerUserID of the agent) names a user that no
-// longer exists, and otherwise locks that user's row shared
-// (lockUserPrincipalTx). The owner counts as a missing user only when it is
-// neither a user nor an agent, the existence rule relationshipSourceActive
-// uses. That covers a legacy agent created by a parent agent with an empty
-// ancestry, which records the parent as both owner and ancestry root (an
-// owner that is an agent is not a missing user, so the restore goes ahead),
-// and a legacy agent with an empty ancestry, whose owner kind is not
-// recorded.
-func checkRestoreOwnerTx(ctx context.Context, tx store.Store, ownerUserID string) error {
-	_, err := lockUserPrincipalTx(ctx, tx, ownerUserID)
-	return err
 }
 
 // MessageRequest is the request body for sending a message to an agent.

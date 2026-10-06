@@ -2028,7 +2028,7 @@ func (s *Server) createAgentInProject(
 		}
 		if errors.Is(err, errAgentOwnerUserMissing) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
-				"cannot create the agent: its owner no longer exists", nil)
+				"cannot create the agent: the user it belongs to no longer exists", nil)
 			return
 		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {

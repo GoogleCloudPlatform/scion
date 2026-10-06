@@ -467,16 +467,21 @@ func softDeletedAgent(t *testing.T, s store.Store, slug, projectID, ownerID stri
 }
 
 // TestRestoreAgent_OwnerUserDeletedRefused: an agent whose owner user was
-// deleted cannot be restored (409); agents owned by an agent principal are
-// unaffected, even when that agent no longer exists.
+// deleted cannot be restored (409). A descendant (owned by an agent, the
+// user at its ancestry root) is checked against its root user only: with
+// its parent agent gone (purged) it is refused when the root user is
+// deleted and restored when the root user exists.
 func TestRestoreAgent_OwnerUserDeletedRefused(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
 	daveAgent := softDeletedAgent(t, s, "dave-agent", project.ID, dave.ID, []string{dave.ID})
-	// A sub-agent owned by an agent that is gone: not a user owner.
+	// Sub-agents owned by an agent that is gone (purged): not a user owner.
 	parentID := tid("agent-gone-parent")
 	child := softDeletedAgent(t, s, "child-agent", project.ID, parentID, []string{dave.ID, parentID})
+	erin := newActiveMember(t, s, "user-erin", "erin@test.com")
+	erinParentID := tid("agent-gone-erin-parent")
+	erinChild := softDeletedAgent(t, s, "erin-child-agent", project.ID, erinParentID, []string{erin.ID, erinParentID})
 
 	// The soft-deleted agent does not block the delete.
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
@@ -484,16 +489,59 @@ func TestRestoreAgent_OwnerUserDeletedRefused(t *testing.T) {
 
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+daveAgent.ID+"/restore", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "owner no longer exists")
+	assert.Contains(t, rec.Body.String(), "the user it belongs to no longer exists")
 	got, err := s.GetAgent(ctx, daveAgent.ID)
 	require.NoError(t, err)
 	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
 
+	// The root user dave is gone: refused like dave's own agent.
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+child.ID+"/restore", nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "the user it belongs to no longer exists")
 	got, err = s.GetAgent(ctx, child.ID)
 	require.NoError(t, err)
-	assert.True(t, got.DeletedAt.IsZero(), "an agent-owned agent is restored")
+	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
+
+	// The root user erin exists: the purged parent does not block it.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+erinChild.ID+"/restore", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err = s.GetAgent(ctx, erinChild.ID)
+	require.NoError(t, err)
+	assert.True(t, got.DeletedAt.IsZero(), "a descendant whose root user exists is restored")
+}
+
+// TestRestoreAgent_ScheduledAgentOfDeletedUserRefused: a soft-deleted agent
+// the scheduler dispatched for a user's schedule (no owner, the user only
+// as CreatedBy) cannot be restored once that user is deleted (409), the
+// same as the user's own agents; one whose creator user exists is restored.
+func TestRestoreAgent_ScheduledAgentOfDeletedUserRefused(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	daves := scheduledAgent("dave-sched", project.ID, dave.ID, "stopped")
+	daves.DeletedAt = time.Now().Add(-time.Hour)
+	require.NoError(t, s.CreateAgent(ctx, daves))
+	erin := newActiveMember(t, s, "user-erin", "erin@test.com")
+	erins := scheduledAgent("erin-sched", project.ID, erin.ID, "stopped")
+	erins.DeletedAt = time.Now().Add(-time.Hour)
+	require.NoError(t, s.CreateAgent(ctx, erins))
+
+	// The soft-deleted scheduled agent does not block the delete.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+daves.ID+"/restore", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
+	assert.Equal(t, "cannot restore the agent: the user it belongs to no longer exists", resp.Error.Message)
+	got, err := s.GetAgent(ctx, daves.ID)
+	require.NoError(t, err)
+	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+erins.ID+"/restore", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 // TestRestoreAgent_OwnerUserExistsRestored: the owner check does not block
@@ -522,6 +570,34 @@ func TestCommitAgentCreate_OwnerUserMissing(t *testing.T) {
 		Agent:      a,
 		Slug:       "orphan",
 		Edge: &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: gone,
+			DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
+			ScopeID: project.ID, Role: string(AgentRoleNone), Active: true},
+		Audit: &store.MutationAuditRecord{MutationType: mutationTypeAgentDelegation},
+	})
+	require.ErrorIs(t, err, errAgentOwnerUserMissing)
+	_, err = s.GetAgent(ctx, a.ID)
+	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
+}
+
+// TestCommitAgentCreate_DescendantRootUserMissing: a descendant create (the
+// owner is an existing parent agent) whose ancestry root user no longer
+// exists fails in the create transaction and writes nothing.
+func TestCommitAgentCreate_DescendantRootUserMissing(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	gone := tid("user-gone")
+	parent := &store.Agent{ID: tid("agent-live-parent"), Slug: "live-parent", Name: "live-parent",
+		ProjectID: project.ID, Phase: "running", OwnerID: gone, CreatedBy: gone, Ancestry: []string{gone}}
+	require.NoError(t, s.CreateAgent(ctx, parent))
+
+	a := &store.Agent{ID: tid("agent-orphan-child"), Slug: "orphan-child", Name: "orphan-child",
+		ProjectID: project.ID, Phase: "created", OwnerID: parent.ID, CreatedBy: parent.ID,
+		Ancestry: []string{gone, parent.ID}}
+	err := srv.commitAgentCreate(ctx, agentCreateWrite{
+		Provenance: store.AuthorityProvenance{ProvenanceVersion: 1},
+		Agent:      a,
+		Slug:       a.Slug,
+		Edge: &store.DelegationEdge{DelegatorType: store.DelegationPrincipalAgent, DelegatorID: parent.ID,
 			DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
 			ScopeID: project.ID, Role: string(AgentRoleNone), Active: true},
 		Audit: &store.MutationAuditRecord{MutationType: mutationTypeAgentDelegation},
@@ -642,12 +718,14 @@ func TestScheduledCreate_CreatorUserMissing(t *testing.T) {
 
 // userLockRecordingStore records, in order, the user-row locks, agent
 // lists and agent writes made through it, including inside WithTx.
-// LockUserRow fails with lockErr when it is set.
+// LockUserRow fails with lockErr when it is set and lockErrFor is empty or
+// names the locked ID.
 type userLockRecordingStore struct {
 	store.Store
-	mu      *sync.Mutex
-	events  *[]string
-	lockErr error
+	mu         *sync.Mutex
+	events     *[]string
+	lockErr    error
+	lockErrFor string
 }
 
 func newUserLockRecordingStore(s store.Store) *userLockRecordingStore {
@@ -688,7 +766,7 @@ func (r *userLockRecordingStore) WithTx(ctx context.Context, fn func(tx store.St
 
 func (r *userLockRecordingStore) LockUserRow(ctx context.Context, id string, exclusive bool) error {
 	r.record(fmt.Sprintf("lock:%s:%t", id, exclusive))
-	if r.lockErr != nil {
+	if r.lockErr != nil && (r.lockErrFor == "" || r.lockErrFor == id) {
 		return r.lockErr
 	}
 	return r.Store.LockUserRow(ctx, id, exclusive)
@@ -810,6 +888,52 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 		requireBefore(t, r, "lock:"+dave.ID+":false", "update:"+a.ID)
 		assert.Equal(t, -1, r.index("lock:"+dave.ID+":true"), "restore must not lock exclusively")
 	})
+	t.Run("scheduled restore", func(t *testing.T) {
+		// A scheduled agent records the user only as CreatedBy; restore
+		// locks that user, the same choice as the scheduled create.
+		srv, s, _, _, project := setupDemoPolicyTest(t)
+		dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+		a := scheduledAgent("dave-sched", project.ID, dave.ID, "stopped")
+		a.DeletedAt = time.Now().Add(-time.Hour)
+		require.NoError(t, s.CreateAgent(context.Background(), a))
+		r := newUserLockRecordingStore(s)
+		srv.store = r
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restore", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		requireBefore(t, r, "lock:"+dave.ID+":false", "update:"+a.ID)
+		assert.Equal(t, -1, r.index("lock:"+dave.ID+":true"), "restore must not lock exclusively")
+	})
+}
+
+// TestCreateAgent_DescendantRootUserMissingReturns409: an agent creating a
+// child through the HTTP route, when its ancestry root user's row is gone
+// at commit time, gets 409 conflict; nothing is written and the quota
+// reservation is released.
+func TestCreateAgent_DescendantRootUserMissingReturns409(t *testing.T) {
+	f := newChainFixture(t, "root-gone")
+	setProjectAgentCeiling(t, f.store, 10)
+	parent, _ := f.sessionParent(t, "root-gone-p")
+	require.Equal(t, []string{f.creator.ID}, parent.Ancestry)
+	token := f.agentToken(t, parent.ID)
+	real := f.store
+	r := newUserLockRecordingStore(real)
+	r.lockErr = store.ErrNotFound
+	r.lockErrFor = f.creator.ID
+	f.srv.store = r
+
+	rec := f.createAsParent(t, token, CreateAgentRequest{Name: "root-gone-c"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
+	assert.Equal(t, "cannot create the agent: the user it belongs to no longer exists", resp.Error.Message)
+	require.GreaterOrEqual(t, r.index("lock:"+f.creator.ID+":false"), 0, "the create must lock the root user")
+
+	_, err := real.GetAgentBySlug(context.Background(), f.proj.ID, "root-gone-c")
+	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
+	assert.Equal(t, []string{parent.ID},
+		activeReservationResources(t, real, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, f.proj.ID),
+		"the refused create must release its reservation (only the parent's remains)")
 }
 
 // TestRestoreAgent_LegacyParentOwnerRestored: a legacy child whose parent
@@ -848,7 +972,7 @@ func TestRestoreAgent_EmptyAncestryOwnerMissingRefused(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+gone.ID+"/restore", nil)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "owner no longer exists")
+	assert.Contains(t, rec.Body.String(), "the user it belongs to no longer exists")
 	got, err := s.GetAgent(ctx, gone.ID)
 	require.NoError(t, err)
 	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
@@ -875,7 +999,7 @@ func TestCreateAgent_OwnerUserMissingReturns409(t *testing.T) {
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
-	assert.Equal(t, "cannot create the agent: its owner no longer exists", resp.Error.Message)
+	assert.Equal(t, "cannot create the agent: the user it belongs to no longer exists", resp.Error.Message)
 	require.GreaterOrEqual(t, r.index("lock:"+f.creator.ID+":false"), 0, "the create must take the owner lock")
 
 	_, err := real.GetAgentBySlug(context.Background(), f.proj.ID, "owner-gone")

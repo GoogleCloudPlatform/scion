@@ -278,8 +278,9 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // is live, clear DeletedAt and SoftDeleteOpID, re-assert the identity keys,
 // reactivate exactly those edges (none when the operation ID is empty), run
 // the restore hooks, and write the agent_restore audit record. Before all
-// of that it refuses, with errAgentOwnerUserMissing, an agent whose owner
-// user no longer exists (checkRestoreOwnerTx).
+// of that it refuses, with errAgentOwnerUserMissing, an agent whose guard
+// user no longer exists (lockAgentGuardUserTx, the same choice of user as
+// create: owner, else ancestry root, else creator when there is no owner).
 //
 // A delegator that is not live returns errRestoreDelegatorNotLive, a store
 // error during that check errRestoreDelegatorLookup, a conflicting active
@@ -301,15 +302,17 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	row.Updated = now
 	hooks := s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.restore)
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		// An agent whose owner is a user that no longer exists is not
-		// restored (ptone/scion#2769): the user delete refuses while the
-		// user has agents, but soft-deleted agents do not count. The check
-		// takes a shared lock on the owner user's row first, so it
-		// serializes with a concurrent user delete on PostgreSQL. User row
-		// first: no path locks an agent, project or group row and then a
-		// user row, so this cannot deadlock with the delete. Agents owned by
-		// an existing agent are not refused.
-		if err := checkRestoreOwnerTx(ctx, tx, agentOwnerUserID(&row)); err != nil {
+		// An agent whose guard user no longer exists is not restored
+		// (ptone/scion#2769): the user delete refuses while the user has
+		// agents, but soft-deleted agents do not count. The guard user is
+		// chosen as on create (lockAgentGuardUserTx): the owner, else the
+		// ancestry root, else the creator when there is no owner (a
+		// scheduled agent). The check takes a shared lock on that user's
+		// row first, so it serializes with a concurrent user delete on
+		// PostgreSQL. User row first: no path locks an agent, project or
+		// group row and then a user row, so this cannot deadlock with the
+		// delete. A legacy owner that is an existing agent is not refused.
+		if err := lockAgentGuardUserTx(ctx, tx, &row); err != nil {
 			return err
 		}
 		cur, err := tx.GetAgent(ctx, row.ID)
