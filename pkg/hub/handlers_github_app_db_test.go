@@ -200,7 +200,8 @@ func TestUpdateGitHubApp_DBWriteFailureReturns500(t *testing.T) {
 	}
 }
 
-// File/SQLite mode has no OperationalSettings service, so settings.yaml remains
+// A hub with no OperationalSettings service (every DB driver, SQLite included,
+// wires one since #1432, so this is only a bare Server) keeps settings.yaml as
 // the durable home for the non-sensitive fields.
 func TestUpdateGitHubApp_PersistsToFileWithoutOperationalSettings(t *testing.T) {
 	settingsPath := tempSettingsHome(t)

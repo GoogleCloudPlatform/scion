@@ -42,7 +42,7 @@ func TestUpdateAgentAfterDispatch_KeepsSoftDelete(t *testing.T) {
 	require.NoError(t, s.UpdateAgent(ctx, row))
 
 	inFlight.Phase = string(state.PhaseRunning)
-	srv.preserveTerminalPhase(ctx, inFlight)
+	assert.True(t, srv.preserveTerminalPhase(ctx, inFlight), "a soft-deleted row reports softDeleted")
 	_ = srv.updateAgentAfterDispatch(ctx, inFlight)
 
 	got := mustGetAgent(t, s, agent.ID)

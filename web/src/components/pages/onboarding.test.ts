@@ -35,6 +35,10 @@ interface OnboardingPage extends HTMLElement {
   wsPathValidation: { resolved: string; exists: boolean; isDir: boolean } | null;
   handleWsHubCreate(): Promise<void>;
   handleWsLinkedCreate(): Promise<void>;
+  gcloudADCAvailable: boolean;
+  autoInjectGcloudADC: boolean;
+  selectedHarnesses: Set<string>;
+  handleHarnessesNext(): Promise<void>;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -136,5 +140,42 @@ describe('onboarding workspace step: membership-changed after project creation',
     await el.handleWsLinkedCreate();
 
     expect(heard).toEqual([]);
+  });
+});
+
+describe('onboarding harness step: gcloud ADC preference', () => {
+  function createHarnessPage(): OnboardingPage {
+    const el = createPage();
+    el.currentStep = 4;
+    el.selectedHarnesses = new Set(['claude']);
+    el.gcloudADCAvailable = true;
+    el.autoInjectGcloudADC = true;
+    return el;
+  }
+
+  it('saves the preference through the workstation-settings PATCH, not server-config', async () => {
+    const el = createHarnessPage();
+    respond(jsonResponse({}), jsonResponse({ auto_inject_gcloud_adc: true }));
+
+    await el.handleHarnessesNext();
+
+    const calls = vi.mocked(apiFetch).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[1][0]).toBe('/api/v1/system/workstation-settings');
+    expect(calls[1][1]?.method).toBe('PATCH');
+    expect(JSON.parse(String(calls[1][1]?.body))).toEqual({ auto_inject_gcloud_adc: true });
+    expect(calls.some((c) => c[0] === '/api/v1/admin/server-config')).toBe(false);
+    expect(el.error).toBeNull();
+    expect(el.currentStep).toBe(5);
+  });
+
+  it('a failed save surfaces an error and stays on the step', async () => {
+    const el = createHarnessPage();
+    respond(jsonResponse({}), jsonResponse({ error: { message: 'write failed' } }, 500));
+
+    await el.handleHarnessesNext();
+
+    expect(el.error).toBeTruthy();
+    expect(el.currentStep).toBe(4);
   });
 });

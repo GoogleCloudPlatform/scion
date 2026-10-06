@@ -54,6 +54,8 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { chatRecentFiles } from './chat-recent-files.js';
+import { pushRouteEntry, type RouteShell } from './route-history.js';
+import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
 import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
@@ -949,6 +951,8 @@ async function init(): Promise<void> {
   // The event fires synchronously from performLogout() or auth-expiry detection
   // so cross-tab teardown completes before the page navigates away.
   window.addEventListener(ACCOUNT_TEARDOWN_EVENT, (e) => {
+    // A chat scroll position belongs to this account's session.
+    clearChatScrollAnchor();
     // Explicit logout only: suspend ingestion and clear this account's
     // persisted key and memory before the logout POST runs, so nothing async
     // can race a response into a store that is no longer this identity's. An
@@ -1253,12 +1257,14 @@ async function renderRoute(path: string): Promise<void> {
     // Only skip the swap when the tag matches AND the path matches what
     // was already rendered; explicit navigation to a different chat
     // destination (e.g. /chat/space/xyz) must still render normally.
+    // The fragment is ignored: it is a one-off jump target (`#msg-…`), not
+    // part of which page is showing.
     const oldPage = shell.querySelector('[data-scion-page]');
     if (
       returningFromTerminal &&
       oldPage &&
       oldPage.tagName.toLowerCase() === tag &&
-      shell.currentPath === path
+      shell.currentPath.split('#')[0] === path.split('#')[0]
     ) {
       shell.user = currentUser;
       return;
@@ -1407,6 +1413,18 @@ function replaceRoute(path: string): Promise<void> {
   return Promise.resolve(shell.updateComplete).then(() => undefined);
 }
 
+/**
+ * Pushes a new history entry for an app path without rendering anything, for
+ * a page that has already switched itself to what the path names (e.g. the
+ * chat page opening another thread in place). Records the path as the active
+ * shell's rendered path, as a render would, so the header's mode switch
+ * remembers it and returning from the terminal workspace reuses the page.
+ * Resolves once the shell has re-rendered for it.
+ */
+function pushRoute(path: string): Promise<void> {
+  return pushRouteEntry(activeShell?.element as RouteShell | undefined, path, browserPath(path));
+}
+
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
@@ -1421,4 +1439,4 @@ if (document.readyState === 'loading') {
 export { openTerminal, terminalHref } from './open-terminal.js';
 
 // Export for use in components and tests
-export { getInitialData, navigateTo, replaceRoute, stateManager };
+export { getInitialData, navigateTo, pushRoute, replaceRoute, stateManager };

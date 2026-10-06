@@ -1643,6 +1643,20 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	s.touchConversationActivity(ctx, key, storeMsg.ID)
 	s.autoAdvanceSenderReadState(ctx, user.ID(), key, storeMsg.ID)
 
+	// Record "web" reply-channel affinity so untagged agent replies
+	// (e.g. `scion message user:...` or sciontool Stop-hook assistant-reply
+	// mirror) route back to web chat rather than a stale external bridge
+	// channel (Discord/Telegram). See #2448.
+	s.mu.RLock()
+	affinityWcs := s.webChatStore
+	s.mu.RUnlock()
+	if affinityWcs != nil && user.ID() != "" && primaryAgent.ProjectID != "" && primaryAgent.ID != "" {
+		if err := affinityWcs.RecordChannel(ctx, user.ID(), primaryAgent.ProjectID, primaryAgent.ID, "web", now); err != nil {
+			s.messageLog.Error("Failed to record web channel affinity for primary agent",
+				"user_id", user.ID(), "agent_id", primaryAgent.ID, "error", err)
+		}
+	}
+
 	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 
 	// Phase 9b(ii): render the delivery envelope from the persisted message
@@ -1816,6 +1830,12 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				s.messageLog.Error("Failed to persist mention message", "slug", mentionAgent.Slug, "error", err)
 				mentionPersisted = false
 			} else {
+				if affinityWcs != nil && user.ID() != "" && mentionAgent.ProjectID != "" && mentionAgent.ID != "" {
+					if err := affinityWcs.RecordChannel(ctx, user.ID(), mentionAgent.ProjectID, mentionAgent.ID, "web", now); err != nil {
+						s.messageLog.Error("Failed to record web channel affinity for mentioned agent",
+							"user_id", user.ID(), "agent_id", mentionAgent.ID, "error", err)
+					}
+				}
 				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs)
 			}
 

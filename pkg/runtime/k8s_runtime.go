@@ -459,6 +459,36 @@ func chownRecursiveArgs(owner, path string) (args []string, ok bool) {
 	return []string{"chown", "-R", fmt.Sprintf("%s:%s", owner, owner), path}, true
 }
 
+// descriptiveLabels are display-only labels: nothing selects or identifies
+// objects by them. Their values come from names (template, harness-config,
+// auth method) that are not guaranteed to be valid Kubernetes label values.
+var descriptiveLabels = map[string]bool{
+	"scion.template":       true,
+	"scion.harness_config": true,
+	"scion.harness_auth":   true,
+}
+
+// filterDescriptiveLabels returns a copy of labels without any descriptive
+// label (see descriptiveLabels) whose value is not a valid Kubernetes label
+// value; each dropped label is logged as a warning. All other labels,
+// including identity labels such as scion.name, the run ID, the start ID,
+// agent_id and the project labels, are copied unchanged, so an invalid
+// identity value still fails object creation.
+func filterDescriptiveLabels(agentName string, labels map[string]string) map[string]string {
+	out := make(map[string]string, len(labels)+1)
+	for k, v := range labels {
+		if descriptiveLabels[k] {
+			if errs := k8svalidation.IsValidLabelValue(v); len(errs) > 0 {
+				runtimeLog.Warn("Dropping descriptive label with a value that is not a valid Kubernetes label value",
+					"agent", agentName, "label", k, "value", v, "reason", strings.Join(errs, "; "))
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
+}
+
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
 	namespace := r.DefaultNamespace
@@ -478,11 +508,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// only this start's own objects and never those of a newer agent that has
 	// since been created with the same name. The label map is copied so the
 	// caller's map is not modified.
+	//
+	// The copy also drops descriptive labels whose value is not a valid
+	// Kubernetes label value (see filterDescriptiveLabels), so that a display
+	// value cannot fail creation of these objects.
 	startID := uuid.NewString()
-	labels := make(map[string]string, len(config.Labels)+1)
-	for k, v := range config.Labels {
-		labels[k] = v
-	}
+	labels := filterDescriptiveLabels(config.Name, config.Labels)
 	labels[labelStartID] = startID
 	config.Labels = labels
 
