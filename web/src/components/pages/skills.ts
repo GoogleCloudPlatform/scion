@@ -326,16 +326,21 @@ export class ScionPageSkills extends LitElement {
   }
 
   /**
-   * After a load that started with focus inside the page: if the focused
-   * control was removed by the re-render (e.g. Retry, once the error or
-   * notice clears), move focus to the search input instead of leaving it on
-   * the document body (ptone/scion#2948).
+   * After a load that started with focus inside the page: if the re-render
+   * removed the focused control (e.g. Retry, once the error or notice
+   * clears) so that focus fell to the document body, move it to the search
+   * input, or else to whichever Retry is shown (ptone/scion#2948). Focus
+   * the user moved elsewhere during the load is left alone.
    */
   private async restoreFocus(): Promise<void> {
     await this.updateComplete;
     if (!this.isConnected || this.shadowRoot?.activeElement) return;
-    const search = this.shadowRoot?.querySelector<HTMLElement>('.search-input');
-    search?.focus();
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    const target = ['.search-input', '.error-retry', '.partial-load-retry']
+      .map((selector) => this.shadowRoot?.querySelector<HTMLElement>(selector))
+      .find((el) => el != null);
+    target?.focus();
   }
 
   private get displaySkills(): Skill[] {
@@ -427,11 +432,12 @@ export class ScionPageSkills extends LitElement {
 
       ${this.loading && !this.hasLoaded
         ? this.renderLoading()
-        : this.error
-          ? this.renderError()
-          : html`
-              ${this.renderFilterBar()} ${this.renderPartialLoadNotice()} ${this.renderSkills()}
-            `}
+        : html`
+            ${this.renderFilterBar()}
+            ${this.error
+              ? this.renderError()
+              : html`${this.renderPartialLoadNotice()} ${this.renderSkills()}`}
+          `}
     `;
   }
 

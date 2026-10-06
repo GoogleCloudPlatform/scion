@@ -504,6 +504,61 @@ describe('scion-page-skills keeps keyboard focus on reload (ptone/scion#2948)', 
     await vi.waitFor(() => expect(focusedIn(el)).toBe(shadowQuery(el, '.search-input')));
   });
 
+  it('a failed search reload keeps the filter bar and focus on the search input', async () => {
+    const { el } = await mountSkillsPage((url) =>
+      Promise.resolve(
+        url.includes('search=foo')
+          ? jsonResponse({ error: { code: 'internal' } }, 500)
+          : jsonResponse({ skills: [skill('1')] })
+      )
+    );
+    element = el;
+
+    const loads = spyOnLoads();
+    const search = shadowQuery(el, '.search-input')!;
+    search.focus();
+    (search as HTMLElement & { value: string }).value = 'foo';
+    search.dispatchEvent(new Event('sl-input'));
+    await vi.waitFor(() => expect(loads).toHaveLength(1), { timeout: 2000 });
+    await loads[0];
+    await settled(el);
+
+    // The error is shown under the filter bar, so the query can be fixed.
+    expect(shadowQuery(el, '.error-state')).not.toBeNull();
+    expect(shadowQuery(el, '.search-input')).toBe(search);
+    expect(focusedIn(el)).toBe(search);
+  });
+
+  it('leaves focus alone when the user moved it out of the page during the load', async () => {
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    try {
+      let fail = true;
+      const pending = deferred<Response>();
+      const { el } = await mountSkillsPage(() =>
+        fail ? Promise.resolve(jsonResponse({ error: { code: 'internal' } }, 500)) : pending.promise
+      );
+      element = el;
+
+      const retry = shadowQuery(el, '.error-state sl-button.error-retry')!;
+      retry.focus();
+      fail = false;
+      retry.click();
+      await el.updateComplete;
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+
+      pending.resolve(jsonResponse({ skills: [skill('1')] }));
+      await settled(el);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(shadowQuery(el, '.error-state')).toBeNull();
+      expect(document.activeElement).toBe(outside);
+      expect(focusedIn(el)).toBeNull();
+    } finally {
+      outside.remove();
+    }
+  });
+
   it('does not take focus when the reload started without focus in the page', async () => {
     let fail = true;
     const { el } = await mountSkillsPage(() =>
