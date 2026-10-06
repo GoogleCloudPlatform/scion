@@ -790,9 +790,7 @@ export class ScionAgentTreeView extends LitElement {
    * @returns false, doing nothing, if the node is not rendered.
    */
   focusAgentNode(agentId: string): boolean {
-    const link = this.renderRoot.querySelector<HTMLElement>(
-      `.node-wrapper a.node[data-agent-id="${CSS.escape(agentId)}"]`
-    );
+    const link = this.nodeLink(agentId);
     if (!link) return false;
     link.focus({ preventScroll: true });
     return true;
@@ -823,11 +821,16 @@ export class ScionAgentTreeView extends LitElement {
    * size; the current zoom while the label is not rendered.
    */
   private jumpScaleFor(agentId: string): number {
-    const name = this.renderRoot.querySelector<HTMLElement>(
-      `a.node[data-agent-id="${CSS.escape(agentId)}"] .name`
-    );
+    const name = this.nodeLink(agentId)?.querySelector<HTMLElement>('.name');
     if (!name) return this.scale;
     return jumpScale(getComputedStyle(name).fontSize, this.scale);
+  }
+
+  /** One agent's rendered node link, or null while it is not rendered. */
+  private nodeLink(agentId: string): HTMLElement | null {
+    return this.renderRoot.querySelector<HTMLElement>(
+      `.node-wrapper a.node[data-agent-id="${CSS.escape(agentId)}"]`
+    );
   }
 
   private dropPendingReveal(): void {
