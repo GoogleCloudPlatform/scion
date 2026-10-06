@@ -18,7 +18,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -62,8 +65,7 @@ CREATE TABLE IF NOT EXISTS telegram_group_links (
 	linked_at          TIMESTAMPTZ NOT NULL,
 	active             BOOLEAN NOT NULL DEFAULT TRUE,
 	show_agent_to_agent    BOOLEAN NOT NULL DEFAULT FALSE,
-	notify_in_group        BOOLEAN NOT NULL DEFAULT FALSE,
-	show_assistant_reply   BOOLEAN NOT NULL DEFAULT TRUE
+	notify_in_group        BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_telegram_group_links_project ON telegram_group_links(project_id);
@@ -77,11 +79,20 @@ CREATE TABLE IF NOT EXISTS telegram_conversation_context (
 	PRIMARY KEY (telegram_user_id, project_id, agent_slug)
 );
 
-CREATE TABLE IF NOT EXISTS telegram_project_agents (
-	project_id   TEXT PRIMARY KEY,
-	agent_slugs  TEXT NOT NULL DEFAULT '[]',
-	refreshed_at TIMESTAMPTZ NOT NULL
+-- The agent-list cache was keyed by project only; it is now keyed by user
+-- and project. The old table only held a cache, so it is dropped.
+-- TODO: remove this DROP one release after the per-user cache ships.
+DROP TABLE IF EXISTS telegram_project_agents;
+
+CREATE TABLE IF NOT EXISTS telegram_user_project_agents (
+	user_principal TEXT NOT NULL,
+	project_id     TEXT NOT NULL,
+	agent_slugs    TEXT NOT NULL DEFAULT '[]',
+	refreshed_at   TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (user_principal, project_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_telegram_user_project_agents_refreshed ON telegram_user_project_agents(refreshed_at);
 
 CREATE TABLE IF NOT EXISTS telegram_user_mappings (
 	telegram_user_id   TEXT PRIMARY KEY,
@@ -143,28 +154,28 @@ func (s *postgresStore) Close() error {
 
 func (s *postgresStore) SaveGroupLink(ctx context.Context, link *GroupLink) error {
 	const q = `
-INSERT INTO telegram_group_links (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO telegram_group_links (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT(chat_id) DO UPDATE SET
 	chat_title=EXCLUDED.chat_title, project_id=EXCLUDED.project_id, project_slug=EXCLUDED.project_slug,
 	default_agent=EXCLUDED.default_agent, linked_by=EXCLUDED.linked_by, linked_at=EXCLUDED.linked_at,
 	active=EXCLUDED.active, show_agent_to_agent=EXCLUDED.show_agent_to_agent,
-	notify_in_group=EXCLUDED.notify_in_group, show_assistant_reply=EXCLUDED.show_assistant_reply`
+	notify_in_group=EXCLUDED.notify_in_group`
 	_, err := s.db.ExecContext(ctx, q,
 		link.ChatID, link.ChatTitle, link.ProjectID, link.ProjectSlug,
 		link.DefaultAgent, link.LinkedBy, link.LinkedAt.UTC(),
-		link.Active, link.ShowAgentToAgent, link.NotifyInGroup, link.ShowAssistantReply)
+		link.Active, link.ShowAgentToAgent, link.NotifyInGroup)
 	return err
 }
 
 func (s *postgresStore) GetGroupLink(ctx context.Context, chatID int64) (*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM telegram_group_links WHERE chat_id = $1`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM telegram_group_links WHERE chat_id = $1`
 	row := s.db.QueryRowContext(ctx, q, chatID)
 	return pgScanGroupLink(row)
 }
 
 func (s *postgresStore) GetGroupLinksForProject(ctx context.Context, projectID string) ([]*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM telegram_group_links WHERE project_id = $1`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM telegram_group_links WHERE project_id = $1`
 	rows, err := s.db.QueryContext(ctx, q, projectID)
 	if err != nil {
 		return nil, err
@@ -174,7 +185,7 @@ func (s *postgresStore) GetGroupLinksForProject(ctx context.Context, projectID s
 }
 
 func (s *postgresStore) GetAllGroupLinks(ctx context.Context) ([]*GroupLink, error) {
-	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply FROM telegram_group_links`
+	const q = `SELECT chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group FROM telegram_group_links`
 	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
@@ -197,14 +208,14 @@ func (s *postgresStore) MigrateGroupLink(ctx context.Context, oldChatID, newChat
 
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO telegram_group_links
-  (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply)
-SELECT $1, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group, show_assistant_reply
+  (chat_id, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group)
+SELECT $1, chat_title, project_id, project_slug, default_agent, linked_by, linked_at, active, show_agent_to_agent, notify_in_group
 FROM telegram_group_links WHERE chat_id = $2
 ON CONFLICT(chat_id) DO UPDATE SET
 	chat_title=EXCLUDED.chat_title, project_id=EXCLUDED.project_id, project_slug=EXCLUDED.project_slug,
 	default_agent=EXCLUDED.default_agent, linked_by=EXCLUDED.linked_by, linked_at=EXCLUDED.linked_at,
 	active=EXCLUDED.active, show_agent_to_agent=EXCLUDED.show_agent_to_agent,
-	notify_in_group=EXCLUDED.notify_in_group, show_assistant_reply=EXCLUDED.show_assistant_reply`, newChatID, oldChatID)
+	notify_in_group=EXCLUDED.notify_in_group`, newChatID, oldChatID)
 	if err != nil {
 		return fmt.Errorf("copy group_link: %w", err)
 	}
@@ -280,26 +291,39 @@ ORDER BY last_message_at DESC LIMIT 1`
 // --- ProjectAgents ---
 
 func (s *postgresStore) SaveProjectAgents(ctx context.Context, pa *ProjectAgents) error {
+	if pa.User == "" {
+		return errors.New("save agent cache: user is required")
+	}
 	slugsJSON, err := json.Marshal(pa.Agents)
 	if err != nil {
 		return fmt.Errorf("marshal agent_slugs: %w", err)
 	}
 	const q = `
-INSERT INTO telegram_project_agents (project_id, agent_slugs, refreshed_at)
-VALUES ($1, $2, $3)
-ON CONFLICT(project_id) DO UPDATE SET
+INSERT INTO telegram_user_project_agents (user_principal, project_id, agent_slugs, refreshed_at)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT(user_principal, project_id) DO UPDATE SET
 	agent_slugs=EXCLUDED.agent_slugs, refreshed_at=EXCLUDED.refreshed_at`
-	_, err = s.db.ExecContext(ctx, q, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC())
-	return err
+	if _, err := s.db.ExecContext(ctx, q, pa.User, pa.ProjectID, string(slugsJSON), pa.RefreshedAt.UTC()); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM telegram_user_project_agents WHERE refreshed_at < $1`, time.Now().Add(-agentCacheRetention).UTC()); err != nil {
+		// The list is saved; old rows are retried on the next save and are
+		// never served meanwhile.
+		slog.Warn("Failed to evict expired agent-cache entries", "error", err)
+	}
+	return nil
 }
 
-func (s *postgresStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
-	const q = `SELECT project_id, agent_slugs, refreshed_at FROM telegram_project_agents WHERE project_id = $1`
-	row := s.db.QueryRowContext(ctx, q, projectID)
+func (s *postgresStore) GetProjectAgents(ctx context.Context, user, projectID string) (*ProjectAgents, error) {
+	if user == "" {
+		return nil, nil
+	}
+	const q = `SELECT user_principal, project_id, agent_slugs, refreshed_at FROM telegram_user_project_agents WHERE user_principal = $1 AND project_id = $2 AND refreshed_at >= $3`
+	row := s.db.QueryRowContext(ctx, q, user, projectID, time.Now().Add(-agentCacheRetention).UTC())
 
 	var pa ProjectAgents
 	var slugsJSON string
-	err := row.Scan(&pa.ProjectID, &slugsJSON, &pa.RefreshedAt)
+	err := row.Scan(&pa.User, &pa.ProjectID, &slugsJSON, &pa.RefreshedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -605,7 +629,7 @@ func pgScanGroupLink(row *sql.Row) (*GroupLink, error) {
 	var link GroupLink
 	err := row.Scan(&link.ChatID, &link.ChatTitle, &link.ProjectID, &link.ProjectSlug,
 		&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
-		&link.NotifyInGroup, &link.ShowAssistantReply)
+		&link.NotifyInGroup)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -621,7 +645,7 @@ func pgScanGroupLinks(rows *sql.Rows) ([]*GroupLink, error) {
 		var link GroupLink
 		err := rows.Scan(&link.ChatID, &link.ChatTitle, &link.ProjectID, &link.ProjectSlug,
 			&link.DefaultAgent, &link.LinkedBy, &link.LinkedAt, &link.Active, &link.ShowAgentToAgent,
-			&link.NotifyInGroup, &link.ShowAssistantReply)
+			&link.NotifyInGroup)
 		if err != nil {
 			return nil, err
 		}

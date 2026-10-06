@@ -172,8 +172,12 @@ export interface Project {
   ownerId?: string;
   ownerName?: string;
   agentCount: number;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   sharedDirs?: SharedDir[];
   githubInstallationId?: number | undefined;
@@ -734,8 +738,12 @@ export interface Template {
   contentHash?: string;
   files?: TemplateFileInfo[];
   config?: TemplateConfig;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; kept optional for compatibility. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
 }
 
@@ -882,8 +890,12 @@ export interface RuntimeBroker {
   labels?: Record<string, string>;
   createdBy?: string;
   createdByName?: string;
-  createdAt: string;
-  updatedAt: string;
+  /** Creation and last-update times, as the hub sends them. */
+  created?: string;
+  updated?: string;
+  /** Older names for created / updated; read as a fallback. */
+  createdAt?: string;
+  updatedAt?: string;
   _capabilities?: Capabilities;
   /**
    * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061

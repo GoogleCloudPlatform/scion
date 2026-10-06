@@ -154,6 +154,11 @@ func TestProvisionCmd_Clone_Idempotent(t *testing.T) {
 	if err := os.WriteFile(sentinelPath, []byte("provisioned_at=test\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// A provisioned workspace with content. (A marked but completely empty
+	// workspace is cloned into instead.)
+	if err := os.WriteFile(filepath.Join(wsDir, "README.md"), []byte("existing\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	oldWorkspace := provisionWorkspace
 	oldMode := provisionMode

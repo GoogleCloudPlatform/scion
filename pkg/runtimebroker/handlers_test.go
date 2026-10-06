@@ -1479,12 +1479,14 @@ runtimes:
 type envCapturingManager struct {
 	mockManager
 	lastEnv           map[string]string
+	lastRunID         string
 	lastTemplateName  string
 	lastHarnessConfig string
 }
 
 func (m *envCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.lastEnv = opts.Env
+	m.lastRunID = opts.RunID
 	m.lastTemplateName = opts.TemplateName
 	m.lastHarnessConfig = opts.HarnessConfig
 	return m.mockManager.Start(ctx, opts)
@@ -1505,15 +1507,17 @@ func newTestServerWithEnvCapture() (*Server, *envCapturingManager) {
 	return New(cfg, mgr, rt), mgr
 }
 
-// TestCreateAgentPassesLaunchIDEnv pins the create request's launchId
-// reaching the agent container as SCION_LAUNCH_ID.
-func TestCreateAgentPassesLaunchIDEnv(t *testing.T) {
+// TestCreateAgentLaunchIDFromRunID pins SCION_LAUNCH_ID as broker-owned:
+// the create request's run ID reaches Manager.Start (which sets the
+// variable from it), and a resolved-env value is dropped.
+func TestCreateAgentLaunchIDFromRunID(t *testing.T) {
 	srv, mgr := newTestServerWithEnvCapture()
 
 	body := `{
 		"name": "test-agent",
 		"id": "agent-uuid-123",
-		"launchId": "launch-uuid-789",
+		"runId": "run-uuid-789",
+		"resolvedEnv": {"SCION_LAUNCH_ID": "forged"},
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -1525,8 +1529,11 @@ func TestCreateAgentPassesLaunchIDEnv(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
 	}
-	if got := mgr.lastEnv["SCION_LAUNCH_ID"]; got != "launch-uuid-789" {
-		t.Errorf("SCION_LAUNCH_ID = %q, want %q", got, "launch-uuid-789")
+	if mgr.lastRunID != "run-uuid-789" {
+		t.Errorf("RunID = %q, want %q", mgr.lastRunID, "run-uuid-789")
+	}
+	if got, ok := mgr.lastEnv["SCION_LAUNCH_ID"]; ok {
+		t.Errorf("SCION_LAUNCH_ID = %q passed through, want it left to Manager.Start", got)
 	}
 }
 
@@ -3306,6 +3313,10 @@ type gitCloneCapturingManager struct {
 	lastProjectPath    string
 	lastBranch         string
 	lastFreshProvision bool
+	// lastSharedWorkspace and lastSharedWorkspaceClone capture the shared
+	// workspace inputs (shared_workspace_clone_test.go).
+	lastSharedWorkspace      bool
+	lastSharedWorkspaceClone *api.GitCloneConfig
 }
 
 func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
@@ -3315,6 +3326,8 @@ func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOpti
 	m.lastProjectPath = opts.ProjectPath
 	m.lastBranch = opts.Branch
 	m.lastFreshProvision = opts.FreshProvision
+	m.lastSharedWorkspace = opts.SharedWorkspace
+	m.lastSharedWorkspaceClone = opts.SharedWorkspaceClone
 	return m.mockManager.Start(ctx, opts)
 }
 
