@@ -44,7 +44,7 @@ import (
 // tests" convention, regardless of how many layers wrap it afterward.
 func newBareTestStore(t *testing.T) store.Store {
 	t.Helper()
-	base, err := newTestStore(":memory:")
+	base, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")

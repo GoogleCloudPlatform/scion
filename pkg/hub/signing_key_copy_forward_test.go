@@ -149,7 +149,7 @@ func prefixedGCPSecretNameForTest(hubID, scope, scopeID, name string) string {
 // the hub-prefixed name — not just have a prefixed copy sitting unused in
 // GCP SM while every read keeps going through the stale ref.
 func TestEnsureSigningKey_CopiesLegacyKeyForwardAndRepairsRef(t *testing.T) {
-	st, err := newTestStore(":memory:")
+	st, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("newTestStore: %v", err)
 	}

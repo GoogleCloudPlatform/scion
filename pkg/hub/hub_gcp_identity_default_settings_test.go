@@ -60,7 +60,7 @@ func gcpIdentitySettingsSA(t *testing.T, s store.Store, scope, scopeID string, v
 // newGCPIdentitySettingsStore returns a migrated in-memory store.
 func newGCPIdentitySettingsStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Skipf("skipping: test store unavailable (%v)", err)
 	}

@@ -227,7 +227,7 @@ func TestGlobalSkillCreate_SuperAdminHasCreateGlobal(t *testing.T) {
 // gains the permission.
 func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	// Create a raw store — no testServer, so no automatic seeding.
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
 	require.NoError(t, s.Migrate(context.Background()))

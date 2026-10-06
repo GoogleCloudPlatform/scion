@@ -34,7 +34,7 @@ func TestNew_DefaultsLaunchTimeoutWhenZero(t *testing.T) {
 }
 
 func TestNew_ClampsLaunchTimeoutBelowMinimum(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestNew_ClampsLaunchTimeoutBelowMinimum(t *testing.T) {
 }
 
 func TestNew_PreservesValidLaunchTimeout(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestNew_DefaultsLaunchKeepaliveSecondsWhenZero(t *testing.T) {
 }
 
 func TestNew_PreservesValidLaunchKeepaliveSeconds(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

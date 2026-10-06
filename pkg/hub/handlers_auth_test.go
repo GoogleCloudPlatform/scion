@@ -1245,7 +1245,7 @@ func TestProvisionUser(t *testing.T) {
 func TestColdStartSuperAdminBinding(t *testing.T) {
 	ctx := context.Background()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered")
@@ -1329,7 +1329,7 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	ctx := context.Background()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered")

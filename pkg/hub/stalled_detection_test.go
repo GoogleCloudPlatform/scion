@@ -31,7 +31,7 @@ import (
 func setupStalledTestServer(t *testing.T) (*Server, store.Store, *trackingEventPublisher) {
 	t.Helper()
 
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestAgentStalledDetectionHandler_IdleAgentMarkedStalled(t *testing.T) {
 }
 
 func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -427,7 +427,7 @@ func TestNew_DefaultsStalledThresholdWhenZero(t *testing.T) {
 }
 
 func TestNew_ClampsStalledThresholdBelowMinimum(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestNew_ClampsStalledThresholdBelowMinimum(t *testing.T) {
 }
 
 func TestNew_PreservesValidStalledThreshold(t *testing.T) {
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

@@ -41,7 +41,7 @@ const testDevToken = "scion_dev_test_token_for_unit_tests_1234567890"
 // The server is configured with dev auth enabled using testDevToken.
 func testServer(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		if strings.Contains(err.Error(), "sqlite driver not registered") {
 			t.Skip("Skipping test because sqlite driver is not registered (build with -tags sqlite to enable)")
@@ -2124,7 +2124,7 @@ func TestRuntimeBrokerListWithProjectLocalPath(t *testing.T) {
 // testServerWithBrokerAuth creates a test server with broker auth enabled.
 func testServerWithBrokerAuth(t *testing.T) (*Server, store.Store) {
 	t.Helper()
-	s, err := newTestStore(":memory:")
+	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}

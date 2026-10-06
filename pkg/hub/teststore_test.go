@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -27,7 +28,7 @@ import (
 )
 
 // testStoreSeq generates unique in-memory database names so each call to
-// newTestStore(":memory:") gets an isolated database.
+// newTestStore(t, ":memory:") gets an isolated database.
 var testStoreSeq atomic.Int64
 
 // newTestStore opens a fresh Ent-backed store for tests, mirroring the
@@ -36,20 +37,30 @@ var testStoreSeq atomic.Int64
 // isolated in-memory database or a file path for a persistent one. The returned
 // store is already migrated; callers may still invoke Migrate (it is
 // idempotent).
-func newTestStore(url string) (store.Store, error) {
+//
+// The store is closed in t.Cleanup. A migrated in-memory database holds
+// several MiB of SQLite memory until its last connection closes, so a store
+// a test forgets to close stays resident for the rest of the package run;
+// enough of them tripped the pkg/hub memory guard (mem_guard_helpers_test.go).
+// Closing twice is harmless, so callers that close the store themselves (for
+// example to reopen a file-backed one) keep working.
+func newTestStore(t testing.TB, url string) (store.Store, error) {
+	t.Helper()
 	var dsn string
 	if url == ":memory:" {
 		dsn = fmt.Sprintf("file:hubtest%d?mode=memory&cache=shared", testStoreSeq.Add(1))
 	} else {
 		dsn = "file:" + url + "?cache=shared"
 	}
-	return newTestStoreAt(dsn)
+	return newTestStoreAt(t, dsn)
 }
 
 // newTestStoreAt opens a fresh, migrated Ent-backed store on the given SQLite
 // DSN. Tests that need a second raw connection to the same database (for
-// example to write legacy column text) pick the DSN themselves.
-func newTestStoreAt(dsn string) (store.Store, error) {
+// example to write legacy column text) pick the DSN themselves. Like
+// newTestStore, it closes the store in t.Cleanup.
+func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
+	t.Helper()
 	// MaxOpenConns must be 1 for SQLite to serialize writes and avoid
 	// "database is locked" errors under concurrent access (e.g. the parallel
 	// per-agent writes in stop-all). This mirrors the production pool config in
@@ -59,6 +70,7 @@ func newTestStoreAt(dsn string) (store.Store, error) {
 		return nil, err
 	}
 	s := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Migrate(context.Background()); err != nil {
 		_ = s.Close()
 		return nil, err
