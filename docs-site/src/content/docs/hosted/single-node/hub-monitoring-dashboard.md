@@ -52,10 +52,10 @@ To pick up a newer version of the file, delete the old dashboard (`gcloud monito
 The Hub uses the Google Cloud OpenTelemetry metric exporter. If you build your own charts or alert policies, use these mappings:
 
 - **Metric type:** `workload.googleapis.com/` followed by the OpenTelemetry name, dots included. For example, `scion.dispatch.claimed` becomes `workload.googleapis.com/scion.dispatch.claimed`.
-- **Replica label:** each Hub process sets the `service.instance.id` resource attribute to its own instance ID, a random ID created at startup (prefixed with the pod name when `POD_NAME` is set, as on Kubernetes). It becomes the metric label `service_instance_id`. You don't configure it. It changes every time a replica restarts, so each restart or rollout starts a new set of series and the old ones stop receiving points.
+- **Replica label:** each Hub process sets the `service.instance.id` resource attribute to its own instance ID, a random UUID created at startup. It is prefixed with the pod name only when the `POD_NAME` environment variable is set. The Helm chart does not set it by default, so chart legends show bare UUIDs. The instance ID becomes the metric label `service_instance_id`. You don't configure it. It changes every time a replica restarts, so each restart or rollout starts a new set of series and the old ones stop receiving points.
 - **Deployment labels:** the `scion.hub.id` resource attribute becomes the metric label `scion_hub_id`. It comes from the Hub ID (`server.hub.hub_id`, environment variable `SCION_SERVER_HUB_HUBID`), which every replica of an HA Hub shares. Use it to filter by deployment, not to tell replicas apart. The `scion.hub.name` resource attribute becomes `scion_hub_name`. Don't group by it: when no name is configured it falls back to the host name, which is not a stable replica identity.
 - **Label names:** the exporter replaces every character that is not a letter or digit with `_`. Point attributes such as `outcome` (reaper ticks) and `reason` (notification drops) are metric labels too.
-- **Monitored resource:** `generic_task`, with `job` set to `scion-hub` and `task_id` set to the replica's instance ID.
+- **Monitored resource:** `generic_task`, with `job` set to `scion-hub` and `task_id` set to the replica's instance ID. `location` is `global` and `namespace` is empty.
 - **Kinds:**
 
   | OpenTelemetry instrument | Metric kind | Value type | Typical aligner |

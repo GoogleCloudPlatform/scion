@@ -16,6 +16,7 @@ import (
 	"time"
 
 	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -101,6 +102,8 @@ func WithHubName(name string) Option {
 // replica's per-process instance ID. The exporter writes it as the metric
 // label InstanceIDLabel and maps the resource to a generic_task monitored
 // resource whose task_id is this ID, so each replica writes its own series.
+// If the ID is empty (or the option is omitted), NewMeterProvider generates a
+// random one, so replicas never share a series.
 func WithInstanceID(id string) Option {
 	return func(o *options) { o.instanceID = id }
 }
@@ -148,9 +151,15 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 	if o.hubName != "" {
 		resAttrs = append(resAttrs, attribute.String(HubNameAttribute, o.hubName))
 	}
-	if o.instanceID != "" {
-		resAttrs = append(resAttrs, semconv.ServiceInstanceID(o.instanceID))
+	instanceID := o.instanceID
+	if instanceID == "" {
+		// Without service.instance.id every replica of a hub would write the
+		// same series, so never export without one.
+		instanceID = uuid.NewString()
+		slog.Warn("hub metrics: no hub instance ID supplied; using a generated one",
+			"service_instance_id", instanceID)
 	}
+	resAttrs = append(resAttrs, semconv.ServiceInstanceID(instanceID))
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(resAttrs...),
