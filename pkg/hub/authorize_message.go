@@ -306,13 +306,18 @@ func (s *Server) authorizeUserToAgent(
 	// Only trust ancestry when hub-attested (not federated). A full-session
 	// local user must also hold active access to the target's project
 	// (ptone/scion#2141), the check uatMessageGate applies to a UAT holder
-	// above. Without it the ancestry allow does not apply and evaluation
-	// continues to the checks below; a lookup fault denies.
+	// above. The ancestry allow requires both (ancestry AND admission).
+	// Without admission it does not apply, and evaluation continues to the
+	// checks below: project-owner piercing and the agent.message permission
+	// check are independent grants with their own conditions, not a
+	// fallback for the ancestry allow, and a sender that fails them gets
+	// the same refusal as any other unauthorized sender. A lookup fault
+	// denies.
 	if !uatDeniesMessage && AncestryIsHubAttested(senderIdentity) {
 		if canAccessAsAncestor(userIdent.ID(), targetResource) {
-			admitted, faultReason := s.authzService.messageAncestorProjectAccess(ctx, senderIdentity, targetAgent.ProjectID, targetResource)
-			if faultReason != "" {
-				return false, faultReason
+			admitted, fault := s.authzService.messageAncestorProjectAccess(ctx, senderIdentity, targetAgent.ProjectID, targetResource)
+			if fault {
+				return false, messageAncestorFaultReason(targetAgent.MessageMode)
 			}
 			if admitted {
 				return true, "user in target ancestry"
@@ -853,25 +858,40 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 // uatMessageGate. A UAT holder is already checked by uatMessageGate, and
 // any other principal kind is not a local user; both report admitted.
 //
-// It returns (false, "") when the user lacks access or the target does not
-// resolve to projectID, and (false, reason) for a store or resolution
+// It returns (false, false) when the user lacks access or the target does
+// not resolve to projectID, and (false, true) for a store or resolution
 // fault, which the caller denies on.
-func (a *AuthzService) messageAncestorProjectAccess(ctx context.Context, sender Identity, projectID string, target Resource) (bool, string) {
+func (a *AuthzService) messageAncestorProjectAccess(ctx context.Context, sender Identity, projectID string, target Resource) (admitted bool, fault bool) {
 	if _, scoped := sender.(*ScopedUserIdentity); scoped {
-		return true, ""
+		return true, false
 	}
 	principal := principalContextForIdentity(sender)
 	if principal.Kind != PrincipalKindUser && principal.Kind != PrincipalKindDev {
-		return true, ""
+		return true, false
 	}
 	res, err := a.ProjectTargetAdmission(ctx, principal, projectID, "agent.message", target, nil)
 	if err != nil {
 		if isProjectAccessLookupFault(err) {
-			return false, "agent.message project access check failed (fail-closed)"
+			if a.logger != nil {
+				a.logger.Warn("message ancestry project access check failed (fail-closed)", "project_id", projectID, "error", err)
+			}
+			return false, true
 		}
-		return false, ""
+		return false, false
 	}
-	return res.Admitted, ""
+	return res.Admitted, false
+}
+
+// messageAncestorFaultReason is the deny reason for a lookup fault in the
+// messaging ancestry admission. The text records the fault for logs, and
+// its prefix maps (mapReasonToCode) to the same public code the mode's
+// ordinary refusal produces, so the response does not reveal that the
+// sender is in the target's ancestry.
+func messageAncestorFaultReason(mode string) string {
+	if mode == store.MessageModeProject || mode == store.MessageModeHub {
+		return "agent.message permission denied: project access check failed (fail-closed)"
+	}
+	return fmt.Sprintf("user not authorized for target agent with message_mode %q: project access check failed (fail-closed)", mode)
 }
 
 // uatMessageGate runs the bearer gate for agent.message on target for a

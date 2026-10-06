@@ -30,6 +30,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -758,6 +759,46 @@ func TestRelationshipProjectAccess_Message(t *testing.T) {
 
 		allowed, reason = send(f, memberID, agent)
 		assert.False(t, allowed)
-		assert.Equal(t, "agent.message project access check failed (fail-closed)", reason)
+		assert.Contains(t, reason, "project access check failed (fail-closed)")
+		// The public code is the lineage-mode refusal any unauthorized
+		// sender gets.
+		assert.Equal(t, ReasonModeLineageNoAncestry, mapReasonToCode(reason))
+		assert.Equal(t, ReasonMissingPermission, mapReasonToCode(messageAncestorFaultReason(store.MessageModeProject)))
 	})
+}
+
+// TestRelationshipProjectAccess_MessageRefusalIdentical pins that an
+// ancestor whose project binding was removed gets exactly the refusal an
+// unrelated non-member gets from the message handler: same status and same
+// body, for a lineage-mode and a project-mode agent.
+func TestRelationshipProjectAccess_MessageRefusalIdentical(t *testing.T) {
+	for _, mode := range []string{store.MessageModeLineage, store.MessageModeProject} {
+		mode := mode
+		t.Run(mode, func(t *testing.T) {
+			f := newRPAFixture(t, "msgsame"+mode)
+			ctx := context.Background()
+			formerID := tid("rpa-msgsame-former-" + mode)
+			outsiderID := tid("rpa-msgsame-outsider-" + mode)
+			uatpMember(t, f.store, f.projectID, formerID)
+			f.hubUser(t, outsiderID)
+			agent := f.messageAgent(t, "same-"+mode, mode, formerID, f.ownerID)
+
+			former, err := f.store.GetUser(ctx, formerID)
+			require.NoError(t, err)
+			outsider, err := f.store.GetUser(ctx, outsiderID)
+			require.NoError(t, err)
+			body := map[string]interface{}{"message": "hello", "interrupt": false}
+			path := "/api/v1/agents/" + agent.ID + "/message"
+
+			uatpDeleteProjectBinding(t, f.store, formerID, f.projectID)
+
+			formerRec := doRequestAsUser(t, f.srv, former, http.MethodPost, path, body)
+			outsiderRec := doRequestAsUser(t, f.srv, outsider, http.MethodPost, path, body)
+
+			require.Equal(t, http.StatusForbidden, outsiderRec.Code, "outsider: %s", outsiderRec.Body.String())
+			assert.Equal(t, outsiderRec.Code, formerRec.Code)
+			assert.Equal(t, outsiderRec.Body.String(), formerRec.Body.String(),
+				"the former-member ancestor's refusal must be identical to an unrelated sender's")
+		})
+	}
 }
