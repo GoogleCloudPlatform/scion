@@ -212,11 +212,10 @@ func checkCarriedSettingsDecode(vs *VersionedSettings, carried map[string]interf
 
 // saveVersionedSettingsData writes already-marshalled v1 settings YAML to dir
 // the way SaveVersionedSettings writes a struct: to newSettingsFilePath(dir),
-// atomically, under the settings-file lock, and not at all when the bytes
-// would not change.
+// atomically, and not at all when the bytes
+// would not change. The caller (MigrateSettingsFile) holds the settings-file
+// lock across its whole read-rename-write.
 func saveVersionedSettingsData(dir string, data []byte) error {
-	unlock := LockSettingsFile()
-	defer unlock()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}

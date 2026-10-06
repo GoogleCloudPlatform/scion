@@ -698,3 +698,34 @@ func TestDeleteHubConnection_CallableUnderSettingsLock(t *testing.T) {
 	}
 	assertV1KeysKept(t, readSettingsMap(t, filepath.Join(dir, "settings.yaml")))
 }
+
+// MigrateSettingsFile holds the settings-file lock from its first read to
+// its final write: while another writer holds the lock it neither reads,
+// backs up nor writes the file.
+func TestMigrateSettingsFile_ReadsUnderLock(t *testing.T) {
+	dir := carryTestDir(t, "settings.yaml", legacyWithV1KeysYAML)
+	unlock := LockSettingsFile()
+	done := make(chan error, 1)
+	go func() {
+		_, err := MigrateSettingsFile(dir, false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("MigrateSettingsFile ran while the settings lock was held (err=%v)", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// Still untouched while the lock is held.
+	assertDirUntouched(t, dir, legacyWithV1KeysYAML)
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("MigrateSettingsFile: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("MigrateSettingsFile did not finish after the lock was released")
+	}
+	assertV1KeysKept(t, readSettingsMap(t, filepath.Join(dir, "settings.yaml")))
+}

@@ -5247,6 +5247,12 @@ func writeVersionedSettingsFile(dir, targetPath string, vs *VersionedSettings) e
 // If dryRun is true, no files are written.
 // Returns MigrationResult describing what was (or would be) done.
 func MigrateSettingsFile(dir string, dryRun bool) (*MigrationResult, error) {
+	// Held from the first read to the final write, so the read, backup
+	// rename and write are one step for in-process writers (see
+	// LockSettingsFile). Nothing below takes the lock again.
+	unlock := LockSettingsFile()
+	defer unlock()
+
 	result := &MigrationResult{}
 
 	// 1. Find settings file
