@@ -39,9 +39,7 @@ import (
 // behind enttest.NewClient for t, so a test can write raw column text.
 func openLegacyTextDB(t *testing.T) *sql.DB {
 	t.Helper()
-	if enttest.Active() {
-		t.Skip("legacy created text only exists on SQLite")
-	}
+	enttest.SkipOnPostgres(t, "legacy created text only exists on SQLite")
 	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

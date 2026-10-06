@@ -4597,6 +4597,7 @@ type AgentMutation struct {
 	deletion_request           *string
 	run_intent                 *string
 	run_intent_at              *time.Time
+	run_intent_marked_at       *time.Time
 	start_claim_id             *string
 	start_claim_kind           *string
 	start_claim_state          *string
@@ -8026,6 +8027,55 @@ func (m *AgentMutation) ResetRunIntentAt() {
 	delete(m.clearedFields, agent.FieldRunIntentAt)
 }
 
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (m *AgentMutation) SetRunIntentMarkedAt(t time.Time) {
+	m.run_intent_marked_at = &t
+}
+
+// RunIntentMarkedAt returns the value of the "run_intent_marked_at" field in the mutation.
+func (m *AgentMutation) RunIntentMarkedAt() (r time.Time, exists bool) {
+	v := m.run_intent_marked_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunIntentMarkedAt returns the old "run_intent_marked_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunIntentMarkedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunIntentMarkedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunIntentMarkedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunIntentMarkedAt: %w", err)
+	}
+	return oldValue.RunIntentMarkedAt, nil
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (m *AgentMutation) ClearRunIntentMarkedAt() {
+	m.run_intent_marked_at = nil
+	m.clearedFields[agent.FieldRunIntentMarkedAt] = struct{}{}
+}
+
+// RunIntentMarkedAtCleared returns if the "run_intent_marked_at" field was cleared in this mutation.
+func (m *AgentMutation) RunIntentMarkedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunIntentMarkedAt]
+	return ok
+}
+
+// ResetRunIntentMarkedAt resets all changes to the "run_intent_marked_at" field.
+func (m *AgentMutation) ResetRunIntentMarkedAt() {
+	m.run_intent_marked_at = nil
+	delete(m.clearedFields, agent.FieldRunIntentMarkedAt)
+}
+
 // SetStartClaimID sets the "start_claim_id" field.
 func (m *AgentMutation) SetStartClaimID(s string) {
 	m.start_claim_id = &s
@@ -8734,7 +8784,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 79)
+	fields := make([]string, 0, 80)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8939,6 +8989,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.run_intent_at != nil {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.run_intent_marked_at != nil {
+		fields = append(fields, agent.FieldRunIntentMarkedAt)
+	}
 	if m.start_claim_id != nil {
 		fields = append(fields, agent.FieldStartClaimID)
 	}
@@ -9116,6 +9169,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.RunIntent()
 	case agent.FieldRunIntentAt:
 		return m.RunIntentAt()
+	case agent.FieldRunIntentMarkedAt:
+		return m.RunIntentMarkedAt()
 	case agent.FieldStartClaimID:
 		return m.StartClaimID()
 	case agent.FieldStartClaimKind:
@@ -9283,6 +9338,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldRunIntent(ctx)
 	case agent.FieldRunIntentAt:
 		return m.OldRunIntentAt(ctx)
+	case agent.FieldRunIntentMarkedAt:
+		return m.OldRunIntentMarkedAt(ctx)
 	case agent.FieldStartClaimID:
 		return m.OldStartClaimID(ctx)
 	case agent.FieldStartClaimKind:
@@ -9790,6 +9847,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRunIntentAt(v)
 		return nil
+	case agent.FieldRunIntentMarkedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunIntentMarkedAt(v)
+		return nil
 	case agent.FieldStartClaimID:
 		v, ok := value.(string)
 		if !ok {
@@ -10137,6 +10201,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRunIntentAt) {
 		fields = append(fields, agent.FieldRunIntentAt)
 	}
+	if m.FieldCleared(agent.FieldRunIntentMarkedAt) {
+		fields = append(fields, agent.FieldRunIntentMarkedAt)
+	}
 	if m.FieldCleared(agent.FieldStartClaimID) {
 		fields = append(fields, agent.FieldStartClaimID)
 	}
@@ -10336,6 +10403,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ClearRunIntentAt()
+		return nil
+	case agent.FieldRunIntentMarkedAt:
+		m.ClearRunIntentMarkedAt()
 		return nil
 	case agent.FieldStartClaimID:
 		m.ClearStartClaimID()
@@ -10581,6 +10651,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRunIntentAt:
 		m.ResetRunIntentAt()
+		return nil
+	case agent.FieldRunIntentMarkedAt:
+		m.ResetRunIntentMarkedAt()
 		return nil
 	case agent.FieldStartClaimID:
 		m.ResetStartClaimID()

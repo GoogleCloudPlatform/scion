@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // ghWrapperCmd wraps the real `gh` CLI binary, injecting a fresh GitHub token
@@ -51,7 +52,7 @@ func runGhWrapper(args []string) int {
 	// by SCION_USER_GITHUB_TOKEN=true during provisioning), skip injection
 	// so that gh uses the user's token from the environment instead.
 	if hub.IsGitHubAppEnabled() {
-		if os.Getenv(hub.EnvUserGitHubToken) == "true" {
+		if util.ParseBoolEnv(hub.EnvUserGitHubToken, false) {
 			fmt.Fprintf(os.Stderr, "sciontool gh-wrapper: user-provided GITHUB_TOKEN detected; using it instead of GitHub App token\n")
 		} else {
 			tokenPath := hub.GitHubTokenPath()
