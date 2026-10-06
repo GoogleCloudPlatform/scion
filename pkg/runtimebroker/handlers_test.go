@@ -1505,6 +1505,31 @@ func newTestServerWithEnvCapture() (*Server, *envCapturingManager) {
 	return New(cfg, mgr, rt), mgr
 }
 
+// TestCreateAgentPassesLaunchIDEnv pins the create request's launchId
+// reaching the agent container as SCION_LAUNCH_ID.
+func TestCreateAgentPassesLaunchIDEnv(t *testing.T) {
+	srv, mgr := newTestServerWithEnvCapture()
+
+	body := `{
+		"name": "test-agent",
+		"id": "agent-uuid-123",
+		"launchId": "launch-uuid-789",
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if got := mgr.lastEnv["SCION_LAUNCH_ID"]; got != "launch-uuid-789" {
+		t.Errorf("SCION_LAUNCH_ID = %q, want %q", got, "launch-uuid-789")
+	}
+}
+
 // TestCreateAgentWithHubCredentials tests that Hub authentication env vars are passed to agent.
 // This verifies the fix from progress-report.md: RuntimeBroker sets SCION_HUB_URL, SCION_AUTH_TOKEN, SCION_AGENT_ID.
 func TestCreateAgentWithHubCredentials(t *testing.T) {
@@ -3281,6 +3306,10 @@ type gitCloneCapturingManager struct {
 	lastProjectPath    string
 	lastBranch         string
 	lastFreshProvision bool
+	// lastSharedWorkspace and lastSharedWorkspaceClone capture the shared
+	// workspace inputs (shared_workspace_clone_test.go).
+	lastSharedWorkspace      bool
+	lastSharedWorkspaceClone *api.GitCloneConfig
 }
 
 func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
@@ -3290,6 +3319,8 @@ func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOpti
 	m.lastProjectPath = opts.ProjectPath
 	m.lastBranch = opts.Branch
 	m.lastFreshProvision = opts.FreshProvision
+	m.lastSharedWorkspace = opts.SharedWorkspace
+	m.lastSharedWorkspaceClone = opts.SharedWorkspaceClone
 	return m.mockManager.Start(ctx, opts)
 }
 

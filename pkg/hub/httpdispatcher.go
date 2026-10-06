@@ -214,6 +214,10 @@ type HTTPAgentDispatcher struct {
 	// provider = no default sent.
 	autoExposePortsDefaultProvider func() *bool
 
+	// conduitCapability reports whether this hub serves conduit sessions
+	// (SCION_HUB_CONDUIT). Nil means never.
+	conduitCapability func() bool
+
 	// dispatchExperimentsProvider returns the enabled hub experiments that
 	// change broker behaviour, read on every create, start and restart
 	// dispatch. Nil provider = none sent.
@@ -308,6 +312,28 @@ func (d *HTTPAgentDispatcher) SetHubName(name string) {
 }
 
 // SetSecretBackend sets the secret backend for resolving secrets.
+// SetConduitCapability sets the check behind SCION_HUB_CONDUIT: agents
+// dispatched while it reports true get SCION_HUB_CONDUIT=true and dial the
+// conduit endpoint; otherwise the variable is removed and sciontool keeps
+// the legacy port-forward tunnel.
+func (d *HTTPAgentDispatcher) SetConduitCapability(fn func() bool) {
+	d.conduitCapability = fn
+}
+
+// applyConduitCapability sets or removes SCION_HUB_CONDUIT. The hub owns
+// the variable: a value from config or storage env is replaced or dropped.
+func (d *HTTPAgentDispatcher) applyConduitCapability(env map[string]string, cls *map[string]api.EnvKind) {
+	if d.conduitCapability != nil && d.conduitCapability() {
+		env[envHubConduit] = "true"
+		classifyEnv(cls, envHubConduit, api.EnvKindPlain)
+		return
+	}
+	delete(env, envHubConduit)
+	if *cls != nil {
+		delete(*cls, envHubConduit)
+	}
+}
+
 func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
 	d.secretBackend = b
 }
@@ -726,7 +752,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		// strategy regardless of whether the broker happens to have the
 		// repo locally.
 		workspace := effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, projectInfo.projectPath)
-		wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
+		wsSpec := workspaceSpecFor(agent, projectInfo)
 		var remoteGCPIdentity *RemoteGCPIdentityConfig
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			remoteGCPIdentity = &RemoteGCPIdentityConfig{
@@ -755,6 +781,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			HarnessConfigHash:         agent.AppliedConfig.HarnessConfigHash,
 			GitClone:                  wsSpec.GitClone,
 			SharedWorkspace:           projectInfo.sharedWorkspace,
+			SharedWorkspaceClone:      wsSpec.SharedWorkspaceClone,
 			GCPIdentity:               remoteGCPIdentity,
 			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
 		}
@@ -855,28 +882,6 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			}
 		}
 	}
-
-	// SCION_METADATA_MODE must be hub-authoritative, never sourced from
-	// storage: overwrite whatever the fill-absent merge above put there.
-	// req.Config.GCPIdentity (set above from agent.AppliedConfig.GCPIdentity)
-	// is what the broker primarily trusts, but that struct is nil when the
-	// agent has no GCP identity configured, and the broker then falls back to
-	// this env var. Without this authoritative overwrite, a stored env var of
-	// this name would decide the metadata mode on that fallback path.
-	gcpMetadataMode := store.GCPMetadataModeBlock
-	if req.Config != nil && req.Config.GCPIdentity != nil {
-		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
-	}
-	req.ResolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
-	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-	// Marks the mode above as this hub's own authoritative write, not a value
-	// that survived from a storage/secret merge. A broker that predates this
-	// marker ignores it (harmless); a broker that checks it only trusts an
-	// elevated (non-block) mode from resolvedEnv when this is present, which
-	// is what closes the fallback path for a broker talking to an older hub
-	// that never sends this marker at all.
-	req.ResolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
-	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 
 	// Include template secrets declarations for broker env-gather
 	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
@@ -998,6 +1003,18 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			req.AvailableAsNeededKeys = asNeededKeys
 		}
 	}
+
+	// The GCP identity mode is hub-authoritative: set after every fill-absent
+	// merge above (config env, storage env, environment-type secrets), so no
+	// stored value of these names can decide it. req.Config.GCPIdentity (set
+	// above from agent.AppliedConfig.GCPIdentity) is what the broker trusts
+	// first; this env carries the same decision for the case where that
+	// struct is nil. See applyHubGCPMetadataModeEnv.
+	gcpMetadataMode := ""
+	if req.Config != nil && req.Config.GCPIdentity != nil {
+		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
+	}
+	applyHubGCPMetadataModeEnv(req.ResolvedEnv, &req.EnvClassifications, gcpMetadataMode)
 
 	// GitHub App token minting: if the project has a GitHub App installation,
 	// always mint an installation token. GitHub App tokens take priority over
@@ -1138,6 +1155,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		}
 	}
 
+	if req.ResolvedEnv == nil {
+		req.ResolvedEnv = make(map[string]string)
+	}
+	d.applyConduitCapability(req.ResolvedEnv, &req.EnvClassifications)
+
 	resolvedSkillsCount := 0
 	if req.PreResolvedSkills != nil {
 		resolvedSkillsCount = len(req.PreResolvedSkills.Resolved)
@@ -1185,6 +1207,9 @@ type projectDispatchInfo struct {
 	sharedDirs      []api.SharedDir
 	sharedWorkspace bool   // true for git-workspace hybrid projects
 	workspaceMode   string // resolved workspace mode label (e.g. "shared", "worktree-per-agent")
+	// sharedWorkspaceClone is a shared-plain git project's workspace clone
+	// settings (sharedWorkspaceCloneConfig); nil for every other project.
+	sharedWorkspaceClone *api.GitCloneConfig
 }
 
 // resolveDispatchProjectInfo resolves the project facts a dispatch carries.
@@ -1217,6 +1242,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.sharedDirs = project.SharedDirs
 	info.sharedWorkspace = project.IsSharedWorkspace()
 	info.workspaceMode = dispatchWorkspaceMode(project)
+	info.sharedWorkspaceClone = sharedWorkspaceCloneConfig(project)
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
@@ -2969,7 +2995,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
-	wsSpec := workspaceSpecFor(agent, projectInfo.workspaceMode)
+	wsSpec := workspaceSpecFor(agent, projectInfo)
 	switch resolvedMode {
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
@@ -2998,13 +3024,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// but the startAgent/restartAgent path doesn't carry that struct, so we
 	// surface the values through resolvedEnv instead.
 	//
-	// This write is unconditional and always the last word on
-	// SCION_METADATA_MODE (identity vars are set after the storage/secrets
-	// merge above, at "highest precedence" per the comment on SCION_AGENT_ID
-	// et al.): when the agent has no GCP identity configured at all, the mode
-	// still needs to be authoritatively set to the secure default rather than
-	// left for whatever a lower-precedence merge put in resolvedEnv.
-	gcpMetadataMode := store.GCPMetadataModeBlock
+	// These writes are the last word on the GCP identity env (identity vars
+	// are set after the storage/secrets merge above, at "highest precedence"
+	// per the comment on SCION_AGENT_ID et al.). When the agent has no GCP
+	// identity configured at all, gcpMetadataMode stays empty and
+	// applyHubGCPMetadataModeEnv removes any merged-in mode, so the broker
+	// applies its runtime default rather than a stored value.
+	gcpMetadataMode := ""
 	if agent.AppliedConfig != nil {
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			gcpMetadataMode = gcpID.MetadataMode
@@ -3032,11 +3058,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			}
 		}
 	}
-	resolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
-	classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-	// See buildCreateRequest for why this marker travels alongside the mode.
-	resolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
-	classifyEnv(&envClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
+	applyHubGCPMetadataModeEnv(resolvedEnv, &envClassifications, gcpMetadataMode)
 
 	// Generate a fresh agent token for Hub authentication. A mint error
 	// stops the start or restart before any broker request; nothing was
@@ -3083,6 +3105,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	}
 
 	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
+	d.applyConduitCapability(resolvedEnv, &envClassifications)
 
 	return startEnvResult{
 		env:             resolvedEnv,
@@ -4000,6 +4023,52 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"asNeededKeys", asNeededKeys)
 	}
 	return result, asNeededKeys, nil
+}
+
+// applyHubGCPMetadataModeEnv writes the hub's authoritative GCP identity
+// mode into a dispatch env. Callers run it after every fill-absent merge
+// (config env, storage env, environment-type secrets), so a stored value of
+// these names never decides the mode.
+//
+// mode is the agent's AppliedConfig.GCPIdentity.MetadataMode, or empty when
+// the agent has no GCP identity configured at all. The two cases stay
+// distinct on the wire:
+//
+//   - An explicit mode (including an explicit "block" from the agent, a
+//     project default or a hub default) is written as SCION_METADATA_MODE.
+//   - No identity removes SCION_METADATA_MODE, so the broker applies its
+//     runtime default: "block" on every runtime except Kubernetes,
+//     "passthrough" on Kubernetes (ptone/scion#2980). Kubernetes refuses an
+//     explicit "block", so writing "block" here for "nothing configured"
+//     would refuse every unconfigured agent there. It also removes
+//     SCION_METADATA_REQUIRE_LOCAL_RUNTIME, which the broker reads from env
+//     when no GCPIdentity struct is present and which only a hub-default
+//     passthrough grant may set.
+//
+// SCION_METADATA_MODE_SOURCE=hub is written in both cases. It marks the env
+// as this hub's own decision: a broker that checks it only trusts an
+// elevated (non-block) mode from resolvedEnv when it is present, which keeps
+// a stray stored value from a hub that predates the marker from counting.
+func applyHubGCPMetadataModeEnv(env map[string]string, cls *map[string]api.EnvKind, mode string) {
+	if cls == nil {
+		// Callers always pass a classification map pointer today; a nil one
+		// gets a throwaway map so neither the delete nor classifyEnv below
+		// dereferences nil.
+		cls = new(map[string]api.EnvKind)
+	}
+	if mode == "" {
+		for _, k := range []string{"SCION_METADATA_MODE", "SCION_METADATA_REQUIRE_LOCAL_RUNTIME"} {
+			delete(env, k)
+			if *cls != nil {
+				delete(*cls, k)
+			}
+		}
+	} else {
+		env["SCION_METADATA_MODE"] = mode
+		classifyEnv(cls, "SCION_METADATA_MODE", api.EnvKindPlain)
+	}
+	env["SCION_METADATA_MODE_SOURCE"] = "hub"
+	classifyEnv(cls, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 }
 
 // classifyEnv sets the classification for an env key in the given map,

@@ -240,8 +240,9 @@ func validGCPMetadataMode(mode string) bool {
 // The mode check exists because an empty MetadataMode on a non-nil GCPIdentity
 // is worse than no GCPIdentity at all: it asserts that a GCP identity decision
 // was made while naming no decision, and there is no safe default to read from
-// it. Dropping just that field lets the agent fall back to the secure "block"
-// default the broker applies when no mode is supplied, while keeping the rest of
+// it. Dropping just that field lets the agent fall back to the runtime default
+// the broker applies when no mode is supplied ("block" on every runtime except
+// Kubernetes, "passthrough" on Kubernetes), while keeping the rest of
 // the applied config — image, template, harness — which is unrelated and
 // probably fine. Discarding the whole config over one bad field would turn a
 // metadata-mode problem into an agent-wide one.
@@ -255,7 +256,7 @@ func parseAppliedConfig(raw string) (*store.AgentAppliedConfig, error) {
 		cfg.GCPIdentity = nil
 		return &cfg, fmt.Errorf(
 			"applied_config has GCP metadata mode %q, which is not one of %q/%q/%q; "+
-				"dropping the GCP identity so the agent falls back to the secure default",
+				"dropping the GCP identity so the agent falls back to the runtime default",
 			bad, store.GCPMetadataModeAssign, store.GCPMetadataModeBlock, store.GCPMetadataModePassthrough)
 	}
 	return &cfg, nil

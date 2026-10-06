@@ -206,6 +206,64 @@ func writeSavedAgentProfile(t *testing.T, dotScionDir, agentName, profile string
 	}
 }
 
+// TestBuildStartContext_LaunchIDEnv pins SCION_LAUNCH_ID as broker-owned:
+// set from the create request's launch id, and never passed through from
+// the resolved or template env.
+func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
+	tests := []struct {
+		name        string
+		launchID    string
+		resolvedEnv map[string]string
+		envCls      map[string]api.EnvKind
+		want        string
+		wantSet     bool
+	}{
+		{name: "create with launch id", launchID: "launch-1", want: "launch-1", wantSet: true},
+		{name: "no launch id", wantSet: false},
+		{
+			name:        "resolved env value replaced",
+			launchID:    "launch-2",
+			resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"},
+			want:        "launch-2",
+			wantSet:     true,
+		},
+		{
+			name:        "resolved env value dropped without launch id",
+			resolvedEnv: map[string]string{"SCION_LAUNCH_ID": "forged"},
+			envCls:      map[string]api.EnvKind{"SCION_LAUNCH_ID": api.EnvKindPlain},
+			wantSet:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:               "my-agent",
+				AgentID:            "uuid-1",
+				LaunchID:           tt.launchID,
+				ProjectPath:        filepath.Join(t.TempDir(), "my-project"),
+				ResolvedEnv:        tt.resolvedEnv,
+				EnvClassifications: tt.envCls,
+				HTTPRequest:        httptest.NewRequest("POST", "/api/v1/agents", nil),
+				Operation:          opCreate,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := sc.Opts.Env["SCION_LAUNCH_ID"]
+			if ok != tt.wantSet || got != tt.want {
+				t.Errorf("SCION_LAUNCH_ID = %q (set %v), want %q (set %v)", got, ok, tt.want, tt.wantSet)
+			}
+			if _, ok := sc.EnvClassifications["SCION_LAUNCH_ID"]; ok && !tt.wantSet {
+				t.Errorf("SCION_LAUNCH_ID classification kept after the value was dropped")
+			}
+		})
+	}
+}
+
 func TestBuildStartContext_BasicFields(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
@@ -5358,7 +5416,7 @@ func TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemoves
 // provision.ProvisionShared's own self-heal expects for a first-time
 // provision), but this agent's worktree already exists on disk with
 // un-pushed work, the start must fail with a clear error instead of letting
-// ProvisionShared's gitCloneWorkspace -> removeDirContents wipe the shared
+// ProvisionShared re-clone over the shared
 // base — and everything under it, including this worktree — while still
 // returning success.
 func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSelfHeal(t *testing.T) {
@@ -5420,7 +5478,7 @@ func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSel
 	}
 
 	// The worktree and its un-pushed file must survive: ProvisionShared's
-	// self-heal (removeDirContents on the shared base) must never have run.
+	// clone step on the shared base must never have run.
 	if _, statErr := os.Stat(worktreePath); statErr != nil {
 		t.Errorf("expected the existing worktree to survive, stat error: %v", statErr)
 	}
