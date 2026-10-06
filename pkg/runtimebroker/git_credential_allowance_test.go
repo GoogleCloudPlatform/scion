@@ -76,3 +76,40 @@ func TestAllowGitCredentials_ReachesStartFromRequestOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestAllowGitCredentials_WrongTypeFailsClosed pins that a wrong-typed
+// allowance ("true" as a string) never allows GitHub credentials. Create
+// refuses the body with 400 and runs no start. Start and restart ignore
+// body decode errors (their body is optional), so the start runs with the
+// allowance left false.
+func TestAllowGitCredentials_WrongTypeFailsClosed(t *testing.T) {
+	paths := []struct {
+		name, path, base string
+		status           int
+		starts           int
+	}{
+		{"create", "/api/v1/agents", `"name": "cred-agent", "config": {"template": "claude"}, `, http.StatusBadRequest, 0},
+		{"start", "/api/v1/agents/test-agent-1/start", "", http.StatusAccepted, 1},
+		{"restart", "/api/v1/agents/test-agent-1/restart", "", http.StatusAccepted, 1},
+	}
+	for _, p := range paths {
+		t.Run(p.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			body := "{" + p.base + `"allowGitCredentials": "true"}`
+			req := httptest.NewRequest(http.MethodPost, p.path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != p.status {
+				t.Fatalf("status = %d, want %d: %s", w.Code, p.status, w.Body.String())
+			}
+			if mgr.startCalls != p.starts {
+				t.Fatalf("Start calls = %d, want %d", mgr.startCalls, p.starts)
+			}
+			if p.starts > 0 && mgr.lastStartOpts.AllowGitCredentials {
+				t.Errorf("AllowGitCredentials = true, want false for a wrong-typed value")
+			}
+		})
+	}
+}
