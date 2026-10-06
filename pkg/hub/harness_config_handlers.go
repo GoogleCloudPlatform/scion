@@ -570,6 +570,15 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	// is carried over from the existing record.
 	hc.ContentHash = existing.ContentHash
 	hc.Files = existing.Files
+	// Lifecycle and image-check state are managed by the server and are
+	// carried over from the existing record.
+	hc.Status = existing.Status
+	hc.ImageStatus = existing.ImageStatus
+	hc.ImageStatusCheckedAt = existing.ImageStatusCheckedAt
+	// The updater is the authenticated caller. PUT is authorized as
+	// ActionUpdate via authorize, which returns false on a nil identity,
+	// so GetIdentityFromContext(ctx) is non-nil here.
+	hc.UpdatedBy = GetIdentityFromContext(ctx).ID()
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}

@@ -445,6 +445,129 @@ func TestHarnessConfigUpdate_AppliesUpdatableFields(t *testing.T) {
 	assertHarnessConfigContentEqual(t, "stored", hc, stored)
 }
 
+// putHarnessConfig sends an update body and returns the stored record.
+func putHarnessConfig(t *testing.T, srv *Server, s store.Store, id string, body store.HarnessConfig) *store.HarnessConfig {
+	t.Helper()
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/harness-configs/"+id, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	stored, err := s.GetHarnessConfig(context.Background(), id)
+	if err != nil {
+		t.Fatalf("failed to get harness config: %v", err)
+	}
+	return stored
+}
+
+// TestHarnessConfigUpdate_PreservesStatus verifies that the update handler
+// keeps the stored lifecycle status of a pending harness config.
+func TestHarnessConfigUpdate_PreservesStatus(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:      tid("hc-update-status"),
+		Slug:    "hc-update-status",
+		Name:    "Status Test",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusPending,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+		t.Fatalf("failed to create harness config: %v", err)
+	}
+
+	stored := putHarnessConfig(t, srv, s, hc.ID, store.HarnessConfig{
+		Name:        hc.Name,
+		Slug:        hc.Slug,
+		Harness:     hc.Harness,
+		Description: "updated description",
+		Status:      store.HarnessConfigStatusActive,
+	})
+	if stored.Status != store.HarnessConfigStatusPending {
+		t.Errorf("status = %q, want %q", stored.Status, store.HarnessConfigStatusPending)
+	}
+	if stored.Description != "updated description" {
+		t.Errorf("description = %q, want %q", stored.Description, "updated description")
+	}
+}
+
+// TestHarnessConfigUpdate_PreservesImageStatus verifies that the update
+// handler keeps the stored image status and its check timestamp.
+func TestHarnessConfigUpdate_PreservesImageStatus(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	checkedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	hc := &store.HarnessConfig{
+		ID:      tid("hc-update-image-status"),
+		Slug:    "hc-update-image-status",
+		Name:    "Image Status Test",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+		t.Fatalf("failed to create harness config: %v", err)
+	}
+	if err := s.UpdateHarnessConfigImageStatus(ctx, hc.ID, store.HarnessConfigImageStatusInvalid, checkedAt); err != nil {
+		t.Fatalf("failed to set image status: %v", err)
+	}
+
+	requestCheckedAt := time.Date(2030, 6, 7, 8, 9, 10, 0, time.UTC)
+	stored := putHarnessConfig(t, srv, s, hc.ID, store.HarnessConfig{
+		Name:                 hc.Name,
+		Slug:                 hc.Slug,
+		Harness:              hc.Harness,
+		Status:               hc.Status,
+		ImageStatus:          store.HarnessConfigImageStatusValid,
+		ImageStatusCheckedAt: &requestCheckedAt,
+	})
+	if stored.ImageStatus != store.HarnessConfigImageStatusInvalid {
+		t.Errorf("image status = %q, want %q", stored.ImageStatus, store.HarnessConfigImageStatusInvalid)
+	}
+	if stored.ImageStatusCheckedAt == nil || !stored.ImageStatusCheckedAt.Equal(checkedAt) {
+		t.Errorf("image status checked at = %v, want %v", stored.ImageStatusCheckedAt, checkedAt)
+	}
+}
+
+// TestHarnessConfigUpdate_RecordsAuthenticatedUpdater verifies that the
+// update handler records the authenticated caller as the updater.
+func TestHarnessConfigUpdate_RecordsAuthenticatedUpdater(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID:        tid("hc-update-updater"),
+		Slug:      "hc-update-updater",
+		Name:      "Updater Test",
+		Harness:   "claude",
+		Scope:     "global",
+		Status:    store.HarnessConfigStatusActive,
+		UpdatedBy: "previous-updater",
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+		t.Fatalf("failed to create harness config: %v", err)
+	}
+
+	stored := putHarnessConfig(t, srv, s, hc.ID, store.HarnessConfig{
+		Name:      hc.Name,
+		Slug:      hc.Slug,
+		Harness:   hc.Harness,
+		Status:    hc.Status,
+		UpdatedBy: "request-body-updater",
+	})
+	if stored.UpdatedBy != DevUserID {
+		t.Errorf("updated by = %q, want authenticated caller %q", stored.UpdatedBy, DevUserID)
+	}
+}
+
 // TestHandleHarnessConfigFinalize_PersistsModelAliases is a regression test
 // for ptone/scion#2365 review round 1 (R2): the production record that
 // triggered the bug was written through the push/finalize path
