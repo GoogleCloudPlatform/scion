@@ -130,7 +130,8 @@ type HubClientConfig struct {
 }
 
 type CLIConfig struct {
-	// AutoHelp indicates whether to print usage help on every error.
+	// AutoHelp indicates whether to print the usage block after an argument or
+	// flag error.
 	AutoHelp *bool  `json:"autohelp,omitempty" yaml:"autohelp,omitempty" koanf:"autohelp"`
 	Mode     string `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 }
