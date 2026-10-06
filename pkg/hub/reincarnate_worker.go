@@ -593,8 +593,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
-	// Take the reprovision echo (HarnessConfig, HarnessAuth, Profile) into
-	// fresh, so the starting step's write below persists it, the same as
+	// Take the reprovision echo (HarnessConfig, HarnessAuth,
+	// HarnessConfigSource, Profile) into fresh, so the starting step's
+	// write below persists it, the same as
 	// create. The echoed image is deliberately NOT taken: the broker's
 	// provision-only response reports the rendered config's image
 	// (runtimebroker handlers.go, agentResp.Image = cfg.Image), before the

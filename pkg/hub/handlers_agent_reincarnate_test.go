@@ -1675,12 +1675,13 @@ func TestUpdateReincarnationStep_StoresCopyOfAppliedConfig(t *testing.T) {
 // non-empty fields win, empty fields leave dst alone, and the image is only
 // taken when asked.
 func TestCopyBrokerEcho(t *testing.T) {
-	dst := &store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "auth", Profile: "p", Model: "m"}
+	dst := &store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "auth", HarnessConfigSource: "src", Profile: "p", Model: "m"}
 	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "bare:v1", HarnessAuth: "echoed-auth", Model: "ignored"}, false)
-	assert.Equal(t, store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "echoed-auth", Profile: "p", Model: "m"}, *dst)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "qualified:v1", HarnessConfig: "hc", HarnessAuth: "echoed-auth", HarnessConfigSource: "src", Profile: "p", Model: "m"}, *dst,
+		"an empty HarnessConfigSource echo (older broker) keeps the recorded value")
 
-	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", Profile: "echoed-p"}, true)
-	assert.Equal(t, store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", HarnessAuth: "echoed-auth", Profile: "echoed-p", Model: "m"}, *dst)
+	copyBrokerEcho(dst, &store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", HarnessConfigSource: "echoed-src", Profile: "echoed-p"}, true)
+	assert.Equal(t, store.AgentAppliedConfig{Image: "resolved:v2", HarnessConfig: "echoed-hc", HarnessAuth: "echoed-auth", HarnessConfigSource: "echoed-src", Profile: "echoed-p", Model: "m"}, *dst)
 
 	snapshot := *dst
 	copyBrokerEcho(nil, dst, true) // must not panic
