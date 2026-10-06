@@ -4573,6 +4573,8 @@ type AgentMutation struct {
 	launch_async_opt_in        *bool
 	launch_id                  *string
 	run_id                     *string
+	previous_run_ids           *[]string
+	appendprevious_run_ids     []string
 	launch_state               *string
 	launch_end_reason          *string
 	launch_kind                *string
@@ -6965,6 +6967,71 @@ func (m *AgentMutation) ResetRunID() {
 	delete(m.clearedFields, agent.FieldRunID)
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (m *AgentMutation) SetPreviousRunIds(s []string) {
+	m.previous_run_ids = &s
+	m.appendprevious_run_ids = nil
+}
+
+// PreviousRunIds returns the value of the "previous_run_ids" field in the mutation.
+func (m *AgentMutation) PreviousRunIds() (r []string, exists bool) {
+	v := m.previous_run_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPreviousRunIds returns the old "previous_run_ids" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldPreviousRunIds(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPreviousRunIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPreviousRunIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPreviousRunIds: %w", err)
+	}
+	return oldValue.PreviousRunIds, nil
+}
+
+// AppendPreviousRunIds adds s to the "previous_run_ids" field.
+func (m *AgentMutation) AppendPreviousRunIds(s []string) {
+	m.appendprevious_run_ids = append(m.appendprevious_run_ids, s...)
+}
+
+// AppendedPreviousRunIds returns the list of values that were appended to the "previous_run_ids" field in this mutation.
+func (m *AgentMutation) AppendedPreviousRunIds() ([]string, bool) {
+	if len(m.appendprevious_run_ids) == 0 {
+		return nil, false
+	}
+	return m.appendprevious_run_ids, true
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (m *AgentMutation) ClearPreviousRunIds() {
+	m.previous_run_ids = nil
+	m.appendprevious_run_ids = nil
+	m.clearedFields[agent.FieldPreviousRunIds] = struct{}{}
+}
+
+// PreviousRunIdsCleared returns if the "previous_run_ids" field was cleared in this mutation.
+func (m *AgentMutation) PreviousRunIdsCleared() bool {
+	_, ok := m.clearedFields[agent.FieldPreviousRunIds]
+	return ok
+}
+
+// ResetPreviousRunIds resets all changes to the "previous_run_ids" field.
+func (m *AgentMutation) ResetPreviousRunIds() {
+	m.previous_run_ids = nil
+	m.appendprevious_run_ids = nil
+	delete(m.clearedFields, agent.FieldPreviousRunIds)
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (m *AgentMutation) SetLaunchState(s string) {
 	m.launch_state = &s
@@ -8667,7 +8734,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 78)
+	fields := make([]string, 0, 79)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8808,6 +8875,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.run_id != nil {
 		fields = append(fields, agent.FieldRunID)
+	}
+	if m.previous_run_ids != nil {
+		fields = append(fields, agent.FieldPreviousRunIds)
 	}
 	if m.launch_state != nil {
 		fields = append(fields, agent.FieldLaunchState)
@@ -9004,6 +9074,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchID()
 	case agent.FieldRunID:
 		return m.RunID()
+	case agent.FieldPreviousRunIds:
+		return m.PreviousRunIds()
 	case agent.FieldLaunchState:
 		return m.LaunchState()
 	case agent.FieldLaunchEndReason:
@@ -9169,6 +9241,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchID(ctx)
 	case agent.FieldRunID:
 		return m.OldRunID(ctx)
+	case agent.FieldPreviousRunIds:
+		return m.OldPreviousRunIds(ctx)
 	case agent.FieldLaunchState:
 		return m.OldLaunchState(ctx)
 	case agent.FieldLaunchEndReason:
@@ -9568,6 +9642,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetRunID(v)
+		return nil
+	case agent.FieldPreviousRunIds:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPreviousRunIds(v)
 		return nil
 	case agent.FieldLaunchState:
 		v, ok := value.(string)
@@ -9999,6 +10080,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldRunID) {
 		fields = append(fields, agent.FieldRunID)
 	}
+	if m.FieldCleared(agent.FieldPreviousRunIds) {
+		fields = append(fields, agent.FieldPreviousRunIds)
+	}
 	if m.FieldCleared(agent.FieldLaunchState) {
 		fields = append(fields, agent.FieldLaunchState)
 	}
@@ -10195,6 +10279,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldRunID:
 		m.ClearRunID()
+		return nil
+	case agent.FieldPreviousRunIds:
+		m.ClearPreviousRunIds()
 		return nil
 	case agent.FieldLaunchState:
 		m.ClearLaunchState()
@@ -10431,6 +10518,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldRunID:
 		m.ResetRunID()
+		return nil
+	case agent.FieldPreviousRunIds:
+		m.ResetPreviousRunIds()
 		return nil
 	case agent.FieldLaunchState:
 		m.ResetLaunchState()

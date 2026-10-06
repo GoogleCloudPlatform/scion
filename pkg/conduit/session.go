@@ -67,6 +67,10 @@ type session struct {
 	refreshing   bool                   // an AuthRefresh is being validated
 	refreshNext  *conduitv1.AuthRefresh // latest refresh queued behind it
 
+	// welcome is the Welcome of a dialer session, set before the session
+	// starts (WelcomeFromContext).
+	welcome atomic.Pointer[conduitv1.Welcome]
+
 	rpcSeq   atomic.Uint64
 	pingSeq  atomic.Uint64
 	lastRecv atomic.Int64 // clock UnixNano of the last inbound frame
@@ -101,7 +105,7 @@ func newSession(cfg Config, conn transport.Conn, isDialer bool) *session {
 		recvSession: SessionWindow,
 	}
 	s.fcCond = sync.NewCond(&s.fcMu)
-	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.ctx, s.cancel = context.WithCancel(context.WithValue(context.Background(), sessionCtxKey{}, s))
 	if isDialer {
 		s.nextID = 1
 	} else {
@@ -152,8 +156,25 @@ func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.
 		}
 	}
 	s.setInfo(hello, w)
+	s.welcome.Store(w)
 	s.start()
 	return s, w, nil
+}
+
+// sessionCtxKey keys the session in the contexts it hands to handlers.
+type sessionCtxKey struct{}
+
+// WelcomeFromContext returns the Welcome of the dialer session whose
+// StreamHandler or RPCHandler received ctx, or nil (relay-side sessions,
+// other contexts). A target verifies the grant of a StreamOpen against
+// this session's binding and admitted incarnation, which is set before the
+// first inbound frame can arrive.
+func WelcomeFromContext(ctx context.Context) *conduitv1.Welcome {
+	s, _ := ctx.Value(sessionCtxKey{}).(*session)
+	if s == nil {
+		return nil
+	}
+	return s.welcome.Load()
 }
 
 // Accept runs the relay side of the handshake on conn: it reads Hello,

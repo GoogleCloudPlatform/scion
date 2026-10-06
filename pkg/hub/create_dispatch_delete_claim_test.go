@@ -115,6 +115,8 @@ func TestCreateDispatchWrite_DeleteClaimed_KeepsPhase(t *testing.T) {
 				"name": "claim-sync-" + string(rune('a'+i)), "projectId": project.ID, "task": "do it",
 			})
 			require.NotNil(t, sent, "dispatch ran: %d %s", rec.Code, rec.Body.String())
+			// The create lost to the delete: 409, not 201 (ptone/scion#3099).
+			requireDeletedDuringCreate(t, rec, sent.ID)
 
 			after := mustGetAgent(t, s, sent.ID)
 			assert.Equal(t, atClaim.Phase, after.Phase,
