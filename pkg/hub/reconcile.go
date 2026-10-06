@@ -215,7 +215,9 @@ func (s *Server) claimQueuedStop(ctx context.Context, agent *store.Agent, intent
 	switch {
 	case err == nil:
 		return func() {
-			if _, err := s.store.ReleaseAgentStart(context.WithoutCancel(ctx), agent.ID, claim.ID, s.instanceID); err != nil {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimReleaseTimeout)
+			defer cancel()
+			if _, err := s.store.ReleaseAgentStart(rctx, agent.ID, claim.ID, s.instanceID); err != nil {
 				s.agentLifecycleLog.Warn("reconcile: releasing the queued stop's claim failed; the reaper will settle it", "agent_id", agent.ID, "error", err)
 			}
 		}, false
