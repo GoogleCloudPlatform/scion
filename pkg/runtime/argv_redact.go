@@ -60,8 +60,8 @@ import (
 const envValueRedactionFloor = 8
 
 // externalEnvValues returns the KEY=VALUE env entries that originated OUTSIDE
-// the runtime -- broker-supplied cfg.Env and harness-supplied env -- and that
-// survived into the final env map.
+// the runtime -- broker-supplied cfg.Env, harness-supplied env and
+// resolved-auth env vars -- and that survived into the final env map.
 //
 // WHY NOT SIMPLY EVERY VALUE THE RUNTIME PUT IN ARGV. Because that measurably
 // destroys the diagnostic. envFor synthesises HOME=/home/scion,
@@ -83,7 +83,8 @@ const envValueRedactionFloor = 8
 func externalEnvValues(cfg RunConfig, env map[string]string) map[string]string {
 	// Collect every external value per key rather than letting one source
 	// overwrite another. Which source wins in env depends on precedence
-	// (cfg.Env, harness, resolved secrets folded into cfg.Env); keeping
+	// (cfg.Env, harness, resolved auth, resolved secrets folded into
+	// cfg.Env); keeping
 	// all candidates means the value that reached argv is in the set
 	// whatever that precedence is.
 	external := make(map[string][]string)
@@ -95,6 +96,11 @@ func externalEnvValues(cfg RunConfig, env map[string]string) map[string]string {
 	}
 	if cfg.Harness != nil {
 		for k, v := range cfg.Harness.GetEnv(cfg.Name, sandboxAgentHome, cfg.UnixUsername) {
+			external[k] = append(external[k], v)
+		}
+	}
+	if cfg.ResolvedAuth != nil {
+		for k, v := range cfg.ResolvedAuth.EnvVars {
 			external[k] = append(external[k], v)
 		}
 	}
