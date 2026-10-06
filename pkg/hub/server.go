@@ -1528,6 +1528,9 @@ type Server struct {
 	// intentStops records when the hub last stopped an agent that ran with
 	// run intent stopped (agent ID -> time.Time), to rate-limit it.
 	intentStops sync.Map
+	// httpDrains marks brokers with a heartbeat-triggered drain of queued
+	// stops running on this node (http_broker_drain.go).
+	httpDrains sync.Map
 
 	// Subsystem loggers for handler methods
 	agentLifecycleLog *slog.Logger
