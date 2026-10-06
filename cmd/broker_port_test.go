@@ -16,13 +16,17 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
@@ -357,4 +361,153 @@ func TestBrokerHubs_NonDefaultPort(t *testing.T) {
 	})
 	assert.Contains(t, out, "Mode: standalone-test")
 	assert.Contains(t, out, "connected-test")
+}
+
+// argsFilePath is the saved broker launch args file in globalDir.
+func argsFilePath(globalDir string) string {
+	return filepath.Join(globalDir, daemon.ArgsFileName(brokerDaemonComponent))
+}
+
+// setForegroundStartForTest runs runBrokerStart in foreground mode on port
+// with run standing in for the in-process server.
+func setForegroundStartForTest(t *testing.T, port int, run func(args []string) error) {
+	t.Helper()
+	savedFG, savedRun := brokerStartForeground, runForegroundBrokerServer
+	t.Cleanup(func() { brokerStartForeground, runForegroundBrokerServer = savedFG, savedRun })
+	brokerStartForeground = true
+	runForegroundBrokerServer = run
+	setBrokerFlagForTest(t, brokerStartCmd, "port", strconv.Itoa(port))
+}
+
+// TestBrokerStop_RemovesArgs: a successful stop removes the record.
+func TestBrokerStop_RemovesArgs(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	child := exec.Command("sleep", "60")
+	require.NoError(t, child.Start())
+	exited := make(chan struct{})
+	go func() { _ = child.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = child.Process.Kill(); <-exited })
+
+	require.NoError(t, daemon.WritePID(globalDir, child.Process.Pid))
+	require.NoError(t, daemon.SaveArgs(brokerDaemonComponent, globalDir, buildBrokerDaemonArgs(19800, false, false)))
+
+	captureStdout(t, func() { require.NoError(t, runBrokerStop(brokerStopCmd, nil)) })
+	_, err := os.Stat(argsFilePath(globalDir))
+	assert.True(t, os.IsNotExist(err), "stop should remove the saved broker args")
+}
+
+// TestBrokerStartForeground_RecordLifecycle: the record exists while the
+// foreground broker runs and is removed when it returns, even on error.
+func TestBrokerStartForeground_RecordLifecycle(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	port := unusedPort(t)
+	var during []string
+	setForegroundStartForTest(t, port, func([]string) error {
+		var err error
+		during, err = daemon.LoadArgs(brokerDaemonComponent, globalDir)
+		require.NoError(t, err)
+		return assert.AnError
+	})
+
+	captureStdout(t, func() {
+		require.ErrorIs(t, runBrokerStart(brokerStartCmd, nil), assert.AnError)
+	})
+	assert.Equal(t, port, brokerPortFromArgs(during), "the record names the port while the broker runs")
+	_, err := os.Stat(argsFilePath(globalDir))
+	assert.True(t, os.IsNotExist(err), "the record should be removed when the foreground broker exits")
+}
+
+// TestBrokerStartForeground_KeepsLiveBrokerRecord: a foreground start on a
+// port another broker already answers on (it will fail to bind) neither
+// overwrites nor removes that broker's record.
+func TestBrokerStartForeground_KeepsLiveBrokerRecord(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	port := newFakeBrokerHealthServer(t, "healthy")
+	live := buildBrokerDaemonArgs(port, true, true)
+	require.NoError(t, daemon.SaveArgs(brokerDaemonComponent, globalDir, live))
+
+	setForegroundStartForTest(t, port, func([]string) error { return assert.AnError })
+	captureStdout(t, func() { _ = runBrokerStart(brokerStartCmd, nil) })
+
+	got, err := daemon.LoadArgs(brokerDaemonComponent, globalDir)
+	require.NoError(t, err)
+	assert.Equal(t, live, got)
+}
+
+// TestBrokerStartForeground_OnlyRemovesOwnRecord: if another broker saved
+// its record while this one ran, exiting leaves that record alone.
+func TestBrokerStartForeground_OnlyRemovesOwnRecord(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	other := buildBrokerDaemonArgs(19877, false, true)
+	setForegroundStartForTest(t, unusedPort(t), func([]string) error {
+		return daemon.SaveArgs(brokerDaemonComponent, globalDir, other)
+	})
+	captureStdout(t, func() { require.NoError(t, runBrokerStart(brokerStartCmd, nil)) })
+
+	got, err := daemon.LoadArgs(brokerDaemonComponent, globalDir)
+	require.NoError(t, err)
+	assert.Equal(t, other, got)
+}
+
+// TestBrokerStartForeground_SIGTERMRemovesRecord: SIGTERM (systemctl stop)
+// removes the record and is turned into the Ctrl+C shutdown.
+func TestBrokerStartForeground_SIGTERMRemovesRecord(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	interrupted := make(chan struct{}, 1)
+	savedInterrupt := interruptSelf
+	t.Cleanup(func() { interruptSelf = savedInterrupt })
+	interruptSelf = func() { interrupted <- struct{}{} }
+
+	var afterSignal error
+	setForegroundStartForTest(t, unusedPort(t), func([]string) error {
+		p, err := os.FindProcess(os.Getpid())
+		require.NoError(t, err)
+		require.NoError(t, p.Signal(syscall.SIGTERM))
+		select {
+		case <-interrupted:
+		case <-time.After(5 * time.Second):
+			return errors.New("SIGTERM was not turned into an interrupt")
+		}
+		_, afterSignal = os.Stat(argsFilePath(globalDir))
+		return nil
+	})
+	captureStdout(t, func() { require.NoError(t, runBrokerStart(brokerStartCmd, nil)) })
+	assert.True(t, os.IsNotExist(afterSignal), "SIGTERM should remove the record before shutdown")
+}
+
+// TestBrokerStartDaemon_FailureKeepsExistingRecord: a failed daemon start
+// saved nothing, so it must not remove a record another broker wrote.
+func TestBrokerStartDaemon_FailureKeepsExistingRecord(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		start func(string, []string, string) error
+	}{
+		{"start error", func(string, []string, string) error { return assert.AnError }},
+		{"not running after start", func(string, []string, string) error { return nil }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, globalDir := brokerTestHome(t)
+			live := buildBrokerDaemonArgs(19866, false, false)
+			require.NoError(t, daemon.SaveArgs(brokerDaemonComponent, globalDir, live))
+
+			savedStart, savedDelay, savedFG := startBrokerDaemon, brokerStartVerifyDelay, brokerStartForeground
+			t.Cleanup(func() {
+				startBrokerDaemon, brokerStartVerifyDelay, brokerStartForeground = savedStart, savedDelay, savedFG
+			})
+			startBrokerDaemon, brokerStartVerifyDelay, brokerStartForeground = tt.start, 0, false
+			setBrokerFlagForTest(t, brokerStartCmd, "port", strconv.Itoa(unusedPort(t)))
+
+			captureStdout(t, func() { require.Error(t, runBrokerStart(brokerStartCmd, nil)) })
+			got, err := daemon.LoadArgs(brokerDaemonComponent, globalDir)
+			require.NoError(t, err)
+			assert.Equal(t, live, got)
+		})
+	}
+}
+
+func TestBrokerStartPortHelpHasOneDefault(t *testing.T) {
+	f := brokerStartCmd.Flags().Lookup("port")
+	require.NotNil(t, f)
+	assert.Equal(t, "0", f.DefValue, "an unset --port falls back to settings, so cobra must not print a default")
+	assert.Contains(t, f.Usage, "else 9800")
 }

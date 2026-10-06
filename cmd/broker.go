@@ -21,9 +21,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -386,7 +390,7 @@ func init() {
 
 	// Start flags
 	brokerStartCmd.Flags().BoolVar(&brokerStartForeground, "foreground", false, "Run in foreground instead of as daemon")
-	brokerStartCmd.Flags().IntVar(&brokerStartPort, "port", DefaultBrokerPort, "Runtime Broker API port (when not set, server.broker.port from settings if set)")
+	brokerStartCmd.Flags().IntVar(&brokerStartPort, "port", 0, "Runtime Broker API port; when not set, server.broker.port from settings, else 9800")
 	brokerStartCmd.Flags().BoolVar(&brokerStartAutoProvide, "auto-provide", false, "Automatically add as provider for new projects")
 	brokerStartCmd.Flags().BoolVar(&brokerStartDebug, "debug", false, "Enable debug logging (verbose output)")
 
@@ -886,23 +890,24 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 	if brokerStartForeground {
 		serverArgs := pinBrokerPort(buildBrokerForegroundArgs(port, brokerStartAutoProvide, brokerStartDebug), port)
 		// Saved so the other subcommands find the port while this broker
-		// runs; removed when it exits. Skipped when a broker daemon owns
-		// the file.
-		if daemonRunning, _, _ := daemon.Status(globalDir); !daemonRunning {
-			saveBrokerArgs(globalDir, pinBrokerPort(buildBrokerDaemonArgs(port, brokerStartAutoProvide, brokerStartDebug), port))
-			defer removeBrokerArgs(globalDir)
+		// runs, and removed when it exits (also on SIGTERM, e.g. systemctl
+		// stop). Skipped when another broker owns the record: a broker
+		// daemon, or a broker already answering on this port (this run
+		// will fail to bind and must not remove that broker's record).
+		if recordArgs, ok := claimForegroundBrokerRecord(globalDir, port); ok {
+			saveBrokerArgs(globalDir, recordArgs)
+			stopSignals := removeBrokerRecordOnSIGTERM(globalDir, recordArgs)
+			defer func() {
+				stopSignals()
+				removeBrokerArgsIfOwned(globalDir, recordArgs)
+			}()
 		}
 
 		fmt.Printf("Starting broker in foreground on port %d...\n", port)
 		fmt.Println("Press Ctrl+C to stop.")
 		fmt.Println()
 
-		// Parse the flags for serverStartCmd before calling RunE
-		// (SetArgs only works with Execute, not RunE)
-		if err := serverStartCmd.ParseFlags(serverArgs); err != nil {
-			return fmt.Errorf("failed to parse server flags: %w", err)
-		}
-		return serverStartCmd.RunE(serverStartCmd, []string{})
+		return runForegroundBrokerServer(serverArgs)
 	}
 
 	// Daemon mode
@@ -924,16 +929,16 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 
 	// Start daemon
 	fmt.Printf("Starting broker as daemon on port %d...\n", port)
-	if err := daemon.Start(executable, daemonArgs, globalDir); err != nil {
-		removeBrokerArgs(globalDir)
+	// Nothing is saved until the daemon is up, so the failure paths leave
+	// any existing record (for example a live foreground broker's) alone.
+	if err := startBrokerDaemon(executable, daemonArgs, globalDir); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
 	// Verify it started
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(brokerStartVerifyDelay)
 	running, pid, _ = daemon.Status(globalDir)
 	if !running {
-		removeBrokerArgs(globalDir)
 		return fmt.Errorf("daemon failed to start. Check log at: %s", daemon.GetLogPath(globalDir))
 	}
 	// Saved so the other subcommands find the port and restart keeps
@@ -2191,6 +2196,79 @@ func saveBrokerArgs(globalDir string, args []string) {
 func removeBrokerArgs(globalDir string) {
 	if err := daemon.RemoveArgs(brokerDaemonComponent, globalDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to remove saved broker launch args: %v\n", err)
+	}
+}
+
+// Seams for tests: launching the daemon, running the foreground server and
+// interrupting this process.
+var (
+	startBrokerDaemon      = daemon.Start
+	brokerStartVerifyDelay = 500 * time.Millisecond
+
+	// runForegroundBrokerServer runs 'server start' in-process with args.
+	runForegroundBrokerServer = func(args []string) error {
+		// Parse the flags for serverStartCmd before calling RunE
+		// (SetArgs only works with Execute, not RunE)
+		if err := serverStartCmd.ParseFlags(args); err != nil {
+			return fmt.Errorf("failed to parse server flags: %w", err)
+		}
+		return serverStartCmd.RunE(serverStartCmd, []string{})
+	}
+
+	// interruptSelf asks this process to shut down the way Ctrl+C does.
+	interruptSelf = func() {
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Signal(os.Interrupt)
+		}
+	}
+)
+
+// claimForegroundBrokerRecord returns the record a foreground broker on
+// port should save, and false when another broker owns the record: a broker
+// daemon is running, or a broker already answers on port.
+func claimForegroundBrokerRecord(globalDir string, port int) ([]string, bool) {
+	if running, _, _ := daemon.Status(globalDir); running {
+		return nil, false
+	}
+	if _, err := checkLocalBrokerServer(port); err == nil {
+		return nil, false
+	}
+	return pinBrokerPort(buildBrokerDaemonArgs(port, brokerStartAutoProvide, brokerStartDebug), port), true
+}
+
+// removeBrokerArgsIfOwned removes the saved launch args only if they are
+// still the args this process saved, so a broker that has since saved its
+// own record keeps it.
+func removeBrokerArgsIfOwned(globalDir string, owned []string) {
+	saved, err := daemon.LoadArgs(brokerDaemonComponent, globalDir)
+	if err != nil || saved == nil || !slices.Equal(saved, owned) {
+		return
+	}
+	removeBrokerArgs(globalDir)
+}
+
+// removeBrokerRecordOnSIGTERM makes SIGTERM (systemd's stop signal) remove
+// this foreground broker's record and then shut the server down like Ctrl+C
+// (the server traps only os.Interrupt, so SIGTERM would otherwise kill the
+// process before deferred cleanup runs). The returned func stops handling.
+func removeBrokerRecordOnSIGTERM(globalDir string, owned []string) (stop func()) {
+	ch := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	signal.Notify(ch, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-ch:
+			removeBrokerArgsIfOwned(globalDir, owned)
+			interruptSelf()
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			signal.Stop(ch)
+			close(done)
+		})
 	}
 }
 
