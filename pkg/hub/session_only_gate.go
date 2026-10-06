@@ -111,7 +111,7 @@ func (s *Server) requireSessionCredentialFor(w http.ResponseWriter, ctx context.
 
 	if !sessionCredentialAllowed(ctx) {
 		writeSessionOnlyDenial(w, ErrCodeForbidden,
-			fmt.Sprintf("user mutations require an interactive session; credential kind %q is not allowed",
+			fmt.Sprintf("this operation requires an interactive session; credential kind %q is not allowed",
 				GetCredentialContextFromContext(ctx).Kind),
 			reason)
 		return nil, false
