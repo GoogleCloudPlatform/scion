@@ -433,10 +433,10 @@ func TestLoadSettingsKoanfV1ProjectIDFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Set SCION_HUB_PROJECT_ID env var — should map to top-level project_id
 	// SCION_PROJECT_ID maps to the same key, so a value inherited from the
 	// environment could win depending on env order. Clear both first.
 	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
+	// Set SCION_HUB_PROJECT_ID env var — should map to top-level project_id
 	t.Setenv("SCION_HUB_PROJECT_ID", "env-project-uuid")
 
 	s, err := LoadSettingsKoanf(projectScionDir)
@@ -504,9 +504,9 @@ func TestLoadSettingsKoanfV1LegacyEnvDoesNotOverrideFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Agent containers export the canonical project-ID env vars, which
-	// populate ProjectID and would make this test fail for a reason
-	// unrelated to the variable under test.
+	// Agent containers export the canonical project-ID env vars. The file
+	// value currently out-ranks them, but clear them so the assertion
+	// depends only on the file and the legacy variable.
 	unsetTestEnv(t, "SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID")
 
 	t.Setenv("SCION_HUB_GROVE_ID", "legacy-env-uuid")
