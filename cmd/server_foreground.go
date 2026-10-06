@@ -30,7 +30,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -555,6 +555,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		var webStore hub.WebChatStore
 		if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
 			if rawDB := dbProvider.DB(); rawDB != nil {
+				// Artifact store: creates the artifact_* tables (outside
+				// the Ent migration graph, design D3) on every start,
+				// whether or not the hub.artifacts experiment is on.
+				as := artifacts.NewStore(rawDB, cfg.Database.Driver)
+				if err := as.Init(ctx); err != nil {
+					log.Printf("Warning: failed to initialize artifact store: %v", err)
+				} else {
+					hubSrv.SetArtifactStore(as)
+					log.Printf("Artifact store initialized")
+				}
+
 				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver)
 				if err := ws.Init(); err != nil {
 					log.Printf("Warning: failed to initialize webchat store: %v", err)
@@ -1733,34 +1744,23 @@ func resolveSessionSecret() string {
 }
 
 // parseBoolEnv reports whether the named environment variable is set to a
-// truthy value. Leading/trailing whitespace is stripped (file-mounted
-// secrets often include a trailing newline). It accepts every spelling
-// strconv.ParseBool understands (1, t, true, TRUE, True, etc.) plus the
-// operator-friendly yes/y/on (and their no/n/off counterparts), all
-// case-insensitively. Unset, empty, and
-// unparseable values are false, but an unparseable non-empty value also logs
-// a warning so a typo does not silently disable a feature the operator meant
-// to turn on.
+// truthy value, using util.LookupBoolEnv for the accepted spellings
+// (whitespace-trimmed, case-insensitive strconv.ParseBool plus yes/y/on and
+// no/n/off). Unset, empty, and unparseable values are false, but an
+// unparseable non-empty value also logs a warning so a typo does not silently
+// disable a feature the operator meant to turn on.
 //
 // The warning uses the stdlib logger because parseBoolEnv runs during
 // initServerLogging, before the slog loggers are wired.
 func parseBoolEnv(key string) bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	if v == "" {
-		return false
+	if v, ok := util.LookupBoolEnv(key); ok {
+		return v
 	}
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
+	// ok is false for both unset/empty and garbage; warn only on garbage.
+	if raw := os.Getenv(key); strings.TrimSpace(raw) != "" {
+		log.Printf("WARNING: environment variable %s=%q is not a recognized boolean value; treating as false. "+
+			"Accepted truthy values: true, 1, t, yes, y, on (case-insensitive, whitespace-trimmed).", key, raw)
 	}
-	switch v {
-	case "yes", "y", "on":
-		return true
-	case "no", "n", "off":
-		// Recognized as an explicit "disabled" spelling: false, but no warning.
-		return false
-	}
-	log.Printf("WARNING: environment variable %s=%q is not a recognized boolean value; treating as false. "+
-		"Accepted truthy values: true, 1, t, yes, y, on (case-insensitive, whitespace-trimmed).", key, os.Getenv(key))
 	return false
 }
 

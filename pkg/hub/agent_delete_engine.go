@@ -310,6 +310,12 @@ type deletionEngine struct {
 	// Only the engine goroutine touches it.
 	finished bool
 
+	// The run intent dispatch recorded (stopped, at intentAt) and the
+	// intent it replaced, so a rollback can restore the prior intent.
+	intentRecorded bool
+	priorIntent    store.RunIntent
+	intentAt       time.Time
+
 	// leaseUntil is the lease expiry this engine last wrote (at the claim,
 	// then on each renewal that took). It bounds the dispatch deadline.
 	leaseMu    sync.Mutex
@@ -600,12 +606,21 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 
 	// A delete is a stop: record it before anything is dispatched. The
 	// claim already holds the row, so a failed write is logged rather than
-	// failing the delete. A rollback leaves this intent in place (see
-	// rollback).
-	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+	// failing the delete. A rollback restores the intent this replaced (see
+	// rollback). The start claim held when the stop was recorded is
+	// released once the dispatch succeeds: the delete superseded it.
+	supersededClaim := agent.StartClaimID
+	if prior, at, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
 		s.agentLifecycleLog.Warn("Failed to record run intent for agent delete",
 			"agent_id", agent.ID, "error", err)
+	} else {
+		e.intentRecorded, e.priorIntent, e.intentAt = true, prior, at
 	}
+	defer func() {
+		if ok && e.intentRecorded {
+			s.releaseSupersededClaim(e.base, agent.ID, supersededClaim, e.intentAt)
+		}
+	}()
 
 	// Managed agent: clean up cloud resources directly, skip the broker.
 	// Errors are logged, as before (follow-up 4).
@@ -793,11 +808,11 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 			}
 		},
 	}
-	// The run intent stays stopped, as dispatch recorded it, even when the
-	// prior phase restored here is a live one (including a broker that was
-	// unavailable): a failed delete is treated like a stop whose dispatch
-	// failed. Nothing acts on a live agent with intent stopped yet, so this
-	// only records what the user last asked for.
+	// The run intent dispatch recorded (stopped) is put back to what it
+	// replaced, with a compare-and-set on the time dispatch wrote, so an
+	// agent restored to a live phase keeps a matching intent (the hub stops
+	// an agent that runs with intent stopped) and a newer start or stop
+	// recorded meanwhile wins.
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateDeleting), set)
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: rollback write failed",
@@ -806,6 +821,12 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	}
 	if n == 0 {
 		return e.lost()
+	}
+	if e.intentRecorded && e.priorIntent.Valid() && e.priorIntent != store.RunIntentStopped {
+		if _, err := e.s.store.RevertRunIntent(ctx, e.agentID(), store.RunIntentStopped, e.intentAt, e.priorIntent); err != nil {
+			e.s.agentLifecycleLog.Warn("delete engine: restoring the run intent failed",
+				"agent_id", e.agentID(), "error", err)
+		}
 	}
 	e.publishStatus(ctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
