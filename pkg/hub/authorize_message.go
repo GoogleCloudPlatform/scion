@@ -192,8 +192,9 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 //  1. System-plane messages bypass all checks (D8).
 //  2. Agent self-messages are allowed (harness integration).
 //  3. Super-admin users pierce everything including mode=none (D6).
-//  4. User senders: ancestry and project-owner piercing for lineage/branch;
-//     agent.message permission check for project mode; none always denied.
+//  4. User senders: ancestry (with active project access) and
+//     project-owner piercing for lineage/branch; agent.message permission
+//     check for project mode; none always denied.
 //  5. Agent senders: both endpoints must be in the same project; both must
 //     be project mode (project cell) or both branch mode with a direct
 //     parent/child relationship (branch cell); lineage-mode agents have
@@ -302,10 +303,20 @@ func (s *Server) authorizeUserToAgent(
 	}
 
 	// Ancestry check: U in target.Ancestry → ALLOW (lineage/branch/project)
-	// Only trust ancestry when hub-attested (not federated).
+	// Only trust ancestry when hub-attested (not federated). A full-session
+	// local user must also hold active access to the target's project
+	// (ptone/scion#2141), the check uatMessageGate applies to a UAT holder
+	// above. Without it the ancestry allow does not apply and evaluation
+	// continues to the checks below; a lookup fault denies.
 	if !uatDeniesMessage && AncestryIsHubAttested(senderIdentity) {
 		if canAccessAsAncestor(userIdent.ID(), targetResource) {
-			return true, "user in target ancestry"
+			admitted, faultReason := s.authzService.messageAncestorProjectAccess(ctx, senderIdentity, targetAgent.ProjectID, targetResource)
+			if faultReason != "" {
+				return false, faultReason
+			}
+			if admitted {
+				return true, "user in target ancestry"
+			}
 		}
 	}
 
@@ -831,6 +842,36 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 		return false
 	}
 	return membership.Role == store.ProjectRoleOwner
+}
+
+// messageAncestorProjectAccess reports whether a full-session local user
+// sender (PrincipalKindUser or PrincipalKindDev, not a UAT holder) holds
+// active access to projectID for agent.message on target, using
+// ProjectTargetAdmission: current membership, or system authority that
+// applies to the target. It gates the messaging ancestry allow in
+// authorizeUserToAgent, mirroring the project-access stage of
+// uatMessageGate. A UAT holder is already checked by uatMessageGate, and
+// any other principal kind is not a local user; both report admitted.
+//
+// It returns (false, "") when the user lacks access or the target does not
+// resolve to projectID, and (false, reason) for a store or resolution
+// fault, which the caller denies on.
+func (a *AuthzService) messageAncestorProjectAccess(ctx context.Context, sender Identity, projectID string, target Resource) (bool, string) {
+	if _, scoped := sender.(*ScopedUserIdentity); scoped {
+		return true, ""
+	}
+	principal := principalContextForIdentity(sender)
+	if principal.Kind != PrincipalKindUser && principal.Kind != PrincipalKindDev {
+		return true, ""
+	}
+	res, err := a.ProjectTargetAdmission(ctx, principal, projectID, "agent.message", target, nil)
+	if err != nil {
+		if isProjectAccessLookupFault(err) {
+			return false, "agent.message project access check failed (fail-closed)"
+		}
+		return false, ""
+	}
+	return res.Admitted, ""
 }
 
 // uatMessageGate runs the bearer gate for agent.message on target for a

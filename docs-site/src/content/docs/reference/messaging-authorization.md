@@ -210,6 +210,12 @@ is evaluated on the **human principal at delivery time**.
   (U → owner's agent → restricted agent). Evaluated on the human principal,
   never on on-behalf-of markers.
 
+- **Active project access for ancestry.** The ancestry allow requires the
+  user's current access to the agent's project: a project role binding
+  (direct or through a group) or system authority that covers the agent.
+  A user whose last project binding was removed or has expired is not
+  allowed through ancestry, for full sessions and User Access Tokens alike.
+
 - **UAT caveat.** For User Access Tokens, piercing applies only when the
   token also carries the `agent:message` scope. A narrow-scoped token held
   by a project owner does not pierce.
