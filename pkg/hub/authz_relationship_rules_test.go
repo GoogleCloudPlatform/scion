@@ -71,6 +71,7 @@ func setUserStatus(t *testing.T, s store.Store, id, status string) {
 func TestRelationshipRules_UnlistedPermissionDenied(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-owner"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relrule-proj"))
 	agent := agentResource(&store.Agent{ID: tid("relrule-agent"), ProjectID: tid("relrule-proj"), OwnerID: owner.ID()})
 	tpl := templateResource(&store.Template{ID: tid("relrule-tpl"), OwnerID: owner.ID(), Scope: store.TemplateScopeUser, ScopeID: owner.ID()})
 
@@ -147,6 +148,7 @@ func TestRelationshipRules_AttachOnlyTokenCannotReachLifecycle(t *testing.T) {
 func TestRelationshipRules_AccessConstraintRestrictsOwner(t *testing.T) {
 	authz, s := authzTestSetup(t)
 	owner := createCharacterizationUser(t, s, tid("relrule-ac-owner"))
+	grantProjectAccessOnly(t, s, owner.ID(), tid("relrule-ac-proj"))
 	agent := agentResource(&store.Agent{ID: tid("relrule-ac-agent"), ProjectID: tid("relrule-ac-proj"), OwnerID: owner.ID()})
 
 	userType, userID := "user", owner.ID()
@@ -181,7 +183,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 	})
 	assert.False(t, decidePerm(authz, fed, desc, Action("notify"), "agent.notify", false).Allowed)
 
-	out := authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), desc, Action("notify"), "agent.notify", nil, false)
+	out := authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fed), desc, Action("notify"), "agent.notify", nil, false, nil)
 	assert.Nil(t, out.accepted)
 	require.Len(t, out.results, 1)
 	assert.Equal(t, RelationshipRuleAncestor, out.results[0].Rule)
@@ -193,7 +195,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 		ID: tid("relrule-fed-user-desc"), ProjectID: tid("relrule-fed-proj"),
 		Ancestry: []string{fedUser.ID()},
 	})
-	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fedUser), userDesc, ActionRead, "agent.read", nil, false)
+	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(fedUser), userDesc, ActionRead, "agent.read", nil, false, nil)
 	assert.Nil(t, out.accepted)
 	require.NotEmpty(t, out.results)
 	assert.Equal(t, RelationshipRuleAncestor, out.results[0].Rule)
@@ -202,7 +204,7 @@ func TestRelationshipRules_UntrustedAncestryRejected(t *testing.T) {
 	// The same shape with a hub-attested agent is accepted by the stage.
 	local := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: tid("relrule-local")}, Scopes: allRegisteredAgentScopes()}}
 	localDesc := agentResource(&store.Agent{ID: tid("relrule-local-desc"), Ancestry: []string{tid("relrule-fed-root"), local.ID()}})
-	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(local), localDesc, Action("notify"), "agent.notify", nil, false)
+	out = authz.evaluateRelationshipCandidates(ctx, principalContextForIdentity(local), localDesc, Action("notify"), "agent.notify", nil, false, nil)
 	require.NotNil(t, out.accepted)
 	assert.Equal(t, "relationship grant: ancestor access", out.accepted.Reason)
 }
@@ -252,7 +254,7 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			out := f.authz.evaluateRelationshipCandidates(ctx, principal, tc.resource, tc.action, tc.perm, nil, false)
+			out := f.authz.evaluateRelationshipCandidates(ctx, principal, tc.resource, tc.action, tc.perm, nil, false, nil)
 			assert.Nil(t, out.accepted)
 			found := false
 			for _, r := range out.results {
