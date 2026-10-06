@@ -24,6 +24,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -4919,7 +4921,13 @@ func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
 			srv, s := testServer(t)
 			ctx := context.Background()
 
-			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			// Count exec requests that reach the fake broker, so the test
+			// cannot pass via a short-circuit before dispatch.
+			var execHits atomic.Int32
+			fakeBroker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/exec") {
+					execHits.Add(1)
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
@@ -4950,6 +4958,7 @@ func TestHandleAgentExec_BrokerAgentNotFound(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
 			assert.Equal(t, tc.wantCode, errResp.Error.Code)
 			assert.Contains(t, errResp.Error.Message, tc.wantMsg)
+			assert.Positive(t, execHits.Load(), "exec request never reached the fake broker")
 		})
 	}
 }
