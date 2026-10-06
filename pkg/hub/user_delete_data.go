@@ -141,10 +141,12 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 	return &userOwnsAgentsDeleteError{agents: owned}
 }
 
-// errAgentOwnerUserMissing is returned when the user an agent belongs to
+// errAgentOwnerUserMissing is returned when the guard principal of an agent
 // (the user the delete guard counts it for: its owner, its ancestry root or
 // the creator of its schedule, see lockAgentGuardUserTx) no longer exists
-// (see lockUserPrincipalTx).
+// (see lockUserPrincipalTx). That is normally a deleted user, but it can be
+// a legacy root agent that has since been purged, because a missing root
+// cannot be told apart from a deleted user; hence the neutral text.
 var errAgentOwnerUserMissing = errors.New("the user or agent this agent belongs to no longer exists")
 
 // lockUserPrincipalTx takes a shared lock on the row of principalID when it
@@ -158,7 +160,10 @@ var errAgentOwnerUserMissing = errors.New("the user or agent this agent belongs 
 // that can own an agent), or names an existing agent. It returns
 // errAgentOwnerUserMissing when the ID is neither a user nor an agent (both
 // lookups return not found), the existence rule relationshipSourceActive
-// uses: the principal was a user that has been deleted.
+// uses: the principal no longer exists. That is normally a deleted user, but
+// it can be a legacy root agent that has since been purged, because a
+// missing root cannot be told apart from a deleted user (see
+// lockAgentGuardUserTx).
 func lockUserPrincipalTx(ctx context.Context, tx store.Store, principalID string) (bool, error) {
 	if principalID == "" {
 		return false, nil

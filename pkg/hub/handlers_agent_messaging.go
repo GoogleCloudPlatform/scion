@@ -1592,7 +1592,8 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// fails), reactivates those edges (a conflicting active edge is a 409)
 	// and writes the agent_restore audit record. It also refuses an agent
 	// whose guard user (its owner, ancestry root or schedule creator) no
-	// longer exists (ptone/scion#2769; errAgentOwnerUserMissing, see
+	// longer exists, normally a deleted user but possibly a purged legacy
+	// root agent (ptone/scion#2769; errAgentOwnerUserMissing, see
 	// lockAgentGuardUserTx).
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {

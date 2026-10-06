@@ -280,7 +280,9 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // the restore hooks, and write the agent_restore audit record. Before all
 // of that it refuses, with errAgentOwnerUserMissing, an agent whose guard
 // user no longer exists (lockAgentGuardUserTx, the same choice of user as
-// create: owner, else ancestry root, else creator when there is no owner).
+// create: owner, else ancestry root, else creator when there is no owner);
+// that is normally a deleted user, but it can be a legacy root agent that
+// has since been purged, which cannot be told apart from one.
 //
 // A delegator that is not live returns errRestoreDelegatorNotLive, a store
 // error during that check errRestoreDelegatorLookup, a conflicting active
