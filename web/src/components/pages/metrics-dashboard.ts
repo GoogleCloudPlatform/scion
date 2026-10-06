@@ -87,15 +87,14 @@ const CHART_COLORS = [
 ];
 
 /**
- * The page asks the hub to bucket every daily series by calendar day in the
- * viewer's effective display zone (`effectiveTimeZone()`: the user's zone
- * preference, else the browser's zone), sent as the `tz` query parameter
- * (ptone/scion#3370). The hub
- * falls back to UTC for a zone it cannot resolve and reports the zone it
- * used as `timeZone`, so the headings and the x-axis title name that
- * reported zone, never the requested one.
+ * Metrics dashboard page. It asks the hub to bucket every daily series by
+ * calendar day in the viewer's effective display zone (`effectiveTimeZone()`:
+ * the user's zone preference, else the browser's zone), sent as the `tz`
+ * query parameter (ptone/scion#3370). The hub falls back to UTC for a zone it
+ * cannot resolve and reports the zone it used as `timeZone` in each view's
+ * response. Each tab's headings and x-axis title name the zone reported with
+ * that tab's own data, never the requested zone or another view's zone.
  */
-
 @customElement('scion-page-metrics')
 export class ScionPageMetrics extends LitElement {
   @property({ type: String })
@@ -105,8 +104,6 @@ export class ScionPageMetrics extends LitElement {
   @state() private error: string | null = null;
   @state() private activeTab = 'summary';
   @state() private periodDays = 7;
-  /** The zone the hub reported for the last loaded view's day buckets. */
-  @state() private bucketZone = 'UTC';
 
   @state() private summary: SummaryData | null = null;
   @state() private sessions: SessionsData | null = null;
@@ -114,6 +111,11 @@ export class ScionPageMetrics extends LitElement {
   @state() private tokens: TokensData | null = null;
 
   private charts: Map<string, Chart> = new Map();
+
+  /** Increments for every metrics request the page issues. */
+  private requestSeq = 0;
+  /** The sequence number of the newest request per view. */
+  private readonly latestRequestByView = new Map<string, number>();
 
   static override styles = css`
     :host {
@@ -297,6 +299,11 @@ export class ScionPageMetrics extends LitElement {
   }
 
   private async loadView(view: string): Promise<void> {
+    // A response older than the newest request for the same view (for
+    // example one sent before a display-zone change) is dropped, so it can
+    // never replace newer data for that view.
+    const seq = ++this.requestSeq;
+    this.latestRequestByView.set(view, seq);
     this.loading = true;
     this.error = null;
 
@@ -321,7 +328,7 @@ export class ScionPageMetrics extends LitElement {
       }
 
       const data = await response.json();
-      this.bucketZone = dayBucketZoneLabel((data as { timeZone?: string }).timeZone);
+      if (this.latestRequestByView.get(view) !== seq) return;
 
       switch (view) {
         case 'summary':
@@ -338,9 +345,14 @@ export class ScionPageMetrics extends LitElement {
           break;
       }
     } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
+      if (this.latestRequestByView.get(view) === seq) {
+        this.error = err instanceof Error ? err.message : String(err);
+      }
     } finally {
-      this.loading = false;
+      // Only the newest request overall ends the loading state.
+      if (seq === this.requestSeq) {
+        this.loading = false;
+      }
     }
   }
 
@@ -377,7 +389,6 @@ export class ScionPageMetrics extends LitElement {
     'tokens',
     'activeTab',
     'loading',
-    'bucketZone',
   ]);
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -397,6 +408,7 @@ export class ScionPageMetrics extends LitElement {
           if (this.sessions.dailyCounts?.length) {
             const sorted = this.sortPointsByDate(this.sessions.dailyCounts);
             this.renderChart(
+              this.sessions.timeZone,
               'chart-sessions',
               'bar',
               sorted.map((p) => p.timestamp),
@@ -412,6 +424,7 @@ export class ScionPageMetrics extends LitElement {
           if (this.sessions.activeAgents?.length) {
             const sorted = this.sortPointsByDate(this.sessions.activeAgents);
             this.renderChart(
+              this.sessions.timeZone,
               'chart-agents',
               'line',
               sorted.map((p) => p.timestamp),
@@ -432,6 +445,7 @@ export class ScionPageMetrics extends LitElement {
           if (this.modelCalls.byModel?.length) {
             const allDates = this.collectDates(this.modelCalls.byModel);
             this.renderChart(
+              this.modelCalls.timeZone,
               'chart-model-calls',
               'bar',
               allDates,
@@ -445,6 +459,7 @@ export class ScionPageMetrics extends LitElement {
           if (this.modelCalls.byHarness?.length) {
             const allDates = this.collectDates(this.modelCalls.byHarness);
             this.renderChart(
+              this.modelCalls.timeZone,
               'chart-harness-calls',
               'bar',
               allDates,
@@ -462,6 +477,7 @@ export class ScionPageMetrics extends LitElement {
           if (this.tokens.input?.length) {
             const allDates = this.collectDates(this.tokens.input);
             this.renderChart(
+              this.tokens.timeZone,
               'chart-tokens-input',
               'bar',
               allDates,
@@ -475,6 +491,7 @@ export class ScionPageMetrics extends LitElement {
           if (this.tokens.output?.length) {
             const allDates = this.collectDates(this.tokens.output);
             this.renderChart(
+              this.tokens.timeZone,
               'chart-tokens-output',
               'bar',
               allDates,
@@ -490,7 +507,12 @@ export class ScionPageMetrics extends LitElement {
     }
   }
 
+  /**
+   * `reportedZone` is the `timeZone` the hub sent with this chart's own data;
+   * it names the x-axis.
+   */
   private renderChart(
+    reportedZone: string | undefined,
     canvasId: string,
     type: 'bar' | 'line',
     labels: string[],
@@ -505,6 +527,11 @@ export class ScionPageMetrics extends LitElement {
         if ((existing.config as { type?: string }).type === type) {
           existing.data.labels = labels;
           existing.data.datasets = datasets;
+          // The data may now come from a different zone, so the axis title
+          // is refreshed along with it.
+          const xTitle = (existing.options.scales?.x as { title?: { text?: string } } | undefined)
+            ?.title;
+          if (xTitle) xTitle.text = dayBucketAxisTitle(reportedZone);
           existing.update();
           return;
         }
@@ -529,7 +556,7 @@ export class ScionPageMetrics extends LitElement {
               ticks: { font: { size: 11 } },
               title: {
                 display: true,
-                text: dayBucketAxisTitle(this.bucketZone),
+                text: dayBucketAxisTitle(reportedZone),
                 font: { size: 11 },
               },
             },
@@ -629,17 +656,18 @@ export class ScionPageMetrics extends LitElement {
   private renderSessionsTab() {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.sessions) return this.renderEmptyState();
+    const zone = dayBucketZoneLabel(this.sessions.timeZone);
 
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Daily Sessions (${this.bucketZone})</h3>
+          <h3 class="chart-section-title">Daily Sessions (${zone})</h3>
           <div class="chart-container">
             <canvas id="chart-sessions"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Active Agents per Day (${this.bucketZone})</h3>
+          <h3 class="chart-section-title">Active Agents per Day (${zone})</h3>
           <div class="chart-container">
             <canvas id="chart-agents"></canvas>
           </div>
@@ -651,17 +679,18 @@ export class ScionPageMetrics extends LitElement {
   private renderModelCallsTab() {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.modelCalls) return this.renderEmptyState();
+    const zone = dayBucketZoneLabel(this.modelCalls.timeZone);
 
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Daily API Calls by Model (${this.bucketZone})</h3>
+          <h3 class="chart-section-title">Daily API Calls by Model (${zone})</h3>
           <div class="chart-container">
             <canvas id="chart-model-calls"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Daily API Calls by Harness (${this.bucketZone})</h3>
+          <h3 class="chart-section-title">Daily API Calls by Harness (${zone})</h3>
           <div class="chart-container">
             <canvas id="chart-harness-calls"></canvas>
           </div>
@@ -673,17 +702,18 @@ export class ScionPageMetrics extends LitElement {
   private renderTokensTab() {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.tokens) return this.renderEmptyState();
+    const zone = dayBucketZoneLabel(this.tokens.timeZone);
 
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Daily Input Tokens by Model (${this.bucketZone})</h3>
+          <h3 class="chart-section-title">Daily Input Tokens by Model (${zone})</h3>
           <div class="chart-container">
             <canvas id="chart-tokens-input"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Daily Output Tokens by Model (${this.bucketZone})</h3>
+          <h3 class="chart-section-title">Daily Output Tokens by Model (${zone})</h3>
           <div class="chart-container">
             <canvas id="chart-tokens-output"></canvas>
           </div>

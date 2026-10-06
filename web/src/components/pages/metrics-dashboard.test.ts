@@ -39,9 +39,11 @@ vi.mock('chart.js', () => {
     static register(): void {}
     config: ChartConfig;
     data: ChartConfig['data'];
+    options: ChartConfig['options'];
     constructor(_canvas: unknown, config: ChartConfig) {
       this.config = config;
       this.data = config.data;
+      this.options = config.options;
       chartConfigs.push(config);
     }
     update(): void {}
@@ -112,6 +114,15 @@ const requestedZones: (string | null)[] = [];
  */
 let reportedZone: string | undefined = 'echo';
 
+/** Per-view overrides of `reportedZone`. */
+let reportedZoneByView: Record<string, string> = {};
+
+/**
+ * When set, the next request's response waits for this promise. The
+ * response body (and its zone) is still fixed when the request is made.
+ */
+let holdNextResponse: Promise<void> | null = null;
+
 async function mountOnTab(tab: string): Promise<MetricsPage> {
   vi.stubGlobal(
     'fetch',
@@ -120,13 +131,18 @@ async function mountOnTab(tab: string): Promise<MetricsPage> {
       const params = new URL(path, 'http://localhost').searchParams;
       const view = params.get('view') ?? '';
       requestedZones.push(params.get('tz'));
-      const zone = reportedZone === 'echo' ? (params.get('tz') ?? undefined) : reportedZone;
+      const zone =
+        reportedZoneByView[view] ??
+        (reportedZone === 'echo' ? (params.get('tz') ?? undefined) : reportedZone);
       const body = { ...((VIEW_BODIES[view] ?? SUMMARY) as object), timeZone: zone };
-      return Promise.resolve(
-        new Response(JSON.stringify(body), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
+      const hold = holdNextResponse ?? Promise.resolve();
+      holdNextResponse = null;
+      return hold.then(
+        () =>
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
       );
     })
   );
@@ -149,10 +165,15 @@ function stubBrowserZone(zone: string): void {
   });
 }
 
-function headings(el: MetricsPage): (string | undefined)[] {
-  return [...(el.shadowRoot?.querySelectorAll('.chart-section-title') ?? [])].map((h) =>
-    h.textContent?.trim()
-  );
+/**
+ * Chart headings in one tab panel (default: the active tab). Every panel is
+ * in the DOM at once, so an unscoped query would mix tabs.
+ */
+function headings(el: MetricsPage, panel: string = el.activeTab): (string | undefined)[] {
+  return [
+    ...(el.shadowRoot?.querySelectorAll(`sl-tab-panel[name="${panel}"] .chart-section-title`) ??
+      []),
+  ].map((h) => h.textContent?.trim());
 }
 
 const TABS = [
@@ -174,6 +195,8 @@ describe('scion-page-metrics — day-bucket zone', () => {
     chartConfigs.length = 0;
     requestedZones.length = 0;
     reportedZone = 'echo';
+    reportedZoneByView = {};
+    holdNextResponse = null;
     setPreferredTimeZone('');
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -241,6 +264,77 @@ describe('scion-page-metrics — day-bucket zone', () => {
     expect(headings(element)).toEqual([
       'Daily API Calls by Model (Asia/Kathmandu)',
       'Daily API Calls by Harness (Asia/Kathmandu)',
+    ]);
+  });
+
+  it("labels each tab with its own view's reported zone, not the last-loaded view's", async () => {
+    reportedZoneByView = { sessions: 'America/Chicago', 'model-calls': 'Asia/Kathmandu' };
+    element = await mountOnTab('sessions');
+    expect(headings(element)).toEqual([
+      'Daily Sessions (America/Chicago)',
+      'Active Agents per Day (America/Chicago)',
+    ]);
+
+    // Load another view in a different zone, then show the sessions tab
+    // again without refetching: its labels still follow its own data.
+    await element.loadView('model-calls');
+    element.activeTab = 'sessions';
+    await settle(element);
+
+    expect(headings(element)).toEqual([
+      'Daily Sessions (America/Chicago)',
+      'Active Agents per Day (America/Chicago)',
+    ]);
+    // Both panels are rendered at once, each with its own zone.
+    expect(headings(element, 'model-calls')).toEqual([
+      'Daily API Calls by Model (Asia/Kathmandu)',
+      'Daily API Calls by Harness (Asia/Kathmandu)',
+    ]);
+    expect(chartConfigs.length).toBeGreaterThan(0);
+    for (const config of chartConfigs) {
+      expect(config.options.scales.x.title.text).toBe('Day (America/Chicago)');
+    }
+    // Reloading the same view in another zone updates the existing charts'
+    // axis title, not just their data.
+    const chartsBefore = chartConfigs.length;
+    reportedZoneByView = { sessions: 'Asia/Tokyo' };
+    await element.loadView('sessions');
+    await settle(element);
+    expect(chartConfigs.length).toBe(chartsBefore);
+    expect(headings(element)).toEqual([
+      'Daily Sessions (Asia/Tokyo)',
+      'Active Agents per Day (Asia/Tokyo)',
+    ]);
+    for (const config of chartConfigs) {
+      expect(config.options.scales.x.title.text).toBe('Day (Asia/Tokyo)');
+    }
+  });
+
+  it('drops a stale response that arrives after a newer one for the same view', async () => {
+    element = await mountOnTab('sessions');
+    expect(headings(element)).toEqual(['Daily Sessions (UTC)', 'Active Agents per Day (UTC)']);
+
+    // An old-zone request is held, then the zone changes and the refetch
+    // completes first; the late old-zone response must not win.
+    let release!: () => void;
+    holdNextResponse = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stale = element.loadView('sessions');
+    setPreferredTimeZone('Asia/Kathmandu');
+    await settle(element);
+    expect(headings(element)).toEqual([
+      'Daily Sessions (Asia/Kathmandu)',
+      'Active Agents per Day (Asia/Kathmandu)',
+    ]);
+
+    release();
+    await stale;
+    await settle(element);
+    expect(requestedZones.slice(-2)).toEqual(['UTC', 'Asia/Kathmandu']);
+    expect(headings(element)).toEqual([
+      'Daily Sessions (Asia/Kathmandu)',
+      'Active Agents per Day (Asia/Kathmandu)',
     ]);
   });
 
