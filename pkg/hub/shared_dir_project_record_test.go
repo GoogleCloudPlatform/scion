@@ -268,6 +268,20 @@ func TestProjectRecordSharedDirPath_RequiresValidRecord(t *testing.T) {
 		})
 	}
 
+	t.Run("rejects a missing project record", func(t *testing.T) {
+		got, err := projectRecordSharedDirPath(nil, "data")
+		require.Equal(t, errSharedDirProjectRecordRequired, err)
+		assert.Empty(t, got)
+		assert.False(t, strings.Contains(err.Error(), string(filepath.Separator)),
+			"error must not contain a path: %q", err.Error())
+
+		got, err = resolveHubProjectSharedDirPath(nil, "data")
+		require.Equal(t, errSharedDirProjectRecordRequired, err)
+		assert.Empty(t, got)
+		assert.False(t, strings.Contains(err.Error(), string(filepath.Separator)),
+			"error must not contain a path: %q", err.Error())
+	})
+
 	t.Run("accepts a valid record", func(t *testing.T) {
 		project := store.Project{ID: validID, Slug: "proj"}
 		got, err := projectRecordSharedDirPath(&project, "data")

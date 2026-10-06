@@ -1372,10 +1372,17 @@ func (s *Server) resolveNFSSharedDirPath(dirName, projectID string) (resolution 
 // than the hub's own project record. Its message is fixed and carries no path.
 var errSharedDirProjectRecordMismatch = errors.New("workspace project identity does not match the project record")
 
+// errSharedDirProjectRecordRequired is returned when no project record is
+// supplied. Its message is fixed and carries no path.
+var errSharedDirProjectRecordRequired = errors.New("project record is required")
+
 // projectRecordSharedDirPath returns the host path of shared dir dirName for a
 // project, derived only from the hub's project record (slug and ID):
 // ~/.scion/project-configs/<slug>__<short-id>/shared-dirs/<dirName>.
 func projectRecordSharedDirPath(project *store.Project, dirName string) (string, error) {
+	if project == nil {
+		return "", errSharedDirProjectRecordRequired
+	}
 	if err := validateProjectSlug(project.Slug); err != nil {
 		return "", err
 	}
