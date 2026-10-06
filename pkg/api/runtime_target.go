@@ -99,3 +99,14 @@ func CheckExpectedRuntimeTarget(runtimeBrokerID, actual, expected string) *Runti
 		ActualRuntimeTargetID:   actual,
 	}
 }
+
+// PinnedRuntimeTarget is the read-only API view of an agent's pinned
+// placement on a flat Runtime Broker (.design/flat-runtime-brokers-contract.md
+// section 8): the runtime target the agent was pinned to and the Runtime
+// Broker that serves it. It is computed from stored data for responses and is
+// never written through the API.
+type PinnedRuntimeTarget struct {
+	ID              string `json:"id"`
+	Type            string `json:"type"`
+	RuntimeBrokerID string `json:"runtimeBrokerId"`
+}

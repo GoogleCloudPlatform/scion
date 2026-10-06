@@ -17,6 +17,8 @@ package hubclient
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Agent represents an agent from the Hub API.
@@ -79,6 +81,10 @@ type Agent struct {
 	// as false). No omitempty: re-encoding keeps an explicit false so a
 	// merging consumer clears a previously seen true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+
+	// PinnedRuntimeTarget is the agent's pinned placement on a flat Runtime
+	// Broker (read-only; nil for an unpinned agent).
+	PinnedRuntimeTarget *api.PinnedRuntimeTarget `json:"pinnedRuntimeTarget,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.
@@ -323,6 +329,9 @@ type RuntimeBroker struct {
 	Created         time.Time           `json:"created"`
 	Updated         time.Time           `json:"updated"`
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker
+	// RuntimeTarget is the stored descriptor of a flat Runtime Broker's
+	// single runtime target; nil for a profile-based Runtime Broker.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.

@@ -186,6 +186,10 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// RunIntent and the launch/deletion columns (ptone/scion#2929); it is
 	// not stored.
 	"ProvisionedOnly": true,
+	// PinnedRuntimeTarget is a computed, read-only response view of the
+	// pinned placement columns (ComputeAgentPinnedRuntimeTarget), filled
+	// only by agent enrichment; it is not stored and not an authz input.
+	"PinnedRuntimeTarget": true,
 	// Start claim columns are written only through the start-claim store
 	// methods (never by CreateAgent/UpdateAgent).
 	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,

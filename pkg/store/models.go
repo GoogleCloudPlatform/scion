@@ -88,6 +88,12 @@ type Agent struct {
 	PinnedRuntimeTargetID   string `json:"-"`
 	PinnedRuntimeTargetType string `json:"-"`
 
+	// PinnedRuntimeTarget is the read-only view of the pinned placement above
+	// (contract name pinnedRuntimeTarget), computed by the Hub for
+	// responses (ComputeAgentPinnedRuntimeTarget); never persisted or
+	// applied from a request.
+	PinnedRuntimeTarget *api.PinnedRuntimeTarget `json:"pinnedRuntimeTarget,omitempty"`
+
 	// Enriched fields (populated by Hub when returning data, not persisted)
 	Project           string `json:"project,omitempty"`           // Project name (resolved from ProjectID)
 	RuntimeBrokerName string `json:"runtimeBrokerName,omitempty"` // Broker name (resolved from RuntimeBrokerID)

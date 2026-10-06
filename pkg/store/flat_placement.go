@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Flat Runtime Broker placement (.design/flat-runtime-brokers-contract.md
@@ -122,5 +124,21 @@ func RuntimeBrokerNameConflict(ctx context.Context, s RuntimeBrokerStore, name, 
 			return nil, nil
 		}
 		cursor = page.NextCursor
+	}
+}
+
+// ComputeAgentPinnedRuntimeTarget returns the read-only API view of a's
+// pinned placement, or nil when a is not pinned. It reports the pin as
+// stored: a stale pin (PinnedRuntimeBrokerID differing from RuntimeBrokerID)
+// is shown as is, so a client can tell it apart from the agent's current
+// Runtime Broker.
+func ComputeAgentPinnedRuntimeTarget(a *Agent) *api.PinnedRuntimeTarget {
+	if !a.IsPinned() {
+		return nil
+	}
+	return &api.PinnedRuntimeTarget{
+		ID:              a.PinnedRuntimeTargetID,
+		Type:            a.PinnedRuntimeTargetType,
+		RuntimeBrokerID: a.PinnedRuntimeBrokerID,
 	}
 }
