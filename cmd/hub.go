@@ -1787,12 +1787,26 @@ func runHubProjectCreateHubManaged() error {
 // detectDefaultBranch probes a git remote to detect its default branch.
 // Returns the branch name or empty string on failure.
 func detectDefaultBranch(cloneURL string) string {
-	cmd := exec.Command("git", "ls-remote", "--symref", cloneURL, "HEAD")
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), defaultBranchProbeTimeout)
+	defer cancel()
+	output, err := defaultBranchProbeCmd(ctx, cloneURL).Output()
 	if err != nil {
 		return ""
 	}
 	return parseDefaultBranch(string(output))
+}
+
+// defaultBranchProbeTimeout bounds the default-branch probe so an
+// unreachable remote falls back to the default instead of hanging.
+const defaultBranchProbeTimeout = 10 * time.Second
+
+// defaultBranchProbeCmd builds the `git ls-remote --symref` command used by
+// detectDefaultBranch. GIT_TERMINAL_PROMPT=0 stops git from blocking on an
+// interactive credential prompt when no credential helper can answer.
+func defaultBranchProbeCmd(ctx context.Context, cloneURL string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--symref", cloneURL, "HEAD")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	return cmd
 }
 
 // parseDefaultBranch extracts the default branch name from `git ls-remote --symref` output.

@@ -16,9 +16,12 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -512,6 +515,44 @@ func TestParseDefaultBranch_NoMatch(t *testing.T) {
 func TestParseDefaultBranch_EmptyOutput(t *testing.T) {
 	result := parseDefaultBranch("")
 	assert.Equal(t, "", result)
+}
+
+// TestDefaultBranchProbeCmd_DisablesTerminalPrompt guards ptone/scion#3411:
+// the `hub project create` default-branch probe must never block on an
+// interactive git credential prompt, mirroring the sciontool init probe
+// (configureGitCommand).
+func TestDefaultBranchProbeCmd_DisablesTerminalPrompt(t *testing.T) {
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+
+	if !slices.Contains(cmd.Env, "GIT_TERMINAL_PROMPT=0") {
+		t.Fatal("expected GIT_TERMINAL_PROMPT=0 to be set")
+	}
+	assert.Equal(t, []string{"git", "ls-remote", "--symref", "https://example.com/org/repo.git", "HEAD"}, cmd.Args)
+}
+
+// TestDefaultBranchProbeCmd_PreservesEnvironment proves the probe keeps the
+// caller's environment (credential helpers, CA bundles) rather than replacing it.
+func TestDefaultBranchProbeCmd_PreservesEnvironment(t *testing.T) {
+	t.Setenv("GIT_SSL_CAINFO", "/tmp/trust-bundle.pem")
+
+	cmd := defaultBranchProbeCmd(context.Background(), "https://example.com/org/repo.git")
+
+	if !slices.Contains(cmd.Env, "GIT_SSL_CAINFO=/tmp/trust-bundle.pem") {
+		t.Errorf("cmd.Env = %v, want it to contain GIT_SSL_CAINFO=/tmp/trust-bundle.pem", cmd.Env)
+	}
+}
+
+// TestDefaultBranchProbeCmd_BoundByContext proves the probe is tied to its
+// context, so detectDefaultBranch's timeout kills a stalled remote.
+func TestDefaultBranchProbeCmd_BoundByContext(t *testing.T) {
+	assert.Greater(t, defaultBranchProbeTimeout, time.Duration(0))
+	assert.LessOrEqual(t, defaultBranchProbeTimeout, 30*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd := defaultBranchProbeCmd(ctx, "https://example.com/org/repo.git")
+	require.NotNil(t, cmd.Cancel, "probe must be built with exec.CommandContext")
+	require.Error(t, cmd.Run(), "a cancelled context must stop the probe")
 }
 
 // TestHubUnknownSubcommand_RejectsRemovedGroveAlias is a regression test for
