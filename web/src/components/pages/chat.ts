@@ -75,6 +75,7 @@ import {
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
+import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
@@ -541,6 +542,13 @@ export class ScionPageChat extends LitElement {
    * re-capture the invoker focus.
    */
   private _palettePendingOpen = false;
+  /**
+   * Captures keys typed from an open until the palette's query input has
+   * focus, so they become the query instead of reaching the composer (see
+   * {@link PaletteTypeahead}). Started in `_openPalette`, before the
+   * first open's lazy import, or when a press queues a reopen.
+   */
+  private readonly _paletteTypeahead = new PaletteTypeahead();
   /**
    * Bumped synchronously at the start of every `_openPalette` call (fresh or
    * dequeued). `_retargetPaletteInvokerToNewComposer` captures this value
@@ -1441,6 +1449,7 @@ export class ScionPageChat extends LitElement {
     this._palettePendingOpen = false;
     this._palettePendingReopen = false;
     this._paletteCloseAnimating = false;
+    this._paletteTypeahead.stop();
     stateManager.removeEventListener('chat-message-received', this._onChatMessage);
     stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
     stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
@@ -3825,6 +3834,7 @@ export class ScionPageChat extends LitElement {
       this._palettePendingReopen
     ) {
       this._palettePendingReopen = false;
+      this._paletteTypeahead.stop();
       return;
     }
     if (e.altKey || e.shiftKey) return;
@@ -4057,6 +4067,7 @@ export class ScionPageChat extends LitElement {
       // which sets the queue unconditionally: a button press can only ever
       // ask for open, never cancel a previously queued one.
       this._palettePendingReopen = mode === 'open' ? true : !this._palettePendingReopen;
+      this._syncPaletteTypeaheadToQueuedReopen();
       return;
     }
     if (this._paletteCloseAnimating) {
@@ -4074,9 +4085,19 @@ export class ScionPageChat extends LitElement {
       // closed, the same as it would with no close in flight at all. 'open'
       // sets it unconditionally instead, for the same reason as above.
       this._palettePendingReopen = mode === 'open' ? true : !this._palettePendingReopen;
+      this._syncPaletteTypeaheadToQueuedReopen();
       return;
     }
     await this._openPalette();
+  }
+
+  /**
+   * A queued reopen is an open request too: keys typed until it runs become
+   * its query. Cancelling the queue stops the capture.
+   */
+  private _syncPaletteTypeaheadToQueuedReopen(): void {
+    if (this._palettePendingReopen) this._paletteTypeahead.start();
+    else this._paletteTypeahead.stop();
   }
 
   /**
@@ -4090,6 +4111,7 @@ export class ScionPageChat extends LitElement {
   private async _openPalette(options: { skipInvokerCapture?: boolean } = {}): Promise<void> {
     this._palettePendingOpen = true;
     this._paletteOpenEpoch++;
+    this._paletteTypeahead.start();
     try {
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
       if (!this.v2SwitcherLoaded) {
@@ -4104,11 +4126,15 @@ export class ScionPageChat extends LitElement {
       }
       if (!this._palettePendingOpen) {
         // Cancelled by a second press while we were awaiting above.
+        this._paletteTypeahead.stop();
         return;
       }
       this.v2PaletteOpen = true;
       this._startPaletteVisibilityWatchdog();
       this._loadPaletteGroupsOnOpen();
+    } catch (err) {
+      this._paletteTypeahead.stop();
+      throw err;
     } finally {
       this._palettePendingOpen = false;
     }
@@ -4327,6 +4353,7 @@ export class ScionPageChat extends LitElement {
     this._selfUserAbortController = null;
     this._stopPaletteVisibilityWatchdog();
     this._stopPaletteDebouncedRefresh();
+    this._paletteTypeahead.stop();
     this.v2PaletteOpen = false;
     this._paletteCloseAnimating = true;
   }
@@ -4795,6 +4822,7 @@ export class ScionPageChat extends LitElement {
         // belong to.
         this._paletteInvoker = null;
         this._paletteInvokerSelection = null;
+        this._paletteTypeahead.stop();
       }
       return;
     }
@@ -4864,6 +4892,7 @@ export class ScionPageChat extends LitElement {
       // restored into a page it may no longer belong to.
       this._paletteInvoker = null;
       this._paletteInvokerSelection = null;
+      this._paletteTypeahead.stop();
       return;
     }
     this._restorePaletteInvokerFocus();
@@ -5085,6 +5114,7 @@ export class ScionPageChat extends LitElement {
               placeholder="Search agents, threads, people, documents…"
               .open=${this.v2PaletteOpen}
               .groups=${this.v2PaletteGroups}
+              .typeahead=${this._paletteTypeahead}
               @palette-select=${this._handlePaletteSelect}
               @palette-retry=${this._handlePaletteRetry}
               @palette-dismiss=${this._handlePaletteDismiss}
