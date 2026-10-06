@@ -42,6 +42,9 @@ allowed_paths=(
   "^cmd/template_resolution_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
   "^extras/fs-watcher-tool/pkg/fswatcher/project_test.go$"
+  # Asserts the removed legacy /groves/ agent-card route no longer bypasses
+  # auth. The literal is the point of the negative test.
+  "^extras/scion-a2a-bridge/internal/bridge/auth_test.go$"
   # Asserts a scion.grove.* user topic yields no user ID from
   # extractUserIDFromTopic. The literal is the point of the negative test.
   "^extras/scion-a2a-bridge/internal/bridge/pgstore_crossprocess_test.go$"

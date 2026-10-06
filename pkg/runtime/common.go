@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -328,6 +329,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	}
 
 	fullRepoRootMounted := false
+	// sharedWorkspaceAgentsMasked is set when the shared workspace mount
+	// (workspace == repo root) contains a .scion directory, whose agents/
+	// subdirectory is shadowed with a tmpfs below.
+	sharedWorkspaceAgentsMasked := false
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the
 		// cloned repo is visible on the host for debugging and persistence.
@@ -377,11 +382,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// (config.GetAgentDir with sharedWorkspace=true), so there is
 			// nothing to leak through this mount. See
 			// .design/hub-shared-workspace-isolation.md (defense by absence).
-			// If the threat model ever requires in-container shadowing, mirror
-			// the /repo-root/.scion tmpfs pattern below at
-			// /workspace/.scion/agents.
+			// Agent state for shared-workspace projects is always resolved
+			// from the broker-side agent dir (pkg/agent agentStateDir), never
+			// from the in-project agents root under this mount; that is the
+			// control on every runtime. On Docker/Podman the in-project
+			// agents root is additionally shadowed with a tmpfs (below) when
+			// <workspace>/.scion is a directory.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
+			if info, err := os.Stat(filepath.Join(config.Workspace, ".scion")); err == nil && info.IsDir() {
+				sharedWorkspaceAgentsMasked = true
+			}
 		} else {
 			// Fallback if workspace is outside repo root or relative path is not straightforward.
 			// Still mount RepoRoot so that .git worktree pointers can potentially be resolved if
@@ -561,6 +572,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// agents' home directories and secrets via the host filesystem.
 	if fullRepoRootMounted {
 		addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
+	}
+	// Docker/Podman: shadow the in-project agents root of a shared workspace
+	// mount the same way, so it is empty in the container. The Apple runtime
+	// drops --mount arguments (stripUnsupportedAppleFlags), and Kubernetes and
+	// Cloud Run build their own mounts; for those, agent state resolving only
+	// from the broker-side agent dir is the control.
+	if sharedWorkspaceAgentsMasked {
+		addArg("--mount", "type=tmpfs,destination=/workspace/.scion/agents")
 	}
 
 	// Add NET_ADMIN capability for iptables-based metadata server interception
@@ -1363,6 +1382,133 @@ func prepareContainerSecretEnv(config *RunConfig) error {
 	return nil
 }
 
+// envSizeLimit is the largest environment entry a runtime accepts.
+// maxBytes 0 means no check. When includeKey is set the limit covers the
+// whole "KEY=VALUE" string (plus its NUL terminator), as for an argv
+// string; otherwise it covers the value alone.
+type envSizeLimit struct {
+	maxBytes   int
+	includeKey bool
+}
+
+// size returns the bytes an entry counts against the limit.
+func (l envSizeLimit) size(key, value string) int {
+	if l.includeKey {
+		return len(key) + 1 + len(value) + 1
+	}
+	return len(value)
+}
+
+// exceeds reports whether key=value does not fit.
+func (l envSizeLimit) exceeds(key, value string) bool {
+	return l.maxBytes > 0 && l.size(key, value) > l.maxBytes
+}
+
+// unit names what the limit measures, for error messages.
+func (l envSizeLimit) unit() string {
+	if l.includeKey {
+		return "environment entry (KEY=VALUE)"
+	}
+	return "environment variable value"
+}
+
+// applyResolvedSecretsToEnv folds config.ResolvedSecrets into config.Env for
+// runtimes that hand the container a flat environment list (Cloud Run
+// instances and cloudrun-sandbox) rather than building it through
+// buildCommonRunArgs.
+//
+// Environment-type secrets become KEY=VALUE entries. As in Docker, a key
+// already present in config.Env wins and the secret is skipped; among
+// secrets sharing a target the later one wins (Docker keeps the last -e
+// flag). Keys this function adds itself (SCION_STAGED_SECRETS,
+// SCION_OTEL_GCP_CREDENTIALS) and any reservedKeys the runtime sets after
+// config.Env are treated the same way, so no env name is emitted twice.
+// File and variable secrets go into the SCION_STAGED_SECRETS blob via
+// prepareContainerSecretEnv, which sciontool init writes out in the
+// container.
+//
+// A secret that does not fit limit fails the call with an error naming it
+// rather than being dropped. Values are never included in the error.
+//
+// It returns the env-type secret keys it added, in order. config.Env is
+// clipped before appending, so a caller's backing array is never written.
+func applyResolvedSecretsToEnv(config *RunConfig, limit envSizeLimit, reservedKeys ...string) ([]string, error) {
+	if len(config.ResolvedSecrets) == 0 {
+		return nil, nil
+	}
+
+	staged := *config
+	staged.Env = nil
+	if err := prepareContainerSecretEnv(&staged); err != nil {
+		return nil, err
+	}
+	for _, e := range staged.Env {
+		key, val, _ := strings.Cut(e, "=")
+		if key == stagedsecrets.EnvVar && limit.exceeds(key, val) {
+			return nil, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q)",
+				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets))
+		}
+	}
+
+	envKeys := make(map[string]struct{}, len(config.Env)+len(reservedKeys)+2)
+	for _, e := range config.Env {
+		key, _, _ := strings.Cut(e, "=")
+		envKeys[key] = struct{}{}
+	}
+	// The staged keys are reserved even when this call does not set them:
+	// sciontool init reads them, so a secret must not supply them.
+	envKeys[stagedsecrets.EnvVar] = struct{}{}
+	envKeys[telemetryGCPCredentialsEnvVar] = struct{}{}
+	for _, key := range reservedKeys {
+		envKeys[key] = struct{}{}
+	}
+
+	// Collect env-type secrets in order, later duplicates replacing earlier ones.
+	var order []string
+	values := make(map[string]api.ResolvedSecret)
+	for _, s := range config.ResolvedSecrets {
+		if s.Type != "environment" && s.Type != "" {
+			continue
+		}
+		if _, collides := envKeys[s.Target]; collides {
+			continue
+		}
+		if _, seen := values[s.Target]; !seen {
+			order = append(order, s.Target)
+		}
+		values[s.Target] = s
+	}
+	for _, target := range order {
+		s := values[target]
+		if limit.exceeds(target, s.Value) {
+			return nil, fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one %s on this runtime",
+				s.Name, s.Target, limit.size(target, s.Value), limit.maxBytes, limit.unit())
+		}
+	}
+
+	config.Env = slices.Clip(config.Env)
+	for _, target := range order {
+		config.Env = append(config.Env, target+"="+values[target].Value)
+	}
+	config.Env = append(config.Env, staged.Env...)
+	return order, nil
+}
+
+// largestStagedSecretName returns the name of the largest file or variable
+// secret, i.e. the one most responsible for an oversized staged blob.
+func largestStagedSecretName(secrets []api.ResolvedSecret) string {
+	name, size := "", -1
+	for _, s := range secrets {
+		if s.Type != "file" && s.Type != "variable" {
+			continue
+		}
+		if len(s.Value) > size {
+			name, size = s.Name, len(s.Value)
+		}
+	}
+	return name
+}
+
 // serializeSecrets collects file and variable secrets into a single JSON blob,
 // base64-encodes it, and returns the encoded string suitable for injection as
 // an environment variable. Returns "" when there are no file or variable secrets.
@@ -1476,12 +1622,16 @@ func nfsOwnerIDs(uid, gid int) (int, int) {
 	return provision.DefaultOwnerID(uid), provision.DefaultOwnerID(gid)
 }
 
-// SupplementalGIDsEnvVar tells sciontool init which supplementary groups to
-// keep when it drops from root to the agent user (Go's privilege drop
-// otherwise clears them). sciontool keeps only ids that are also in its own
-// supplementary groups, i.e. ids the runtime actually granted with
-// --group-add. The broker owns it: buildCommonRunArgs drops any value from
-// template or user env, and appendSharedDirGroupArgs sets it. Mirrored in
+// SupplementalGIDsEnvVar lists the nfs shared-dir groups the runtime
+// granted. sciontool keeps only ids that are also in its own supplementary
+// groups (what the runtime actually granted), keeps them when it drops from
+// root to the agent user (Go's privilege drop otherwise clears them), and
+// clears the group bits of the umask (077 becomes 007) when any remain.
+// Both runtimes set it and own it:
+// Docker/Podman via appendSharedDirGroupArgs (buildCommonRunArgs drops
+// template or user values), Kubernetes via withSupplementalGIDsEnv with
+// the leaf gids the pod holds (supplementalGroups plus one equal to
+// fsGroup). Mirrored in
 // pkg/sciontool/suppgroups (EnvVar) (ptone/scion#3155).
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
 

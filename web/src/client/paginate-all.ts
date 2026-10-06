@@ -37,7 +37,7 @@
  * after 50 pages, and offers no way to stop the walk early.
  */
 
-import { apiFetch } from './api.js';
+import { apiErrorMessageFromBody, apiFetch } from './api.js';
 import type { ApiFetchOptions } from './api.js';
 
 /** One parsed page: its items, plus the cursor for the next page (absent/empty on the last page). */
@@ -97,12 +97,61 @@ export interface PaginateAllOptions<T> {
 const DEFAULT_MAX_PAGES = 500;
 const DEFAULT_PAGE_TIMEOUT_MS = 60_000;
 
+/** Extra context carried by a {@link PaginationError} raised for a non-2xx page response. */
+export interface PaginationErrorDetails {
+  /** HTTP status of the failed page response. */
+  status?: number;
+  /** The failed response's body: parsed JSON when it was JSON, else its text; text, including a JSON string body, is capped at 500 characters (absent if unreadable or empty). */
+  body?: unknown;
+  /** The hub's human-readable error message from a JSON body, when it had one, capped at 500 characters. */
+  hubMessage?: string;
+}
+
 /** Raised when a page request fails or times out, a response body is malformed, or pagination does not terminate within the safety bound. */
 export class PaginationError extends Error {
-  constructor(message: string) {
+  /** HTTP status, set when a page response was not ok. */
+  readonly status?: number;
+  /** The failed page response's body, set when a page response was not ok and its body was readable. */
+  readonly body?: unknown;
+  /** The hub's error message from the failed response body, when it had one. */
+  readonly hubMessage?: string;
+
+  constructor(message: string, details: PaginationErrorDetails = {}) {
     super(message);
     this.name = 'PaginationError';
+    if (details.status !== undefined) this.status = details.status;
+    if (details.body !== undefined) this.body = details.body;
+    if (details.hubMessage !== undefined) this.hubMessage = details.hubMessage;
   }
+}
+
+/** Cap on the hub message and text body kept from a failed response, so a large error page is not carried around or shown whole. */
+const MAX_ERROR_TEXT = 500;
+
+function capErrorText(text: string): string {
+  if (text.length <= MAX_ERROR_TEXT) return text;
+  // Do not split a surrogate pair (e.g. an emoji) at the cut.
+  const code = text.charCodeAt(MAX_ERROR_TEXT - 1);
+  const end = code >= 0xd800 && code <= 0xdbff ? MAX_ERROR_TEXT - 1 : MAX_ERROR_TEXT;
+  return `${text.slice(0, end)}…`;
+}
+
+/**
+ * Read a failed response's body for error reporting: parsed JSON if it is
+ * JSON, else its text. Text (including a JSON string body) is capped at
+ * {@link MAX_ERROR_TEXT} characters.
+ */
+async function readErrorBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (!text) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return capErrorText(text);
+  }
+  // A JSON string body is text too; cap it the same way.
+  return typeof parsed === 'string' ? capErrorText(parsed) : parsed;
 }
 
 /**
@@ -201,7 +250,23 @@ export async function paginateAll<T>(options: PaginateAllOptions<T>): Promise<T[
         throw err;
       }
       if (!res.ok) {
-        throw new PaginationError(`${label} request failed: ${res.status}`);
+        // Keep the hub's explanation (e.g. why a 403 was refused) instead of
+        // reporting only the status. The body read is still bounded by this
+        // page's timeout; if it cannot be read, report the status alone.
+        let body: unknown;
+        try {
+          body = await readErrorBody(res);
+        } catch {
+          if (signal?.aborted) throw walkAbortedError();
+        }
+        const details: PaginationErrorDetails = { status: res.status };
+        if (body !== undefined) details.body = body;
+        // Only a JSON error body carries a hub message; a non-JSON body
+        // (e.g. a proxy's HTML error page) is kept as text but not shown.
+        const message = typeof body === 'object' ? apiErrorMessageFromBody(body) : undefined;
+        const hubMessage = message ? capErrorText(message) : undefined;
+        if (hubMessage !== undefined) details.hubMessage = hubMessage;
+        throw new PaginationError(`${label} request failed: ${res.status}`, details);
       }
       try {
         raw = await res.json();

@@ -235,10 +235,10 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 // externalEnvValues (written for cloudrun-sandbox's argv construction) and
 // not buildBootstrapEnv's output either:
 //
-//   - externalEnvValues only covers cfg.Env and Harness.GetEnv(), and
-//     cross-checks against a final env map — it has no coverage for
-//     ResolvedAuth.EnvVars or ResolvedSecrets at all, so it must not be
-//     treated as a substitute for this function.
+//   - externalEnvValues covers cfg.Env, Harness.GetEnv() and
+//     ResolvedAuth.EnvVars, and cross-checks against a final env map — it
+//     reads ResolvedSecrets only once a runtime has folded them into
+//     cfg.Env, so it must not be treated as a substitute for this function.
 //   - buildBootstrapEnv's output isn't reusable as-is either: it adds
 //     SCION_RUNTIME=substrate, a runtime-synthesised constant that is also
 //     a substring of every one of this runtime's own error-message

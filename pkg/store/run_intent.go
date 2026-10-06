@@ -46,6 +46,16 @@ func NormalizeRunIntentTime(t time.Time) time.Time {
 	return t.UTC().Truncate(RunIntentResolution)
 }
 
+// RunIntentWrittenWithClaims reports whether a's run intent was last written
+// by code that maintains start claims: such code records run_intent_marked_at
+// equal to run_intent_at, which earlier code never writes.
+func (a *Agent) RunIntentWrittenWithClaims() bool {
+	if a == nil || a.RunIntentAt == nil || a.RunIntentMarkedAt == nil {
+		return false
+	}
+	return NormalizeRunIntentTime(*a.RunIntentAt).Equal(NormalizeRunIntentTime(*a.RunIntentMarkedAt))
+}
+
 // RunIntentMatches reports whether a's stored intent is intent, written at
 // exactly at (compared at RunIntentResolution).
 func (a *Agent) RunIntentMatches(intent RunIntent, at time.Time) bool {
