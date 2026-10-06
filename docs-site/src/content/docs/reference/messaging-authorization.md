@@ -400,7 +400,8 @@ The error message names `scion keys`; `details` carries `operation_id`,
 (`raw_combination_unsupported`) and `unsupported_capability` reasons
 (`raw_plain_conflict`, `raw_broadcast_unsupported`,
 `raw_scheduling_unsupported`, `raw_broker_ingress_unsupported`) are no longer
-returned. See [API Reference](/scion/reference/api/#agents-apiv1agents).
+returned. See [API Reference](/scion/reference/api/#agents-apiv1agents) and
+[Migrating from raw message delivery](/scion/reference/raw-message-removal/).
 
 ---
 

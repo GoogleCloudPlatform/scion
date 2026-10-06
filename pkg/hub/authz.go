@@ -120,6 +120,12 @@ type Resource struct {
 	// grant (skillProgenyAdapter, authz_skill_progeny.go) match the same
 	// column the skill list predicate filters on. Empty otherwise.
 	ScopeUserID string
+
+	// launchedTarget is the agent record the single-agent GET handlers
+	// read from the store, set only by agentStatusReadResource. The
+	// launcher status-read rule (authz_launcher_read.go) decides from it
+	// alone. It is unexported so no decoded request can carry it.
+	launchedTarget *store.Agent
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -1000,9 +1006,9 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 
 	// ── Step 9: Relationship candidates ───────────────────────────────
-	// On a kernel deny, named relationships (owner, ancestor, progeny,
-	// hub-member assign) are evaluated as typed candidates through the
-	// common stages in authz_relationship_rules.go:
+	// On a kernel deny, named relationships (owner, ancestor, launcher,
+	// progeny, hub-member assign) are evaluated as typed candidates
+	// through the common stages in authz_relationship_rules.go:
 	// relationship policy, hub-attested ancestry, relationship fact, source
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
@@ -1669,6 +1675,11 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 		Check: func(permissionID string) bool {
 			if permissionID == permissions.PermissionGCPServiceAccountUse {
 				return agentGCPServiceAccountUseScopeMatch(agent, permissionID, resource)
+			}
+			// agent.read has no agent scope. The launcher status read
+			// (authz_launcher_read.go) admits it for one stored target.
+			if permissionID == permissionAgentRead && launcherStatusReadHolds(agent, resource, ActionRead, permissionID) {
+				return true
 			}
 			_, ok := allowed[permissionID]
 			return ok

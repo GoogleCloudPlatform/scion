@@ -37,8 +37,15 @@ import (
 // It tries: 1) by ID, 2) by slug in project scope, 3) by slug in global scope.
 // Returns nil if not found, or an error for actual failures.
 func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID string) (*store.Template, error) {
+	return resolveTemplateRef(ctx, s.store, templateRef, projectID)
+}
+
+// resolveTemplateRef resolves templateRef by ID, then by slug in the
+// project's scope, then by slug in the global scope. It returns nil and no
+// error when nothing matches.
+func resolveTemplateRef(ctx context.Context, st store.Store, templateRef, projectID string) (*store.Template, error) {
 	// Try looking up by ID first (the CLI typically resolves names to IDs)
-	template, err := s.store.GetTemplate(ctx, templateRef)
+	template, err := st.GetTemplate(ctx, templateRef)
 	if err != nil && err != store.ErrNotFound {
 		return nil, err
 	}
@@ -47,7 +54,7 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID str
 	}
 
 	// Try by slug/name within project scope
-	template, err = s.store.GetTemplateBySlug(ctx, templateRef, "project", projectID)
+	template, err = st.GetTemplateBySlug(ctx, templateRef, "project", projectID)
 	if err != nil && err != store.ErrNotFound {
 		return nil, err
 	}
@@ -56,7 +63,7 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID str
 	}
 
 	// Try global scope
-	template, err = s.store.GetTemplateBySlug(ctx, templateRef, "global", "")
+	template, err = st.GetTemplateBySlug(ctx, templateRef, "global", "")
 	if err != nil && err != store.ErrNotFound {
 		return nil, err
 	}
@@ -247,9 +254,16 @@ func deepCopyScionConfig(cfg *api.ScionConfig) *api.ScionConfig {
 // template-derived fields after the initial config block has been set up.
 // It populates GitClone config from project labels for git-anchored projects, and
 // sets template ID, hash, and hub access scopes from the resolved template.
-func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+//
+// It returns an error only when the project workspace path could not be
+// resolved because workspace storage did not respond (wraps
+// errWorkspaceContentTimeout). Creating the agent anyway would leave
+// Workspace empty, and the broker would fall back to the legacy local
+// project path: the agent would run against the wrong workspace. Every other
+// failure here stays best-effort.
+func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	if agent.AppliedConfig == nil {
-		return
+		return nil
 	}
 
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
@@ -276,7 +290,11 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
 			workspacePath, err := s.hubManagedProjectPath(project.Slug)
-			if err == nil {
+			if err != nil {
+				if errors.Is(err, errWorkspaceContentTimeout) {
+					return err
+				}
+			} else {
 				agent.AppliedConfig.Workspace = workspacePath
 			}
 		}
@@ -293,6 +311,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+	return nil
 }
 
 // projectCloneSource returns the URL and branch to clone a git-anchored
@@ -359,7 +378,10 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //     default only fills a slot that request, project, AND template all
 //     left empty (design §5.2 risk (b);
 //     TestCreateAgent_HubDefaultHarnessConfig_LosesToTemplate pins this).
-func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+//
+// It returns populateAgentConfig's error: non-nil only on a workspace storage
+// timeout (errWorkspaceContentTimeout). Callers must not create the agent then.
+func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
 	// from the explicit-inputs setup) > project annotation > template default.
 	if agent.AppliedConfig.HarnessConfig == "" && project != nil && project.Annotations != nil {
@@ -384,7 +406,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 		ctx = withHubDefaultHarnessConfig(ctx)
 	}
 
-	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
+	return s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
 }
 
 // resolveDerivedConfig is fill-if-empty, not recompute-against-the-catalog:
@@ -1119,7 +1141,9 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 // checked before quota and run intent), fail the start-dispatch setup
 // (beginStartDispatchHTTP, branches 1 and 2: the quota reservation, the
 // starting-phase write, or a delete claim taking the row) or run-intent
-// bookkeeping, or get a dispatch error. The one exception is a
+// bookkeeping, or get a dispatch error, or find, after a start dispatch that
+// landed, that a delete won (409 delete_in_progress; existingAgentDeleteWon,
+// existingAgentGoneAfterLanding). The one exception is a
 // dispatch-time start-guard refusal reporting a launch already in flight,
 // which is answered like the start gate above → existingAgentStarted.
 // Branch 3 writes an error → existingAgentErrored when recording run intent,
@@ -1218,6 +1242,9 @@ func (s *Server) handleExistingAgent(
 		// The agent is marked starting for the dispatch so the quota
 		// reconcile keeps the slot (ptone/scion#2014); beginStartDispatch
 		// requires the lifecycle op.
+		// From the reservation on, the resume no longer follows the client
+		// (ptone/scion#1961); the dispatch is bounded by syncDispatch.
+		ctx = detachLaunchFromClient(ctx)
 		defer s.beginLifecycleOp(existingAgent.ID)()
 		sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 		if !ok {
@@ -1232,7 +1259,9 @@ func (s *Server) handleExistingAgent(
 			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
+		if err := syncDispatch(ctx, func(dctx context.Context) error {
+			return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, resume)
+		}); err != nil {
 			sd.rollback(ctx)
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
@@ -1253,6 +1282,9 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
+		if s.existingAgentDeleteWon(ctx, w, sd, existingAgent.ID) {
+			return existingAgentErrored
+		}
 
 		if existingAgent.Phase == string(state.PhaseSuspended) {
 			existingAgent.Phase = string(state.PhaseRunning)
@@ -1269,6 +1301,9 @@ func (s *Server) handleExistingAgent(
 		existingAgent.Message = ""
 		existingAgent.StalledFromActivity = ""
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			if s.existingAgentGoneAfterLanding(ctx, w, sd, existingAgent.ID, err) {
+				return existingAgentErrored
+			}
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
 		sd.settle()
@@ -1335,6 +1370,10 @@ func (s *Server) handleExistingAgent(
 			// starting for the dispatch so the quota reconcile keeps the
 			// slot (ptone/scion#2014); beginStartDispatch requires the
 			// lifecycle op.
+			// From the reservation on, the restart no longer follows the
+			// client (ptone/scion#1961); the dispatch is bounded by
+			// syncDispatch.
+			ctx = detachLaunchFromClient(ctx)
 			defer s.beginLifecycleOp(existingAgent.ID)()
 			sd, ok := s.beginStartDispatchHTTP(ctx, w, existingAgent)
 			if !ok {
@@ -1345,7 +1384,9 @@ func (s *Server) handleExistingAgent(
 				writeRunIntentError(w, err, existingAgent.ID)
 				return existingAgentErrored
 			}
-			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
+			if err := syncDispatch(ctx, func(dctx context.Context) error {
+				return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, forcedRecovery)
+			}); err != nil {
 				sd.rollback(ctx)
 				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 					return res
@@ -1366,6 +1407,9 @@ func (s *Server) handleExistingAgent(
 				}
 				return existingAgentErrored
 			}
+			if s.existingAgentDeleteWon(ctx, w, sd, existingAgent.ID) {
+				return existingAgentErrored
+			}
 
 			existingAgent.Phase = string(state.PhaseRunning)
 			// Clear any exit reason/code left from the prior generation —
@@ -1381,6 +1425,9 @@ func (s *Server) handleExistingAgent(
 			existingAgent.Message = ""
 			existingAgent.StalledFromActivity = ""
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
+				if s.existingAgentGoneAfterLanding(ctx, w, sd, existingAgent.ID, err) {
+					return existingAgentErrored
+				}
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
 			sd.settle()
@@ -1491,11 +1538,16 @@ func (s *Server) handleExistingAgent(
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
+		// From here the start no longer follows the client
+		// (ptone/scion#1961); the dispatch is bounded by syncDispatch.
+		ctx = detachLaunchFromClient(ctx)
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
 			writeRunIntentError(w, err, existingAgent.ID)
 			return existingAgentErrored
 		}
-		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+		if err := syncDispatch(ctx, func(dctx context.Context) error {
+			return dispatcher.DispatchAgentStart(dctx, existingAgent, req.Task, false)
+		}); err != nil {
 			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
 				return res
 			}
@@ -1515,6 +1567,9 @@ func (s *Server) handleExistingAgent(
 			}
 			return existingAgentErrored
 		}
+		if s.existingAgentDeleteWon(ctx, w, nil, existingAgent.ID) {
+			return existingAgentErrored
+		}
 
 		// If the broker didn't set a running phase, default to running.
 		if existingAgent.Phase == string(state.PhaseCreated) ||
@@ -1526,6 +1581,9 @@ func (s *Server) handleExistingAgent(
 		existingAgent.ExitReason = ""
 		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
+			if s.existingAgentGoneAfterLanding(ctx, w, nil, existingAgent.ID, err) {
+				return existingAgentErrored
+			}
 			// Log but continue — agent was started.
 			s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)
 		}
@@ -2252,4 +2310,32 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 	}
 
 	return false, nil
+}
+
+// existingAgentDeleteWon answers 409 delete_in_progress when the broker start
+// of an existing agent landed but a delete won while the broker call was in
+// flight (deleteWonAfterLanding), as the lifecycle start does
+// (ptone/scion#3255). The dispatch has already tried to remove the landed run
+// (compensateLandedRun); its outcome is in the dispatch warnings. The delete
+// engine owns the row and its reservation, so sd is settled, not rolled
+// back, and nothing is written. It reports whether it answered.
+func (s *Server) existingAgentDeleteWon(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string) bool {
+	if !s.deleteWonAfterLanding(ctx, agentID) {
+		return false
+	}
+	sd.settle()
+	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
+	return true
+}
+
+// existingAgentGoneAfterLanding is the same answer when the post-start write
+// finds the row gone (hard-deleted after the re-read). It reports whether it
+// answered.
+func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.ResponseWriter, sd *startDispatch, agentID string, err error) bool {
+	if !errors.Is(err, store.ErrNotFound) {
+		return false
+	}
+	sd.settle()
+	writeDeleteWon(w, agentID, deletedWhileStartingMessage, dispatchWarningsFromContext(ctx))
+	return true
 }

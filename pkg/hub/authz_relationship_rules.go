@@ -175,8 +175,8 @@ func isHubScopedServiceAccount(resource Resource) bool {
 	return resource.Type == "gcp_service_account" && resource.ParentType == "" && resource.ParentID == ""
 }
 
-// relationshipCandidates lists, in a stable order (ancestor, owner,
-// hub-member assign, creator skill, progeny), the relationships that
+// relationshipCandidates lists, in a stable order (ancestor, launcher,
+// owner, hub-member assign, creator skill, progeny), the relationships that
 // structurally hold for this principal and resource.
 func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resource Resource, action Action, permissionID string) []relationshipCandidate {
 	var out []relationshipCandidate
@@ -193,6 +193,13 @@ func (a *AuthzService) relationshipCandidates(principal PrincipalContext, resour
 				MatchedGrant: "ancestor",
 			},
 		})
+	}
+
+	// Launcher: an agent reading the status of an agent it directly
+	// launched (authz_launcher_read.go). Decided from the target's stored
+	// record, never from the caller's ancestry claim.
+	if c, ok := launcherCandidate(principal, resource, action, permissionID); ok {
+		out = append(out, c)
 	}
 
 	// Owner: a user principal that owns the resource. Assign on a hub-scoped
