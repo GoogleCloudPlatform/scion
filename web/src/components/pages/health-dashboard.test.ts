@@ -69,7 +69,10 @@ describe('buildStallConfigUpdate', () => {
           soft_delete_retain_files: false,
         },
       },
-      section_metadata: { lifecycle: { revision: 4 }, access: { revision: 9 } },
+      section_metadata: {
+        lifecycle: { source: 'db', revision: 4 },
+        access: { source: 'db', revision: 9 },
+      },
     };
     expect(buildStallConfigUpdate(current, true)).toEqual({
       server: {
@@ -84,8 +87,20 @@ describe('buildStallConfigUpdate', () => {
     });
   });
 
-  it('omits the revision when the lifecycle section is not in the DB', () => {
-    const body = buildStallConfigUpdate({ section_metadata: { lifecycle: { revision: 0 } } }, true);
+  it('sends create-only revision 0 when the lifecycle row is not in the DB yet', () => {
+    for (const lifecycle of [
+      { source: 'default', revision: 0 },
+      { source: 'file' },
+      { source: 'db', revision: 0 },
+    ]) {
+      expect(
+        buildStallConfigUpdate({ section_metadata: { lifecycle } }, true).expected_revisions
+      ).toEqual({ lifecycle: 0 });
+    }
+  });
+
+  it('sends no revision on a file-backed hub (no section metadata)', () => {
+    const body = buildStallConfigUpdate({ server: { hub: { stalled_threshold: '5m' } } }, true);
     expect(body).not.toHaveProperty('expected_revisions');
   });
 });

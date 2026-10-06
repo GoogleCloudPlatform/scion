@@ -88,7 +88,8 @@ export interface ServerConfigSnapshot {
       soft_delete_retain_files?: boolean;
     };
   };
-  section_metadata?: Record<string, { revision?: number }>;
+  /** Present on a DB-backed hub only; absent in file mode. */
+  section_metadata?: Record<string, { source?: string; revision?: number }>;
 }
 
 /**
@@ -99,9 +100,13 @@ export interface ServerConfigSnapshot {
  * "server.hub.auto_suspend_stalled" is silently dropped and the PUT still
  * returns 200 (ptone/scion#3059). A DB-backed hub also replaces the whole
  * lifecycle row, keeping only the start-claim keys a PUT omits, so the other
- * lifecycle keys are carried over from `current`. When the lifecycle row
- * exists in the DB, its revision is sent so a concurrent edit gets a 409
- * instead of being overwritten (a file-backed hub ignores it).
+ * lifecycle keys are carried over from `current`.
+ *
+ * On a DB-backed hub (section_metadata present) the write is a CAS: when the
+ * lifecycle row exists its revision is sent, otherwise revision 0, which the
+ * store treats as create-only. Either way a concurrent edit gets a 409
+ * instead of being overwritten. A file-backed hub sends no metadata and gets
+ * no expected_revisions.
  */
 export function buildStallConfigUpdate(
   current: ServerConfigSnapshot,
@@ -115,8 +120,16 @@ export function buildStallConfigUpdate(
     hub.soft_delete_retain_files = curHub.soft_delete_retain_files;
   }
   const body: Record<string, unknown> = { server: { hub } };
-  const rev = current.section_metadata?.lifecycle?.revision;
-  if (typeof rev === 'number' && rev > 0) body.expected_revisions = { lifecycle: rev };
+  const meta = current.section_metadata;
+  if (meta) {
+    const lifecycle = meta.lifecycle;
+    const rev = lifecycle?.revision;
+    if (lifecycle?.source === 'db' && typeof rev === 'number' && rev > 0) {
+      body.expected_revisions = { lifecycle: rev };
+    } else if (lifecycle) {
+      body.expected_revisions = { lifecycle: 0 };
+    }
+  }
   return body;
 }
 
