@@ -820,7 +820,20 @@ func waitForSandboxLiveness(ctx context.Context, delays []time.Duration, probe f
 	return probeErr
 }
 
+// sandboxMaxEnvValueBytes bounds a single env value passed to the sandbox
+// CLI. Each value travels as one "--env KEY=VALUE" argv string, which Linux
+// caps at 128 KiB (MAX_ARG_STRLEN); the margin leaves room for the key.
+const sandboxMaxEnvValueBytes = 128*1024 - 256
+
 func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	// Fold resolved secrets into cfg.Env before anything is created and
+	// before envFor reads it, so they reach the sandbox as --env values and
+	// are covered by the error-output redaction (externalEnvValues reads
+	// cfg.Env).
+	if err := applyResolvedSecretsToEnv(&cfg, sandboxMaxEnvValueBytes); err != nil {
+		return "", fmt.Errorf("cloudrun-sandbox: %w", err)
+	}
+
 	slug := sanitizeSandboxName(cfg.Name)
 
 	// OQ-14 (§11.12) proved that Vertex AI and gcloud-adc auth modes work

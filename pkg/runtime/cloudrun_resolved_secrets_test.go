@@ -161,3 +161,106 @@ func TestCloudRunSandboxRun_DeliversResolvedSecrets(t *testing.T) {
 	}
 	assertResolvedSecretsInEnv(t, env)
 }
+
+func TestApplyResolvedSecretsToEnv_CollisionKeepsCfgEnv(t *testing.T) {
+	cfg := RunConfig{
+		UnixUsername: "scion",
+		Env:          []string{"PRESET_KEY=from-env"},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "dup", Type: "environment", Target: "PRESET_KEY", Value: "from-secret"},
+			{Name: "a1", Type: "environment", Target: "SAME_TARGET", Value: "first-value"},
+			{Name: "a2", Type: "", Target: "SAME_TARGET", Value: "second-value"},
+		},
+	}
+	if err := applyResolvedSecretsToEnv(&cfg, cloudRunMaxEnvValueBytes); err != nil {
+		t.Fatalf("applyResolvedSecretsToEnv: %v", err)
+	}
+	want := []string{"PRESET_KEY=from-env", "SAME_TARGET=second-value"}
+	if strings.Join(cfg.Env, "\n") != strings.Join(want, "\n") {
+		t.Errorf("Env = %q, want %q", cfg.Env, want)
+	}
+}
+
+func TestCloudRunRun_OversizedSecretFailsWithName(t *testing.T) {
+	big := strings.Repeat("x", cloudRunMaxEnvValueBytes+1)
+	cases := []struct {
+		name    string
+		secret  api.ResolvedSecret
+		wantErr string
+	}{
+		{"environment", api.ResolvedSecret{Name: "big-env", Type: "environment", Target: "BIG_ENV", Value: big}, `"big-env"`},
+		{"file", api.ResolvedSecret{Name: "big-file", Type: "file", Target: "/home/scion/big.bin", Value: big}, `"big-file"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeInstancesClient{getErr: notFoundErr()}
+			rt := newFakeCloudRunRuntime(t, fake)
+			cfg := runConfigForTest()
+			cfg.UnixUsername = "scion"
+			cfg.ResolvedSecrets = []api.ResolvedSecret{
+				{Name: "small", Type: "environment", Target: "SMALL", Value: "fits"},
+				tc.secret,
+			}
+			_, err := rt.Run(context.Background(), cfg)
+			if err == nil {
+				t.Fatal("Run succeeded; want an error for the oversized secret")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not name secret %s", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "xxxxxxxx") {
+				t.Error("error message contains the secret value")
+			}
+			if len(fake.createReqs) != 0 {
+				t.Errorf("CreateInstance called %d times, want 0", len(fake.createReqs))
+			}
+		})
+	}
+}
+
+func TestCloudRunSandboxRun_ErrorRedactsResolvedSecretValue(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockBin := writeFakeSandbox(t, tmpDir, true) // echoes argv to stderr, exits 1
+	homeDir := filepath.Join(tmpDir, "agent-home")
+	if err := os.MkdirAll(homeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rt := &CloudRunSandboxRuntime{
+		bin:          mockBin,
+		state:        newSandboxStateStore(filepath.Join(tmpDir, "state.json")),
+		rootDir:      filepath.Join(tmpDir, "scion"),
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+	cfg := RunConfig{
+		Name:         "redact-probe",
+		HomeDir:      homeDir,
+		Workspace:    filepath.Join(tmpDir, "workspace"),
+		Image:        "omni-image",
+		UnixUsername: "scion",
+		Harness:      &mockHarness{command: []string{"/bin/true"}},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "api-key", Type: "environment", Target: "EXAMPLE_API_KEY", Value: crTestEnvSecretValue},
+			{Name: "creds", Type: "file", Target: crTestFileTarget, Value: crTestFileSecretValue},
+		},
+	}
+	if err := os.MkdirAll(cfg.Workspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() returned nil error, but the fake sandbox binary exits 1")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "--allow-egress") {
+		t.Fatalf("error does not carry the echoed sandbox argv, so the check is vacuous: %q", msg)
+	}
+	if strings.Contains(msg, crTestEnvSecretValue) {
+		t.Errorf("error output contains the env-type secret value: %q", msg)
+	}
+	if !strings.Contains(msg, "EXAMPLE_API_KEY") {
+		t.Errorf("error output should still name the redacted key: %q", msg)
+	}
+	if strings.Contains(msg, stagedsecrets.EnvVar+"=ey") {
+		t.Errorf("error output contains the staged secrets blob: %q", msg)
+	}
+}

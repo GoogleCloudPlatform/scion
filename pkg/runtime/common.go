@@ -1126,6 +1126,90 @@ func prepareContainerSecretEnv(config *RunConfig) error {
 	return nil
 }
 
+// applyResolvedSecretsToEnv folds config.ResolvedSecrets into config.Env for
+// runtimes that hand the container a flat environment list (Cloud Run
+// instances and cloudrun-sandbox) rather than building it through
+// buildCommonRunArgs.
+//
+// Environment-type secrets become KEY=VALUE entries. As in the Docker and k8s
+// runtimes, a key already present in config.Env wins and the secret is
+// skipped; among secrets sharing a target the later one wins. File and
+// variable secrets go into the SCION_STAGED_SECRETS blob via
+// prepareContainerSecretEnv, which sciontool init writes out in the container.
+//
+// maxValueBytes is the largest single variable value the runtime accepts
+// (0 means no check). A secret that does not fit fails the call with an
+// error naming it, so no secret is ever dropped silently. Values are never
+// included in the error.
+func applyResolvedSecretsToEnv(config *RunConfig, maxValueBytes int) error {
+	if len(config.ResolvedSecrets) == 0 {
+		return nil
+	}
+
+	envKeys := make(map[string]struct{}, len(config.Env))
+	for _, e := range config.Env {
+		key, _, _ := strings.Cut(e, "=")
+		envKeys[key] = struct{}{}
+	}
+
+	// Collect env-type secrets in order, later duplicates replacing earlier ones.
+	var order []string
+	values := make(map[string]api.ResolvedSecret)
+	for _, s := range config.ResolvedSecrets {
+		if s.Type != "environment" && s.Type != "" {
+			continue
+		}
+		if _, collides := envKeys[s.Target]; collides {
+			continue
+		}
+		if _, seen := values[s.Target]; !seen {
+			order = append(order, s.Target)
+		}
+		values[s.Target] = s
+	}
+	for _, target := range order {
+		s := values[target]
+		if maxValueBytes > 0 && len(s.Value) > maxValueBytes {
+			return fmt.Errorf("secret %q (env %s) is %d bytes, over the %d-byte limit for one environment variable on this runtime",
+				s.Name, s.Target, len(s.Value), maxValueBytes)
+		}
+	}
+
+	staged := *config
+	staged.Env = nil
+	if err := prepareContainerSecretEnv(&staged); err != nil {
+		return err
+	}
+	for _, e := range staged.Env {
+		key, val, _ := strings.Cut(e, "=")
+		if key == stagedsecrets.EnvVar && maxValueBytes > 0 && len(val) > maxValueBytes {
+			return fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one environment variable on this runtime (largest secret: %q)",
+				stagedsecrets.EnvVar, len(val), maxValueBytes, largestStagedSecretName(config.ResolvedSecrets))
+		}
+	}
+
+	for _, target := range order {
+		config.Env = append(config.Env, target+"="+values[target].Value)
+	}
+	config.Env = append(config.Env, staged.Env...)
+	return nil
+}
+
+// largestStagedSecretName returns the name of the largest file or variable
+// secret, i.e. the one most responsible for an oversized staged blob.
+func largestStagedSecretName(secrets []api.ResolvedSecret) string {
+	name, size := "", -1
+	for _, s := range secrets {
+		if s.Type != "file" && s.Type != "variable" {
+			continue
+		}
+		if len(s.Value) > size {
+			name, size = s.Name, len(s.Value)
+		}
+	}
+	return name
+}
+
 // serializeSecrets collects file and variable secrets into a single JSON blob,
 // base64-encodes it, and returns the encoded string suitable for injection as
 // an environment variable. Returns "" when there are no file or variable secrets.

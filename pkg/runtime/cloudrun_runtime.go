@@ -203,12 +203,23 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 	return cloudrun.NewInstancesClient(ctx)
 }
 
+// cloudRunMaxEnvValueBytes is Cloud Run's size cap for a single environment
+// variable value (32 KiB).
+const cloudRunMaxEnvValueBytes = 32 * 1024
+
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
 	// Checked before anything is resolved or provisioned: this runtime
 	// always mounts the project's shared NFS workspace (see
 	// provisionCloudRunNFS), which would break empty-per-agent isolation.
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
 		return "", err
+	}
+	// Deliver resolved secrets through the instance env: env-type secrets as
+	// plain variables, file/variable secrets as the staged blob that
+	// sciontool init writes out. Done before any provisioning so an
+	// oversized secret fails fast.
+	if err := applyResolvedSecretsToEnv(&cfg, cloudRunMaxEnvValueBytes); err != nil {
+		return "", fmt.Errorf("cloudrun: %w", err)
 	}
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
