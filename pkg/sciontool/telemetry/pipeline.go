@@ -153,9 +153,9 @@ const (
 	// UsageActivationRuntimeEnvPrecedence means SCION_USAGE_SOURCE is
 	// present in this process's environment (even if empty), and so wins.
 	UsageActivationRuntimeEnvPrecedence UsageActivation = "runtime SCION_USAGE_SOURCE takes precedence"
-	// UsageActivationNotRunning means the pipeline is nil, not started, or
-	// has no bound loopback config (which cannot happen once Start has
-	// succeeded, so in practice it means nil or not started).
+	// UsageActivationNotRunning is returned when the pipeline is nil, has
+	// not been started, has been stopped, or has no bound loopback config
+	// (which cannot happen once Start has succeeded).
 	UsageActivationNotRunning UsageActivation = "telemetry pipeline is not running"
 	// UsageActivationAlreadyActive means a deriver with rules is already in
 	// place and is left untouched.
@@ -182,7 +182,9 @@ const (
 //   - an already-active deriver is left untouched, so usage is never counted
 //     twice;
 //   - SCION_HARNESS gating still applies: a harness with no native rule stays
-//     a no-op.
+//     a no-op;
+//   - activation is refused before Start and after Stop (this assumes Stop
+//     completed; sciontool init activates once, before any Stop).
 //
 // It returns UsageActivated when a new deriver was stored, and otherwise the
 // reason it was skipped.
