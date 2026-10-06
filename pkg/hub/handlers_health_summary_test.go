@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -301,4 +302,62 @@ func TestHandleHealthSummary_ViaRouter(t *testing.T) {
 	// Without auth, the auth middleware may return 401 or the handler returns 403
 	assert.True(t, rr.Code == http.StatusForbidden || rr.Code == http.StatusUnauthorized,
 		"unauthenticated request should be rejected, got %d", rr.Code)
+}
+
+// TestHandleHealthSummary_SurfacesNonHealthyChecks: a degraded hub must carry
+// its cause in the summary, not only the database check (ptone/scion#1094).
+func TestHandleHealthSummary_SurfacesNonHealthyChecks(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.ExpectEmbeddedBroker()
+	srv.EmbeddedBrokerRegistrationFailed(errors.New("boom"))
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "degraded", resp.Status)
+	assert.Equal(t, "degraded", resp.Hub.Status)
+	assert.Equal(t, "healthy", resp.Database.Status, "database itself is fine; the cause is elsewhere")
+	assert.Equal(t, "unhealthy: registration failed", resp.Hub.Checks["colocated_broker"])
+	assert.Equal(t, []string{"colocated_broker: unhealthy: registration failed"}, resp.Hub.UnhealthyChecks)
+}
+
+// TestHandleHealthSummary_HealthyHasNoUnhealthyChecks: the cause list is
+// omitted when everything is healthy.
+func TestHandleHealthSummary_HealthyHasNoUnhealthyChecks(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "healthy", resp.Status)
+	assert.Empty(t, resp.Hub.UnhealthyChecks)
+	assert.Equal(t, "healthy", resp.Hub.Checks["database"])
+}
+
+// TestHandleHealthSummary_UnhealthyNotDowngraded: degrading signals (stalled
+// agents, offline brokers, aggregation errors) only raise severity, so an
+// unhealthy hub stays unhealthy in the summary.
+func TestHandleHealthSummary_UnhealthyNotDowngraded(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     tid("summary-offline-broker"),
+		Name:   "offline-broker",
+		Slug:   "offline-broker",
+		Status: store.BrokerStatusOffline,
+	}))
+	srv.store = pingFailStore{srv.store}
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "unhealthy", resp.Status)
+	assert.Equal(t, "unhealthy", resp.Database.Status)
+	assert.Contains(t, resp.Hub.UnhealthyChecks, "database: unhealthy")
 }

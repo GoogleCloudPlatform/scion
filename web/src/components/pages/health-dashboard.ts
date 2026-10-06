@@ -44,6 +44,10 @@ interface HealthSummary {
     connected_brokers: number;
     active_agents: number;
     projects: number;
+    /** The hub's /healthz check map. */
+    checks?: Record<string, string>;
+    /** Non-healthy checks as "key: value" — the cause of a degraded/unhealthy hub. */
+    unhealthy_checks?: string[];
   };
   database: {
     status: string;
@@ -325,6 +329,12 @@ export class ScionPageHealthDashboard extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .check-problem {
+      font-size: 0.8125rem;
+      padding: 0.125rem 0 0.25rem;
+      word-break: break-word;
+    }
+
     .broker-grid {
       display: flex;
       flex-wrap: wrap;
@@ -595,6 +605,12 @@ export class ScionPageHealthDashboard extends LitElement {
           >
           ${d.hub.status}
         </div>
+        ${(d.hub.unhealthy_checks ?? []).map(
+          (c) =>
+            html`<div class="check-problem" style="color: ${this.statusColor(d.hub.status)}">
+              ${c}
+            </div>`
+        )}
         <div class="stat-row"><span class="label">Uptime</span><span>${d.hub.uptime}</span></div>
         <div class="stat-row"><span class="label">Version</span><span>${d.hub.version}</span></div>
         <div class="stat-row">

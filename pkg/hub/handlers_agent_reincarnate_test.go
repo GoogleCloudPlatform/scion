@@ -695,7 +695,7 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			// populateAgentConfig's GitClone/Workspace conditions ever
 			// change shape again without a matching gate update.
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 
 			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 				a.AppliedConfig.GitClone = probe.AppliedConfig.GitClone
@@ -788,7 +788,7 @@ func TestReincarnateAgent_ExplicitMountWorkspace_Eligible(t *testing.T) {
 			require.NoError(t, s.UpdateProject(ctx, project))
 
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: an explicit-mount agent must have no GitClone")
 			require.NotEmpty(t, probe.AppliedConfig.Workspace, "fixture check: populateAgentConfig must set an explicit Workspace")
 
@@ -838,7 +838,7 @@ func TestReincarnateAgent_ModeSwitchedToShared_Returns400(t *testing.T) {
 	// Build the agent's config the way create actually would, while the
 	// project was still clone-per-agent.
 	probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-	srv.populateAgentConfig(ctx, probe, project, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 	require.NotNil(t, probe.AppliedConfig.GitClone, "fixture check: a clone-per-agent project must produce a GitClone")
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
@@ -924,7 +924,7 @@ func TestReincarnateAgent_ModeSwitchedToCloneOnly_Returns400(t *testing.T) {
 			// Build the agent's config the way create actually would, under
 			// the ORIGINAL mode.
 			probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-			srv.populateAgentConfig(ctx, probe, project, nil)
+			require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 			require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: this project must produce no GitClone before any switch")
 			require.NotEmpty(t, probe.AppliedConfig.Workspace, "fixture check: populateAgentConfig must set an explicit Workspace")
 
@@ -1003,7 +1003,7 @@ func TestReincarnateAgent_LinkedSharedProject_ClearedWorkspace_Returns400(t *tes
 	}))
 
 	probe := &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}
-	srv.populateAgentConfig(ctx, probe, project, nil)
+	require.NoError(t, srv.populateAgentConfig(ctx, probe, project, nil))
 	require.Nil(t, probe.AppliedConfig.GitClone, "fixture check: a shared-workspace project must produce no GitClone")
 	require.True(t, filepath.IsAbs(probe.AppliedConfig.Workspace), "fixture check: populateAgentConfig's Workspace for a shared project must be absolute")
 
