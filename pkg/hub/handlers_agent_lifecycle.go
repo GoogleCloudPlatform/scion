@@ -776,10 +776,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if hasBroker {
 			// Restart is implemented as stop + start so that env vars
 			// (API keys, secrets) are re-resolved from Hub storage.
-			// Stop errors are tolerated: the container may already be
-			// exited and some runtimes (podman) return non-standard
-			// errors for stopping non-running containers. The subsequent
-			// Start will handle cleanup of the exited container.
+			// The broker already answers a stop of an exited or absent
+			// container with success (runtimebroker stopAgent), so the
+			// start leg only runs once the old instance is known to be
+			// down (ptone/scion#2710).
 			stopErr := syncDispatch(ctx, func(dctx context.Context) error {
 				return dispatcher.DispatchAgentStop(dctx, agent)
 			})
@@ -793,7 +793,22 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			if stopErr != nil {
-				slog.Warn("Restart: stop dispatch failed, proceeding with start",
+				if !isRestartStopTolerable(stopErr) {
+					// The old instance may still be running (for example,
+					// the broker could not reach or resolve it), and a
+					// start now could leave two instances. Abort before
+					// the start leg. The rollback restores the pre-restart
+					// phase and undoes only a reservation this call made,
+					// so a running agent keeps the slot it already held.
+					slog.Warn("Restart: stop dispatch failed, not starting",
+						"agent_id", id, "error", stopErr)
+					sd.rollback(ctx)
+					writeRestartStopFailed(w, stopErr)
+					return
+				}
+				// The broker reports no running instance: the stop's goal
+				// is met, so continue as after a clean stop.
+				slog.Info("Restart: agent not running on broker, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
 			// The dying container's own status report (phase stopped)
@@ -831,12 +846,13 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// is conditional on the row still reading starting,
 					// so it leaves the engine's phase alone.
 					sd.rollback(ctx)
-				} else if stopErr == nil {
-					// The stop leg succeeded, so the container is down:
-					// release the slot and record the stopped state as an
-					// explicit stop would, so the agent does not keep
-					// showing its pre-restart phase until the next
-					// heartbeat.
+				} else {
+					// The start leg only runs after the stop leg succeeded
+					// or reported no running instance (any other stop error
+					// returns above), so the container is down: release the
+					// slot and record the stopped state as an explicit stop
+					// would, so the agent does not keep showing its
+					// pre-restart phase until the next heartbeat.
 					sd.settle()
 					// Guard on the run this restart left on the row: the
 					// failed start leg may keep the run it minted (or the
@@ -845,11 +861,6 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					if s.recordRestartStopped(ctx, agent.ID, agent.RunID) {
 						s.releaseBrokerQuota(ctx, agent)
 					}
-				} else {
-					// The container may still be running: keep a
-					// reservation this call did not create, and
-					// restore the phase.
-					sd.rollback(ctx)
 				}
 			}
 		}
