@@ -92,8 +92,11 @@ func TestHandleHealthSummary_ResponseShape(t *testing.T) {
 	// Verify dispatch is nil (no dispatch metrics available yet)
 	assert.Nil(t, resp.Dispatch)
 
-	// Verify stall config has defaults
-	assert.Equal(t, 300, resp.Stall.ThresholdSeconds, "default stalled threshold should be 5 minutes (300s)")
+	// Stall settings are configuration, not health: they are edited on the
+	// Server Config page and are not part of the health summary.
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+	assert.NotContains(t, raw, "stall_config", "health summary must not carry stall settings")
 }
 
 func TestHandleHealthSummary_AgentAggregation(t *testing.T) {
