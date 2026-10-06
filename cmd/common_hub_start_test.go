@@ -547,6 +547,12 @@ func TestNonInteractiveBrokerMessage(t *testing.T) {
 			want:       "Default runtime broker is unavailable: multiple runtime brokers available, specify a broker with --broker <name>",
 		},
 		{
+			name:       "non-map broker entry is skipped",
+			hubMessage: "Default runtime broker is unavailable; specify an alternative",
+			brokers:    []interface{}{"not-a-map", map[string]interface{}{"id": "b1", "name": "laptop"}, map[string]interface{}{"id": "b2", "name": "server"}},
+			want:       `Default runtime broker is unavailable: multiple runtime brokers available ("laptop", "server"), specify a broker with --broker <name>`,
+		},
+		{
 			name:       "unrecognised hub reason is kept verbatim",
 			hubMessage: "Broker pool exhausted",
 			brokers:    one,

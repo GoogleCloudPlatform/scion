@@ -1758,7 +1758,10 @@ func createAgentWithBrokerResolution(ctx context.Context, hubCtx *HubContext, pr
 func nonInteractiveBrokerMessage(hubMessage string, brokers []interface{}) string {
 	names := make([]string, 0, len(brokers))
 	for _, b := range brokers {
-		m, _ := b.(map[string]interface{})
+		m, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
 		name, _ := m["name"].(string)
 		if name == "" {
 			name, _ = m["id"].(string)
