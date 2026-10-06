@@ -1244,7 +1244,7 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 // supplementary groups, i.e. ids the runtime actually granted with
 // --group-add. The broker owns it: buildCommonRunArgs drops any value from
 // template or user env, and appendSharedDirGroupArgs sets it. Mirrored in
-// pkg/sciontool/supervisor (ptone/scion#3155).
+// pkg/sciontool/suppgroups (EnvVar) (ptone/scion#3155).
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
 
 // sharedDirGroups returns the guarded nfs shared-dir leaf groups for config,
