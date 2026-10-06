@@ -523,10 +523,11 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // written as the retryable 503 from writeSavedProfileUnresolved; its text is
 // client-safe by construction.
 //
-// A *startContextError whose OriginalErr is a missing local file
-// (fs.ErrNotExist) is written as a 422 template_error by
-// writeMissingLocalFileError, ahead of the Hub-connectivity check, unless
-// it already carries an explicit 4xx Status.
+// Within that Hub branch, a missing local file (OriginalErr matches
+// fs.ErrNotExist) is checked first and written as a 422 template_error by
+// writeMissingLocalFileError. Like the rest of the Hub branch, this runs
+// ahead of, and regardless of, any explicit Status. A missing file outside
+// template/harness-config hydration (IsHubError false) is not affected.
 //
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
@@ -559,17 +560,19 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		RuntimeError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
-	// A missing local file is checked ahead of the Hub-connectivity
-	// classification: *fs.PathError satisfies net.Error (it has Timeout and
-	// Temporary methods), so IsHubConnectivityError would otherwise report a
-	// file the broker could not find as a 503 hub_unreachable, even though
-	// the Hub answered (ptone/scion#3531). An explicit 4xx Status still wins.
-	if !(sce.Status >= 400 && sce.Status < 500) && errors.Is(sce.OriginalErr, fs.ErrNotExist) {
-		s.agentLifecycleLog.Warn("buildStartContext failed: local file missing", "op", op, "error", startContextDiagnostic(sce))
-		writeMissingLocalFileError(w, sce.OriginalErr, op)
-		return http.StatusUnprocessableEntity
-	}
 	if sce.IsHubError {
+		// A missing local file is checked ahead of the Hub-connectivity
+		// classification: *fs.PathError satisfies net.Error (it has Timeout
+		// and Temporary methods), so IsHubConnectivityError would otherwise
+		// report a file the broker could not find as a 503 hub_unreachable,
+		// even though the Hub answered (ptone/scion#3531). errors.Is sees
+		// through the templatecache.HubConnectivityError the resolver wraps
+		// such a failure in, via its Unwrap method.
+		if errors.Is(sce.OriginalErr, fs.ErrNotExist) {
+			s.agentLifecycleLog.Warn("buildStartContext failed: local file missing", "op", op, "error", startContextDiagnostic(sce))
+			writeMissingLocalFileError(w, sce.OriginalErr, op)
+			return http.StatusUnprocessableEntity
+		}
 		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
 			HubUnreachableError(w, sce.OriginalErr.Error())
 			return http.StatusServiceUnavailable

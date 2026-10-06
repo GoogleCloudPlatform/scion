@@ -390,22 +390,24 @@ func TestWriteStartContextError_MissingLocalFileIsNotHubUnreachable(t *testing.T
 		t.Fatalf("precondition changed: IsHubConnectivityError(%v) = false; the regression this test guards may no longer be reachable", readErr)
 	}
 
-	// Shaped as hydrateHarnessConfig/hydrateTemplate failures arrive: the
-	// resolver wraps the transfer client's read error, and buildStartContext
-	// marks it IsHubError.
-	wrapped := fmt.Errorf("failed to download file settings.json: %w", readErr)
-
 	tests := []struct {
 		name string
 		sce  *startContextError
 	}{
 		{
-			name: "harness-config hydration",
+			// The production shape: templatecache.Resolver.Resolve checks
+			// IsHubConnectivityError on the transfer client's read error
+			// first, which is true for a *fs.PathError, so it returns
+			// &HubConnectivityError{Cause: readErr}. hydrateHarnessConfig
+			// and hydrateTemplate return that as is, and buildStartContext
+			// marks it IsHubError. The fix depends on HubConnectivityError
+			// unwrapping to its cause; this case pins that.
+			name: "harness-config hydration, resolver-wrapped HubConnectivityError",
 			sce: &startContextError{
 				Status:      http.StatusInternalServerError,
-				Message:     "Failed to hydrate harness-config: " + wrapped.Error(),
+				Message:     "Failed to hydrate harness-config: hub is unreachable: " + readErr.Error(),
 				IsHubError:  true,
-				OriginalErr: wrapped,
+				OriginalErr: &templatecache.HubConnectivityError{Cause: readErr},
 			},
 		},
 		{
@@ -418,11 +420,24 @@ func TestWriteStartContextError_MissingLocalFileIsNotHubUnreachable(t *testing.T
 			},
 		},
 		{
-			name: "non-hub start-context step",
+			name: "template hydration, fmt-wrapped path error",
 			sce: &startContextError{
 				Status:      http.StatusInternalServerError,
-				Message:     "prepare failed",
-				OriginalErr: wrapped,
+				Message:     "Failed to hydrate template: failed to download file settings.json: " + readErr.Error(),
+				IsHubError:  true,
+				OriginalErr: fmt.Errorf("failed to download file settings.json: %w", readErr),
+			},
+		},
+		{
+			// Hub-branch errors never honored an explicit Status (the Hub
+			// branch runs before the 4xx check); a missing file is still
+			// reported as one, not as the 503 the Hub branch would give.
+			name: "hydration error that also carries a 4xx Status",
+			sce: &startContextError{
+				Status:      http.StatusBadRequest,
+				Message:     "curated",
+				IsHubError:  true,
+				OriginalErr: &templatecache.HubConnectivityError{Cause: readErr},
 			},
 		},
 	}
@@ -467,11 +482,22 @@ func TestWriteStartContextError_MissingLocalFileIsNotHubUnreachable(t *testing.T
 		})
 	}
 
-	t.Run("explicit 4xx status still wins", func(t *testing.T) {
+	// Outside template/harness-config hydration a missing file keeps the
+	// pre-existing handling: an explicit 4xx is honored, anything else is
+	// the redacted generic 500, never the hydration-specific message.
+	t.Run("non-hydration step keeps existing handling", func(t *testing.T) {
 		w := httptest.NewRecorder()
-		sce := &startContextError{Status: http.StatusBadRequest, Message: "curated", OriginalErr: wrapped}
+		sce := &startContextError{Status: http.StatusBadRequest, Message: "curated", OriginalErr: readErr}
 		if got := srv.writeStartContextError(w, sce, "create agent"); got != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body: %s", got, w.Body.String())
+			t.Fatalf("explicit 4xx: status = %d, want 400; body: %s", got, w.Body.String())
+		}
+		w = httptest.NewRecorder()
+		sce = &startContextError{Status: http.StatusInternalServerError, Message: "prepare failed", OriginalErr: readErr}
+		if got := srv.writeStartContextError(w, sce, "create agent"); got != http.StatusInternalServerError {
+			t.Fatalf("no 4xx: status = %d, want 500; body: %s", got, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "harness-config file is missing") {
+			t.Errorf("non-hydration error must not get the hydration-specific message: %s", w.Body.String())
 		}
 	})
 }

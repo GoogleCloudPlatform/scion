@@ -21,7 +21,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -134,8 +136,24 @@ func TestHarnessConfigFileRead_RawStreamsLargeFile(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
 		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
 	}
+	if cl := rec.Header().Get("Content-Length"); cl != strconv.Itoa(len(large)) {
+		t.Errorf("Content-Length = %q, want %d", cl, len(large))
+	}
+	if cd := rec.Header().Get("Content-Disposition"); cd != `attachment; filename=big.bin` {
+		t.Errorf("Content-Disposition = %q, want attachment with filename big.bin", cd)
+	}
 	if !bytes.Equal(rec.Body.Bytes(), large) {
 		t.Errorf("raw body (%d bytes) does not match stored file (%d bytes)", rec.Body.Len(), len(large))
+	}
+
+	// The Accept: application/octet-stream trigger takes the same raw path.
+	req := httptest.NewRequest(http.MethodGet, base, nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	req.Header.Set("Accept", "application/octet-stream")
+	acceptRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(acceptRec, req)
+	if acceptRec.Code != http.StatusOK || !bytes.Equal(acceptRec.Body.Bytes(), large) {
+		t.Errorf("Accept: application/octet-stream read: status %d, %d bytes (want 200, %d bytes)", acceptRec.Code, acceptRec.Body.Len(), len(large))
 	}
 
 	rec = doRequest(t, srv, http.MethodGet, base, nil)
