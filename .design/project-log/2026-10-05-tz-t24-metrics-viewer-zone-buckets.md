@@ -39,7 +39,7 @@ All four findings were fixed; none declined.
 
 ## Review round 3 and upstream merge
 
-- Round 3 was clean. Upstream main (a4bf5eb) was merged in with a merge commit (2a93fce), not a rebase: \`git show --remerge-diff\` is empty, and the diff against upstream lists only this task's files. On the merged tree, \`go build\`, the time-literals gate, the targeted pkg/hub tests (UTC, Tokyo, Kathmandu), web typecheck and the three web test files (Tokyo, Kathmandu) all pass.
+- Round 3 was clean. Upstream main (a4bf5eb) was merged in with a merge commit (2a93fce), not a rebase: `git show --remerge-diff` is empty, and the diff against upstream lists only this task's files. On the merged tree, `go build`, the time-literals gate, the targeted pkg/hub tests (UTC, Tokyo, Kathmandu), web typecheck and the three web test files (Tokyo, Kathmandu) all pass.
 
 ## Follow-ups noticed (not done)
 
