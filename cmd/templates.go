@@ -679,7 +679,8 @@ var templatesSyncCmd = &cobra.Command{
 	Use:   "sync [template]",
 	Short: "Create or update a template in the Hub (Hub only)",
 	Long: `Sync a local template to the Hub. Creates the template if it doesn't exist,
-or updates it with any changed files if it does.
+or updates it with any changed files if it does. Syncing an existing template
+mirrors the local directory: files deleted locally are removed from the Hub copy.
 
 The harness type is automatically detected from the template's configuration file.
 Use the root --global flag to sync to global scope instead of project scope.
