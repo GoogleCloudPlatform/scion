@@ -28,15 +28,15 @@ import (
 
 // listSeed describes one artifact for the candidate-query tests.
 type listSeed struct {
-	title, key  string
-	ownerKind   string
-	ownerRef    string
-	scope       string
-	updated     time.Time
-	kind        string // current version kind; "" = publish
-	expires     *time.Time
-	deleted     bool
-	grants      []Grant // ArtifactID filled in
+	title, key string
+	ownerKind  string
+	ownerRef   string
+	scope      string
+	updated    time.Time
+	kind       string // current version kind; "" = publish
+	expires    *time.Time
+	deleted    bool
+	grants     []Grant // ArtifactID filled in
 }
 
 // seedList writes s and returns its id.
