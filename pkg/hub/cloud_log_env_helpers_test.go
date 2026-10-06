@@ -17,6 +17,7 @@ package hub
 import (
 	"fmt"
 	"os"
+	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -39,5 +40,47 @@ func clearAmbientGCPProjectEnv() {
 			fmt.Fprintf(os.Stderr, "clearAmbientGCPProjectEnv: unsetting %s: %v\n", k, err)
 			os.Exit(1)
 		}
+	}
+}
+
+// TestCloudLogQueryProjectID pins the gate New() uses to decide whether to
+// build the Cloud Logging query service (ptone/scion#3188), without building
+// any client: with a GCP project env var set, DisableCloudLogQuery yields no
+// project (so no client), and the default config yields that project. Not
+// parallel: it uses t.Setenv.
+func TestCloudLogQueryProjectID(t *testing.T) {
+	for _, key := range ambientGCPProjectEnvKeys {
+		t.Run(key, func(t *testing.T) {
+			for _, k := range ambientGCPProjectEnvKeys {
+				t.Setenv(k, "")
+			}
+			t.Setenv(key, "test-ambient-project")
+
+			if got := cloudLogQueryProjectID(ServerConfig{}); got != "test-ambient-project" {
+				t.Errorf("enabled: cloudLogQueryProjectID = %q, want %q (the env project)", got, "test-ambient-project")
+			}
+			if got := cloudLogQueryProjectID(ServerConfig{DisableCloudLogQuery: true}); got != "" {
+				t.Errorf("disabled: cloudLogQueryProjectID = %q, want \"\" (no Cloud Logging client)", got)
+			}
+		})
+	}
+
+	t.Run("no env", func(t *testing.T) {
+		for _, k := range ambientGCPProjectEnvKeys {
+			t.Setenv(k, "")
+		}
+		if got := cloudLogQueryProjectID(ServerConfig{}); got != "" {
+			t.Errorf("no project env: cloudLogQueryProjectID = %q, want \"\"", got)
+		}
+	})
+}
+
+// TestTestMainClearsAmbientGCPProjectEnv pins the TestMain half of
+// ptone/scion#3188: helpers that call New() directly with a default config
+// must not see an ambient GCP project ID either. It lives in this untagged
+// file so no_sqlite builds pin it too.
+func TestTestMainClearsAmbientGCPProjectEnv(t *testing.T) {
+	if got := logging.ResolveProjectID(); got != "" {
+		t.Fatalf("ResolveProjectID() = %q inside the test binary; TestMain must clear the ambient GCP project env", got)
 	}
 }

@@ -1526,6 +1526,17 @@ func newInstanceID() string {
 func (s *Server) InstanceID() string { return s.instanceID }
 
 // New creates a new Hub API server.
+// cloudLogQueryProjectID returns the GCP project New() builds the Cloud
+// Logging query service for, or "" when that service must not be built:
+// cfg.DisableCloudLogQuery is set, or no project ID is found in the
+// environment (logging.ResolveProjectID).
+func cloudLogQueryProjectID(cfg ServerConfig) string {
+	if cfg.DisableCloudLogQuery {
+		return ""
+	}
+	return logging.ResolveProjectID()
+}
+
 func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
@@ -2119,7 +2130,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Initialize Cloud Logging query service (optional, gated on GCP project
 	// ID and on cfg.DisableCloudLogQuery)
-	if projectID := logging.ResolveProjectID(); projectID != "" && !cfg.DisableCloudLogQuery {
+	if projectID := cloudLogQueryProjectID(cfg); projectID != "" {
 		logQuerySvc, err := NewLogQueryService(ctx, projectID)
 		if err != nil {
 			slog.Warn("Failed to initialize Cloud Logging query service", "error", err)

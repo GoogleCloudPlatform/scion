@@ -18,39 +18,21 @@ package hub
 
 import (
 	"testing"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// TestTestServerBuildsNoCloudLogClient pins ptone/scion#3188: even with a
-// GCP project env var set, the shared testServer helper builds no Cloud
-// Logging query service (and therefore no real Cloud Logging clients),
-// because it sets ServerConfig.DisableCloudLogQuery. Not parallel: it uses
-// t.Setenv.
-func TestTestServerBuildsNoCloudLogClient(t *testing.T) {
-	for _, key := range ambientGCPProjectEnvKeys {
-		t.Run(key, func(t *testing.T) {
-			for _, k := range ambientGCPProjectEnvKeys {
-				t.Setenv(k, "")
-			}
-			t.Setenv(key, "test-ambient-project")
-			if got := logging.ResolveProjectID(); got != "test-ambient-project" {
-				t.Fatalf("ResolveProjectID() = %q, want the env value; the gate under test would not be reached", got)
-			}
-
-			srv, _ := testServer(t)
-			if srv.logQueryService != nil {
-				t.Fatalf("testServer built a Cloud Logging query service with %s set; want none", key)
-			}
-		})
+// TestTestServerDisablesCloudLogQuery pins the testServer half of
+// ptone/scion#3188: the shared helper builds its server with
+// DisableCloudLogQuery set, so cloudLogQueryProjectID (see
+// TestCloudLogQueryProjectID) never hands New() a project, whatever the
+// environment. Asserting the config rather than srv.logQueryService keeps
+// the test meaningful on runners without GCP credentials, where client
+// construction fails and leaves logQueryService nil regardless.
+func TestTestServerDisablesCloudLogQuery(t *testing.T) {
+	srv, _ := testServer(t)
+	if !srv.config.DisableCloudLogQuery {
+		t.Fatal("testServer must set ServerConfig.DisableCloudLogQuery")
 	}
-}
-
-// TestTestMainClearsAmbientGCPProjectEnv pins the TestMain half of
-// ptone/scion#3188: helpers that call New() directly with a default config
-// must not see an ambient GCP project ID either.
-func TestTestMainClearsAmbientGCPProjectEnv(t *testing.T) {
-	if got := logging.ResolveProjectID(); got != "" {
-		t.Fatalf("ResolveProjectID() = %q inside the test binary; TestMain must clear the ambient GCP project env", got)
+	if got := cloudLogQueryProjectID(srv.config); got != "" {
+		t.Fatalf("cloudLogQueryProjectID(testServer config) = %q, want \"\"", got)
 	}
 }
