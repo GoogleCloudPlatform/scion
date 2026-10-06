@@ -53,6 +53,12 @@ const (
 	// artifacts.Host adapter against the artifact's home project.
 	ResourceArtifact = "artifact"
 
+	// ResourceInbox and ResourceUserSkillInjection are self-scoped resource
+	// types: their records belong to one user and carry no project or hub
+	// target that a role binding could authorize. See TargetClassKindSelf.
+	ResourceInbox              = "inbox"
+	ResourceUserSkillInjection = "user_skill_injection"
+
 	ActionCreate         = "create"
 	ActionRead           = "read"
 	ActionUpdate         = "update"
@@ -84,6 +90,9 @@ const (
 	// action.
 	ActionDeliver = "deliver"
 	ActionUse     = "use"
+	// ActionWrite covers creating, changing and removing the holder's own
+	// self-scoped records.
+	ActionWrite = "write"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -338,6 +347,14 @@ var Registry = []Permission{
 	{ID: "skill_injection.deliver", Resource: ResourceSkillInjection, Action: ActionDeliver, Description: "Deliver a stored skill reference to an agent at launch", NonRouteUse: []string{"material delivery grant evaluation"}},
 	{ID: "secret.use", Resource: ResourceSecret, Action: ActionUse, AgentScopes: []string{"project:secret:read"}, Description: "Retrieve a secret value at runtime by key", Enforcement: []string{"pkg/hub/material_runtime.go"}},
 	{ID: "gcp_service_account.use", Resource: ResourceGCPServiceAccount, Action: ActionUse, Description: "Mint a token as an assigned GCP service account", NonRouteUse: []string{"GCP token mint request"}},
+
+	// Self-scoped permissions act only on the holder's own records. A user
+	// access token needs the exact selector, and the target checks in
+	// Server.authorizeSelfScoped apply. Mint eligibility is "the issuer is
+	// an active user"; see permissions.IsSelfPermission.
+	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
+	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
+	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", NonRouteUse: []string{"pkg/hub/authorize.go:authorizeSelfScoped"}},
 }
 
 // ResourceActions returns item-level capability actions keyed by resource type.
