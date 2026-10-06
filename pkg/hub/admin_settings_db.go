@@ -864,10 +864,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		endpointsBaseRev = rev
 	}
 
-	// Lifecycle section: keep the start-claim keys a PUT leaves out (the
-	// admin form has no fields for them), and validate them.
+	// Lifecycle section: like access, carry omitted keys forward from the
+	// current row (ptone/scion#3464), and validate the start-claim keys.
+	lifecycleBaseRev := int64(-1)
 	if doc, ok := sectionDocs["lifecycle"]; ok {
-		merged, err := carryForwardStartClaimSettings(r.Context(), ops, doc)
+		merged, rev, err := carryForwardLifecycleSettings(r.Context(), ops, doc, rawBody)
 		if err != nil {
 			slog.Error("PUT server-config: failed to build lifecycle document", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
@@ -881,6 +882,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		sectionDocs["lifecycle"] = merged
+		lifecycleBaseRev = rev
 	}
 
 	// Validate federation semantics (beyond JSON schema).
@@ -1081,6 +1083,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = accessBaseRev
 		} else if secName == "endpoints" && endpointsBaseRev >= 0 {
 			expectedRev = endpointsBaseRev
+		} else if secName == "lifecycle" && lifecycleBaseRev >= 0 {
+			expectedRev = lifecycleBaseRev
 		}
 
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
@@ -1212,7 +1216,7 @@ func (s *Server) validateHubDefaultGCPIdentity(w http.ResponseWriter, ctx contex
 		return false
 	}
 
-	if !sa.Verified {
+	if !gcpServiceAccountVerified(sa) {
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
 			"GCP service account is not verified; verify it before setting it as the hub default", nil)
 		return false
@@ -1553,7 +1557,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 //
 // Only the clearable Layer-1 fields are checked here:
 // admin_emails, user_access_mode, default_user_role, notification_channels,
-// public_url, runtimes, profiles, harness_configs.
+// public_url, the four lifecycle keys (auto_suspend_stalled,
+// stalled_threshold, soft_delete_retention, soft_delete_retain_files),
+// runtimes, profiles, harness_configs.
 func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	fp, err := parseFieldPresence(rawBody)
 	if err != nil {
@@ -1595,6 +1601,14 @@ func appendPresenceAwareKeys(keys []string, rawBody []byte) []string {
 	// public_url: present in hub but empty → add the key.
 	if !keySet["server.hub.public_url"] && hubFP.has("public_url") {
 		keys = append(keys, "server.hub.public_url")
+	}
+	// Lifecycle keys: present in hub but empty or null → add the key, so a
+	// lone explicit clear builds the lifecycle doc and clears the key
+	// instead of being carried forward (ptone/scion#3464).
+	for _, k := range []string{"auto_suspend_stalled", "stalled_threshold", "soft_delete_retention", "soft_delete_retain_files"} {
+		if !keySet["server.hub."+k] && hubFP.has(k) {
+			keys = append(keys, "server.hub."+k)
+		}
 	}
 	// hub_name: present in hub but empty → add the key (clears a managed
 	// hub_name; handlePutServerConfigDB drops it when it is an echo).
@@ -1775,9 +1789,10 @@ func dropEnvOverriddenAccessFields(base *opsettings.AccessSettings, envKeys []st
 // distinguish OMITTED fields from EXPLICITLY-SENT empty values:
 //   - OMITTED → field not in raw JSON → do NOT include in section doc.
 //     The write replaces the whole row, so for most sections an omitted
-//     field is dropped from the DB. The access section is the exception:
-//     handlePutServerConfigDB rebuilds it on the current row
-//     (buildAccessDocOnCurrent), so omitted access fields are kept.
+//     field is dropped from the DB. The access, endpoints and lifecycle
+//     sections are the exception: handlePutServerConfigDB rebuilds them on
+//     the current row (buildAccessDocOnCurrent, buildEndpointsDocOnCurrent,
+//     carryForwardLifecycleSettings), so their omitted fields are kept.
 //   - EXPLICIT empty ("", [], null) → field IS in raw JSON → include the
 //     zero value in the section doc, which CLEARS it in the DB
 //

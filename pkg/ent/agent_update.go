@@ -877,6 +877,24 @@ func (_u *AgentUpdate) ClearRunID() *AgentUpdate {
 	return _u
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_u *AgentUpdate) SetPreviousRunIds(v []string) *AgentUpdate {
+	_u.mutation.SetPreviousRunIds(v)
+	return _u
+}
+
+// AppendPreviousRunIds appends value to the "previous_run_ids" field.
+func (_u *AgentUpdate) AppendPreviousRunIds(v []string) *AgentUpdate {
+	_u.mutation.AppendPreviousRunIds(v)
+	return _u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (_u *AgentUpdate) ClearPreviousRunIds() *AgentUpdate {
+	_u.mutation.ClearPreviousRunIds()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
 	_u.mutation.SetLaunchState(v)
@@ -1276,6 +1294,26 @@ func (_u *AgentUpdate) SetNillableRunIntentAt(v *time.Time) *AgentUpdate {
 // ClearRunIntentAt clears the value of the "run_intent_at" field.
 func (_u *AgentUpdate) ClearRunIntentAt() *AgentUpdate {
 	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdate) SetRunIntentMarkedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdate) ClearRunIntentMarkedAt() *AgentUpdate {
+	_u.mutation.ClearRunIntentMarkedAt()
 	return _u
 }
 
@@ -1919,6 +1957,17 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.RunIDCleared() {
 		_spec.ClearField(agent.FieldRunID, field.TypeString)
 	}
+	if value, ok := _u.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedPreviousRunIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldPreviousRunIds, value)
+		})
+	}
+	if _u.mutation.PreviousRunIdsCleared() {
+		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
+	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 	}
@@ -2038,6 +2087,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)
@@ -3087,6 +3142,24 @@ func (_u *AgentUpdateOne) ClearRunID() *AgentUpdateOne {
 	return _u
 }
 
+// SetPreviousRunIds sets the "previous_run_ids" field.
+func (_u *AgentUpdateOne) SetPreviousRunIds(v []string) *AgentUpdateOne {
+	_u.mutation.SetPreviousRunIds(v)
+	return _u
+}
+
+// AppendPreviousRunIds appends value to the "previous_run_ids" field.
+func (_u *AgentUpdateOne) AppendPreviousRunIds(v []string) *AgentUpdateOne {
+	_u.mutation.AppendPreviousRunIds(v)
+	return _u
+}
+
+// ClearPreviousRunIds clears the value of the "previous_run_ids" field.
+func (_u *AgentUpdateOne) ClearPreviousRunIds() *AgentUpdateOne {
+	_u.mutation.ClearPreviousRunIds()
+	return _u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
 	_u.mutation.SetLaunchState(v)
@@ -3486,6 +3559,26 @@ func (_u *AgentUpdateOne) SetNillableRunIntentAt(v *time.Time) *AgentUpdateOne {
 // ClearRunIntentAt clears the value of the "run_intent_at" field.
 func (_u *AgentUpdateOne) ClearRunIntentAt() *AgentUpdateOne {
 	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
+// SetRunIntentMarkedAt sets the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) SetRunIntentMarkedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIntentMarkedAt(v)
+	return _u
+}
+
+// SetNillableRunIntentMarkedAt sets the "run_intent_marked_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntentMarkedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntentMarkedAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentMarkedAt clears the value of the "run_intent_marked_at" field.
+func (_u *AgentUpdateOne) ClearRunIntentMarkedAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIntentMarkedAt()
 	return _u
 }
 
@@ -4159,6 +4252,17 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.RunIDCleared() {
 		_spec.ClearField(agent.FieldRunID, field.TypeString)
 	}
+	if value, ok := _u.mutation.PreviousRunIds(); ok {
+		_spec.SetField(agent.FieldPreviousRunIds, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedPreviousRunIds(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, agent.FieldPreviousRunIds, value)
+		})
+	}
+	if _u.mutation.PreviousRunIdsCleared() {
+		_spec.ClearField(agent.FieldPreviousRunIds, field.TypeJSON)
+	}
 	if value, ok := _u.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 	}
@@ -4278,6 +4382,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.RunIntentAtCleared() {
 		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.RunIntentMarkedAt(); ok {
+		_spec.SetField(agent.FieldRunIntentMarkedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentMarkedAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentMarkedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.StartClaimID(); ok {
 		_spec.SetField(agent.FieldStartClaimID, field.TypeString, value)

@@ -121,6 +121,11 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 // which uses an NFS home only when it is on.
 const K8sNFSHome = "hub.k8s_nfs_home"
 
+// Artifacts gates the artifact service (pkg/artifacts): the hub's
+// /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
+// every artifact surface.
+const Artifacts = "hub.artifacts"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -157,6 +162,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#2615",
 		Owner:       "k8s-runtime",
 		ReviewBy:    "2027-01-04",
+	},
+	{
+		Name:        Artifacts,
+		Title:       "Artifacts",
+		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates the artifact page and other web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3202",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-05",
 	},
 	{
 		Name:        "hub.conduit",

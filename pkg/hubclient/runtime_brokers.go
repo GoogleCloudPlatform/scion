@@ -120,6 +120,9 @@ type AgentLaunchReportInfo struct {
 	Phase           string `json:"phase,omitempty"`
 	Activity        string `json:"activity,omitempty"`
 	ContainerStatus string `json:"containerStatus,omitempty"`
+	// RunID is the run the launched entry is labelled with
+	// (ptone/scion#3176), so the hub can settle exactly that run.
+	RunID string `json:"runId,omitempty"`
 	// WorkspacePlacement is where the launch's start placed the agent's
 	// workspace (api.WorkspacePlacementExport or WorkspacePlacementLocal).
 	WorkspacePlacement string `json:"workspacePlacement,omitempty"`
@@ -241,6 +244,8 @@ type BrokerHeartbeat struct {
 	// An older broker omits the field and the hub keeps every stored
 	// value.
 	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
+	// ProfileSAMappings: see ProfileSAMappingsState.
+	ProfileSAMappings []ProfileSAMappingsState `json:"profileSAMappings,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// when this heartbeat was built, read before the agents were listed, so
 	// a start that finishes between the two reads is either listed here or

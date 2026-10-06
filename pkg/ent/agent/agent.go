@@ -110,6 +110,8 @@ const (
 	FieldLaunchID = "launch_id"
 	// FieldRunID holds the string denoting the run_id field in the database.
 	FieldRunID = "run_id"
+	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
+	FieldPreviousRunIds = "previous_run_ids"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -150,6 +152,8 @@ const (
 	FieldRunIntent = "run_intent"
 	// FieldRunIntentAt holds the string denoting the run_intent_at field in the database.
 	FieldRunIntentAt = "run_intent_at"
+	// FieldRunIntentMarkedAt holds the string denoting the run_intent_marked_at field in the database.
+	FieldRunIntentMarkedAt = "run_intent_marked_at"
 	// FieldStartClaimID holds the string denoting the start_claim_id field in the database.
 	FieldStartClaimID = "start_claim_id"
 	// FieldStartClaimKind holds the string denoting the start_claim_kind field in the database.
@@ -253,6 +257,7 @@ var Columns = []string{
 	FieldLaunchAsyncOptIn,
 	FieldLaunchID,
 	FieldRunID,
+	FieldPreviousRunIds,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -273,6 +278,7 @@ var Columns = []string{
 	FieldDeletionRequest,
 	FieldRunIntent,
 	FieldRunIntentAt,
+	FieldRunIntentMarkedAt,
 	FieldStartClaimID,
 	FieldStartClaimKind,
 	FieldStartClaimState,
@@ -754,6 +760,11 @@ func ByRunIntent(opts ...sql.OrderTermOption) OrderOption {
 // ByRunIntentAt orders the results by the run_intent_at field.
 func ByRunIntentAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRunIntentAt, opts...).ToFunc()
+}
+
+// ByRunIntentMarkedAt orders the results by the run_intent_marked_at field.
+func ByRunIntentMarkedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntentMarkedAt, opts...).ToFunc()
 }
 
 // ByStartClaimID orders the results by the start_claim_id field.
