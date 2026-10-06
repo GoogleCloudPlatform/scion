@@ -511,8 +511,9 @@ func TestAgentListReadRule_ScopedTokenRacedRowStaysListed(t *testing.T) {
 // path of the sorted project list for a token holding agent:list but not
 // agent:read, when the race moves a row out of the holder's reads: the
 // row gets a new owner between the member read and the full-row read.
-// The list read on the full row fails, so the row is dropped, and the
-// complete response's totalCount follows the dropped row.
+// The list read on the full row fails, so the row is dropped before its
+// remaining actions are decided, and the complete response's totalCount
+// follows the dropped row.
 func TestAgentListReadRule_ScopedTokenRacedRowLeavesReads(t *testing.T) {
 	f := readRuleSetup(t, 6, func(i int) bool { return i%2 == 0 })
 	key := mintScopedUAT(t, f.srv, f.caller.ID, f.project.ID, []string{"agent:list"})
@@ -520,10 +521,24 @@ func TestAgentListReadRule_ScopedTokenRacedRowLeavesReads(t *testing.T) {
 	moved := f.readable[0]
 	f.srv.store = &ownerChangingAfterMembersStore{Store: f.store, agentID: moved, newOwnerID: f.owner.ID}
 
+	emitter := &recordingDecisionAuditEmitter{}
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+
 	rec := doRequestWithUAT(t, f.srv, key, http.MethodGet, f.listPath("sort=updated&fit=500"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.Empty(t, resp.NextCursor, "the response is complete")
+
+	// The list read on the full row drops the moved row before the
+	// remaining actions are decided, so the moved row has no decision
+	// record for any action other than read.
+	var movedRemaining []string
+	for _, r := range emitter.records {
+		if r.ResourceType == "agent" && r.ResourceID == moved && r.Permission != string(ActionRead) {
+			movedRemaining = append(movedRemaining, r.Permission)
+		}
+	}
+	assert.Empty(t, movedRemaining, "the dropped row is not charged for the remaining actions")
 
 	ids := make([]string, 0, len(resp.Agents))
 	for _, a := range resp.Agents {
