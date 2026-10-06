@@ -100,7 +100,29 @@ describe('agentPlacementView', () => {
       broker({ status: 'offline', connectionState: 'disconnected' })
     );
     expect(v!.connection).toEqual({ label: 'offline', status: 'danger', detail: 'disconnected' });
-    expect(v!.lastRuntimeOperation.status).toBe('success');
+    expect(v!.lastRuntimeOperation).toEqual({ label: 'none recorded', status: 'neutral' });
+  });
+
+  it('shows a refused start recorded on a stopped agent, never a success', () => {
+    // A Runtime Broker refusal leaves the resting phase and records the
+    // refusal as the agent message.
+    const v = agentPlacementView(
+      agent({ phase: 'stopped', message: 'refused by the Runtime Broker' }),
+      broker({})
+    );
+    expect(v!.lastRuntimeOperation).toEqual({
+      label: 'see message',
+      status: 'warning',
+      detail: 'refused by the Runtime Broker',
+    });
+    // A running agent's activity message is not a runtime-operation result.
+    const running = agentPlacementView(agent({ phase: 'running', message: 'working' }), broker({}));
+    expect(running!.lastRuntimeOperation).toEqual({ label: 'none recorded', status: 'neutral' });
+    for (const phase of ['stopped', 'created', 'suspended', 'running', 'starting'] as const) {
+      expect(
+        agentPlacementView(agent({ phase }), broker({}))!.lastRuntimeOperation.status
+      ).not.toBe('success');
+    }
   });
 
   it('flags a stale pin and does not report the current Runtime Broker as the pinned one', () => {

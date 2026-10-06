@@ -109,6 +109,21 @@ describe('agent detail Placement card', () => {
     expect(el.querySelector('.placement-stale')).toBeNull();
   });
 
+  it('shows a refused start on a stopped agent with its recorded message', () => {
+    const agent = makeAgent({
+      phase: 'stopped',
+      message: 'refused by the Runtime Broker',
+      pinnedRuntimeTarget: { id: 't-1', type: 'docker', runtimeBrokerId: 'b-flat' },
+    });
+    const el = host(page(flatBroker).renderPlacementCard(agent));
+    const op = el.querySelector('.placement-runtime-op scion-status-badge');
+    expect(op?.getAttribute('label')).toBe('see message');
+    expect(op?.getAttribute('status')).toBe('warning');
+    expect(el.querySelector('.placement-runtime-op-detail')?.textContent).toBe(
+      'refused by the Runtime Broker'
+    );
+  });
+
   it('renders nothing for an unpinned agent', () => {
     const el = host(page(null).renderPlacementCard(makeAgent({})));
     expect(el.querySelector('.placement-card')).toBeNull();

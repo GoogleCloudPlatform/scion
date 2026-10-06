@@ -100,13 +100,25 @@ export function brokerConnectionIndicator(broker: RuntimeBroker | null): Placeme
   }
 }
 
+/** Phases in which the agent is not running and no start is under way. */
+const RESTING_PHASES = new Set(['stopped', 'created', 'suspended']);
+
 /**
  * Failed runtime operations on the agent, from the agent's own phase and
  * message: independent of whether its Runtime Broker is connected.
+ *
+ * An error phase is a failure. A refused start (for example a Runtime
+ * Broker refusal) leaves the agent in its resting phase with the refusal
+ * as its message, and the stored data does not tell that message apart
+ * from any other, so a resting agent's message is shown as a warning to
+ * read rather than as a failure. Nothing is ever shown as a success.
  */
 export function lastRuntimeOperationIndicator(agent: Agent): PlacementIndicator {
   if (agent.phase === 'error') {
     return { label: 'failed', status: 'danger', detail: agent.message || undefined };
   }
-  return { label: 'no failure recorded', status: 'success' };
+  if (agent.message && RESTING_PHASES.has(agent.phase)) {
+    return { label: 'see message', status: 'warning', detail: agent.message };
+  }
+  return { label: 'none recorded', status: 'neutral' };
 }
