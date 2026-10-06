@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -370,11 +370,30 @@ func (s *Server) validateProjectDefaultSAID(w http.ResponseWriter, ctx context.C
 	return true
 }
 
+// Bounds on the per-profile default service account map. Profile names are
+// not checked against the profiles brokers report (a broker may be offline
+// when the setting is saved); they only have to look like a profile name.
+const (
+	maxProfileDefaultSAEntries = 64
+	maxProfileDefaultNameLen   = 63
+)
+
+// profileDefaultNamePattern is the accepted profile-name charset: letters,
+// digits, '-' and '_', starting with a letter or digit, at most
+// maxProfileDefaultNameLen characters. Dots are excluded because settings
+// loading splits dotted profile names.
+var profileDefaultNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
+
 // validateProfileDefaultSAIDs checks every entry of the per-profile default
-// service account map: a non-empty profile name and a service account that
-// passes validateProjectDefaultSAID. A nil or empty map is always accepted
+// service account map: at most maxProfileDefaultSAEntries entries, a profile
+// name matching profileDefaultNamePattern, and a service account that passes
+// validateProjectDefaultSAID. A nil or empty map is always accepted
 // (nil keeps the stored map, empty clears it).
 func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.Context, project *store.Project, byProfile map[string]string) bool {
+	if len(byProfile) > maxProfileDefaultSAEntries {
+		BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: at most %d entries are allowed", maxProfileDefaultSAEntries))
+		return false
+	}
 	profiles := make([]string, 0, len(byProfile))
 	for profile := range byProfile {
 		profiles = append(profiles, profile)
@@ -383,8 +402,8 @@ func (s *Server) validateProfileDefaultSAIDs(w http.ResponseWriter, ctx context.
 	sort.Strings(profiles)
 	for _, profile := range profiles {
 		saID := byProfile[profile]
-		if strings.TrimSpace(profile) == "" || profile != strings.TrimSpace(profile) {
-			BadRequest(w, "defaultGCPIdentityServiceAccountIDByProfile: profile names must be non-empty and have no surrounding whitespace")
+		if !profileDefaultNamePattern.MatchString(profile) {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByProfile: profile name %q is invalid; use 1-%d letters, digits, '-' or '_', starting with a letter or digit", profile, maxProfileDefaultNameLen))
 			return false
 		}
 		if saID == "" {

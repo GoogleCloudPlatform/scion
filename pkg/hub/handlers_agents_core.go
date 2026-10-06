@@ -1772,7 +1772,7 @@ func (s *Server) createAgentInProject(
 		// than the project-wide default below and wins over it, including an
 		// explicit project "block" (block is not offered on Kubernetes,
 		// ptone/scion#2328, where per-profile defaults matter most).
-		cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID, profileSAID, SurfaceProjectDefault, defaultTierProfile)
+		cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID, profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if !ok {
 			return
 		}

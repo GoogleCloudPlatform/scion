@@ -4226,7 +4226,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	// the project-wide default, as on the create path.
 	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
-			profileSAID, SurfaceProjectDefault, defaultTierProfile)
+			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {
 			return err
 		}

@@ -130,6 +130,7 @@ constants at the top of `pkg/hub/project_settings_handlers.go`:
 | `scion.io/default-max-duration` | `defaultMaxDuration` |
 | `scion.io/default-gcp-identity-mode` | `defaultGcpIdentityMode` |
 | `scion.io/default-gcp-identity-service-account-id` | `defaultGcpIdentityServiceAccountId` |
+| `scion.io/default-gcp-identity-service-account-id-by-profile` | `defaultGCPIdentityServiceAccountIDByProfile` (JSON object, profile name to SA ID; kept on PUT when absent, cleared by `{}`) |
 | `scion.io/default-resources-cpu-request` | `defaultResources.cpuRequest` |
 | `scion.io/default-resources-memory-request` | `defaultResources.memoryRequest` |
 | `scion.io/default-resources-cpu-limit` | `defaultResources.cpuLimit` |

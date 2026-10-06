@@ -19,11 +19,14 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -207,7 +210,7 @@ func TestProfileDefaultSA_StaleUnverifiedEntryFailsCreate(t *testing.T) {
 
 	rec := createAgentAsOwner(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "profile-default-stale"})
 	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "project profile default GCP service account is not verified")
+	assert.Contains(t, rec.Body.String(), `project default for profile \"remote\" GCP service account is not verified`)
 }
 
 // The authorization gate applies to the per-profile default as it does to
@@ -232,6 +235,9 @@ func TestScheduledDispatch_ProfileDefaultSAWinsOverProjectDefault(t *testing.T) 
 	require.NoError(t, err)
 	assertAssigned(t, got, pf.k8s, "the scheduled path must apply the per-profile default")
 	assert.Equal(t, "remote", got.AppliedConfig.Profile)
+	require.NotNil(t, got.AppliedConfig.CreateInputs)
+	assert.Equal(t, "remote", got.AppliedConfig.CreateInputs.Profile,
+		"the scheduled pin must reach CreateInputs so reincarnate replays the same profile")
 }
 
 func TestScheduledDispatch_ProfileDefaultNoEntryKeepsProjectDefault(t *testing.T) {
@@ -310,8 +316,12 @@ func TestProjectSettings_ProfileDefaultSA_Rejections(t *testing.T) {
 		{"other project's SA", map[string]string{"k8s": otherSA.ID}, msgSANotAvailableInProject},
 		{"unverified SA", map[string]string{"k8s": unverified.ID}, `as the default for profile \"k8s\"`},
 		{"empty SA ID", map[string]string{"k8s": ""}, "a service account ID is required"},
-		{"empty profile", map[string]string{"": good.ID}, "profile names must be non-empty"},
-		{"padded profile", map[string]string{" k8s": good.ID}, "profile names must be non-empty"},
+		{"empty profile", map[string]string{"": good.ID}, "is invalid"},
+		{"padded profile", map[string]string{" k8s": good.ID}, "is invalid"},
+		{"dotted profile", map[string]string{"k8s.prod": good.ID}, "is invalid"},
+		{"leading dash", map[string]string{"-k8s": good.ID}, "is invalid"},
+		{"profile name too long", map[string]string{strings.Repeat("a", 64): good.ID}, "is invalid"},
+		{"too many entries", manyProfileEntries(65, good.ID), "at most 64 entries"},
 		{"one bad entry among good", map[string]string{"a": good.ID, "b": "no-such-sa"}, msgSANotAvailableInProject},
 	}
 	for _, tc := range cases {
@@ -378,4 +388,137 @@ func TestProjectClone_ProfileDefaultSARemapped(t *testing.T) {
 func logSource(r slog.Record) string {
 	v, _ := recordAttr(r, "source")
 	return v.String()
+}
+
+func manyProfileEntries(n int, saID string) map[string]string {
+	m := make(map[string]string, n)
+	for i := 0; i < n; i++ {
+		m[fmt.Sprintf("p%d", i)] = saID
+	}
+	return m
+}
+
+// The bounds accept their maximums.
+func TestProjectSettings_ProfileDefaultSA_BoundsAcceptMaximums(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+	sa := newSettingsTestSA(t, s, project.ID, "sa-bounds")
+	m := manyProfileEntries(62, sa.ID)
+	m[strings.Repeat("a", 63)] = sa.ID // a 63-character name
+	m["Gke_prod-1"] = sa.ID            // mixed case, '_' and '-'; 64 entries in total
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityServiceAccountIDByProfile: m})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Len(t, getProjectSettings(t, srv, project.ID).DefaultGCPIdentityServiceAccountIDByProfile, 64)
+}
+
+// F2: the scheduled per-profile rung runs the same authorization gate.
+func TestScheduledDispatch_ProfileDefaultSA_ActAsDenied(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "remote")
+	pf.setProjectDefaultAssignBroad(t)
+	pf.setProfileDefaults(t, map[string]string{"remote": pf.k8s.ID})
+	enforceSAAssign(pf.srv, store.NewFakeCallerPermissionChecker().
+		AllowTarget(pf.broad.Email).DenyTarget(pf.k8s.Email, "no actAs grant"))
+
+	err := fireScheduledDispatchAsOwner(t, pf.bypassAgentsFixture, "sched-profile-denied")
+	require.Error(t, err, "a creator without actAs on the per-profile SA must not get a scheduled agent")
+	assert.Contains(t, err.Error(), store.PermissionActAs)
+	_, getErr := pf.store.GetAgentBySlug(context.Background(), pf.proj.ID, "sched-profile-denied")
+	assert.ErrorIs(t, getErr, store.ErrNotFound, "denied dispatch must not create the agent record")
+}
+
+func TestScheduledDispatch_ProfileDefaultSA_StaleUnverifiedFails(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "remote")
+	unverified := bypassAgentsCreateSA(t, pf.bypassAgentsFixture, pf.proj.ID, false)
+	pf.setProjectDefaultAssignBroad(t)
+	pf.setProfileDefaults(t, map[string]string{"remote": unverified.ID})
+
+	err := fireScheduledDispatchAsOwner(t, pf.bypassAgentsFixture, "sched-profile-stale")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `project default for profile "remote" GCP service account is not verified`)
+	_, getErr := pf.store.GetAgentBySlug(context.Background(), pf.proj.ID, "sched-profile-stale")
+	assert.ErrorIs(t, getErr, store.ErrNotFound)
+}
+
+// F8: the per-profile default wins over a hub-default assign when the
+// project has no default of its own, on both paths.
+func TestProfileDefaultSA_WinsOverHubDefaultAssign(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "remote")
+	pf.setProfileDefaults(t, map[string]string{"remote": pf.k8s.ID})
+	setHubAgentDefaults(pf.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
+		DefaultGCPIdentityServiceAccountID: pf.broad.ID,
+	})
+
+	agent := createdAgentRecord(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "profile-over-hub"})
+	assertAssigned(t, agent, pf.k8s, "the per-profile default must win over the hub default")
+
+	require.NoError(t, fireScheduledDispatchAsOwner(t, pf.bypassAgentsFixture, "sched-profile-over-hub"))
+	got, err := pf.store.GetAgentBySlug(context.Background(), pf.proj.ID, "sched-profile-over-hub")
+	require.NoError(t, err)
+	assertAssigned(t, got, pf.k8s, "the scheduled per-profile default must win over the hub default")
+}
+
+// With no entry for the agent's profile, the hub default still applies.
+func TestProfileDefaultSA_NoEntryKeepsHubDefaultAssign(t *testing.T) {
+	pf := newProfileDefaultFixture(t, "local")
+	pf.setProfileDefaults(t, map[string]string{"remote": pf.k8s.ID})
+	setHubAgentDefaults(pf.srv, opsettings.AgentDefaultsSettings{
+		DefaultGCPIdentityMode:             store.GCPMetadataModeAssign,
+		DefaultGCPIdentityServiceAccountID: pf.broad.ID,
+	})
+	agent := createdAgentRecord(t, pf.bypassAgentsFixture, CreateAgentRequest{Name: "profile-miss-hub"})
+	assertAssigned(t, agent, pf.broad, "with no entry for local, the hub default must apply")
+}
+
+// F3: projectProfileDefaultSA's broker-resolution branches, directly.
+func TestProjectProfileDefaultSA_BrokerResolution(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	byProfile, err := json.Marshal(map[string]string{"remote": "sa-remote", "local": "sa-local"})
+	require.NoError(t, err)
+	project := &store.Project{ID: f.proj.ID, Annotations: map[string]string{
+		projectSettingDefaultGCPIdentitySAIDByProfile: string(byProfile),
+	}}
+
+	t.Run("unknown broker with a request profile uses that profile", func(t *testing.T) {
+		profile, saID := f.srv.projectProfileDefaultSA(ctx, "no-such-broker", project, "remote")
+		assert.Equal(t, "remote", profile)
+		assert.Equal(t, "sa-remote", saID)
+	})
+	t.Run("unknown broker and no request or active profile is empty", func(t *testing.T) {
+		profile, saID := f.srv.projectProfileDefaultSA(ctx, "no-such-broker", project, "")
+		assert.Empty(t, profile)
+		assert.Empty(t, saID)
+	})
+	t.Run("no broker ID with an active profile uses it", func(t *testing.T) {
+		withActive := &store.Project{ID: f.proj.ID, Annotations: map[string]string{
+			projectSettingDefaultGCPIdentitySAIDByProfile: string(byProfile),
+			projectSettingActiveProfile:                   "local",
+		}}
+		profile, saID := f.srv.projectProfileDefaultSA(ctx, "", withActive, "")
+		assert.Equal(t, "local", profile)
+		assert.Equal(t, "sa-local", saID)
+	})
+	t.Run("broker with two profiles and no default is empty", func(t *testing.T) {
+		markBrokerStockProfiles(t, f, "")
+		profile, saID := f.srv.projectProfileDefaultSA(ctx, f.broker.ID, project, "")
+		assert.Empty(t, profile)
+		assert.Empty(t, saID)
+	})
+	t.Run("broker with a single unnamed-default profile resolves it", func(t *testing.T) {
+		b, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+		require.NoError(t, err)
+		b.Profiles = []store.BrokerProfile{{Name: "remote", Type: "kubernetes", Available: true}}
+		b.DefaultProfile = ""
+		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+		profile, saID := f.srv.projectProfileDefaultSA(ctx, f.broker.ID, project, "")
+		assert.Equal(t, "remote", profile)
+		assert.Equal(t, "sa-remote", saID)
+	})
+	t.Run("no map is empty", func(t *testing.T) {
+		profile, saID := f.srv.projectProfileDefaultSA(ctx, f.broker.ID, &store.Project{ID: f.proj.ID}, "remote")
+		assert.Empty(t, profile)
+		assert.Empty(t, saID)
+	})
 }
