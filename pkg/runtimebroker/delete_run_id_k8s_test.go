@@ -42,11 +42,9 @@ import (
 // (exact run or unlabelled legacy entry matches; another run returns
 // ErrRunMismatch and deletes nothing).
 //
-// Stop does nothing by default: these tests model Stop as it is after
-// ptone/scion#3076, which passes the RunRef to Stop so that Kubernetes Stop
-// (a Delete) gets the same run check. withStopByName models upstream main
-// today, where AgentManager.deleteResolved calls Stop(id) before Delete and
-// Kubernetes Stop deletes by name.
+// Stop does nothing by default. withStopAsDelete models KubernetesRuntime
+// exactly, where Stop is the same run-checked Delete
+// (AgentManager.deleteResolved calls Stop(ref) before Delete(ref)).
 type nameHeldRuntime struct {
 	runtime.MockRuntime
 	mu      sync.Mutex
@@ -55,34 +53,33 @@ type nameHeldRuntime struct {
 	deletes []runtime.RunRef
 }
 
-// withStopByName makes Stop remove whatever entry holds the name, as
-// Kubernetes Stop does before ptone/scion#3076.
-func (r *nameHeldRuntime) withStopByName() *nameHeldRuntime {
-	r.StopFunc = func(context.Context, string) error {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		r.present = false
+// withStopAsDelete makes Stop the run-checked delete, as Kubernetes Stop is.
+func (r *nameHeldRuntime) withStopAsDelete() *nameHeldRuntime {
+	r.StopFunc = r.runCheckedDelete
+	return r
+}
+
+// runCheckedDelete removes the entry holding the name unless ref names a
+// different run than its (non-empty) run label, as KubernetesRuntime.Delete
+// does.
+func (r *nameHeldRuntime) runCheckedDelete(_ context.Context, ref runtime.RunRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deletes = append(r.deletes, ref)
+	if !r.present {
 		return nil
 	}
-	return r
+	if ref.RunID != "" && r.holder != "" && r.holder != ref.RunID {
+		return runtime.ErrRunMismatch
+	}
+	r.present = false
+	return nil
 }
 
 func newNameHeldRuntime(holderRun string) *nameHeldRuntime {
 	r := &nameHeldRuntime{holder: holderRun, present: true}
 	r.NameFunc = func() string { return "kubernetes" }
-	r.DeleteFunc = func(_ context.Context, ref runtime.RunRef) error {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		r.deletes = append(r.deletes, ref)
-		if !r.present {
-			return nil
-		}
-		if ref.RunID != "" && r.holder != "" && r.holder != ref.RunID {
-			return runtime.ErrRunMismatch
-		}
-		r.present = false
-		return nil
-	}
+	r.DeleteFunc = r.runCheckedDelete
 	return r
 }
 
@@ -130,23 +127,36 @@ func TestDeleteAgent_RuntimeRunMismatch_404LeavesNewRun(t *testing.T) {
 	assertUntouched(t, scionB, "dev", infoB)
 }
 
-// Upstream main today: deleteResolved's Stop(id) runs before the run-aware
-// Delete, and Kubernetes Stop deletes by name, so a stale delete still
-// removes the newer run's entry. P2 closes this only together with
-// ptone/scion#3076.
-// TODO(ptone/scion#3076): once Stop takes a RunRef, this entry must
-// survive; flip the assertion (or drop this test for the one above).
-func TestDeleteAgent_RuntimeRunMismatch_StopByNameStillRemovesNewRun(t *testing.T) {
-	rt := newNameHeldRuntime("run-new").withStopByName()
+// The same stale delete with Stop modelled as Kubernetes has it since
+// ptone/scion#3076 (Stop takes the RunRef and is the run-checked Delete):
+// deleteResolved's Stop(ref) before Delete(ref) refuses too, so run-new's
+// entry survives and the delete is a 404.
+func TestDeleteAgent_RuntimeRunMismatch_RunCheckedStopLeavesNewRun(t *testing.T) {
+	rt := newNameHeldRuntime("run-new").withStopAsDelete()
 	mgr := &k8sStyleManager{real: agent.NewManager(rt)}
 	srv, home := newCleanupTestServer(t, mgr)
-	scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+	scionB, infoB := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{withRun(labelled("dev", "dev", scopeProjB, scionB), "run-old")}
 
-	_ = doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old")
-	if rt.stillPresent() {
-		t.Error("Stop no longer deletes by name: ptone/scion#3076 has landed; update this test")
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old&deleteFiles=true")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
+	if !rt.stillPresent() {
+		t.Error("run-new's entry was removed by a stale run-old delete's Stop")
+	}
+	rt.mu.Lock()
+	deletes := append([]runtime.RunRef(nil), rt.deletes...)
+	rt.mu.Unlock()
+	if len(deletes) != 2 {
+		t.Fatalf("runtime calls = %+v, want Stop then Delete", deletes)
+	}
+	for _, ref := range deletes {
+		if ref.RunID != "run-old" {
+			t.Errorf("runtime call carried run %q, want run-old", ref.RunID)
+		}
+	}
+	assertUntouched(t, scionB, "dev", infoB)
 }
 
 // A soft delete that loses the race: the mark written before the runtime
