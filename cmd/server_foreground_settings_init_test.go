@@ -19,8 +19,13 @@ package cmd
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -226,6 +231,85 @@ func TestInitOperationalSettings_HubDefaultGCPIdentitySurvivesRestart(t *testing
 	}
 }
 
+// TestInitOperationalSettings_SeedEnvReachesHubOnSQLite shows that
+// SCION_SEED_* values reach the live hub through initOperationalSettings on
+// a SQLite store (LoadBootstrapKoanf seed merge -> syncHubSettings' no-lock
+// branch -> Refresh -> ApplySnapshot); see closed issue ptone/scion#1284.
+// It calls initOperationalSettings directly, so it does not guard against a
+// driver gate returning in its caller, initHubServer.
+func TestInitOperationalSettings_SeedEnvReachesHubOnSQLite(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed-admin@example.com,seed-admin2@example.com")
+	t.Setenv("SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE", "viewer")
+
+	cfg := &config.GlobalConfig{}
+	st := newTestStore(t)
+	srv, err := hub.New(hub.ServerConfig{}, st)
+	if err != nil {
+		t.Fatalf("hub.New: %v", err)
+	}
+	if err := initOperationalSettings(ctx, cfg, srv, st, globalDir); err != nil {
+		t.Fatalf("initOperationalSettings: %v", err)
+	}
+
+	got := srv.AdminEmails()
+	want := []string{"seed-admin@example.com", "seed-admin2@example.com"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("AdminEmails() = %v, want %v", got, want)
+	}
+	if role := srv.DefaultUserRole(); role != "viewer" {
+		t.Errorf("DefaultUserRole() = %q, want viewer", role)
+	}
+}
+
+// TestInitOperationalSettings_MaintenanceBreakGlassByMode: a workstation hub
+// started in admin mode (SCION_SERVER_ADMIN_MODE=true / settings.yaml
+// admin_mode) stays in maintenance over a DB maintenance row that says
+// otherwise; a hosted hub follows the row (ptone/scion#1091 option C).
+func TestInitOperationalSettings_MaintenanceBreakGlassByMode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		workstation bool
+		want        bool
+	}{
+		{"workstation", true, true},
+		{"hosted", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			globalDir := filepath.Join(home, ".scion")
+			if err := os.MkdirAll(globalDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = "sqlite3"
+			st := newTestStore(t)
+			if _, err := st.UpsertHubSetting(ctx, "maintenance",
+				[]byte(`{"admin_mode":false}`), "admin@example.com", -1, "managed"); err != nil {
+				t.Fatal(err)
+			}
+			srv, err := hub.New(hub.ServerConfig{AdminMode: true, Workstation: tc.workstation}, st)
+			if err != nil {
+				t.Fatalf("hub.New: %v", err)
+			}
+			if err := initOperationalSettings(ctx, cfg, srv, st, globalDir); err != nil {
+				t.Fatalf("initOperationalSettings: %v", err)
+			}
+			if got := srv.GetMaintenanceState().IsEnabled(); got != tc.want {
+				t.Errorf("maintenance enabled after startup = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestColocatedBrokerRegisters pins the single condition shared by the early
 // ExpectEmbeddedBroker call and co-located registration in startRuntimeBroker.
 func TestColocatedBrokerRegisters(t *testing.T) {
@@ -254,5 +338,72 @@ func TestColocatedBrokerRegisters(t *testing.T) {
 				t.Errorf("colocatedBrokerRegisters = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestInitHubServer_CallsInitOperationalSettingsUnconditionally is a cheap
+// structural guard for closed issue ptone/scion#1284, which was a
+// postgres-only `if` around the operational-settings init in initHubServer.
+// It parses server_foreground.go and fails if initHubServer no longer calls
+// initOperationalSettingsWithRetry, or if that call sits inside any `if`
+// body/else, `switch`/`select`, or `for`/`range` loop (the call may be the
+// `if`'s own init statement, as in `if err := call(); err != nil`). It is
+// not a semantic check: an early return or `goto` before the call, or
+// moving the call into a helper or closure, is not seen.
+func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "initHubServer" {
+			fn = fd
+		}
+	}
+	if fn == nil {
+		t.Fatal("initHubServer not found in server_foreground.go")
+	}
+
+	found := false
+	var stack []ast.Node
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "initOperationalSettingsWithRetry" {
+			return true
+		}
+		found = true
+		for i, anc := range stack[:len(stack)-1] {
+			child := stack[i+1]
+			switch a := anc.(type) {
+			case *ast.IfStmt:
+				if child == a.Init || child == a.Cond {
+					continue
+				}
+				var cond strings.Builder
+				_ = printer.Fprint(&cond, fset, a.Cond)
+				t.Errorf("initOperationalSettingsWithRetry is conditional on `if %s` (%s); settings init must run on every driver",
+					cond.String(), fset.Position(a.Pos()))
+			case *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt:
+				t.Errorf("initOperationalSettingsWithRetry is inside a switch/select (%s); settings init must run on every driver",
+					fset.Position(anc.Pos()))
+			case *ast.ForStmt, *ast.RangeStmt:
+				t.Errorf("initOperationalSettingsWithRetry is inside a loop (%s); settings init must run once, on every driver",
+					fset.Position(anc.Pos()))
+			}
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("initHubServer no longer calls initOperationalSettingsWithRetry")
 	}
 }

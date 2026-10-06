@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -1566,35 +1567,47 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
-	agent.DeletedAt = time.Time{}
-	agent.Updated = time.Now()
-
 	// Identity-key rows persist through soft-delete (only a hard delete or
 	// purge frees them -- see composite.go's DeleteAgent/DeleteProject/
 	// PurgeDeletedAgents), so restoring an agent should normally find its own
 	// keys already reserved and in place. But an agent soft-deleted before
 	// this invariant existed, or before a backfill of it, may have no key
 	// rows at all, leaving a window where another agent could since have
-	// taken its slug or display-name key. Re-asserting the keys in the same
-	// transaction as the restore turns that window into a defensive
-	// revalidation: a genuine collision surfaces as the same
+	// taken its slug or display-name key. restoreAgentTx re-asserts the keys
+	// in the same transaction as the restore, turning that window into a
+	// defensive revalidation: a genuine collision surfaces as the same
 	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
 	// than silently restoring an agent whose key now belongs to someone else.
-	// api.IdentityKeysFor is also what the backfill migration uses, so a
-	// legacy row's empty-display-name-key tolerance is handled identically
-	// by both.
-	keys := api.IdentityKeysFor(agent.Slug, agent.Name)
-	if err := s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.UpdateAgent(ctx, agent); err != nil {
-			return err
+	// The same transaction checks that every delegator of the edges the soft
+	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
+	// fails), reactivates those edges (a conflicting active edge is a 409)
+	// and writes the agent_restore audit record.
+	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
+		if errors.Is(err, errAgentNotSoftDeleted) {
+			BadRequest(w, "Agent is not in deleted state")
+			return
 		}
-		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
-	}); err != nil {
+		if errors.Is(err, errRestoreEdgeConflict) {
+			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorNotLive) {
+			Conflict(w, "A principal that delegated to this agent is not active, so its delegation cannot be restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorLookup) {
+			slog.Error("restore: delegator lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's delegators; retry the restore", nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	s.events.PublishAgentCreated(ctx, agent)
+	// Marked as a restore so web clients that tombstoned the ID on deleted
+	// bring it back (ptone/scion#2951). restoreAgentTx stamps the restored
+	// row's Updated with the restore time, so that is the marker.
+	s.events.PublishAgentRestored(ctx, agent, agent.Updated)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
 	// restored agent carries its deletion view (null) and project/broker
@@ -1786,6 +1799,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				})
 				return
 			}
+		}
+	}
+
+	// Resuming a suspended agent to deliver a message requires the
+	// lifecycle permission that starting the agent requires. The check runs
+	// before conversation resolution, persistence and dispatch, so a refused
+	// request resumes nothing and stores nothing. A migrating recipient is
+	// never resumed (see the migration gate below), so the rule does not
+	// apply to it.
+	if req.Wake && !reincarnationInFlight(agent) {
+		if denial := s.wakeResumeDenial(ctx, GetIdentityFromContext(ctx), agent); denial != nil {
+			WriteAgentDMError(w, denial)
+			return
 		}
 	}
 

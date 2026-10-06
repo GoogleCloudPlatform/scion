@@ -284,6 +284,9 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		softDelete = args.SoftDelete
 		deletedAt = args.DeletedAt
 		claim = args.Claim
+		if len(args.PreviousRunIDs) > 0 {
+			agent.PreviousRunIDs = args.PreviousRunIDs
+		}
 	}
 	// A delete engine's intent applies only while the claim it was created
 	// under is still the row's current claim, live or failed in_doubt (see
@@ -295,7 +298,10 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 	// the intent was written.
 	//
 	// An intent records no run ID of its own until ptone/scion#2550 P5; the
-	// broker gets the re-read row's run ID.
+	// broker gets the re-read row's run ID. The intent's previous runs
+	// (ptone/scion#3097) are deleted by the same DispatchAgentDelete call
+	// under this fence, so each previous-run delete carries the same
+	// notAfter and a stale intent deletes none of them.
 	if claim != 0 {
 		notAfter, ok := deferredDeleteDeadline(ctx, agent, claim, deleteClock())
 		if !ok {

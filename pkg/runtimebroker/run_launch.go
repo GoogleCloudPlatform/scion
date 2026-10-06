@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -378,6 +379,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			Phase:           sr.info.Phase,
 			Activity:        sr.info.Activity,
 			ContainerStatus: sr.info.ContainerStatus,
+			RunID:           sr.info.RunID,
+
+			WorkspacePlacement: sr.info.WorkspacePlacement,
 		}
 	}
 	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", info)
@@ -515,6 +519,11 @@ func classifyStartError(ctx context.Context, err error) (code, message string) {
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):
 		return "name_in_use", err.Error()
+	case errors.Is(err, scionrt.ErrRunConflict):
+		// Another live run holds the agent name, and the runtime deleted
+		// nothing of it (ptone/scion#2550). Fixed text: the wrapped error
+		// names the namespace, object and the other run's ID.
+		return "name_in_use", scionrt.ErrRunConflict.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a
 		// synchronous create or start returns, with the error naming the
