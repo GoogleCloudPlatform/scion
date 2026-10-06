@@ -393,6 +393,14 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
 				t.Errorf("%s: a %s token with %s got %d, want neither 401 nor 403: %s", label, boundary.Kind, sel, rec.Code, rec.Body.String())
 			}
+			// A WebSocket upgrade cannot return 2xx to a plain request, so
+			// for a WebSocket row the admitting token must get a status
+			// other than 401, 403 or 404 on the seeded target, which shows
+			// both authorization and existence; the refusing tokens above
+			// got 403 or 404 on the same target.
+			if ep.Kind == authzop.EntryPointWebSocket && rec.Code == http.StatusNotFound {
+				t.Errorf("%s: WebSocket row: the admitting token got 404, so the seeded target is not reached: %s", label, rec.Body.String())
+			}
 			// A 404 counts as a refusal only when the admitting token
 			// proves the same target exists: a 2xx, or for a WebSocket
 			// entry point (which cannot answer 2xx to a plain request) any
