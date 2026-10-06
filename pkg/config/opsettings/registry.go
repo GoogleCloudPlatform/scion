@@ -64,6 +64,19 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 	}
 }
 
+// sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
+// settings-v1.schema.json: shared dir name keys (lowercase letters, digits
+// and hyphens, as api.ValidateSharedDirs requires) mapped to local or nfs.
+func sharedDirStorageBackendsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"propertyNames": map[string]interface{}{
+			"pattern": config.SharedDirNamePattern,
+		},
+		"additionalProperties": map[string]interface{}{"type": "string", "enum": []string{"local", "nfs"}},
+	}
+}
+
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
 // Layer-0 (bootstrap) and must not be written via the admin API.
@@ -227,6 +240,14 @@ func init() {
 			Name:       "experiments",
 			KoanfPaths: nil,
 			New:        func() any { return &ExperimentsSettings{} },
+		},
+		{
+			// artifacts is durable via DB but has no settings.yaml
+			// representation. Absent DB row = compiled defaults (see
+			// ArtifactsSettings). Seeding skips this section (KoanfPaths nil).
+			Name:       "artifacts",
+			KoanfPaths: nil,
+			New:        func() any { return &ArtifactsSettings{} },
 		},
 	}
 
@@ -394,31 +415,13 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
-		"auto_expose_ports": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"enabled": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
-		// quotas schema is hand-written — like auto_expose_ports, it has no
-		// $defs in settings-v1.schema.json.
-		"quotas": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"enforce_broker_quotas": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
-		// agent_secrets schema is hand-written — like quotas, it has no
-		// $defs in settings-v1.schema.json.
-		"agent_secrets": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"user_scope_only": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
+		// auto_expose_ports, quotas, agent_secrets, project_defaults,
+		// github_app and federation are derived from settings-v1.schema.json
+		// so the section schema and the settings file schema cannot drift
+		// apart (the $defs are attached to every section at compile time).
+		"auto_expose_ports": schemaObject(getSchemaProperty(root, "auto_expose_ports")),
+		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
+		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
 		// experiments schema is hand-written -- it is runtime/API-owned
 		// state with no $defs in settings-v1.schema.json (like maintenance
 		// and messaging). overrides is a map of experiment name -> bool;
@@ -438,6 +441,24 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
+		// artifacts schema is hand-written -- it is runtime/API-owned state
+		// with no $defs in settings-v1.schema.json. The per-field minimums
+		// match ArtifactsSettings.Resolve; the cross-field rules (file limit
+		// <= bundle limit, default TTL <= max TTL) are not expressible here
+		// and are enforced by Resolve, which fails closed.
+		"artifacts": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enabled":                map[string]interface{}{"type": "boolean"},
+				"max_file_bytes":         map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_bundle_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
+				"max_files":              map[string]interface{}{"type": "integer", "minimum": 1},
+				"default_retention_days": map[string]interface{}{"type": "integer", "minimum": 0},
+				"link_default_ttl_hours": map[string]interface{}{"type": "integer", "minimum": 1},
+				"link_max_ttl_hours":     map[string]interface{}{"type": "integer", "minimum": 1},
+			},
+			"additionalProperties": false,
+		},
 		"telemetry": buildTelemetrySchema(defs),
 		"agent_defaults": {
 			"type": "object",
@@ -452,8 +473,8 @@ func compileSchemas() {
 				"default_thinking_level":                  map[string]interface{}{"type": "integer"},
 				"default_max_agent_role":                  getSchemaProperty(root, "default_max_agent_role"),
 				"default_agent_role":                      getSchemaProperty(root, "default_agent_role"),
-				"default_runtime_broker":                  map[string]interface{}{"type": "string"},
-				"default_timezone":                        map[string]interface{}{"type": "string"},
+				"default_runtime_broker":                  getSchemaProperty(root, "default_runtime_broker"),
+				"default_timezone":                        getSchemaProperty(root, "default_timezone"),
 				"default_gcp_identity_mode":               getSchemaProperty(root, "default_gcp_identity_mode"),
 				"default_gcp_identity_service_account_id": getSchemaProperty(root, "default_gcp_identity_service_account_id"),
 			},
@@ -463,34 +484,16 @@ func compileSchemas() {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"public_url":     getSchemaProperty(root, "server", "hub", "public_url"),
+				"hub_name":       getSchemaProperty(root, "server", "hub", "hub_name"),
 				"image_registry": getSchemaProperty(root, "image_registry"),
 			},
 			"additionalProperties": false,
 		},
-		// Tech debt: github_app schema is hand-written — the canonical
-		// settings-v1.schema.json has no $defs for GitHub App fields. If a
-		// gitHubApp $def is added later, unify here.
-		"github_app": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"app_id":           map[string]interface{}{"type": "integer"},
-				"api_base_url":     map[string]interface{}{"type": "string"},
-				"webhooks_enabled": map[string]interface{}{"type": "boolean"},
-				"installation_url": map[string]interface{}{"type": "string"},
-				"private_key_path": map[string]interface{}{"type": "string"},
-			},
-			"additionalProperties": false,
-		},
-		"notifications": buildNotificationsSchema(),
-		// project_defaults schema is hand-written — like maintenance, it has
-		// no $defs in settings-v1.schema.json because it is runtime/DB state.
-		"project_defaults": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"default_scratchpad": map[string]interface{}{"type": "boolean"},
-			},
-			"additionalProperties": false,
-		},
+		// github_app omits private_key and webhook_secret: secret material
+		// stays in the secret backend and is never stored in the DB section.
+		"github_app":       withoutProperties(schemaObject(getSchemaProperty(root, "server", "github_app")), "private_key", "webhook_secret"),
+		"notifications":    buildNotificationsSchema(),
+		"project_defaults": schemaObject(getSchemaProperty(root, "project_defaults")),
 		// runtimes: map-of-objects — keys are runtime names, values are
 		// runtime config objects. additionalProperties validates each entry.
 		"runtimes": {
@@ -498,22 +501,23 @@ func compileSchemas() {
 			"additionalProperties": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"type":                       map[string]interface{}{"type": "string"},
-					"host":                       map[string]interface{}{"type": "string"},
-					"context":                    map[string]interface{}{"type": "string"},
-					"namespace":                  map[string]interface{}{"type": "string", "maxLength": 63, "pattern": dns1123LabelOrEmptyPattern},
-					"env":                        map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
-					"sync":                       map[string]interface{}{"type": "string"},
-					"gke":                        map[string]interface{}{"type": "boolean"},
-					"list_all_namespaces":        map[string]interface{}{"type": "boolean"},
-					"priority_class_name":        map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
-					"cloudrun":                   map[string]interface{}{"type": "object"},
-					"shared_dir_storage_class":   map[string]interface{}{"type": "string"},
-					"shared_dir_size":            map[string]interface{}{"type": "string"},
-					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
-					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
+					"type":                        map[string]interface{}{"type": "string"},
+					"host":                        map[string]interface{}{"type": "string"},
+					"context":                     map[string]interface{}{"type": "string"},
+					"namespace":                   map[string]interface{}{"type": "string", "maxLength": 63, "pattern": dns1123LabelOrEmptyPattern},
+					"env":                         map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					"sync":                        map[string]interface{}{"type": "string"},
+					"gke":                         map[string]interface{}{"type": "boolean"},
+					"list_all_namespaces":         map[string]interface{}{"type": "boolean"},
+					"priority_class_name":         map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
+					"cloudrun":                    map[string]interface{}{"type": "object"},
+					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
+					"shared_dir_size":             map[string]interface{}{"type": "string"},
+					"safe_to_evict":               map[string]interface{}{"type": "boolean"},
+					"shared_dir_storage_backend":  map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"shared_dir_storage_backends": sharedDirStorageBackendsSchema(),
+					"home_storage_backend":        map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":           map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
@@ -549,13 +553,14 @@ func compileSchemas() {
 							},
 						},
 					},
-					"secrets":                    map[string]interface{}{"type": "array"},
-					"shared_dir_storage_class":   map[string]interface{}{"type": "string"},
-					"shared_dir_size":            map[string]interface{}{"type": "string"},
-					"safe_to_evict":              map[string]interface{}{"type": "boolean"},
-					"shared_dir_storage_backend": map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_backend":       map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
-					"home_storage_leaf":          map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
+					"secrets":                     map[string]interface{}{"type": "array"},
+					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
+					"shared_dir_size":             map[string]interface{}{"type": "string"},
+					"safe_to_evict":               map[string]interface{}{"type": "boolean"},
+					"shared_dir_storage_backend":  map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"shared_dir_storage_backends": sharedDirStorageBackendsSchema(),
+					"home_storage_backend":        map[string]interface{}{"type": "string", "enum": []string{"", "local", "nfs"}},
+					"home_storage_leaf":           map[string]interface{}{"type": "string", "enum": []string{"", "pod", "broker"}},
 
 					// GCP identity "assign" on Kubernetes.
 					"kubernetes_service_account_mappings": kubernetesServiceAccountMappingsSchema(),
@@ -586,45 +591,20 @@ func compileSchemas() {
 				},
 			},
 		},
-		// federation schema is hand-written — federation config has no $defs
-		// in settings-v1.schema.json because it is a new Layer-1 section.
-		"federation": {
-			"type": "object",
-			"properties": map[string]interface{}{
-				"enabled": map[string]interface{}{"type": "boolean"},
-				"trusted_issuers": map[string]interface{}{
-					"type": "array",
-					"items": map[string]interface{}{
-						"type":     "object",
-						"required": []string{"issuer_url"},
-						"properties": map[string]interface{}{
-							"issuer_url":           map[string]interface{}{"type": "string", "minLength": 1},
-							"jwks_url":             map[string]interface{}{"type": "string"},
-							"expected_audience":    map[string]interface{}{"type": "string"},
-							"allowed_projects":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"allowed_root_users":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"default_scopes":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"issuer_type":          map[string]interface{}{"type": "string", "enum": []string{"hub", "service_account", "user"}},
-							"default_role":         map[string]interface{}{"type": "string"},
-							"allowed_emails":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"allowed_gcp_projects": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"allowed_domains":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-						},
-						"additionalProperties": false,
-					},
-				},
-				"algorithms": map[string]interface{}{
-					"type":  "array",
-					"items": map[string]interface{}{"type": "string", "enum": []string{"RS256", "ES256"}},
-				},
-				"refresh_interval":  map[string]interface{}{"type": "string"},
-				"debounce_interval": map[string]interface{}{"type": "string"},
-			},
-			"additionalProperties": false,
-		},
+		// federation: a DB section doc decodes strictly into
+		// FederationSettings, so the intervals keep only the string branch
+		// of the root anyOf (the file loader also takes an unquoted 0).
+		"federation": withStringOnlyIntervals(schemaObject(getSchemaProperty(root, "server", "federation"))),
 	}
 
-	rawSchemas = sectionSchemaMap
+	// SchemaInfo serves self-contained schemas: inline every local $ref so
+	// a client does not need the root $defs. Compilation below still uses
+	// sectionSchemaMap with the $defs attached.
+	rawSchemas = make(map[string]map[string]interface{}, len(sectionSchemaMap))
+	for name, def := range sectionSchemaMap {
+		inlined, _ := inlineRefs(root, def, nil).(map[string]interface{})
+		rawSchemas[name] = inlined
+	}
 
 	for i := range Registry {
 		s := &Registry[i]
@@ -716,6 +696,118 @@ func getSchemaProperty(root map[string]interface{}, path ...string) interface{} 
 		}
 	}
 	return map[string]interface{}{}
+}
+
+// withStringOnlyIntervals returns a copy of the federation schema whose
+// refresh_interval and debounce_interval keep only their string anyOf
+// branch, with the parent's description carried over. The copy is shallow:
+// only the top-level map, the properties map and the two new interval maps
+// are new; everything else is shared with the root schema and must not be
+// modified.
+func withStringOnlyIntervals(node map[string]interface{}) map[string]interface{} {
+	out := withoutProperties(node)
+	props, ok := out["properties"].(map[string]interface{})
+	if !ok || props == nil {
+		return out // unexpected shape: leave the schema as it is
+	}
+	for _, key := range []string{"refresh_interval", "debounce_interval"} {
+		prop, ok := props[key].(map[string]interface{})
+		if !ok || prop == nil {
+			continue
+		}
+		branches, _ := prop["anyOf"].([]interface{})
+		for _, b := range branches {
+			bm, ok := b.(map[string]interface{})
+			if !ok || bm["type"] != "string" {
+				continue
+			}
+			repl := make(map[string]interface{}, len(bm)+1)
+			for k, v := range bm {
+				repl[k] = v
+			}
+			if desc, ok := prop["description"]; ok {
+				repl["description"] = desc
+			}
+			props[key] = repl
+		}
+	}
+	return out
+}
+
+// inlineRefs returns a deep copy of v with every local "#/$defs/..." $ref
+// replaced by the referenced definition (sibling keywords such as
+// description are kept, and win over the definition's). stack holds the
+// definitions being expanded; a recursive reference is left as a $ref
+// rather than expanded forever.
+func inlineRefs(root map[string]interface{}, v interface{}, stack []string) interface{} {
+	switch node := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(node))
+		if ref, ok := node["$ref"].(string); ok && strings.HasPrefix(ref, "#/$defs/") {
+			recursive := false
+			for _, s := range stack {
+				if s == ref {
+					recursive = true
+				}
+			}
+			if def, ok := resolveRef(root, ref).(map[string]interface{}); ok && !recursive {
+				expanded, _ := inlineRefs(root, def, append(stack, ref)).(map[string]interface{})
+				for k, val := range expanded {
+					out[k] = val
+				}
+				for k, val := range node {
+					if k != "$ref" {
+						out[k] = inlineRefs(root, val, stack)
+					}
+				}
+				return out
+			}
+		}
+		for k, val := range node {
+			out[k] = inlineRefs(root, val, stack)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(node))
+		for i, val := range node {
+			out[i] = inlineRefs(root, val, stack)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// schemaObject asserts a getSchemaProperty result is a schema object. A
+// missing property yields an empty object, which
+// TestSectionSchemas_MatchRootSchema reports.
+func schemaObject(v interface{}) map[string]interface{} {
+	m, _ := v.(map[string]interface{})
+	if m == nil {
+		return map[string]interface{}{}
+	}
+	return m
+}
+
+// withoutProperties returns a copy of an object schema with the named
+// properties removed. The root schema maps are shared, so they are copied
+// rather than modified.
+func withoutProperties(node map[string]interface{}, names ...string) map[string]interface{} {
+	out := make(map[string]interface{}, len(node))
+	for k, v := range node {
+		out[k] = v
+	}
+	if props, ok := node["properties"].(map[string]interface{}); ok {
+		cp := make(map[string]interface{}, len(props))
+		for k, v := range props {
+			cp[k] = v
+		}
+		for _, n := range names {
+			delete(cp, n)
+		}
+		out["properties"] = cp
+	}
+	return out
 }
 
 func resolveRef(root map[string]interface{}, ref string) interface{} {

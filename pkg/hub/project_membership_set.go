@@ -889,6 +889,12 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 		}
 	}
+	// Project members groups cannot be granted roles. Only new bindings are
+	// refused: keeping an unchanged set (the idempotent return above) and
+	// removing roles stay allowed so existing bindings can be cleaned up.
+	if len(plan0.Create) > 0 && isProjectMembersGroupPrincipal(ctx, svc.store, req.PrincipalType, req.PrincipalID) {
+		return nil, projectMembersGroupPrincipalDecision(req.PrincipalID)
+	}
 
 	authPre, aErr := svc.memberActorAuthorityPreTx(ctx, req.Actor.ID(), req.ProjectID,
 		len(plan0.Create) > 0, len(plan0.Remove) > 0, plan0.hasCustomCreate(), plan0.hasCustomRemove(currentDefs0))
@@ -1048,6 +1054,20 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 		}
 
+		// Last-owner guard, part 1 (ptone/scion#2769): note, before the
+		// plan is applied, whether it removes a usable owner binding.
+		var removedOwners []*store.RoleBinding
+		for _, b := range plan1.Remove {
+			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil && rd.Name == store.ProjectRoleOwner {
+				removedOwners = append(removedOwners, b)
+			}
+		}
+		now := svc.nowFunc() // one instant for the pre-state and post-state checks
+		removedUsable, err := anyUsableOwnerBinding(ctx, tx, removedOwners, now)
+		if err != nil {
+			return fmt.Errorf("cannot verify usable owner: %w", err)
+		}
+
 		// Apply the plan: every direct role-binding mutation for this request
 		// goes through applyRolePlanTx (project_membership_service.go), the
 		// one purpose-named step the authzop mutation catalog classifies for
@@ -1064,21 +1084,11 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 			}
 		}
 
-		// Last-owner guard, evaluated on the full post-state, inside the
-		// same transaction as the mutations it may roll back.
-		removedOwner := false
-		for _, b := range plan1.Remove {
-			if rd := currentDefs1[b.RoleDefinitionID]; rd != nil && rd.Name == store.ProjectRoleOwner && b.PrincipalType == store.RoleBindingPrincipalUser {
-				removedOwner = true
-			}
-		}
-		if removedOwner {
-			count, cErr := svc.countActiveDirectOwnersFromStore(ctx, tx, req.ProjectID)
-			if cErr != nil {
-				return fmt.Errorf("post-state owner count: %w", cErr)
-			}
-			if count < 1 {
-				return &lastOwnerError{projectID: req.ProjectID}
+		// Last-owner guard, part 2: evaluated on the full post-state, inside
+		// the same transaction as the mutations it may roll back.
+		if len(removedOwners) > 0 {
+			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
+				return err
 			}
 		}
 
@@ -1196,6 +1206,9 @@ func (svc *ProjectMembershipService) SetMemberRoles(ctx context.Context, req Set
 		}
 		if errors.Is(txErr, store.ErrAlreadyExists) || errors.Is(txErr, store.ErrBuiltInMembershipConflict) {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "conflict", Reason: txErr.Error(), HTTPStatus: 409}
+		}
+		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
+			return nil, d
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: txErr.Error(), HTTPStatus: 500}
 	}

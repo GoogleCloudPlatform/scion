@@ -123,20 +123,19 @@ type ConversationReference struct {
 
 // ChannelLink maps a Teams conversation to a Scion project.
 type ChannelLink struct {
-	ConversationID     string
-	TeamID             string
-	TeamName           string
-	ChannelName        string
-	ProjectID          string
-	ProjectSlug        string
-	DefaultAgent       string
-	LinkedBy           string // Azure AD object ID of user who ran setup
-	LinkedAt           time.Time
-	Active             bool
-	ShowAgentToAgent   bool
-	ShowAssistantReply bool
-	ShowStateChanges   bool
-	ChatOnly           bool
+	ConversationID   string
+	TeamID           string
+	TeamName         string
+	ChannelName      string
+	ProjectID        string
+	ProjectSlug      string
+	DefaultAgent     string
+	LinkedBy         string // Azure AD object ID of user who ran setup
+	LinkedAt         time.Time
+	Active           bool
+	ShowAgentToAgent bool
+	ShowStateChanges bool
+	ChatOnly         bool
 }
 
 // TeamsUserMapping links a Teams user to a Scion user identity.
@@ -275,16 +274,6 @@ type InputText struct {
 }
 
 func (InputText) cardElement() {}
-
-// ActionSubmit is a button that submits data back to the bot.
-type ActionSubmit struct {
-	Type  string      `json:"type"` // "Action.Submit"
-	Title string      `json:"title"`
-	Style string      `json:"style,omitempty"` // "positive", "destructive"
-	Data  interface{} `json:"data"`
-}
-
-func (ActionSubmit) cardAction() {}
 
 // ActionExecute is a button that sends an invoke activity to the bot.
 // Unlike Action.Submit (which sends a message activity), Action.Execute

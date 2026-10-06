@@ -100,6 +100,7 @@ func TestStderrReporter_EnvIgnoredMessage(t *testing.T) {
 // to stderr only: with --format json, stdout must stay valid, parseable
 // JSON with no warning text mixed in.
 func TestWarnRemovedLegacyEnv_StderrOnlyUnderJSON(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	t.Setenv("SCION_HUB_GROVE_ID", "legacy-uuid")
 	// Neutralize checks that are unrelated to this test but would otherwise
 	// depend on the environment scion happens to run in (agent-container
@@ -317,6 +318,7 @@ func TestProjectMigration_ConflictNamesPathsAndRemedy(t *testing.T) {
 // scans ~/.scion/projects, the migration line goes to stderr only, and
 // stdout stays valid, parseable JSON under --format json.
 func TestGlobalLayoutMigration_CLIStderrOnlyUnderJSON(t *testing.T) {
+	restoreAllSilenceUsage(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("SCION_HOST_UID", "")

@@ -254,12 +254,11 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
 	// Shared-workspace git projects skip clone — agents mount the shared workspace instead.
+	// The shared workspace's own clone settings travel separately, at
+	// dispatch time (sharedWorkspaceCloneConfig), so they never turn on the
+	// broker's per-agent clone mode.
 	if project != nil && project.GitRemote != "" && !project.IsSharedWorkspace() {
-		cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
-		defaultBranch := project.Labels[store.LabelDefaultBranch]
-		if defaultBranch == "" {
-			defaultBranch = "main"
-		}
+		cloneURL, defaultBranch := projectCloneSource(project)
 		defaultDepth := 1
 		agent.AppliedConfig.GitClone = &api.GitCloneConfig{
 			URL:    cloneURL,
@@ -294,6 +293,41 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	}
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+}
+
+// projectCloneSource returns the URL and branch to clone a git-anchored
+// project from: the clone-url label (or the git remote), and the
+// default-branch label (or "main").
+func projectCloneSource(project *store.Project) (cloneURL, branch string) {
+	cloneURL = resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	branch = project.Labels[store.LabelDefaultBranch]
+	if branch == "" {
+		branch = "main"
+	}
+	return cloneURL, branch
+}
+
+// sharedWorkspaceCloneConfig returns the clone settings for the workspace of
+// a shared-plain git project, or nil for any other project. They describe
+// the same full clone of the default branch the hub makes for the project's
+// own workspace (cloneSharedWorkspaceProject).
+//
+// They are sent to the broker separately from AppliedConfig.GitClone, which
+// stays nil for these projects: GitClone would make the broker clone into a
+// per-agent workspace. Only the Kubernetes runtime uses these settings, in
+// the workspace-provision init container of an NFS-backed workspace
+// (RunConfig.GitCloneForInit), where the first agent to start clones the
+// repository into the shared workspace.
+func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
+	if project == nil || !project.IsSharedWorkspace() {
+		return nil
+	}
+	cloneURL, branch := projectCloneSource(project)
+	if cloneURL == "" {
+		return nil
+	}
+	fullClone := 0
+	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone}
 }
 
 // deriveAgentConfig is create's whole config-resolution pipeline, run after
@@ -985,20 +1019,11 @@ const (
 // createNotifySubscription creates a notification subscription for the given agent
 // if notify is true and a subscriber has been identified.
 func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectID, notifySubscriberType, notifySubscriberID, createdBy string) {
-	if notifySubscriberID == "" {
+	sub := newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, createdBy)
+	if sub == nil {
 		return
 	}
-	sub := &store.NotificationSubscription{
-		ID:                api.NewUUID(),
-		Scope:             store.SubscriptionScopeAgent,
-		AgentID:           agentID,
-		SubscriberType:    notifySubscriberType,
-		SubscriberID:      notifySubscriberID,
-		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
-		CreatedAt:         time.Now(),
-		CreatedBy:         createdBy,
-	}
+	sub.AgentID = agentID
 	if err := s.store.CreateNotificationSubscription(ctx, sub); err != nil {
 		s.agentLifecycleLog.Warn("Failed to create notification subscription",
 			"agent_id", agentID, "subscriber", notifySubscriberID, "error", err)
@@ -1006,6 +1031,25 @@ func (s *Server) createNotifySubscription(ctx context.Context, agentID, projectI
 		s.agentLifecycleLog.Debug("Created notification subscription",
 			"subscriptionID", sub.ID, "agent_id", agentID,
 			"subscriberType", notifySubscriberType, "subscriberID", notifySubscriberID)
+	}
+}
+
+// newNotifySubscription builds the agent-scoped notification subscription a
+// create with notify=true records, without its AgentID. It returns nil when
+// there is no subscriber.
+func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, createdBy string) *store.NotificationSubscription {
+	if notifySubscriberID == "" {
+		return nil
+	}
+	return &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		SubscriberType:    notifySubscriberType,
+		SubscriberID:      notifySubscriberID,
+		ProjectID:         projectID,
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		CreatedAt:         time.Now(),
+		CreatedBy:         createdBy,
 	}
 }
 
@@ -1035,13 +1079,53 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 }
 
 // handleExistingAgent encapsulates the full decision tree for an agent that
-// already exists when a create/start request arrives.
+// already exists (same slug, same project) when a create request arrives. It
+// either writes the HTTP response itself or tells the caller what to do.
 //
-// Phases:
-//  1. Stale cleanup (running/stopped/error + not provision-only): dispatch delete, remove from DB → deleted
-//  2. Env-gather re-provisioning (provisioning + GatherEnv): dispatch delete, remove from DB → deleted
-//  3. Restart (created/provisioning/pending + not provision-only): recover broker ID, update config, dispatch start → started
-//  4. Otherwise: none (caller decides what to do)
+// Gates, in order, before any branch acts:
+//   - Lifecycle authz: the caller must be allowed to manage this specific
+//     agent (the same check the /start route enforces). A denial returns
+//     existingAgentConflict, so the caller learns only that the name is taken.
+//   - Start gate: an agent whose create/start is already in flight is
+//     returned as it is (200, request not applied) → existingAgentStarted;
+//     any other start-gate refusal is written → existingAgentErrored.
+//
+// Branches (all but env-gather are skipped for req.ProvisionOnly):
+//  1. Suspended: restart in place, preserving harness state. Re-reserves
+//     quota, records run intent, dispatches start with the harness resume
+//     flag set, marks the agent running → existingAgentStarted.
+//  2. Running/stopped/error: resumeInPlaceDecision decides. A stopped agent
+//     with req.Resume restarts in place with a fresh harness session; an
+//     errored agent with req.Resume and req.ForceResume is force-resumed
+//     (crash recovery), continuing the interrupted session. Either path
+//     re-reserves quota and dispatches start → existingAgentStarted.
+//     Anything else, including every running agent, is a duplicate →
+//     existingAgentConflict. Existing agents are never deleted here.
+//  3. Env-gather re-provisioning (provisioning + req.GatherEnv): record run
+//     intent stopped, dispatch a broker delete when both a dispatcher and a
+//     runtime broker are set (skipped otherwise; a delete failure aborts
+//     unless cleanupMode=force), revoke the agent's credentials, hard-delete
+//     the row and release its quotas → existingAgentDeleted, and the caller
+//     creates a fresh agent.
+//  4. Restart (created/provisioning): recover the broker ID if unset, apply
+//     task/attach, record run intent and dispatch start without resume (the
+//     agent keeps the quota reservation taken at create) → existingAgentStarted.
+//  5. Otherwise (e.g. any provision-only request outside branch 3) →
+//     existingAgentConflict.
+//
+// Branches 1, 2 and 4 write an error response → existingAgentErrored when
+// they cannot dispatch (no dispatcher or runtime broker), have a GCP
+// identity the token-mint gate would refuse (gcpIdentityStartRefusal,
+// checked before quota and run intent), fail the start-dispatch setup
+// (beginStartDispatchHTTP, branches 1 and 2: the quota reservation, the
+// starting-phase write, or a delete claim taking the row) or run-intent
+// bookkeeping, or get a dispatch error. The one exception is a
+// dispatch-time start-guard refusal reporting a launch already in flight,
+// which is answered like the start gate above → existingAgentStarted.
+// Branch 3 writes an error → existingAgentErrored when recording run intent,
+// the broker delete (unless cleanupMode=force) or the row delete fails.
+// existingAgentNone is returned only when existingAgent is nil, and the
+// caller proceeds with a normal create.
 func (s *Server) handleExistingAgent(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -1100,7 +1184,7 @@ func (s *Server) handleExistingAgent(
 		cleanupMode = "strict"
 	}
 
-	// Suspended agents are restarted in-place (not deleted), preserving harness state.
+	// Branch 1: Suspended agents are restarted in-place (not deleted), preserving harness state.
 	if !req.ProvisionOnly && existingAgent.Phase == string(state.PhaseSuspended) {
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
@@ -1110,6 +1194,12 @@ func (s *Server) handleExistingAgent(
 		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				"cannot resume agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
 			return existingAgentErrored
 		}
 
@@ -1195,7 +1285,7 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	// Phase 1: Agent is running/stopped/error.
+	// Branch 2: Agent is running/stopped/error.
 	// Resume=true for stopped agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseRunning) ||
@@ -1212,6 +1302,12 @@ func (s *Server) handleExistingAgent(
 			if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 					"cannot resume agent: no runtime broker available", nil)
+				return existingAgentErrored
+			}
+
+			// Fail fast on a GCP identity the token-mint gate would refuse,
+			// before any quota reservation or run-intent write.
+			if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
 				return existingAgentErrored
 			}
 
@@ -1304,7 +1400,7 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Phase 2: Env-gather re-provisioning — provisioning + GatherEnv requested.
+	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
 			writeErrorFromErr(w, err, "")
@@ -1328,7 +1424,15 @@ func (s *Server) handleExistingAgent(
 		// fall-through create below mints a credential for the new agent
 		// row's own (distinct) ID.
 		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
-		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
+		// The row delete runs as a hard-delete lifecycle transaction, so the
+		// agent's delegation edges are deactivated, the hard-delete hooks run
+		// and the agent_hard_delete audit record is written atomically with it.
+		if err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.DeleteAgent(ctx, existingAgent.ID); err != nil {
+				return err
+			}
+			return s.hardDeleteAgentTx(ctx, tx, existingAgent, auditActorFromContext(ctx))
+		}); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}
@@ -1345,7 +1449,7 @@ func (s *Server) handleExistingAgent(
 		return existingAgentDeleted
 	}
 
-	// Phase 3: Restart — agent was provisioned/created and needs to be started.
+	// Branch 4: Restart — agent was provisioned/created and needs to be started.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseCreated) ||
 			existingAgent.Phase == string(state.PhaseProvisioning)) {
@@ -1359,6 +1463,12 @@ func (s *Server) handleExistingAgent(
 		if dispatcher == nil || existingAgent.RuntimeBrokerID == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				"cannot start agent: no runtime broker available", nil)
+			return existingAgentErrored
+		}
+
+		// Fail fast on a GCP identity the token-mint gate would refuse,
+		// before any quota reservation or run-intent write.
+		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "start") {
 			return existingAgentErrored
 		}
 
@@ -2042,7 +2152,7 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 		return false, err
 	}
 	for _, sa := range sas {
-		if sa.Verified {
+		if gcpServiceAccountVerified(&sa) {
 			return true, nil
 		}
 	}

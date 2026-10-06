@@ -517,7 +517,12 @@ export class AgentStore {
   private feedUnavailable = false;
   /** The current feed was marked as holding the complete hub set. */
   private feedHoldsHubSet = false;
-  /** Agents deleted on earlier feeds: a later feed's walks must not bring them back. */
+  /**
+   * Agents deleted on earlier feeds: a later feed's walks and probes must
+   * not bring them back. A restore the feed reports clears one; a restore
+   * while no feed is open goes unseen, and the agent stays hidden until a
+   * reload.
+   */
   private readonly carriedTombstones = new Set<string>();
   /** Agent ids whose single-agent read is in flight on the current feed. */
   private readonly hydrating = new Set<string>();
@@ -1212,6 +1217,7 @@ export class AgentStore {
     const listed = new Set(entry.agents.map((a) => a.id));
     let total: number | undefined;
     let caughtUp = false;
+    let fresh: Agent[] = [];
     try {
       let cursor: string | undefined;
       for (let page = 0; page <= extraPages; page++) {
@@ -1252,7 +1258,7 @@ export class AgentStore {
         cursor = body.nextCursor;
       }
       if (this.feed !== feed) return;
-      const fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
+      fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
       feed.seedAgents(
         fresh.map((row) => mergeCompactRow(feed.getAgent(row.id), row, keys)),
         { token }
@@ -1269,8 +1275,10 @@ export class AgentStore {
       feed.endSeedEpoch(token);
     }
 
-    // Deleted agents were not seeded, so the merge skips them.
-    const upserted = Array.from(new Set(changed.map((row) => row.id)));
+    // Only the rows seeded. The server can still list an agent deleted on an
+    // earlier feed while its delete completes, and this feed can hold it
+    // from a `created` replayed after the delete.
+    const upserted = Array.from(new Set(fresh.map((row) => row.id)));
     if (upserted.length > 0) {
       this.applyChange(
         feed,
@@ -1338,6 +1346,15 @@ export class AgentStore {
     const onChanged = ((event: CustomEvent<{ data: AgentsChangedDetail }>) => {
       if (this.feed === feed) this.applyChange(feed, event.detail.data);
     }) as EventListener;
+    // Agent ids are not reused: a restore is the one way a deleted agent
+    // comes back, and it is never inferred from a listing, which can still
+    // show an agent while its delete completes. The restore mark is subject
+    // to the replay limit documented in state.ts.
+    const onCreated = ((event: CustomEvent<{ data: { agentId: string; restored?: boolean } }>) => {
+      if (this.feed === feed && event.detail.data.restored) {
+        this.carriedTombstones.delete(event.detail.data.agentId);
+      }
+    }) as EventListener;
     const onResync = (): void => {
       if (this.feed === feed) this.invalidate('resync');
     };
@@ -1355,11 +1372,13 @@ export class AgentStore {
         entry.walk.feedDropped = true;
       }
     };
+    feed.addEventListener('agent-created', onCreated);
     feed.addEventListener('agents-changed', onChanged);
     feed.addEventListener('agents-resync', onResync);
     feed.addEventListener('connected', onConnected);
     feed.addEventListener('disconnected', onDisconnected);
     this.detachFeed = (): void => {
+      feed.removeEventListener('agent-created', onCreated);
       feed.removeEventListener('agents-changed', onChanged);
       feed.removeEventListener('agents-resync', onResync);
       feed.removeEventListener('connected', onConnected);
