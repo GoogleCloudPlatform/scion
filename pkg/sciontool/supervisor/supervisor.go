@@ -122,6 +122,10 @@ type Supervisor struct {
 	exitCode  int
 	exitError error
 
+	// startedCh is closed once the child process has been started (and
+	// Signal can reach it). It is never closed if Run fails before Start.
+	startedCh chan struct{}
+
 	// done is closed when the child process exits
 	done chan struct{}
 }
@@ -129,8 +133,9 @@ type Supervisor struct {
 // New creates a new Supervisor with the given configuration.
 func New(config Config) *Supervisor {
 	return &Supervisor{
-		config: config,
-		done:   make(chan struct{}),
+		config:    config,
+		startedCh: make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -284,6 +289,7 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
+	close(s.startedCh)
 
 	// Wait for the child in a goroutine
 	go s.waitForChild()
@@ -391,6 +397,14 @@ func (s *Supervisor) shutdown() (int, error) {
 		defer s.mu.Unlock()
 		return s.exitCode, s.exitError
 	}
+}
+
+// Started returns a channel that is closed once the child process has been
+// started, i.e. from the point at which Signal reaches it rather than being
+// a no-op. It is never closed if Run fails before starting the child, so
+// callers waiting on it should also select on Done or a deadline.
+func (s *Supervisor) Started() <-chan struct{} {
+	return s.startedCh
 }
 
 // Done returns a channel that is closed when the child process exits.
