@@ -134,11 +134,21 @@ func TestFriendlyTemplateName_NoHashQueryOrUserinfo(t *testing.T) {
 		{"https://github.com/user/repo/tree/main/templates/claude?token=s3cr3t", "claude"},
 		{"https://example.com/my-template.tar.gz", "my-template"},
 		{"claude", "claude"},
+		// Percent-encoding is kept, never decoded (review round 2).
+		{"https://example.com/a%20b", "a%20b"},
+		{"https://example.com/a%2Fb", "a%2Fb"},
+		{"https://example.com/a%0Ab", "a%0Ab"},
+		// A dot element is not a template name.
+		{"https://example.com/a/b/..", "remote"},
+		{"https://example.com/a/b/.", "remote"},
 	}
 	for _, c := range cases {
 		got := FriendlyTemplateName(c.ref)
 		if got != c.want {
 			t.Errorf("FriendlyTemplateName(%q) = %q, want %q", c.ref, got, c.want)
+		}
+		if strings.ContainsAny(got, "\n\r ") {
+			t.Errorf("FriendlyTemplateName(%q) = %q contains a decoded space or line break", c.ref, got)
 		}
 		for _, secret := range []string{"s3cr3t", "sig", "token", "user", "pw@", hex} {
 			if strings.Contains(got, secret) {

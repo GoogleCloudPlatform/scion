@@ -374,8 +374,11 @@ func DeriveTemplateName(uri string) string {
 			}
 			return "remote"
 		}
-		base := path.Base(u.Path)
-		if base == "/" || base == "." {
+		// EscapedPath, not Path: the name keeps the reference's own
+		// percent-encoding, so an encoded "/" or control character
+		// (a%2Fb, a%0Ab) is never decoded into the displayed name.
+		base := path.Base(u.EscapedPath())
+		if base == "/" || base == "." || base == ".." {
 			return "remote"
 		}
 		return trimArchiveExt(base)
