@@ -3940,6 +3940,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	if settingsPath != "" {
 		vs, _, err := config.LoadEffectiveSettings(settingsPath)
 		if err == nil {
+			vs = s.settingsView(vs)
 			settings = vs
 			if s.config.Debug {
 				s.envSecretLog.Debug("extractRequiredEnvKeys: loaded settings",

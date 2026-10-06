@@ -141,3 +141,27 @@ func (s *Server) createRuntimeTargetRefusal(req *CreateAgentRequest) *runtimeTar
 	}
 	return nil
 }
+
+// profileResolutionMiddleware tags every request a flat instance serves
+// (HTTP and control channel) with flat profile resolution, so agent
+// provisioning and start skip the Runtime Broker Profile tier, including the
+// settings active_profile fallback. A legacy Runtime Broker's requests keep
+// legacy resolution (no tag).
+func (s *Server) profileResolutionMiddleware(next http.Handler) http.Handler {
+	if !s.isFlat() {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(config.WithProfileResolution(r.Context(), config.ProfileResolutionFlatInstance)))
+	})
+}
+
+// settingsView returns the settings view this server reads for its own
+// decisions: the flat profile-resolution view on a flat instance, vs itself
+// on a legacy Runtime Broker.
+func (s *Server) settingsView(vs *config.VersionedSettings) *config.VersionedSettings {
+	if s.isFlat() {
+		return vs.ForProfileResolution(config.ProfileResolutionFlatInstance)
+	}
+	return vs
+}

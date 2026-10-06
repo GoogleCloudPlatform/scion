@@ -37,7 +37,7 @@ func (s *Server) lookupHarnessConfigForPolicy(req CreateAgentRequest) (string, c
 	}
 	if settingsPath != "" {
 		if vs, _, err := config.LoadEffectiveSettings(settingsPath); err == nil {
-			settings = vs
+			settings = s.settingsView(vs)
 		}
 	}
 

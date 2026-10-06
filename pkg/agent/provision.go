@@ -630,7 +630,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 			// (§3.7), same as every other precondition here; the
 			// reincarnation is recorded failed with this error as the
 			// reason, and the agent stays stopped until a retry.
-			settings, _, err := config.LoadEffectiveSettings(projectDir)
+			settings, _, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 			if err != nil {
 				return nil, fmt.Errorf("reprovision: load effective settings: %w", err)
 			}
@@ -860,7 +860,7 @@ func (m *AgentManager) Preflight(ctx context.Context, opts api.StartOptions) err
 		return err
 	}
 
-	settings, warnings, _ := config.LoadEffectiveSettings(projectDir)
+	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
 
 	profileName := opts.Profile
@@ -987,7 +987,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		return "", "", nil, err
 	}
 
-	settings, warnings, _ := config.LoadEffectiveSettings(projectDir)
+	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
 	if profileName == "" && settings != nil {
 		profileName = settings.ActiveProfile
@@ -2562,7 +2562,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	}
 
 	// Load settings for default template
-	vs, vsWarnings, err := config.LoadEffectiveSettings(projectDir)
+	vs, vsWarnings, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		util.Debugf("failed to load effective settings: %v", err)
 	}

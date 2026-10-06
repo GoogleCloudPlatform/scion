@@ -2444,6 +2444,7 @@ func (s *Server) registerRoutes() {
 // applyMiddleware wraps the handler with middleware.
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
+	h = s.profileResolutionMiddleware(h)
 	h = s.recoveryMiddleware(h)
 	if s.requestLogger != nil {
 		h = logging.RequestLogMiddleware(s.requestLogger, "broker", logging.BrokerPathPatterns(), s.config.SlowRequestThreshold)(h)

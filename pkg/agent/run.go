@@ -299,7 +299,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	// Load settings for registry resolution
-	settings, settingsWarnings, err := config.LoadEffectiveSettings(projectDir)
+	settings, settingsWarnings, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		util.Debugf("Start: LoadEffectiveSettings(%s) error: %v", projectDir, err)
 	}
@@ -1330,7 +1330,7 @@ authDone:
 			return nil, recErr
 		}
 		recordedSharedDirBackend = recorded
-		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
+		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlayFor(ctx)
 		if gErr != nil {
 			// A broken global settings file must fail closed (design G5)
 			// ONLY when the operator plausibly intended to configure
