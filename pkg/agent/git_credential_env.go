@@ -87,11 +87,41 @@ var gitCredentialHelperEnvKeys = map[string]struct{}{
 // of an agent without the allowance: a credential key or a helper key. Both
 // match ignoring ASCII case, like IsGitCredentialEnvKey.
 func isStrippedGitEnvKey(key string) bool {
-	if IsGitCredentialEnvKey(key) {
-		return true
-	}
+	return IsGitCredentialEnvKey(key) || isGitCredentialHelperEnvKey(key)
+}
+
+// isGitCredentialHelperEnvKey reports whether key is one of
+// gitCredentialHelperEnvKeys, ignoring ASCII case.
+func isGitCredentialHelperEnvKey(key string) bool {
 	_, ok := gitCredentialHelperEnvKeys[strings.ToUpper(key)]
 	return ok
+}
+
+// secretHasEnvName reports whether a secret of this type is delivered to the
+// container under an env name: environment-type (or untyped) secrets as env
+// vars, variable-type secrets as entries of the container's secrets.json.
+// File-type secrets are projected to a path instead.
+func secretHasEnvName(secretType string) bool {
+	return secretType == "environment" || secretType == "variable" || secretType == ""
+}
+
+// secretEnvName is the env name a secret is delivered under: its target, or
+// its name when the target is empty.
+func secretEnvName(name, target string) string {
+	if target != "" {
+		return target
+	}
+	return name
+}
+
+// IsGitCredentialSecret reports whether a secret is delivered to the
+// container under a GitHub credential env name: an environment-type,
+// variable-type or untyped secret whose env name (target, or name when the
+// target is empty) matches IsGitCredentialEnvKey. File-type secrets never
+// match. The broker's container env filter and the hub's agent secret reads
+// both use this one definition.
+func IsGitCredentialSecret(secretType, name, target string) bool {
+	return secretHasEnvName(secretType) && IsGitCredentialEnvKey(secretEnvName(name, target))
 }
 
 // gitCredentialsStripped reports whether GitHub credential keys must be
@@ -178,7 +208,8 @@ func stripGitCredentialRunConfig(cfg *runtime.RunConfig) (removed []string) {
 	if len(cfg.ResolvedSecrets) > 0 {
 		secrets := make([]api.ResolvedSecret, 0, len(cfg.ResolvedSecrets))
 		for _, s := range cfg.ResolvedSecrets {
-			if (s.Type == "environment" || s.Type == "variable" || s.Type == "") && isStrippedGitEnvKey(secretEnvTarget(s)) {
+			if IsGitCredentialSecret(s.Type, s.Name, s.Target) ||
+				(secretHasEnvName(s.Type) && isGitCredentialHelperEnvKey(secretEnvTarget(s))) {
 				note(secretEnvTarget(s))
 				continue
 			}

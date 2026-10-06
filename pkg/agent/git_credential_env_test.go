@@ -567,3 +567,31 @@ func TestStart_GitCredentials_AuthValueNotStagedAsFile(t *testing.T) {
 		t.Fatalf("control: allowed start did not stage GH_TOKEN (err=%v); the test does not exercise staging", err)
 	}
 }
+
+// TestIsGitCredentialSecret pins the shared secret rule used by the
+// container env filter and the hub's agent secret reads: the env name is
+// the target, or the name when the target is empty, and only secrets
+// delivered under an env name (environment, variable, untyped) match.
+func TestIsGitCredentialSecret(t *testing.T) {
+	cases := []struct {
+		typ, name, target string
+		want              bool
+	}{
+		{"environment", "deploy-pat", "GITHUB_TOKEN", true},
+		{"variable", "tool-cfg", "gh_org", true},
+		{"", "untyped", "GH_TOKEN", true},
+		{"environment", "GH_NAMED", "", true},
+		{"variable", "github_token", "", true},
+		{"environment", "GITHUB_TOKEN", "OTHER_NAME", false},
+		{"environment", "plain", "PLAIN", false},
+		{"file", "cfg-file", "GH_TOKEN", false},
+		{"file", "GITHUB_TOKEN", "/home/scion/.config/tool", false},
+		{"internal", "GITHUB_TOKEN", "GITHUB_TOKEN", false},
+		{"environment", "copilot", "COPILOT_GITHUB_TOKEN", false},
+	}
+	for _, c := range cases {
+		if got := IsGitCredentialSecret(c.typ, c.name, c.target); got != c.want {
+			t.Errorf("IsGitCredentialSecret(%q, %q, %q) = %v, want %v", c.typ, c.name, c.target, got, c.want)
+		}
+	}
+}

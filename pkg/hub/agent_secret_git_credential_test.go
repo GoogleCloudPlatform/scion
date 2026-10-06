@@ -291,6 +291,209 @@ func TestAgentListSecrets_GitCredentialKeys_RequireAllowance(t *testing.T) {
 	}
 }
 
+// getRecordingBackend records the names passed to Get (value reads).
+type getRecordingBackend struct {
+	secret.SecretBackend
+	gets []string
+}
+
+func (g *getRecordingBackend) Get(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	g.gets = append(g.gets, name)
+	return g.SecretBackend.Get(ctx, name, scope, scopeID)
+}
+
+// seedTargetCredSecrets seeds secrets whose names do not match the GitHub
+// credential pattern but whose targets do (project environment, project
+// variable, user environment), plus a file secret and a plain secret that
+// are not affected.
+func seedTargetCredSecrets(t *testing.T, f *materialFixture) {
+	t.Helper()
+	seedSecret(t, f.Server.secretBackend, "deploy-pat", "fake-deploy", store.SecretTypeEnvironment, "GITHUB_TOKEN", f.ProjectID)
+	seedSecret(t, f.Server.secretBackend, "tool-cfg", "fake-tool", store.SecretTypeVariable, "gh_org", f.ProjectID)
+	_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+		Name: "user-pat", Value: "fake-user-pat", SecretType: store.SecretTypeEnvironment, Target: "GH_TOKEN",
+		Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+	})
+	require.NoError(t, err)
+}
+
+func seedTargetPlainSecrets(t *testing.T, f *materialFixture) {
+	t.Helper()
+	seedSecret(t, f.Server.secretBackend, "cfg-file", "fake-file", store.SecretTypeFile, "/home/scion/.config/tool.conf", f.ProjectID)
+	seedSecret(t, f.Server.secretBackend, "plain-setting", "fake-plain", store.SecretTypeEnvironment, "PLAIN_SETTING", f.ProjectID)
+}
+
+// TestAgentSecretRead_GitCredentialTarget_RequireAllowance pins that a
+// secret whose name does not match but whose target names a GitHub
+// credential (the env name the broker filter uses) is refused on fetch and
+// get to an agent without the allowance, with the same answer as a missing
+// key, after the metadata read and without a value read. File-type and
+// plain secrets are unaffected, and an allowed agent reads them all.
+func TestAgentSecretRead_GitCredentialTarget_RequireAllowance(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		applied *store.AgentAppliedConfig
+	}{
+		{"unset", &store.AgentAppliedConfig{}},
+		{"nil-applied-config", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := gitCredentialSecretFixture(t, "git-cred-target-"+tc.name, tc.applied)
+			seedTargetCredSecrets(t, f)
+			seedTargetPlainSecrets(t, f)
+			rec := &getRecordingBackend{SecretBackend: f.Server.secretBackend}
+			f.Server.SetSecretBackend(rec)
+			audit := newRecordingMaterialAuditor()
+			f.Server.SetAuditLogger(audit)
+
+			fetch := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+				secretFetchRequest{Keys: []string{"deploy-pat", "tool-cfg", "PLAIN_ABSENT", "cfg-file", "plain-setting"}}, f.Token)
+			require.Equal(t, http.StatusOK, fetch.Code, fetch.Body.String())
+			var resp secretFetchResponse
+			require.NoError(t, json.NewDecoder(fetch.Body).Decode(&resp))
+			require.Equal(t, []secretFetchResult{
+				{Key: "deploy-pat", Status: "not_found", Error: "secret not found"},
+				{Key: "tool-cfg", Status: "not_found", Error: "secret not found"},
+				{Key: "PLAIN_ABSENT", Status: "not_found", Error: "secret not found"},
+				{Key: "cfg-file", Value: "fake-file", Status: "ok"},
+				{Key: "plain-setting", Value: "fake-plain", Status: "ok"},
+			}, resp.Secrets)
+
+			get := func(key, scope string) (int, string) {
+				r := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/"+key+"?scope="+scope, nil, f.Token)
+				return r.Code, r.Body.String()
+			}
+			absentCode, absentBody := get("PLAIN_ABSENT", "project")
+			require.Equal(t, http.StatusNotFound, absentCode)
+			for _, k := range []string{"deploy-pat", "tool-cfg"} {
+				code, body := get(k, "project")
+				require.Equal(t, http.StatusNotFound, code, "get %s", k)
+				require.Equal(t, absentBody, body, "get %s body", k)
+			}
+			userAbsentCode, userAbsentBody := get("PLAIN_ABSENT", "user")
+			require.Equal(t, http.StatusNotFound, userAbsentCode)
+			code, body := get("user-pat", "user")
+			require.Equal(t, http.StatusNotFound, code, "get user-pat")
+			require.Equal(t, userAbsentBody, body, "get user-pat body")
+
+			for _, k := range rec.gets {
+				require.NotContains(t, []string{"deploy-pat", "tool-cfg", "user-pat"}, k, "value read for a refused secret")
+			}
+			refused := 0
+			for _, e := range audit.events {
+				for _, item := range e.Items {
+					if item.Reason == ReasonGitCredentialNotAllowed {
+						refused++
+						require.False(t, item.Allowed, "key %s", item.Key)
+					}
+				}
+			}
+			require.Equal(t, 5, refused, "fetch 2 + get 3 refused items")
+		})
+	}
+
+	allowed := gitCredentialSecretFixture(t, "git-cred-target-allowed", &store.AgentAppliedConfig{AllowGitCredentials: true})
+	seedTargetCredSecrets(t, allowed)
+	fetch := doRequestWithAgentToken(t, allowed.Server, http.MethodPost, "/api/v1/agent/secrets",
+		secretFetchRequest{Keys: []string{"deploy-pat", "tool-cfg"}}, allowed.Token)
+	require.Equal(t, http.StatusOK, fetch.Code, fetch.Body.String())
+	var resp secretFetchResponse
+	require.NoError(t, json.NewDecoder(fetch.Body).Decode(&resp))
+	require.Equal(t, []secretFetchResult{
+		{Key: "deploy-pat", Value: "fake-deploy", Status: "ok"},
+		{Key: "tool-cfg", Value: "fake-tool", Status: "ok"},
+	}, resp.Secrets)
+	userGet := doRequestWithAgentToken(t, allowed.Server, http.MethodGet, "/api/v1/agents/"+allowed.AgentID+"/secrets/user-pat?scope=user", nil, allowed.Token)
+	require.Equal(t, http.StatusOK, userGet.Code, userGet.Body.String())
+}
+
+// TestAgentListSecrets_GitCredentialTarget_RequireAllowance pins that the
+// list leaves out secrets whose target names a GitHub credential for an
+// agent without the allowance, so its body is byte-identical with and
+// without them, and that an allowed agent still sees them.
+func TestAgentListSecrets_GitCredentialTarget_RequireAllowance(t *testing.T) {
+	list := func(t *testing.T, f *materialFixture, scope string) string {
+		t.Helper()
+		path := "/api/v1/agents/" + f.AgentID + "/secrets"
+		if scope != "" {
+			path += "?scope=" + scope
+		}
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, path, nil, f.Token)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return rec.Body.String()
+	}
+	for name, applied := range map[string]*store.AgentAppliedConfig{"unset": {}, "nil-applied-config": nil} {
+		without := gitCredentialSecretFixture(t, "git-cred-target-list-"+name, applied)
+		seedTargetPlainSecrets(t, without)
+		with := gitCredentialSecretFixture(t, "git-cred-target-list-"+name, applied)
+		seedTargetPlainSecrets(t, with)
+		seedTargetCredSecrets(t, with)
+		for _, scope := range []string{"", "project", "user"} {
+			got := list(t, with, scope)
+			require.Equal(t, list(t, without, scope), got, "%s scope=%q", name, scope)
+			for _, k := range []string{"deploy-pat", "tool-cfg", "user-pat"} {
+				require.NotContains(t, got, k, "%s scope=%q", name, scope)
+			}
+		}
+		require.Contains(t, list(t, with, ""), "cfg-file")
+		require.Contains(t, list(t, with, ""), "plain-setting")
+	}
+
+	allowed := gitCredentialSecretFixture(t, "git-cred-target-list-allowed", &store.AgentAppliedConfig{AllowGitCredentials: true})
+	seedTargetCredSecrets(t, allowed)
+	got := list(t, allowed, "")
+	for _, k := range []string{"deploy-pat", "tool-cfg", "user-pat"} {
+		require.Contains(t, got, k)
+	}
+}
+
+// TestAgentSecretRead_GitCredentialTarget_RecheckedOnReadRecord pins that
+// the target rule is applied again to the record the value read returns: a
+// record whose target names a GitHub credential is not returned to an agent
+// without the allowance even if its metadata did not show that target.
+func TestAgentSecretRead_GitCredentialTarget_RecheckedOnReadRecord(t *testing.T) {
+	f := gitCredentialSecretFixture(t, "git-cred-target-recheck", &store.AgentAppliedConfig{})
+	seedSecret(t, f.Server.secretBackend, "plain-setting", "fake-plain", store.SecretTypeEnvironment, "PLAIN_SETTING", f.ProjectID)
+	race := &raceSecretBackend{SecretBackend: f.Server.secretBackend}
+	race.overrideGet = func(sv *secret.SecretWithValue, err error) (*secret.SecretWithValue, error) {
+		if sv != nil {
+			changed := *sv
+			changed.Target = "GITHUB_TOKEN"
+			return &changed, err
+		}
+		return sv, err
+	}
+	f.Server.SetSecretBackend(race)
+
+	fetch := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+		secretFetchRequest{Keys: []string{"plain-setting"}}, f.Token)
+	require.Equal(t, http.StatusOK, fetch.Code, fetch.Body.String())
+	var resp secretFetchResponse
+	require.NoError(t, json.NewDecoder(fetch.Body).Decode(&resp))
+	require.Equal(t, []secretFetchResult{{Key: "plain-setting", Status: "not_found", Error: "secret not found"}}, resp.Secrets)
+
+	get := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+f.AgentID+"/secrets/plain-setting", nil, f.Token)
+	require.Equal(t, http.StatusNotFound, get.Code, get.Body.String())
+	require.NotContains(t, get.Body.String(), "fake-plain")
+}
+
+// TestGitCredentialSecretDenied pins the metadata rule: the shared
+// agent.IsGitCredentialSecret match plus the same allowance predicate.
+func TestGitCredentialSecretDenied(t *testing.T) {
+	allowed := &TargetFacts{Agent: &store.Agent{AppliedConfig: &store.AgentAppliedConfig{AllowGitCredentials: true}}}
+	unset := &TargetFacts{Agent: &store.Agent{AppliedConfig: &store.AgentAppliedConfig{}}}
+	cred := secret.SecretMeta{Name: "deploy-pat", SecretType: store.SecretTypeEnvironment, Target: "github_token"}
+	file := secret.SecretMeta{Name: "cfg", SecretType: store.SecretTypeFile, Target: "GH_TOKEN"}
+	plain := secret.SecretMeta{Name: "plain", SecretType: store.SecretTypeVariable, Target: "PLAIN"}
+
+	require.False(t, gitCredentialSecretDenied(allowed, cred))
+	for name, facts := range map[string]*TargetFacts{"unset": unset, "no-config": {Agent: &store.Agent{}}, "no-agent": {}, "nil-facts": nil} {
+		require.True(t, gitCredentialSecretDenied(facts, cred), name)
+		require.False(t, gitCredentialSecretDenied(facts, file), name)
+		require.False(t, gitCredentialSecretDenied(facts, plain), name)
+	}
+}
+
 // TestGitCredentialKeyDenied pins the per-key decision: the same matcher as
 // the broker env strip (case-insensitive) and the same predicate as the
 // token refresh gate, refusing when the agent record or applied config is

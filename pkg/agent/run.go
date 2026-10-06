@@ -2641,10 +2641,7 @@ func isAuthCandidateSecret(s api.ResolvedSecret, configAuthKeys map[string]struc
 }
 
 func secretEnvTarget(s api.ResolvedSecret) string {
-	if s.Target != "" {
-		return s.Target
-	}
-	return s.Name
+	return secretEnvName(s.Name, s.Target)
 }
 
 func isAuthEnvKey(key string, extraAuthKeys ...map[string]struct{}) bool {

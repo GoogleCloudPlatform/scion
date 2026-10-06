@@ -134,7 +134,9 @@ const (
 // Before either check, a GitHub credential key is refused for an agent
 // without the allowance (gitCredentialKeyDenied): the item is not allowed
 // and no metadata or value is read, so both endpoints report it as not
-// found.
+// found. A key whose target names a GitHub credential
+// (gitCredentialSecretDenied) is refused the same way after the metadata
+// read and before the value read.
 //
 // decisionCache must be created once per request and passed to every
 // project-scope call within that request, so the check-7 decision is
@@ -190,9 +192,26 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 		return item, nil, permission, detail
 	}
 
+	// A key whose name does not match can still be delivered under a GitHub
+	// credential env name through its target. That needs the metadata, so it
+	// is refused here: after the metadata read, before the value read, and
+	// reported exactly like a missing key.
+	if gitCredentialSecretDenied(facts, item.Meta) {
+		item.Allowed = false
+		item.Reason = ReasonGitCredentialNotAllowed
+		return item, nil, permission, detail
+	}
+
 	sv, valReason := s.fetchAuthorizedValue(ctx, item)
 	if valReason != ReasonAllowed {
 		item.Reason = valReason
+		return item, nil, permission, detail
+	}
+	// The same check on the record that was read (check 9 already refuses a
+	// record whose version changed since the metadata read).
+	if gitCredentialSecretDenied(facts, sv.SecretMeta) {
+		item.Allowed = false
+		item.Reason = ReasonGitCredentialNotAllowed
 		return item, nil, permission, detail
 	}
 
@@ -208,12 +227,26 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 // so a refused key is reported exactly like a missing one whether or not it
 // exists. A nil facts, agent record or applied config is refused.
 func gitCredentialKeyDenied(facts *TargetFacts, key string) bool {
-	if !agent.IsGitCredentialEnvKey(key) {
+	return agent.IsGitCredentialEnvKey(key) && !factsAllowGitCredentials(facts)
+}
+
+// gitCredentialSecretDenied reports whether a runtime read or listing of a
+// secret is refused because the secret is delivered under a GitHub
+// credential env name (agent.IsGitCredentialSecret: its target, or its name
+// when the target is empty, for environment-type and variable-type secrets),
+// the same rule the broker's container env filter applies, and the agent's
+// applied config does not allow GitHub credentials. It covers secrets whose
+// name does not match but whose target does; it needs the secret metadata,
+// so it runs after the metadata read and before any value read.
+func gitCredentialSecretDenied(facts *TargetFacts, meta secret.SecretMeta) bool {
+	return agent.IsGitCredentialSecret(meta.SecretType, meta.Name, meta.Target) && !factsAllowGitCredentials(facts)
+}
+
+// factsAllowGitCredentials applies agentAllowsGitCredentials to the agent
+// record in facts; nil facts are not allowed.
+func factsAllowGitCredentials(facts *TargetFacts) bool {
+	if facts == nil {
 		return false
 	}
-	var rec *store.Agent
-	if facts != nil {
-		rec = facts.Agent
-	}
-	return !agentAllowsGitCredentials(rec)
+	return agentAllowsGitCredentials(facts.Agent)
 }
