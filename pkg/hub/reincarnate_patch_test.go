@@ -320,6 +320,9 @@ func TestReincarnatePatch_ServiceAccountRefusals(t *testing.T) {
 		user := newReincarnateAuthzUser(t, s, "sa-denied")
 		grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
 		grantAgentDelegationAtProject(t, s, user.ID, project.ID)
+		// agent.update too, so the patch-flag update gate (D4) passes and
+		// the refusal below is the service account's.
+		grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
 		// Created by someone else; nothing grants this user read on it.
 		sa := patchTestSA(t, s, project.ID, true, "someone-else")
 		identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
@@ -731,4 +734,116 @@ func TestReincarnatePatch_LegacyAgent(t *testing.T) {
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "legacy-patched-model", resp.Plan.Model.New)
+}
+
+// TestReincarnatePatch_SelfRoleChangeDoesNotReRecordEdge: a self request
+// that changes the role passes CanDelegate and the ceiling, but does not
+// re-record the delegation edge with the agent as its own delegator (D1).
+func TestReincarnatePatch_SelfRoleChangeDoesNotReRecordEdge(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil) // baseline
+	ctx := context.Background()
+	edgesBefore, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID)
+	require.NoError(t, err)
+
+	self := agentIdentityFor(agent.ID, project.ID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
+	req := reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h", Role: "readonly"})
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, req, agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	waitForReincarnationSettled(t, s, agent.ID)
+
+	final, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "readonly", final.AppliedConfig.AgentRole, "the role patch applied")
+
+	edgesAfter, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, len(edgesBefore), len(edgesAfter), "a self request must not add or replace delegation edges")
+	for _, e := range edgesAfter {
+		assert.NotEqual(t, agent.ID, e.DelegatorID, "the agent must never become its own delegator")
+	}
+}
+
+// TestReincarnatePatch_UserNeedsUpdateForPatch pins decision D4: with a
+// patch flag, a user caller needs agent.update on the target as well as
+// lifecycle, like the agent PATCH.
+func TestReincarnatePatch_UserNeedsUpdateForPatch(t *testing.T) {
+	t.Run("lifecycle without update is refused", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		user := newReincarnateAuthzUser(t, s, "lifecycle-no-update")
+		grantAgentLifecycleAtProject(t, s, user.ID, project.ID)
+		grantAgentDelegationAtProject(t, s, user.ID, project.ID)
+		identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+
+		// Precondition: no-flag reincarnate is allowed for this user.
+		req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{DryRun: true})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		require.Equal(t, http.StatusOK, rec.Code, "precondition: %s", rec.Body.String())
+
+		before := snapshotAgent(t, s, agent.ID)
+		for _, body := range []ReincarnateAgentRequest{
+			{Image: "other:v1"},
+			{Role: "readonly"},
+			{DryRun: true, Image: "other:v1"},
+			{DryRun: true, Role: "readonly"},
+		} {
+			req := reincarnateRequest(t, agent.ID, identity, body)
+			rec := httptest.NewRecorder()
+			srv.handleReincarnateAgent(rec, req, agent.ID)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%+v: %s", body, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "agent.update")
+		}
+		assertAgentUntouched(t, s, disp, agent.ID, before)
+
+		// Admitted arm: the same user with agent.update may patch.
+		grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
+		req = reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{DryRun: true, Image: "other:v1", Role: "readonly"})
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("UAT cannot patch but can reincarnate", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		user := newReincarnateAuthzUser(t, s, "uat-patch")
+		grantProjectRole(t, s, user.ID, project.ID, store.ProjectRoleAdmin) // holds agent.update
+		identity := scopedIdentityFor(user, project.ID, append(minimalSelectors(t), "agent:lifecycle"))
+
+		req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{DryRun: true})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		require.Equal(t, http.StatusOK, rec.Code, "no-flag reincarnate must still work: %s", rec.Body.String())
+
+		before := snapshotAgent(t, s, agent.ID)
+		req = reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{Model: "other-model"})
+		rec = httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "user access token")
+		assertAgentUntouched(t, s, disp, agent.ID, before)
+	})
+
+	t.Run("owner may patch", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		user := newReincarnateAuthzUser(t, s, "owner-patch")
+		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+			a.OwnerID = user.ID
+			a.CreatedBy = user.ID
+			a.Ancestry = []string{user.ID}
+		})
+		grantAgentDelegationAtProject(t, s, user.ID, project.ID)
+		identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")
+		req := reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{DryRun: true, Image: "owner:v1"})
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, req, agent.ID)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
 }

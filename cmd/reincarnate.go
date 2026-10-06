@@ -274,6 +274,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 			if v := moveVerdictFromError(err); v != nil && !isJSONOutput() {
 				printMoveVerdict(os.Stderr, v)
 			}
+			if perr := patchNeedsUpdateError(err, wantPatched); perr != nil {
+				return wrapHubError(perr)
+			}
 			return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
 		}
 		if err := checkHubAppliedPatch(wantPatched, probeResp); err != nil {
@@ -296,6 +299,9 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		}
 		if apiclient.IsConflictError(err) && moveVerdictFromError(err) == nil {
 			return wrapHubError(fmt.Errorf("a reincarnation is already pending for '%s': %w", agentName, err))
+		}
+		if perr := patchNeedsUpdateError(err, wantPatched); perr != nil {
+			return wrapHubError(perr)
 		}
 		return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
 	}
@@ -389,6 +395,19 @@ func requestedPatchFields(req *hubclient.ReincarnateAgentRequest) []string {
 	add(req.ThinkingLevel != nil, "thinkingLevel")
 	add(req.HarnessAuth != "", "harnessAuth")
 	return out
+}
+
+// patchNeedsUpdateError explains a 403 from the hub's patch-flag gate
+// (decision D4): the flags need agent update permission on top of
+// lifecycle, which a user access token can never carry. Returns nil for any
+// other error.
+func patchNeedsUpdateError(err error, wantPatched []string) error {
+	if len(wantPatched) == 0 || !apiclient.IsForbiddenError(err) || !strings.Contains(err.Error(), "agent.update") {
+		return nil
+	}
+	return fmt.Errorf("reincarnate patch flags need permission to update the agent, not just to reincarnate it. "+
+		"A user access token (UAT) cannot use patch flags: sign in with 'scion hub auth login' and retry, "+
+		"or reincarnate without the flags: %w", err)
 }
 
 // checkHubAppliedPatch fails when the response's plan does not list every

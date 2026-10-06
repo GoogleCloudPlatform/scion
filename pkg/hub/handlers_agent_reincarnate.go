@@ -25,6 +25,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// reincarnatePatchNeedsUpdateMsg is the 403 body for a user caller whose
+// reincarnate request has patch flags but who lacks agent.update.
+const reincarnatePatchNeedsUpdateMsg = "Reincarnate patch flags (--service-account, --role, --model, --thinking-level, --harness-auth, --image) need permission to update the agent (agent.update) in addition to lifecycle; a user access token cannot grant it, so use a signed-in session"
+
 // maxHandoffBytes bounds the reincarnate request's handoff text (design §3.2).
 const maxHandoffBytes = 256 * 1024
 
@@ -212,6 +216,17 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// authority as reincarnating another agent.
 	if req.hasPatch() && isSelfRequest(ctx, agent) {
 		if !s.authorizeAgentLifecycle(w, r, agent, ActionLifecycle) {
+			return
+		}
+	}
+	// Decision D4 (ptone/scion#3302): a patch flag edits the agent's
+	// config, so a user caller (session or UAT) also needs ActionUpdate on
+	// the target, the same gate the agent PATCH applies (applyAgentUpdate).
+	// agent.update has no UAT scope, so a UAT cannot patch. Agent callers
+	// stay on the lifecycle check (D1). Runs before any side effect, for a
+	// dry run too.
+	if req.hasPatch() && GetUserIdentityFromContext(ctx) != nil {
+		if !s.authorizeMsg(w, r, agentResource(agent), ActionUpdate, reincarnatePatchNeedsUpdateMsg) {
 			return
 		}
 	}

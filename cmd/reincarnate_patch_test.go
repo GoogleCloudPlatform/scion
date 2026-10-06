@@ -244,3 +244,30 @@ func TestReincarnatePatch_SkewedHubAfter202_SaysStartedWithoutPatch(t *testing.T
 	assert.Contains(t, err.Error(), "started without the requested changes (role)")
 	require.Len(t, hub.requests, 2)
 }
+
+// TestReincarnatePatch_ForbiddenPatchExplainsUAT: the hub's D4 refusal
+// (agent.update needed for patch flags) becomes a plain CLI error naming
+// the UAT limitation, and no real request follows the refused probe.
+func TestReincarnatePatch_ForbiddenPatchExplainsUAT(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"Reincarnate patch flags need permission to update the agent (agent.update) in addition to lifecycle; a user access token cannot grant it, so use a signed-in session"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}
+	setReincarnatePatchFlags(t, "", "", "m1", -1, "", "")
+	reincarnateBroker, reincarnateDryRun = "", false
+
+	err = reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "A user access token (UAT) cannot use patch flags")
+	assert.Equal(t, 1, calls, "the refused probe is the only request")
+
+	// A 403 without patch flags is not rewritten.
+	assert.Nil(t, patchNeedsUpdateError(err, nil))
+}
