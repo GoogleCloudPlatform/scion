@@ -482,3 +482,96 @@ func TestRouterExcludesUnreachableOwner(t *testing.T) {
 		})
 	}
 }
+
+// twinStore gives the broker a second current session on relay: a copy
+// of its row there under another session id. The relay test world cannot
+// create one, because a broker that reconnects to a relay supersedes its
+// earlier session on that relay.
+type twinStore struct {
+	registry.Store
+	relay string
+}
+
+const twinSuffix = "-twin"
+
+func (s twinStore) withTwin(ps registry.PrincipalSessions) registry.PrincipalSessions {
+	for _, v := range ps.Sessions {
+		if v.Session.RelayInstanceID == s.relay {
+			twin := v
+			twin.Session.SessionID += twinSuffix
+			ps.Sessions = append(slices.Clone(ps.Sessions), twin)
+			return ps
+		}
+	}
+	return ps
+}
+
+func (s twinStore) ListPrincipalSessions(ctx context.Context, kind, id string) (registry.PrincipalSessions, error) {
+	ps, err := s.Store.ListPrincipalSessions(ctx, kind, id)
+	if err != nil {
+		return ps, err
+	}
+	return s.withTwin(ps), nil
+}
+
+func (s twinStore) ListPrincipalSessionsBySession(ctx context.Context, sessionID string) (registry.PrincipalSessions, bool, error) {
+	ps, found, err := s.Store.ListPrincipalSessionsBySession(ctx, strings.TrimSuffix(sessionID, twinSuffix))
+	if err != nil || !found {
+		return ps, found, err
+	}
+	return s.withTwin(ps), true, nil
+}
+
+// TestRouterExcludesEverySessionOnAnUnreachableRelay (design §3.5): once
+// a dial to relay-a fails, no other session relay-a holds is tried in the
+// same resolution; the router moves on to another relay.
+func TestRouterExcludesEverySessionOnAnUnreachableRelay(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	w.SetPrincipal("b", relay.Principal{Kind: registry.PrincipalBroker, ID: brokerID, Incarnation: "inc-1"})
+	live := w.StartNode("relay-live", nil)
+	live.MustDial("b", relaytest.BrokerHello(brokerID, "inc-1"), echoTarget())
+	var f *front
+	a := w.StartNode("relay-a", func(c *relay.Config) {
+		f = newFront(t, c.InternalEndpoint)
+		c.InternalEndpoint = f.srv.URL
+	})
+	a.MustDial("b", relaytest.BrokerHello(brokerID, "inc-1"), echoTarget())
+
+	store := twinStore{Store: w.Store, relay: "relay-a"}
+	reg := registry.New(store, registry.Config{Clock: registry.ClockFunc(w.Now)})
+	req := router.Request{Op: router.OpStatefulRPC, Kind: registry.PrincipalBroker, ID: brokerID, BrokerIncarnation: "inc-1"}
+	recs, err := reg.Eligible(context.Background(), req.Kind, req.ID, registry.Want{Incarnation: "inc-1"}, w.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onA []string
+	for _, rec := range recs {
+		if rec.RelayInstanceID == "relay-a" {
+			onA = append(onA, rec.SessionID)
+		}
+	}
+	if len(recs) != 3 || len(onA) != 2 || recs[2].RelayInstanceID != "relay-live" {
+		t.Fatalf("eligible = %+v; want two sessions on relay-a ranked before relay-live", recs)
+	}
+
+	f.srv.Close() // dials to relay-a fail
+	r := w.StartNode("relay-r", nil)
+	rt, err := router.New(router.Config{Relay: r.Relay, Registry: reg, Store: store, Peers: r.Peers, Now: w.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var tried []string
+	err = rt.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+		tried = append(tried, res.Record.RelayInstanceID)
+		_, err := res.Session.Call(ctx, &conduitv1.RpcRequest{RequestId: "r1", Method: "exec"})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want success on relay-live", err)
+	}
+	if want := []string{"relay-a", "relay-live"}; !slices.Equal(tried, want) {
+		t.Fatalf("relays tried = %v, want %v", tried, want)
+	}
+}
