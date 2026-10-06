@@ -597,6 +597,12 @@ func isBrokerRuntimeUnavailable(err error) bool {
 // codes are defensive, for older brokers or proxies: a 404 agent_not_found
 // or a 409 agent_not_running. Any other error, including a
 // runtime_unavailable 503, leaves the old instance's state unknown.
+//
+// A code accepted here must mean the old instance is not running: when the
+// restart's start leg then fails, handleAgentLifecycle settles the
+// reservation and records the agent as stopped on that assumption (the
+// final else after the start leg's dispatchErr checks), with no further
+// stop.
 func isRestartStopTolerable(err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {

@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -111,4 +112,44 @@ func TestAgentLifecycle_RestartStopErrorHandling(t *testing.T) {
 				"an aborted restart leaves the pre-restart phase: the instance may still be running")
 		})
 	}
+}
+
+// tolerableStopFailingStartDispatcher answers a restart's stop leg with a
+// tolerated broker error (404 agent_not_found) and fails its start leg.
+type tolerableStopFailingStartDispatcher struct {
+	failingStartDispatcher
+}
+
+func (d *tolerableStopFailingStartDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
+	d.stopCount.Add(1)
+	return &brokerStatusError{
+		StatusCode: http.StatusNotFound,
+		Body:       `{"error":{"code":"` + ErrCodeAgentNotFound + `","message":"m"}}`,
+	}
+}
+
+// A tolerated stop error means the old instance is not running, so a restart
+// whose start leg then fails is handled as after a clean stop: the slot is
+// released and the agent is recorded as stopped.
+func TestAgentLifecycle_RestartToleratedStopThenFailedStartReleasesSlot(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &tolerableStopFailingStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 1)
+
+	broker, project := newQuotaTestBrokerAndProject(t, s, "restart-tolerated-stop")
+	running := newQuotaTestAgent(t, s, broker, project, "restart-tolerated-stop", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, running.ID)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
+	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+	assert.EqualValues(t, 1, disp.stopCount.Load(), "the stop leg is dispatched once")
+	assert.EqualValues(t, 1, disp.startCount.Load(), "the start leg follows a tolerated stop error")
+
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID),
+		"the slot is released after a tolerated stop and a failed start")
+	got, err := s.GetAgent(context.Background(), running.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase,
+		"the agent is recorded as stopped after a tolerated stop and a failed start")
 }
