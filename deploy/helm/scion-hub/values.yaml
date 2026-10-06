@@ -89,11 +89,11 @@ image:
   #
   # The hub image this chart needs is the one built from the root Dockerfile
   # with --target hub-gke: non-root, uid 1000, web UI embedded, no baked
-  # KUBECONFIG. That stage is added by the image-build change that accompanies
-  # this chart and is not in the root Dockerfile yet, so the build command above
-  # fails with an unknown-target error until it lands - which is a known
-  # sequencing gap and not a mistake in this file.
-  # No such image is published anywhere, so every possible default
+  # KUBECONFIG. image-build/cloudbuild-hub-gke.yaml builds it and pushes it as
+  # <registry>/scion-hub-gke:<git short sha> (see image-build/README.md).
+  # That image is linux/amd64 only; on a cluster with arm64 nodes, set
+  # hub.nodeSelector to {kubernetes.io/arch: amd64}.
+  # The chart has no canonical registry to point at, so every possible default
   # would point either at an empty registry path or at somebody else's
   # artifact - and a default that cannot be correct turns an install-time error
   # into a runtime mystery.
@@ -131,6 +131,17 @@ hub:
 
   # Display name for the hub. Cosmetic; unlike hubId nothing is scoped by it.
   name: Scion Hub
+
+  # Optional. Email addresses auto-promoted to the admin role at sign-in,
+  # rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig,
+  # pkg/config/settings_v1.go). The hub lower-cases and trims each entry
+  # (config.SanitizeEmailList). Empty leaves the key out, and the hub then
+  # promotes nobody from configuration.
+  #
+  #   adminEmails:
+  #     - alice@example.com
+  #
+  adminEmails: []
 
   # REQUIRED, and deliberately without a default. The external URL the hub is
   # reached at, scheme and host, no trailing path. Absence is not an error in
@@ -218,7 +229,8 @@ hub:
     # runAsUser and runAsGroup remain configurable because a later part of this
     # chart requires them to match the uid and gid of the workspace share it
     # mounts. Zero is rejected: it contradicts runAsNonRoot rather than
-    # overriding it.
+    # overriding it. The hub-gke image assumes 1000:1000; any other uid needs
+    # a writable HOME and a passwd entry for that uid, which ssh requires.
     runAsUser: 1000
     runAsGroup: 1000
 
@@ -315,9 +327,18 @@ runtime:
   listAllNamespaces: false
 
 agents:
-  # Optional. Registry prefix agent images are pulled from, rendered as the
-  # top-level image_registry key of settings.yaml. Empty leaves the key out and
-  # the hub uses its own default.
+  # REQUIRED when the chart renders settings.yaml. Registry prefix agent images
+  # are pulled from, rendered as the top-level image_registry key. The chart
+  # always runs an in-process runtime broker, and the hub refuses to start the
+  # broker without a registry (requireImageRegistryForBroker,
+  # cmd/server_foreground.go), so an empty value fails the render. The hub
+  # also accepts image_registry for the active profile through config.extra,
+  # or SCION_IMAGE_REGISTRY / SCION_MAINTENANCE_IMAGE_REGISTRY through
+  # hub.extraEnv; either satisfies the check instead. Not checked under
+  # config.existingSecret, where your file must carry it.
+  #
+  #   imageRegistry: us-docker.pkg.dev/my-project/scion
+  #
   imageRegistry: ""
 
 # The hub's own configuration - the contents of settings.yaml.
@@ -377,9 +398,10 @@ config:
   # NOTES.txt, from a single definition in templates/_helpers.tpl.
   #
   # Not listed, because they refuse rather than go quiet: config.extra,
-  # storage.bucket, agents.imageRegistry, the database name, user and password,
-  # the OAuth web client credentials, auth.proxy.iap.audience and the three
-  # auth.transport values fail the render when set together with this
+  # storage.bucket, agents.imageRegistry, hub.adminEmails, a non-local
+  # secrets.backend and the secrets.gcpsm values, the database name, user and
+  # password, the OAuth web client credentials, auth.proxy.iap.audience and the
+  # three auth.transport values fail the render when set together with this
   # (NOTES.txt prints the exact list). auth.proxy.provider is not on either
   # list: its only legal value is its default, so there is nothing an operator
   # could set that goes quiet. auth.mode carries it instead - under proxy mode
@@ -629,6 +651,39 @@ storage:
   # no bucket fails at hub startup rather than at install; requiring it here
   # moves that failure to helm template.
   bucket: ""
+
+# Where the hub keeps the secrets users and agents store through it, rendered
+# as server.secrets in settings.yaml (V1SecretsConfig,
+# pkg/config/settings_v1.go). Read once at startup by secret.NewBackend
+# (cmd/server_foreground.go).
+secrets:
+  # local (the default) keeps secrets in the hub database and renders nothing.
+  # gcpsm stores them in Google Cloud Secret Manager and renders
+  # server.secrets.backend: gcpsm.
+  #
+  # The chart grants no IAM. The hub authenticates to Secret Manager with
+  # Application Default Credentials - on GKE, the Workload Identity binding
+  # named by serviceAccount.gcpServiceAccount - and that service account's
+  # Secret Manager roles belong to whatever provisions the project (Terraform).
+  # server.secrets.gcp_credentials, an inline key or key path, is deliberately
+  # not modelled.
+  backend: local
+
+  gcpsm:
+    # REQUIRED when backend is gcpsm. The project the secrets are created in,
+    # rendered as server.secrets.gcp_project_id. The hub does not refuse to
+    # start without it: NewGCPBackend errors, the server logs a warning and
+    # runs with no secret backend. The chart refuses the render instead.
+    projectId: ""
+
+    # Optional. Non-empty switches Secret Manager from automatic (global) to
+    # user-managed regional replication in these locations; needed when the
+    # constraints/gcp.resourceLocations org policy forbids global resources.
+    # Rendered as server.secrets.gcp_replication_locations.
+    #
+    #   replicationLocations: [us-central1]
+    #
+    replicationLocations: []
 
 auth:
   # proxy is the hosted shape: an identity-aware proxy in front of the hub
