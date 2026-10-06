@@ -51,6 +51,7 @@ func TestCheckNFSMoveWorkspace(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 		_, err := m.CheckNFSMoveWorkspace(projectPath, testNFSWorkspaceProjectID, "test-agent", MoveWorkspaceAgentDir)
 		require.True(t, errors.Is(err, ErrMoveWorkspaceMissing), "err = %v", err)
+		assert.Contains(t, err.Error(), "does not exist")
 
 		ws := filepath.Join(nfsTestAgentDir(mountRoot, "test-agent"), provision.AgentWorkspaceDir)
 		require.NoError(t, os.MkdirAll(ws, 0o755))
@@ -66,6 +67,7 @@ func TestCheckNFSMoveWorkspace(t *testing.T) {
 		require.NoError(t, os.WriteFile(ws, []byte("not a directory"), 0o644))
 		_, err := m.CheckNFSMoveWorkspace(projectPath, testNFSWorkspaceProjectID, "test-agent", MoveWorkspaceAgentDir)
 		require.True(t, errors.Is(err, ErrMoveWorkspaceMissing), "err = %v", err)
+		assert.Contains(t, err.Error(), "is not a directory")
 	})
 	t.Run("project checkout", func(t *testing.T) {
 		m, projectPath, mountRoot := setup(t)
